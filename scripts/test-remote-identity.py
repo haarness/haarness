@@ -1,30 +1,35 @@
 #!/usr/bin/env python3
-"""A connector identity copied to another computer, against a fake Cloud.
+"""Connector identities in a configuration folder two computers have, against a fake Cloud.
 
   scripts/test-remote-identity.py [state-folder]   (HAARNESS_BIN picks the binary, default target/debug/haarness)
 
-Migration Assistant, or a synced configuration folder, copies the identity
-`remote enable` keeps beside the configuration. Each computer here is a
-folder of its own (home, data, Cloud sign-in, project with the echo
-provider), and `HAARNESS_TEST_MACHINE_ID`, honoured only with
-`HAARNESS_TEST_PROVIDER`, stands in for its hardware id. The fake Cloud
-registers hosts (keeping a known host's name, as Cloud does), lists them and
-holds one relay connection per host, closing the older one when a host
-connects again, as Cloud does.
+Migration Assistant copies the configuration folder `remote enable` keeps its
+identities in, and a synced or shared dotfiles folder keeps two computers'
+in step. Each computer here is a folder of its own (home, data, Cloud
+sign-in, project with the echo provider), and `HAARNESS_TEST_MACHINE_ID`,
+honoured only with `HAARNESS_TEST_PROVIDER`, stands in for its hardware id.
+The fake Cloud registers hosts (keeping a known host's name, as Cloud does),
+lists them and holds one relay connection per host, closing the older one
+when a host connects again, as Cloud does.
 
-1. Studio shares itself; its identity is stamped as Studio's.
-2. Studio's identity is copied to Laptop. Before Laptop connects, Laptop's
-   account bridge (what Desktop lists under Your computers) lists Studio.
-3. Laptop shares itself: it registers a new host under its own name, says so
-   once, and both stay connected for 15 seconds without taking the connection
-   from each other. Each bridge lists the other computer and not itself.
-4. Restarting either keeps its host id.
-5. An identity written before identities were stamped is adopted: Studio's,
-   with its stamp removed, keeps its id and is stamped again.
-6. A computer that cannot tell its hardware id (an empty override) leaves a
-   copied identity as it is.
+1. Studio shares itself: its identity file is named for Studio and stamped
+   as Studio's.
+2. Studio's configuration folder is copied to Laptop. There, before Laptop
+   connects, the account bridge (Desktop's Your computers) lists Studio,
+   `remote status` lists nothing and `remote forget` of Studio's host is
+   refused, leaving it registered.
+3. Laptop shares itself: a host of its own under its own name, and both stay
+   connected for 15 seconds without taking the connection from each other.
+   Each bridge lists the other computer only; restarting either keeps its id.
+4. Mini and Air share one configuration folder: started and each restarted
+   twice, they keep two ids, and each `remote status` lists only its own.
+5. An identity from before names carried the computer is taken over by the
+   computer whose name it has (same id, stamped, renamed), and a copy of it
+   on a computer of another name is left alone while that one starts afresh.
+6. A computer that cannot tell its hardware id (an empty override) uses the
+   name every computer used before and keeps the identity there as it is.
 7. Without `HAARNESS_TEST_PROVIDER` the override is ignored: Desk, given
-   Studio's stand-in id, still reads its own and moves off Studio's host.
+   Studio's stand-in id and Studio's folder, still reads its own hardware id.
 
 Writes secret-free results to checks.json in a new folder under the state
 folder (default: a temporary folder, removed when the run passes).
@@ -157,11 +162,15 @@ class Cloud:
 
 
 class Computer:
-    def __init__(self, root: pathlib.Path, cloud: Cloud, name: str, machine, test_provider: bool = True) -> None:
+    def __init__(self, root: pathlib.Path, cloud: Cloud, name: str, machine, test_provider: bool = True, config=None) -> None:
         self.name = name
         self.folder = root / name
         for sub in ("home", "data", "account", "project/.haarness"):
             (self.folder / sub).mkdir(parents=True)
+        # Where this data folder keeps its configuration, and so identities.
+        self.config = self.folder / "data/config"
+        if config is not None:
+            self.config.symlink_to(config, target_is_directory=True)
         (self.folder / "project/.haarness/config.toml").write_text(CONFIG if test_provider else "[lsp]\nenabled=false\n")
         self.project = self.folder / "project"
         self.env = {
@@ -195,6 +204,7 @@ class Computer:
         os.chmod(credentials, 0o600)
         self.log = self.folder / "connector.log"
         self.connector = None
+        self.cloud = cloud
 
     def cli(self, *args, input=None) -> str:
         result = subprocess.run(
@@ -223,13 +233,22 @@ class Computer:
                 self.connector.wait()
         self.connector = None
 
-    def identity_file(self) -> pathlib.Path | None:
-        found = sorted(path for path in self.folder.rglob("remote-*.json"))
-        return found[0] if found else None
+    def identity_file(self) -> pathlib.Path:
+        """The file this computer's connector keeps its identity in."""
+        machine = self.env.get("HAARNESS_TEST_MACHINE_ID") or None
+        return self.config / file_name(self.cloud, machine)
 
     def identity(self) -> dict:
         path = self.identity_file()
-        return json.loads(path.read_text()) if path else {}
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    def status_ids(self) -> list[str]:
+        return [item["id"] for item in json.loads(self.cli("remote", "status", "--json"))["items"]]
+
+    def forget(self, id: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [BIN, "--workspace", str(self.project), "remote", "forget", id], env=self.env, capture_output=True, text=True, timeout=60
+        )
 
     def others(self) -> list[str]:
         """What the account bridge lists for Desktop on this computer."""
@@ -242,6 +261,13 @@ class Computer:
 
 def stamp(machine: str, host: str) -> str:
     return hashlib.sha256(f"{machine}|{host}".encode()).hexdigest()
+
+
+def file_name(cloud: Cloud, machine: str | None) -> str:
+    """A host connector's identity file: named for `machine`, or the name
+    every computer used before names carried the computer."""
+    key = f"{cloud.url}/|{ACCOUNT}||None" + (f"|{machine}" if machine else "")
+    return f"remote-{hashlib.sha256(key.encode()).hexdigest()}.json"
 
 
 def wait_for(check, timeout: float, what: str):
@@ -290,22 +316,27 @@ def main() -> None:
         # 1. Studio shares itself.
         studio.start()
         first = connected_as(studio, cloud)
-        check(studio.identity().get("machine") == stamp("MACHINE-STUDIO", first), "Studio's identity carries Studio's stamp")
+        check(studio.identity().get("machine") == stamp("MACHINE-STUDIO", first), "Studio's identity is named for Studio and stamped as Studio's")
 
-        # 2. Its identity is copied to Laptop, at the same place in its folder.
-        source = studio.identity_file()
-        target = laptop.folder / source.relative_to(studio.folder)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        # 2. Its configuration folder is copied to Laptop.
+        laptop.config.mkdir(parents=True, exist_ok=True)
+        for path in studio.config.glob("remote-*"):
+            shutil.copy2(path, laptop.config / path.name)
         check(laptop.others() == ["Studio"], "before Laptop connects, its bridge lists Studio", laptop.others())
+        check(laptop.status_ids() == [], "Laptop's remote status does not list Studio's connector", laptop.status_ids())
+        forgot = laptop.forget(first)
+        check(forgot.returncode != 0 and first in cloud.hosts and first in cloud.connected(), "remote forget on Laptop leaves Studio's host alone", forgot.stderr)
 
         # 3. Laptop shares itself: a host of its own, and no fight.
         laptop.start()
         second = connected_as(laptop, cloud)
         check(second != first, "Laptop connects as a new host", (first, second))
-        check(len(laptop.copied_lines()) == 1, "Laptop says once that its identity was copied", laptop.copied_lines())
-        check(first in laptop.copied_lines()[0] and second in laptop.copied_lines()[0], "the line names both hosts", laptop.copied_lines())
-        check(laptop.identity().get("machine") == stamp("MACHINE-LAPTOP", second), "Laptop's identity carries Laptop's stamp")
+        check(not laptop.copied_lines(), "without ever reading the copy as its own")
+        check(laptop.identity().get("machine") == stamp("MACHINE-LAPTOP", second), "Laptop's identity is its own file, stamped as Laptop's")
+        check(
+            json.loads((laptop.config / file_name(cloud, "MACHINE-STUDIO")).read_text())["id"] == first,
+            "the copy of Studio's identity is left as it was",
+        )
         check(
             cloud.hosts[first]["name"] == "Studio" and cloud.hosts[second]["name"] == "Laptop",
             "each host has its own computer's name",
@@ -315,53 +346,89 @@ def main() -> None:
         time.sleep(15)
         opens = [id for at, id in cloud.opens if at >= settled]
         takeovers = [id for at, id in cloud.takeovers if at >= settled - 5]
-        check(cloud.connected() == {first, second}, "both stay connected", sorted(cloud.connected()))
+        check(cloud.connected() >= {first, second}, "both stay connected", sorted(cloud.connected()))
         check(not opens and not takeovers, "neither takes the connection from the other", {"opens": opens, "takeovers": takeovers})
-        check(not studio.copied_lines(), "Studio keeps its identity as it was")
         check(studio.others() == ["Laptop"] and laptop.others() == ["Studio"], "each bridge lists the other computer only", (studio.others(), laptop.others()))
-
-        # 4. Restarting either keeps its host.
+        check(laptop.status_ids() == [second], "Laptop's remote status lists its own connector only", laptop.status_ids())
         for computer, id in ((studio, first), (laptop, second)):
             computer.stop()
             computer.start()
             check(connected_as(computer, cloud) == id, f"{computer.name} keeps host …{id[-8:]} when it starts again")
-        check(len(laptop.copied_lines()) == 1, "Laptop does not move again")
-
-        # 5. An identity from before identities were stamped is adopted.
         studio.stop()
-        path = studio.identity_file()
-        old = json.loads(path.read_text())
+        laptop.stop()
+
+        # 4. One configuration folder for two computers.
+        shared = root / "shared-config"
+        shared.mkdir()
+        mini = Computer(root, cloud, "Mini", "MACHINE-MINI", config=shared)
+        air = Computer(root, cloud, "Air", "MACHINE-AIR", config=shared)
+        computers += [mini, air]
+        before = set(cloud.hosts)
+        ids = {}
+        for computer in (mini, air):
+            computer.start()
+            ids[computer.name] = {connected_as(computer, cloud)}
+        for _ in range(2):
+            for computer in (mini, air):
+                computer.stop()
+                computer.start()
+                ids[computer.name].add(connected_as(computer, cloud))
+        check(all(len(found) == 1 for found in ids.values()) and len(set().union(*ids.values())) == 2, "in one shared folder each computer keeps one id over three starts", ids)
+        check(len(set(cloud.hosts) - before) == 2, "and Cloud has two hosts for them, no more", sorted(set(cloud.hosts) - before))
+        check(
+            mini.status_ids() == list(ids["Mini"]) and air.status_ids() == list(ids["Air"]),
+            "each one's remote status lists its own connector only",
+            (mini.status_ids(), air.status_ids()),
+        )
+        mini.stop()
+        air.stop()
+
+        # 5. An identity from before names carried the computer.
+        old = studio.identity()
         old.pop("machine")
-        path.write_text(json.dumps(old))
+        legacy = studio.config / file_name(cloud, None)
+        studio.identity_file().unlink()
+        legacy.write_text(json.dumps(old))
+        (laptop.config / file_name(cloud, None)).write_text(json.dumps(old))
+        (laptop.config / file_name(cloud, "MACHINE-LAPTOP")).unlink()
         studio.start()
-        check(connected_as(studio, cloud) == first, "an unstamped identity keeps its host")
-        check(studio.identity().get("machine") == stamp("MACHINE-STUDIO", first), "and is stamped as this computer's")
-        check(not studio.copied_lines(), "without saying it was copied")
+        check(connected_as(studio, cloud) == first, "an identity from before keeps its host on the computer of its name")
+        check(not legacy.exists() and studio.identity().get("machine") == stamp("MACHINE-STUDIO", first), "and moves to that computer's own file, stamped")
+        laptop.start()
+        renewed = connected_as(laptop, cloud)
+        check(renewed not in (first, second), "a copy of it on a computer of another name starts afresh", renewed)
+        check((laptop.config / file_name(cloud, None)).exists(), "and is left where it was")
+        check(laptop.status_ids() == [renewed], "and no longer counts as Laptop's", laptop.status_ids())
+        check(len(cloud.connected() & {first, renewed}) == 2, "both connected")
         studio.stop()
         laptop.stop()
 
         # 6. A computer that cannot tell its hardware id changes nothing.
         attic = Computer(root, cloud, "Attic", "")
         computers.append(attic)
-        target = attic.folder / source.relative_to(studio.folder)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-        before = attic.identity()
+        attic.config.mkdir(parents=True, exist_ok=True)
+        (attic.config / file_name(cloud, None)).write_text(json.dumps(old))
         attic.start()
-        check(connected_as(attic, cloud) == first, "without a hardware id a copied identity keeps its host")
-        check(attic.identity().get("machine") == before.get("machine"), "and keeps the stamp it came with")
-        check(not attic.copied_lines(), "and says nothing about a copy")
+        check(connected_as(attic, cloud) == first, "without a hardware id the identity under the old name keeps its host")
+        check("machine" not in attic.identity(), "and gets no stamp")
         attic.stop()
 
         # 7. The stand-in id needs the test providers.
         desk = Computer(root, cloud, "Desk", "MACHINE-STUDIO", test_provider=False)
         computers.append(desk)
-        target = desk.folder / source.relative_to(studio.folder)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
+        desk.config.mkdir(parents=True, exist_ok=True)
+        for path in studio.config.glob("remote-*"):
+            shutil.copy2(path, desk.config / path.name)
         desk.start()
-        third = connected_as(desk, cloud)
-        check(third not in (first, second) and len(desk.copied_lines()) == 1, "without the test providers the override is ignored", third)
+        # Its file is named for its real hardware id: find it by its pid.
+        def desk_identity():
+            for path in desk.config.glob("remote-*.json"):
+                identity = json.loads(path.read_text())
+                if identity.get("pid") == desk.connector.pid and identity.get("registered") and identity["id"] in cloud.connected():
+                    return identity
+            return None
+        third = wait_for(desk_identity, 90, "Desk to connect")
+        check(third["id"] != first and third.get("machine") != stamp("MACHINE-STUDIO", third["id"]), "without the test providers the override is ignored", third["id"])
         desk.stop()
         (root / "checks.json").write_text(json.dumps({"verdict": "PASS", "checks": checks}, indent=2))
     except BaseException as error:
