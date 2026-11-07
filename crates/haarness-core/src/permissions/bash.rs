@@ -318,6 +318,7 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         carried: None,
         names_work_tree: false,
         work_trees: Vec::new(),
+        loops: Vec::new(),
     };
     if !reader.read(command, Depth::default()) {
         return fallback(command);
@@ -712,6 +713,9 @@ struct Reader<'w> {
     /// The `GIT_WORK_TREE` settings of the command being read, by where
     /// each starts: see [`work_tree_settings`].
     work_trees: Vec<(usize, Path_)>,
+    /// Where the loops and function definitions of the text being read are:
+    /// see [`Self::repeats`].
+    loops: Vec<std::ops::Range<usize>>,
 }
 
 /// The written command whose standard input a program reads.
@@ -825,10 +829,26 @@ impl Reader<'_> {
         // Parse errors: what the parser could not place is read best-effort.
         let mut errors = Vec::new();
         let mut loose_starts = Vec::new();
+        // The parent of each list, which asking the tree would find by
+        // walking down from the root.
+        let mut list_parents = HashMap::new();
+        let mut loops = Vec::new();
         let mut cursor = tree.walk();
         while let Some((node, parent)) = stack.pop() {
             if node.kind() == "command" {
                 command_nodes.push((node, parent));
+            }
+            if node.kind() == "list" {
+                list_parents.insert(node.id(), parent);
+            }
+            if matches!(
+                node.kind(),
+                "for_statement"
+                    | "c_style_for_statement"
+                    | "while_statement"
+                    | "function_definition"
+            ) {
+                loops.push(node.start_byte()..node.end_byte());
             }
             if node.kind() == "redirected_statement"
                 && let Some(parent) = parent
@@ -876,7 +896,7 @@ impl Reader<'_> {
         // on the whole list, but it belongs to the list's last command, and
         // that command reads it as if written alone with it.
         for (node, parent) in &mut command_nodes {
-            if let Some(statement) = heredoc_holder(*node, *parent) {
+            if let Some(statement) = heredoc_holder(*node, *parent, &list_parents) {
                 *parent = Some(statement);
             }
         }
@@ -962,6 +982,7 @@ impl Reader<'_> {
         let outer_names_work_tree = self.names_work_tree;
         self.names_work_tree |= command.contains("GIT_WORK_TREE");
         let outer_work_trees = std::mem::take(&mut self.work_trees);
+        let outer_loops = std::mem::replace(&mut self.loops, loops);
         let continued = command.contains("\\\n");
         // The written command each command node is read for, by where the
         // node starts.
@@ -1184,6 +1205,7 @@ impl Reader<'_> {
         self.lost = outer_lost;
         self.names_work_tree = outer_names_work_tree;
         self.work_trees = outer_work_trees;
+        self.loops = outer_loops;
         true
     }
 
@@ -1794,6 +1816,14 @@ impl Reader<'_> {
         }
     }
 
+    /// Whether `node` runs again and again, or later than written: inside a
+    /// loop or a function of the text being read.
+    fn repeats(&self, node: tree_sitter::Node<'_>) -> bool {
+        self.loops
+            .iter()
+            .any(|range| range.start <= node.start_byte() && node.end_byte() <= range.end)
+    }
+
     /// Where a relative path being checked starts: see [`Self::folder`] and
     /// [`Self::carried`].
     fn from(&self) -> &Path {
@@ -2374,7 +2404,7 @@ impl Reader<'_> {
             let end = words
                 .last()
                 .map_or(program.node.end_byte(), |word| word.node.end_byte());
-            let repeated = repeats(program.node);
+            let repeated = self.repeats(program.node);
             self.analysis.links.push((top && !repeated).then_some(end));
         }
         if complete && matches!(name.as_str(), "cd" | "pushd" | "popd") {
@@ -2707,6 +2737,13 @@ const BRACE_WORDS: usize = 64;
 /// before anything else: `None` past `limit` words, or for a list it cannot
 /// read.
 fn expand_braces(raw: &str, limit: usize) -> Option<Vec<String>> {
+    // Each call reads the first list and calls itself for what follows it,
+    // one brace fewer each time, so a word with more braces that may open a
+    // list than it may expand to words is not read: that keeps the calls
+    // few however the word is written.
+    if opening_braces(raw) > limit {
+        return None;
+    }
     let chars: Vec<char> = raw.chars().collect();
     // The first unquoted `{` that opens a list, and its matching `}`.
     let (mut single, mut double, mut escaped) = (false, false, false);
@@ -2786,6 +2823,29 @@ fn expand_braces(raw: &str, limit: usize) -> Option<Vec<String>> {
     Some(vec![raw.to_owned()])
 }
 
+/// How many braces in `raw` may open a list for [`expand_braces`]: those
+/// outside quotes, not escaped and not after a `$`.
+fn opening_braces(raw: &str) -> usize {
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    let mut previous = '\0';
+    let mut count = 0;
+    for c in raw.chars() {
+        if escaped {
+            escaped = false;
+        } else {
+            match c {
+                '\\' if !single => escaped = true,
+                '\'' if !double => single = !single,
+                '"' if !single => double = !double,
+                '{' if !single && !double && previous != '$' => count += 1,
+                _ => {}
+            }
+        }
+        previous = c;
+    }
+    count
+}
+
 /// A brace sequence (`1..3`, `a..c`, `1..10..2`) as its words; `None` for
 /// one the shell would leave as it is (`{a}`) or that is too long.
 fn sequence(text: &str) -> Option<Vec<String>> {
@@ -2858,22 +2918,6 @@ fn makes_links(name: &str, arguments: &[Word<'_>]) -> bool {
         "rsync" => short(&['l', 'a']) || long(&["--links", "--archive"]),
         _ => false,
     }
-}
-
-/// Whether a command runs again and again, or later than written: inside
-/// a loop or a function.
-fn repeats(node: tree_sitter::Node<'_>) -> bool {
-    let mut current = node.parent();
-    while let Some(node) = current {
-        if matches!(
-            node.kind(),
-            "for_statement" | "c_style_for_statement" | "while_statement" | "function_definition"
-        ) {
-            return true;
-        }
-        current = node.parent();
-    }
-    false
 }
 
 /// Interpreters that take code inline.
@@ -3582,10 +3626,12 @@ fn stdin_script(stdin: Stdin<'_, '_>, source: &str) -> Input {
 
 /// The statement whose here-document `node` reads when the parser hung it
 /// on a list `node` ends (`false && bash <<'EOF' … EOF`): its last command,
-/// in lists nested any depth. `None` for any other command.
+/// in lists nested any depth. `None` for any other command. `parents` holds
+/// each list's parent.
 fn heredoc_holder<'t>(
     node: tree_sitter::Node<'t>,
     parent: Option<tree_sitter::Node<'t>>,
+    parents: &HashMap<usize, Option<tree_sitter::Node<'t>>>,
 ) -> Option<tree_sitter::Node<'t>> {
     let mut list = parent.filter(|parent| parent.kind() == "list")?;
     let mut child = node;
@@ -3598,7 +3644,7 @@ fn heredoc_holder<'t>(
         if final_part.id() != child.id() {
             return None;
         }
-        let holder = list.parent()?;
+        let holder = (*parents.get(&list.id())?)?;
         match holder.kind() {
             "list" => {
                 child = list;
@@ -3665,39 +3711,43 @@ fn document_readers(body: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> {
             .filter(|child| child.kind() != "comment")
             .collect()
     }
-    match body.kind() {
-        "command" => vec![body],
-        "list" | "pipeline" => named(body)
-            .last()
-            .map(|last| document_readers(*last))
-            .unwrap_or_default(),
-        "negated_command" => named(body)
-            .first()
-            .map(|inner| document_readers(*inner))
-            .unwrap_or_default(),
-        "subshell" | "compound_statement" => {
-            named(body).into_iter().flat_map(document_readers).collect()
+    // Walked without recursion: subshells and groups nest any depth.
+    let mut readers = Vec::new();
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "command" => readers.push(node),
+            "list" | "pipeline" => stack.extend(named(node).last()),
+            "negated_command" => stack.extend(named(node).first()),
+            // In order: the first is taken next.
+            "subshell" | "compound_statement" => stack.extend(named(node).into_iter().rev()),
+            "redirected_statement" => stack.extend(node.child_by_field_name("body")),
+            _ => {}
         }
-        "redirected_statement" => body
-            .child_by_field_name("body")
-            .map(document_readers)
-            .unwrap_or_default(),
-        _ => Vec::new(),
     }
+    readers
 }
 
 /// The command that writes last in a statement: the last command of a list,
 /// the command under `!`, the body of a redirected statement.
 fn last_command(node: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
-    let named: Vec<_> = (0..node.named_child_count())
-        .filter_map(|index| node.named_child(index))
-        .filter(|child| child.kind() != "comment")
-        .collect();
-    match node.kind() {
-        "list" => named.last().map_or(node, |last| last_command(*last)),
-        "negated_command" => named.first().map_or(node, |inner| last_command(*inner)),
-        "redirected_statement" => node.child_by_field_name("body").map_or(node, last_command),
-        _ => node,
+    let mut node = node;
+    loop {
+        let named = || {
+            (0..node.named_child_count())
+                .filter_map(|index| node.named_child(index))
+                .filter(|child| child.kind() != "comment")
+        };
+        let next = match node.kind() {
+            "list" => named().next_back(),
+            "negated_command" => named().next(),
+            "redirected_statement" => node.child_by_field_name("body"),
+            _ => None,
+        };
+        match next {
+            Some(next) => node = next,
+            None => return node,
+        }
     }
 }
 
@@ -4498,25 +4548,28 @@ fn bracket_matches_dot(rest: &[(char, bool)]) -> Option<(bool, usize)> {
 /// Whether `node` (a line's statement) is one `&&` chain of commands, each
 /// running only once those before it succeeded, all in the same shell.
 fn and_chain(node: tree_sitter::Node<'_>) -> bool {
-    match node.kind() {
-        "command" => true,
-        "redirected_statement" => node
-            .child_by_field_name("body")
-            .is_some_and(|body| body.kind() == "command"),
-        "list" => {
-            let mut cursor = node.walk();
-            let children: Vec<_> = node.children(&mut cursor).collect();
-            children
-                .iter()
-                .filter(|child| !child.is_named())
-                .all(|operator| operator.kind() == "&&")
-                && children
-                    .iter()
-                    .filter(|child| child.is_named())
-                    .all(|child| and_chain(*child))
+    // Walked without recursion: a chain of n steps is n lists deep.
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "command" => {}
+            "redirected_statement"
+                if node
+                    .child_by_field_name("body")
+                    .is_some_and(|body| body.kind() == "command") => {}
+            "list" => {
+                for child in node.children(&mut node.walk()) {
+                    if child.is_named() {
+                        stack.push(child);
+                    } else if child.kind() != "&&" {
+                        return false;
+                    }
+                }
+            }
+            _ => return false,
         }
-        _ => false,
     }
+    true
 }
 
 /// Builtins that run text or another command in the line's own shell, which
@@ -7172,6 +7225,58 @@ mod readings {
                 .iter()
                 .all(|pattern| pattern.len() <= MAX_PATTERN_BYTES)
         );
+    }
+
+    #[test]
+    fn a_long_chain_and_deep_groups_are_read_on_a_small_stack() {
+        // A model may write a line of thousands of steps: reading it in every
+        // way a call is read must not overflow a small stack, or take long.
+        let workspace = workspace();
+        let chain = format!("{}rm -rf ~/x", "true && ".repeat(16_000));
+        let followed = format!("cd src && {}cat ../README.md", "true && ".repeat(16_000));
+        for line in [
+            chain.clone(),
+            followed.clone(),
+            format!("{}true", "true || ".repeat(16_000)),
+            format!("{}bash <<'EOF'\nrm x\nEOF", "true && ".repeat(16_000)),
+            format!("{}rm -rf x", "ln -s a b && ".repeat(8_000)),
+            format!(
+                "{}true{} <<EOF\nx\nEOF",
+                "( ".repeat(3_000),
+                " )".repeat(3_000)
+            ),
+            format!(
+                "{}true{} <<EOF\nx\nEOF",
+                "{ ".repeat(3_000),
+                "; }".repeat(3_000)
+            ),
+            format!("rm x{}", "{1..1}".repeat(2_000)),
+        ] {
+            let workspace = workspace.clone();
+            let took = std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(move || {
+                    let started = std::time::Instant::now();
+                    let _ = analyze(&line, &workspace);
+                    let _ = outside_deletions(&line, &workspace, None);
+                    let _ = script_files(&line, &workspace);
+                    let _ = is_obviously_read_only(&line);
+                    started.elapsed()
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+        }
+        // Read whole: the chain is one, its last step's path asks, and a
+        // path after its `cd` is read from where it went.
+        let analysis = analyze(&chain, &workspace);
+        assert!(analysis.directories.is_some());
+        assert_eq!(
+            analysis.external_dirs,
+            analyze("rm -rf ~/x", &workspace).external_dirs
+        );
+        assert!(analyze(&followed, &workspace).external_dirs.is_empty());
     }
 
     #[test]
