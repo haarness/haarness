@@ -14874,7 +14874,21 @@ fn attachment_summary(sources: &[String]) -> String {
         .join(", ")
 }
 
+/// A message of the chat as the summary request reads it: text only. The
+/// summary request offers no tools, and a provider may refuse tool calls and
+/// results in a request without them (Bedrock's Converse wants a tool list
+/// then), so the chat's calls and their results are written out as text.
 fn compaction_message(message: ProviderMessage) -> ProviderMessage {
+    let omitted = |attachments: &[String]| {
+        if attachments.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n[Attachments omitted during compaction: {}]",
+                attachment_summary(attachments)
+            )
+        }
+    };
     match message {
         ProviderMessage::Media {
             role,
@@ -14882,29 +14896,54 @@ fn compaction_message(message: ProviderMessage) -> ProviderMessage {
             attachments,
         } => ProviderMessage::Text {
             role,
-            content: format!(
-                "{content}\n[Attachments omitted during compaction: {}]",
-                attachment_summary(&attachments)
-            ),
+            content: format!("{content}{}", omitted(&attachments)),
+        },
+        ProviderMessage::ToolCall {
+            name, arguments, ..
+        } => ProviderMessage::Text {
+            role: "assistant".into(),
+            content: format!("[Called the {name} tool with {arguments}]"),
         },
         ProviderMessage::ToolResult {
-            call_id,
             name,
             output,
             is_error,
             attachments,
-        } if !attachments.is_empty() => ProviderMessage::ToolResult {
-            call_id,
-            name,
-            is_error,
-            output: format!(
-                "{output}\n[Attachments omitted during compaction: {}]",
-                attachment_summary(&attachments)
+            ..
+        } => ProviderMessage::Text {
+            role: "user".into(),
+            content: format!(
+                "[The {name} tool {}]\n{output}{}",
+                if is_error { "failed" } else { "returned" },
+                omitted(&attachments)
             ),
-            attachments: Vec::new(),
         },
-        message => message,
+        message @ ProviderMessage::Text { .. } => message,
     }
+}
+
+/// The chat's messages for the summary request, one message for each run of
+/// messages with the same role, as providers that want roles to alternate
+/// take them.
+fn compaction_messages(messages: Vec<ProviderMessage>) -> Vec<ProviderMessage> {
+    let mut merged: Vec<ProviderMessage> = Vec::new();
+    for message in messages.into_iter().map(compaction_message) {
+        if let (
+            Some(ProviderMessage::Text {
+                role: previous,
+                content: text,
+            }),
+            ProviderMessage::Text { role, content },
+        ) = (merged.last_mut(), &message)
+            && previous == role
+        {
+            text.push_str("\n\n");
+            text.push_str(content);
+            continue;
+        }
+        merged.push(message);
+    }
+    merged
 }
 
 /// Run a tools-disabled summarization request and collect the text.
@@ -14923,10 +14962,7 @@ async fn summarize_context(
     // Summaries need the textual meaning of media turns, not the original
     // potentially huge or now-missing binary payload. This also makes overflow
     // recovery safe after an attachment pushed the provider over its limit.
-    let mut messages = messages
-        .into_iter()
-        .map(compaction_message)
-        .collect::<Vec<_>>();
+    let mut messages = compaction_messages(messages);
     messages.push(ProviderMessage::Text {
         role: "user".into(),
         content: "Summarize this conversation for continuation: goals, decisions, current \
@@ -19262,7 +19298,70 @@ mod tests {
         assert!(serialized.contains("screen.png (image/png)"));
         assert!(!serialized.contains("base64"));
         assert!(
-            matches!(&messages[1], ProviderMessage::ToolResult { attachments, .. } if attachments.is_empty())
+            matches!(&messages[1], ProviderMessage::Text { role, content } if role == "user" && content.contains("Image loaded"))
+        );
+    }
+
+    #[test]
+    fn the_summary_request_reads_tool_calls_and_results_as_text_in_turns() {
+        let text = |role: &str, content: &str| ProviderMessage::Text {
+            role: role.into(),
+            content: content.into(),
+        };
+        let messages = super::compaction_messages(vec![
+            text("user", "Fix the parser"),
+            text("assistant", "Reading it first."),
+            ProviderMessage::ToolCall {
+                call_id: "read-1".into(),
+                name: "read".into(),
+                arguments: json!({"path":"parse.rs"}),
+                provider_metadata: json!({"bedrock_reasoning":[{"reasoningContent":{}}]}),
+            },
+            ProviderMessage::ToolCall {
+                call_id: "read-2".into(),
+                name: "read".into(),
+                arguments: json!({"path":"lex.rs"}),
+                provider_metadata: serde_json::Value::Null,
+            },
+            ProviderMessage::ToolResult {
+                call_id: "read-1".into(),
+                name: "read".into(),
+                output: "fn parse() {}".into(),
+                is_error: false,
+                attachments: Vec::new(),
+            },
+            ProviderMessage::ToolResult {
+                call_id: "read-2".into(),
+                name: "read".into(),
+                output: "no such file: lex.rs".into(),
+                is_error: true,
+                attachments: Vec::new(),
+            },
+            text("assistant", "The bug is in parse.rs."),
+        ]);
+        // No call or result is left for a request that offers no tools, and
+        // the roles alternate.
+        let roles = messages
+            .iter()
+            .map(|message| match message {
+                ProviderMessage::Text { role, .. } => role.as_str(),
+                _ => panic!("not text: {message:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
+        let ProviderMessage::Text { content, .. } = &messages[1] else {
+            unreachable!()
+        };
+        assert_eq!(
+            content,
+            "Reading it first.\n\n[Called the read tool with {\"path\":\"parse.rs\"}]\n\n[Called the read tool with {\"path\":\"lex.rs\"}]"
+        );
+        let ProviderMessage::Text { content, .. } = &messages[2] else {
+            unreachable!()
+        };
+        assert_eq!(
+            content,
+            "[The read tool returned]\nfn parse() {}\n\n[The read tool failed]\nno such file: lex.rs"
         );
     }
 
