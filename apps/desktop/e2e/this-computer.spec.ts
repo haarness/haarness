@@ -735,7 +735,7 @@ test("a chat of This computer busy at the last quit has it tried at the next lau
   expect(await calls()).toBe(before);
 });
 
-test("with the terminal open, opening another chat leaves the keyboard in its message box; the terminal takes it when brought up", async () => {
+test("with the terminal open, opening another chat by pointer or keyboard leaves the keyboard in its message box; the terminal takes it only when brought up", async () => {
   await launch();
   await send("First chat about the shell");
   await ready();
@@ -777,6 +777,41 @@ test("with the terminal open, opening another chat leaves the keyboard in its me
   await expect.poll(async () => ((await shown.textContent()) ?? "").trim().length).toBeGreaterThan(0);
   await page.waitForTimeout(800);
   await expect(composer()).toBeFocused();
+
+  // From the keyboard too: with the keyboard in this chat's shell, another
+  // chat chosen in the command palette has it in its message box, also once
+  // that chat's shell has connected.
+  await page.locator(".terminal-view").click();
+  await expect(terminal).toBeFocused();
+  await page.keyboard.type("echo from-the-shell");
+  await expect(shown).toContainText("echo from-the-shell");
+  // What the command palette's key does: the menu tells the window.
+  await app!.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", { kind: "menu", data: "palette" }),
+  );
+  const search = page.getByRole("combobox", { name: "Search Haarness", exact: true });
+  await search.fill("First chat about the shell");
+  await expect(page.getByRole("option").first()).toContainText("First chat about the shell");
+  await search.press("Enter");
+  await expect(rows().filter({ hasText: "First chat" })).toHaveAttribute("aria-current", "true");
+  await expect(composer()).toBeFocused();
+  await expect.poll(async () => ((await shown.textContent()) ?? "").trim().length, { timeout: 30000 }).toBeGreaterThan(0);
+  await page.waitForTimeout(800);
+  await expect(composer()).toBeFocused();
+
+  // Typing in the message box while a terminal connects keeps the keyboard
+  // there: the panel opened, then the message box chosen without the pointer.
+  await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+  await app!.evaluate(() => void ((globalThis as { haarnessTerminalOutage?: boolean }).haarnessTerminalOutage = true));
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await composer().focus();
+  await page.keyboard.type("typed while it connects");
+  await app!.evaluate(() => void ((globalThis as { haarnessTerminalOutage?: boolean }).haarnessTerminalOutage = false));
+  await expect.poll(async () => ((await shown.textContent()) ?? "").trim().length, { timeout: 30000 }).toBeGreaterThan(0);
+  await page.waitForTimeout(800);
+  await expect(composer()).toBeFocused();
+  await expect(composer()).toHaveValue("typed while it connects");
+  await composer().fill("");
 
   // A terminal the person starts takes the keyboard.
   await page.locator(".terminal-tabs").getByRole("button", { name: "New terminal", exact: true }).click();

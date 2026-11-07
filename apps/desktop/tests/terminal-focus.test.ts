@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { keyboardClaim } from "../src/renderer/terminal-focus";
+import { keyboardClaim, typedElsewhere } from "../src/renderer/terminal-focus";
 
 // A terminal view takes the keyboard on its first connect only when the
 // person brought it up. Each step below is what the panel tells the claim.
@@ -54,4 +54,19 @@ test("a terminal that takes the place of the one shown has the keyboard if the p
   claim.claim();
   claim.shown(false);
   assert.equal(claim.take(), true);
+});
+
+test("typing or Tab outside the terminal keeps the keyboard there; a shortcut may still bring the terminal up", () => {
+  const key = (key: string, mods: Partial<{ ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) => ({
+    key, ctrlKey: false, metaKey: false, altKey: false, ...mods,
+  });
+  for (const event of [key("a"), key("A", { shiftKey: true }), key(" "), key("Enter"), key("Backspace"), key("Delete"), key("Tab"), key("Tab", { shiftKey: true }), key("é")])
+    assert.equal(typedElsewhere(event), true, event.key);
+  for (const event of [key("j", { metaKey: true }), key("`", { ctrlKey: true }), key("k", { metaKey: true }), key("ArrowDown", { altKey: true }), key("Shift"), key("Meta"), key("ArrowUp"), key("Escape"), key("Process")])
+    assert.equal(typedElsewhere(event), false, event.key);
+  // Typing in the message box while the terminal connects ends the claim.
+  const claim = keyboardClaim();
+  claim.claim();
+  if (typedElsewhere(key("x"))) claim.release();
+  assert.equal(claim.take(), false);
 });

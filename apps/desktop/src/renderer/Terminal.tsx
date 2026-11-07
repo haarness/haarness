@@ -6,6 +6,7 @@ import {
   createEffect,
   onMount,
   onCleanup,
+  untrack,
 } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -97,6 +98,9 @@ export function TerminalPanel() {
     const id = ++generation;
     const connection = app.state.connection!.id;
     const shown = folder();
+    // Read before the view goes: the terminal shown (untracked, as the
+    // panel's effects call this), and whether the keyboard is in the panel.
+    const was = untrack(selected);
     const kept = hasKeyboard();
     try {
       if (unfoldered()) {
@@ -113,8 +117,10 @@ export function TerminalPanel() {
         shownOutput.keep(connection + ":", values.map((value) => value.id));
         setTabs(values);
         if (!values.some((value) => value.id === selected())) {
-          // The terminal shown is gone (closed, or its server replaced).
-          terminalKeyboard.shown(kept);
+          // The terminal shown is gone (closed, or its server replaced). A
+          // list made for another chat's folder or another project showed
+          // none, and leaves the keyboard where it is.
+          if (was) terminalKeyboard.shown(kept);
           setSelected(values[0]?.id ?? "");
         }
       }
@@ -149,16 +155,17 @@ export function TerminalPanel() {
     terminalKeyboard.claim();
     setSelected(id);
   };
-  let listed: string | undefined;
+  let listed: { place: string; folderless: boolean } | undefined;
   createEffect(() => {
     const connection = app.state.connection?.id;
     const shown = folder();
     if (!connection) return;
     // Another chat's folder or another project lists its own terminals,
-    // and the keyboard stays where it is.
+    // and the keyboard stays where it is. A new chat of This computer that
+    // gets its folder as its first message goes is the same chat.
     const place = connection + "\n" + (shown ?? "");
-    terminalKeyboard.shown(hasKeyboard(), listed !== undefined && listed !== place);
-    listed = place;
+    terminalKeyboard.shown(hasKeyboard(), !!listed && listed.place !== place && !listed.folderless);
+    listed = { place, folderless: unfoldered() };
     setTabs([]);
     setSelected("");
     setStarting(true);
