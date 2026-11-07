@@ -255,6 +255,9 @@ type SubagentSlots = Arc<Mutex<HashMap<(u8, usize), Arc<Semaphore>>>>;
 struct ChatTools {
     /// Tools the model loaded or called, which stay in its list.
     promoted: HashSet<String>,
+    /// The provider and model Auto chose to defer tools for: the chat goes
+    /// on deferring them (see [`select_tools`]).
+    deferring: Option<(String, String)>,
 }
 
 impl ChatTools {
@@ -265,7 +268,17 @@ impl ChatTools {
             .collect::<Vec<_>>();
         Self {
             promoted: crate::tool_catalog::promoted_in(items, &names),
+            deferring: None,
         }
+    }
+
+    /// Whether Auto keeps deferring for `provider`'s `model`.
+    fn defers(&self, provider: &str, model: &str) -> bool {
+        self.deferring
+            .as_ref()
+            .is_some_and(|(kept_provider, kept_model)| {
+                kept_provider == provider && kept_model == model
+            })
     }
 }
 
@@ -2118,8 +2131,9 @@ pub struct AgentRuntime {
     /// the write lease. Different tools and concurrent child agents do not
     /// serialize behind one global execution lock.
     tool_execution_gates: Arc<ToolExecutionGates>,
-    /// Session-local schema promotions survive turns without leaking between
-    /// threads. A restart rebuilds them from each chat's history.
+    /// Session-local schema promotions and Auto's lazy decision survive
+    /// turns without leaking between threads. A restart rebuilds the
+    /// promotions from each chat's history.
     tool_promotions: Arc<ToolPromotions>,
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
     /// Stores of the chats that work in a folder of their own: each such
@@ -2755,7 +2769,7 @@ impl AgentRuntime {
         thread_id: Option<ThreadId>,
     ) -> CoreResult<ToolCatalogResponse> {
         let components = self.components();
-        let (context_window, promoted) = if let Some(thread_id) = thread_id {
+        let (context_window, promoted, deferring) = if let Some(thread_id) = thread_id {
             let thread = self.repository.get_thread(thread_id).await?;
             let tools = self.chat_tools(thread_id, &components).await?;
             (
@@ -2766,6 +2780,7 @@ impl AgentRuntime {
                     .find(|candidate| candidate.id == thread.model)
                     .and_then(|candidate| candidate.context_window),
                 tools.promoted.clone(),
+                tools.defers(&thread.provider, &thread.model),
             )
         } else {
             let context = components
@@ -2781,7 +2796,7 @@ impl AgentRuntime {
                         .find(|candidate| candidate.id == model)
                         .and_then(|candidate| candidate.context_window)
                 });
-            (context, HashSet::new())
+            (context, HashSet::new(), false)
         };
         let live = self.tool_availability.read().clone();
         let mut lazy_tools = components.config.lazy_tools.clone();
@@ -2795,6 +2810,7 @@ impl AgentRuntime {
             &lazy_tools,
             &promoted,
             context_window,
+            deferring,
         )
         .response;
         // The server a tool comes from, as it is named: `a__b`'s tools read
@@ -3990,6 +4006,7 @@ impl AgentRuntime {
                 &lazy,
                 &tools.promoted,
                 context_window,
+                tools.defers(&thread.provider, &thread.model),
             );
             if selection.response.lazy_active {
                 system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
@@ -10061,7 +10078,13 @@ impl RunnerTask {
                     .find(|candidate| candidate.id == model)
                     .and_then(|candidate| candidate.context_window);
                 let selection = self
-                    .round_tools(eligible_tools, &lazy_settings, context_window)
+                    .round_tools(
+                        eligible_tools,
+                        &lazy_settings,
+                        provider_id,
+                        &model,
+                        context_window,
+                    )
                     .await?;
                 if selection.response.lazy_active {
                     system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
@@ -11511,11 +11534,14 @@ impl RunnerTask {
     }
 
     /// This round's tools, from the chat's tool state (read back from its
-    /// history when this process has none).
+    /// history when this process has none), keeping Auto's choice to defer
+    /// tools for the chat's model while the person keeps that mode and model.
     async fn round_tools(
         &self,
         eligible: Vec<crate::ToolDefinition>,
         settings: &crate::LazyToolSettings,
+        provider: &str,
+        model: &str,
         context_window: Option<u64>,
     ) -> CoreResult<crate::tool_catalog::ToolSelection> {
         if !self.tool_promotions.contains_key(&self.thread.id) {
@@ -11525,19 +11551,27 @@ impl RunnerTask {
                 .entry(self.thread.id)
                 .or_insert(rebuilt);
         }
-        let promoted = self
+        let (promoted, deferring) = self
             .tool_promotions
             .get(&self.thread.id)
-            .map(|tools| tools.promoted.clone())
+            .map(|tools| (tools.promoted.clone(), tools.defers(provider, model)))
             .unwrap_or_default();
-        Ok(select_tools(
+        let selection = select_tools(
             eligible,
             &self.config.tool_availability,
             &self.tool_availability.read(),
             settings,
             &promoted,
             context_window,
-        ))
+            deferring,
+        );
+        self.tool_promotions
+            .entry(self.thread.id)
+            .or_default()
+            .deferring = (settings.mode == haarness_protocol::LazyToolMode::Auto
+            && selection.response.lazy_active)
+            .then(|| (provider.to_owned(), model.to_owned()));
+        Ok(selection)
     }
 
     fn promote_tools(&self, names: impl IntoIterator<Item = String>) -> Vec<String> {

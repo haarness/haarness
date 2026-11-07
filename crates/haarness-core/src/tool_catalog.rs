@@ -225,6 +225,12 @@ pub struct ToolSelection {
 
 /// Build both the public catalog and the exact provider-facing schema list
 /// from one snapshot, preventing UI estimates from drifting from execution.
+/// `deferring`: Auto deferred tools for this chat and model before, so it
+/// goes on deferring them, whatever has changed since (a server joining or
+/// leaving, the model's window learned, the model loading tools): the tools
+/// open the cached prompt, and the whole list changing would cost the chat
+/// its cache. A chat sent every tool can still switch to deferring once, as
+/// sending every schema could crowd a small model's window.
 #[must_use]
 pub fn select_tools<ConfiguredHasher, LiveHasher, PromotedHasher>(
     mut definitions: Vec<ToolDefinition>,
@@ -233,6 +239,7 @@ pub fn select_tools<ConfiguredHasher, LiveHasher, PromotedHasher>(
     settings: &LazyToolSettings,
     promoted: &HashSet<String, PromotedHasher>,
     context_window: Option<u64>,
+    deferring: bool,
 ) -> ToolSelection
 where
     ConfiguredHasher: BuildHasher,
@@ -259,13 +266,14 @@ where
     // tiny catalog; the reported savings still saturate at zero below.
     let loader_tokens = estimated_tokens(&load_tool_definition());
     let active = effective_enabled(configured, live, LOAD_TOOL_NAME)
-        && lazy_active(
-            settings.mode,
-            settings.min_saved_tokens,
-            context_window,
-            deferred_tokens,
-            loader_tokens,
-        );
+        && ((deferring && settings.mode == LazyToolMode::Auto)
+            || lazy_active(
+                settings.mode,
+                settings.min_saved_tokens,
+                context_window,
+                deferred_tokens,
+                loader_tokens,
+            ));
 
     let mut entries = Vec::with_capacity(definitions.len());
     let mut advertised = Vec::new();
@@ -495,6 +503,7 @@ mod tests {
             &settings,
             &HashSet::new(),
             Some(128_000),
+            false,
         );
         assert!(selection.response.lazy_active);
         assert!(selection.advertised.iter().any(|tool| tool.name == "read"));
@@ -527,6 +536,7 @@ mod tests {
             &settings,
             &HashSet::new(),
             None,
+            false,
         );
         assert!(selection.advertised.is_empty());
         assert!(
@@ -552,6 +562,7 @@ mod tests {
             &settings,
             &HashSet::new(),
             None,
+            false,
         );
         let found = search_deferred_tools(
             &definitions,
@@ -577,6 +588,7 @@ mod tests {
             },
             &HashSet::new(),
             None,
+            false,
         );
         for query in ["skill tool", "skill tools", "skill"] {
             assert_eq!(
@@ -592,6 +604,67 @@ mod tests {
             ),
             ["mcp__docs__search"]
         );
+    }
+
+    fn names(tools: &[ToolDefinition]) -> Vec<&str> {
+        tools.iter().map(|tool| tool.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_chat_auto_deferred_for_keeps_deferring_when_the_savings_shrink() {
+        let definitions = vec![
+            definition("read", "read a file"),
+            definition("memory_read", &"durable project notes ".repeat(500)),
+            definition("session_manage", "sessions"),
+        ];
+        let select = |promoted: &HashSet<String>, deferring: bool, mode: LazyToolMode| {
+            select_tools(
+                definitions.clone(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &LazyToolSettings {
+                    mode,
+                    ..LazyToolSettings::default()
+                },
+                promoted,
+                Some(200_000),
+                deferring,
+            )
+        };
+        let first = select(&HashSet::new(), false, LazyToolMode::Auto);
+        assert!(first.response.lazy_active);
+        assert_eq!(names(&first.advertised), ["read", LOAD_TOOL_NAME]);
+
+        // Once the model loaded the large schema, what is left to defer no
+        // longer pays for the loader: decided afresh, every tool would be
+        // sent and the loader dropped, a new tool list mid-chat.
+        let loaded = HashSet::from(["memory_read".to_owned()]);
+        let afresh = select(&loaded, false, LazyToolMode::Auto);
+        assert!(!afresh.response.lazy_active);
+        let kept = select(&loaded, true, LazyToolMode::Auto);
+        assert!(kept.response.lazy_active);
+        assert_eq!(
+            names(&kept.advertised),
+            ["memory_read", "read", LOAD_TOOL_NAME]
+        );
+
+        // The person's own choice of mode is not overruled.
+        assert!(
+            !select(&HashSet::new(), true, LazyToolMode::Off)
+                .response
+                .lazy_active
+        );
+        // Nor is turning the loader off.
+        let without_loader = select_tools(
+            definitions.clone(),
+            &HashMap::from([(LOAD_TOOL_NAME.to_owned(), false)]),
+            &HashMap::new(),
+            &LazyToolSettings::default(),
+            &loaded,
+            Some(200_000),
+            true,
+        );
+        assert!(!without_loader.response.lazy_active);
     }
 
     fn result(name: &str, is_error: bool, metadata: Value) -> Item {
