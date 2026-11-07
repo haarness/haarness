@@ -52,6 +52,10 @@ With HAARNESS_BASE_BIN:
     start and Desktop's restore each keep the host; with it still running,
     Desktop's restore makes it this computer's, and once it has stopped the
     next restore turns access back on with the same host.
+11. One folder Bay and Cove keep in step, one host under the release before:
+    Bay runs this release first and keeps the host; Cove's Desktop then turns
+    access back on as a host of its own, both stay connected, and Cove keeps
+    that host when Desktop starts again.
 
 Writes secret-free results to checks.json in a new folder under the state
 folder (default: a temporary folder, removed when the run passes).
@@ -625,6 +629,43 @@ def main() -> None:
             check(again.get("state") == "on" and restored == loft_id and set(cloud.hosts) == hosts, "after it stopped, the next restore turns access back on with the same host", again)
             loft.cli("remote", "disable", loft_id)
 
+            # 11. One folder kept in step: the first computer on this release
+            # keeps the host, the other's Desktop turns access on as its own.
+            kept = root / "kept-config"
+            kept.mkdir()
+            bay = computer("Bay", "MACHINE-BAY", config=kept)
+            cove = computer("Cove", "MACHINE-COVE", config=kept)
+            bay.start(base)
+            bay_id = connected_as(bay, cloud)
+            bay.stop()
+            cove.start(base)
+            check(connected_as(cove, cloud) == bay_id, "under the release before, both computers of one kept folder are one host")
+            cove.stop()
+            bay.start()
+            check(connected_as(bay, cloud) == bay_id and bay.file.name == old and bay.identity().get("machine") == stamp("MACHINE-BAY", bay_id), "Bay, first on this release, keeps the host, stamped as Bay's")
+            hosts = set(cloud.hosts)
+
+            def own_connector(each, machine):
+                for path, identity in each.identities().items():
+                    if alive(identity.get("pid")) and identity.get("machine") == stamp(machine, identity.get("id", "")):
+                        return identity["pid"]
+                return None
+
+            restored = cove.restore()
+            pid = wait_for(lambda: own_connector(cove, "MACHINE-COVE"), 60, "Cove's restored connector")
+            cove_id = connected_as(cove, cloud, pid=pid)
+            check(restored.get("state") == "on" and cove_id != bay_id and set(cloud.hosts) - hosts == {cove_id}, "Cove's Desktop restore then turns access on, as a host of its own", restored)
+            check(cove.file.name == file_name(cloud, "MACHINE-COVE") and json.loads((kept / old).read_text())["id"] == bay_id, "in a file named for Cove, leaving Bay's as it was", cove.file.name)
+            settled = time.time()
+            time.sleep(5)
+            check({bay_id, cove_id} <= cloud.connected() and not [id for at, id in cloud.takeovers if at >= settled], "both stay connected, neither taking the other's connection")
+            os.kill(pid, signal.SIGTERM)
+            wait_for(lambda: not alive(pid), 30, "Cove's connector to stop")
+            again = cove.restore()
+            pid = wait_for(lambda: own_connector(cove, "MACHINE-COVE"), 60, "Cove's connector, restored again")
+            check(again.get("state") == "on" and connected_as(cove, cloud, pid=pid) == cove_id and set(cloud.hosts) - hosts == {cove_id}, "and Desktop starting again keeps Cove's host", again)
+            cove.cli("remote", "disable", cove_id)
+            bay.stop()
         (root / "checks.json").write_text(json.dumps({"verdict": "PASS", "checks": checks}, indent=2))
     except BaseException as error:
         (root / "checks.json").write_text(json.dumps({"verdict": "FAIL", "error": str(error), "checks": checks}, indent=2))

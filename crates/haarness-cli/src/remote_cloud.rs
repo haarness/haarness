@@ -2661,6 +2661,14 @@ pub(crate) async fn restore_host(
         Err(error) => return Err(error),
     };
     let Some(identity) = read_identity(&file) else {
+        // No identity of this computer's own yet, beside one another computer
+        // stamped under the old name: a folder both keep, where the two were
+        // one host before this release. Access that was on there comes back
+        // on here too, as a host of this computer's own.
+        let shared = identity_file_for(paths, client, &account, gateway, None, None);
+        if file != shared && left_on_elsewhere(&shared, hardware) {
+            return enable_for(client, paths, gateway, &account, hardware).await;
+        }
         return host_access(client, paths, false).await;
     };
     let current = identity["version"].as_str() == Some(env!("CARGO_PKG_VERSION"));
@@ -2674,6 +2682,15 @@ pub(crate) async fn restore_host(
         return host_access(client, paths, false).await;
     }
     enable_for(client, paths, gateway, &account, hardware).await
+}
+/// Whether the identity in `shared` is another computer's (stamped there by
+/// a computer other than the one with `hardware` id) and was left on: its
+/// connector neither turned off nor given up.
+fn left_on_elsewhere(shared: &Path, hardware: Option<&str>) -> bool {
+    !shared.with_extension("stop").exists()
+        && read_identity(shared).is_some_and(|identity| {
+            stamped_elsewhere(&identity, hardware) && identity["error"].is_null()
+        })
 }
 /// Stop the connectors that make this computer reachable through the
 /// configured Cloud, except those of `keep` (the account now selected): after
@@ -3233,6 +3250,34 @@ mod tests {
         // The next start keeps the same host, and Studio's is untouched.
         assert_eq!(start().unwrap().id.to_string(), id);
         assert_eq!(read_identity(&shared), Some(studio));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_folder_two_computers_shared_as_one_host_comes_back_on_as_two() {
+        let root = std::env::temp_dir().join(format!("haarness-left-on-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let shared = root.join("remote-shared.json");
+        let id = Uuid::now_v7().to_string();
+        let write = |identity: Value| std::fs::write(&shared, identity.to_string()).unwrap();
+        let studio = json!({"id": id, "name": "Studio", "registered": true,
+            "machine": machine_stamp("STUDIO", &id)});
+        assert!(!left_on_elsewhere(&shared, Some("LAPTOP")), "nothing there");
+        write(studio.clone());
+        assert!(left_on_elsewhere(&shared, Some("LAPTOP")));
+        // Studio's own, or one this computer cannot check, is not another's.
+        assert!(!left_on_elsewhere(&shared, Some("STUDIO")));
+        assert!(!left_on_elsewhere(&shared, None));
+        // From before stamps, it is this computer's own (see `adopt`).
+        write(json!({"id": id, "name": "Studio"}));
+        assert!(!left_on_elsewhere(&shared, Some("LAPTOP")));
+        // Turned off, or given up: it stays off here too.
+        let mut failed = studio.clone();
+        failed["error"] = json!("Remote host access was revoked");
+        write(failed);
+        assert!(!left_on_elsewhere(&shared, Some("LAPTOP")));
+        write(studio);
+        std::fs::write(shared.with_extension("stop"), "stop").unwrap();
+        assert!(!left_on_elsewhere(&shared, Some("LAPTOP")));
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
