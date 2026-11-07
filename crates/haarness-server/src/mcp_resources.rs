@@ -447,13 +447,19 @@ pub(crate) async fn read_mentions(
 /// first whole lines that fit, and the start of a long line that does not,
 /// then a note that says how much is left out and where the whole text was
 /// saved for the model to read. JSON on one line is laid out a value a line
-/// first (see [`crate::tools::indented_json`]).
+/// first (see [`crate::tools::indented_json`]), and comes whole when it
+/// then fits.
 async fn cut(text: String, room: usize, directory: &Path) -> CoreResult<String> {
-    if text.len() <= room && text.lines().count() <= MENTION_LINES {
+    let fits = |text: &str| text.len() <= room && text.lines().count() <= MENTION_LINES;
+    if fits(&text) {
         return Ok(text);
     }
     // Saved, and shown, as an MCP tool's text is, so the file reads by line.
-    let text = crate::tools::indented_json(&text).unwrap_or(text);
+    let text = match crate::tools::indented_json(&text) {
+        Some(laid_out) if fits(&laid_out) => return Ok(laid_out),
+        Some(laid_out) => laid_out,
+        None => text,
+    };
     let mut kept = 0;
     for (index, line) in text.split_inclusive('\n').enumerate() {
         if index == MENTION_LINES {
@@ -1133,6 +1139,34 @@ mod tests {
             "{text:.300}"
         );
         assert_eq!(kept, MENTION_BYTES);
+    }
+
+    /// JSON past 50 KiB only for its wide indents was laid out to fit and
+    /// still said to be cut, with a file saved for nothing.
+    #[tokio::test]
+    async fn a_mention_that_fits_once_laid_out_comes_whole() {
+        let rows: Vec<Value> = (0..300)
+            .map(|id| json!({"id": id, "title": "t".repeat(50), "body": "b".repeat(50)}))
+            .collect();
+        let mut spaced = Vec::new();
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(b"        ");
+        serde::Serialize::serialize(
+            &rows,
+            &mut serde_json::Serializer::with_formatter(&mut spaced, formatter),
+        )
+        .unwrap();
+        let spaced = String::from_utf8(spaced).unwrap();
+        assert!(spaced.len() > MENTION_BYTES, "{}", spaced.len());
+        let directory =
+            std::env::temp_dir().join(format!("haarness-mention-{}", uuid::Uuid::now_v7()));
+        let body = cut(spaced, MENTION_BYTES, &directory).await.unwrap();
+        assert!(
+            !body.contains("[Only the first "),
+            "{}",
+            &body[body.len() - 200..]
+        );
+        assert_eq!(body, serde_json::to_string_pretty(&rows).unwrap());
+        assert!(!directory.exists());
     }
 
     #[tokio::test]

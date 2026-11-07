@@ -666,7 +666,9 @@ impl WorkflowHost for McpCodeHost {
         // A call of a script is never shown to the model, so the file the
         // cut text names is read by nothing else once the script has it.
         if let Some((text, metadata, file)) = take_whole_mcp_output(self.thread, &output).await {
-            let _ = tokio::fs::remove_file(file).await;
+            if let Some(file) = file {
+                let _ = tokio::fs::remove_file(file).await;
+            }
             return Ok(Some(json!({"text":text,"metadata":metadata})));
         }
         Ok(Some(json!({"text":output.text,"metadata":output.metadata})))
@@ -2673,11 +2675,13 @@ impl Tool for McpProjectedTool {
 /// not the model and gets the whole text and the server's own metadata.
 struct WholeOutput {
     thread: ThreadId,
-    /// The file the cut text names.
-    file: PathBuf,
+    /// The file the cut text names, or `None` for JSON that fit once laid
+    /// out, which is not cut.
+    file: Option<PathBuf>,
     /// The cut text the call gave, by its length and hash: what a script is
     /// handed must start with it (hooks may add to its end), so a server
-    /// that names this file in its own short result gets nothing.
+    /// that names this file in its own short result gets nothing. A text
+    /// that is not cut names no file, so it must be all that is handed.
     cut: (usize, [u8; 32]),
     /// The server's text when the file holds another form of it (JSON
     /// laid out a value a line), else `None`: the file is the text.
@@ -2710,6 +2714,15 @@ async fn capped_mcp_output(
     let whole = text.clone();
     let (capped, saved) = cut_mcp_text(text, directory, false).await?;
     let Some((file, reformatted)) = saved else {
+        if capped.text != whole {
+            keep_whole_output(WholeOutput {
+                thread,
+                file: None,
+                cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
+                text: Some(whole),
+                metadata: metadata.clone(),
+            });
+        }
         return Ok(ToolOutput {
             text: capped.text,
             metadata,
@@ -2734,13 +2747,20 @@ async fn capped_mcp_output(
         other => serde_json::Map::from_iter([("structuredContent".to_owned(), other)]),
     };
     merged.extend(cut);
-    let kept = WholeOutput {
+    keep_whole_output(WholeOutput {
         thread,
-        file,
+        file: Some(file),
         cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
         text: reformatted.then_some(whole),
         metadata,
-    };
+    });
+    Ok(ToolOutput {
+        text: capped.text,
+        metadata: Value::Object(merged),
+    })
+}
+
+fn keep_whole_output(kept: WholeOutput) {
     let mut outputs = WHOLE_OUTPUTS.lock();
     outputs.push_back(kept);
     while outputs.len() > WHOLE_OUTPUTS_KEPT
@@ -2752,11 +2772,6 @@ async fn capped_mcp_output(
     {
         outputs.pop_front();
     }
-    drop(outputs);
-    Ok(ToolOutput {
-        text: capped.text,
-        metadata: Value::Object(merged),
-    })
 }
 
 fn cut_fingerprint(text: &[u8]) -> [u8; 32] {
@@ -2765,35 +2780,39 @@ fn cut_fingerprint(text: &[u8]) -> [u8; 32] {
 }
 
 /// What a script of chat `thread` gets for an MCP result
-/// [`capped_mcp_output`] cut: the whole text and the server's own metadata,
-/// taken once, with the file that holds the whole. `None` for any other
-/// output, so a server cannot name a file, another call's or another
-/// chat's, in its structured content and have a script read it.
+/// [`capped_mcp_output`] cut, or laid out: the whole text as the server
+/// wrote it and the server's own metadata, taken once, with the file that
+/// holds the whole when there is one. `None` for any other output, so a
+/// server cannot name a file, another call's or another chat's, in its
+/// structured content and have a script read it.
 pub(crate) async fn take_whole_mcp_output(
     thread: ThreadId,
     output: &ToolOutput,
-) -> Option<(String, Value, PathBuf)> {
-    if output.metadata.get("truncated") != Some(&Value::Bool(true)) {
-        return None;
-    }
-    let path = Path::new(output.metadata.get("outputPath")?.as_str()?);
+) -> Option<(String, Value, Option<PathBuf>)> {
+    let named = if output.metadata.get("truncated") == Some(&Value::Bool(true)) {
+        Some(Path::new(output.metadata.get("outputPath")?.as_str()?))
+    } else {
+        None
+    };
     let kept = {
         let mut outputs = WHOLE_OUTPUTS.lock();
         let at = outputs.iter().position(|kept| {
             let (length, hash) = kept.cut;
+            let text = output.text.as_bytes();
+            let start = match kept.file {
+                Some(_) => text.get(..length),
+                None => (text.len() == length).then_some(text),
+            };
             kept.thread == thread
-                && kept.file == path
-                && output
-                    .text
-                    .as_bytes()
-                    .get(..length)
-                    .is_some_and(|start| cut_fingerprint(start) == hash)
+                && kept.file.as_deref() == named
+                && start.is_some_and(|start| cut_fingerprint(start) == hash)
         })?;
         outputs.remove(at)?
     };
-    let text = match kept.text {
-        Some(text) => text,
-        None => tokio::fs::read_to_string(&kept.file).await.ok()?,
+    let text = match (kept.text, &kept.file) {
+        (Some(text), _) => text,
+        (None, Some(file)) => tokio::fs::read_to_string(file).await.ok()?,
+        (None, None) => return None,
     };
     Some((text, kept.metadata, kept.file))
 }
@@ -5344,20 +5363,25 @@ fn cut_notice(path: &Path, removed: usize, failed: bool) -> String {
 /// JSON on one line (the whole text, or a long line of it, such as an
 /// embedded resource's) is saved, and shown, indented one value a line, so
 /// the file can be read by line, and a line longer than what is left of the
-/// 50 KiB is cut inside it rather than left out. Gives the output and, when
-/// it was cut, the file holding the whole and whether it holds it indented
-/// rather than as it came.
+/// 50 KiB is cut inside it rather than left out. JSON that fits once
+/// indented (written with wider indents than two spaces, say) is not cut.
+/// Gives the output (the text, or its JSON indented) and, when it was cut,
+/// the file holding the whole and whether it holds it indented rather than
+/// as it came.
 pub(crate) async fn cut_mcp_text(
     text: String,
     directory: &Path,
     failed: bool,
 ) -> CoreResult<(ToolOutput, Option<(PathBuf, bool)>)> {
-    if text.lines().count() <= TOOL_OUTPUT_MAX_LINES && text.len() <= TOOL_OUTPUT_MAX_BYTES {
+    if within_tool_output_limits(&text) {
         return Ok((output(text), None));
     }
     let indented = indented_json(&text);
     let reformatted = indented.is_some();
     let readable = indented.unwrap_or(text);
+    if reformatted && within_tool_output_limits(&readable) {
+        return Ok((output(readable), None));
+    }
     let preview = filled_preview(&readable);
     let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
         .await
@@ -5381,6 +5405,10 @@ pub(crate) async fn cut_mcp_text(
 /// minified code) rather than prose: it is indented when it is JSON, and a
 /// mentioned resource's cut goes inside it rather than before it.
 pub(crate) const LONG_LINE_BYTES: usize = 2_000;
+
+fn within_tool_output_limits(text: &str) -> bool {
+    text.len() <= TOOL_OUTPUT_MAX_BYTES && text.lines().count() <= TOOL_OUTPUT_MAX_LINES
+}
 
 /// `text` with its JSON indented, or `None` when it holds none to indent:
 /// the whole of it when it is one JSON object or array, else each line of
@@ -10345,6 +10373,23 @@ mod webfetch_tests {
         serde_json::to_string(&rows).unwrap()
     }
 
+    /// 52 KiB of JSON indented four spaces a level, as Python's
+    /// `json.dumps(rows, indent=4)` writes it: 48 KiB at two spaces.
+    fn rows_indented_four() -> String {
+        let row = |id: usize| {
+            format!(
+                "    {{\n        \"id\": {id},\n        \"title\": \"{}\",\n        \"body\": \"{}\",\n        \"owner\": \"{}\",\n        \"state\": \"open\"\n    }}",
+                "t".repeat(50),
+                "b".repeat(50),
+                "o".repeat(50)
+            )
+        };
+        format!(
+            "[\n{}\n]",
+            (0..200).map(row).collect::<Vec<_>>().join(",\n")
+        )
+    }
+
     /// One line of JSON over 50 KiB holding what parsing would change: an
     /// integer past 64 bits, a decimal past 17 digits, a key given twice.
     fn exact_numbers() -> String {
@@ -10353,10 +10398,11 @@ mod webfetch_tests {
     }
 
     /// Answers `wide` with 200 KB of lines beside its structured content
-    /// and page, `rows` with 120 KB of one-line JSON, `line` with 120 KB on
-    /// one line, `tree` with structured content that uses `truncated` itself,
-    /// `listing` with array content, `failing` with a long failure, and
-    /// anything else briefly.
+    /// and page, `rows` with 120 KB of one-line JSON, `spaced` with JSON
+    /// that fits once laid out, `line` with 120 KB on one line, `tree` with
+    /// structured content that uses `truncated` itself, `listing` with
+    /// array content, `failing` with a long failure, and anything else
+    /// briefly.
     struct WideMcp;
 
     #[async_trait]
@@ -10391,6 +10437,7 @@ mod webfetch_tests {
                     json!({"rows": 2000, "mcp_app": {"uri": "ui://rows"}}),
                 ),
                 "rows" => output(compact_rows(), Value::Null),
+                "spaced" => output(rows_indented_four(), json!({"rows": 200})),
                 "line" => output("l".repeat(120 * 1024), Value::Null),
                 "tree" => output(
                     "t".repeat(80 * 1024),
@@ -10483,7 +10530,7 @@ mod webfetch_tests {
             json!({"rows": 2000, "mcp_app": {"uri": "ui://rows"}})
         );
         assert!(take_whole_mcp_output(thread, &output).await.is_none());
-        std::fs::remove_file(file).unwrap();
+        std::fs::remove_file(file.unwrap()).unwrap();
 
         // Array content moves under `structuredContent` beside the cut.
         let listing = call_wide("listing", thread).await.unwrap();
@@ -10537,7 +10584,7 @@ mod webfetch_tests {
             metadata,
             json!({"tree": [{"path": "a"}], "truncated": false})
         );
-        std::fs::remove_file(file).unwrap();
+        std::fs::remove_file(file.unwrap()).unwrap();
     }
 
     /// Text on one line came to the model as its first 2,000 characters,
@@ -10570,7 +10617,7 @@ mod webfetch_tests {
         // A script still gets the text as the server wrote it.
         let (text, _, file) = take_whole_mcp_output(thread, &rows).await.unwrap();
         assert_eq!(text, compact_rows());
-        std::fs::remove_file(file).unwrap();
+        std::fs::remove_file(file.unwrap()).unwrap();
 
         let line = call_wide("line", thread).await.unwrap();
         assert!(
@@ -10619,6 +10666,60 @@ mod webfetch_tests {
             indent_json("{\"a\":[],\"b\":{ },\"c\":[1,{\"d\":null}]}").unwrap(),
             "{\n  \"a\": [],\n  \"b\": {},\n  \"c\": [\n    1,\n    {\n      \"d\": null\n    }\n  ]\n}"
         );
+    }
+
+    /// JSON over 50 KiB only for its wide indents was laid out to 48 KiB
+    /// and then said to be truncated by 0 bytes, with a file to read for
+    /// nothing; it now comes whole, and a script still gets the server's
+    /// text.
+    #[tokio::test]
+    async fn json_that_fits_once_laid_out_is_not_cut() {
+        let thread = ThreadId::new();
+        let output = call_wide("spaced", thread).await.unwrap();
+        assert!(
+            !output.text.contains("truncated"),
+            "{}",
+            &output.text[output.text.len() - 300..]
+        );
+        assert_eq!(output.metadata, json!({"rows": 200}));
+        assert!(
+            output.text.starts_with("[\n  {\n    \"id\": 0,\n"),
+            "{:.60}",
+            output.text
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.text).unwrap(),
+            serde_json::from_str::<Value>(&rows_indented_four()).unwrap()
+        );
+        // Matched whole: another chat's script, or a text with more after
+        // it, gets the text as it is.
+        assert!(
+            take_whole_mcp_output(ThreadId::new(), &output)
+                .await
+                .is_none()
+        );
+        let longer = ToolOutput {
+            text: format!("{}\n\nmore", output.text),
+            metadata: output.metadata.clone(),
+        };
+        assert!(take_whole_mcp_output(thread, &longer).await.is_none());
+        let (text, metadata, file) = take_whole_mcp_output(thread, &output).await.unwrap();
+        assert_eq!(
+            (text, metadata, file),
+            (rows_indented_four(), json!({"rows": 200}), None)
+        );
+        assert!(take_whole_mcp_output(thread, &output).await.is_none());
+
+        // A resource read's text, and a failure's, are not cut either.
+        let directory =
+            std::env::temp_dir().join(format!("haarness-laid-out-{}", uuid::Uuid::now_v7()));
+        for failed in [false, true] {
+            let (cut, saved) = cut_mcp_text(rows_indented_four(), &directory, failed)
+                .await
+                .unwrap();
+            assert_eq!((cut.text, saved), (output.text.clone(), None));
+        }
+        assert!(!directory.exists());
     }
 
     /// Indenting gave each line two spaces a level, so JSON nested deep grew

@@ -2,8 +2,8 @@
 """Real server, echo provider: MCP results carried only as structured content reach the model and workflows;
 resources embedded as base64 reach the model as what they hold (an image as an attachment, text as text, anything
 else named), never as base64; audio of a type Haarness does not carry is named rather than attached; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
-all of it. One-line JSON is laid out a value a line within a few times its length, however
-deep it nests.
+all of it. One-line JSON is laid out a value a line, whole when it then fits, and within a few times its length however deep
+it nests.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -175,6 +175,22 @@ try:
         time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
     assert run_state['status'] == 'completed' and run_state.get('result') == {'tree': 1, 'truncated': False, 'text': 80 * 1024}, run_state.get('result')
     check('a workflow gets the server\'s own metadata for a cut result, its own `truncated` included')
+
+    # Indented four spaces it passes 50 KiB; laid out at two it fits, so it is not cut.
+    SPACED = json.dumps([{'id': n, 'title': 't' * 50, 'body': 'b' * 50, 'owner': 'o' * 50, 'state': 'open'}
+                         for n in range(200)], indent=4)
+    result = call(thread, 'spaced')
+    assert not result['is_error'] and len(SPACED) > 50 * 1024, len(SPACED)
+    assert result['output'] == json.dumps(json.loads(SPACED), indent=2), result['output'][-300:]
+    assert 'truncated' not in result['output'] and 'outputPath' not in (result.get('metadata') or {}), result.get('metadata')
+    source = ("export const meta = { name: 'spaced-rows', phases: ['call'] };\nphase('call');\n"
+              "return (await tool('mcp__structured__spaced', {})).output;\n")
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed' and run_state.get('result') == SPACED, str(run_state.get('result'))[:200]
+    check('JSON that fits once laid out reaches the model whole, with no truncation note or saved file, and a workflow gets it as the server wrote it')
 
     # Two spaces a level would make this 1.8 GB; past 32 levels the rest stays on its line.
     started = time.monotonic()

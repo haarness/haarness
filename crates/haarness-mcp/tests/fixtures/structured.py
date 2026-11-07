@@ -38,6 +38,10 @@ TOOLS = {
     # The same JSON after a heading line.
     'found': {'content': [{'type': 'text', 'text': 'Found 800 entries:\n[%s]' % ','.join(
         ['{"wei":1234567890123456789012345,"key":1,"key":2}'] * 1600)}]},
+    # 52 KB of JSON indented four spaces, as Python's json.dumps(rows, indent=4) writes it: 48 KB at two.
+    'spaced': {'content': [{'type': 'text', 'text': json.dumps(
+        [{'id': n, 'title': 't' * 50, 'body': 'b' * 50, 'owner': 'o' * 50, 'state': 'open'} for n in range(200)],
+        indent=4)}]},
     # 60 KB of arrays nested 30,000 deep.
     'nested': {'content': [{'type': 'text', 'text': '[' * 30000 + ']' * 30000}]},
     # Structured content that names `truncated` itself, beside 80 KB of text.
