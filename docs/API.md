@@ -179,10 +179,25 @@ and loop prompts with redaction markers before the archive leaves the server.
 Compaction accepts an optional caller `summary`; omitting it asks the server to
 generate a real summary with the thread model. Before committing, the server
 confirms any pending revert, captures a versioned exact todo checkpoint, and
-records the configured recent-turn tail. Subsequent provider requests receive
-the summary, exact todo JSON as data, then the retained turns. Media from the
-pre-compaction tail is represented by a textual attachment note rather than
-re-uploaded. The summary request offers no tools, so it reads the chat's tool
+records what stays in view beside the summary. The person's latest request
+always does, word for word and with what it attached, and with what else they
+wrote in its turn. Then come the configured recent turns when they fit under
+the kept part's budget (half the model-safe input, at most
+`preserve_recent_tokens`, less the instructions, tools and summary); when the
+request's own turn is too long for that, its newest rounds, each call with its
+result. When even the newest round does not fit, every kept tool output shows
+only its start and end, cut to the same length, with a note saying how many
+characters were left out and how to read the rest: the file the tool saved it
+in (webfetch saves any page over 8 KiB), `read` with an offset, or the call
+made again. The record holds this as `tail_start_sequence`, `kept_sequences`
+(items before the tail that stay in view) and `tool_output_chars`; stored
+items never change. Subsequent provider requests receive the summary, exact
+todo JSON as data, then the kept items. A latest message too long to keep in
+the model's window ends the turn (or refuses a manual compaction) with a
+message saying so and what to do, rather than being summarized away. A
+subagent's chat compacts as the person's does. The summary request offers no
+tools, and when the history would not fit the window its long tool outputs are
+cut to the same length as well. It reads the chat's tool
 calls and their results written out as text, each between an opening and a
 closing marker that carry the call's number. A result names the earliest call
 of its response with its id that has no result yet, so two calls a server gave

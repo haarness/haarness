@@ -5298,7 +5298,7 @@ async fn a_structured_turn_keeps_narration_ahead_of_its_call() {
 }
 
 #[tokio::test]
-async fn context_overflow_compacts_once_and_replays_without_binary_media() {
+async fn context_overflow_compacts_once_and_the_retry_keeps_the_requests_image() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let provider = OverflowOnce::default();
     let requests = provider.requests.clone();
@@ -5357,17 +5357,16 @@ async fn context_overflow_compacts_once_and_replays_without_binary_media() {
         ProviderMessage::Text { content, .. }
             if content.contains("Attachments omitted during compaction")
     )));
+    // The retry still has the request the person sent, image and all.
     assert!(
-        requests[2]
-            .messages
-            .iter()
-            .all(|message| !matches!(message, ProviderMessage::Media { .. }))
+        requests[2].messages.iter().any(|message| matches!(
+            message,
+            ProviderMessage::Media { content, attachments, .. }
+                if content == "inspect the attachment" && attachments.len() == 1
+        )),
+        "{:#?}",
+        requests[2].messages
     );
-    assert!(requests[2].messages.iter().any(|message| matches!(
-        message,
-        ProviderMessage::Text { content, .. }
-            if content.contains("Attachments from the compacted history are not replayed")
-    )));
 }
 
 #[tokio::test]
@@ -14928,6 +14927,9 @@ mod definition_snippets;
 
 #[path = "cases/zero_window.rs"]
 mod zero_window;
+
+#[path = "cases/small_window.rs"]
+mod small_window;
 
 #[path = "cases/background_commands.rs"]
 mod background_commands;

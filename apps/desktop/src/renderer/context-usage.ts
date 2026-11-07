@@ -20,18 +20,20 @@ export function contextUsage(items: Item[], thread: Thread) {
   const summary = retained.findLast(
     (item) => item.data.type === "compaction",
   );
-  const tail =
-    summary?.data.type === "compaction"
-      ? summary.data.tail_start_sequence
-      : null;
+  const compaction = summary?.data.type === "compaction" ? summary.data : null;
+  const tail = compaction?.tail_start_sequence;
+  // Items the summary kept ahead of its tail: the latest request.
+  const kept = new Set(compaction?.kept_sequences ?? []);
+  // The most characters a tool result kept from before the summary shows.
+  const outputChars = compaction?.tool_output_chars ?? null;
   const visible = summary
     ? retained.filter(
         (item) =>
           item.id === summary.id ||
           item.sequence > summary.sequence ||
-          (tail != null &&
-            item.sequence >= tail &&
-            item.data.type !== "compaction"),
+          (item.data.type !== "compaction" &&
+            ((tail != null && item.sequence >= tail) ||
+              kept.has(item.sequence))),
       )
     : retained;
   const counts = new Map<string, number>(
@@ -57,7 +59,10 @@ export function contextUsage(items: Item[], thread: Thread) {
         break;
       case "tool_result":
         kind = "Tool results";
-        text = data.output;
+        text =
+          outputChars != null && summary && item.sequence < summary.sequence
+            ? Array.from(data.output).slice(0, outputChars).join("")
+            : data.output;
         break;
       case "compaction":
         kind = "Compaction summary";

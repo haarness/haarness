@@ -401,12 +401,25 @@ async fn a_command_too_long_to_read_is_refused_by_a_deny_in_auto_yolo_schedules_
     };
     let padded = format!("bash -c '{}rm -rf victim'", "true; ".repeat(300 * 1024 / 6));
     let runtime = runtime(&fixture.0, &[("bash:rm *", D::Deny)]);
-    // Each in a chat of its own: 300 KiB of history would be compacted
-    // before the next call.
+    // Each in a chat of its own. 300 KiB is more than the model's window
+    // holds beside Haarness's instructions: once the refusal is in, the turn
+    // says the message is too long rather than compacting it away.
     for command in [stacked("rm -rf victim"), padded] {
         let thread = echo_thread(&runtime).await;
         auto(&runtime, &thread).await;
-        run(&runtime, &thread, &command).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request(&bash(&command)))
+            .await
+            .unwrap();
+        let done = wait_done(&runtime, &turn).await;
+        assert!(
+            done.status == TurnStatus::Completed
+                || (command.len() > 300_000
+                    && done.error.as_deref().is_some_and(|error| {
+                        error.starts_with("The latest message is too long")
+                    })),
+            "{done:?}"
+        );
         let errors = tool_errors(&runtime, &thread).await;
         assert!(refused(&errors), "{errors:?}");
         // The refusal names the command clipped, not 300 KiB of it.

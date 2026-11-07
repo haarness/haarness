@@ -82,56 +82,69 @@ fn provider_visible_items(items: &[Item]) -> Vec<&Item> {
     tokens::visible_items(items)
 }
 
-fn retained_tail_start(
-    items: &[Item],
-    tail_turns: usize,
-    token_budget: u64,
-    tokenizer: Tokenizer,
-) -> Option<u64> {
-    let visible = provider_visible_items(items)
-        .into_iter()
-        .filter(|item| !matches!(item.data, ItemData::Compaction { .. }))
-        .collect::<Vec<_>>();
-    let mut tokens = 0_u64;
-    let mut users = 0_usize;
-    let mut start = None;
-    for item in visible.into_iter().rev() {
-        tokens = tokens.saturating_add(tokenizer.item(&item.data));
-        if tokens > token_budget {
-            break;
-        }
-        if matches!(
-            item.data,
-            ItemData::UserMessage {
-                synthetic: false,
-                ..
-            }
-        ) {
-            users += 1;
-            start = Some(item.sequence);
-            if users >= tail_turns {
-                break;
-            }
-        }
-    }
-    start
-}
-
+/// `request` completed for a compaction of `items`: the exact task list,
+/// and what the compaction keeps beside its summary under `input_limit`
+/// (see [`retained`]), with `share` of the room there is for it. Refused,
+/// in words for the person, when their latest request cannot fit.
 fn complete_compaction_request(
     settings: &crate::CompactionSettings,
     items: &[Item],
     mut request: CompactRequest,
     input_limit: Option<u64>,
     tokenizer: Tokenizer,
-) -> CompactRequest {
+    share: f64,
+) -> CoreResult<CompactRequest> {
     request.todo_checkpoint = Some(latest_todo_checkpoint(items, None));
-    let tail_budget = input_limit
-        .map(|limit| limit / 2)
-        .unwrap_or(settings.preserve_recent_tokens)
-        .min(settings.preserve_recent_tokens);
-    request.tail_start_sequence =
-        retained_tail_start(items, settings.tail_turns, tail_budget, tokenizer);
-    request
+    let summary = tokenizer.item(&ItemData::Compaction {
+        summary: request.summary.clone().unwrap_or_default(),
+        files_touched: request.files_touched.clone(),
+        outstanding: request.outstanding.clone(),
+        todo_checkpoint: request.todo_checkpoint.clone(),
+        tail_start_sequence: None,
+        kept_sequences: Vec::new(),
+        tool_output_chars: None,
+    });
+    let budget = retained::Budget::new(settings, items, input_limit, summary, share);
+    let plan = retained::plan(items, settings.tail_turns, budget, tokenizer)
+        .map_err(|too_long| CoreError::Invalid(too_long.message()))?;
+    request.tail_start_sequence = plan.tail_start;
+    request.kept_sequences = plan.kept;
+    request.tool_output_chars = plan.output_chars;
+    Ok(request)
+}
+
+/// Refuses a compaction of `items` that could not keep the person's latest
+/// request, before a summary is asked for.
+fn request_fits(
+    settings: &crate::CompactionSettings,
+    items: &[Item],
+    input_limit: Option<u64>,
+    tokenizer: Tokenizer,
+    share: f64,
+) -> CoreResult<()> {
+    let budget = retained::Budget::new(settings, items, input_limit, 0, share);
+    match retained::too_long(items, budget, tokenizer) {
+        Some(too_long) => Err(CoreError::Invalid(too_long.message())),
+        None => Ok(()),
+    }
+}
+
+/// The share of the room for the kept part a compaction after a provider
+/// refused the request as too long takes: the estimate ran low, so each
+/// further refusal in one turn aims lower.
+fn overflow_share(compactions: u8) -> f64 {
+    [0.7, 0.5, 0.35, 0.25][usize::from(compactions.min(3))]
+}
+
+/// `share` of `tokens`.
+fn scaled(tokens: u64, share: f64) -> u64 {
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let scaled = (tokens as f64 * share) as u64;
+    scaled
 }
 
 fn compaction_input_limit(
@@ -1703,6 +1716,12 @@ pub fn refusal_reason(error: &CoreError) -> String {
 /// smaller. Without, for a model that started the work, it only says what
 /// happened.
 fn describe_failure(error: &CoreError, provider: Option<&str>, advice: bool) -> String {
+    // Already in words for the person, and what to do.
+    if let CoreError::Invalid(reason) = error
+        && reason.starts_with(retained::MESSAGE_TOO_LONG)
+    {
+        return reason.clone();
+    }
     if let Some(words) = describe_cut(error, provider, advice) {
         return words;
     }
@@ -5494,13 +5513,14 @@ impl AgentRuntime {
         request: CompactRequest,
         input_limit: Option<u64>,
         model: &str,
-    ) -> CompactRequest {
+    ) -> CoreResult<CompactRequest> {
         complete_compaction_request(
             &self.components().config.compaction,
             items,
             request,
             input_limit,
             Tokenizer::for_model(model),
+            1.0,
         )
     }
 
@@ -5565,7 +5585,7 @@ impl AgentRuntime {
         let expected_tail = items.last().map(|item| (item.id, item.sequence));
         let input_limit = self.compaction_input_limit_for(&thread.provider, &thread.model);
         let request =
-            self.complete_compaction_request(&items, request, Some(input_limit), &thread.model);
+            self.complete_compaction_request(&items, request, Some(input_limit), &thread.model)?;
         let item = self.repository.compact(id, request, expected_tail).await?;
         drop(admission_guard);
         if let Some(hooks) = &self.components().hooks {
@@ -5599,6 +5619,13 @@ impl AgentRuntime {
         if items.is_empty() {
             return Err(CoreError::Invalid("nothing to compact".into()));
         }
+        request_fits(
+            &self.components().config.compaction,
+            &items,
+            Some(input_limit),
+            Tokenizer::for_model(&thread.model),
+            1.0,
+        )?;
         let summarized_revision = items
             .iter()
             .map(|item| (item.id, item.sequence))
@@ -5612,6 +5639,7 @@ impl AgentRuntime {
                 .text(crate::PromptName::Compaction),
             items.clone(),
             CancellationToken::new(),
+            Some(input_limit),
         )
         .await?;
         // Do not hold admission during the model call: users must still be
@@ -5650,10 +5678,12 @@ impl AgentRuntime {
                         outstanding: Vec::new(),
                         todo_checkpoint: None,
                         tail_start_sequence: None,
+                        kept_sequences: Vec::new(),
+                        tool_output_chars: None,
                     },
                     Some(input_limit),
                     &thread.model,
-                ),
+                )?,
                 summarized_revision.last().copied(),
             )
             .await?;
@@ -10340,14 +10370,29 @@ impl RunnerTask {
         &self,
         provider: &Arc<dyn ModelProvider>,
         model: &str,
+        compactions: u8,
     ) -> CoreResult<bool> {
-        if self.depth != 0 || !self.config.compaction.enabled {
+        if !self.config.compaction.enabled {
             return Ok(false);
         }
         let items = self.repository.list_items(self.thread.id, None).await?;
         if !unconsumed_queued(&items, self.turn.id).is_empty() {
             return Ok(false);
         }
+        let models = self.providers.models(provider.id());
+        let metadata = model_metadata(&models, model);
+        let input_limit = compaction_input_limit(
+            &self.config.compaction,
+            stated_window(metadata).unwrap_or(128_000),
+            metadata.and_then(|info| info.max_output_tokens),
+        );
+        request_fits(
+            &self.config.compaction,
+            &items,
+            Some(input_limit),
+            Tokenizer::for_model(model),
+            overflow_share(compactions),
+        )?;
         let revision = items
             .iter()
             .map(|item| (item.id, item.sequence))
@@ -10359,6 +10404,7 @@ impl RunnerTask {
             self.config.prompts.text(crate::PromptName::Compaction),
             items.clone(),
             self.cancel.clone(),
+            Some(scaled(input_limit, overflow_share(compactions))),
         )
         .await?;
         let active = self
@@ -10385,13 +10431,6 @@ impl RunnerTask {
             return Ok(false);
         }
         let expected_tail = current_items.last().map(|item| (item.id, item.sequence));
-        let models = self.providers.models(provider.id());
-        let metadata = model_metadata(&models, model);
-        let input_limit = compaction_input_limit(
-            &self.config.compaction,
-            stated_window(metadata).unwrap_or(128_000),
-            metadata.and_then(|info| info.max_output_tokens),
-        );
         let item = self
             .repository
             .compact(
@@ -10405,10 +10444,13 @@ impl RunnerTask {
                         outstanding: Vec::new(),
                         todo_checkpoint: None,
                         tail_start_sequence: None,
+                        kept_sequences: Vec::new(),
+                        tool_output_chars: None,
                     },
                     Some(input_limit),
                     Tokenizer::for_model(model),
-                ),
+                    overflow_share(compactions),
+                )?,
                 expected_tail,
             )
             .await?;
@@ -10754,12 +10796,18 @@ impl RunnerTask {
                 // Summarizing this snapshot would then truncate its durable
                 // item before provider_messages can deliver it, while the
                 // later QueueConsumed marker would falsely claim delivery.
-                let has_unconsumed_queued =
-                    self.depth == 0 && !unconsumed_queued(&items, self.turn.id).is_empty();
-                if self.depth == 0
-                    && self.config.compaction.enabled
+                let has_unconsumed_queued = !unconsumed_queued(&items, self.turn.id).is_empty();
+                // A compaction with nothing after it is what this request is
+                // built from: another would only summarize the summary.
+                let just_compacted = matches!(
+                    items.last().map(|item| &item.data),
+                    Some(ItemData::Compaction { .. })
+                );
+                // A subagent's turn compacts its own chat as a person's does.
+                if self.config.compaction.enabled
                     && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
                     && !has_unconsumed_queued
+                    && !just_compacted
                 {
                     let provider_models = self.providers.models(provider_id);
                     let model_info = model_metadata(&provider_models, &model);
@@ -10770,6 +10818,13 @@ impl RunnerTask {
                         model_info.and_then(|info| info.max_output_tokens),
                     );
                     if tokens::context(&items, Tokenizer::for_model(&model)).tokens > budget {
+                        request_fits(
+                            &self.config.compaction,
+                            &items,
+                            Some(budget),
+                            Tokenizer::for_model(&model),
+                            1.0,
+                        )?;
                         self.set_status("compacting", None);
                         let summary = summarize_context(
                             &provider,
@@ -10777,6 +10832,7 @@ impl RunnerTask {
                             self.config.prompts.text(crate::PromptName::Compaction),
                             items,
                             self.cancel.clone(),
+                            Some(budget),
                         )
                         .await?;
                         // Summarization is intentionally outside the queue gate:
@@ -10800,11 +10856,7 @@ impl RunnerTask {
                         let mut compacted = None;
                         let current_items =
                             self.repository.list_items(self.thread.id, None).await?;
-                        if self.depth == 0
-                            && !unconsumed_queued(&current_items, self.turn.id).is_empty()
-                        {
-                            items = current_items;
-                        } else {
+                        if unconsumed_queued(&current_items, self.turn.id).is_empty() {
                             let expected_tail =
                                 current_items.last().map(|item| (item.id, item.sequence));
                             let item = self
@@ -10820,30 +10872,37 @@ impl RunnerTask {
                                             outstanding: Vec::new(),
                                             todo_checkpoint: None,
                                             tail_start_sequence: None,
+                                            kept_sequences: Vec::new(),
+                                            tool_output_chars: None,
                                         },
                                         Some(budget),
                                         Tokenizer::for_model(&model),
-                                    ),
+                                        1.0,
+                                    )?,
                                     expected_tail,
                                 )
                                 .await?;
                             compactions_this_turn = compactions_this_turn.saturating_add(1);
-                            self.events.publish(
+                            self.events.publish_scoped(
                                 "item.created",
                                 Some(self.thread.id),
+                                Some(self.root_thread_id),
                                 Some(self.turn.id),
                                 Some(item.id),
                                 json!(item),
                             );
-                            self.events.publish(
+                            self.events.publish_scoped(
                                 "thread.compacted",
                                 Some(self.thread.id),
+                                Some(self.root_thread_id),
                                 Some(self.turn.id),
                                 Some(item.id),
                                 json!(item),
                             );
                             compacted = Some(item);
                             items = self.repository.list_items(self.thread.id, None).await?;
+                        } else {
+                            items = current_items;
                         }
                         drop(accepting);
                         if let (Some(hooks), Some(item)) = (&self.hooks, compacted) {
@@ -11214,7 +11273,9 @@ impl RunnerTask {
                         }
                         if compactions_this_turn < MAX_COMPACTIONS_PER_TURN
                             && (oversized || is_provider_context_overflow(&error_value))
-                            && self.recover_context_overflow(&provider, &model).await?
+                            && self
+                                .recover_context_overflow(&provider, &model, compactions_this_turn)
+                                .await?
                         {
                             compactions_this_turn = compactions_this_turn.saturating_add(1);
                             compacted_for_size |= oversized;
@@ -11309,7 +11370,13 @@ impl RunnerTask {
                             if !saw_provider_event
                                 && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
                                 && (oversized || is_provider_context_overflow(&error_value))
-                                && self.recover_context_overflow(&provider, &model).await?
+                                && self
+                                    .recover_context_overflow(
+                                        &provider,
+                                        &model,
+                                        compactions_this_turn,
+                                    )
+                                    .await?
                             {
                                 compactions_this_turn = compactions_this_turn.saturating_add(1);
                                 compacted_for_size |= oversized;
@@ -15807,10 +15874,17 @@ fn provider_messages_with_origins(
     items: Vec<Item>,
 ) -> (Vec<ProviderMessage>, Vec<crate::image_budget::Origin>) {
     let omitted = omitted_media(&items);
-    let compaction_sequence = items
+    // What the newest compaction kept from before its tail (the person's
+    // request), and how it cuts the tool results it kept.
+    let kept = items
         .iter()
-        .rfind(|item| matches!(item.data, ItemData::Compaction { .. }))
-        .map(|item| item.sequence);
+        .rev()
+        .find_map(|item| match &item.data {
+            ItemData::Compaction { kept_sequences, .. } => Some(kept_sequences.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let cut = tokens::OutputCut::of(&items);
     let mut valid_calls = HashMap::<String, String>::new();
     let mut messages = Vec::new();
     let mut origins = Vec::new();
@@ -15880,26 +15954,15 @@ fn provider_messages_with_origins(
                 } else {
                     text
                 };
-                let replayed_after_compaction =
-                    compaction_sequence.is_some_and(|sequence| item.sequence < sequence);
-                let (content, attachments) = if replayed_after_compaction {
-                    (content, attachments)
-                } else {
-                    let (content, attachments) =
-                        crate::attachments::for_model(content, attachments, &omitted);
-                    without_omitted(content, attachments, &omitted)
-                };
-                let message = if attachments.is_empty() || replayed_after_compaction {
+                // A message a compaction kept is the person's as they sent
+                // it, what they attached included: the compaction counted it.
+                let (content, attachments) =
+                    crate::attachments::for_model(content, attachments, &omitted);
+                let (content, attachments) = without_omitted(content, attachments, &omitted);
+                let message = if attachments.is_empty() {
                     ProviderMessage::Text {
                         role: "user".into(),
-                        content: if replayed_after_compaction && !attachments.is_empty() {
-                            format!(
-                                "{content}\n[Attachments from the compacted history are not replayed: {}]",
-                                attachment_summary(&attachments)
-                            )
-                        } else {
-                            content
-                        },
+                        content,
                     }
                 } else {
                     ProviderMessage::Media {
@@ -15908,7 +15971,9 @@ fn provider_messages_with_origins(
                         attachments,
                     }
                 };
-                if queued {
+                // A steer a compaction kept ahead of its tail goes where it
+                // was kept: the marker that it was read may be summarized.
+                if queued && !kept.contains(&item.sequence) {
                     // A queued message can be persisted while a tool call is
                     // executing, which puts its durable item between the call
                     // and result. Hold it until QueueConsumed records the
@@ -15975,11 +16040,12 @@ fn provider_messages_with_origins(
             }
             ItemData::ToolResult {
                 call_id,
-                output,
                 is_error,
                 metadata,
                 ..
             } if !stray.contains(&index) => valid_calls.get(&call_id).cloned().map(|name| {
+                // A result a compaction kept shows as much as it kept.
+                let output = tokens::OutputCut::output(cut, item).into_owned();
                 // A tool's image is a file it saw; one deleted since is named
                 // instead of failing every later request.
                 let (output, attachments) = crate::attachments::for_model(
@@ -16424,6 +16490,67 @@ fn summary_messages(
         .collect()
 }
 
+/// The fewest characters of a tool output a summary request keeps.
+const MIN_SUMMARY_OUTPUT_CHARS: u64 = 1_000;
+
+/// Cuts the tool outputs of a summary request's `messages`, each to the same
+/// number of characters, its start and end, until the request fits in
+/// `room` tokens: a summary needs what a long output was about, not all of
+/// it. Nothing is cut when the request fits, and no output is cut below
+/// [`MIN_SUMMARY_OUTPUT_CHARS`].
+fn fit_summary_input(messages: &mut [ProviderMessage], room: u64, tokenizer: Tokenizer) {
+    let result = |name: &str, output: &str, cap: Option<u64>| {
+        let shown = cap
+            .and_then(|cap| tokens::cut_tool_output(output, name, &serde_json::Value::Null, cap));
+        4 + tokenizer.text(name) + tokenizer.text(shown.as_deref().unwrap_or(output))
+    };
+    let size = |message: &ProviderMessage, cap: Option<u64>| match message {
+        ProviderMessage::Text { content, .. } | ProviderMessage::Media { content, .. } => {
+            4 + tokenizer.text(content)
+        }
+        ProviderMessage::ToolCall {
+            name, arguments, ..
+        } => 4 + tokenizer.text(name) + tokenizer.text(&arguments.to_string()),
+        ProviderMessage::ToolResult { name, output, .. } => result(name, output, cap),
+    };
+    let total = |cap: Option<u64>| {
+        messages
+            .iter()
+            .map(|message| size(message, cap))
+            .sum::<u64>()
+    };
+    if total(None) <= room {
+        return;
+    }
+    let longest = messages
+        .iter()
+        .filter_map(|message| match message {
+            ProviderMessage::ToolResult { output, .. } => Some(output.chars().count() as u64),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    if longest <= MIN_SUMMARY_OUTPUT_CHARS {
+        return;
+    }
+    let (mut low, mut high) = (MIN_SUMMARY_OUTPUT_CHARS, longest);
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if total(Some(middle)) <= room {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    for message in messages.iter_mut() {
+        if let ProviderMessage::ToolResult { name, output, .. } = message
+            && let Some(cut) = tokens::cut_tool_output(output, name, &serde_json::Value::Null, low)
+        {
+            *output = cut;
+        }
+    }
+}
+
 /// Run a tools-disabled summarization request and collect the text.
 #[instrument(
     name = "context.compact",
@@ -16436,11 +16563,20 @@ async fn summarize_context(
     system: String,
     items: Vec<Item>,
     cancel: CancellationToken,
+    room: Option<u64>,
 ) -> CoreResult<String> {
     // Summaries need the textual meaning of media turns, not the original
     // potentially huge or now-missing binary payload. This also makes overflow
     // recovery safe after an attachment pushed the provider over its limit.
-    let (messages, origins) = provider_messages_with_origins(items);
+    let (mut messages, origins) = provider_messages_with_origins(items);
+    if let Some(room) = room {
+        let tokenizer = Tokenizer::for_model(model);
+        fit_summary_input(
+            &mut messages,
+            room.saturating_sub(tokenizer.text(&system)),
+            tokenizer,
+        );
+    }
     let messages = summary_messages(messages, &origins, &summary_key());
     let request = ProviderRequest {
         model: model.to_owned(),
@@ -18230,6 +18366,7 @@ fn rule_spelling(path: &Path) -> String {
 }
 
 mod commands;
+mod retained;
 mod undo_files;
 
 #[cfg(test)]
@@ -20562,6 +20699,8 @@ mod tests {
                     outstanding: Vec::new(),
                     todo_checkpoint: None,
                     tail_start_sequence: None,
+                    kept_sequences: Vec::new(),
+                    tool_output_chars: None,
                 },
             ),
             item(
@@ -20901,6 +21040,8 @@ mod tests {
                     outstanding: vec!["run tests".into()],
                     todo_checkpoint: Some(checkpoint),
                     tail_start_sequence: Some(3),
+                    kept_sequences: Vec::new(),
+                    tool_output_chars: None,
                 },
             ),
             item(
@@ -20953,6 +21094,8 @@ mod tests {
                     outstanding: Vec::new(),
                     todo_checkpoint: None,
                     tail_start_sequence: Some(1),
+                    kept_sequences: Vec::new(),
+                    tool_output_chars: None,
                 },
             ),
             item(
@@ -20977,6 +21120,8 @@ mod tests {
                         todos: Vec::new(),
                     }),
                     tail_start_sequence: Some(3),
+                    kept_sequences: Vec::new(),
+                    tool_output_chars: None,
                 },
             ),
         ]);
@@ -21733,6 +21878,8 @@ mod tests {
                 outstanding: Vec::new(),
                 todo_checkpoint: None,
                 tail_start_sequence: None,
+                kept_sequences: Vec::new(),
+                tool_output_chars: None,
             },
             summary_user(code, false),
             summary_call("r1", "read", json!({ "path": "page.html" })),
@@ -22737,6 +22884,8 @@ mod tests {
                         todos: Vec::new(),
                     }),
                     tail_start_sequence: None,
+                    kept_sequences: Vec::new(),
+                    tool_output_chars: None,
                 },
             ),
             item(

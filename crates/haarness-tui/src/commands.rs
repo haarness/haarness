@@ -2626,6 +2626,8 @@ impl App {
                             outstanding: Vec::new(),
                             todo_checkpoint: None,
                             tail_start_sequence: None,
+                            kept_sequences: Vec::new(),
+                            tool_output_chars: None,
                         },
                     )
                     .await?;

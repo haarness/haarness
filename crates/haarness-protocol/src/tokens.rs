@@ -252,6 +252,25 @@ impl Tokenizer {
     }
 }
 
+impl Tokenizer {
+    /// [`Tokenizer::item`] for `item` as the model is shown it, a tool result
+    /// the newest compaction `cut` counted cut.
+    pub fn shown(self, item: &Item, cut: Option<OutputCut>) -> u64 {
+        let whole = self.item(&item.data);
+        match (&item.data, cut) {
+            (ItemData::ToolResult { output, .. }, Some(cut)) if item.sequence < cut.before => {
+                match OutputCut::output(Some(cut), item) {
+                    std::borrow::Cow::Owned(shown) => {
+                        whole - self.text(output).min(whole) + self.text(&shown)
+                    }
+                    std::borrow::Cow::Borrowed(_) => whole,
+                }
+            }
+            _ => whole,
+        }
+    }
+}
+
 fn claude_family(rest: &str) -> Tokenizer {
     // `-opus-4-6`, `-sonnet-5.5`, `-3-5-sonnet-20241022`, `-haiku-4-5-20251001`
     let numbers: Vec<u64> = rest
@@ -308,7 +327,8 @@ fn classes(text: &str) -> [u64; CLASSES] {
 }
 
 /// Items still sent to the provider after the newest compaction: its summary,
-/// then the retained verbatim tail (whose rows have earlier sequences), then
+/// then the items it kept from before the tail (the latest request), then
+/// the retained verbatim tail (whose rows have earlier sequences), then
 /// everything after it.
 pub fn visible_items(items: &[Item]) -> Vec<&Item> {
     let Some(index) = items
@@ -317,21 +337,169 @@ pub fn visible_items(items: &[Item]) -> Vec<&Item> {
     else {
         return items.iter().collect();
     };
-    let tail_start = match &items[index].data {
+    let (tail_start, kept) = match &items[index].data {
         ItemData::Compaction {
             tail_start_sequence,
+            kept_sequences,
             ..
-        } => *tail_start_sequence,
-        _ => None,
+        } => (*tail_start_sequence, kept_sequences.as_slice()),
+        _ => (None, [].as_slice()),
     };
     let mut visible = vec![&items[index]];
-    if let Some(tail_start) = tail_start {
-        visible.extend(items[..index].iter().filter(|item| {
-            item.sequence >= tail_start && !matches!(item.data, ItemData::Compaction { .. })
-        }));
-    }
+    visible.extend(items[..index].iter().filter(|item| {
+        !matches!(item.data, ItemData::Compaction { .. })
+            && (tail_start.is_some_and(|start| item.sequence >= start)
+                || kept.contains(&item.sequence))
+    }));
     visible.extend(&items[index + 1..]);
     visible
+}
+
+/// The fewest characters of a tool output a compaction keeps when it cuts
+/// one: less says too little to be worth its call.
+pub const MIN_KEPT_OUTPUT_CHARS: u64 = 2_000;
+
+/// How the newest compaction shows the tool results it kept from before
+/// it: each at most `chars` characters, its start and its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputCut {
+    /// The compaction's sequence: results before it are cut.
+    pub before: u64,
+    pub chars: u64,
+}
+
+impl OutputCut {
+    /// The newest compaction's cut, when it made one.
+    pub fn of(items: &[Item]) -> Option<Self> {
+        items.iter().rev().find_map(|item| match &item.data {
+            ItemData::Compaction {
+                tool_output_chars, ..
+            } => Some(tool_output_chars.map(|chars| Self {
+                before: item.sequence,
+                chars,
+            })),
+            _ => None,
+        })?
+    }
+
+    /// The output of `item`, a tool result, as the model is shown it: cut
+    /// when the compaction kept it from before itself and it is longer.
+    pub fn output(cut: Option<Self>, item: &Item) -> std::borrow::Cow<'_, str> {
+        let ItemData::ToolResult {
+            name,
+            output,
+            metadata,
+            ..
+        } = &item.data
+        else {
+            return std::borrow::Cow::Borrowed("");
+        };
+        cut.filter(|cut| item.sequence < cut.before)
+            .and_then(|cut| cut_tool_output(output, name, metadata, cut.chars))
+            .map_or(
+                std::borrow::Cow::Borrowed(output.as_str()),
+                std::borrow::Cow::Owned,
+            )
+    }
+}
+
+/// `output`, a tool's, cut to its first and last characters, `chars` in
+/// all, with a note between them on how much was left out and where the
+/// rest is: the file the tool saved it in (`outputPath` in `metadata`), the
+/// file `read` read, or the call made again. `None` when it is no longer.
+pub fn cut_tool_output(
+    output: &str,
+    name: &str,
+    metadata: &serde_json::Value,
+    chars: u64,
+) -> Option<String> {
+    let total = output.chars().count();
+    let chars = usize::try_from(chars).unwrap_or(usize::MAX);
+    if total <= chars {
+        return None;
+    }
+    let head_chars = chars - chars / 3;
+    let tail_chars = chars / 3;
+    let at = |count: usize| {
+        output
+            .char_indices()
+            .nth(count)
+            .map_or(output.len(), |(at, _)| at)
+    };
+    // A whole line at either side of the cut when one ends close to it.
+    let mut head_end = at(head_chars);
+    if let Some(line) = output[..head_end].rfind('\n')
+        && output[line..head_end].chars().count() <= head_chars / 4
+    {
+        head_end = line + 1;
+    }
+    let mut tail_start = at(total - tail_chars).max(head_end);
+    if let Some(line) = output[tail_start..].find('\n')
+        && output[tail_start..tail_start + line].chars().count() <= tail_chars / 4
+    {
+        tail_start += line + 1;
+    }
+    let head = output[..head_end].trim_end_matches('\n');
+    let tail = &output[tail_start..];
+    let left_out = total - head.chars().count() - tail.chars().count();
+    let rest = match metadata
+        .get("outputPath")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(path) => format!(
+            "The whole output is saved in {path}: read the part you need from it with offset and limit, or search it with grep."
+        ),
+        None if name == "read" => {
+            "Read the file again with offset and limit to see that part.".to_owned()
+        }
+        None => "If you need that part, run the call again for just that part.".to_owned(),
+    };
+    Some(format!(
+        "{}\n\n[{} of {} characters are left out here so the chat fits the model's context window. {rest}]\n\n{}",
+        head,
+        grouped(left_out as u64),
+        grouped(total as u64),
+        tail,
+    ))
+}
+
+/// `value` with its thousands apart: `48,877`.
+pub fn grouped(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// Tokens of the system prompt and tools the last request carried, by its
+/// report, scaled by how that whole request compared with its count:
+/// providers render tool schemas far more compactly than their JSON (OpenAI
+/// ~0.6). `None` before any request reported its parts.
+pub fn request_overhead(items: &[Item]) -> Option<u64> {
+    items.iter().rev().find_map(|item| match &item.data {
+        ItemData::Usage {
+            prompt: Some(prompt),
+            input_tokens,
+            ..
+        } => {
+            let overhead = prompt.system_tokens + prompt.tool_tokens;
+            #[allow(clippy::cast_precision_loss)]
+            let ratio =
+                prompt_total(prompt).map_or(1.0, |total| *input_tokens as f64 / total as f64);
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            Some((overhead as f64 * ratio.clamp(0.25, 2.0)).ceil() as u64)
+        }
+        _ => None,
+    })
 }
 
 /// Size of the context the next provider request carries.
@@ -374,35 +542,13 @@ pub fn context(items: &[Item], tokenizer: Tokenizer) -> ContextEstimate {
             };
             (input_tokens + output_tokens, &visible[index + 1..], 0)
         }
-        None => {
-            // System prompt and tools of the last request, scaled by how that
-            // whole request compared with its report: providers render tool
-            // schemas far more compactly than their JSON (OpenAI ~0.6).
-            let overhead = items.iter().rev().find_map(|item| match &item.data {
-                ItemData::Usage {
-                    prompt: Some(prompt),
-                    input_tokens,
-                    ..
-                } => {
-                    let overhead = prompt.system_tokens + prompt.tool_tokens;
-                    #[allow(clippy::cast_precision_loss)]
-                    let ratio = prompt_total(prompt)
-                        .map_or(1.0, |total| *input_tokens as f64 / total as f64);
-                    #[allow(
-                        clippy::cast_precision_loss,
-                        clippy::cast_possible_truncation,
-                        clippy::cast_sign_loss
-                    )]
-                    Some((overhead as f64 * ratio.clamp(0.25, 2.0)).ceil() as u64)
-                }
-                _ => None,
-            });
-            (0, visible.as_slice(), overhead.unwrap_or(0))
-        }
+        None => (0, visible.as_slice(), request_overhead(items).unwrap_or(0)),
     };
+    // Tool results the newest compaction kept are counted as it shows them.
+    let cut = OutputCut::of(items);
     let appended = appended
         .iter()
-        .map(|item| tokenizer.item(&item.data))
+        .map(|item| tokenizer.shown(item, cut))
         .sum::<u64>();
     #[allow(
         clippy::cast_precision_loss,
@@ -725,6 +871,112 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_cut_tool_output_keeps_its_start_and_end_and_says_where_the_rest_is() {
+        let output = (0..400)
+            .map(|line| format!("línea {line} — ✓ résumé"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let saved = json!({"outputPath": "/data/tool-output/fetched-1.txt"});
+        let cut = cut_tool_output(&output, "webfetch", &saved, 2_000).unwrap();
+        // Whole lines on either side, nothing split inside a character.
+        assert!(cut.starts_with("línea 0 — ✓ résumé\n"), "{cut}");
+        assert!(cut.ends_with("\nlínea 399 — ✓ résumé"), "{cut}");
+        let total = output.chars().count();
+        assert!(cut.chars().count() < total);
+        let note = cut.lines().find(|line| line.starts_with('[')).unwrap();
+        assert!(note.contains(&format!(
+            "of {} characters are left out",
+            grouped(total as u64)
+        )));
+        assert!(note.contains("/data/tool-output/fetched-1.txt"), "{note}");
+        // The kept text and the count of what is left out add up.
+        let left_out: usize = note[1..note.find(" of ").unwrap()]
+            .replace(',', "")
+            .parse()
+            .unwrap();
+        let kept = cut.chars().count() - note.chars().count() - 4;
+        assert_eq!(kept + left_out, total);
+        let read = cut_tool_output(&output, "read", &serde_json::Value::Null, 2_000).unwrap();
+        assert!(read.contains("Read the file again with offset and limit"));
+        assert!(cut_tool_output("short", "read", &serde_json::Value::Null, 2_000).is_none());
+        assert_eq!(grouped(48_877), "48,877");
+        assert_eq!(grouped(1_000_000), "1,000,000");
+        assert_eq!(grouped(999), "999");
+    }
+
+    #[test]
+    fn a_compaction_shows_the_request_it_kept_ahead_of_its_tail_and_counts_the_cut() {
+        let user = |text: &str| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+            command_line: None,
+        };
+        let page = "word ".repeat(20_000);
+        let items = vec![
+            item(1, user("old question")),
+            item(2, user("the request")),
+            item(
+                3,
+                ItemData::AssistantMessage {
+                    text: "middle".into(),
+                },
+            ),
+            item(
+                4,
+                ItemData::ToolCall {
+                    call_id: "c".into(),
+                    name: "webfetch".into(),
+                    arguments: json!({}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                5,
+                ItemData::ToolResult {
+                    call_id: "c".into(),
+                    name: "webfetch".into(),
+                    output: page.clone(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                6,
+                ItemData::Compaction {
+                    summary: "summary".into(),
+                    files_touched: Vec::new(),
+                    outstanding: Vec::new(),
+                    todo_checkpoint: None,
+                    tail_start_sequence: Some(4),
+                    kept_sequences: vec![2],
+                    tool_output_chars: Some(4_000),
+                },
+            ),
+        ];
+        let visible = visible_items(&items)
+            .into_iter()
+            .map(|item| item.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![6, 2, 4, 5]);
+        let cut = OutputCut::of(&items).unwrap();
+        assert_eq!(
+            cut,
+            OutputCut {
+                before: 6,
+                chars: 4_000
+            }
+        );
+        let shown = OutputCut::output(Some(cut), &items[4]);
+        assert!(shown.len() < 4_400 && shown.contains("characters are left out"));
+        let whole = Tokenizer::Generic.item(&items[4].data);
+        let counted = Tokenizer::Generic.shown(&items[4], Some(cut));
+        assert!(counted * 4 < whole, "{counted} of {whole}");
+        assert!(context(&items, Tokenizer::Generic).tokens < whole / 4);
+    }
+
     fn usage(input_tokens: u64, output_tokens: u64, prompt: Option<PromptUsage>) -> ItemData {
         ItemData::Usage {
             prompt,
@@ -944,6 +1196,8 @@ mod tests {
                     outstanding: Vec::new(),
                     todo_checkpoint: None,
                     tail_start_sequence: Some(2),
+                    kept_sequences: Vec::new(),
+                    tool_output_chars: None,
                 },
             ),
         ];
@@ -1026,6 +1280,8 @@ mod tests {
                     outstanding: Vec::new(),
                     todo_checkpoint: None,
                     tail_start_sequence: None,
+                    kept_sequences: Vec::new(),
+                    tool_output_chars: None,
                 },
             ),
             item(3, usage(4_100, 0, Some(prompt(3_000)))),
@@ -1067,6 +1323,8 @@ mod tests {
                     outstanding: Vec::new(),
                     todo_checkpoint: None,
                     tail_start_sequence: None,
+                    kept_sequences: Vec::new(),
+                    tool_output_chars: None,
                 },
             ),
         ];
