@@ -2498,7 +2498,27 @@ pub(super) fn replace_config_file(
     use anyhow::Context as _;
     let target = save_target(path, scope)?;
     let parent = target.parent().context("configuration parent")?;
+    let new_folders: Vec<PathBuf> = parent
+        .ancestors()
+        .take_while(|folder| fs::symlink_metadata(folder).is_err())
+        .map(Path::to_path_buf)
+        .collect();
     fs::create_dir_all(parent)?;
+    // Checked again once made: nothing may have led the new folders out of
+    // the project meanwhile. Folders made for a save that is then refused
+    // are taken away again.
+    if let SaveScope::Project(root) = scope {
+        let root = dunce::canonicalize(root).unwrap_or_else(|_| root.clone());
+        if !dunce::canonicalize(parent).is_ok_and(|real| real.starts_with(&root)) {
+            for folder in &new_folders {
+                let _ = fs::remove_dir(folder);
+            }
+            anyhow::bail!(
+                "Haarness did not save {}: its folder leads outside the project",
+                path.display()
+            );
+        }
+    }
     // Writers lock the folder itself: a lock file beside a project's
     // haarness.json would be left behind in the person's repository.
     #[cfg(unix)]
@@ -2550,8 +2570,14 @@ pub(super) fn replace_config_file(
 
 /// The file a save of `path` writes: `path`, or the file a link there
 /// leads to, through every link on the way; for a project's save, the real
-/// path of that file, which must be inside the project.
+/// path of that file, which must be inside the project. No save goes into
+/// the system configuration folder, which Haarness never changes.
 fn save_target(path: &Path, scope: &SaveScope) -> Result<PathBuf> {
+    save_target_beside(path, scope, crate::layout::system_config_dir().as_deref())
+}
+
+/// [`save_target`], with `system` as the system configuration folder.
+fn save_target_beside(path: &Path, scope: &SaveScope, system: Option<&Path>) -> Result<PathBuf> {
     use anyhow::Context as _;
     // The folder a path is in, `.` for a bare file name.
     let folder_of = |path: &Path| {
@@ -2573,21 +2599,32 @@ fn save_target(path: &Path, scope: &SaveScope) -> Result<PathBuf> {
         return Err(unsaved("its links lead round in a circle".into()));
     }
     let name = current.file_name().context("configuration file name")?;
+    let real = real_path(&folder_of(&current))
+        .map_err(|why| unsaved(why.into()))?
+        .join(name);
+    if let Some(system) =
+        system.map(|system| dunce::canonicalize(system).unwrap_or_else(|_| system.to_path_buf()))
+        && real.starts_with(&system)
+    {
+        return Err(unsaved(format!(
+            "it leads into the system configuration folder ({}), which Haarness never changes. Replace the link with a copy of the file",
+            system.display()
+        )));
+    }
     let target = match scope {
         SaveScope::Global if current == path => return Ok(current),
         SaveScope::Global => dunce::canonicalize(folder_of(&current))
             .map_err(|_| unsaved("it is a link to a folder that does not exist".into()))?
             .join(name),
         SaveScope::Project(root) => {
-            let target = real_path(&folder_of(&current)).join(name);
             let root = dunce::canonicalize(root).unwrap_or_else(|_| root.clone());
-            if !target.starts_with(&root) {
+            if !real.starts_with(&root) {
                 return Err(unsaved(format!(
                     "it leads to {}, outside the project. Save the setting in your global configuration instead, or replace the link with a copy of the file",
-                    target.display()
+                    real.display()
                 )));
             }
-            target
+            real
         }
     };
     if fs::metadata(&target).is_ok_and(|metadata| !metadata.is_file()) {
@@ -2599,21 +2636,50 @@ fn save_target(path: &Path, scope: &SaveScope) -> Result<PathBuf> {
     Ok(target)
 }
 
-/// Where `folder` really is: its nearest folder that exists with every link
-/// followed, and the parts not made yet after it.
-fn real_path(folder: &Path) -> PathBuf {
-    let mut existing = folder;
-    let mut missing = Vec::new();
-    while fs::symlink_metadata(existing).is_err() {
-        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
-            break;
-        };
-        missing.push(name.to_os_string());
-        existing = parent;
+/// Where `folder` really is, as the system will find it: each part that is
+/// there resolved as the system resolves it (a link followed, `..` taken
+/// from where the link led), and the parts not made yet after it as written,
+/// since they hold no links. A `.` or `..` after a part not made yet is
+/// refused: such a path names one place now and another once the folders
+/// before it are made.
+fn real_path(folder: &Path) -> std::result::Result<PathBuf, &'static str> {
+    use std::path::Component;
+    let absolute = if folder.is_absolute() {
+        folder.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| "its folder could not be found")?
+            .join(folder)
+    };
+    let mut real = PathBuf::new();
+    let mut made = true;
+    for part in absolute.components() {
+        match part {
+            Component::Prefix(_) | Component::RootDir => real.push(part.as_os_str()),
+            Component::CurDir | Component::ParentDir if !made => {
+                return Err("it goes through `.` or `..` after a folder that does not exist yet");
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                real.pop();
+            }
+            Component::Normal(name) if !made => real.push(name),
+            Component::Normal(name) => {
+                let next = real.join(name);
+                match dunce::canonicalize(&next) {
+                    Ok(resolved) => real = resolved,
+                    Err(_) if fs::symlink_metadata(&next).is_ok() => {
+                        return Err("it leads through a link to a folder that does not exist");
+                    }
+                    Err(_) => {
+                        made = false;
+                        real = next;
+                    }
+                }
+            }
+        }
     }
-    let mut real = dunce::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
-    real.extend(missing.into_iter().rev());
-    real
+    Ok(real)
 }
 
 /// Replaces `path` with `bytes` through a file beside it, or writes it in
@@ -5035,6 +5101,95 @@ mod tests {
             fs::read_to_string(dotfiles.join("haarness.json"))
                 .unwrap()
                 .contains("\"docs\"")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A link through a folder the project does not have yet, then `..`,
+    /// names a place inside the project now but outside once the folder is
+    /// made; such a save is refused before anything is made, with or without
+    /// Git, for the project's own file and its `.haarness` one.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_save_never_climbs_out_through_a_folder_not_made_yet() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-json-climb-{}", uuid::Uuid::now_v7()));
+        let outside = root.join("outside.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&outside, "{}\n").unwrap();
+        for git in [false, true] {
+            let project = root.join(if git { "repository" } else { "download" });
+            fs::create_dir_all(project.join(".haarness")).unwrap();
+            if git {
+                fs::create_dir_all(project.join(".git")).unwrap();
+            }
+            for (file, link) in [
+                ("haarness.json", "missing/../../outside.json"),
+                (".haarness/haarness.json", "missing/../../../outside.json"),
+            ] {
+                let path = project.join(file);
+                std::os::unix::fs::symlink(link, &path).unwrap();
+                let error = write_entry(
+                    &path,
+                    &SaveScope::project(&project),
+                    "mcp",
+                    "docs",
+                    Some(serde_json::json!({"command":"true","env":{"TOKEN":"project-only"}})),
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(
+                    error.ends_with(
+                        "it goes through `.` or `..` after a folder that does not exist yet"
+                    ),
+                    "{file}: {error}"
+                );
+                assert_eq!(fs::read_to_string(&outside).unwrap(), "{}\n", "{file}");
+                assert!(!path.parent().unwrap().join("missing").exists(), "{file}");
+            }
+        }
+        // A new folder of the project's own is still made.
+        let project = root.join("download");
+        write_entry(
+            &project.join(".haarness/cloud/haarness.json"),
+            &SaveScope::project(&project),
+            "mcp",
+            "docs",
+            Some(serde_json::json!({"command":"true"})),
+        )
+        .unwrap();
+        assert!(project.join(".haarness/cloud/haarness.json").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Haarness never changes the system configuration folder, so a save
+    /// that a link leads into it is refused, saying so.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_never_follows_a_link_into_the_system_folder() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-json-system-{}", uuid::Uuid::now_v7()));
+        let system = root.join("team base");
+        let global = root.join("config");
+        fs::create_dir_all(&system).unwrap();
+        fs::create_dir_all(&global).unwrap();
+        fs::write(system.join("haarness.json"), "{}\n").unwrap();
+        let path = global.join("haarness.json");
+        std::os::unix::fs::symlink(system.join("haarness.json"), &path).unwrap();
+        let error = save_target_beside(&path, &SaveScope::Global, Some(&system))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("it leads into the system configuration folder")
+                && error.ends_with(
+                    "which Haarness never changes. Replace the link with a copy of the file"
+                ),
+            "{error}"
+        );
+        // Without a system folder there, the link is followed as before.
+        assert_eq!(
+            save_target_beside(&path, &SaveScope::Global, None).unwrap(),
+            dunce::canonicalize(system.join("haarness.json")).unwrap()
         );
         fs::remove_dir_all(root).unwrap();
     }

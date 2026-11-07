@@ -5,14 +5,16 @@
    and an edit saved from Desktop's MCP settings change the file it leads to, keeping its comments.
 2. A project's save must land inside the project, Git or not: a `haarness.json` or a `.haarness` folder
    that links out (to the global file, say) is not saved through, and `haarness mcp add --project` says
-   so in one line with what to do. A link to a file inside the repository is saved through, and a
-   global file in a folder inside a Git work tree still follows its link to dotfiles.
+   so in one line with what to do, also through a folder not made yet followed by `..` (from the CLI,
+   Desktop's configuration editor and its hooks editor). A link to a file inside the repository is saved
+   through, and a global file in a folder inside a Git work tree still follows its link to dotfiles.
 3. Several `haarness mcp add --project` at once against a project's `config.toml` all land, the file keeps its
    permissions, and a reader polling it meanwhile never meets a file it cannot parse.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-config-saves.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -122,6 +124,28 @@ try:
     add("in-a-work-tree", env, project)
     check("A global file in a Git work tree still saves through its link to dotfiles",
           '"in-a-work-tree"' in kept.read_text() and (config / "haarness.json").is_symlink())
+
+    # A link through a folder the project does not have yet, then `..`: refused before anything is made,
+    # by `haarness mcp add --project`, Desktop's configuration editor and Desktop's hooks editor.
+    outside_file = root / "linked/outside.json"
+    outside_file.write_text("{}\n")
+    for name, git in (("climb-plain", False), ("climb-git", True)):
+        climb = root / "linked" / name
+        climb.mkdir()
+        if git:
+            subprocess.run(["git", "init", "-q", str(climb)], check=True)
+        (climb / "haarness.json").symlink_to("missing/../../outside.json")
+        refused = add("climb-docs", env, climb, "--project", "--env", "TOKEN=project-only", ok=False)
+        editor = run("desktop", env=env, workspace=climb, ok=False, input=json.dumps({
+            "action": "write_configuration", "id": "project-json", "text": '{"model":"echo/echo-1"}',
+            "revision": hashlib.sha256(b"").hexdigest()}))
+        hook = run("desktop", env=env, workspace=climb, ok=False, input=json.dumps({
+            "action": "asset", "kind": "hooks", "input": {"action": "create", "scope": "local", "event": "Stop",
+                                                          "command": "echo project", "timeout": 60}}))
+        check(f"A project{' with Git' if git else ' with no Git'} linked through a missing folder and `..` saves nothing outside it",
+              refused.returncode != 0 and "after a folder that does not exist yet" in refused.stderr
+              and editor.returncode != 0 and hook.returncode != 0
+              and outside_file.read_text() == "{}\n" and not (climb / "missing").exists())
 
     # 3. Saves at once against a TOML file (a project's: a global one becomes JSON when it loads).
     env, _ = environment("toml")

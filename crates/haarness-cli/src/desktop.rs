@@ -684,6 +684,41 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// The editor's project file, linked through a folder the project does
+    /// not have yet and then `..`, is not saved out of the project.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_editor_never_saves_a_project_file_outside_the_project() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-desktop-config-climb-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let paths = Paths::new(Some(&root.join("home"))).unwrap();
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(root.join("outside.json"), "{}\n").unwrap();
+        std::os::unix::fs::symlink("missing/../../outside.json", project.join("haarness.json"))
+            .unwrap();
+        let saved = execute(
+            &paths,
+            &project,
+            true,
+            Request::WriteConfiguration {
+                id: "project-json".into(),
+                text: "{\"model\":\"echo/echo-1\"}".into(),
+                revision: revision(""),
+            },
+        )
+        .await;
+        assert!(saved.is_err(), "{saved:?}");
+        assert_eq!(
+            fs::read_to_string(root.join("outside.json")).unwrap(),
+            "{}\n"
+        );
+        assert!(!project.join("missing").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn projects_register_sidebar_folders_and_the_project_of_a_linked_checkout() {
         let root = std::env::temp_dir().join(format!(

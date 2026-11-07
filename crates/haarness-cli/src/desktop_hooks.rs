@@ -294,6 +294,40 @@ pub fn execute(paths: &Paths, workspace: &Path, trust: bool, input: &Value) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A project hook created in Desktop never lands outside the project,
+    /// also when the project's file links through a folder it does not
+    /// have yet and then `..`.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_hook_is_never_saved_outside_the_project() {
+        let temp =
+            std::env::temp_dir().join(format!("haarness-hooks-climb-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&temp).unwrap();
+        let temp = dunce::canonicalize(&temp).unwrap();
+        let workspace = temp.join("project");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(temp.join("outside.json"), "{}\n").unwrap();
+        std::os::unix::fs::symlink(
+            "missing/../../outside.json",
+            workspace.join("haarness.json"),
+        )
+        .unwrap();
+        let paths = Paths::new(Some(&temp.join("home"))).unwrap();
+        let created = execute(
+            &paths,
+            &workspace,
+            true,
+            &json!({"action":"create","scope":"local","event":"Stop","command":"echo project","timeout":60}),
+        );
+        assert!(created.is_err(), "{created:?}");
+        assert_eq!(
+            fs::read_to_string(temp.join("outside.json")).unwrap(),
+            "{}\n"
+        );
+        assert!(!workspace.join("missing").exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     #[test]
     fn desktop_hook_edits_preserve_siblings_and_reject_stale_revisions() {
         let temp = std::env::temp_dir().join(format!("haarness-hooks-{}", uuid::Uuid::now_v7()));
