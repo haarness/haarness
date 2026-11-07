@@ -2673,6 +2673,10 @@ struct WholeOutput {
     thread: ThreadId,
     /// The file the cut text names.
     file: PathBuf,
+    /// The cut text the call gave, by its length and hash: what a script is
+    /// handed must start with it (hooks may add to its end), so a server
+    /// that names this file in its own short result gets nothing.
+    cut: (usize, [u8; 32]),
     /// The server's text when the file holds another form of it (JSON
     /// laid out a value a line), else `None`: the file is the text.
     text: Option<String>,
@@ -2731,6 +2735,7 @@ async fn capped_mcp_output(
     let kept = WholeOutput {
         thread,
         file,
+        cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
         text: reformatted.then_some(whole),
         metadata,
     };
@@ -2752,11 +2757,16 @@ async fn capped_mcp_output(
     })
 }
 
+fn cut_fingerprint(text: &[u8]) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(text).into()
+}
+
 /// What a script of chat `thread` gets for an MCP result
 /// [`capped_mcp_output`] cut: the whole text and the server's own metadata,
 /// taken once, with the file that holds the whole. `None` for any other
-/// output, so a server cannot name a file, another chat's or its own, in
-/// its structured content and have a script read it.
+/// output, so a server cannot name a file, another call's or another
+/// chat's, in its structured content and have a script read it.
 pub(crate) async fn take_whole_mcp_output(
     thread: ThreadId,
     output: &ToolOutput,
@@ -2767,9 +2777,16 @@ pub(crate) async fn take_whole_mcp_output(
     let path = Path::new(output.metadata.get("outputPath")?.as_str()?);
     let kept = {
         let mut outputs = WHOLE_OUTPUTS.lock();
-        let at = outputs
-            .iter()
-            .position(|kept| kept.thread == thread && kept.file == path)?;
+        let at = outputs.iter().position(|kept| {
+            let (length, hash) = kept.cut;
+            kept.thread == thread
+                && kept.file == path
+                && output
+                    .text
+                    .as_bytes()
+                    .get(..length)
+                    .is_some_and(|start| cut_fingerprint(start) == hash)
+        })?;
         outputs.remove(at)?
     };
     let text = match kept.text {
@@ -10447,18 +10464,26 @@ mod webfetch_tests {
         std::fs::remove_file(saved(&listing)).unwrap();
 
         // A short one is as the server sent it, and a file a server names,
-        // even one this chat's own call saved, is never read for a script.
+        // even one another call of this chat saved, is never read for a
+        // script; that call's own script still gets its text.
         let short = call_wide("short", thread).await.unwrap();
         assert_eq!(
             (short.text.as_str(), &short.metadata),
             ("short", &json!({"rows": 1}))
         );
-        let real = call_wide("wide", ThreadId::new()).await.unwrap();
-        let named = ToolOutput {
-            text: "short".into(),
-            metadata: json!({"truncated": true, "outputPath": saved(&real)}),
+        let real = call_wide("wide", thread).await.unwrap();
+        for text in ["short".to_owned(), "x".repeat(real.text.len() + 1)] {
+            let named = ToolOutput {
+                text,
+                metadata: json!({"truncated": true, "outputPath": saved(&real)}),
+            };
+            assert!(take_whole_mcp_output(thread, &named).await.is_none());
+        }
+        let hooked = ToolOutput {
+            text: format!("{}\n\n<hook-context>\nnoted\n</hook-context>", real.text),
+            metadata: real.metadata.clone(),
         };
-        assert!(take_whole_mcp_output(thread, &named).await.is_none());
+        assert!(take_whole_mcp_output(thread, &hooked).await.is_some());
         let spoofed = ToolOutput {
             text: "short".into(),
             metadata: json!({"truncated": true, "outputPath": "/etc/hosts"}),
