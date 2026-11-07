@@ -2,20 +2,11 @@ import { For, Show } from "solid-js";
 import type { UnrestoredFile } from "@haarness/sdk";
 import { Icon } from "./ui";
 import { formatNumber, t } from "./i18n";
-import { unrestoredFiles } from "./conversation-history";
+import { unrestoredFiles, unrestoredReason } from "./conversation-history";
 
 /** "1 file …" or "N files …" in the interface language. */
 function counted(count: number, one: string, many: string) {
   return count === 1 ? t(one) : t(many, { count: formatNumber(count) });
-}
-
-/** How the folder stands where undo left `file` as it was. */
-function reason(file: UnrestoredFile) {
-  return file.reason === "large"
-    ? t("too large for Undo")
-    : file.reason === "outside"
-      ? t("outside the folder")
-      : t("ignored");
 }
 
 /** One kind of file an undo left: a line that opens to list them. */
@@ -37,8 +28,8 @@ function Group(props: {
           {(file) => (
             <li>
               <bdi dir="ltr">{file.path}</bdi>
-              <Show when={!props.pressing}>
-                <span class="reason"> · {reason(file)}</span>
+              <Show when={!props.pressing && unrestoredReason(file)}>
+                {(reason) => <span class="reason"> · {reason()}</span>}
               </Show>
             </li>
           )}

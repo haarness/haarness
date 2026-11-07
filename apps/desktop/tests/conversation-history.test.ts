@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { Item, ItemData, Thread } from "@haarness/sdk";
-import { retainedItems, lastUserMessage, findConversationMessages, unrestoredFiles } from "../src/renderer/conversation-history";
+import type { Item, ItemData, Thread, UnrestoredFile } from "@haarness/sdk";
+import { retainedItems, lastUserMessage, findConversationMessages, unrestoredFiles, unrestoredReason } from "../src/renderer/conversation-history";
 const item = (sequence: number, data: ItemData): Item => ({ id: String(sequence), threadId: "thread", turnId: "turn", sequence, createdAt: "2026-09-11T00:00:00Z", data });
 test("undo boundaries hide future messages without destroying redo history", () => {
   const items = [item(1, { type: "user_message", text: "first" }), item(2, { type: "assistant_message", text: "reply" }), item(3, { type: "user_message", text: "second" }), item(4, { type: "user_message", text: "internal", synthetic: true })];
@@ -33,7 +33,10 @@ test("an undo names the files it left as they are, those left for their size apa
   assert.deepEqual(unrestoredFiles(thread({ unrestored: [env], unrestoredCount: 51 })), { large: [], quiet: [env], more: 50, count: 51 });
   // A count below the names given never hides one.
   assert.deepEqual(unrestoredFiles(thread({ unrestored: [env, notes], unrestoredCount: 1 })), { large: [], quiet: [env, notes], more: 0, count: 2 });
-  // A reason from a newer server stays quiet.
+  // A reason from a newer server stays quiet, and goes unsaid.
   const other = { path: "x", reason: "other" as const };
   assert.deepEqual(unrestoredFiles(thread({ unrestored: [other] })).quiet, [other]);
+  assert.deepEqual([big, env, notes].map(unrestoredReason), ["too large for Undo", "ignored", "outside the folder"]);
+  assert.equal(unrestoredReason(other), undefined);
+  assert.equal(unrestoredReason({ path: "x", reason: "linked" } as unknown as UnrestoredFile), undefined);
 });
