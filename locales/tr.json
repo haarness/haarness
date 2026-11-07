@@ -2865,6 +2865,7 @@
   "Auto review unavailable": "Otomatik inceleme kullanılamıyor",
   "Auto review paused": "Otomatik inceleme duraklatıldı",
   "Stopped by Auto's reviewer": "Otomatik modun denetleyicisi durdurdu",
+  "Refused by a hook": "Bir kanca reddetti",
   "reviewing…": "inceleniyor…",
   "Reviewing…": "İnceleniyor…",
   "Auto review is deciding…": "Otomatik inceleme karar veriyor…",

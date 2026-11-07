@@ -2865,6 +2865,7 @@
   "Auto review unavailable": "Авто-проверка недоступна",
   "Auto review paused": "Авто-проверка приостановлена",
   "Stopped by Auto's reviewer": "Остановлено проверяющим режима Авто",
+  "Refused by a hook": "Отклонено хуком",
   "reviewing…": "проверка…",
   "Reviewing…": "Проверка…",
   "Auto review is deciding…": "Авто-проверка решает…",

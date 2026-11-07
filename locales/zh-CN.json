@@ -2865,6 +2865,7 @@
   "Auto review unavailable": "自动审查不可用",
   "Auto review paused": "自动审查已暂停",
   "Stopped by Auto's reviewer": "已被自动模式的审核模型拦下",
+  "Refused by a hook": "已被钩子拒绝",
   "reviewing…": "审查中…",
   "Reviewing…": "审查中…",
   "Auto review is deciding…": "自动审查正在判断…",

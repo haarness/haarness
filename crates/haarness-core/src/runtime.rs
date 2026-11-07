@@ -558,6 +558,7 @@ fn failure_message(error: &mut CoreError) -> Option<&mut String> {
         | CoreError::Storage(message)
         | CoreError::Tool(message) => Some(message),
         CoreError::PermissionRejected(_)
+        | CoreError::HookRefused { .. }
         | CoreError::ReviewBlocked(_)
         | CoreError::Provider(_)
         | CoreError::ProviderBlocked(_)
@@ -8860,18 +8861,27 @@ fn refusal_message(feedback: Option<&str>) -> String {
 const REFUSAL_REASON_CHARS: usize = 300;
 
 /// What the agent reads when a `PermissionRequest` hook or an extension's
-/// `permission.ask` refused its call: the hook's own reason, and that no
-/// person saw the request, so the agent does not take it for a person's
-/// answer.
-fn hook_refusal_message(reason: Option<&str>) -> String {
+/// `permission.ask` refused its call, or `failed` to answer it: the hook's
+/// own reason, and that no person saw the request, so the agent does not
+/// take it for a person's answer, nor a failure for a decision.
+fn hook_refusal_message(reason: Option<&str>, failed: bool) -> String {
     let reason = reason
         .map(|reason| reason.trim().trim_end_matches('.').trim_end())
         .filter(|reason| !reason.is_empty());
-    let lead = match reason {
-        Some(reason) => {
+    let lead = match (reason, failed) {
+        (Some(error), true) => format!(
+            "A permission hook could not answer ({error}), so this action was refused without asking the user."
+        ),
+        (None, true) => {
+            "A permission hook could not answer, so this action was refused without asking the user."
+                .to_owned()
+        }
+        (Some(reason), false) => {
             format!("A permission hook refused this action without asking the user: {reason}.")
         }
-        None => "A permission hook refused this action without asking the user.".to_owned(),
+        (None, false) => {
+            "A permission hook refused this action without asking the user.".to_owned()
+        }
     };
     format!("{lead} Take a different approach, or ask the user if you need it.")
 }
@@ -8911,9 +8921,9 @@ impl PermissionResolution {
         }
     }
 
-    fn refused_by_hook(reason: Option<String>) -> Self {
+    fn refused_by_hook(reason: Option<String>, answered_by: AnsweredBy) -> Self {
         Self {
-            answered_by: AnsweredBy::Hook,
+            answered_by,
             ..Self::rejected(reason)
         }
     }
@@ -8932,6 +8942,8 @@ enum AnsweredBy {
     /// refused it before anyone saw it: `feedback` is its reason, when it
     /// gave one.
     Hook,
+    /// A hook could not answer it, which refuses it: `feedback` is why.
+    HookFailure,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11025,6 +11037,9 @@ impl RunnerTask {
                             // tell it from a person's reject.
                             let metadata = match &error {
                                 CoreError::ReviewBlocked(review) => json!({ "review": review }),
+                                CoreError::HookRefused { reason, .. } => {
+                                    json!({ "refusedBy": "hook", "reason": reason })
+                                }
                                 _ => serde_json::Value::Null,
                             };
                             self.publish_item(ItemData::ToolResult {
@@ -11946,15 +11961,27 @@ impl RunnerTask {
                 return Err(CoreError::ReviewBlocked(Box::new(review)));
             }
             if !resolution.allowed {
+                // A hook answered: no person saw the request, and clients
+                // show it as the hook's.
+                if matches!(
+                    resolution.answered_by,
+                    AnsweredBy::Hook | AnsweredBy::HookFailure
+                ) {
+                    let failed = resolution.answered_by == AnsweredBy::HookFailure;
+                    let reason = resolution
+                        .feedback
+                        .map(|reason| reason.trim().to_owned())
+                        .filter(|reason| !reason.is_empty());
+                    return Err(CoreError::HookRefused {
+                        message: hook_refusal_message(reason.as_deref(), failed),
+                        reason,
+                    });
+                }
                 let message = match resolution.feedback {
                     // Nobody answered: the reason is Haarness's, and no
                     // one is there to ask.
                     feedback if resolution.answered_by == AnsweredBy::Nobody => {
                         refusal_message(feedback.as_deref())
-                    }
-                    // A hook answered: no person saw the request.
-                    feedback if resolution.answered_by == AnsweredBy::Hook => {
-                        hook_refusal_message(feedback.as_deref())
                     }
                     Some(feedback) if !feedback.trim().is_empty() => format!(
                         "The user rejected this action and said: {feedback}. Adjust your \
@@ -12292,7 +12319,16 @@ impl RunnerTask {
             let call = self.hook_call(Some(agent));
             match permission_hook_answer(hooks.as_ref(), &call, plan, always, detail).await {
                 HookAnswer::Refused(reason) => {
-                    return Ok(PermissionResolution::refused_by_hook(reason));
+                    return Ok(PermissionResolution::refused_by_hook(
+                        reason,
+                        AnsweredBy::Hook,
+                    ));
+                }
+                HookAnswer::Failed(error) => {
+                    return Ok(PermissionResolution::refused_by_hook(
+                        Some(error),
+                        AnsweredBy::HookFailure,
+                    ));
                 }
                 HookAnswer::Allowed { always } if !forced && !explicit => {
                     if always {
@@ -15445,6 +15481,8 @@ enum HookAnswer {
     },
     /// Refused, with the reason a hook gave, if any.
     Refused(Option<String>),
+    /// A hook could not answer (its error): refused all the same.
+    Failed(String),
     Open,
 }
 
@@ -15483,6 +15521,9 @@ async fn permission_hook_answer(
             .permission_request(call, &plan.permission, &patterns, always, &input)
             .await;
         remembered &= decision.always;
+        if let Some(error) = decision.failure {
+            return HookAnswer::Failed(error);
+        }
         if let Some(reason) = decision.block {
             return HookAnswer::Refused(Some(reason));
         }

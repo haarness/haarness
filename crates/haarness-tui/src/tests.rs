@@ -11604,6 +11604,70 @@ fn a_rejected_tool_and_a_stopped_turn_read_as_choices_not_failures() {
     }
 }
 
+/// A hook's refusal reads as its decision, quietly, with the hook's own
+/// reason when it gave one, whatever words the agent read; a refusal that
+/// gave none says only who refused.
+#[test]
+fn a_hooks_refusal_reads_as_the_hooks_decision_not_a_failure() {
+    let thread = fixture_thread();
+    let refusal = |sequence, call_id: &str, command: &str, reason: serde_json::Value| {
+        [
+            message_item(
+                sequence,
+                &thread,
+                ItemData::ToolCall {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command": command}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            message_item(
+                sequence + 1,
+                &thread,
+                ItemData::ToolResult {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    output: "A permission hook refused this action without asking the user. Take a different approach, or ask the user if you need it.".into(),
+                    is_error: true,
+                    metadata: serde_json::json!({"refusedBy": "hook", "reason": reason}),
+                },
+            ),
+        ]
+    };
+    let mut items = refusal(
+        1,
+        "call-1",
+        "cargo build",
+        serde_json::json!("builds run only in CI"),
+    )
+    .to_vec();
+    items.extend(refusal(3, "call-2", "cargo test", serde_json::Value::Null));
+    let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let transcript = crate::view::transcript::transcript_lines(&app, 100);
+    let text: String = transcript
+        .lines
+        .iter()
+        .map(|line| line_text(line) + "\n")
+        .collect();
+    assert!(
+        text.contains("⊘ bash cargo build  Refused by a hook: builds run only in CI"),
+        "{text}"
+    );
+    assert!(
+        text.contains("⊘ bash cargo test  Refused by a hook\n"),
+        "{text}"
+    );
+    assert!(!text.contains("failed"), "{text}");
+    assert!(!text.contains("A permission hook refused"), "{text}");
+    for line in &transcript.lines {
+        assert!(
+            line.spans.iter().all(|span| span.fg != app.theme.danger),
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn a_batch_step_auto_review_blocked_reads_as_its_decision() {
     let thread = fixture_thread();

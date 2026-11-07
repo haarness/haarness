@@ -998,8 +998,8 @@ async fn a_permission_request_hooks_allow_without_always_is_asked_again() {
 }
 
 /// A `PermissionRequest` hook that refuses every request, with its reason
-/// when it gives one.
-struct Refuses(Option<&'static str>);
+/// when it gives one, or (`failing`) that fails to answer, with that error.
+struct Refuses(Option<&'static str>, bool);
 #[async_trait]
 impl HookPort for Refuses {
     async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
@@ -1026,6 +1026,13 @@ impl HookPort for Refuses {
         _: Option<&[String]>,
         _: &Value,
     ) -> HookDecision {
+        if self.1 {
+            return HookDecision {
+                failure: self.0.map(str::to_owned),
+                permission: Some(PermissionDecision::Deny),
+                ..HookDecision::default()
+            };
+        }
         HookDecision {
             block: self.0.map(str::to_owned),
             permission: Some(PermissionDecision::Deny),
@@ -1051,21 +1058,42 @@ async fn a_hooks_refusal_reads_as_the_hooks_and_a_persons_reject_as_theirs() {
         config
     };
     let echo = || vec![vec![call("one", "bash", json!({"command": "echo one"}))]];
-    for (reason, said) in [
+    for (reason, failing, said, shown) in [
         (
             Some("not on this machine."),
+            false,
             "A permission hook refused this action without asking the user: not on this \
              machine. Take a different approach, or ask the user if you need it.",
+            json!("not on this machine."),
         ),
         (
             None,
+            false,
             "A permission hook refused this action without asking the user. Take a different \
              approach, or ask the user if you need it.",
+            Value::Null,
+        ),
+        (
+            Some("lookup timed out"),
+            true,
+            "A permission hook could not answer (lookup timed out), so this action was \
+             refused without asking the user. Take a different approach, or ask the user if \
+             you need it.",
+            json!("lookup timed out"),
         ),
     ] {
-        let fixture = Fixture::with_hooks(asks(), Some(Arc::new(Refuses(reason))));
+        let fixture = Fixture::with_hooks(asks(), Some(Arc::new(Refuses(reason, failing))));
         let items = fixture.run(echo()).await;
         assert_eq!(tool_results(&items), vec![(said.to_owned(), true)]);
+        // Clients show it as the hook's, from the result's metadata.
+        let metadata = items
+            .iter()
+            .find_map(|item| match &item.data {
+                ItemData::ToolResult { metadata, .. } => Some(metadata.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(metadata, json!({"refusedBy": "hook", "reason": shown}));
         assert!(fixture.runtime.pending_permissions().is_empty());
     }
     for (feedback, said) in [

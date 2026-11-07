@@ -2865,6 +2865,7 @@
   "Auto review unavailable": "การตรวจสอบอัตโนมัติไม่พร้อมใช้งาน",
   "Auto review paused": "การตรวจสอบอัตโนมัติหยุดชั่วคราว",
   "Stopped by Auto's reviewer": "ผู้ตรวจของโหมดอัตโนมัติหยุดไว้",
+  "Refused by a hook": "ฮุกปฏิเสธแล้ว",
   "reviewing…": "กำลังตรวจสอบ…",
   "Reviewing…": "กำลังตรวจสอบ…",
   "Auto review is deciding…": "การตรวจสอบอัตโนมัติกำลังตัดสินใจ…",

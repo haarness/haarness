@@ -2865,6 +2865,7 @@
   "Auto review unavailable": "Revisão automática indisponível",
   "Auto review paused": "Revisão automática pausada",
   "Stopped by Auto's reviewer": "Interrompido pelo revisor do Auto",
+  "Refused by a hook": "Recusado por um hook",
   "reviewing…": "revisando…",
   "Reviewing…": "Revisando…",
   "Auto review is deciding…": "A revisão automática está decidindo…",

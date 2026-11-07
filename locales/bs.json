@@ -2865,6 +2865,7 @@
   "Auto review unavailable": "Auto pregled nije dostupan",
   "Auto review paused": "Auto pregled je pauziran",
   "Stopped by Auto's reviewer": "Zaustavio ga je recenzent za Auto",
+  "Refused by a hook": "Odbio ga je hook",
   "reviewing…": "pregledava…",
   "Reviewing…": "Pregledava…",
   "Auto review is deciding…": "Auto pregled odlučuje…",

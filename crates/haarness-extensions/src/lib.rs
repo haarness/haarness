@@ -870,23 +870,26 @@ impl HookPort for CombinedHooks {
                             ..HookDecision::default()
                         };
                     }
+                    // A deny with no reason gives none: the agent reads
+                    // that a hook refused it, and nothing made up for why.
                     Some("deny") => {
                         return HookDecision {
-                            block: Some(
-                                value["reason"]
-                                    .as_str()
-                                    .unwrap_or("denied by an extension permission.ask hook")
-                                    .to_owned(),
-                            ),
+                            block: value["reason"]
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|reason| !reason.is_empty())
+                                .map(str::to_owned),
                             permission: Some(PermissionDecision::Deny),
                             ..HookDecision::default()
                         };
                     }
                     _ => {}
                 },
+                // A handler that threw refuses the request, as a failure
+                // of the hook rather than its decision.
                 Err(error) => {
                     return HookDecision {
-                        block: Some(error.to_string()),
+                        failure: Some(error.to_string()),
                         permission: Some(PermissionDecision::Deny),
                         ..HookDecision::default()
                     };

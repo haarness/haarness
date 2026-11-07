@@ -2865,6 +2865,7 @@
   "Auto review unavailable": "Auto-gjennomgang er ikke tilgjengelig",
   "Auto review paused": "Auto-gjennomgang er satt på pause",
   "Stopped by Auto's reviewer": "Stoppet av Auto-kontrolløren",
+  "Refused by a hook": "Avvist av en hook",
   "reviewing…": "går gjennom…",
   "Reviewing…": "Går gjennom…",
   "Auto review is deciding…": "Auto-gjennomgang avgjør…",

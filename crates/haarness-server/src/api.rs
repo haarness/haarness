@@ -3490,7 +3490,9 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
         CoreError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found", false),
         CoreError::Conflict(_) => (StatusCode::CONFLICT, "conflict", true),
         CoreError::PermissionDenied(_) => (StatusCode::FORBIDDEN, "permission_denied", false),
-        CoreError::PermissionRejected(_) => (StatusCode::FORBIDDEN, "permission_rejected", false),
+        CoreError::PermissionRejected(_) | CoreError::HookRefused { .. } => {
+            (StatusCode::FORBIDDEN, "permission_rejected", false)
+        }
         CoreError::ReviewBlocked(_) => (StatusCode::FORBIDDEN, "review_blocked", false),
         CoreError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request", false),
         CoreError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error", true),
