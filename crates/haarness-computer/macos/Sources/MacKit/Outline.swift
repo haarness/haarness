@@ -47,6 +47,31 @@ public let containerRoles: Set<String> = [
     "AXList", "AXOutline", "AXTable", "AXRow", "AXCell", "AXColumn", "AXBrowser", "AXGrowArea", "AXMatte",
 ]
 
+/// Roles whose frame is the visible part of what they hold. A list's rows beyond its scroll area are scrolled away;
+/// Accessibility still reports their frames, which then overlap whatever is drawn there instead.
+public let clippingRoles: Set<String> = ["AXWindow", "AXScrollArea"]
+
+/// How much of an element can be seen.
+public enum Sight: Equatable {
+    /// Its visible part, or nil when it reports no frame.
+    case seen(Box?)
+    /// Every bit of it lies outside the scroll area or window around it.
+    case hidden
+}
+
+/// The part of `box` inside `clip`, the visible region its scroll areas and window leave. A box without area keeps its
+/// place, since nothing can be told from it.
+public func sight(of box: Box?, within clip: Box?) -> Sight {
+    guard let box, box.hasArea, let clip else { return .seen(box) }
+    return box.intersection(clip).map { .seen($0) } ?? .hidden
+}
+
+/// The line standing in for a scroll area's elements that are scrolled out of its view.
+public func hiddenLine(_ count: Int, level: Int) -> String {
+    let what = count == 1 ? "1 more element is" : "\(count) more elements are"
+    return String(repeating: "  ", count: level) + "(\(what) scrolled out of view here; scroll this area to reach \(count == 1 ? "it" : "them").)"
+}
+
 /// One line, flattened and cut to `limit` characters.
 public func shorten(_ text: String, _ limit: Int) -> String {
     let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)

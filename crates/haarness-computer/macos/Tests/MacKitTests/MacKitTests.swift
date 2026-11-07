@@ -109,4 +109,21 @@ final class MacKitTests: XCTestCase {
         // An app name with a percent sign is printed as it is.
         XCTAssertEqual(BarText.english.label(for: "100%@ App"), "Haarness is working in 100%@ App")
     }
+
+    func testPositionsAreTheVisiblePartOfAnElement() {
+        let list = Box(x: 100, y: 300, width: 200, height: 120)
+        // A row inside the list keeps its frame; one half under the list's edge keeps its visible half.
+        XCTAssertEqual(sight(of: Box(x: 100, y: 320, width: 50, height: 20), within: list), .seen(Box(x: 100, y: 320, width: 50, height: 20)))
+        XCTAssertEqual(sight(of: Box(x: 100, y: 410, width: 50, height: 20), within: list), .seen(Box(x: 100, y: 410, width: 50, height: 10)))
+        // A row scrolled above the list reports a frame over whatever sits there; it counts as hidden.
+        XCTAssertEqual(sight(of: Box(x: 100, y: 230, width: 50, height: 20), within: list), .hidden)
+        XCTAssertEqual(sight(of: Box(x: 100, y: 420, width: 50, height: 20), within: list), .hidden)
+        // Nothing to clip against, no frame, or a frame without area: nothing can be told, so nothing is hidden.
+        XCTAssertEqual(sight(of: Box(x: 0, y: 0, width: 5, height: 5), within: nil), .seen(Box(x: 0, y: 0, width: 5, height: 5)))
+        XCTAssertEqual(sight(of: nil, within: list), .seen(nil))
+        XCTAssertEqual(sight(of: Box(x: 0, y: 0, width: 0, height: 0), within: list), .seen(Box(x: 0, y: 0, width: 0, height: 0)))
+        XCTAssertNil(Box(x: 0, y: 0, width: 10, height: 10).intersection(Box(x: 10, y: 0, width: 10, height: 10)))
+        XCTAssertEqual(hiddenLine(1, level: 2), "    (1 more element is scrolled out of view here; scroll this area to reach it.)")
+        XCTAssertEqual(hiddenLine(54, level: 0), "(54 more elements are scrolled out of view here; scroll this area to reach them.)")
+    }
 }

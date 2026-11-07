@@ -20,6 +20,17 @@ public struct Box: Equatable {
         px >= x && py >= y && px <= x + width && py <= y + height
     }
 
+    /// The area this box shares with `other`, or nil when they do not overlap.
+    public func intersection(_ other: Box) -> Box? {
+        let left = max(x, other.x), top = max(y, other.y)
+        let right = min(x + width, other.x + other.width), bottom = min(y + height, other.y + other.height)
+        guard right > left, bottom > top else { return nil }
+        return Box(x: left, y: top, width: right - left, height: bottom - top)
+    }
+
+    /// False for the zero-sized frames some elements report, which say nothing about where they are.
+    public var hasArea: Bool { width > 0 && height > 0 }
+
     public func grown(by amount: Double) -> Box {
         Box(x: x - amount, y: y - amount, width: width + amount * 2, height: height + amount * 2)
     }

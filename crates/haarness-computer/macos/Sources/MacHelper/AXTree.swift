@@ -148,7 +148,25 @@ final class AXTree {
         return out
     }
 
-    private func item(_ element: AXUIElement, level: Int, viewport: Viewport) -> OutlineItem {
+    /// What of `element` the scroll areas and window around it leave visible, in screen points.
+    static func visibleArea(_ element: AXUIElement) -> Sight {
+        guard var visible = box(element) else { return .seen(nil) }
+        guard visible.hasArea else { return .seen(visible) }
+        var current = element
+        for _ in 0..<40 {
+            guard let up = parent(current) else { break }
+            current = up
+            let role = text(current, kAXRoleAttribute) ?? ""
+            if clippingRoles.contains(role), let frame = box(current), frame.hasArea {
+                guard let inside = visible.intersection(frame) else { return .hidden }
+                visible = inside
+            }
+            if role == "AXWindow" || role == "AXApplication" { break }
+        }
+        return .seen(visible)
+    }
+
+    private func item(_ element: AXUIElement, level: Int, box: Box?, viewport: Viewport) -> OutlineItem {
         let role = Self.text(element, kAXRoleAttribute) ?? "AXUnknown"
         let password = Self.isPassword(element)
         var name = Self.text(element, kAXTitleAttribute)
@@ -160,7 +178,7 @@ final class AXTree {
             detail: Self.text(element, kAXDescriptionAttribute),
             value: password || role == "AXStaticText" ? nil : Self.text(element, kAXValueAttribute),
             placeholder: Self.text(element, kAXPlaceholderValueAttribute),
-            box: Self.box(element).map { viewport.pixels($0) },
+            box: box.map { viewport.pixels($0) },
             enabled: Self.flag(element, kAXEnabledAttribute) ?? true,
             focused: Self.flag(element, kAXFocusedAttribute) ?? false,
             selected: Self.flag(element, kAXSelectedAttribute) ?? false,
@@ -176,21 +194,51 @@ final class AXTree {
         return item
     }
 
-    /// Depth-first walk of `root` into `budget`, assigning refs to the elements worth acting on.
+    /// Depth-first walk of `root` into `budget`, assigning refs to the elements worth acting on. Positions are the
+    /// visible part of each element; elements scrolled wholly out of their scroll area are left out with their
+    /// contents and counted in one line for that area, so no position points at something drawn over them.
     func walk(_ root: AXUIElement, depthLimit: Int, viewport: Viewport, into budget: inout OutlineBudget) {
-        var stack: [(element: AXUIElement, level: Int, depth: Int)] = [(root, 0, 0)]
+        // `element` nil marks the end of a scroll area's contents, where its count of hidden elements is reported.
+        struct Step {
+            var element: AXUIElement?
+            var level: Int
+            var depth: Int
+            var clip: Box?
+            var area: Int?
+        }
+        var hidden: [Int] = []
+        var stack = [Step(element: root, level: 0, depth: 0, clip: nil, area: nil)]
         var seen = 0
         while let next = stack.popLast() {
             if budget.exhausted { return }
+            guard let element = next.element else {
+                if let area = next.area, hidden[area] > 0 { budget.take(hiddenLine(hidden[area], level: next.level)) }
+                continue
+            }
             seen += 1
             // A runaway tree (a huge table) stops here instead of taking the helper's whole time limit.
             if seen > 20_000 { return }
-            let item = item(next.element, level: next.level, viewport: viewport)
+            guard case .seen(let box) = sight(of: Self.box(element), within: next.clip) else {
+                if let area = next.area { hidden[area] += 1 }
+                continue
+            }
+            let item = item(element, level: next.level, box: box, viewport: viewport)
             let shown = worthShowing(item)
             if shown { budget.take(outlineLine(item)) }
             if next.depth >= depthLimit { continue }
-            for child in Self.children(next.element).reversed() {
-                stack.append((child, shown ? next.level + 1 : next.level, next.depth + 1))
+            let level = shown ? next.level + 1 : next.level
+            var clip = next.clip
+            var area = next.area
+            if clippingRoles.contains(item.role), let box, box.hasArea {
+                clip = box
+                if item.role == "AXScrollArea" {
+                    hidden.append(0)
+                    area = hidden.count - 1
+                    stack.append(Step(element: nil, level: level, depth: next.depth, clip: nil, area: area))
+                }
+            }
+            for child in Self.children(element).reversed() {
+                stack.append(Step(element: child, level: level, depth: next.depth + 1, clip: clip, area: area))
             }
         }
     }

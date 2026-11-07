@@ -114,6 +114,24 @@ def outline_ref(output, pattern):
     return match.group(1)
 
 
+LAB_ELEMENTS = {
+    "count": r'\[button\] "Count"',
+    "name": r'\[text-field\] "[^"]*"[^\n]*(?:description|placeholder)="Name"',
+    "password": r'\[text-field:secure-text-field\]',
+    "level": r'\[slider\][^\n]*description="Level"',
+    "rows": r'\[scroll-area\][^\n]*description="Rows"',
+}
+refs = {}
+
+
+def read_refs(output):
+    """Every snapshot issues new refs and retires the old ones, so the lab's refs are re-read from each outline."""
+    if "elements (use these refs" in output:
+        refs.update({key: outline_ref(output, pattern) for key, pattern in LAB_ELEMENTS.items()})
+        first = re.search(r'@(e\d+) \[static-text\] "Row 1"', output)
+        refs["row1"] = first.group(1) if first else None
+
+
 class Chat:
     def __init__(self):
         self.thread = api("/threads", {"title": "Computer use live", "provider": "echo", "model": "echo-1"})["id"]
@@ -138,7 +156,9 @@ class Chat:
             time.sleep(0.1)
         if expect_ask is not None:
             assert (pending is not None) == expect_ask, f"{name}: asked={pending is not None}, expected {expect_ask}"
-        return self.result(turn["id"], name) + (pending,)
+        result = self.result(turn["id"], name)
+        read_refs(result[0])
+        return result + (pending,)
 
     def result(self, turn_id, name):
         items = api("/threads/" + self.thread + "/items")
@@ -171,14 +191,12 @@ try:
     assert not error, output
     assert "Haarness Lab" in output and metadata.get("bundle") == LAB, output[:600]
     assert metadata.get("attachments") and pathlib.Path(metadata["attachments"][0]).stat().st_size > 1000
-    count = outline_ref(output, r'\[button\] "Count"')
-    name = outline_ref(output, r'\[text-field\] "[^"]*"[^\n]*(?:description|placeholder)="Name"')
-    password = outline_ref(output, r'\[text-field:secure-text-field\]')
-    level = outline_ref(output, r'\[slider\][^\n]*description="Level"')
-    rows = outline_ref(output, r'\[scroll-area\][^\n]*description="Rows"')
+    assert set(LAB_ELEMENTS) <= set(refs) and refs["row1"], refs
+    # The list opens at its top: the rows below its frame are counted, not placed over the window's other controls.
+    assert '"Row 60"' not in output and "more elements are scrolled out of view here" in output, output
     check("a look at one app asks nothing and returns its elements and a screenshot")
 
-    output, error, _, pending = chat.turn("mac_click", {"ref": count}, answer="always", expect_ask=True)
+    output, error, _, pending = chat.turn("mac_click", {"ref": refs["count"]}, answer="always", expect_ask=True)
     assert not error, output
     assert pending["permission"] == "computer" and pending["explicit"], pending
     mac = pending["detail"]["__mac"]
@@ -187,12 +205,12 @@ try:
     until(lambda: state().get("count") == 1, "the click counted")
     check("the first action in the app asks, with a picture of the spot, and the click lands")
 
-    _, error, _, _ = chat.turn("mac_click", {"ref": count, "snapshot": False}, expect_ask=False)
-    assert not error
+    output, error, _, _ = chat.turn("mac_click", {"ref": refs["count"], "snapshot": False}, expect_ask=False)
+    assert not error, output
     until(lambda: state().get("count") == 2, "the second click counted")
     check("allowed in this chat: the next action asks nothing")
 
-    output, error, _, _ = chat.turn("mac_type", {"ref": name, "text": "hello lab"}, expect_ask=False)
+    output, error, _, _ = chat.turn("mac_type", {"ref": refs["name"], "text": "hello lab"}, expect_ask=False)
     assert not error, output
     until(lambda: state().get("name") == "hello lab", "typed text")
     check("typing into a field")
@@ -202,18 +220,27 @@ try:
     until(lambda: state().get("submitted"), "Return pressed the default button")
     check("pressing Return")
 
-    output, error, _, _ = chat.turn("mac_type", {"ref": password, "text": "hunter2"}, expect_ask=False)
+    output, error, _, _ = chat.turn("mac_type", {"ref": refs["password"], "text": "hunter2"}, expect_ask=False)
     assert error and "Password fields are refused" in output, output
     assert state().get("passwordLength") == 0
     check("a password field is refused before anything is typed")
 
-    output, error, _, _ = chat.turn("mac_scroll", {"ref": rows, "direction": "down", "amount": 10}, expect_ask=False)
+    first_row = refs["row1"]
+    output, error, _, _ = chat.turn("mac_scroll", {"ref": refs["rows"], "direction": "down", "amount": 10, "snapshot": False},
+                                    expect_ask=False)
     assert not error, output
     until(lambda: state().get("scrollY", 0) > 0, "the list scrolled")
     check("scrolling")
 
+    # Row 1 now sits above the list's frame, where Accessibility still places it: over the Name field.
+    output, error, _, _ = chat.turn("mac_click", {"ref": first_row}, expect_ask=False)
+    assert error and "scrolled out of view" in output, output
+    assert state().get("name") == "hello lab", state()
     output, _, _, _ = chat.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
-    knob = re.search(r"@" + level + r" \[slider\][^\n]* at=(\d+),(\d+) size=(\d+)x(\d+)", output)
+    assert '"Row 1"' not in output and "scrolled out of view here" in output, output
+    check("a row scrolled out of view is left out of the outline and refused as a target")
+
+    knob = re.search(r"@" + refs["level"] + r" \[slider\][^\n]* at=(\d+),(\d+) size=(\d+)x(\d+)", output)
     assert knob, output
     x, y, width, height = map(int, knob.groups())
     before = state().get("slider")
@@ -230,7 +257,7 @@ try:
 
     long_text = "x" * 4000
     turn = api("/threads/" + chat.thread + "/turns",
-               {"requestId": str(uuid.uuid4()), "text": "!tool mac_type " + json.dumps({"ref": name, "text": long_text})})
+               {"requestId": str(uuid.uuid4()), "text": "!tool mac_type " + json.dumps({"ref": refs["name"], "text": long_text})})
     until(lambda: len(state().get("name", "")) > len("hello lab") + 20, "typing started")
     subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--press-escape"], check=True)
     finished = until(lambda: (value if (value := api("/turns/" + turn["id"]))["status"] not in ("running", "queued") else None),

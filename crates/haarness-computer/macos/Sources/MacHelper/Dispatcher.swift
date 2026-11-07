@@ -293,11 +293,16 @@ final class Dispatcher {
     func locate(_ input: [String: Any]) throws -> (x: Double, y: Double, element: AXUIElement?) {
         if let ref = double(input["ref"]) {
             let element = try tree.element(Int(ref))
-            guard let box = AXTree.box(element) else {
+            switch AXTree.visibleArea(element) {
+            case .hidden:
+                // Its frame lies under other elements, so neither an event nor the approval's picture may use it.
+                throw HelperFailure("out_of_view", "@e\(Int(ref)) is scrolled out of view. Scroll the area that holds it with mac_scroll, then use the refs of the next snapshot.")
+            case .seen(nil):
                 throw HelperFailure("not_found", "@e\(Int(ref)) is not visible on screen right now; call mac_snapshot again.")
+            case .seen(let box?):
+                let middle = box.middle
+                return (middle.x, middle.y, element)
             }
-            let middle = box.middle
-            return (middle.x, middle.y, element)
         }
         if let x = double(input["x"]), let y = double(input["y"]) {
             guard let viewport else {

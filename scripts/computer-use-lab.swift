@@ -20,6 +20,10 @@ if CommandLine.arguments.dropFirst().first == "--windows", let pid = Int32(Comma
 
 let statePath = CommandLine.arguments.dropFirst().first ?? "/tmp/haarness-lab-state.json"
 
+final class TopDownStack: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
 final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var window: NSWindow!
     var count = 0
@@ -46,7 +50,8 @@ final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         slider.target = self
         slider.action = #selector(slid)
         slider.setAccessibilityLabel("Level")
-        let list = NSStackView(views: (1...60).map { NSTextField(labelWithString: "Row \($0)") })
+        // Top-down, like a real list: it opens at Row 1 and scrolling down moves toward Row 60.
+        let list = TopDownStack(views: (1...60).map { NSTextField(labelWithString: "Row \($0)") })
         list.orientation = .vertical
         list.alignment = .leading
         list.frame = NSRect(x: 0, y: 0, width: 200, height: 1200)
