@@ -1191,6 +1191,8 @@ impl MacTool {
                     .wait_after_refusal(&context.cancel)
                     .await
                     .map_err(from_helper)?;
+                // Switching off also ends the wait.
+                self.still_on().map_err(from_helper)?;
                 Err(tool_error(format!("{} {RESUMED}", error.message)))
             }
             Err(error) => Err(from_helper(error)),

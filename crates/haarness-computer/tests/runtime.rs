@@ -941,6 +941,83 @@ async fn a_paused_chat_is_told_so_and_resume_from_a_client_lets_the_agent_go_on(
     );
 }
 
+/// Starts a turn whose typing the stand-in pauses and whose helper then quits, as one an agent's `pkill` or a crash
+/// ends; returns once the helper has gone.
+async fn pause_then_lose_the_helper(
+    lab: &Lab,
+    thread: ThreadId,
+    events: &mut tokio::sync::broadcast::Receiver<haarness_protocol::EventEnvelope>,
+) {
+    lab.start(
+        thread,
+        vec![
+            vec![call(
+                "held",
+                "mac_type",
+                json!({"ref": "e2", "text": "CRASH", "snapshot": false}),
+            )],
+            vec![call("after", "mac_snapshot", json!({}))],
+        ],
+    )
+    .await;
+    assert_eq!(next_update(events).await.payload, json!({"paused": true}));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+}
+
+#[tokio::test]
+async fn a_helper_that_quits_during_a_pause_leaves_the_agent_paused_until_the_person_resumes() {
+    let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));
+    let thread = lab.thread().await;
+    let mut events = lab.events.subscribe(None).receiver;
+    pause_then_lose_the_helper(&lab, thread, &mut events).await;
+    assert!(lab.computer.is_paused(), "the pause outlives the helper");
+    assert_eq!(lab.computer.paused_chat(), Some(thread));
+    assert!(
+        unread_updates(&mut events).is_empty(),
+        "nobody is told it ended"
+    );
+    assert!(lab.runtime.active_turn(thread).await.unwrap().is_some());
+    let items = lab.runtime.items(thread, None).await.unwrap();
+    assert!(
+        !items.iter().any(
+            |item| matches!(&item.data, ItemData::ToolResult { call_id, .. } if call_id == "held")
+        ),
+        "the agent went on without the person"
+    );
+    // The person's Resume in the chat lets it go on, with a new helper.
+    let answer = lab
+        .computer
+        .manage(&json!({"action": "resume"}))
+        .await
+        .unwrap();
+    assert_eq!(answer["paused"], false);
+    let items = lab.finish(thread).await;
+    let (output, error, _) = result(&items, "held");
+    assert!(error && output.contains("running again"), "{output}");
+    let (output, error, _) = result(&items, "after");
+    assert!(!error, "{output}");
+    assert_eq!(
+        lab.ops().iter().filter(|op| *op == "hello").count(),
+        2,
+        "{:?}",
+        lab.ops()
+    );
+}
+
+#[tokio::test]
+async fn switching_off_frees_an_agent_paused_without_a_helper() {
+    let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));
+    let thread = lab.thread().await;
+    let mut events = lab.events.subscribe(None).receiver;
+    pause_then_lose_the_helper(&lab, thread, &mut events).await;
+    assert!(lab.computer.is_paused());
+    lab.computer.enable(false).unwrap();
+    let items = lab.finish(thread).await;
+    let (output, error, _) = result(&items, "held");
+    assert!(error && output.contains("switched off"), "{output}");
+    assert!(!lab.computer.is_paused());
+}
+
 #[tokio::test]
 async fn stop_on_a_paused_strip_still_ends_the_turn_and_the_paused_line_goes() {
     let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));

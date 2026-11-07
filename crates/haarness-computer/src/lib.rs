@@ -160,7 +160,11 @@ impl Computer {
                 };
                 match event {
                     Event::Pause => computer.pause(),
-                    Event::Resume | Event::Exit => computer.resume(),
+                    Event::Resume => computer.resume(),
+                    // A helper that quits during a pause (killed, crashed) takes the strip with it but not the pause:
+                    // the agent still waits for the person, who resumes it from the chat, and the next helper starts
+                    // unpaused.
+                    Event::Exit => {}
                     // The bar's Stop is only there while the agent works; Escape counts only shortly after its
                     // latest action.
                     Event::Stop => {
@@ -399,6 +403,10 @@ impl Computer {
             tokio::select! {
                 () = cancel.cancelled() => return Err(HelperError::new("cancelled", "Stopped.")),
                 _ = renewal.tick() => {
+                    // Switched off in another process (`haarness mac off`): the waiting agent learns it from the caller.
+                    if !self.store.get().on() {
+                        return Ok(true);
+                    }
                     // Refreshing this process's holder only: a pause never takes the screen from another chat.
                     if let Some(holder) = self.lease.current() {
                         let _ = self.lease.take(&holder.thread);
