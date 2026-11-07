@@ -25,7 +25,9 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use haarness_core::{CoreError, CoreResult, DeltaRestore, SnapshotInfo, SnapshotStore};
+use haarness_core::{
+    ChangedFile, CoreError, CoreResult, DeltaRestore, SnapshotInfo, SnapshotStore,
+};
 use haarness_protocol::{FileDiff, FileDiffStatus, ThreadId};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -512,6 +514,49 @@ impl SqliteSnapshotStore {
             }
         }
         Ok(manifest)
+    }
+
+    /// See [`SnapshotStore::left_out`]: each file asked of the manifests by
+    /// its path, so neither is loaded whole.
+    fn left_out_sync(
+        &self,
+        snapshots: &[String],
+        changed: Vec<ChangedFile>,
+    ) -> CoreResult<Vec<String>> {
+        let connection = self.connection.lock();
+        let mut held = connection
+            .prepare("SELECT EXISTS(SELECT 1 FROM snapshot_files WHERE snapshot_id=?1 AND path=?2)")
+            .map_err(storage)?;
+        let mut left = Vec::new();
+        for file in changed {
+            let relative = file
+                .path
+                .strip_prefix(&self.workspace)
+                .ok()
+                .and_then(|relative| encode_relative_path(relative).ok())
+                .filter(|relative| !relative.is_empty());
+            if let Some(relative) = &relative {
+                let mut kept = false;
+                for snapshot in snapshots {
+                    kept = held
+                        .query_row(params![snapshot, relative], |row| row.get(0))
+                        .map_err(storage)?;
+                    if kept {
+                        break;
+                    }
+                }
+                if kept {
+                    continue;
+                }
+            }
+            // Gone, and not there before its first change either: nothing
+            // to put back.
+            if file.created && fs::symlink_metadata(&file.path).is_err() {
+                continue;
+            }
+            left.push(relative.unwrap_or_else(|| file.path.display().to_string()));
+        }
+        Ok(left)
     }
 
     fn load_blob(&self, entry: &ManifestEntry) -> CoreResult<Vec<u8>> {
@@ -1517,6 +1562,20 @@ impl SnapshotStore for SqliteSnapshotStore {
         }
         journal.finish(failure)?;
         Ok(DeltaRestore { touched, skipped })
+    }
+
+    async fn left_out(
+        &self,
+        expected_snapshot_id: &str,
+        desired_snapshot_id: &str,
+        changed: Vec<ChangedFile>,
+    ) -> CoreResult<Vec<String>> {
+        let snapshots = [
+            expected_snapshot_id.to_owned(),
+            desired_snapshot_id.to_owned(),
+        ];
+        self.blocking(move |store| store.left_out_sync(&snapshots, changed))
+            .await
     }
 
     async fn diff_live(&self, snapshot_id: &str) -> CoreResult<Vec<FileDiff>> {
@@ -2645,6 +2704,55 @@ mod tests {
         assert_eq!(
             fs::read_to_string(workspace.join("small.txt")).unwrap(),
             "after\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn left_out_names_the_changed_files_no_checkpoint_holds() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::create_dir(workspace.join(".git")).unwrap();
+        fs::write(workspace.join(".gitignore"), ".env\nbuild/\n").unwrap();
+        fs::write(workspace.join(".env"), "TOKEN=old\n").unwrap();
+        fs::write(workspace.join("tracked.txt"), "before\n").unwrap();
+        fs::create_dir(workspace.join("build")).unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join(".env"), "TOKEN=new\n").unwrap();
+        fs::write(workspace.join("tracked.txt"), "after\n").unwrap();
+        fs::write(workspace.join("new.txt"), "made\n").unwrap();
+        fs::write(workspace.join("build/out.js"), "made\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+        let outside = guard.0.join("notes.txt");
+        fs::write(&outside, "outside\n").unwrap();
+
+        let root = dunce::canonicalize(&workspace).unwrap();
+        let file = |path: PathBuf, created| ChangedFile { path, created };
+        let left = store
+            .left_out(
+                &after.id,
+                &before.id,
+                vec![
+                    file(root.join(".env"), false),
+                    file(root.join("tracked.txt"), false),
+                    file(root.join("new.txt"), true),
+                    file(root.join("build/out.js"), true),
+                    // Made and gone again in the same turn: nothing to say.
+                    file(root.join("scratch.txt"), true),
+                    // An ignored file the turn deleted: its content is lost.
+                    file(root.join("build/old.js"), false),
+                    file(outside.clone(), false),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            left,
+            vec![
+                ".env".to_owned(),
+                "build/out.js".to_owned(),
+                "build/old.js".to_owned(),
+                outside.display().to_string(),
+            ]
         );
     }
 

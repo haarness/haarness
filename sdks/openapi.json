@@ -5335,6 +5335,22 @@
           "snapshotId": {
             "description": "Pre-revert backup snapshot consumed by unrevert.",
             "type": "string"
+          },
+          "unrestored": {
+            "description": "Files the undone turns changed that undo left as they are: files the\ncheckpoints never hold (ignored, or outside the folder) that the\nagent's file tools wrote, and files over the checkpoints' size limit.\nRelative to the folder, or absolute when outside it; at most\n[`MAX_UNRESTORED`]. Absent from older servers, and empty when undo put\neverything back.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unrestoredCount": {
+            "description": "How many such files there are in all, when `unrestored` names only\nthe first of them.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [

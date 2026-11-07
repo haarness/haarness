@@ -336,6 +336,21 @@ pub trait ThreadRepository: Send + Sync {
         id: ThreadId,
         state: Option<(u64, String, Option<String>)>,
     ) -> CoreResult<()>;
+    /// [`Self::set_revert_state`] for an undo step, also recording the files
+    /// that step left as they are. The steps of the same pending undo that
+    /// are still undone keep theirs, and [`RevertState::unrestored`] lists
+    /// them all; a redo drops those of the step it brings back. The default
+    /// records none, which keeps test adapters source-compatible.
+    ///
+    /// [`RevertState::unrestored`]: haarness_protocol::RevertState::unrestored
+    async fn set_revert_state_unrestored(
+        &self,
+        id: ThreadId,
+        state: (u64, String, Option<String>),
+        _unrestored: UndoStepFiles,
+    ) -> CoreResult<()> {
+        self.set_revert_state(id, Some(state)).await
+    }
     /// Commit a pending revert before a direct host-side action. Production
     /// repositories override this with one transaction; the default keeps
     /// test adapters source-compatible.
@@ -920,6 +935,21 @@ pub trait SnapshotStore: Send + Sync {
         expected_snapshot_id: &str,
         desired_snapshot_id: &str,
     ) -> CoreResult<DeltaRestore>;
+    /// Of `changed`, the files a restore from `expected_snapshot_id` to
+    /// `desired_snapshot_id` leaves as they are because neither checkpoint
+    /// holds them: outside the folder, or left out of every checkpoint (an
+    /// ignored file). A file made since and gone again is not one. Each is
+    /// named relative to the folder, as manifests name it, or by its absolute
+    /// path when outside. The default names none, so external snapshot
+    /// adapters stay compatible.
+    async fn left_out(
+        &self,
+        _expected_snapshot_id: &str,
+        _desired_snapshot_id: &str,
+        _changed: Vec<ChangedFile>,
+    ) -> CoreResult<Vec<String>> {
+        Ok(Vec::new())
+    }
     /// Compare one checkpoint with the live workspace for Last turn `/diff`.
     async fn diff_live(&self, snapshot_id: &str) -> CoreResult<Vec<haarness_protocol::FileDiff>>;
     /// Stable diff between a pre-mutation and completion checkpoint.
@@ -989,6 +1019,47 @@ pub struct DeltaRestore {
     /// Paths left as they are because a checkpoint holds no content for
     /// them: files over the size limit, which no restore could put back.
     pub skipped: Vec<String>,
+}
+
+/// A file the agent's file tools changed, for [`SnapshotStore::left_out`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    /// Absolute, as the tools resolved it.
+    pub path: PathBuf,
+    /// Its first change made it, so it was not there before.
+    pub created: bool,
+}
+
+/// The files one undo step left as they are, as
+/// [`Repository::set_revert_state_unrestored`] records them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndoStepFiles {
+    /// At most [`haarness_protocol::MAX_UNRESTORED`], sorted.
+    pub paths: Vec<String>,
+    /// How many there are in all.
+    pub count: u64,
+}
+
+impl UndoStepFiles {
+    /// `paths`, deduplicated, the files in the folder first, kept to
+    /// [`haarness_protocol::MAX_UNRESTORED`].
+    #[must_use]
+    pub fn new(paths: impl IntoIterator<Item = String>) -> Self {
+        let mut paths = paths
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        paths.sort_by_key(|path| Path::new(path).is_absolute());
+        let count = u64::try_from(paths.len()).unwrap_or(u64::MAX);
+        paths.truncate(haarness_protocol::MAX_UNRESTORED);
+        Self { paths, count }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
 }
 
 /// Durable secret storage. Implemented by the CLI over owner-only auth.json;

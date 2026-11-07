@@ -5091,12 +5091,24 @@ impl AgentRuntime {
             } else {
                 (after, snapshots.capture(id).await?.id)
             };
-            snapshots.restore_delta(&expected, &before).await?;
+            let restored = snapshots.restore_delta(&expected, &before).await?;
+            let unrestored = self
+                .undo_step_files(
+                    &thread,
+                    snapshots,
+                    &items,
+                    (boundary, current_boundary),
+                    &expected,
+                    &before,
+                    restored.skipped,
+                )
+                .await;
             if let Err(error) = self
                 .repository
-                .set_revert_state(
+                .set_revert_state_unrestored(
                     id,
-                    Some((boundary, backup_id.clone(), Some(before.clone()))),
+                    (boundary, backup_id.clone(), Some(before.clone())),
+                    unrestored,
                 )
                 .await
             {
@@ -16293,6 +16305,7 @@ fn rule_spelling(path: &Path) -> String {
 }
 
 mod commands;
+mod undo_files;
 
 #[cfg(test)]
 mod permission_corpus;

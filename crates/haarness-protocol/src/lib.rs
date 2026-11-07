@@ -232,7 +232,7 @@ pub struct ForkOrigin {
     pub item_id: Option<ItemId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RevertState {
     /// Items after this sequence soft-delete when the next turn starts.
@@ -243,7 +243,22 @@ pub struct RevertState {
     /// a conflict-checked delta before restoring `snapshot_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_snapshot_id: Option<String>,
+    /// Files the undone turns changed that undo left as they are: files the
+    /// checkpoints never hold (ignored, or outside the folder) that the
+    /// agent's file tools wrote, and files over the checkpoints' size limit.
+    /// Relative to the folder, or absolute when outside it; at most
+    /// [`MAX_UNRESTORED`]. Absent from older servers, and empty when undo put
+    /// everything back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unrestored: Vec<String>,
+    /// How many such files there are in all, when `unrestored` names only
+    /// the first of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unrestored_count: Option<u64>,
 }
+
+/// The most files [`RevertState::unrestored`] names.
+pub const MAX_UNRESTORED: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]

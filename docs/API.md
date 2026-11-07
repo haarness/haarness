@@ -519,9 +519,16 @@ changes all of its files or none: when a path cannot be written part way (a
 read-only directory, a locked file, a full disk), every path already changed
 is put back, the chat keeps its previous undo state, and the same request
 succeeds once the cause is fixed. Undo and redo run one at a time across the
-chats of a workspace. Checkpoints keep only the hash of a file over
-2 MiB, so undo cannot put one back: a changed file over 2 MiB stays as it
-is while the rest is restored (a later edit to it still conflicts). The last-turn diff comes from the newest pair before any
+chats of a workspace. Checkpoints follow the folder's ignore files and keep
+only the hash of a file over 2 MiB, so undo cannot put such files back: a
+changed file over 2 MiB stays as it is while the rest is restored (a later
+edit to it still conflicts), and so do the ignored and outside files that the
+undone turns' `write`, `edit`, `multiedit` and `apply_patch` calls (direct,
+in a `batch`, or a child agent's) changed. The thread's `revert` lists them
+in `unrestored`, relative to the folder or absolute when outside it, at most
+50, with `unrestoredCount` when there are more; it follows the steps still
+undone and is absent when undo put everything back, as it is from older
+servers. A file made and removed within those turns is not listed. The last-turn diff comes from the newest pair before any
 pending undo boundary that changed files: an undone turn drops out of it, and a
 later turn that only ran commands does not hide the edits before it. The VCS
 endpoint reports staged, unstaged, untracked, unborn-branch, and

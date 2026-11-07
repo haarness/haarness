@@ -8,7 +8,10 @@ short echo turn after another, each writing its items to the same database. Then
 both writes.
 
 Checks that no turn of chat B fails or waits on chat A's captures (the slowest one is reported),
-and that undo puts the tree back byte for byte. Before captures were written in short batches,
+and that undo puts the tree back byte for byte. A third turn of chat A changes an ignored file and
+shrinks a file over the checkpoints' 2 MiB limit along with a tracked one: its undo restores the
+tracked file, leaves those two as the turn left them and names them in `revert.unrestored`, which
+the later steps keep until redo or new work. Before captures were written in short batches,
 one capture held the database's write lock for as long as it took to read and compress every
 file: B's writes waited the five-second busy timeout and failed with "database is locked".
 
@@ -109,6 +112,11 @@ def write_project():
             folder.mkdir(parents=True)
         lines = (' '.join(rng.choices(words, k=rng.randint(3, 14))) for _ in range(rng.randint(20, 160)))
         (folder / f'f{index:05d}.txt').write_text(f'// file {index}\n' + ';\n'.join(lines) + '\n')
+    # An ignored file, and one over the checkpoints' size limit that is tracked.
+    (project / '.gitignore').write_text('local.env\n')
+    (project / 'local.env').write_text('TOKEN=fixture\n')
+    (project / 'assets').mkdir()
+    (project / 'assets/model.bin').write_bytes(bytes(rng.randrange(256) for _ in range(256)) * (12 * 1024))
     git = ['git', '-C', str(project), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid']
     for command in (['init', '-q', '-b', 'main'], ['add', '-A'], ['commit', '-q', '-m', 'fixture']):
         subprocess.run(git + command, check=True, capture_output=True, env=env)
@@ -171,10 +179,31 @@ try:
     assert (project / 'notes/new.txt').read_text() == 'added by chat A\n'
     passed('chat A writes into a large project while chat B keeps running turns')
 
+    model, env_file = project / 'assets/model.bin', project / 'local.env'
+    large_before, env_before = model.read_bytes(), env_file.read_text()
+    calls = [{'name': 'write', 'arguments': {'path': path, 'content': content}} for path, content in (
+        ('local.env', 'TOKEN=changed\n'), ('assets/model.bin', 'small now\n'),
+        ('src/d000/f00001.txt', 'third turn\n'))]
+    done, _ = turn(first, '!multi ' + json.dumps(calls))
+    assert done['status'] == 'completed', done
+    start = time.monotonic()
+    reverted = api('POST', f'/threads/{first["id"]}/revert', {}, timeout=300)
+    timings['undo_left_s'] = round(time.monotonic() - start, 2)
+    left = reverted['revert'].get('unrestored')
+    assert left == ['assets/model.bin', 'local.env'], reverted['revert']
+    assert 'unrestoredCount' not in reverted['revert'], reverted['revert']
+    assert (project / 'src/d000/f00001.txt').read_text() != 'third turn\n', 'undo left the tracked file'
+    assert env_file.read_text() == 'TOKEN=changed\n' and model.read_bytes() == b'small now\n'
+    passed('undo restores the tracked file and names the ignored and the large file it left')
+    # As a person would, put the two back by hand before undoing further.
+    env_file.write_text(env_before)
+    model.write_bytes(large_before)
+
     for step in ('undo_add', 'undo_edit'):
         start = time.monotonic()
         reverted = api('POST', f'/threads/{first["id"]}/revert', {}, timeout=300)
         assert reverted.get('revert'), reverted
+        assert reverted['revert'].get('unrestored') == left, (step, reverted['revert'])
         timings[f'{step}_s'] = round(time.monotonic() - start, 2)
     chatter.stopping.set()
     chatter.join(timeout=120)
@@ -184,7 +213,14 @@ try:
 
     assert not (project / 'notes/new.txt').exists(), 'undo left the added file'
     assert tree() == (original, count), 'undo did not restore the project byte for byte'
-    passed('undo restores the whole project byte for byte')
+    passed('undo restores the whole project byte for byte, and keeps naming what it left')
+
+    # Redo walks forward again; at the end no undo is pending and nothing is named.
+    for _ in range(3):
+        redone = api('POST', f'/threads/{first["id"]}/unrevert', {}, timeout=300)
+    assert redone.get('revert') is None, redone
+    assert (project / 'src/d000/f00001.txt').read_text() == 'third turn\n'
+    passed('redo brings all three turns back')
 
     assert chatter.turns >= 5, chatter.turns
     assert not chatter.errors, chatter.errors[:5]

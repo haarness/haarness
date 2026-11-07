@@ -13571,6 +13571,7 @@ fn todo_transcript_fallback_respects_a_pending_revert_boundary() {
         sequence: 1,
         snapshot_id: "backup".into(),
         base_snapshot_id: None,
+        ..Default::default()
     });
     let items = vec![
         message_item(
@@ -18873,6 +18874,7 @@ fn undo_and_redo_report_how_far_the_history_reaches() {
         sequence: 3,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     assert_eq!(app.undo_depth(), (1, 2));
     // At the earliest checkpoint there is nowhere further back to go.
@@ -18880,6 +18882,7 @@ fn undo_and_redo_report_how_far_the_history_reaches() {
         sequence: 1,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     assert_eq!(app.undo_depth(), (0, 3));
 }
@@ -20323,6 +20326,7 @@ fn a_slash_command_reads_as_the_line_typed_with_its_prompt_folded_below() {
         sequence: 0,
         snapshot_id: "backup".into(),
         base_snapshot_id: None,
+        ..Default::default()
     });
     assert_eq!(
         app.undone_prompt().map(|(text, _)| text),
@@ -23445,6 +23449,7 @@ async fn an_undo_whose_history_cannot_be_read_keeps_the_undone_prompt() {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     let error = serde_json::json!({
         "code": "storage",
@@ -23474,6 +23479,7 @@ async fn undo_restores_the_prompt_and_slash_starts_a_command_over_it() {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     let items = serde_json::to_string(&app.items).unwrap();
     let (client, server) = workspace_http_status_client(
@@ -23543,6 +23549,7 @@ async fn an_undone_prompt_with_a_reference_keeps_its_chip_under_a_slash_command(
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     // As /undo puts it back: the reference reads as its chip.
     app.composer.set_text(sent.clone());
@@ -23569,6 +23576,7 @@ async fn redo_typed_over_an_undone_prompt_runs_and_leaves_the_composer_empty() {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     // A draft that is still the undone prompt, as the composer holds it
     // after /undo or after coming back to the chat later.
@@ -23613,6 +23621,7 @@ async fn redo_from_elsewhere_drops_the_undone_prompt_copy_from_the_composer() {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     app.composer.set_text("write the file".into());
     // Moving the cursor is not an edit of the text: the copy still goes.

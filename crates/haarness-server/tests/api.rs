@@ -6776,6 +6776,82 @@ async fn undo_restores_the_files_a_persons_shell_command_wrote() {
 }
 
 #[tokio::test]
+async fn undo_names_the_files_it_left_as_they_are() {
+    let root = std::env::temp_dir().join(format!("haarness-unrestored-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(workspace.join(".git"))
+        .await
+        .unwrap();
+    for (path, content) in [
+        (".gitignore", "local.env\n"),
+        ("local.env", "TOKEN=old\n"),
+        ("tracked.txt", "before\n"),
+    ] {
+        tokio::fs::write(workspace.join(path), content)
+            .await
+            .unwrap();
+    }
+    // Over the checkpoints' size limit: they keep its hash, not its content.
+    let large = vec![b'x'; 3 * 1024 * 1024];
+    tokio::fs::write(workspace.join("large.bin"), &large)
+        .await
+        .unwrap();
+    let runtime = undo_fixture(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Unrestored fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let calls = serde_json::json!([
+        {"name": "write", "arguments": {"path": "local.env", "content": "TOKEN=new\n"}},
+        {"name": "write", "arguments": {"path": "tracked.txt", "content": "after\n"}},
+        {"name": "write", "arguments": {"path": "large.bin", "content": "small now\n"}},
+        {"name": "write", "arguments": {"path": "added.txt", "content": "new\n"}},
+    ]);
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&format!("!multi {calls}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let read = |path: &str| std::fs::read(workspace.join(path)).ok();
+
+    let reverted = runtime.revert(thread.id, None).await.unwrap();
+    assert_eq!(read("tracked.txt").as_deref(), Some(&b"before\n"[..]));
+    assert_eq!(read("added.txt"), None);
+    // The ignored file and the large one stay as the turn left them, and
+    // the undo says so.
+    assert_eq!(read("local.env").as_deref(), Some(&b"TOKEN=new\n"[..]));
+    assert_eq!(read("large.bin").as_deref(), Some(&b"small now\n"[..]));
+    let unrestored = |thread: &haarness_protocol::Thread| {
+        thread
+            .revert
+            .as_ref()
+            .map(|revert| (revert.unrestored.clone(), revert.unrestored_count))
+    };
+    let expected = Some((vec!["large.bin".to_owned(), "local.env".to_owned()], None));
+    assert_eq!(unrestored(&reverted), expected);
+    assert_eq!(
+        unrestored(&runtime.get_thread(thread.id).await.unwrap()),
+        expected,
+        "kept with the undo"
+    );
+
+    // Redo brings back what undo put back, and the notice goes with it.
+    let redone = runtime.unrevert(thread.id).await.unwrap();
+    assert!(redone.revert.is_none());
+    assert_eq!(read("tracked.txt").as_deref(), Some(&b"after\n"[..]));
+    assert_eq!(read("added.txt").as_deref(), Some(&b"new\n"[..]));
+    remove_test_folder(root).await;
+}
+
+#[tokio::test]
 async fn undo_of_a_move_brings_back_the_old_path_and_removes_the_new() {
     let root = std::env::temp_dir().join(format!("haarness-move-undo-{}", uuid::Uuid::now_v7()));
     let workspace = root.join("ws");
