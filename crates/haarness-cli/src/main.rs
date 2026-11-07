@@ -4075,23 +4075,30 @@ async fn follow_scheduled_run(
     };
     match outcome {
         Ok(end) => Ok(end),
-        Err(error) => {
-            // The run ends here: nothing it started may go on without it.
-            let stopped = match work.look(client).await {
-                Ok(()) => end_run_work(client, &mut work).await.unwrap_or_default(),
-                Err(_) => Vec::new(),
-            };
-            if stopped.is_empty() {
-                return Err(error);
-            }
-            let error = format!("{error:#}");
-            anyhow::bail!(
-                "{}. What the run had started was stopped: {}.",
-                error.trim_end().trim_end_matches('.'),
-                stopped.join(", ")
-            )
-        }
+        Err(error) => Err(end_failed_run(client, &mut work, error).await),
     }
+}
+
+/// The run failed with `error`, and ends here: nothing it started may go on
+/// without it. What the last look that worked found is stopped even when
+/// the chat can no longer be read, and the error names what was.
+async fn end_failed_run(
+    client: &haarness_tui::api::ApiClient,
+    work: &mut RunWork,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    // A look that fails leaves what the one before it found.
+    let _ = work.look(client).await;
+    let stopped = end_run_work(client, work).await.unwrap_or_default();
+    if stopped.is_empty() {
+        return error;
+    }
+    let error = format!("{error:#}");
+    anyhow::anyhow!(
+        "{}. What the run had started was stopped: {}.",
+        error.trim_end().trim_end_matches('.'),
+        stopped.join(", ")
+    )
 }
 
 /// Wait for the run's first turn to end, declining its questions, or until
@@ -4229,6 +4236,8 @@ struct RunWork {
     in_background: std::collections::HashSet<String>,
     /// Workflow runs the run's turns started in the background, by name.
     workflows: HashMap<WorkflowId, String>,
+    /// Those of them the server no longer has: deleted, so ended.
+    deleted: std::collections::HashSet<WorkflowId>,
     /// The `workflow` calls that start a run, by call id, with the name
     /// they ask for (the run's own name replaces it once read).
     workflow_starts: HashMap<String, String>,
@@ -4283,6 +4292,7 @@ impl RunWork {
             described: HashMap::new(),
             in_background: std::collections::HashSet::new(),
             workflows: HashMap::new(),
+            deleted: std::collections::HashSet::new(),
             workflow_starts: HashMap::new(),
             commands: std::collections::HashSet::new(),
             stopping: std::collections::HashSet::new(),
@@ -4349,17 +4359,19 @@ impl RunWork {
         Ok(())
     }
 
-    /// The run's workflows whose result has not reached the chat.
+    /// The run's workflows whose result has not reached the chat, of those
+    /// still there to ask about.
     fn untold_workflows(&self) -> Vec<WorkflowId> {
         self.workflows
             .keys()
-            .filter(|id| !self.told.contains(&id.to_string()))
+            .filter(|id| !self.told.contains(&id.to_string()) && !self.deleted.contains(id))
             .copied()
             .collect()
     }
 
     /// Those of `ids` still going (paused ones too), each named as its run
-    /// is.
+    /// is. A run that is gone (deleted with `/workflow delete`, the tool's
+    /// `delete` or the API) has ended, and is not asked about again.
     async fn workflows_going(
         &mut self,
         client: &haarness_tui::api::ApiClient,
@@ -4367,7 +4379,17 @@ impl RunWork {
     ) -> Result<Vec<WorkflowId>> {
         let mut going = Vec::new();
         for &id in ids {
-            let run = client.workflow_run(id, None).await?;
+            let run = match client.workflow_run(id, None).await {
+                Ok(run) => run,
+                Err(error)
+                    if haarness_tui::api::refusal_status(&error)
+                        == Some(reqwest::StatusCode::NOT_FOUND) =>
+                {
+                    self.deleted.insert(id);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if !run.workflow_name.is_empty() {
                 self.workflows.insert(id, run.workflow_name.clone());
             }
@@ -4643,7 +4665,8 @@ fn delivered(text: &str) -> Option<&str> {
 /// (ten seconds at most) until it has stopped: a result already on its way
 /// when the stop came may start a turn of the run, which is stopped too, as
 /// is a turn that began after the chat was read once a look shows it is the
-/// run's. Answers what was stopped, named for the run's record.
+/// run's. A look that fails ends the wait: what the last one found has been
+/// stopped. Answers what was stopped, named for the run's record.
 async fn end_run_work(
     client: &haarness_tui::api::ApiClient,
     work: &mut RunWork,
@@ -4658,7 +4681,9 @@ async fn end_run_work(
                 return Ok(stopped);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
-            work.look(client).await?;
+            if work.look(client).await.is_err() {
+                return Ok(stopped);
+            }
             continue;
         }
         ensure_run_work_stops(client, work, &going).await?;
@@ -4681,7 +4706,9 @@ async fn end_run_work(
             return Ok(stopped);
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
-        work.look(client).await?;
+        if work.look(client).await.is_err() {
+            return Ok(stopped);
+        }
     }
 }
 
@@ -20687,6 +20714,174 @@ request_timeout = 0
             )
             .await
             .unwrap();
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A scheduled run's server with workflows, beside the runtime (`None`
+    /// where Bun, which runs them, is missing).
+    async fn scheduled_client_with_workflows() -> Option<(
+        haarness_tui::api::ApiClient,
+        haarness_server::ServerHandle,
+        Arc<AgentRuntime>,
+        PathBuf,
+    )> {
+        let executor = haarness_workflows::WorkflowExecutor::new(
+            haarness_workflows::ExecutorConfig::default(),
+        );
+        if !executor.capability().executable {
+            eprintln!("skipping a workflow fixture: Bun is unavailable");
+            return None;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "haarness-cli-schedule-workflows-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = Arc::new(haarness_store::SqliteStore::open(root.join("haarness.db")).unwrap());
+        let provider: Arc<dyn ModelProvider> = Arc::new(ScheduledWorkProvider);
+        let mut config = haarness_core::RuntimeConfig::default();
+        config.execution.shell_stop_grace_ms = 200;
+        let events = haarness_core::EventBus::new(64);
+        let runtime = Arc::new(AgentRuntime::with_config(
+            store.clone(),
+            Arc::new(haarness_core::StaticProviderRegistry::new(vec![provider])),
+            Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+            events.clone(),
+            workspace.clone(),
+            String::new(),
+            config,
+        ));
+        let host = haarness_server::WorkflowRuntimeAdapter::new();
+        host.attach(&runtime);
+        let workflows = Arc::new(super::WorkflowCoordinator::new(
+            store,
+            Arc::new(super::WorkflowCatalog::for_workspace(&workspace)),
+            executor,
+            host,
+            events,
+            workspace.clone(),
+            true,
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = haarness_server::serve(
+            listener,
+            "run-test-token",
+            haarness_server::ServerState {
+                browser: None,
+                management: None,
+                runtime: runtime.clone(),
+                mcp: Arc::new(haarness_mcp::NativeMcpRegistry::default()),
+                skills: Arc::new(haarness_server::FilesystemSkillRegistry::new(Vec::new())),
+                plugins: None,
+                workflows: Some(workflows),
+                workspaces: None,
+                workspace_id: None,
+                workspace: workspace.clone(),
+                project_trusted: true,
+                language: None,
+            },
+        )
+        .await
+        .unwrap();
+        let client = haarness_tui::api::ApiClient::new(
+            &format!("http://{}", server.address),
+            "run-test-token",
+        )
+        .unwrap();
+        Some((client, server, runtime, root))
+    }
+
+    /// Start a workflow in the background from `chat`, as its agent's
+    /// `workflow` call does: one that waits `milliseconds`, then returns
+    /// `result`.
+    async fn background_workflow(
+        client: &haarness_tui::api::ApiClient,
+        chat: ThreadId,
+        name: &str,
+        milliseconds: u64,
+        result: &str,
+    ) -> super::WorkflowId {
+        let source = format!(
+            "import {{ workflow }} from \"@haarness-ai/plugin\"\nexport default workflow({{\n  name: {name:?},\n  async run() {{\n    await new Promise((done) => setTimeout(done, {milliseconds}))\n    return {result:?}\n  }},\n}})\n"
+        );
+        client
+            .start_workflow(haarness_protocol::WorkflowStartRequest {
+                source: Some(source),
+                thread_id: Some(chat),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    /// A workflow of the run that is deleted (with `/workflow delete`, the
+    /// tool's `delete` or the API) has ended: the run neither fails on it
+    /// nor asks about it again, and goes on waiting for the rest.
+    #[tokio::test]
+    async fn a_scheduled_run_takes_a_deleted_workflow_for_one_that_ended() {
+        let Some((client, server, runtime, root)) = scheduled_client_with_workflows().await else {
+            return;
+        };
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "launch: wait 60000").await;
+        assert_eq!(settles(&client, first).await, TurnStatus::Completed);
+        let slow = background_workflow(&client, thread, "slow", 60_000, "never").await;
+        let mut work = super::RunWork::new(thread, first);
+        work.workflows.insert(slow, "slow".into());
+        work.look(&client).await.unwrap();
+        assert_eq!(work.running, [slow]);
+        client.delete_workflow(slow).await.unwrap();
+        work.look(&client).await.unwrap();
+        assert!(work.running.is_empty(), "{:?}", work.running);
+        assert!(work.deleted.contains(&slow));
+        // Whatever else the run has going is still its own to stop.
+        assert_eq!(
+            super::end_run_work(&client, &mut work).await.unwrap(),
+            ["subagent \u{201c}Background check\u{201d}"]
+        );
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// When the chat cannot be read any more, what the last look that
+    /// worked found is stopped all the same, at a limit or after a failure.
+    #[tokio::test]
+    async fn a_scheduled_run_that_cannot_look_again_stops_what_it_last_saw() {
+        let (client, server, runtime, root) = scheduled_client(120_000).await;
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "launch: wait 60000").await;
+        assert_eq!(settles(&client, first).await, TurnStatus::Completed);
+        let mut work = super::RunWork::new(thread, first);
+        work.look(&client).await.unwrap();
+        // A run of the chat this server cannot tell about (it runs no
+        // workflows): every later look fails.
+        work.workflows
+            .insert(super::WorkflowId::new(), "unknown".into());
+        assert!(work.look(&client).await.is_err());
+        let error = super::end_failed_run(&client, &mut work, anyhow::anyhow!("It broke.")).await;
+        assert_eq!(
+            error.to_string(),
+            "It broke. What the run had started was stopped: subagent \u{201c}Background check\u{201d}."
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(client.background_tasks(thread).await.unwrap().is_empty());
+
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "launch: wait 60000").await;
+        assert_eq!(settles(&client, first).await, TurnStatus::Completed);
+        let mut work = super::RunWork::new(thread, first);
+        work.look(&client).await.unwrap();
+        work.workflows
+            .insert(super::WorkflowId::new(), "unknown".into());
+        assert_eq!(
+            super::end_run_work(&client, &mut work).await.unwrap(),
+            ["subagent \u{201c}Background check\u{201d}"]
+        );
         server.shutdown().await.unwrap();
         drop(runtime);
         let _ = std::fs::remove_dir_all(root);

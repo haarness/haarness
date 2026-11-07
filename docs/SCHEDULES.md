@@ -91,6 +91,7 @@ Every native entry runs the hidden command
    it waits:
    - Subagents, workflows and the turns their results start have 30 minutes, counted from the end of
      the first turn, or from the end of the run's last command with a time limit if that came later.
+     A workflow deleted meanwhile (`/workflow delete`, or the agent's own `delete`) has ended.
    - A command with a time limit of its own (the `timeout` the agent gave, or
      `execution.shell_timeout_ms`) is waited for until it ends, however long that limit is, and so
      is the turn its end starts. Short of the 12 hours below, nothing is stopped while one runs.
