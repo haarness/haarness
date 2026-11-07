@@ -816,6 +816,18 @@ The references stay in the file: `haarness mcp enable`/`disable`, `mcp_manage` a
 edits write only the keys they change, in the entry's own shape, and `haarness mcp get
 --show-secrets` shows the entry as written.
 
+A local server's `command` without a folder in it (`npx`, `uvx`) is looked for on the PATH
+Haarness runs with. Desktop opened from Finder or the Dock never ran your shell profile, so
+when the command is not there Haarness also looks where such launchers are usually
+installed: the absolute folders in `HAARNESS_MCP_PATH` first, then `~/.local/bin`,
+`~/.cargo/bin`, `~/.bun/bin`, the Node version managers' folders (Volta's `bin`, the asdf
+and mise shims, fnm's default alias, nvm's `current` link or else the version its `default`
+alias names, the newest installed one when it names none; nvm's folder is `NVM_DIR` when that
+is absolute), pnpm's and Yarn's global folders, `/opt/homebrew/bin` on macOS and
+`/usr/local/bin`. Only folders that exist are used, nothing is run to find them, and the
+server starts with them after its own PATH, so `npx` finds the `node` installed beside it. An
+entry that sets `PATH` in its `env`, or names its command by path, starts as written.
+
 Answering an approval with **Always** (`a`) saves the rule shown on the card, which is a pattern rather than the exact call (approving `rm -rf build` allows every `rm` command), for every chat on that server until it stops. **This folder** (`w`) and **Repository** (`r`) answers are saved in the local database and apply after restarts. See [Permissions and approvals](https://haarness.ai/docs/security/permissions#what-does-always-remember). Global skills live in `~/.config/haarness/skills/<name>/SKILL.md` (where `haarness skill create` writes them); project skills live in `.haarness/skills/<name>/SKILL.md`.
 
 `auto_review` (`[auto_review]` in TOML) sets how Auto's reviewer works: `enabled` (default true), `model` (`provider/model`; default your global `small_model` when it is on the chat's provider, then the chat's model), `environment`, `allow` and `block` (plain-language lines), and `timeout` (seconds, default 60). A project file may only add `block` entries and lower `timeout`; its `small_model` never picks the reviewer. See [Auto's reviewer](AUTO-APPROVALS.md#autos-reviewer).
