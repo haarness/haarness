@@ -4102,6 +4102,10 @@ async fn wait_for_run_work(
     // commands with a time limit that ends (its end may start a turn).
     let mut until = started + to_delta(limit);
     let mut stopped = Vec::new();
+    let mut loose = Vec::new();
+    // Nothing held at the last look: the next one, at once, makes sure (a
+    // result may have moved between two of that look's reads).
+    let mut quiet = false;
     loop {
         work.look(client).await?;
         decline_run_questions_client(client, work).await?;
@@ -4110,8 +4114,20 @@ async fn wait_for_run_work(
             until = until.max(ended + to_delta(limit));
         }
         if left.held.is_empty() && left.timed.is_empty() {
-            break;
+            if !quiet {
+                quiet = true;
+                continue;
+            }
+            // A command with no time limit holds nothing: it ends with the
+            // run, and then the chat is looked at again, since one that
+            // ended by itself just before may have started a turn.
+            if !end_loose_commands(client, work, &mut loose).await? {
+                break;
+            }
+            quiet = false;
+            continue;
         }
+        quiet = false;
         // Nothing stops while a command of the run with a time limit runs.
         if left.timed.is_empty() && chrono::Utc::now() >= until {
             stopped = end_run_work(client, work).await?;
@@ -4125,13 +4141,9 @@ async fn wait_for_run_work(
         };
         tokio::time::sleep(every).await;
     }
-    // A command with no time limit holds nothing: it ends with the run.
-    let loose = if stopped.is_empty() {
-        work.look(client).await?;
-        end_run_work(client, work).await?
-    } else {
-        Vec::new()
-    };
+    if stopped.is_empty() {
+        end_loose_commands(client, work, &mut loose).await?;
+    }
     let last = match work.last_turn() {
         Some(turn) => Some(client.turn(turn).await?),
         None => None,
@@ -4177,6 +4189,10 @@ struct RunWork {
     workflows: HashMap<WorkflowId, String>,
     /// Commands the run's turns ran, from their results.
     commands: std::collections::HashSet<String>,
+    /// The run's commands with no time limit it has asked to stop.
+    stopping: std::collections::HashSet<String>,
+    /// Whether the server can stop the run's work, once asked.
+    can_stop: Option<bool>,
     /// Background results that reached the chat.
     told: std::collections::HashSet<String>,
     /// The run's commands seen running with a time limit of their own.
@@ -4221,6 +4237,8 @@ impl RunWork {
             in_background: std::collections::HashSet::new(),
             workflows: HashMap::new(),
             commands: std::collections::HashSet::new(),
+            stopping: std::collections::HashSet::new(),
+            can_stop: None,
             told: std::collections::HashSet::new(),
             timed: std::collections::HashSet::new(),
             owed: 0,
@@ -4242,10 +4260,16 @@ impl RunWork {
         self.turns.last().copied()
     }
 
-    /// Read what changed in the chat since the last look.
+    /// Read what changed in the chat since the last look. The work in the
+    /// background is read first, then the chat, then whether a turn runs:
+    /// a result leaves the background only once the turn it starts is in
+    /// the chat, so no look finds the run's work in neither.
     async fn look(&mut self, client: &haarness_tui::api::ApiClient) -> Result<()> {
-        // Commands first: a notice read below names one of them.
+        // Commands before the chat, too: a notice read below names one.
         self.listed = client.shell_commands(self.thread).await?;
+        self.tasks = client.background_tasks(self.thread).await?;
+        let known = self.untold_workflows();
+        self.running = self.workflows_going(client, &known).await?;
         let items = client.items_after(self.thread, self.read).await?;
         for item in &items {
             self.read_item(item);
@@ -4254,6 +4278,14 @@ impl RunWork {
             .iter()
             .map(|item| item.sequence)
             .fold(self.read, u64::max);
+        // A workflow first seen in these items.
+        let fresh = self
+            .untold_workflows()
+            .into_iter()
+            .filter(|id| !known.contains(id))
+            .collect::<Vec<_>>();
+        let going = self.workflows_going(client, &fresh).await?;
+        self.running.extend(going);
         let activity = client.thread_activity(self.thread).await?;
         self.active = activity.active_turn.map(|turn| turn.id);
         self.owed = activity.background;
@@ -4265,24 +4297,36 @@ impl RunWork {
             .map(|command| command.id.clone())
             .collect::<Vec<_>>();
         self.timed.extend(timed);
-        self.tasks = client.background_tasks(self.thread).await?;
-        let mut running = Vec::new();
-        for (&id, _) in self
-            .workflows
-            .iter()
-            .filter(|(id, _)| !self.told.contains(&id.to_string()))
-        {
+        Ok(())
+    }
+
+    /// The run's workflows whose result has not reached the chat.
+    fn untold_workflows(&self) -> Vec<WorkflowId> {
+        self.workflows
+            .keys()
+            .filter(|id| !self.told.contains(&id.to_string()))
+            .copied()
+            .collect()
+    }
+
+    /// Those of `ids` still going (paused ones too).
+    async fn workflows_going(
+        &self,
+        client: &haarness_tui::api::ApiClient,
+        ids: &[WorkflowId],
+    ) -> Result<Vec<WorkflowId>> {
+        let mut going = Vec::new();
+        for &id in ids {
             let run = client.workflow_run(id, None).await?;
             if matches!(
                 run.status,
                 haarness_protocol::WorkflowRunStatus::Running
                     | haarness_protocol::WorkflowRunStatus::Paused
             ) {
-                running.push(id);
+                going.push(id);
             }
         }
-        self.running = running;
-        Ok(())
+        Ok(going)
     }
 
     fn read_item(&mut self, item: &haarness_protocol::Item) {
@@ -4415,6 +4459,11 @@ impl RunWork {
         if self.owns(self.active) {
             left.held.push("the turn in progress".into());
         }
+        // A turn that began after the chat was read: the next look tells
+        // whether it is the run's.
+        if self.active.is_some_and(|turn| !self.begun.contains(&turn)) {
+            left.held.push("a turn that has just begun".into());
+        }
         for task in self.tasks.iter().filter(|task| {
             task.parent_thread_id == self.thread && self.owns(Some(task.parent_turn_id))
         }) {
@@ -4519,8 +4568,9 @@ fn started_workflow(output: &str) -> Option<(String, WorkflowId)> {
 
 /// Stop what the run still has going, telling the chat nothing, and wait
 /// (ten seconds at most) until it has stopped: a result already on its way
-/// when the stop came may start a turn of the run, which is stopped too.
-/// Answers what was stopped, named for the run's record.
+/// when the stop came may start a turn of the run, which is stopped too, as
+/// is a turn that began after the chat was read once a look shows it is the
+/// run's. Answers what was stopped, named for the run's record.
 async fn end_run_work(
     client: &haarness_tui::api::ApiClient,
     work: &mut RunWork,
@@ -4529,12 +4579,24 @@ async fn end_run_work(
     let until = Instant::now() + Duration::from_secs(10);
     loop {
         let going = work.going();
+        let unread = work.active.is_some_and(|turn| !work.begun.contains(&turn));
         if going.is_empty() {
-            return Ok(stopped);
+            if !unread || Instant::now() >= until {
+                return Ok(stopped);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            work.look(client).await?;
+            continue;
         }
+        ensure_run_work_stops(client, work, &going).await?;
         let request = haarness_protocol::StopTurnWorkRequest {
             turns: work.turns.clone(),
             workflows: work.running.clone(),
+            commands: work
+                .own_commands()
+                .filter(|command| command.state.is_live())
+                .map(|command| command.id.clone())
+                .collect(),
         };
         client.stop_turn_work(work.thread, &request).await?;
         for what in going {
@@ -4548,6 +4610,92 @@ async fn end_run_work(
         tokio::time::sleep(Duration::from_millis(200)).await;
         work.look(client).await?;
     }
+}
+
+/// Stop the run's commands with no time limit that still run, those alone
+/// and telling the chat nothing, adding them to `loose`, and wait (ten
+/// seconds at most) until they have stopped. Answers whether there were any
+/// it had not asked to stop before.
+async fn end_loose_commands(
+    client: &haarness_tui::api::ApiClient,
+    work: &mut RunWork,
+    loose: &mut Vec<String>,
+) -> Result<bool> {
+    let commands = work
+        .own_commands()
+        .filter(|command| {
+            command.state.is_live()
+                && command.background
+                && command.stops_at.is_none()
+                && !work.stopping.contains(&command.id)
+        })
+        .map(|command| {
+            (
+                command.id.clone(),
+                format!("command \u{201c}{}\u{201d}", command_line(&command.command)),
+            )
+        })
+        .collect::<Vec<_>>();
+    if commands.is_empty() {
+        return Ok(false);
+    }
+    let names = commands
+        .iter()
+        .map(|(_, name)| name.clone())
+        .collect::<Vec<_>>();
+    ensure_run_work_stops(client, work, &names).await?;
+    let request = haarness_protocol::StopTurnWorkRequest {
+        turns: Vec::new(),
+        workflows: Vec::new(),
+        commands: commands.iter().map(|(id, _)| id.clone()).collect(),
+    };
+    client.stop_turn_work(work.thread, &request).await?;
+    for (id, name) in commands {
+        work.stopping.insert(id);
+        if !loose.contains(&name) {
+            loose.push(name);
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        work.look(client).await?;
+        if !work
+            .own_commands()
+            .any(|command| command.state.is_live() && work.stopping.contains(&command.id))
+        {
+            break;
+        }
+    }
+    Ok(true)
+}
+
+/// Fail, naming `going`, when the server is too old to stop a run's work:
+/// it is left running.
+async fn ensure_run_work_stops(
+    client: &haarness_tui::api::ApiClient,
+    work: &mut RunWork,
+    going: &[String],
+) -> Result<()> {
+    let can_stop =
+        match work.can_stop {
+            Some(can_stop) => can_stop,
+            None => {
+                let can_stop =
+                    client.info().await?.capabilities.iter().any(|capability| {
+                        capability == haarness_protocol::TURN_WORK_STOP_CAPABILITY
+                    });
+                work.can_stop = Some(can_stop);
+                can_stop
+            }
+        };
+    if !can_stop {
+        anyhow::bail!(
+            "The server is older than this haarness and cannot stop a scheduled run's work, so it was left running: {}.",
+            going.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Decline the questions of the run's own turns and subagents (a scheduled
@@ -19547,6 +19695,15 @@ request_timeout = 0
             None,
             "a workflow the turn waited for delivers nothing"
         );
+
+        // A turn that began after the chat was read holds the run until a
+        // look tells whose it is; a person's, once read, holds nothing.
+        work.active = Some(TurnId::new());
+        assert_eq!(work.left().held, ["a turn that has just begun"]);
+        work.active = Some(person_turn);
+        assert!(work.left().held.is_empty(), "{:?}", work.left());
+        work.active = Some(result_turn);
+        assert_eq!(work.left().held, ["the turn in progress"]);
     }
 
     /// Scripts scheduled runs, from the last thing the chat was told. A
@@ -19555,7 +19712,8 @@ request_timeout = 0
     /// its result is answered `Done: <how it ended>`, or with `then fail` in
     /// the prompt by a failed turn. `command: <line>` (with ` within <ms>`)
     /// runs the line in the background, and its end is answered `Command
-    /// done.`. A person's `person: command <line>` does the same;
+    /// done.` (after `<ms>` when the notice ends `linger <ms>`). A person's
+    /// `person: command <line>` does the same;
     /// `person: linger <ms>` answers after that long. A child told
     /// `wait <ms>` answers after that long, and one told `fail` fails.
     struct ScheduledWorkProvider;
@@ -19635,6 +19793,16 @@ request_timeout = 0
                 });
             }
             if last.starts_with("<command id=") {
+                // A notice ending `linger <ms>` keeps its turn that long.
+                if let Some(milliseconds) = last
+                    .rsplit_once("linger ")
+                    .and_then(|(_, milliseconds)| milliseconds.trim().parse().ok())
+                {
+                    tokio::select! {
+                        () = cancel.cancelled() => return Err(haarness_core::CoreError::Cancelled),
+                        () = tokio::time::sleep(Duration::from_millis(milliseconds)) => {}
+                    }
+                }
                 return reply("Command done.");
             }
             if let Some(child) = last
@@ -20002,6 +20170,191 @@ request_timeout = 0
         tokio::time::sleep(Duration::from_millis(500)).await;
         let activity = client.thread_activity(thread).await.unwrap();
         assert_eq!(activity.last_turn.map(|last| last.id), Some(turn));
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The end of a run stops its commands with no time limit, and nothing
+    /// else: a turn of the run that runs at that moment (one a result just
+    /// started) goes on, and is waited for.
+    #[tokio::test]
+    async fn a_scheduled_runs_end_stops_only_its_commands_with_no_time_limit() {
+        let (client, server, runtime, root) = scheduled_client(0).await;
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "command: sleep 30").await;
+        assert_eq!(settles(&client, first).await, TurnStatus::Completed);
+        let late = start(&client, thread, "person: linger 3000").await;
+        let mut work = super::RunWork::new(thread, first);
+        work.turns.push(late);
+        work.look(&client).await.unwrap();
+        let mut loose = Vec::new();
+        assert!(
+            super::end_loose_commands(&client, &mut work, &mut loose)
+                .await
+                .unwrap()
+        );
+        assert_eq!(loose, ["command \u{201c}sleep 30\u{201d}"]);
+        assert_eq!(client.turn(late).await.unwrap().status, TurnStatus::Running);
+        let command = client.shell_commands(thread).await.unwrap()[0].clone();
+        assert!(!command.state.is_live(), "{command:?}");
+        assert_eq!(
+            command.ended_by,
+            Some(haarness_protocol::ShellCommandEndedBy::TurnEnded)
+        );
+        // Asked once, it is not asked again.
+        assert!(
+            !super::end_loose_commands(&client, &mut work, &mut loose)
+                .await
+                .unwrap()
+        );
+        assert_eq!(settles(&client, late).await, TurnStatus::Completed);
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A turn that begins just as the run's work is stopped, after the chat
+    /// was read, is looked at before the run ends: one the result of the
+    /// run's own work started is stopped with the rest.
+    #[tokio::test]
+    async fn a_result_turn_that_begins_as_a_run_ends_is_stopped_with_it() {
+        let (client, server, runtime, root) = scheduled_client(0).await;
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "hello").await;
+        assert_eq!(settles(&client, first).await, TurnStatus::Completed);
+        let mut work = super::RunWork::new(thread, first);
+        work.look(&client).await.unwrap();
+        // A command of the run whose end the chat is told of.
+        work.commands.insert("cmd-run".into());
+        let result = client
+            .start_turn(
+                thread,
+                StartTurnRequest {
+                    request_id: RequestId::new(),
+                    text: "<command id=\"cmd-run\" state=\"exited\">linger 30000".into(),
+                    synthetic: true,
+                    auto_approve: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+        // As a look whose read of the chat came just before the turn began.
+        work.active = Some(result);
+        let stopped = super::end_run_work(&client, &mut work).await.unwrap();
+        assert_eq!(stopped, ["the turn in progress"]);
+        assert_eq!(work.last_turn(), Some(result));
+        assert_eq!(settles(&client, result).await, TurnStatus::Interrupted);
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A server that cannot stop a run's work (one older than this client)
+    /// fails the run, naming what goes on, and leaves it running.
+    #[tokio::test]
+    async fn a_scheduled_run_on_a_server_that_cannot_stop_its_work_leaves_it() {
+        let (client, server, runtime, root) = scheduled_client(120_000).await;
+        assert!(
+            client
+                .info()
+                .await
+                .unwrap()
+                .capabilities
+                .iter()
+                .any(|capability| capability == haarness_protocol::TURN_WORK_STOP_CAPABILITY)
+        );
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "launch: wait 60000").await;
+        assert_eq!(settles(&client, first).await, TurnStatus::Completed);
+        let mut work = super::RunWork::new(thread, first);
+        work.look(&client).await.unwrap();
+        // As an older server's capabilities read.
+        work.can_stop = Some(false);
+        let error = super::end_run_work(&client, &mut work).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "The server is older than this haarness and cannot stop a scheduled run's work, so it was left running: subagent \u{201c}Background check\u{201d}."
+        );
+        assert_eq!(client.background_tasks(thread).await.unwrap().len(), 1);
+        client
+            .stop_turn_work(
+                thread,
+                &haarness_protocol::StopTurnWorkRequest {
+                    turns: vec![first],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The server stops only what the named turns of the chat left, and the
+    /// chat's own named commands: a turn named from another chat, that
+    /// chat's commands, and a person's subagent in the same chat go on.
+    #[tokio::test]
+    async fn stopping_a_runs_work_leaves_every_other_turns_work_alone() {
+        let (client, server, runtime, root) = scheduled_client(0).await;
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "launch: wait 60000").await;
+        settles(&client, first).await;
+        let persons = start(&client, thread, "launch: wait 60000").await;
+        settles(&client, persons).await;
+        let other = scheduled_chat(&client).await;
+        let elsewhere = start(&client, other, "launch: wait 60000").await;
+        settles(&client, elsewhere).await;
+        settles(&client, start(&client, other, "command: sleep 30").await).await;
+        let command = client.shell_commands(other).await.unwrap()[0].id.clone();
+        let stopped = client
+            .stop_turn_work(
+                thread,
+                &haarness_protocol::StopTurnWorkRequest {
+                    turns: vec![first, elsewhere],
+                    workflows: vec![super::WorkflowId::new()],
+                    commands: vec![command.clone()],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stopped
+                .subagents
+                .iter()
+                .map(|task| task.parent_turn_id)
+                .collect::<Vec<_>>(),
+            [first]
+        );
+        assert!(stopped.turns.is_empty() && stopped.commands.is_empty());
+        assert!(stopped.workflows.is_empty());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let left = client.background_tasks(thread).await.unwrap();
+        assert_eq!(
+            left.iter()
+                .map(|task| task.parent_turn_id)
+                .collect::<Vec<_>>(),
+            [persons]
+        );
+        assert_eq!(client.background_tasks(other).await.unwrap().len(), 1);
+        let still = client.shell_commands(other).await.unwrap()[0].clone();
+        assert!(still.state.is_live(), "{still:?}");
+        for (chat, turns) in [(thread, vec![persons]), (other, vec![elsewhere])] {
+            client
+                .stop_turn_work(
+                    chat,
+                    &haarness_protocol::StopTurnWorkRequest {
+                        turns,
+                        commands: vec![command.clone()],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
         server.shutdown().await.unwrap();
         drop(runtime);
         let _ = std::fs::remove_dir_all(root);

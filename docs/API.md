@@ -427,14 +427,16 @@ command that completed. Enums may gain values; an unknown one reads as
   apart). The answer reads `stopping` until the process has exited, then a
   `command.updated` event reports `stopped`. Stopping an ended command answers
   it unchanged.
-- `POST /v1/threads/{id}/work/stop` with `{"turns": [...], "workflows": [...]}`
-  stops what those turns of the chat left running, and tells the chat
-  nothing: any of them still running, the subagents they started (with
-  everything under them), the commands they ran (`endedBy: turn_ended`), and
-  the named workflows launched from the chat, running or paused, cancelled
-  with no result delivered. Every other turn's work goes on. It answers what
-  began to stop (`StopTurnWorkResult`). A scheduled run ends its own work this
-  way, leaving a person's turns in its chat alone.
+- `POST /v1/threads/{id}/work/stop` with `{"turns": [...], "workflows": [...],
+  "commands": [...]}` stops what those turns of the chat left running, and
+  tells the chat nothing: any of them still running, the subagents they
+  started (with everything under them), the commands they ran (`endedBy:
+  turn_ended`), the named workflows launched from the chat, running or
+  paused, cancelled with no result delivered, and the named commands of the
+  chat itself, whichever turn ran them. Every other turn's work goes on. It
+  answers what began to stop (`StopTurnWorkResult`). A scheduled run ends its
+  own work this way, leaving a person's turns in its chat alone; servers that
+  have the route list `turn-work-stop.v1`.
 - `POST /v1/threads/{id}/commands/background` sends every running foreground
   command of the chat tree to the background, the one named with
   `?commandId=` alone; it answers the commands moved. A named command that
@@ -847,6 +849,7 @@ treats a missing one as an older server.
 | `remote-chat-scope.v1` | The server confines a published chat's requests to its chat tree; the Cloud connector does not serve through a server without it |
 | `session-archive.v1` | Portable session archives |
 | `thread-create-id.v1` | A client-chosen `id` on `POST /v1/threads` |
+| `turn-work-stop.v1` | `POST /v1/threads/{id}/work/stop`; a scheduled run on a server without it fails when it has work to stop, and leaves that work running |
 | `workspace-history.v1` | Git review and undo/redo; the CLI and TUI use a running folder server only when it has this and `pty.v1` |
 | `browser.v1`, `browser-drafts.v1` | The browser host routes (servers with a browser broker) |
 | `browser-extension.v1` | Haarness for Chrome: the extension host route and its settings |

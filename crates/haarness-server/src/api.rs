@@ -847,6 +847,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             PTY_CAPABILITY.into(),
             SESSION_ARCHIVE_CAPABILITY.into(),
             haarness_protocol::BACKGROUND_COMMANDS_CAPABILITY.into(),
+            haarness_protocol::TURN_WORK_STOP_CAPABILITY.into(),
         ]
         .into_iter()
         .chain(
@@ -3022,7 +3023,8 @@ async fn interrupt_thread_tree(
 }
 /// Stop what some turns of a chat left running, telling the chat nothing:
 /// those turns if one still runs, their subagents and commands, and the
-/// named workflows launched from the chat. Other turns' work goes on.
+/// named workflows launched from the chat and commands of it. Other turns'
+/// work goes on.
 async fn stop_turn_work(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
@@ -3038,7 +3040,8 @@ async fn stop_turn_work(
         }
     }
     let turns = request.turns.into_iter().collect();
-    let mut stopped = state.runtime.stop_turn_work(id, &turns).await?;
+    let commands = request.commands.into_iter().collect();
+    let mut stopped = state.runtime.stop_turn_work(id, &turns, &commands).await?;
     stopped.workflows = workflows;
     Ok(Json(stopped))
 }

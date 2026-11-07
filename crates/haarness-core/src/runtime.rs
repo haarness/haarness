@@ -4657,13 +4657,15 @@ impl AgentRuntime {
 
     /// Stop, telling the chat nothing, what the turns `turns` of `root` left
     /// running: those of them still running, the subagents they started
-    /// (with everything under those) and the commands they ran. Every other
-    /// turn's work goes on, so a person's turn in the chat, and what it
-    /// started, are left alone. A scheduled run ends its own work this way.
+    /// (with everything under those) and the commands they ran, and the
+    /// commands of `root` itself named in `commands`. Every other turn's
+    /// work goes on, so a person's turn in the chat, and what it started,
+    /// are left alone. A scheduled run ends its own work this way.
     pub async fn stop_turn_work(
         &self,
         root: ThreadId,
         turns: &HashSet<TurnId>,
+        commands: &HashSet<String>,
     ) -> CoreResult<haarness_protocol::StopTurnWorkResult> {
         self.repository.get_thread(root).await?;
         let threads = self.repository.list_threads(true).await?;
@@ -4718,8 +4720,11 @@ impl AgentRuntime {
                 return Err(error);
             }
         }
-        stopped.commands =
-            self.stop_turn_commands(|thread, turn| theirs(thread, turn) || under.contains(thread));
+        stopped.commands = self.stop_turn_commands(|id, thread, turn| {
+            theirs(thread, turn)
+                || under.contains(thread)
+                || (*thread == root && commands.contains(id))
+        });
         Ok(stopped)
     }
 

@@ -62,6 +62,9 @@ pub const THREAD_CREATE_ID_CAPABILITY: &str = "thread-create-id.v1";
 /// [`Thread::directory`] and [`PtyCreateRequest::directory`]. Older servers
 /// ignore an unknown `directory` and create a chat in the project folder.
 pub const THREAD_DIRECTORY_CAPABILITY: &str = "thread-directory.v1";
+/// Server capability for `POST /v1/threads/{id}/work/stop`
+/// ([`StopTurnWorkRequest`]), which a scheduled run needs to end its own work.
+pub const TURN_WORK_STOP_CAPABILITY: &str = "turn-work-stop.v1";
 /// The most media (images, PDFs, audio, video) one message sends a provider
 /// inline, all its attachments together. Providers refuse a request past it,
 /// and a chat sends its stored attachments with every later request, so the
@@ -1428,10 +1431,14 @@ pub struct StopTurnWorkRequest {
     /// The turns whose work stops: any of them still running, the subagents
     /// they started (and everything under those) and the commands they ran.
     pub turns: Vec<TurnId>,
-    /// Workflow runs launched from the chat that stop too, with no result
-    /// delivered to it.
+    /// Workflow runs launched from the chat that stop too, running or
+    /// paused, with no result delivered to it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workflows: Vec<WorkflowId>,
+    /// Commands of the chat itself (not of a chat under it) that stop too,
+    /// by id, whatever turn ran them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
 }
 
 /// What a `StopTurnWorkRequest` began to stop.

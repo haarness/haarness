@@ -6388,6 +6388,13 @@
       "StopTurnWorkRequest": {
         "description": "`POST /v1/threads/{id}/work/stop`: stop what some turns of a chat left\nrunning, telling the chat nothing, and leave every other turn's work\nalone. A scheduled run ends its own work this way.",
         "properties": {
+          "commands": {
+            "description": "Commands of the chat itself (not of a chat under it) that stop too,\nby id, whatever turn ran them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "turns": {
             "description": "The turns whose work stops: any of them still running, the subagents\nthey started (and everything under those) and the commands they ran.",
             "items": {
@@ -6396,7 +6403,7 @@
             "type": "array"
           },
           "workflows": {
-            "description": "Workflow runs launched from the chat that stop too, with no result\ndelivered to it.",
+            "description": "Workflow runs launched from the chat that stop too, running or\npaused, with no result delivered to it.",
             "items": {
               "$ref": "#/components/schemas/WorkflowId"
             },
