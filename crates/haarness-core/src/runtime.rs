@@ -7618,6 +7618,39 @@ impl AgentRuntime {
                 turn = %active_turn.id,
                 "turn did not stop within the graceful shutdown window"
             );
+            // Its calls still running end here, as startup recovery ends
+            // those of a turn a crash stopped: the turn is marked
+            // interrupted below, which recovery leaves alone.
+            if let Ok(items) = self.repository.list_items(*thread_id, None).await {
+                let turn_items = items
+                    .into_iter()
+                    .filter(|item| item.turn_id == Some(active_turn.id))
+                    .collect::<Vec<_>>();
+                let ended = crate::pair_tool_calls(turn_items.iter().map(|item| &item.data))
+                    .calls
+                    .into_iter()
+                    .filter_map(|call| match &turn_items[call].data {
+                        ItemData::ToolCall { call_id, name, .. } => {
+                            Some(crate::unfinished_call_result(call_id, name))
+                        }
+                        _ => None,
+                    });
+                for data in ended {
+                    if let Ok(item) = self
+                        .repository
+                        .append_item(*thread_id, Some(active_turn.id), data)
+                        .await
+                    {
+                        self.events.publish(
+                            "item.created",
+                            Some(*thread_id),
+                            Some(active_turn.id),
+                            Some(item.id),
+                            json!(item),
+                        );
+                    }
+                }
+            }
             let message = stopped_turn_message(reason);
             if let Ok(item) = self
                 .repository
@@ -14499,7 +14532,11 @@ fn provider_messages_with_origins(
     // turn did in the parent.
     let mut group = None;
     let visible = provider_visible_items(&items);
-    let abandoned = abandoned_calls(&visible);
+    let pairs = crate::pair_tool_calls(visible.iter().map(|item| &item.data));
+    let abandoned = abandoned_calls(&visible, &pairs.calls);
+    // A second result for one call (a stopped turn's own, written after the
+    // one its shutdown gave it) would be a duplicate providers refuse.
+    let stray = pairs.stray.into_iter().collect::<HashSet<_>>();
     // Results owed to abandoned calls of the batch being read, sent once its
     // calls and results end.
     let mut owed = Vec::<(ProviderMessage, crate::image_budget::Origin)>::new();
@@ -14652,7 +14689,7 @@ fn provider_messages_with_origins(
                 is_error,
                 metadata,
                 ..
-            } => valid_calls.get(&call_id).cloned().map(|name| {
+            } if !stray.contains(&index) => valid_calls.get(&call_id).cloned().map(|name| {
                 // A tool's image is a file it saw; one deleted since is named
                 // instead of failing every later request.
                 let (output, attachments) = crate::attachments::for_model(
@@ -14710,10 +14747,10 @@ fn provider_messages_with_origins(
 /// a turn that outlived its shutdown), or an older fork copied them while
 /// they waited. A running turn's calls are left as they are, a steer queued
 /// while they run included.
-fn abandoned_calls(items: &[&Item]) -> HashSet<usize> {
-    crate::unanswered_calls(items.iter().map(|item| &item.data))
-        .calls
-        .into_iter()
+fn abandoned_calls(items: &[&Item], unanswered: &[usize]) -> HashSet<usize> {
+    unanswered
+        .iter()
+        .copied()
         .filter(|&call| {
             items[call + 1..].iter().any(|later| match later.data {
                 // A turn opens with a message that is not a steer.
@@ -18737,6 +18774,39 @@ mod tests {
             in_turn(3, Some(TurnId::new()), person("hi", false)),
         ]);
         assert_eq!(outline(&messages)[2], unfinished);
+    }
+
+    #[test]
+    fn a_second_result_for_one_call_is_not_sent() {
+        let (stopped, next) = (Some(TurnId::new()), Some(TurnId::new()));
+        let messages = provider_messages(vec![
+            in_turn(1, stopped, person("run it", false)),
+            in_turn(2, stopped, sleep_call("a")),
+            // The shutdown's result, then the stopped turn's own.
+            in_turn(
+                3,
+                stopped,
+                ItemData::ToolResult {
+                    call_id: "a".into(),
+                    name: "bash".into(),
+                    output: crate::UNFINISHED_CALL_RESULT.into(),
+                    is_error: true,
+                    metadata: json!({"unfinished": true}),
+                },
+            ),
+            in_turn(4, stopped, slept("a")),
+            in_turn(5, next, person("and now?", false)),
+        ]);
+        let unfinished = format!("result a (error): {}", crate::UNFINISHED_CALL_RESULT);
+        assert_eq!(
+            outline(&messages),
+            [
+                "user: run it",
+                "call a",
+                unfinished.as_str(),
+                "user: and now?"
+            ]
+        );
     }
 
     #[test]

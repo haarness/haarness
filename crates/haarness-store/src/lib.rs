@@ -125,7 +125,7 @@ impl SqliteStore {
                 items.push(data);
             }
         }
-        Ok(haarness_core::unanswered_calls(&items)
+        Ok(haarness_core::pair_tool_calls(&items)
             .calls
             .into_iter()
             .filter_map(|index| match &items[index] {
@@ -1367,7 +1367,7 @@ impl ThreadRepository for SqliteStore {
             // never get one in the fork, and providers refuse a call without
             // its result: it is left out with what was recorded for it.
             let unanswered =
-                haarness_core::unanswered_calls(copied.iter().map(|(_, _, data, _)| data));
+                haarness_core::pair_tool_calls(copied.iter().map(|(_, _, data, _)| data));
             let left_out = unanswered
                 .calls
                 .into_iter()
@@ -1745,13 +1745,7 @@ impl ThreadRepository for SqliteStore {
             // holds a result for each of them and its next turn is taken.
             let mut ended = Self::unanswered_turn_calls(&tx, raw_thread_id, raw_turn_id)?
                 .into_iter()
-                .map(|(call_id, name)| ItemData::ToolResult {
-                    call_id,
-                    name,
-                    output: haarness_core::UNFINISHED_CALL_RESULT.into(),
-                    is_error: true,
-                    metadata: serde_json::Value::Null,
-                })
+                .map(|(call_id, name)| haarness_core::unfinished_call_result(&call_id, &name))
                 .collect::<Vec<_>>();
             ended.push(ItemData::Error {
                 message: RECOVERED_TURN_MESSAGE.into(),
@@ -4146,8 +4140,9 @@ mod tests {
         for ((turn_id, data), expected) in ended.iter().zip(["call-1", "call-2"]) {
             assert_eq!(*turn_id, Some(turn));
             assert!(
-                matches!(data, ItemData::ToolResult { call_id, name, output, is_error: true, .. }
-                    if call_id == expected && name == "bash" && output == haarness_core::UNFINISHED_CALL_RESULT),
+                matches!(data, ItemData::ToolResult { call_id, name, output, is_error: true, metadata }
+                    if call_id == expected && name == "bash" && output == haarness_core::UNFINISHED_CALL_RESULT
+                        && metadata["unfinished"] == true),
                 "{data:?}"
             );
         }
@@ -4156,7 +4151,7 @@ mod tests {
             ItemData::Error { message, .. } if message == RECOVERED_TURN_MESSAGE
         ));
         assert!(
-            haarness_core::unanswered_calls(items.iter().map(|item| &item.data))
+            haarness_core::pair_tool_calls(items.iter().map(|item| &item.data))
                 .calls
                 .is_empty()
         );
