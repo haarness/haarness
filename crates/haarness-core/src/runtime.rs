@@ -1696,10 +1696,11 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             None => "This provider is not connected. Connect it with an API key or by signing in, then try again.".into(),
         };
     }
-    // Haarness refuses a picture for a model that reads none before anything
-    // is sent, in words that already say what to do: they are not the
+    // Haarness refuses a picture, recording, video or file the model can't
+    // take before anything is sent, in words that already say what to do
+    // ("… Send the message without the recording, …"): they are not the
     // provider's error.
-    if lower.contains("doesn't read images. send the message without the picture") {
+    if lower.contains(". send the message without the ") {
         return clean_error_text(raw.trim(), 600);
     }
     // GitHub accepts the sign-in but the account has no Copilot seat, so
@@ -18668,13 +18669,22 @@ mod tests {
 
     #[test]
     fn a_picture_refused_for_a_model_without_vision_reads_as_advice() {
-        let refused = CoreError::Provider(
-            "GLM-5.1 doesn't read images. Send the message without the picture, or switch to a model that reads them.".into(),
-        );
-        assert_eq!(
-            super::describe_failure(&refused, Some("Z.AI"), true),
-            "GLM-5.1 doesn't read images. Send the message without the picture, or switch to a model that reads them."
-        );
+        // Every refusal the provider adapters write (haarness-providers
+        // `media::Unreadable::stand_in` and the Chat Completions audio one).
+        for refusal in [
+            "GLM-5.1 doesn't read images. Send the message without the picture, or switch to a model that reads them.",
+            "Haarness can't send audio to Claude Sonnet 5.5. Send the message without the recording, or switch to a model that takes audio.",
+            "Haarness can't send video to GPT-6.1 Sol. Send the message without the video, or switch to a model that takes video.",
+            "Haarness can't send notes.bin to gpt-oss-120b. Send the message without the file, or switch to another model.",
+            "Haarness can send Voxtral Small audio only as MP3 or WAV. Send the message without the recording, or with it as MP3 or WAV.",
+        ] {
+            let refused = CoreError::Provider(refusal.into());
+            assert_eq!(
+                super::describe_failure(&refused, Some("Z.AI"), true),
+                refusal
+            );
+            assert_eq!(super::describe_error(&refused, Some("Z.AI")), refusal);
+        }
     }
 
     #[test]
