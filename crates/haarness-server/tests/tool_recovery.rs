@@ -100,11 +100,15 @@ impl Fixture {
     }
 
     async fn thread(&self) -> ThreadId {
+        self.thread_of("fixture").await
+    }
+
+    async fn thread_of(&self, model: &str) -> ThreadId {
         self.runtime
             .create_thread(CreateThreadRequest {
                 title: Some("Tool recovery".into()),
                 provider: Some("fixture".into()),
-                model: Some("fixture".into()),
+                model: Some(model.into()),
                 ..Default::default()
             })
             .await
@@ -113,8 +117,17 @@ impl Fixture {
     }
 
     async fn run(&self, rounds: Vec<Vec<ProviderEvent>>) -> Vec<haarness_protocol::Item> {
+        self.run_as("fixture", rounds).await
+    }
+
+    /// A turn of a chat on `model`.
+    async fn run_as(
+        &self,
+        model: &str,
+        rounds: Vec<Vec<ProviderEvent>>,
+    ) -> Vec<haarness_protocol::Item> {
         *self.provider.rounds.lock().unwrap() = rounds.into();
-        let thread = self.thread().await;
+        let thread = self.thread_of(model).await;
         let turn = self
             .runtime
             .start_turn(
@@ -178,6 +191,50 @@ fn error(items: &[haarness_protocol::Item], id: &str) -> String {
             _ => None,
         })
         .unwrap_or_else(|| panic!("missing error result for {id}"))
+}
+
+#[tokio::test]
+async fn the_patch_tool_is_offered_to_models_trained_on_it_and_still_runs_for_others() {
+    let fixture = Fixture::new(RuntimeConfig::default());
+    let offered = |fixture: &Fixture| {
+        let requests = fixture.provider.requests.lock().unwrap();
+        requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>()
+    };
+    fixture.run_as("gpt-5.4", vec![]).await;
+    let gpt = offered(&fixture);
+    fixture.provider.requests.lock().unwrap().clear();
+    // Claude, given the patch tool before, wrote diffs it could not read.
+    // A patch it sends anyway is applied all the same.
+    let patch = "*** Begin Patch\n*** Add File: added.txt\n+x\n*** End Patch\n";
+    let items = fixture
+        .run_as(
+            "claude-sonnet-5-5",
+            vec![vec![call("p1", "apply_patch", json!({ "input": patch }))]],
+        )
+        .await;
+    let claude = offered(&fixture);
+    assert!(gpt.iter().any(|name| name == "apply_patch"), "{gpt:?}");
+    assert!(
+        !claude.iter().any(|name| name == "apply_patch"),
+        "{claude:?}"
+    );
+    for tools in [&gpt, &claude] {
+        for name in ["edit", "multiedit", "write"] {
+            assert!(tools.iter().any(|tool| tool == name), "{name} in {tools:?}");
+        }
+    }
+    assert_eq!(
+        tool_results(&items),
+        vec![("added added.txt".to_owned(), false)]
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("added.txt")).unwrap(),
+        "x\n"
+    );
 }
 
 #[tokio::test]

@@ -70,9 +70,9 @@ const GLOB_DESCRIPTION: &str = "Find paths by glob pattern within a directory. S
 
 const GREP_DESCRIPTION: &str = "Search UTF-8 file contents with a Rust regular expression. path defaults to the workspace. The search respects standard ignore files and returns path:line:text matches. Use this for locating content; use bash with rg only when you need unsupported operations such as match counts or file-type filters. For a known file or a small set of files, use grep/read directly; reserve task for a genuinely open-ended, multi-step investigation that benefits from independent context.";
 
-const WRITE_DESCRIPTION: &str = "Write a complete UTF-8 file, creating missing parent directories and overwriting the target if it exists. Read an existing file first so its current contents and unrelated user changes are understood. Prefer edit or apply_patch for existing files; use write for a genuinely new file or an intentional full replacement. Do not proactively create README or other documentation files unless the user requested documentation or the task requires it.";
+const WRITE_DESCRIPTION: &str = "Write a complete UTF-8 file, creating missing parent directories and overwriting the target if it exists. Read an existing file first so its current contents and unrelated user changes are understood. Prefer edit or multiedit for existing files; use write for a genuinely new file or an intentional full replacement. Do not proactively create README or other documentation files unless the user requested documentation or the task requires it.";
 
-const EDIT_DESCRIPTION: &str = "Replace exactly one occurrence of old with new in a UTF-8 file. Read the file first and preserve its exact whitespace. The call fails when old is absent or appears more than once, so include enough surrounding context to identify one location. Use apply_patch for multiple edits or multi-file changes; use write only for an intentional full-file replacement.";
+const EDIT_DESCRIPTION: &str = "Replace exactly one occurrence of old with new in a UTF-8 file. Read the file first and preserve its exact whitespace. The call fails when old is absent or appears more than once, so include enough surrounding context to identify one location. Use multiedit for several edits to one file; use write only for an intentional full-file replacement.";
 
 const MULTIEDIT_DESCRIPTION: &str = "Apply several exact replacements to one UTF-8 file atomically and in order. Every edit is validated against the result of the preceding edit before anything is written. By default old must occur exactly once; set replaceAll=true to replace every occurrence. The whole call fails without changing the file when any edit is invalid.";
 
@@ -7216,13 +7216,20 @@ export default workflow({
 
         let write = definition("write");
         assert!(write.description.contains("Read an existing file first"));
-        assert!(write.description.contains("Prefer edit or apply_patch"));
+        assert!(write.description.contains("Prefer edit or multiedit"));
         assert!(write.description.contains("unrelated user changes"));
 
         let edit = definition("edit");
         assert!(edit.description.contains("exactly one occurrence"));
         assert!(edit.description.contains("enough surrounding context"));
-        assert!(edit.description.contains("Use apply_patch"));
+        assert!(edit.description.contains("Use multiedit"));
+        // Not every model is offered apply_patch, so no other tool sends it there.
+        for tool in ["write", "edit", "bash"] {
+            assert!(
+                !definition(tool).description.contains("apply_patch"),
+                "{tool}"
+            );
+        }
 
         let patch = definition("apply_patch");
         assert!(patch.description.contains("explicit *** Add File"));

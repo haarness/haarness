@@ -10591,6 +10591,10 @@ impl RunnerTask {
                             && !permission_engine.hides_tool(&tool.name)
                             && (goal_for_request.is_some() || !is_goal_tool(&tool.name))
                             && (resources_open || !is_resource_tool(&tool.name))
+                            // The patch tool goes to the models trained on
+                            // its format; every model has edit and write.
+                            && (tool.name != "apply_patch"
+                                || crate::tool_catalog::writes_patches(&model))
                     })
                     .collect::<Vec<_>>();
                 if eligible_tools.iter().any(|tool| tool.name == "preview") {
@@ -11796,7 +11800,10 @@ impl RunnerTask {
             )));
         }
         let advertised = self.advertised_tools.lock();
-        if require_advertised && !advertised.contains(name) {
+        // apply_patch is offered only to the models trained on its format
+        // (`writes_patches`); a call another model makes still runs, as
+        // scripts, clients and workflows that name it do.
+        if require_advertised && !advertised.contains(name) && name != "apply_patch" {
             let catalog = self.last_tool_catalog.lock();
             if advertised.contains(LOAD_TOOL_NAME)
                 && catalog.as_ref().is_some_and(|catalog| {
