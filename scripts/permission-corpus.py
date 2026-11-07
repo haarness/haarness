@@ -176,6 +176,8 @@ CORPUS = [
     'cd src && rm -rf ../build | true', 'cd src && cargo test 2>&1 | tee ../test.log', 'cd src && ls | xargs rm -f',
     'cd src && cat ../package.json | jq .scripts', 'cd src && touch ../notes.txt | true',
     'cd deep/er && cp ../../README.md . | true', 'cd src && diff <(cat ../README.md) main.rs',
+    # Copies of dotfiles
+    'cp -r .* build', 'cp .* build 2>/dev/null',
 ]
 
 

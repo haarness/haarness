@@ -1856,9 +1856,9 @@ impl Reader<'_> {
         }
         // `/bin/sh` on macOS (bash 3.2) and dash expand `.*` to `..` too, so
         // `chmod -R a-w .*` changes the folder above. `rm`, `rmdir` and `mv`
-        // refuse `..`.
+        // refuse `..`, and `cp` copies nothing of it (`dest/..` is there).
         if complete
-            && matches!(name, "chmod" | "chown" | "chgrp" | "cp")
+            && matches!(name, "chmod" | "chown" | "chgrp")
             && let Some(up) = dot_patterns_up(raw, value)
         {
             // A quoted `~` stays a name.
@@ -6560,7 +6560,6 @@ mod regression {
             "chmod -R a-w .*",
             "chown -R sam .*",
             "chgrp -R staff .*",
-            "cp -R .* build/",
             "chmod -R a-w ./.*",
             "chmod a-w .?",
             "chmod a-w '.'*",
@@ -6594,6 +6593,9 @@ mod regression {
             "du -sh .*",
             "rm -rf .*",
             "mv .* build/",
+            "cp -R .* build/",
+            "cp -r .* build",
+            "cp .* build 2>/dev/null",
             "cat .*",
         ] {
             assert!(
