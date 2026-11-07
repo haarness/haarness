@@ -184,6 +184,13 @@ CORPUS = [
     # CDPATH set in the line
     'CDPATH=/ cd etc && cat passwd', 'export CDPATH=/ && cd etc && cat passwd', 'CDPATH=/; cd etc; cat passwd',
     'CDPATH=.: cd src && ls', 'CDPATH="$X" cd etc', 'unset CDPATH; cd src && ls', 'CDPATH=/ cd ./src && ls',
+    # A here-document delimiter written against an operator
+    'cat <<EOF; rm -rf ~/x\nbody\nEOF', 'cat > notes.txt <<EOF; ls\nbody\nEOF', 'cat <<EOF;\nbody\nEOF\nrm -rf victim',
+    'cat <<EOF&&rm -rf ../outside/x\nbody\nEOF', 'cat <<EOF|sh\nrm -rf victim\nEOF', 'cat <<EOF>out.txt\nbody\nEOF',
+    'cat <<EOF>../outside/f\nbody\nEOF', 'for f in a; do cat; done <<EOF; rm -rf ~/x\nbody\nEOF',
+    'while read -r l; do echo "$l"; done <<EOF ; rm -rf victim\nbody\nEOF', 'bash <<EOF ; true\nrm -rf victim\nEOF',
+    'cat <<EOF ; echo ../outside/secret\nbody\nEOF', 'cat<<EOF; ls\nbody\nEOF', 'python3 - <<EOF; ls\nprint(1)\nEOF',
+    'git commit -F - <<EOF; git push --force\nmsg\nEOF', 'cat << -EOF; true\nbody\n-EOF\nrm -rf victim',
 ]
 
 

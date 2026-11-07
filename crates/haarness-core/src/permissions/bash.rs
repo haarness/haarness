@@ -39,9 +39,11 @@ pub struct BashAnalysis {
     /// [`Self::patterns`] too; their "always" patterns are not in
     /// [`Self::always`].
     pub derived: Vec<Derived>,
-    /// The line is too large to read as the shell would (its patterns passed
-    /// [`MAX_PATTERN_BYTES`], or it is longer than [`MAX_COMMAND_BYTES`]):
-    /// its written patterns may be clipped, and no rule allows it.
+    /// The line cannot be read as the shell would: its patterns passed
+    /// [`MAX_PATTERN_BYTES`], it is longer than [`MAX_COMMAND_BYTES`], or a
+    /// here-document delimiter in it could not be set apart from the operator
+    /// written against it (see [`separated_delimiters`]). Its written
+    /// patterns may be clipped, and no rule allows it.
     pub unreadable: bool,
     /// What the line deletes or overwrites, wherever it runs the program
     /// (behind a wrapper, in text run again): `rm`, `rmdir`, `unlink`,
@@ -320,9 +322,12 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         cdpaths: Vec::new(),
         work_trees: Vec::new(),
         loops: Vec::new(),
+        unseparated: false,
     };
     if !reader.read(command, Depth::default()) {
-        return fallback(command);
+        let mut fallback = fallback(command);
+        fallback.unreadable = reader.unseparated;
+        return fallback;
     }
     let Reader {
         mut analysis,
@@ -330,11 +335,15 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         overflow,
         nested_cd,
         unplaced,
+        unseparated,
         ..
     } = reader;
     if nested_cd {
         analysis.directories = None;
     }
+    // The parser read a here-document's text, and what follows its operator
+    // on its line, otherwise than the shell does.
+    analysis.unreadable |= unseparated;
     if overflow {
         // Patterns past the limit are clipped and the line's readings stop,
         // but its paths outside the project and its commands as written
@@ -352,6 +361,9 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         for written in &mut fallback.written {
             written.incomplete |= unplaced;
         }
+        // `X=1 <<EOF; rm -rf x`: no command is read before the delimiter
+        // that could not be set apart.
+        fallback.unreadable = unseparated;
         return fallback;
     }
     if unplaced && analysis.written.is_empty() {
@@ -371,9 +383,241 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
     analysis
 }
 
-/// What the parser is given for a shell line: the line itself, except for
-/// the backslash shapes tree-sitter-bash reads otherwise than the shell does,
-/// where one backslash is written as a space. The parser takes a line feed
+/// What the parser is given for a shell line: the line itself, with the
+/// shapes tree-sitter-bash reads otherwise than the shell does rewritten in
+/// place (see [`shell_reading`] and [`separated_delimiters`]), so the text
+/// keeps its length. False with it when a here-document delimiter could not
+/// be set apart from the operator written against it: the line is then not
+/// read whole. With them, the text's tree when finding that took a parse.
+fn parser_input(command: &str) -> (std::borrow::Cow<'_, str>, bool, Option<tree_sitter::Tree>) {
+    match shell_reading(command) {
+        std::borrow::Cow::Borrowed(text) => separated_delimiters(text),
+        std::borrow::Cow::Owned(text) => {
+            let (separated, whole, tree) = separated_delimiters(&text);
+            (std::borrow::Cow::Owned(separated.into_owned()), whole, tree)
+        }
+    }
+}
+
+/// How many times [`separated_delimiters`] parses a line: each parse shows
+/// the delimiters up to the first one the parser misreads inside another.
+const MAX_DELIMITER_PASSES: usize = 16;
+
+/// `text` with each here-document delimiter that is written against an
+/// operator (`cat <<EOF; rm -rf x`, `cat <<EOF>out.txt`, `cat <<EOF|sh`) set
+/// apart from it, whether every one could be, and the tree of the text
+/// returned when it was parsed. The shell ends an unquoted delimiter at a
+/// blank or an operator, the parser only at a blank: it would look for a
+/// line `EOF;` to close the document, and take the rest of the operator's
+/// line and every line after it for the document's text. The delimiter moves
+/// one byte left, into a blank between it and `<<` (unless it starts with
+/// `-`, which would make `<<` a `<<-`), or else with `<<` into the blank
+/// before them (`cat<<EOF ; rm -rf x`), and that blank goes after it. The
+/// text keeps its length and every node's range is a range of the line as
+/// written, but for those of `<<` and the delimiter, one byte early; the
+/// delimiter's text is only read for its quotes, which stay in that range. A
+/// delimiter that has no blank to take, or whose `<<` would join the word
+/// before it (`2 <<EOF;` would read as a redirect of descriptor 2, `a=
+/// <<EOF;` as a value) or take it in (the parser reads `-s<<` and `-<<` as
+/// the operator), cannot move.
+fn separated_delimiters(
+    text: &str,
+) -> (std::borrow::Cow<'_, str>, bool, Option<tree_sitter::Tree>) {
+    if !may_glue_delimiter(text) {
+        return (std::borrow::Cow::Borrowed(text), true, None);
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return (std::borrow::Cow::Borrowed(text), true, None);
+    }
+    let mut bytes = text.as_bytes().to_vec();
+    let mut changed = false;
+    for _ in 0..MAX_DELIMITER_PASSES {
+        // Only whole characters move, and a blank takes an ASCII byte's
+        // place: the text is still UTF-8.
+        let Ok(current) = std::str::from_utf8(&bytes) else {
+            break;
+        };
+        let Some(tree) = parser.parse(current, None) else {
+            break;
+        };
+        let moves = misread_delimiters(&tree, current);
+        if moves.as_ref().is_none_or(Vec::is_empty) {
+            let text = if changed {
+                std::borrow::Cow::Owned(current.to_owned())
+            } else {
+                std::borrow::Cow::Borrowed(text)
+            };
+            return (text, moves.is_some(), Some(tree));
+        }
+        for (from, end) in moves.unwrap_or_default() {
+            bytes.copy_within(from..end, from - 1);
+            bytes[end - 1] = b' ';
+        }
+        changed = true;
+    }
+    // More misread delimiters than passes.
+    (
+        std::borrow::Cow::Owned(String::from_utf8(bytes).unwrap_or_else(|_| text.to_owned())),
+        false,
+        None,
+    )
+}
+
+/// The delimiters a parse of `text` misreads, each as where the bytes that
+/// move start and where the shell ends the delimiter, or `None` when one of
+/// them cannot move (see [`separated_delimiters`]). After a misread one the
+/// parser takes each later `<<EOF;` on the line for that document's end
+/// (`cat <<EOF; cat <<EOF;`): those are delimiters too.
+fn misread_delimiters(tree: &tree_sitter::Tree, text: &str) -> Option<Vec<(usize, usize)>> {
+    let mut moves = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let parts: Vec<_> = node.children(&mut node.walk()).collect();
+        for (index, part) in parts.iter().enumerate() {
+            let operator = index
+                .checked_sub(1)
+                .map(|before| parts[before])
+                .filter(|before| matches!(before.kind(), "<<" | "<<-"));
+            match part.kind() {
+                "heredoc_start" => {}
+                "heredoc_end" if operator.is_some() => {}
+                _ => continue,
+            }
+            let start = part.start_byte();
+            let end = start + delimiter_length(&text[start..]);
+            if end == start || end >= part.end_byte() {
+                continue;
+            }
+            let operator = operator?;
+            let from = delimiter_room(
+                text.as_bytes(),
+                operator.start_byte(),
+                operator.end_byte(),
+                start,
+                end,
+            )?;
+            moves.push((from, end));
+        }
+        stack.extend(parts);
+    }
+    Some(moves)
+}
+
+/// Whether `text` may hold a here-document delimiter written against an
+/// operator: a `<<` (not `<<<`) whose word, to the next blank, is longer
+/// than the shell's delimiter. Quotes and comments are not looked at, so
+/// some lines it names hold none; [`separated_delimiters`] parses those.
+fn may_glue_delimiter(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(found) = text[from..].find("<<") {
+        let operator = from + found;
+        from = operator + 1;
+        if bytes.get(operator + 2) == Some(&b'<')
+            || operator.checked_sub(1).map(|before| bytes[before]) == Some(b'<')
+        {
+            continue;
+        }
+        let mut start = operator + 2;
+        if bytes.get(start) == Some(&b'-') {
+            start += 1;
+        }
+        while matches!(bytes.get(start), Some(b' ' | b'\t')) {
+            start += 1;
+        }
+        let word = bytes[start..]
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .map_or(bytes.len(), |end| start + end);
+        let length = delimiter_length(&text[start..word]);
+        if length > 0 && start + length < word {
+            return true;
+        }
+    }
+    false
+}
+
+/// How long the here-document delimiter that `text` starts with is, as the
+/// shell reads it: to a blank or an operator outside quotes.
+fn delimiter_length(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let (mut quote, mut escaped) = (None, false);
+    for (at, &byte) in bytes.iter().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+        } else if let Some(open) = quote {
+            if byte == open {
+                quote = None;
+            }
+        } else if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+        } else if byte.is_ascii_whitespace() || b";&|<>()".contains(&byte) {
+            return at;
+        }
+    }
+    bytes.len()
+}
+
+/// Where the bytes start that move one byte left to set the delimiter
+/// (from `start` to `end`) of the `<<` at `operator..operator_end` apart
+/// from what follows it: the delimiter alone when a blank stands between
+/// `<<` and it and it does not start with `-`, else `<<` with it when a
+/// blank stands before `<<` and the word before that blank stays a word,
+/// whole, once `<<` touches it. `None` when neither holds, or the shell's
+/// delimiter stops at a `$(` the parser would read otherwise.
+fn delimiter_room(
+    bytes: &[u8],
+    operator: usize,
+    operator_end: usize,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    if bytes.get(end) == Some(&b'(') && bytes.get(end.checked_sub(1)?) == Some(&b'$') {
+        return None;
+    }
+    if start > operator_end && matches!(bytes[start - 1], b' ' | b'\t') && bytes[start] != b'-' {
+        return Some(start);
+    }
+    let blank = operator.checked_sub(1)?;
+    if !matches!(bytes[blank], b' ' | b'\t') {
+        return None;
+    }
+    let before = blank.checked_sub(1)?;
+    // A word that starts with `-` (`-s`, `-`) the parser would read as
+    // part of `<<`.
+    let first = bytes[..before]
+        .iter()
+        .rposition(|byte| byte.is_ascii_whitespace() || b";&|(".contains(byte))
+        .map_or(0, |at| at + 1);
+    if bytes[first] == b'-' {
+        return None;
+    }
+    let joins = match bytes[before] {
+        // A word that ends in digits, not one of digits only: `2<<EOF`
+        // redirects descriptor 2.
+        b'0'..=b'9' => bytes[..before]
+            .iter()
+            .rev()
+            .find(|byte| !byte.is_ascii_digit())
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_'),
+        // A group's `}` alone, not a descriptor's name (`{fd}<<EOF`).
+        b'}' => before
+            .checked_sub(1)
+            .is_some_and(|index| matches!(bytes[index], b' ' | b'\t' | b'\n' | b';')),
+        byte => byte.is_ascii_alphabetic() || byte >= 0x80 || b"_./-+,:@%'\"])".contains(&byte),
+    };
+    joins.then_some(operator)
+}
+
+/// A shell line with the backslash shapes tree-sitter-bash reads otherwise
+/// than the shell does, where one backslash is written as a space (the first
+/// step of [`parser_input`]). The parser takes a line feed
 /// directly followed by a backslash as part of the next word, so the line
 /// after it becomes more words of the command before (`true` then a line
 /// `\rm -rf x` reads as one `true` command, and the first line of a
@@ -724,6 +968,9 @@ struct Reader<'w> {
     /// Where the loops and function definitions of the text being read are:
     /// see [`Self::repeats`].
     loops: Vec<std::ops::Range<usize>>,
+    /// A here-document delimiter in the text read could not be set apart
+    /// from the operator written against it (see [`separated_delimiters`]).
+    unseparated: bool,
 }
 
 /// The written command whose standard input a program reads.
@@ -818,7 +1065,9 @@ impl Reader<'_> {
         }
         // The tree comes from the shell's reading of the line; every text is
         // read from the line itself, which has the same length.
-        let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
+        let (reading, whole, tree) = parser_input(command);
+        self.unseparated |= !whole;
+        let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
             return false;
         };
         // Each node with its parent: asking the tree for a node's parent
@@ -917,12 +1166,12 @@ impl Reader<'_> {
         // operator, to the end of its line, is read as a command line of its
         // own, as the shell runs it.
         let mut hidden: HashMap<usize, Vec<String>> = HashMap::new();
+        // Each statement of `hidden`, by where the first of its lines
+        // starts, and those a command of theirs read.
+        let mut hidden_at = Vec::new();
+        let mut consumed = HashSet::new();
         for error in &errors {
-            let text = node_text(*error, command);
-            if !["|", "&&", "||", ";", "&"]
-                .iter()
-                .any(|operator| text.trim_start().starts_with(operator))
-            {
+            if !starts_with_operator(*error, command) {
                 continue;
             }
             let rest = command.get(error.end_byte()..).unwrap_or_default();
@@ -934,10 +1183,11 @@ impl Reader<'_> {
             if let Some(statement) = holder
                 && !line.is_empty()
             {
-                hidden
-                    .entry(statement.id())
-                    .or_default()
-                    .push(line.to_owned());
+                let lines = hidden.entry(statement.id()).or_default();
+                if lines.is_empty() {
+                    hidden_at.push((error.start_byte(), statement.id()));
+                }
+                lines.push(line.to_owned());
             }
         }
         // A here-document the parser could not attach (`true && bash <<'A'
@@ -1101,7 +1351,12 @@ impl Reader<'_> {
             self.here = None;
             self.carried = None;
             self.work_trees.clear();
-            if let Some(lines) = parent.and_then(|statement| hidden.get(&statement.id())) {
+            if let Some((statement, lines)) = parent.and_then(|statement| {
+                hidden
+                    .get(&statement.id())
+                    .map(|lines| (statement.id(), lines))
+            }) {
+                consumed.insert(statement);
                 for line in lines {
                     self.nested(line, depth);
                 }
@@ -1134,6 +1389,25 @@ impl Reader<'_> {
             let mut first = vec![None; sources.len() + 1];
             for index in (0..sources.len()).rev() {
                 first[index] = sources[index].1.or(first[index + 1]);
+            }
+            // A statement no command of which is its own (a loop, a group,
+            // a pipeline: `for f in a; do cat; done <<EOF; rm -rf x`) has
+            // none that reads what follows its here-document's operator: it
+            // is read for the command written last before it.
+            for (at, statement) in hidden_at {
+                if consumed.contains(&statement) {
+                    continue;
+                }
+                let before = sources.partition_point(|(start, _)| *start < at);
+                if let Some(source) = last[before].or(first[before]) {
+                    self.source = Some(source);
+                } else if depth.text == 0 || self.source.is_none() {
+                    self.unplaced = true;
+                    continue;
+                }
+                for line in &hidden[&statement] {
+                    self.nested(line, depth);
+                }
             }
             for heredoc in heredocs {
                 let Some(text) = backquoted(heredoc, command) else {
@@ -3897,6 +4171,19 @@ fn command_words<'t>(
     };
     let before = list.len();
     for redirect in children(statement) {
+        // Words after an operator the parser could not place inside the
+        // redirect (`cat <<EOF ; rm -rf x`), to the end of its line, are the
+        // next command's, which is read as a line of its own (see
+        // [`Reader::read`]).
+        let unplaced = children(redirect)
+            .into_iter()
+            .find(|part| part.kind() == "ERROR" && starts_with_operator(*part, source))
+            .map_or(0..0, |error| {
+                let end = source[error.end_byte()..]
+                    .find('\n')
+                    .map_or(source.len(), |at| error.end_byte() + at);
+                error.start_byte()..end
+            });
         let carried: Vec<tree_sitter::Node<'t>> = match redirect.kind() {
             "file_redirect" => {
                 let mut cursor = redirect.walk();
@@ -3913,10 +4200,9 @@ fn command_words<'t>(
             }
             _ => Vec::new(),
         };
-        for child in carried
-            .into_iter()
-            .filter(|child| WORD_KINDS.contains(&child.kind()))
-        {
+        for child in carried.into_iter().filter(|child| {
+            WORD_KINDS.contains(&child.kind()) && !unplaced.contains(&child.start_byte())
+        }) {
             let (value, literal) = unquote(child, source);
             list.push(Word {
                 node: child,
@@ -4231,7 +4517,11 @@ pub fn is_obviously_read_only(command: &str) -> bool {
     if joined_continuations(command, true).is_some() {
         return false;
     }
-    let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
+    let (reading, whole, tree) = parser_input(command);
+    if !whole {
+        return false;
+    }
+    let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
         return false;
     };
     if tree.root_node().has_error() {
@@ -4862,6 +5152,15 @@ fn node_text(node: tree_sitter::Node, source: &str) -> String {
         .to_owned()
 }
 
+/// Whether the parser's error `node` starts with an operator it could not
+/// place (`;`, `&`, `|`, `&&`, `||`): what follows it is another command.
+fn starts_with_operator(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    let text = node_text(node, source);
+    ["|", "&&", "||", ";", "&"]
+        .iter()
+        .any(|operator| text.trim_start().starts_with(operator))
+}
+
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
@@ -5249,12 +5548,13 @@ pub fn script_files(command: &str, cwd: &Path) -> Vec<ScriptFile> {
     if joined_continuations(command, true).is_some() {
         return Vec::new();
     }
-    let Some(tree) = parser.parse(shell_reading(command).as_ref(), None) else {
+    let (reading, whole, tree) = parser_input(command);
+    let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
         return Vec::new();
     };
     // A line the tree cannot read whole may hold an `&` or a `cd` where the
     // tree puts none (`a && cd sub <<EOF &`): no folder can be told.
-    if tree.root_node().has_error() {
+    if !whole || tree.root_node().has_error() {
         return Vec::new();
     }
     let mut line = Line {
@@ -7216,6 +7516,108 @@ mod readings {
                 analyze(command, &workspace).deletions.is_empty(),
                 "{command}"
             );
+        }
+    }
+
+    #[test]
+    fn what_follows_a_here_document_operator_on_its_line_is_read() {
+        let workspace = workspace();
+        let home = analyze("rm -rf ~/x", &workspace).external_dirs;
+        assert!(!home.is_empty());
+        // The shell ends the delimiter at the operator and runs the rest of
+        // the line before the document's text; the parser reads none of it
+        // when the delimiter touches the operator, and not what follows a
+        // loop's, a group's or a pipeline's document.
+        for command in [
+            "cat <<EOF; rm -rf ~/x\nbody\nEOF",
+            "cat > notes.txt <<EOF; rm -rf ~/x\nbody\nEOF",
+            "cat <<-EOF; rm -rf ~/x\n\tbody\n\tEOF",
+            "cat << EOF; rm -rf ~/x\nbody\nEOF",
+            "cat<< EOF; rm -rf ~/x\nbody\nEOF",
+            "true; cat <<EOF;rm -rf ~/x\nbody\nEOF",
+            "cat <<EOF&&rm -rf ~/x\nbody\nEOF",
+            "(cat <<EOF); rm -rf ~/x\nbody\nEOF",
+            "cat <<EOF; cat <<B; rm -rf ~/x\na\nEOF\nb\nB",
+            "cat <<EOF; cat <<EOF; rm -rf ~/x\na\nEOF\nb\nEOF",
+            "for f in a; do cat; done <<EOF; rm -rf ~/x\nbody\nEOF",
+            "for f in a; do cat; done <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "while read l; do echo \"$l\"; done <<EOF; rm -rf ~/x\nbody\nEOF",
+            "for f in a; do cat <<EOF; done && rm -rf ~/x\nbody\nEOF",
+            "true | cat <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "{ cat; } <<EOF; rm -rf ~/x\nbody\nEOF",
+            // And what follows the document, and a document a shell runs.
+            "cat <<EOF;\nbody\nEOF\nrm -rf ~/x",
+            "(cat <<EOF)\nbody\nEOF\nrm -rf ~/x",
+            "cat <<EOF; ls\nbody\nEOF\ncat <<B; rm -rf ~/x\nb\nB",
+            "cat <<EOF|sh\nrm -rf ~/x\nEOF",
+            "bash <<EOF; true\nrm -rf ~/x\nEOF",
+            "bash <<EOF ; true\nrm -rf ~/x\nEOF",
+            "python3 <<EOF; rm -rf ~/x\nprint(1)\nEOF",
+            // A delimiter that starts with `-` ends at its own line.
+            "cat << -EOF; true\nbody\n-EOF\nrm -rf ~/x",
+        ] {
+            let analysis = analyze(command, &workspace);
+            assert!(
+                analysis
+                    .patterns
+                    .iter()
+                    .any(|pattern| pattern == "rm -rf ~/x"),
+                "{command}: {:?}",
+                analysis.patterns
+            );
+            assert!(
+                home.iter().all(|dir| analysis.external_dirs.contains(dir)),
+                "{command}: {:?}",
+                analysis.external_dirs
+            );
+            assert!(!analysis.unreadable, "{command}");
+            assert!(
+                outside_deletions(command, &workspace, None)
+                    .iter()
+                    .any(|deletion| deletion.path.ends_with("/x")),
+                "{command}"
+            );
+        }
+        // However many share a line, they are set apart in one pass.
+        let chain = format!(
+            "{}rm -rf ~/x\nbody\nEOF",
+            "cat <<EOF; ".repeat(4 * MAX_DELIMITER_PASSES)
+        );
+        let analysis = analyze(&chain, &workspace);
+        assert!(!analysis.unreadable);
+        assert!(analysis.patterns.contains(&"rm -rf ~/x".to_owned()));
+        // A redirect written against the delimiter writes where it says.
+        let written = analyze("cat <<EOF>../outside/f\nbody\nEOF", &workspace);
+        assert!(!written.external_dirs.is_empty(), "{written:?}");
+        // A delimiter with no blank to take, or whose `<<` would join the
+        // word before it or take it in, is not read whole.
+        for command in [
+            "cat<<EOF; rm -rf ~/x\nbody\nEOF",
+            "cat 2 <<EOF; rm -rf ~/x\nbody\nEOF",
+            "cat {fd} <<EOF; rm -rf ~/x\nbody\nEOF",
+            "git commit -F - <<EOF; git push --force\nmsg\nEOF",
+            "python3 - <<EOF; rm -rf ~/x\nprint(1)\nEOF",
+            "mysql -uroot <<EOF; rm -rf ~/x\nselect 1;\nEOF",
+            "git clean -fdx <<EOF; true\nbody\nEOF",
+            "X=1 <<EOF; rm -rf ~/x\nbody\nEOF",
+        ] {
+            assert!(analyze(command, &workspace).unreadable, "{command}");
+            assert!(!is_obviously_read_only(command), "{command}");
+        }
+        // Lines whose delimiters the parser reads as the shell does are
+        // given to it as written.
+        for command in [
+            "cat <<'EOF' > notes.txt; ls\nbody\nEOF",
+            "cat <<\"EOF\"; ls\nbody\nEOF",
+            "cat <<EOF ; ls\nbody\nEOF",
+            "cat <<EOF > out.txt\nbody\nEOF",
+            "git commit -F - <<'EOF'\nfix: thing\nEOF",
+            "cat <<< \"a;b\"",
+            "echo $((1<<2)); ls",
+            "echo '<<EOF;'",
+        ] {
+            let (reading, whole, _) = parser_input(command);
+            assert_eq!((reading, whole), (command.into(), true), "{command}");
         }
     }
 

@@ -45,11 +45,14 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    project, and an `rm` a trap runs there, ask though the reviewer allows them; a clean of the project runs.
 16. cdpath: a `cd` under a `CDPATH` the line sets asks for the folder it may enter (`CDPATH=/ cd etc && cat
    hosts` asks for `/etc` before the line runs), while `CDPATH=.: cd sub && cat inside.txt` runs.
+17. heredoc_line: what follows a here-document's delimiter on its line, written against it or not, meets the
+   rules (`cat <<EOF; rm -rf victim` against an `rm *` deny), plain lines of that shape run, and one whose
+   delimiter cannot be set apart (`cat<<EOF; touch x`) asks.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
 toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always,
-workdir_home, wrappers, trap, owners_and_dots, cd_pipeline, auto_deletions, cdpath). No model is
+workdir_home, wrappers, trap, owners_and_dots, cd_pipeline, auto_deletions, cdpath, heredoc_line). No model is
 called; nothing outside the fixture is touched.
 """
 import grp
@@ -612,12 +615,44 @@ def case_cdpath():
     passed('a cd under a CDPATH the line sets asks for the folder it may enter; one that stays in the project runs')
 
 
+
+def case_heredoc_line():
+    """What follows a here-document's delimiter on its line is a command of its own."""
+    _, env = environment('heredoc-line')
+    denied = project('heredoc-line', {'permission': {'bash': {'rm *': 'deny'}}})
+    for command in ['cat <<EOF; rm -rf victim\nbody\nEOF', 'cat > notes.txt <<EOF&&rm -rf victim\nbody\nEOF',
+                    'for f in a; do cat; done <<EOF; rm -rf victim\nbody\nEOF',
+                    'bash <<EOF ; true\nrm -rf victim\nEOF']:
+        (denied / 'victim').mkdir(exist_ok=True)
+        try:
+            output = bash(env, denied, command)
+        finally:
+            stop(env, denied)
+        assert "is denied by permission rule 'bash:rm *'" in output, (command, output)
+        assert (denied / 'victim').is_dir(), f'{command!r} deleted victim'
+    passed('an rm deny refuses the rm after a here-document delimiter on its line, written against it or not, '
+           "after a loop's document, and in the document a shell runs")
+    folder = project('heredoc-line-review', REVIEW)
+    try:
+        output = bash(env, folder, 'cat <<EOF; echo after-the-operator\nbody line\nEOF', code=0)
+        assert 'body line' in output and 'after-the-operator' in output and 'Stopped' not in output, output
+        bash(env, folder, 'cat <<EOF>out.txt\nwritten\nEOF', code=0)
+        assert (folder / 'out.txt').read_text() == 'written\n'
+        output = bash(env, folder, 'cat<<EOF; touch made.txt\nbody\nEOF', code=1)
+        assert 'Stopped:' in output, output
+        assert not (folder / 'made.txt').exists(), 'a line whose delimiter could not be set apart ran unasked'
+    finally:
+        stop(env, folder)
+    passed('a here-document line with a command after its delimiter runs, a redirect against the delimiter '
+           'writes, and a delimiter with no blank on either side of its operator asks')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
          'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
          'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always,
          'workdir_home': case_workdir_home, 'wrappers': case_wrappers, 'trap': case_trap,
          'owners_and_dots': case_owners_and_dots, 'cd_pipeline': case_cd_pipeline,
-         'auto_deletions': case_auto_deletions, 'cdpath': case_cdpath}
+         'auto_deletions': case_auto_deletions, 'cdpath': case_cdpath, 'heredoc_line': case_heredoc_line}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
