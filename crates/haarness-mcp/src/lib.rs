@@ -45,8 +45,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-/// The fields of a listed tool MCP leaves optional, in the order a tool
-/// that fails to read is tried again without them.
+/// The fields of a listed tool MCP leaves optional, in the order they are
+/// put back on a tool that fails to read (see [`lenient_tool`]).
 const OPTIONAL_TOOL_FIELDS: [&str; 6] = [
     "outputSchema",
     "annotations",
@@ -56,11 +56,14 @@ const OPTIONAL_TOOL_FIELDS: [&str; 6] = [
     "_meta",
 ];
 
-/// A listed tool, read on its own: as it is, or else without the optional
-/// field (and failing that, all of them) that keeps it from being read, so
-/// a tool whose only fault is, say, an `outputSchema` that is not an object
-/// is offered without it. Gives the fields left out, or why the tool cannot
-/// be read at all (no name, no `inputSchema`).
+/// A listed tool, read on its own: as it is, or else with the optional
+/// fields that can be read put back one at a time, so a tool whose only
+/// fault is, say, an `outputSchema` that is not an object is offered
+/// without it, its description and the rest kept. A tool whose `_meta`
+/// cannot be read is left out instead: `_meta` is where a page marks a tool
+/// as one only it calls, and offered without it such a tool would reach the
+/// model. Gives the fields left out, or why the tool cannot be read (no
+/// name, no `inputSchema`, a `_meta` that is not an object).
 fn lenient_tool(item: &Value) -> Result<(rmcp::model::Tool, Vec<&'static str>), serde_json::Error> {
     let error = match serde_json::from_value(item.clone()) {
         Ok(tool) => return Ok((tool, Vec::new())),
@@ -69,26 +72,31 @@ fn lenient_tool(item: &Value) -> Result<(rmcp::model::Tool, Vec<&'static str>), 
     let Some(object) = item.as_object() else {
         return Err(error);
     };
-    let present: Vec<&'static str> = OPTIONAL_TOOL_FIELDS
-        .into_iter()
-        .filter(|field| object.contains_key(*field))
-        .collect();
-    let without = |fields: &[&str]| {
-        let mut trimmed = object.clone();
-        for field in fields {
-            trimmed.remove(*field);
-        }
-        serde_json::from_value::<rmcp::model::Tool>(Value::Object(trimmed)).ok()
+    let readable = |fields: &serde_json::Map<String, Value>| {
+        serde_json::from_value::<rmcp::model::Tool>(Value::Object(fields.clone())).ok()
     };
-    for field in &present {
-        if let Some(tool) = without(&[*field]) {
-            return Ok((tool, vec![*field]));
+    let mut kept = object.clone();
+    kept.retain(|field, _| !OPTIONAL_TOOL_FIELDS.contains(&field.as_str()));
+    let Some(mut tool) = readable(&kept) else {
+        return Err(error);
+    };
+    let mut left_out = Vec::new();
+    for field in OPTIONAL_TOOL_FIELDS {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        let mut with = kept.clone();
+        with.insert(field.to_owned(), value.clone());
+        match readable(&with) {
+            Some(read) => (kept, tool) = (with, read),
+            None if field == "_meta" => return Err(error),
+            None => left_out.push(field),
         }
     }
-    match without(&present) {
-        Some(tool) if !present.is_empty() => Ok((tool, present)),
-        _ => Err(error),
+    if left_out.is_empty() {
+        return Err(error);
     }
+    Ok((tool, left_out))
 }
 
 /// Connection, discovery and header-helper deadline for a server that sets
@@ -5377,10 +5385,16 @@ mod recovery_tests {
                 {"name": "broken", "description": "no input schema"},
                 {"name": "odd", "inputSchema": "not an object"},
                 {"description": "no name"},
-                // Only optional fields are wrong: offered without them.
+                // Only optional fields are wrong: offered without them, and
+                // only them.
                 {"name": "lenient", "inputSchema": {"type": "object"}, "outputSchema": "not an object"},
-                {"name": "loose", "inputSchema": {"type": "object"}, "outputSchema": [],
-                 "annotations": {"readOnlyHint": "yes"}}
+                {"name": "loose", "description": "kept", "inputSchema": {"type": "object"},
+                 "outputSchema": [], "annotations": {"readOnlyHint": "yes"}},
+                // Its page alone calls it: kept from the model with its `_meta`.
+                {"name": "paged", "inputSchema": {"type": "object"}, "outputSchema": [],
+                 "annotations": {"readOnlyHint": "yes"}, "_meta": {"ui": {"visibility": ["app"]}}},
+                // A `_meta` that cannot be read leaves the tool out.
+                {"name": "unmarked", "inputSchema": {"type": "object"}, "_meta": "app only"}
             ])
             .to_string(),
         );
@@ -5389,7 +5403,9 @@ mod recovery_tests {
         assert_eq!(info.status, "connected");
         assert_eq!(
             info.detail.as_deref(),
-            Some("5 tools discovered; left out as not valid MCP tools: \"broken\", \"odd\" +1")
+            Some(
+                "5 tools discovered; left out as not valid MCP tools: \"broken\", \"odd\", \"unmarked\" +1"
+            )
         );
         let mut offered: Vec<_> = registry
             .tool_snapshot()
@@ -5411,6 +5427,17 @@ mod recovery_tests {
             reached(&registry, "mcp__shelf__loose").await["tool"],
             "loose"
         );
+        // Only the bad fields went: its description stayed, and the tool its
+        // page alone calls is kept from the model.
+        let snapshot = registry.tool_snapshot();
+        assert_eq!(
+            snapshot
+                .iter()
+                .find(|tool| tool.name == "mcp__shelf__loose")
+                .map(|tool| tool.description.as_str()),
+            Some("kept")
+        );
+        assert!(!snapshot.iter().any(|tool| tool.name == "mcp__shelf__paged"));
         assert_eq!(
             reached(&registry, "mcp__shelf__third").await["tool"],
             "third"
