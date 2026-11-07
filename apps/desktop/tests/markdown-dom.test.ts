@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "../src/renderer/link-target";
-import { replyAttribute } from "../src/renderer/remote-images";
+import { REPLY_ID, replyAttribute, replyIds } from "../src/renderer/remote-images";
 
 // Markdown sanitizing needs a DOM, which these tests do not have, so this
 // reads the source: replies are sanitized by a DOMPurify of their own, and
@@ -146,4 +146,28 @@ test("a reply keeps no class but the language Markdown writes on a code block's 
   assert.equal(replyAttribute("CLASS", "language-py overlay", "code"), "language-py");
   // Other attributes stay as written.
   assert.equal(replyAttribute("title", "modal-backdrop", "DIV"), "modal-backdrop");
+});
+
+// The app finds parts of its own by id (`slash-command-1` in the message
+// box's command menu), and a reply drawn before them would be found instead.
+test("a reply's ids, and its references to them, are its own", () => {
+  assert.equal(REPLY_ID, "reply-");
+  assert.equal(replyIds("id", "slash-command-1", false), "reply-slash-command-1");
+  assert.equal(replyIds("ID", "shade", true), "reply-shade");
+  assert.equal(replyIds("aria-labelledby", " a  b ", false), "reply-a reply-b");
+  assert.equal(replyIds("for", "name", false), "reply-name");
+  assert.equal(replyIds("headers", "h1 h2", false), "reply-h1 reply-h2");
+  assert.equal(replyIds("fill", "url(#shade)", true), "url(#reply-shade)");
+  assert.equal(replyIds("mask", "url( '#m' ) url(\"#n\")", true), "url( '#reply-m' ) url(\"#reply-n\")");
+  assert.equal(replyIds("href", "#shape", true), "#reply-shape");
+  assert.equal(replyIds("xlink:href", " #shape", true), "#reply-shape");
+  // What names no id of the reply stays as written.
+  for (const [name, value, svg] of [
+    ["href", "#section", false],
+    ["href", "https://example.test/#x", true],
+    ["fill", "teal", true],
+    ["title", "slash-command-1", false],
+    ["id", "", false],
+  ] as const)
+    assert.equal(replyIds(name, value, svg), value, `${name}=${value}`);
 });

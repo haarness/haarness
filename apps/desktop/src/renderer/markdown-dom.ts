@@ -1,7 +1,7 @@
 import DOMPurify from "dompurify";
 import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "./link-target";
 import type { MarkdownPatch } from "./markdown-project";
-import { holdRemoteImages, madeHere, markMade, replyAttribute, type RemoteImageLabels } from "./remote-images";
+import { holdRemoteImages, madeHere, markMade, replyAttribute, replyIds, type RemoteImageLabels } from "./remote-images";
 import { holdProjectImages, type ProjectImageLabels, type ShownImage } from "./project-images";
 import { openMark } from "./ImageViewer";
 import { codeBlockShows, hasCodeCharacters, spelledCharacter, spelledOutParts } from "./display-text";
@@ -47,6 +47,8 @@ purifier.addHook("uponSanitizeAttribute", (node, data) => {
   }
   data.attrValue = kept;
   if (node.nodeName === "IMG" && data.attrName === "src") written.set(node as Element, kept);
+  // Its ids are its own, and so are its references to them.
+  data.attrValue = replyIds(data.attrName, data.attrValue, node.namespaceURI === "http://www.w3.org/2000/svg");
   if (!URL_ATTRIBUTES.has(data.attrName)) {
     const css = CSS_URL_ATTRIBUTES.has(data.attrName) || /url\(/i.test(data.attrValue);
     if (css && cssReferencesOutside(data.attrValue)) data.keepAttr = false;

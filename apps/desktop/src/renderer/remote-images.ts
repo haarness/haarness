@@ -147,6 +147,34 @@ export function replyAttribute(name: string, value: string, element: string): st
   return kept.length ? kept.join(" ") : undefined;
 }
 
+/** What every id a reply's markup writes starts with (`replyIds`). */
+export const REPLY_ID = "reply-";
+/** Attributes that name ids of the same page, one or several. */
+const ID_REFERENCES = new Set([
+  "aria-activedescendant", "aria-controls", "aria-describedby", "aria-details", "aria-errormessage",
+  "aria-flowto", "aria-labelledby", "aria-owns", "for", "headers", "itemref",
+]);
+
+/**
+ * A reply's ids are its own: the app finds parts of its own by id (the
+ * message box's command menu scrolls to `slash-command-1`, and names it to
+ * assistive technology), and a reply drawn before them in the page would be
+ * found instead. So each id a reply writes gets `REPLY_ID` in front, and so
+ * does each reference to one inside the reply (an SVG's `url(#shade)` or
+ * `href="#shape"`, a label's `for`, an `aria-labelledby`), so a drawing
+ * still finds its gradient. `svg` says the attribute is on an SVG element,
+ * where `href="#…"` names one of the reply's elements.
+ */
+export function replyIds(name: string, value: string, svg: boolean): string {
+  const lower = name.toLowerCase();
+  if (lower === "id") return value ? REPLY_ID + value : value;
+  if (ID_REFERENCES.has(lower))
+    return value.split(/\s+/).filter(Boolean).map((id) => REPLY_ID + id).join(" ");
+  if (svg && (lower === "href" || lower === "xlink:href") && value.trim().startsWith("#"))
+    return "#" + REPLY_ID + value.trim().slice(1);
+  return value.replace(/url\((\s*['"]?\s*)#/gi, (_match, before: string) => `url(${before}#${REPLY_ID}`);
+}
+
 /**
  * The addresses one click on `host`'s button loads: each placeholder of that
  * host whose address really is on that host, so the host the button names is

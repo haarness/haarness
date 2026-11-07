@@ -13981,12 +13981,16 @@ test("raw HTML in a reply stays inside it and passes for none of the app's parts
   }
 });
 
-test("a reply's code block reads left to right inside markup that turns it", async () => {
+test("a reply's code block reads left to right inside markup that turns it, and its ids are never the app's", async () => {
   await newCanvasSession();
-  // A direction turned around a code block.
-  await send('<div dir="rtl"><pre><code>./deploy.sh --prod;</code></pre></div>\n\nAfter the block');
+  // A direction turned around a code block, an id the message box's command
+  // menu uses, and a drawing that names its own gradient.
+  await send(
+    '<div dir="rtl"><pre><code>./deploy.sh --prod;</code></pre></div>\n\n<p id="slash-command-1">Not the menu</p>\n\n' +
+      '<svg width="16" height="16"><defs><linearGradient id="shade"><stop offset="0" stop-color="teal"/></linearGradient></defs><rect width="16" height="16" fill="url(#shade)"/></svg>',
+  );
   const reply = page.locator(".transcript article.assistant").last().locator(".markdown");
-  await expect(reply).toContainText("After the block");
+  await expect(reply).toContainText("Not the menu");
   /** Where the code's first and last characters are drawn, left to right. */
   const order = () =>
     reply.locator("pre code").evaluate((code) => {
@@ -14007,6 +14011,20 @@ test("a reply's code block reads left to right inside markup that turns it", asy
     expect(drawn.first, language).toBeLessThan(drawn.last);
   }
   await page.evaluate(() => window.haarness.preferences({ language: "en" } as never));
+  // The drawing still finds its gradient, under an id of the reply's own.
+  const fill = await reply.locator("svg rect").getAttribute("fill");
+  expect(fill).toMatch(/^url\(#.+\)$/);
+  expect(await reply.evaluate((markdown, fill) => markdown.querySelector(fill!.slice(4, -1))?.localName, fill)).toBe("linearGradient");
+  // The message box's command menu finds its own second command, and names
+  // it as the active one, not the reply's paragraph.
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  await composer.fill("/");
+  await expect(page.locator("#slash-commands")).toBeVisible();
+  await composer.press("ArrowDown");
+  const active = await composer.getAttribute("aria-activedescendant");
+  expect(active).toBe("slash-command-1");
+  expect(await page.evaluate((id) => !!document.getElementById(id)?.closest("#slash-commands"), active!)).toBe(true);
+  await composer.fill("");
   expect(errors).toEqual([]);
 });
 
