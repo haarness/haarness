@@ -1237,9 +1237,21 @@ impl Drop for AbortTask {
 #[derive(Debug)]
 struct Claimed {
     file: std::path::PathBuf,
-    lock: std::fs::File,
+    lock: Held,
     identity: Value,
     id: Uuid,
+}
+/// The lock a connector holds on its identity's `.lock` file, given back
+/// explicitly when it drops rather than when the file closes. On Unix a
+/// process another thread is starting at that moment holds a copy of every
+/// open descriptor until it runs its program, and closing the file leaves
+/// the lock to that copy: a connector that stopped would still look running.
+#[derive(Debug)]
+struct Held(std::fs::File);
+impl Drop for Held {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
 }
 /// Take this computer's identity for a connector named `name` (see
 /// [`identity_path`]) on the computer with `hardware` id, lock it, make it
@@ -1264,6 +1276,7 @@ fn claim(
         .write(true)
         .open(file.with_extension("lock"))?;
     fs2::FileExt::try_lock_exclusive(&lock).context("This remote connector is already running")?;
+    let lock = Held(lock);
     let mut id = match std::fs::read_to_string(&file) {
         Ok(value) => serde_json::from_str::<Value>(&value)?["id"]
             .as_str()
@@ -1663,9 +1676,19 @@ fn running(file: &Path) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
-    let lock = std::fs::OpenOptions::new().write(true).open(path)?;
-    match fs2::FileExt::try_lock_exclusive(&lock) {
-        Ok(()) => Ok(false),
+    taken(&std::fs::OpenOptions::new().write(true).open(path)?)
+}
+/// Whether something other than `lock` holds the lock on its file. Finding
+/// out takes the lock when it is free, and it is given back at once (see
+/// [`Held`]): left to a copy of the descriptor in a process starting
+/// meanwhile, it would make the next check, or a connector starting then,
+/// find this one running.
+fn taken(lock: &std::fs::File) -> Result<bool> {
+    match fs2::FileExt::try_lock_exclusive(lock) {
+        Ok(()) => {
+            fs2::FileExt::unlock(lock)?;
+            Ok(false)
+        }
         Err(error) if crate::lock_busy(&error) => Ok(true),
         Err(error) => Err(error.into()),
     }
@@ -2936,8 +2959,7 @@ mod tests {
         assert_eq!(own_identities(&dir, Some("LAPTOP")).unwrap().len(), 3);
         // A connector running here under one set aside is this computer's
         // all the same: status lists it and signing out stops it.
-        let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&shared);
         assert!(own_hosts(&dir, Some("LAPTOP")).unwrap().contains(&ids[3]));
         drop(lock);
         // Before the laptop had a file of its own, the one from before was
@@ -2985,6 +3007,13 @@ mod tests {
         }
         HARDWARE.set(Some(id.unwrap_or_default().to_owned()));
         Reset
+    }
+    /// Hold the lock of the identity in `file` as a connector running with it
+    /// does, until the returned lock drops.
+    fn hold(file: &Path) -> Held {
+        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        Held(lock)
     }
     /// A client of a Cloud nothing answers, for naming identity files.
     fn offline_client(root: &Path) -> haarness_account::Client {
@@ -3056,8 +3085,7 @@ mod tests {
 
         // A connector running under the studio's stamp is the studio's (on a
         // drive both share), so the laptop keeps its own beside it.
-        let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&shared);
         assert_eq!(path(Some("LAPTOP")), laptop);
         // One from before stamps run here under the old name is this
         // computer's whatever name it has, so a second never starts beside it.
@@ -3113,8 +3141,7 @@ mod tests {
         // `remote enable` or `remote run` saying it already runs, and stays
         // this computer's once it stops.
         write(&shared, &earlier);
-        let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&shared);
         assert_eq!(path("LAPTOP"), shared);
         assert_eq!(read(&shared)["machine"], machine_stamp("LAPTOP", &id));
         drop(lock);
@@ -3126,8 +3153,7 @@ mod tests {
         assert_eq!(desktop(), shared);
         assert_eq!(read(&shared)["machine"], machine_stamp("LAPTOP", &id));
         write(&shared, &earlier);
-        let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&shared);
         assert_eq!(desktop(), shared);
         assert_eq!(read(&shared)["machine"], machine_stamp("LAPTOP", &id));
         drop(lock);
@@ -3142,13 +3168,42 @@ mod tests {
                 "apiUrl": client.config.api_url, "accountId": "a1"}),
         );
         write(&shared, &earlier);
-        let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&shared);
         assert_eq!(path("LAPTOP"), shared, "a second connector beside it");
         assert!(read(&shared)["machine"].is_null());
         drop(lock);
         assert_eq!(path("LAPTOP"), own);
         assert!(read(&shared)["machine"].is_null());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_stopped_connector_or_a_check_for_one_leaves_the_lock_free_while_a_copy_of_it_is_open() {
+        let root = std::env::temp_dir().join(format!("haarness-release-{}", Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        let client = offline_client(&root);
+        let start = || claim(&paths, &client, "a1", &root, None, "Laptop", Some("LAPTOP"));
+        // A process another thread is starting holds a copy of every open
+        // descriptor until it runs its program; a duplicate stands in for
+        // that copy here.
+        let connector = start().unwrap();
+        let file = connector.file.clone();
+        let copy = connector.lock.0.try_clone().unwrap();
+        assert!(running(&file).unwrap());
+        drop(connector);
+        assert!(!running(&file).unwrap(), "it looks running once stopped");
+
+        // A check that finds the lock free gives it back, so neither the next
+        // check nor a connector starting meanwhile finds it taken.
+        let check = std::fs::OpenOptions::new()
+            .write(true)
+            .open(file.with_extension("lock"))
+            .unwrap();
+        assert!(!taken(&check).unwrap());
+        assert!(!running(&file).unwrap(), "a check looks like a connector");
+        let next = start().unwrap();
+        assert!(running(&file).unwrap());
+        drop((next, check, copy));
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -3416,8 +3471,7 @@ mod tests {
         let identity = mine(json!({"id":host,"workspace":workspace,"chatId":thread,
             "apiUrl":client.config.api_url,"publicationId":publication,"name":"Desk"}));
         std::fs::write(&file, identity.to_string()).unwrap();
-        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&file);
         let local = status(false).await.unwrap();
         assert_eq!(local.state, ShareState::Connecting);
         let shared = status(true).await.unwrap();
@@ -3463,8 +3517,7 @@ mod tests {
         let stopped_in_cloud = mine(json!({"id":host,"workspace":workspace,"chatId":thread,
             "apiUrl":client.config.api_url,"publicationId":Uuid::now_v7()}));
         std::fs::write(&file, stopped_in_cloud.to_string()).unwrap();
-        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&file);
         let (gone_host, gone_share) = (Uuid::now_v7(), Uuid::now_v7());
         let connector = {
             let (stop, file) = (file.with_extension("stop"), file.clone());
@@ -3493,8 +3546,7 @@ mod tests {
         // published under it) before going: what it registered goes.
         let (moved, republished) = (Uuid::now_v7(), Uuid::now_v7());
         std::fs::write(&file, identity.to_string()).unwrap();
-        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&file);
         let connector = {
             let (stop, file, identity) =
                 (file.with_extension("stop"), file.clone(), identity.clone());
@@ -3573,8 +3625,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(access(false).await.unwrap().state, AccessState::Off);
-        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&file);
         let local = access(false).await.unwrap();
         assert_eq!(
             (local.state, local.computer.as_deref()),
@@ -3642,8 +3693,7 @@ mod tests {
         )
         .unwrap();
         std::fs::remove_file(&stop).unwrap();
-        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&file);
         let connector = {
             let stop = stop.clone();
             std::thread::spawn(move || {
@@ -3685,8 +3735,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&file);
         let away = host_access(&client, &paths, true).await.unwrap();
         assert_eq!((away.state, away.error), (AccessState::Connecting, None));
         assert!(file.exists(), "an unreachable Cloud is not a removal");
@@ -3714,8 +3763,7 @@ mod tests {
                     .to_string(),
             )
             .unwrap();
-            let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
-            fs2::FileExt::lock_exclusive(&lock).unwrap();
+            let lock = hold(&file);
             let stop = file.with_extension("stop");
             let thread = std::thread::spawn(move || {
                 for _ in 0..250 {
@@ -3794,8 +3842,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
-        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let lock = hold(&shared);
         let stop = shared.with_extension("stop");
         let studio = {
             let stop = stop.clone();
