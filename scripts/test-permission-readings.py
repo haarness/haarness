@@ -46,10 +46,10 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 16. cdpath: a `cd` under a `CDPATH` the line sets asks for the folder it may enter (`CDPATH=/ cd etc && cat
    hosts` asks for `/etc` before the line runs, also when `export` is given it quoted), while `CDPATH=.: cd sub &&
    cat inside.txt` runs.
-17. heredoc_line: what follows a here-document's delimiter on its line, written against it or not, meets the
-   rules (`cat <<EOF; rm -rf victim` against an `rm *` deny) as a command of the line, so an allowed `cat *`
-   under `"*": "ask"` does not open `cat <<EOF ; touch x`; plain lines of that shape run, and one whose
-   delimiter cannot be set apart (`cat<<EOF; touch x`) asks.
+17. heredoc_line: what follows a here-document's delimiter on its line, written against it or not, or on
+   the next line after a backslash, meets the rules (`cat <<EOF; rm -rf victim` against an `rm *` deny) as a
+   command of the line, so an allowed `cat *` under `"*": "ask"` does not open `cat <<EOF ; touch x`; plain
+   lines of that shape run, and one whose delimiter cannot be set apart (`cat<<EOF; touch x`) asks.
 18. quoted_lines: a double-quoted script that `bash -c`, `sh -c` or `eval` runs keeps its line breaks, so an
    `rm *` deny refuses the `rm` on its own line of it.
 
@@ -627,7 +627,7 @@ def case_heredoc_line():
     denied = project('heredoc-line', {'permission': {'bash': {'rm *': 'deny'}}})
     for command in ['cat <<EOF; rm -rf victim\nbody\nEOF', 'cat > notes.txt <<EOF&&rm -rf victim\nbody\nEOF',
                     'for f in a; do cat; done <<EOF; rm -rf victim\nbody\nEOF',
-                    'bash <<EOF ; true\nrm -rf victim\nEOF']:
+                    'bash <<EOF ; true\nrm -rf victim\nEOF', 'cat <<EOF;\\\nrm -rf victim\nbody\nEOF']:
         (denied / 'victim').mkdir(exist_ok=True)
         try:
             output = bash(env, denied, command)
@@ -636,7 +636,7 @@ def case_heredoc_line():
         assert "is denied by permission rule 'bash:rm *'" in output, (command, output)
         assert (denied / 'victim').is_dir(), f'{command!r} deleted victim'
     passed('an rm deny refuses the rm after a here-document delimiter on its line, written against it or not, '
-           "after a loop's document, and in the document a shell runs")
+           "on the next line after a backslash, after a loop's document, and in the document a shell runs")
     asked = project('heredoc-line-ask', {**REVIEW, 'permission': {'bash': {'*': 'ask', 'cat *': 'allow'}}})
     try:
         output = bash(env, asked, 'cat <<EOF ; touch made.txt\nbody\nEOF', code=1)

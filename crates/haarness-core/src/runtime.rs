@@ -17032,6 +17032,7 @@ mod shell_reading_tests {
             "cat <<'EOF' 2>&1 | git push --force\nbody\nEOF",
             "ls <<EOF ; git push --force\nbody\nEOF",
             "cargo build <<EOF ; git push --force\nb\nEOF",
+            "cat <<EOF;\\\ngit push --force\nb\nEOF",
         ] {
             assert_eq!(
                 verdicts(&allowlist, command),

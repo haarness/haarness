@@ -502,6 +502,12 @@ fn misread_delimiters(tree: &tree_sitter::Tree, text: &str) -> Option<Vec<(usize
             if end == start || end >= part.end_byte() {
                 continue;
             }
+            // The shell joins the line after a backslash to it before it
+            // reads the delimiter (`<<EOF\⏎; …`): the operator is on another
+            // line of the text.
+            if text[start..end].contains("\\\n") {
+                return None;
+            }
             let operator = operator?;
             let from = delimiter_room(
                 text.as_bytes(),
@@ -519,8 +525,9 @@ fn misread_delimiters(tree: &tree_sitter::Tree, text: &str) -> Option<Vec<(usize
 
 /// Whether `text` may hold a here-document delimiter written against an
 /// operator: a `<<` (not `<<<`) whose word, to the next blank, is longer
-/// than the shell's delimiter. Quotes and comments are not looked at, so
-/// some lines it names hold none; [`separated_delimiters`] parses those.
+/// than the shell's delimiter or ends in a line continuation. Quotes and
+/// comments are not looked at, so some lines it names hold none;
+/// [`separated_delimiters`] parses those.
 fn may_glue_delimiter(text: &str) -> bool {
     let bytes = text.as_bytes();
     let mut from = 0;
@@ -545,6 +552,15 @@ fn may_glue_delimiter(text: &str) -> bool {
             .map_or(bytes.len(), |end| start + end);
         let length = delimiter_length(&text[start..word]);
         if length > 0 && start + length < word {
+            return true;
+        }
+        // A line continuation right after it, which the shell drops.
+        let backslashes = bytes[start..word]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        if backslashes % 2 == 1 && bytes.get(word) == Some(&b'\n') {
             return true;
         }
     }
@@ -1192,7 +1208,7 @@ impl Reader<'_> {
                 continue;
             }
             let rest = command.get(error.end_byte()..).unwrap_or_default();
-            let line = rest.split('\n').next().unwrap_or_default().trim();
+            let line = rest[..line_end(rest)].trim();
             let mut holder = error.parent();
             while let Some(node) = holder.filter(|node| node.kind() != "redirected_statement") {
                 holder = node.parent();
@@ -4258,10 +4274,7 @@ fn command_words<'t>(
             .into_iter()
             .find(|part| part.kind() == "ERROR" && starts_with_operator(*part, source))
             .map_or(0..0, |error| {
-                let end = source[error.end_byte()..]
-                    .find('\n')
-                    .map_or(source.len(), |at| error.end_byte() + at);
-                error.start_byte()..end
+                error.start_byte()..error.end_byte() + line_end(&source[error.end_byte()..])
             });
         let carried: Vec<tree_sitter::Node<'t>> = match redirect.kind() {
             "file_redirect" => {
@@ -5259,6 +5272,27 @@ fn starts_with_operator(node: tree_sitter::Node<'_>, source: &str) -> bool {
     ["|", "&&", "||", ";", "&"]
         .iter()
         .any(|operator| text.trim_start().starts_with(operator))
+}
+
+/// How long the line `text` starts with is, as the shell reads it: to the
+/// first line feed that a backslash before it does not join to the next
+/// line.
+fn line_end(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(found) = text[from..].find('\n') {
+        let at = from + found;
+        let backslashes = bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        if backslashes % 2 == 0 {
+            return at;
+        }
+        from = at + 1;
+    }
+    text.len()
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -7662,6 +7696,10 @@ mod readings {
             "python3 <<EOF; rm -rf ~/x\nprint(1)\nEOF",
             // A delimiter that starts with `-` ends at its own line.
             "cat << -EOF; true\nbody\n-EOF\nrm -rf ~/x",
+            // The operator's line goes on past a backslash at its end.
+            "cat <<EOF;\\\nrm -rf ~/x\nb\nEOF",
+            "cat <<EOF ;\\\n rm -rf ~/x\nb\nEOF",
+            "cat <<EOF \\\n; rm -rf ~/x\nb\nEOF",
         ] {
             let analysis = analyze(command, &workspace);
             assert!(
@@ -7704,8 +7742,9 @@ mod readings {
         let written = analyze("cat <<EOF>../outside/f\nbody\nEOF", &workspace);
         assert!(!written.external_dirs.is_empty(), "{written:?}");
         // A delimiter with no blank to take, or whose `<<` would join the
-        // word before it or take it in, and what follows an operator that no
-        // command of the line opens are not read whole.
+        // word before it or take it in, one the shell joins to the next line
+        // before it reads it, and what follows an operator that no command of
+        // the line opens are not read whole.
         for command in [
             "cat<<EOF; rm -rf ~/x\nbody\nEOF",
             "cat 2 <<EOF; rm -rf ~/x\nbody\nEOF",
@@ -7714,6 +7753,8 @@ mod readings {
             "python3 - <<EOF; rm -rf ~/x\nprint(1)\nEOF",
             "mysql -uroot <<EOF; rm -rf ~/x\nselect 1;\nEOF",
             "git clean -fdx <<EOF; true\nbody\nEOF",
+            "cat <<EOF\\\n; rm -rf ~/x\nb\nEOF",
+            "cat <<EO\\\nF; rm -rf ~/x\nb\nEOF",
             "X=1 <<EOF; rm -rf ~/x\nbody\nEOF",
             "X=1 <<EOF ; rm -rf ~/x\nbody\nEOF",
         ] {
@@ -7752,6 +7793,7 @@ mod readings {
             "cat <<EOF; git push --force\nbody\nEOF",
             "cat <<'EOF' 2>&1 | git push --force\nbody\nEOF",
             "for f in a; do cat; done <<EOF & git push --force\nbody\nEOF",
+            "cat <<EOF;\\\ngit push --force\nb\nEOF",
         ] {
             assert!(
                 own(command).contains(&("git push --force".to_owned(), true)),
