@@ -32,6 +32,7 @@ import { useApp } from "./state";
 import { Button, Icon, ask } from "./ui";
 import { createOrdering } from "./Sortable";
 import { registerCyclePanel } from "./tab-cycle";
+import { terminalKeyboard } from "./terminal-focus";
 
 /** The terminals of `folder` among a server's: in This computer each chat
  * has its own, opened in its folder; a project's have none. */
@@ -90,10 +91,13 @@ export function TerminalPanel() {
    * terminals open there; a new one has no folder until its first message. */
   const folder = () => app.chatFolder();
   const unfoldered = () => !!app.state.connection?.chatHome && !folder();
+  /** Whether the keyboard is in this panel (its terminal, a tab, a button). */
+  const hasKeyboard = () => !!panel?.contains(document.activeElement);
   async function refresh(open = false) {
     const id = ++generation;
     const connection = app.state.connection!.id;
     const shown = folder();
+    const kept = hasKeyboard();
     try {
       if (unfoldered()) {
         setTabs([]);
@@ -108,8 +112,11 @@ export function TerminalPanel() {
       if (id === generation && connection === app.state.connection?.id && shown === folder()) {
         shownOutput.keep(connection + ":", values.map((value) => value.id));
         setTabs(values);
-        if (!values.some((value) => value.id === selected()))
+        if (!values.some((value) => value.id === selected())) {
+          // The terminal shown is gone (closed, or its server replaced).
+          terminalKeyboard.shown(kept);
           setSelected(values[0]?.id ?? "");
+        }
       }
       return values;
     } finally {
@@ -118,6 +125,8 @@ export function TerminalPanel() {
   }
   async function create() {
     if (starting() || creating() || unfoldered()) return;
+    // The person asked for it: it takes the keyboard once it connects.
+    terminalKeyboard.claim();
     const connection = app.state.connection!.id;
     const shown = folder();
     setCreating(true);
@@ -134,10 +143,22 @@ export function TerminalPanel() {
       setCreating(false);
     }
   }
+  /** The person chose another terminal: it takes the keyboard once it connects. */
+  const pick = (id: string) => {
+    if (id === selected()) return;
+    terminalKeyboard.claim();
+    setSelected(id);
+  };
+  let listed: string | undefined;
   createEffect(() => {
     const connection = app.state.connection?.id;
-    folder();
+    const shown = folder();
     if (!connection) return;
+    // Another chat's folder or another project lists its own terminals,
+    // and the keyboard stays where it is.
+    const place = connection + "\n" + (shown ?? "");
+    terminalKeyboard.shown(hasKeyboard(), listed !== undefined && listed !== place);
+    listed = place;
     setTabs([]);
     setSelected("");
     setStarting(true);
@@ -196,7 +217,7 @@ export function TerminalPanel() {
       id: "terminal",
       tabs: () => order.ordered(),
       active: () => selected(),
-      select: setSelected,
+      select: pick,
       keep: () => panel.querySelector<HTMLElement>(".xterm-helper-textarea")?.focus(),
     }),
   );
@@ -215,7 +236,7 @@ export function TerminalPanel() {
       name: tab.title,
       icon: "terminal" as const,
       detail: folder() ?? app.state.connection?.workspace,
-      action: () => setSelected(tab.id),
+      action: () => pick(tab.id),
     })),
     ...(tabs().find((tab) => tab.id === selected())
       ? [
@@ -248,7 +269,7 @@ export function TerminalPanel() {
                 <button
                   data-cycle-tab={id}
                   aria-current={id === selected() ? "true" : undefined}
-                  onClick={() => setSelected(id)}
+                  onClick={() => pick(id)}
                   onDblClick={() =>
                     app.run(async () => {
                       const value = await ask(t("Rename terminal"), [
@@ -521,7 +542,9 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     let restoring = false;
     const lineText = (index: number) =>
       terminal.buffer.active.getLine(index)?.translateToString(true);
-    let focused = false;
+    /** Whether this view has connected before: only its first connect
+     * takes the keyboard, and only when the person brought it up. */
+    let connected = false;
     // What the view says while the connection is down; reconnects go on
     // whatever it says.
     const watch = linkWatch({
@@ -560,8 +583,8 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
         // those, wrapping and clearing in the wrong places here.
         await sizes.now({ cols: terminal.cols, rows: terminal.rows });
         if (disposed) return true;
-        if (!focused) terminal.focus();
-        focused = true;
+        if (!connected && terminalKeyboard.take()) terminal.focus();
+        connected = true;
         live = true;
         watch.connected();
         for (const bytes of waiting.take()) send(bytes);
@@ -569,6 +592,8 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       },
     });
     retryNow = () => {
+      // A view that never connected is still being brought up.
+      if (!connected) terminalKeyboard.claim();
       watch.retry();
       loop.now();
     };

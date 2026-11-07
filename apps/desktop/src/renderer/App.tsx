@@ -121,6 +121,7 @@ import { chatTitle } from "./chat-title";
 import { tabOrderScope } from "./chat-tabs";
 import { revealInStrip } from "./reveal";
 import { chatRowSelector, rovingRows, rowAfter } from "./roving-rows";
+import { terminalKeyboard } from "./terminal-focus";
 const TerminalPanel = lazy(() =>
   import("./Terminal").then((module) => ({ default: module.TerminalPanel })),
 );
@@ -765,6 +766,16 @@ export function App() {
     set("terminal", true);
     setDockExpanded(false);
   }
+  // However the terminal is opened (its button, its key, Search, the menu),
+  // the person brought it up: its shell takes the keyboard once it connects.
+  createEffect(
+    on(
+      () => state.terminal,
+      (open, was) => {
+        if (open && !was) terminalKeyboard.claim();
+      },
+    ),
+  );
   const remote = openServerConnection;
   app.registerSearch("application", () => {
     const connected = !!state.connection && !state.openingProject;

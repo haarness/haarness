@@ -734,3 +734,59 @@ test("a chat of This computer busy at the last quit has it tried at the next lau
   await page.waitForTimeout(3000);
   expect(await calls()).toBe(before);
 });
+
+test("with the terminal open, opening another chat leaves the keyboard in its message box; the terminal takes it when brought up", async () => {
+  await launch();
+  await send("First chat about the shell");
+  await ready();
+  client = homeClient();
+  await expect(rows()).toHaveCount(1);
+  await section().getByRole("button", { name: "New chat in This computer", exact: true }).click();
+  await send("Second chat about the shell");
+  await expect(rows()).toHaveCount(2);
+  const terminal = page.locator(".xterm-helper-textarea");
+  const shown = page.locator(".terminal-view .xterm-rows");
+  const connected = async (count: number) => {
+    await expect.poll(async () => (await client!.listPtys()).length, { timeout: 60000 }).toBe(count);
+    // Its view has drawn what the shell wrote, so it has connected.
+    await expect.poll(async () => ((await shown.textContent()) ?? "").trim().length, { timeout: 30000 }).toBeGreaterThan(0);
+    // Room for a late connect to take the keyboard, as one did.
+    await page.waitForTimeout(800);
+  };
+  // Opened, the terminal takes the keyboard once its shell is connected.
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(terminal).toBeFocused();
+  await connected(1);
+  await expect(terminal).toBeFocused();
+
+  // Another chat, chosen with the pointer: its message box keeps the
+  // keyboard while that chat's own shell starts and connects, and what is
+  // typed next goes there.
+  await rows().filter({ hasText: "First chat" }).click();
+  await expect(composer()).toBeFocused();
+  await connected(2);
+  await expect(composer()).toBeFocused();
+  await page.keyboard.type("typed after switching");
+  await expect(composer()).toHaveValue("typed after switching");
+  await expect(shown).not.toContainText("typed after switching");
+  await composer().fill("");
+
+  // And back, to a chat whose shell is already running.
+  await rows().filter({ hasText: "Second chat" }).click();
+  await expect(composer()).toBeFocused();
+  await expect.poll(async () => ((await shown.textContent()) ?? "").trim().length).toBeGreaterThan(0);
+  await page.waitForTimeout(800);
+  await expect(composer()).toBeFocused();
+
+  // A terminal the person starts takes the keyboard.
+  await page.locator(".terminal-tabs").getByRole("button", { name: "New terminal", exact: true }).click();
+  await connected(3);
+  await expect(terminal).toBeFocused();
+  // So does one shown again: the panel hidden, then opened from its button.
+  await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+  await expect(composer()).toBeVisible();
+  await composer().click();
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(terminal).toBeFocused();
+  for (const pty of await client!.listPtys()) await client!.deletePty(pty.id);
+});
