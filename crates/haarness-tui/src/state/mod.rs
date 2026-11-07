@@ -2832,6 +2832,7 @@ impl App {
         let query = query.trim().to_ascii_lowercase();
         let mut entries: Vec<SlashEntry> = COMMANDS
             .iter()
+            .filter(|entry| crate::commands::listed(entry))
             .filter(|entry| {
                 query.is_empty()
                     || entry.name.starts_with(&query)

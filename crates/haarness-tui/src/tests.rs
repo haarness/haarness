@@ -25299,6 +25299,25 @@ async fn a_pause_reaches_the_paused_conversation_and_mac_resume_ends_it() {
     );
 }
 
+/// `/mac` is listed only where computer use exists: on macOS.
+#[test]
+fn mac_is_listed_on_macos_only() {
+    let mac = COMMANDS.iter().find(|spec| spec.name == "mac").unwrap();
+    assert!(crate::commands::listed_on(mac, "macos"));
+    assert!(!crate::commands::listed_on(mac, "linux"));
+    assert!(!crate::commands::listed_on(mac, "windows"));
+    let help = COMMANDS.iter().find(|spec| spec.name == "help").unwrap();
+    assert!(crate::commands::listed_on(help, "linux"));
+    let thread = fixture_thread();
+    let app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    assert_eq!(
+        app.filtered_slash_entries("mac")
+            .iter()
+            .any(|entry| entry.name == "mac"),
+        cfg!(target_os = "macos")
+    );
+}
+
 /// The server's own request for a drag from TextEdit, set to act without
 /// asking, into Notes (as `a_drag_into_another_app_asks_only_about_the_app_not_yet_allowed`
 /// in haarness-computer pins it): only Notes is asked about, so only Notes

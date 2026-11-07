@@ -440,6 +440,16 @@ pub const COMMANDS: &[CommandSpec] = &[
     command("exit", &["quit", "q"], "Exit Haarness"),
 ];
 
+/// Whether this build lists `spec` among its commands. Computer use exists only on macOS, so elsewhere `/mac` is left
+/// out of the palette and `/help`; typed, it still opens what the server says about it.
+pub(crate) fn listed(spec: &CommandSpec) -> bool {
+    listed_on(spec, std::env::consts::OS)
+}
+
+pub(crate) fn listed_on(spec: &CommandSpec, os: &str) -> bool {
+    spec.name != "mac" || os == "macos"
+}
+
 const fn command(
     name: &'static str,
     aliases: &'static [&'static str],

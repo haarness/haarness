@@ -11,7 +11,7 @@ The feature exists only on macOS, in builds that embed the helper (all macOS rel
 ## Switching it on
 
 - **Desktop:** open **Settings → Computer use**, read the terms, tick **I have read and agree to these terms** and press **Agree and turn on**. Then grant **Accessibility** and **Screen Recording** from the **macOS permissions** rows: the first press brings up macOS's own prompts, later presses open the matching System Settings page.
-- **Terminal UI:** `/mac` opens the same choices as a server-authored view.
+- **Terminal UI:** `/mac` opens the same choices as a server-authored view. It is listed on macOS only.
 - **CLI:** `haarness mac on` prints the terms and waits for `I agree`; `haarness mac permissions` raises the macOS prompts and opens System Settings.
 
 macOS ties both permissions to whichever app launched the server: Haarness Desktop for the servers it starts, or the terminal app when a server was started from a shell. Settings and `haarness mac status` say which one that is. Every process descended from that app inherits the grants, including the shell commands an agent runs.
