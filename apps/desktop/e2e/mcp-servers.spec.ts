@@ -200,16 +200,20 @@ test("a working server that left a tool out says so quietly under its name", asy
   const shelf = block("shelf");
   const note = shelf.locator(".mcp-server-detail.quiet");
   await expect(note).toHaveText('Left out as not valid MCP tools: "broken"');
-  // In the theme's quiet text colour, unlike a failure's reason.
-  const muted = await page.evaluate(() => {
-    const probe = document.createElement("span");
-    probe.style.color = "var(--muted)";
-    document.body.append(probe);
-    const color = getComputedStyle(probe).color;
-    probe.remove();
-    return color;
-  });
+  // In the theme's quiet text colour, where a failure's reason reads in the text colour.
+  const colour = (token: string) =>
+    page.evaluate((token) => {
+      const probe = document.createElement("span");
+      probe.style.color = `var(${token})`;
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    }, token);
+  const [muted, text] = [await colour("--muted"), await colour("--text")];
+  expect(muted).not.toBe(text);
   await expect(note).toHaveCSS("color", muted);
+  await expect(block("badurl").locator(".mcp-server-detail")).toHaveCSS("color", text);
   await pictures(shelf, "mcp-left-out-tools");
   await closeSettings();
 });
