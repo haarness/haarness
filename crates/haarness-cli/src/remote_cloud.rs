@@ -215,7 +215,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             let account = status["selectedAccountId"]
                 .as_str()
                 .context("Sign in to Haarness to continue. Run `haarness login`.")?;
-            let file = identity_path(paths, &client, account, workspace, session, &name)?;
+            let file = identity_path(paths, &client, account, workspace, session)?;
             if running(&file)? {
                 println!("Connector is already running");
                 return Ok(());
@@ -329,61 +329,21 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             } else {
                 "host"
             };
-            let file = identity_path(paths, &client, account, workspace, session, &name)?;
-            std::fs::create_dir_all(paths.config_dir())?;
-            let lock = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(file.with_extension("lock"))?;
-            fs2::FileExt::try_lock_exclusive(&lock)
-                .context("This remote connector is already running")?;
-            let mut id = match std::fs::read_to_string(&file) {
-                Ok(value) => serde_json::from_str::<Value>(&value)?["id"]
-                    .as_str()
-                    .context("Invalid remote identity")?
-                    .parse::<Uuid>()?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Uuid::now_v7(),
-                Err(error) => return Err(error.into()),
-            };
-            // Keep what an earlier run learned (the publication) so status
-            // can show the chat's link while this run reconnects.
-            let mut identity = std::fs::read(&file)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .filter(Value::is_object)
-                .unwrap_or_else(|| json!({}));
-            for (key, value) in [
-                ("id", json!(id)),
-                ("workspace", json!(workspace)),
-                ("chatId", json!(session)),
-                ("accountId", json!(account)),
-                ("name", json!(name)),
-                ("apiUrl", json!(client.config.api_url)),
-                ("pid", json!(std::process::id())),
-                ("version", json!(env!("CARGO_PKG_VERSION"))),
-            ] {
-                identity[key] = value;
-            }
-            if let Settled::Moved { from } = settle_identity(&mut identity, machine_id().as_deref())
-            {
-                id = identity["id"]
-                    .as_str()
-                    .context("Invalid remote identity")?
-                    .parse()?;
-                eprintln!(
-                    "This identity was copied from another computer, which keeps remote host {from}; this computer connects as a new remote host, {id}."
-                );
-            }
-            // Why an earlier run gave up no longer applies once this one starts.
-            if let Some(fields) = identity.as_object_mut() {
-                fields.remove("error");
-            }
-            super::write_private_json(&file, &identity)?;
+            let Claimed {
+                file,
+                lock: _lock,
+                mut identity,
+                id,
+            } = claim(
+                paths,
+                &client,
+                account,
+                workspace,
+                session,
+                &name,
+                machine_id().as_deref(),
+            )?;
             let stop_file = file.with_extension("stop");
-            if stop_file.exists() {
-                std::fs::remove_file(&stop_file)?;
-            }
             client.request(reqwest::Method::POST,"/api/v1/remote-hosts",Some(json!({"id":id,"accountId":account,"name":name,"mode":mode,"metadata":{"platform":std::env::consts::OS,"version":env!("CARGO_PKG_VERSION")}}))).await?;
             // From here a host Cloud no longer lists was removed there, not
             // still on its way.
@@ -1289,6 +1249,86 @@ impl Drop for AbortTask {
         self.0.abort();
     }
 }
+/// The identity a `remote run` connects with, held under its lock while
+/// `lock` lives.
+#[derive(Debug)]
+struct Claimed {
+    file: std::path::PathBuf,
+    lock: std::fs::File,
+    identity: Value,
+    id: Uuid,
+}
+/// Take this computer's identity for a connector named `name` (see
+/// [`identity_path`]) on the computer with `hardware` id, lock it, make it
+/// this computer's ([`settle_identity`]) and write it back for this run. The
+/// file and the stamp follow the same read of the hardware id: a second read
+/// that answered otherwise could stamp, or give a new id to, a file the first
+/// one never chose.
+fn claim(
+    paths: &Paths,
+    client: &haarness_account::Client,
+    account: &str,
+    workspace: &Path,
+    session: Option<Uuid>,
+    name: &str,
+    hardware: Option<&str>,
+) -> Result<Claimed> {
+    let file = identity_path_for(paths, client, account, workspace, session, hardware)?;
+    std::fs::create_dir_all(paths.config_dir())?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(file.with_extension("lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lock).context("This remote connector is already running")?;
+    let mut id = match std::fs::read_to_string(&file) {
+        Ok(value) => serde_json::from_str::<Value>(&value)?["id"]
+            .as_str()
+            .context("Invalid remote identity")?
+            .parse::<Uuid>()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Uuid::now_v7(),
+        Err(error) => return Err(error.into()),
+    };
+    // Keep what an earlier run learned (the publication) so status can show
+    // the chat's link while this run reconnects.
+    let mut identity = read_identity(&file).unwrap_or_else(|| json!({}));
+    for (key, value) in [
+        ("id", json!(id)),
+        ("workspace", json!(workspace)),
+        ("chatId", json!(session)),
+        ("accountId", json!(account)),
+        ("name", json!(name)),
+        ("apiUrl", json!(client.config.api_url)),
+        ("pid", json!(std::process::id())),
+        ("version", json!(env!("CARGO_PKG_VERSION"))),
+    ] {
+        identity[key] = value;
+    }
+    if let Settled::Moved { from } = settle_identity(&mut identity, hardware) {
+        id = identity["id"]
+            .as_str()
+            .context("Invalid remote identity")?
+            .parse()?;
+        eprintln!(
+            "This identity was copied from another computer, which keeps remote host {from}; this computer connects as a new remote host, {id}."
+        );
+    }
+    // Why an earlier run gave up no longer applies once this one starts.
+    if let Some(fields) = identity.as_object_mut() {
+        fields.remove("error");
+    }
+    super::write_private_json(&file, &identity)?;
+    let stop_file = file.with_extension("stop");
+    if stop_file.exists() {
+        std::fs::remove_file(&stop_file)?;
+    }
+    Ok(Claimed {
+        file,
+        lock,
+        identity,
+        id,
+    })
+}
 /// Where a connector identity can live: one file per Cloud, account and
 /// shared chat (with its project), under the name every computer has used
 /// (`hardware` `None`), or under a name that also carries a computer's
@@ -1332,8 +1372,8 @@ fn identity_name(
     }
     format!("remote-{:x}.json", Sha256::digest(key))
 }
-/// Where this computer's connector named `name` keeps its identity: under
-/// the name every computer used before names carried the computer (see
+/// Where this computer's connector keeps its identity: under the name every
+/// computer used before names carried the computer (see
 /// [`identity_file_for`]), stamped there in place, so an earlier release run
 /// here keeps finding it with the same host id. An identity an earlier
 /// release wrote there, without a stamp, is always this computer's, whatever
@@ -1347,7 +1387,6 @@ fn identity_path(
     account: &str,
     workspace: &Path,
     session: Option<Uuid>,
-    name: &str,
 ) -> Result<std::path::PathBuf> {
     identity_path_for(
         paths,
@@ -1356,7 +1395,6 @@ fn identity_path(
         workspace,
         session,
         machine_id().as_deref(),
-        name,
     )
 }
 /// [`identity_path`] on the computer with `hardware` id.
@@ -1367,11 +1405,10 @@ fn identity_path_for(
     workspace: &Path,
     session: Option<Uuid>,
     hardware: Option<&str>,
-    name: &str,
 ) -> Result<std::path::PathBuf> {
     let shared = identity_file_for(paths, client, account, workspace, session, None);
     let Some(hardware) = hardware else {
-        return unchecked_identity_path(paths, client, account, workspace, session, shared, name);
+        return unchecked_identity_path(paths, client, account, workspace, session, shared);
     };
     let identity = read_identity(&shared);
     let foreign = identity
@@ -1392,13 +1429,13 @@ fn identity_path_for(
     Ok(shared)
 }
 /// [`identity_path`] on a computer whose hardware id cannot be read, where
-/// no stamp can be checked: `shared` (the old name) when nothing else is
-/// there and it carries no stamp, as every release used it; else the one
-/// file of a computer's own that carries the name this connector starts
-/// under, when the old name's does not. Anything else may be another
-/// computer's identity, so this start refuses ([`UncheckedIdentity`])
-/// rather than connect as that computer, and changes nothing: the next one
-/// tries again.
+/// no stamp can be checked: `shared` (the old name), and only while it
+/// carries no stamp and no computer keeps a file of its own beside it, as on
+/// a computer whose folder no other computer has used since this release.
+/// Anything else may be another computer's identity, a file named for a
+/// computer's hardware id included, since this computer cannot tell whose
+/// id that is: this start refuses ([`UncheckedIdentity::Start`]) rather
+/// than connect as that computer, and changes nothing.
 fn unchecked_identity_path(
     paths: &Paths,
     client: &haarness_account::Client,
@@ -1406,50 +1443,83 @@ fn unchecked_identity_path(
     workspace: &Path,
     session: Option<Uuid>,
     shared: std::path::PathBuf,
-    name: &str,
 ) -> Result<std::path::PathBuf> {
     let chat = session.map(|id| id.to_string());
-    let others = identities_in(paths.config_dir())?
-        .into_iter()
-        .filter(|(file, identity)| {
+    let alone = !identities_in(paths.config_dir())?
+        .iter()
+        .any(|(file, identity)| {
             *file != shared
                 && identity["apiUrl"].as_str() == Some(client.config.api_url.as_str())
                 && identity["accountId"].as_str() == Some(account)
                 && identity["chatId"].as_str() == chat.as_deref()
                 && (session.is_none() || identity["workspace"].as_str() == workspace.to_str())
-        })
-        .collect::<Vec<_>>();
-    let earlier = read_identity(&shared);
-    if others.is_empty() {
-        if earlier
-            .as_ref()
-            .is_none_or(|identity| identity["machine"].is_null())
-        {
-            return Ok(shared);
-        }
-    } else {
-        let named = |identity: &Value| identity["name"].as_str() == Some(name);
-        let mut found = others.iter().filter(|(_, identity)| named(identity));
-        if let (Some((file, _)), None) = (found.next(), found.next())
-            && !earlier.as_ref().is_some_and(named)
-        {
-            return Ok(file.clone());
+        });
+    let unstamped = read_identity(&shared).is_none_or(|identity| identity["machine"].is_null());
+    if alone && unstamped {
+        return Ok(shared);
+    }
+    Err(UncheckedIdentity::Start.into())
+}
+/// Why a connector does not start, or is left as it is, on a computer whose
+/// hardware id cannot be read (see [`unchecked_identity_path`] and
+/// [`refuse_unchecked`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UncheckedIdentity {
+    /// A start, which might connect as another computer.
+    Start,
+    /// Stopping or forgetting a connector that may be another computer's.
+    Change,
+}
+impl UncheckedIdentity {
+    /// Whether reading the hardware id again may work: macOS may not know it
+    /// for a moment early in a boot, while a Linux system without a lasting
+    /// machine id has none until someone writes one.
+    const PASSES: bool = !cfg!(all(unix, not(target_os = "macos")));
+    /// What this says where reading again may (`passes`) or may not work.
+    fn reason(self, passes: bool) -> String {
+        let outcome = match self {
+            Self::Start => {
+                "remote access did not start rather than risk connecting as another computer"
+            }
+            Self::Change => {
+                "Haarness cannot tell this computer's connectors from another computer's and changed nothing"
+            }
+        };
+        if passes {
+            format!(
+                "This computer's hardware ID could not be read, so {outcome}. Try again in a moment."
+            )
+        } else {
+            format!(
+                "This computer has no lasting machine ID, so {outcome}. Write one to /etc/machine-id (`systemd-machine-id-setup` does), then try again."
+            )
         }
     }
-    Err(UncheckedIdentity.into())
 }
-/// Why a connector does not start on a computer whose hardware id cannot
-/// be read (see [`unchecked_identity_path`]).
-#[derive(Debug)]
-struct UncheckedIdentity;
 impl std::fmt::Display for UncheckedIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            "This computer's hardware ID could not be read, so remote access did not start rather than risk connecting as another computer. Try again in a moment.",
-        )
+        f.write_str(&self.reason(Self::PASSES))
     }
 }
 impl std::error::Error for UncheckedIdentity {}
+/// Refuse a change ([`UncheckedIdentity::Change`]) on a computer whose
+/// hardware id cannot be read when a connector identity that `matches` it
+/// carries a stamp: [`ours`] leaves those out then, as any may be another
+/// computer's, in a folder both keep.
+fn refuse_unchecked(
+    paths: &Paths,
+    hardware: Option<&str>,
+    matches: impl Fn(&Path, &Value) -> bool,
+) -> Result<()> {
+    let stamped = hardware.is_none()
+        && identities_in(paths.config_dir())?
+            .iter()
+            .any(|(file, identity)| identity["machine"].is_string() && matches(file, identity));
+    if stamped {
+        return Err(UncheckedIdentity::Change.into());
+    }
+    Ok(())
+}
 /// The identity in `file`, if it can be read.
 fn read_identity(file: &Path) -> Option<Value> {
     std::fs::read(file)
@@ -1501,6 +1571,10 @@ fn own_name(identity: &Value, hardware: &str) -> String {
 /// (`HAARNESS_TEST_PROVIDER`) `HAARNESS_TEST_MACHINE_ID` stands in for it,
 /// empty for none.
 fn machine_id() -> Option<String> {
+    #[cfg(test)]
+    if let Some(id) = tests::HARDWARE.with_borrow(Clone::clone) {
+        return (!id.is_empty()).then_some(id);
+    }
     if std::env::var_os("HAARNESS_TEST_PROVIDER").is_some()
         && let Some(id) = std::env::var_os("HAARNESS_TEST_MACHINE_ID")
     {
@@ -1523,10 +1597,12 @@ fn machine_stamp(hardware: &str, host: &str) -> String {
 /// Whether the identity in `file` is this computer's (with `hardware` id):
 /// stamped here; or from before stamps and either run by a connector here
 /// or not beside a file this computer keeps of its own, as it does once the
-/// old name's was another computer's (see [`identity_path`]).
+/// old name's was another computer's (see [`identity_path`]). Without a
+/// hardware id only one from before stamps is: a stamped one may be another
+/// computer's, so it is neither listed, stopped nor forgotten here then.
 fn ours(file: &Path, identity: &Value, hardware: Option<&str>) -> bool {
     let Some(hardware) = hardware else {
-        return true;
+        return identity["machine"].is_null();
     };
     if identity["machine"].is_string() {
         return !stamped_elsewhere(identity, Some(hardware));
@@ -1785,11 +1861,22 @@ fn connector_line(connector: &Value) -> String {
     line.push('\n');
     line
 }
+/// The identity file of this computer's connector for host `id`, for
+/// `remote disable` and `remote forget`. Without a hardware id a stamped one
+/// cannot be told from another computer's, so either is refused.
 fn local_file(paths: &Paths, id: Uuid) -> Result<Option<std::path::PathBuf>> {
-    Ok(identities(paths)?
+    let hardware = machine_id();
+    let id = id.to_string();
+    let found = own_identities(paths.config_dir(), hardware.as_deref())?
         .into_iter()
-        .find(|(_, value)| value["id"].as_str() == Some(&id.to_string()))
-        .map(|(path, _)| path))
+        .find(|(_, value)| value["id"].as_str() == Some(&id))
+        .map(|(path, _)| path);
+    if found.is_none() {
+        refuse_unchecked(paths, hardware.as_deref(), |_, identity| {
+            identity["id"].as_str() == Some(&id)
+        })?;
+    }
+    Ok(found)
 }
 
 /// Start a background connector and return once it holds its lock, with the
@@ -1923,19 +2010,29 @@ impl ChatShare {
     }
 }
 /// The connector identity that publishes this chat of this project, under
-/// any account of the configured Cloud.
+/// any account of the configured Cloud, on the computer with `hardware` id.
 fn chat_identity(
     paths: &Paths,
     client: &haarness_account::Client,
     workspace: &Path,
     thread: Uuid,
+    hardware: Option<&str>,
 ) -> Result<Option<(std::path::PathBuf, Value)>> {
-    let thread = thread.to_string();
-    Ok(identities(paths)?.into_iter().find(|(_, value)| {
-        value["chatId"].as_str() == Some(thread.as_str())
-            && value["apiUrl"].as_str() == Some(client.config.api_url.as_str())
-            && value["workspace"].as_str() == workspace.to_str()
-    }))
+    Ok(own_identities(paths.config_dir(), hardware)?
+        .into_iter()
+        .find(|(_, value)| chat_of(value, client, workspace, thread)))
+}
+/// Whether `identity` publishes this chat of this project to the configured
+/// Cloud.
+fn chat_of(
+    identity: &Value,
+    client: &haarness_account::Client,
+    workspace: &Path,
+    thread: Uuid,
+) -> bool {
+    identity["chatId"].as_str() == Some(thread.to_string().as_str())
+        && identity["apiUrl"].as_str() == Some(client.config.api_url.as_str())
+        && identity["workspace"].as_str() == workspace.to_str()
 }
 fn not_found(error: &haarness_account::Error) -> bool {
     matches!(
@@ -1975,7 +2072,9 @@ async fn status_with(
     } else {
         ShareState::SignedOut
     };
-    let Some((file, identity)) = chat_identity(paths, client, workspace, thread)? else {
+    let Some((file, identity)) =
+        chat_identity(paths, client, workspace, thread, machine_id().as_deref())?
+    else {
         return Ok(ChatShare::new(idle));
     };
     if !running(&file)? {
@@ -2038,7 +2137,9 @@ pub(crate) async fn share_chat(paths: &Paths, workspace: &Path, thread: Uuid) ->
         .as_str()
         .filter(|id| !id.is_empty())
         .context("Choose a Haarness Cloud account first")?;
-    if let Some((file, identity)) = chat_identity(paths, &client, workspace, thread)? {
+    if let Some((file, identity)) =
+        chat_identity(paths, &client, workspace, thread, machine_id().as_deref())?
+    {
         if running(&file)? {
             let share = chat_status(paths, workspace, thread, true).await?;
             if share.state != ShareState::Stopped {
@@ -2049,7 +2150,7 @@ pub(crate) async fn share_chat(paths: &Paths, workspace: &Path, thread: Uuid) ->
         }
     }
     let computer = haarness_account::computer_name();
-    let file = identity_path(paths, &client, account, workspace, Some(thread), &computer)?;
+    let file = identity_path(paths, &client, account, workspace, Some(thread))?;
     if let Some(identity) = std::fs::read(&file)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -2121,7 +2222,14 @@ async fn stop_with(
     } else {
         ShareState::SignedOut
     };
-    let Some((file, identity)) = chat_identity(paths, client, workspace, thread)? else {
+    let hardware = machine_id();
+    let Some((file, identity)) =
+        chat_identity(paths, client, workspace, thread, hardware.as_deref())?
+    else {
+        // Unless it may be another computer's, for want of a hardware id.
+        refuse_unchecked(paths, hardware.as_deref(), |_, identity| {
+            chat_of(identity, client, workspace, thread)
+        })?;
         return Ok(ChatShare::new(idle));
     };
     stop_connector(&file).await?;
@@ -2251,20 +2359,18 @@ impl HostAccess {
         }
     }
 }
-/// The connector identities that make this computer a host of the configured
-/// Cloud, for `account` when it is known: the running ones first.
+/// The connector identities that make this computer (with `hardware` id) a
+/// host of the configured Cloud, for `account` when it is known: the running
+/// ones first.
 fn host_identities(
     paths: &Paths,
     client: &haarness_account::Client,
     account: Option<&str>,
+    hardware: Option<&str>,
 ) -> Result<Vec<(std::path::PathBuf, Value)>> {
-    let mut found = identities(paths)?
+    let mut found = own_identities(paths.config_dir(), hardware)?
         .into_iter()
-        .filter(|(_, identity)| {
-            identity["chatId"].is_null()
-                && identity["apiUrl"].as_str() == Some(client.config.api_url.as_str())
-                && account.is_none_or(|account| identity["accountId"].as_str() == Some(account))
-        })
+        .filter(|(_, identity)| host_of(identity, client, account))
         .map(|(file, identity)| Ok((running(&file)?, file, identity)))
         .collect::<Result<Vec<_>>>()?;
     found.sort_by_key(|(running, ..)| !running);
@@ -2273,40 +2379,39 @@ fn host_identities(
         .map(|(_, file, identity)| (file, identity))
         .collect())
 }
-/// The identity file of `account`'s host connector: the one a connector
-/// here runs (stamped as this computer's when an earlier release runs it),
-/// or one this computer stamped, or where its connector would keep it (see
-/// [`identity_path`]).
+/// Whether `identity` makes a computer a host of the configured Cloud, for
+/// `account` when it is known.
+fn host_of(identity: &Value, client: &haarness_account::Client, account: Option<&str>) -> bool {
+    identity["chatId"].is_null()
+        && identity["apiUrl"].as_str() == Some(client.config.api_url.as_str())
+        && account.is_none_or(|account| identity["accountId"].as_str() == Some(account))
+}
+/// The identity file of `account`'s host connector on the computer with
+/// `hardware` id: the one a connector here runs (stamped as this computer's
+/// when an earlier release runs it), or one this computer stamped, or where
+/// its connector would keep it (see [`identity_path`]).
 fn host_file(
     paths: &Paths,
     client: &haarness_account::Client,
     account: &str,
     gateway: &Path,
+    hardware: Option<&str>,
 ) -> Result<std::path::PathBuf> {
-    let hardware = machine_id();
-    if let Some((file, identity)) = host_identities(paths, client, Some(account))?
+    if let Some((file, identity)) = host_identities(paths, client, Some(account), hardware)?
         .into_iter()
         .next()
     {
         if running(&file)? {
-            if let Some(hardware) = hardware.as_deref() {
+            if let Some(hardware) = hardware {
                 adopt(&file, hardware)?;
             }
             return Ok(file);
         }
-        if stamped_here(&identity, hardware.as_deref()) {
+        if stamped_here(&identity, hardware) {
             return Ok(file);
         }
     }
-    identity_path_for(
-        paths,
-        client,
-        account,
-        gateway,
-        None,
-        hardware.as_deref(),
-        &haarness_account::computer_name(),
-    )
+    identity_path_for(paths, client, account, gateway, None, hardware)
 }
 /// The selected account and, for an organization, its name. Signed out is
 /// `None`.
@@ -2359,9 +2464,10 @@ pub(crate) async fn host_access(
             Err(_) => reached = false,
         }
     }
-    let Some((file, identity)) = host_identities(paths, client, account.as_deref())?
-        .into_iter()
-        .next()
+    let Some((file, identity)) =
+        host_identities(paths, client, account.as_deref(), machine_id().as_deref())?
+            .into_iter()
+            .next()
     else {
         let mut access = HostAccess::new(AccessState::Off);
         access.organization = organization;
@@ -2425,7 +2531,17 @@ pub(crate) async fn enable_host(
     let Some((account, _)) = host_account(client).await? else {
         return Ok(HostAccess::new(AccessState::SignedOut));
     };
-    let file = host_file(paths, client, &account, gateway)?;
+    enable_for(client, paths, gateway, &account, machine_id().as_deref()).await
+}
+/// [`enable_host`] for `account` on the computer with `hardware` id.
+async fn enable_for(
+    client: &haarness_account::Client,
+    paths: &Paths,
+    gateway: &Path,
+    account: &str,
+    hardware: Option<&str>,
+) -> Result<HostAccess> {
+    let file = host_file(paths, client, account, gateway, hardware)?;
     if !running(&file)? {
         forget_removed_host(client, &file).await?;
         paths.workspace_manager()?.register_chat_home(gateway)?;
@@ -2434,15 +2550,10 @@ pub(crate) async fn enable_host(
         // The connector registers with Cloud as soon as it holds its lock;
         // an identity copied from another computer says it was registered
         // until the connector has made it this one's.
-        let hardware = machine_id();
         for _ in 0..150 {
-            let registered = std::fs::read(&file)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .is_some_and(|identity| {
-                    identity["registered"] == true
-                        && !stamped_elsewhere(&identity, hardware.as_deref())
-                });
+            let registered = read_identity(&file).is_some_and(|identity| {
+                identity["registered"] == true && !stamped_elsewhere(&identity, hardware)
+            });
             if registered {
                 break;
             }
@@ -2482,7 +2593,14 @@ pub(crate) async fn disable_host(
     } else {
         AccessState::SignedOut
     });
-    for (file, mut identity) in host_identities(paths, client, None)? {
+    // A running connector this computer cannot tell from another computer's
+    // is refused rather than passed over, so "off" is never said while this
+    // computer's own may still run.
+    let hardware = machine_id();
+    refuse_unchecked(paths, hardware.as_deref(), |file, identity| {
+        host_of(identity, client, None) && running(file).unwrap_or(false)
+    })?;
+    for (file, mut identity) in host_identities(paths, client, None, hardware.as_deref())? {
         stop_connector(&file).await?;
         access.computer = access
             .computer
@@ -2516,15 +2634,25 @@ pub(crate) async fn restore_host(
     let Some((account, _)) = host_account(client).await? else {
         return Ok(HostAccess::new(AccessState::SignedOut));
     };
-    let file = match host_file(paths, client, &account, gateway) {
+    let hardware = machine_id();
+    let hardware = hardware.as_deref();
+    let file = match host_file(paths, client, &account, gateway, hardware) {
         Ok(file) => file,
-        // This start cannot tell this computer's identity: access stays off
-        // until the next one, saying why unless it was turned off anyway.
         Err(error) if error.downcast_ref::<UncheckedIdentity>().is_some() => {
-            let mut access = host_access(client, paths, false).await?;
-            let on = host_identities(paths, client, Some(&account))?
+            // This start cannot tell this computer's identity. If access was
+            // on, a hardware id that may read in a moment fails the restore,
+            // so Desktop tries again as it does when Cloud is out of reach;
+            // one that never will leaves access off and says what helps.
+            let on = identities_in(paths.config_dir())?
                 .iter()
-                .any(|(file, _)| !file.with_extension("stop").exists());
+                .any(|(file, identity)| {
+                    host_of(identity, client, Some(&account))
+                        && !file.with_extension("stop").exists()
+                });
+            if on && UncheckedIdentity::PASSES {
+                return Err(error);
+            }
+            let mut access = host_access(client, paths, false).await?;
             if access.state == AccessState::Off && on {
                 access.error = Some(error.to_string());
             }
@@ -2532,10 +2660,7 @@ pub(crate) async fn restore_host(
         }
         Err(error) => return Err(error),
     };
-    let Some(identity) = std::fs::read(&file)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-    else {
+    let Some(identity) = read_identity(&file) else {
         return host_access(client, paths, false).await;
     };
     let current = identity["version"].as_str() == Some(env!("CARGO_PKG_VERSION"));
@@ -2548,13 +2673,15 @@ pub(crate) async fn restore_host(
     } else if turned_off || (identity["error"].is_string() && current) {
         return host_access(client, paths, false).await;
     }
-    enable_host(client, paths, gateway).await
+    enable_for(client, paths, gateway, &account, hardware).await
 }
 /// Stop the connectors that make this computer reachable through the
 /// configured Cloud, except those of `keep` (the account now selected): after
 /// a sign-out none may stay, and after an account switch only the new
 /// account's. Each leaves its stop file, so starting Desktop does not turn
-/// it back on.
+/// it back on. Without a hardware id a stamped one is left as it is, as
+/// [`ours`] says: in a folder another computer keeps too, it may be that
+/// computer's.
 pub(crate) async fn stop_connectors(
     client: &haarness_account::Client,
     paths: &Paths,
@@ -2784,9 +2911,33 @@ mod tests {
         let others = other_computers(&hosts, &own_hosts(&dir, Some("LAPTOP")).unwrap());
         assert_eq!(others.len(), 1);
         assert_eq!(others[0]["id"], ids[0]);
-        // Without a hardware id every identity here counts as this one's.
-        assert_eq!(own_hosts(&dir, None).unwrap().len(), 4);
+        // Without a hardware id only those from before stamps count as this
+        // one's: any stamped one may be another computer's.
+        let mut unchecked = own_hosts(&dir, None)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
+        unchecked.sort();
+        assert_eq!(unchecked, [ids[2].clone(), ids[3].clone()]);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    thread_local! {
+        /// The hardware id [`machine_id`] reads on this thread while a test
+        /// stands in for it, empty for one that cannot be read.
+        pub(super) static HARDWARE: std::cell::RefCell<Option<String>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    /// This thread's hardware id reads as `id` (`None`: it cannot be read)
+    /// until the returned guard drops.
+    fn hardware_reads(id: Option<&str>) -> impl Drop {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                HARDWARE.set(None);
+            }
+        }
+        HARDWARE.set(Some(id.unwrap_or_default().to_owned()));
+        Reset
     }
     /// A client of a Cloud nothing answers, for naming identity files.
     fn offline_client(root: &Path) -> haarness_account::Client {
@@ -2815,8 +2966,8 @@ mod tests {
         let file = |hardware: Option<&str>| {
             identity_file_for(&paths, &client, "a1", &gateway, None, hardware)
         };
-        let path = |hardware: Option<&str>, name: &str| {
-            identity_path_for(&paths, &client, "a1", &gateway, None, hardware, name).unwrap()
+        let path = |hardware: Option<&str>| {
+            identity_path_for(&paths, &client, "a1", &gateway, None, hardware).unwrap()
         };
         let (shared, laptop) = (file(None), file(Some("LAPTOP")));
         assert_ne!(shared, laptop);
@@ -2837,35 +2988,35 @@ mod tests {
 
         // Nothing yet: the name older releases look under, for every
         // computer, with a hardware id or without.
-        assert_eq!(path(Some("STUDIO"), "Studio"), shared);
-        assert_eq!(path(None, "Studio"), shared);
+        assert_eq!(path(Some("STUDIO")), shared);
+        assert_eq!(path(None), shared);
 
         // Written by an earlier release: this computer's, where it is.
         write(&shared, &identity("Studio"));
-        assert_eq!(path(Some("STUDIO"), "Studio"), shared);
+        assert_eq!(path(Some("STUDIO")), shared);
         // Stamped by the studio: still the studio's, and never the laptop's,
         // which keeps a file of its own: one folder, two stable ids.
         let mut stamped = identity("Studio");
         stamped["machine"] = json!(machine_stamp("STUDIO", &id));
         write(&shared, &stamped);
-        assert_eq!(path(Some("STUDIO"), "Studio"), shared);
-        assert_eq!(path(Some("LAPTOP"), "Laptop"), laptop);
+        assert_eq!(path(Some("STUDIO")), shared);
+        assert_eq!(path(Some("LAPTOP")), laptop);
         write(&laptop, &json!({"id": Uuid::now_v7(), "name": "Laptop"}));
         for _ in 0..2 {
-            assert_eq!(path(Some("STUDIO"), "Studio"), shared);
-            assert_eq!(path(Some("LAPTOP"), "Laptop"), laptop);
+            assert_eq!(path(Some("STUDIO")), shared);
+            assert_eq!(path(Some("LAPTOP")), laptop);
         }
 
         // A connector running under the studio's stamp is the studio's (on a
         // drive both share), so the laptop keeps its own beside it.
         let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
         fs2::FileExt::lock_exclusive(&lock).unwrap();
-        assert_eq!(path(Some("LAPTOP"), "Laptop"), laptop);
+        assert_eq!(path(Some("LAPTOP")), laptop);
         // One from before stamps run here under the old name is this
         // computer's whatever name it has, so a second never starts beside it.
         write(&shared, &identity("Old Name"));
         std::fs::remove_file(&laptop).unwrap();
-        assert_eq!(path(Some("LAPTOP"), "Laptop"), shared);
+        assert_eq!(path(Some("LAPTOP")), shared);
         drop(lock);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2879,16 +3030,7 @@ mod tests {
         let shared = identity_file_for(&paths, &client, "a1", &gateway, None, None);
         let own = identity_file_for(&paths, &client, "a1", &gateway, None, Some("LAPTOP"));
         let path = |hardware: &str| {
-            identity_path_for(
-                &paths,
-                &client,
-                "a1",
-                &gateway,
-                None,
-                Some(hardware),
-                "Laptop",
-            )
-            .unwrap()
+            identity_path_for(&paths, &client, "a1", &gateway, None, Some(hardware)).unwrap()
         };
         let read = |file: &Path| -> Value {
             serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
@@ -2932,17 +3074,16 @@ mod tests {
 
         // Desktop finds it the same way, under this computer's own name,
         // running or not.
-        if let Some(hardware) = machine_id() {
-            write(&shared, &earlier);
-            assert_eq!(host_file(&paths, &client, "a1", &gateway).unwrap(), shared);
-            assert_eq!(read(&shared)["machine"], machine_stamp(&hardware, &id));
-            write(&shared, &earlier);
-            let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
-            fs2::FileExt::lock_exclusive(&lock).unwrap();
-            assert_eq!(host_file(&paths, &client, "a1", &gateway).unwrap(), shared);
-            assert_eq!(read(&shared)["machine"], machine_stamp(&hardware, &id));
-            drop(lock);
-        }
+        let desktop = || host_file(&paths, &client, "a1", &gateway, Some("LAPTOP")).unwrap();
+        write(&shared, &earlier);
+        assert_eq!(desktop(), shared);
+        assert_eq!(read(&shared)["machine"], machine_stamp("LAPTOP", &id));
+        write(&shared, &earlier);
+        let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        assert_eq!(desktop(), shared);
+        assert_eq!(read(&shared)["machine"], machine_stamp("LAPTOP", &id));
+        drop(lock);
 
         // Beside a file of this computer's own (kept since the old name was
         // another computer's), an earlier release's connector running under
@@ -2973,11 +3114,14 @@ mod tests {
         let file = |hardware: Option<&str>| {
             identity_file_for(&paths, &client, "a1", &gateway, None, hardware)
         };
-        let path =
-            |name: &str| identity_path_for(&paths, &client, "a1", &gateway, None, None, name);
-        let refused = |name: &str| {
-            let error = path(name).expect_err("a start that cannot tell its identity connected");
-            assert!(error.to_string().contains("hardware ID"), "{error}");
+        let path = || identity_path_for(&paths, &client, "a1", &gateway, None, None);
+        let refused = |what: &str| {
+            let error = path().expect_err(what);
+            assert_eq!(
+                error.downcast_ref::<UncheckedIdentity>(),
+                Some(&UncheckedIdentity::Start),
+                "{what}: {error}"
+            );
         };
         let read = |file: &Path| -> Value {
             serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
@@ -2998,42 +3142,97 @@ mod tests {
 
         // Nothing yet, or an earlier release's identity: the old name, as
         // every release used it, and no stamp without the hardware id.
-        assert_eq!(path("Laptop").unwrap(), shared);
-        write(&shared, &identity(&studio_id, "Studio", None));
-        assert_eq!(path("Laptop").unwrap(), shared);
+        assert_eq!(path().unwrap(), shared);
+        let earlier = identity(&studio_id, "Mac", None);
+        write(&shared, &earlier);
+        assert_eq!(path().unwrap(), shared);
         assert!(read(&shared)["machine"].is_null());
 
         // Stamped, it cannot be checked and may be another computer's: this
         // start does not connect, and the identity stays as it is.
-        let studio = identity(&studio_id, "Studio", Some("STUDIO"));
+        let studio = identity(&studio_id, "Mac", Some("STUDIO"));
         write(&shared, &studio);
-        refused("Studio");
-        // The copy of Studio's beside Laptop's own: Laptop's own, by its name.
+        refused("the old name's, stamped");
+        // A file of a computer's own beside it cannot be checked either,
+        // even one with the name this connector starts under: two computers
+        // can share a name, and the hardware id in its file name is unknown.
         let laptop = file(Some("LAPTOP"));
-        write(&laptop, &identity(&laptop_id, "Laptop", Some("LAPTOP")));
-        assert_eq!(path("Laptop").unwrap(), laptop);
-        // In a folder both share Studio sees that file too: never Laptop's.
-        refused("Studio");
-        // Two computers of one name: no telling which.
-        write(&shared, &identity(&studio_id, "Laptop", Some("STUDIO")));
-        refused("Laptop");
-        write(&shared, &studio);
-        // Several computers' own files: the one with this computer's name.
+        write(&laptop, &identity(&laptop_id, "Mac", Some("LAPTOP")));
+        refused("a computer's own file beside a stamped one");
+        write(&shared, &earlier);
+        refused("a computer's own file beside one from before stamps");
+        // Without the old name's file (forgotten, or removed in Cloud), the
+        // one file left is still no more this computer's.
+        std::fs::remove_file(&shared).unwrap();
+        refused("the one file of a computer's own");
         let air = file(Some("AIR"));
         write(&air, &identity(&air_id, "Air", Some("AIR")));
-        assert_eq!(path("Air").unwrap(), air);
-        assert_eq!(path("Laptop").unwrap(), laptop);
-        refused("Mini");
-        // Without the old name's file, still only by name.
-        std::fs::remove_file(&shared).unwrap();
-        assert_eq!(path("Laptop").unwrap(), laptop);
-        refused("Studio");
-        // None of it stamped or changed a thing.
-        assert_eq!(
-            read(&laptop),
-            identity(&laptop_id, "Laptop", Some("LAPTOP"))
-        );
+        refused("several computers' own files");
+        // None of it wrote or stamped a thing.
+        assert!(!shared.exists());
+        assert_eq!(read(&laptop), identity(&laptop_id, "Mac", Some("LAPTOP")));
         assert_eq!(read(&air), identity(&air_id, "Air", Some("AIR")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_refusal_for_want_of_a_hardware_id_says_what_helps() {
+        let start = UncheckedIdentity::Start;
+        assert!(start.reason(true).contains("hardware ID could not be read"));
+        assert!(start.reason(true).ends_with("Try again in a moment."));
+        // Linux without a lasting machine id: waiting never helps.
+        let lasting = start.reason(false);
+        assert!(lasting.contains("no lasting machine ID") && lasting.contains("/etc/machine-id"));
+        assert!(!lasting.contains("a moment"), "{lasting}");
+        let change = UncheckedIdentity::Change;
+        assert!(change.reason(true).contains("changed nothing"));
+        assert!(change.reason(false).contains("/etc/machine-id"));
+        assert_eq!(
+            start.to_string(),
+            start.reason(UncheckedIdentity::PASSES),
+            "the reason for this platform"
+        );
+    }
+    #[test]
+    fn a_start_takes_its_file_and_its_stamp_from_one_read_of_the_hardware_id() {
+        let root = std::env::temp_dir().join(format!("haarness-claim-{}", Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        let client = offline_client(&root);
+        let gateway = root.join("Chat folders");
+        let shared = identity_file_for(&paths, &client, "a1", &gateway, None, None);
+        let own = identity_file_for(&paths, &client, "a1", &gateway, None, Some("LAPTOP"));
+        let studio_id = Uuid::now_v7().to_string();
+        let studio = json!({"id": studio_id, "name": "Studio", "chatId": null,
+            "apiUrl": client.config.api_url, "accountId": "a1", "registered": true,
+            "machine": machine_stamp("STUDIO", &studio_id)});
+        std::fs::write(&shared, studio.to_string()).unwrap();
+        // The start read "LAPTOP"; any later read would find nothing.
+        let _unread = hardware_reads(None);
+        let start = || {
+            claim(
+                &paths,
+                &client,
+                "a1",
+                &gateway,
+                None,
+                "Laptop",
+                Some("LAPTOP"),
+            )
+        };
+        let claimed = start().unwrap();
+        assert_eq!(claimed.file, own);
+        let id = claimed.id.to_string();
+        assert_ne!(id, studio_id);
+        assert_eq!(claimed.identity["id"], id);
+        assert_eq!(claimed.identity["machine"], machine_stamp("LAPTOP", &id));
+        assert_eq!(read_identity(&own).as_ref(), Some(&claimed.identity));
+        assert!(running(&own).unwrap(), "claimed without its lock");
+        let again = start().expect_err("a second connector beside the first");
+        assert!(again.to_string().contains("already running"), "{again}");
+        drop(claimed);
+        // The next start keeps the same host, and Studio's is untouched.
+        assert_eq!(start().unwrap().id.to_string(), id);
+        assert_eq!(read_identity(&shared), Some(studio));
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -3330,7 +3529,14 @@ mod tests {
         assert!(file.exists() && stop.exists());
         let gateway = root.join("Chat folders");
         assert_eq!(
-            host_file(&paths, &client, &account.to_string(), &gateway).unwrap(),
+            host_file(
+                &paths,
+                &client,
+                &account.to_string(),
+                &gateway,
+                machine_id().as_deref()
+            )
+            .unwrap(),
             file
         );
         let restored = restore_host(&client, &paths, &gateway).await.unwrap();
@@ -3461,6 +3667,140 @@ mod tests {
         assert!(running(&elsewhere).unwrap());
         std::fs::write(elsewhere.with_extension("stop"), "stop").unwrap();
         elsewhere_thread.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn without_a_hardware_id_another_computers_connectors_are_left_alone() {
+        use axum::{Json, Router, routing::get};
+        let root = std::env::temp_dir().join(format!("haarness-unchecked-{}", Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        let account = Uuid::now_v7();
+        let router = Router::new().route(
+            "/api/v1/key",
+            get(move || async move {
+                Json(json!({"key":{"id":Uuid::now_v7(),"accountId":account,"label":"Desk","scopes":[]},
+                    "accountName":"Personal"}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = haarness_account::Client::new(
+            haarness_account::Config::new(&api, root.join("cloud"), "test")
+                .unwrap()
+                .with_api_key("hck_fixture".into())
+                .unwrap(),
+        )
+        .unwrap();
+        let gateway = root.join("Chat folders");
+        let account = account.to_string();
+        // A folder Studio and Laptop both keep: Studio's connector runs under
+        // the old name, Laptop keeps its own, Studio shares a chat, and one
+        // identity from before stamps is there too.
+        let [studio_id, laptop_id, chat_id, older_id] = [(); 4].map(|()| Uuid::now_v7());
+        let stamped = |id: Uuid, machine: &str, chat: Option<Uuid>| {
+            json!({"id": id, "name": machine, "chatId": chat, "accountId": account,
+                "apiUrl": client.config.api_url, "workspace": root, "registered": true,
+                "machine": machine_stamp(machine, &id.to_string())})
+        };
+        let shared = identity_file_for(&paths, &client, &account, &gateway, None, None);
+        let laptop = identity_file_for(&paths, &client, &account, &gateway, None, Some("LAPTOP"));
+        let chat = paths.config_dir().join("remote-chat.json");
+        let older = paths.config_dir().join("remote-older.json");
+        std::fs::write(&shared, stamped(studio_id, "STUDIO", None).to_string()).unwrap();
+        std::fs::write(&laptop, stamped(laptop_id, "LAPTOP", None).to_string()).unwrap();
+        let thread = Uuid::now_v7();
+        std::fs::write(&chat, stamped(chat_id, "STUDIO", Some(thread)).to_string()).unwrap();
+        std::fs::write(
+            &older,
+            json!({"id": older_id, "name": "Old", "chatId": null, "accountId": "other",
+                "apiUrl": client.config.api_url})
+            .to_string(),
+        )
+        .unwrap();
+        let lock = std::fs::File::create(shared.with_extension("lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let stop = shared.with_extension("stop");
+        let studio = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                for _ in 0..500 {
+                    if stop.exists() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                drop(lock);
+            })
+        };
+        let unread = hardware_reads(None);
+        let refused = |error: anyhow::Error| {
+            assert_eq!(
+                error.downcast_ref::<UncheckedIdentity>(),
+                Some(&UncheckedIdentity::Change),
+                "{error}"
+            );
+        };
+
+        // `remote status` lists only the one from before stamps.
+        let listed = local_status(&paths).unwrap();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0]["id"], json!(older_id));
+        // `remote disable` and `remote forget` of a stamped one are refused.
+        for id in [studio_id, laptop_id] {
+            refused(local_file(&paths, id).unwrap_err());
+        }
+        assert_eq!(local_file(&paths, older_id).unwrap(), Some(older.clone()));
+        assert_eq!(local_file(&paths, Uuid::now_v7()).unwrap(), None);
+        // So are Desktop's Remote access off and stopping the chat's share.
+        refused(disable_host(&client, &paths).await.unwrap_err());
+        refused(stop_with(&client, &paths, &root, thread).await.unwrap_err());
+        assert!(running(&shared).unwrap() && !stop.exists() && chat.exists());
+        // Signing out passes them over, and stops (here: marks) only the
+        // one from before stamps.
+        stop_connectors(&client, &paths, None).await.unwrap();
+        assert!(running(&shared).unwrap());
+        for file in [&shared, &laptop, &chat] {
+            assert!(!file.with_extension("stop").exists(), "{}", file.display());
+        }
+        assert!(older.with_extension("stop").exists());
+
+        // Desktop starting with access on: a read that may work in a moment
+        // fails, so Desktop tries again; one that never will says what helps.
+        let restored = restore_host(&client, &paths, &gateway).await;
+        if UncheckedIdentity::PASSES {
+            let error = restored.unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<UncheckedIdentity>(),
+                Some(&UncheckedIdentity::Start)
+            );
+        } else {
+            let access = restored.unwrap();
+            assert_eq!(access.state, AccessState::Off);
+            assert_eq!(access.error, Some(UncheckedIdentity::Start.to_string()));
+        }
+        assert!(!running(&laptop).unwrap(), "restoring started a connector");
+        // With access off, there is nothing to restore and nothing to say.
+        std::fs::write(laptop.with_extension("stop"), "stop").unwrap();
+        std::fs::write(&stop, "stop").unwrap();
+        studio.join().unwrap();
+        let off = restore_host(&client, &paths, &gateway).await.unwrap();
+        assert_eq!((off.state, off.error), (AccessState::Off, None));
+
+        // Once the id reads, this computer's own are its again.
+        drop(unread);
+        let _laptop = hardware_reads(Some("LAPTOP"));
+        let mut listed = local_status(&paths)
+            .unwrap()
+            .into_iter()
+            .map(|connector| connector["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        listed.sort();
+        let mut own = vec![laptop_id.to_string(), older_id.to_string()];
+        own.sort();
+        assert_eq!(listed, own);
+        assert_eq!(local_file(&paths, studio_id).unwrap(), None);
         std::fs::remove_dir_all(root).unwrap();
     }
     /// `wait` is `nominal` milliseconds, jittered at most a fifth shorter.

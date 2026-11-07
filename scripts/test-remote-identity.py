@@ -28,12 +28,13 @@ connects again, as Cloud does.
    two ids, and each `remote status` lists only its own.
 5. A computer that cannot tell its hardware id (an empty override) keeps an
    unstamped identity under the old name as it is. A start whose id cannot be
-   read never connects as another computer: Laptop, with the copy of
-   Studio's identity still beside its own, keeps its own host while Studio
-   stays connected, and so does Air in the shared folder; Studio and Mini,
-   whose stamped identity a second computer could hold too, do not connect,
-   Desktop's restore says why, and once the id reads again it turns access
-   back on with the same host.
+   read never connects as another computer: Studio and Mini, whose stamped
+   identity a second computer could hold too, and Laptop and Air, whose own
+   file cannot be told from another computer's either, do not connect, and
+   Studio stays connected meanwhile. Desktop's restore fails, so Desktop
+   tries again, and once the id reads it turns access back on with the same
+   host. Air, unable to read its id, does not list, stop or forget Mini's
+   running connector, and signing out leaves it running.
 6. Without `HAARNESS_TEST_PROVIDER` the override is ignored.
 
 With HAARNESS_BASE_BIN:
@@ -290,16 +291,19 @@ class Computer:
         listed = json.loads(self.cli("account", "--rpc", input=json.dumps({"action": "remote-hosts"})))
         return sorted(item["name"] for item in listed["items"])
 
-    def restore(self) -> dict:
+    def restoring(self) -> subprocess.CompletedProcess:
         """Desktop starting: the account bridge's remote access `restore`."""
         home = self.folder / "chat-home"
-        result = self.run(
+        return self.run(
             "--chat-home",
             "account",
             "--rpc",
             workspace=home,
             input=json.dumps({"action": "remote-access", "change": "restore", "chatHome": str(home)}),
         )
+
+    def restore(self) -> dict:
+        result = self.restoring()
         if result.returncode != 0:
             raise SystemExit(f"FAIL: {self.name}: restore: {result.stderr}")
         return json.loads(result.stdout)
@@ -441,41 +445,52 @@ def computers_apart(root, cloud, computer, check, old) -> None:
         check(set(cloud.hosts) == hosts and {path.name: path.read_text() for path in each.identities()} == files, "registering nothing and changing no identity")
         each.connector = None
 
-    # Laptop, the copy of Studio's identity still beside its own: its own
-    # host, by its name, while Studio stays connected.
+    # Laptop, the copy of Studio's identity still beside its own: a file
+    # named for a hardware id it cannot read is no more its own than
+    # Studio's, so it does not connect, and Studio stays connected.
     studio.start()
     check(connected_as(studio, cloud) == first, "Studio connected")
     settled = time.time()
     unread(laptop)
-    laptop.start()
-    check(connected_as(laptop, cloud) == second, "a start of Laptop that cannot read its hardware id keeps its own host beside the copy of Studio's")
-    time.sleep(5)
+    refused(laptop, "a start of Laptop that cannot read its hardware id, its own file beside the copy of Studio's")
     takeovers = [id for at, id in cloud.takeovers if at >= settled]
-    check(first in cloud.connected() and not takeovers, "and never takes Studio's connection", takeovers)
-    laptop.stop()
+    check(first in cloud.connected() and second not in cloud.connected() and not takeovers, "and Studio keeps its connection", takeovers)
     read_again(laptop)
     studio.stop()
     # Studio: its stamped identity under the old name is just what a
     # computer it was copied to holds, so nothing tells them apart.
     unread(studio)
     refused(studio, "a start of Studio that cannot read its hardware id")
-    restored = studio.restore()
-    check(restored.get("state") == "off" and "hardware ID" in (restored.get("error") or "") and first not in cloud.connected(), "Desktop's restore leaves access off and says why", restored)
+    failed = studio.restoring()
+    check(failed.returncode != 0 and "hardware ID could not be read" in failed.stderr and first not in cloud.connected(), "Desktop's restore fails, saying why, so Desktop tries it again", failed.stdout + failed.stderr)
     read_again(studio)
     restored = studio.restore()
     pid = wait_for(lambda: studio.identity().get("pid") if alive(studio.identity().get("pid")) else None, 60, "Studio's restored connector")
     check(restored.get("state") == "on" and connected_as(studio, cloud, pid=pid) == first, "once the id reads again, the next restore turns access on with the same host", restored)
     studio.cli("remote", "disable", first)
-    # The shared folder: Air keeps its own by its name; Mini, under the old
-    # name, does not connect.
+    # The shared folder: neither Air, by its own file, nor Mini, under the
+    # old name, connects.
     unread(air)
-    air.start()
-    check(connected_as(air, cloud) == next(iter(ids["Air"])), "in the shared folder, a start of Air that cannot read its hardware id keeps its own host")
-    air.stop()
+    refused(air, "in the shared folder, a start of Air that cannot read its hardware id")
     read_again(air)
     unread(mini)
     refused(mini, "a start of Mini, whose identity is the shared one, that cannot read its hardware id")
     read_again(mini)
+    # Mini runs; Air, unable to read its id, leaves Mini's connector alone.
+    mini_id = next(iter(ids["Mini"]))
+    mini.start()
+    check(connected_as(mini, cloud) == mini_id, "Mini connected")
+    unread(air)
+    check(air.status_ids() == [], "Air's remote status, without its hardware id, lists no stamped connector", air.status_ids())
+    for command in ("disable", "forget"):
+        result = air.run("remote", command, mini_id)
+        check(result.returncode != 0 and "hardware ID could not be read" in result.stderr and mini.connector.poll() is None and mini_id in cloud.connected() and mini_id in cloud.hosts, f"Air's remote {command} of Mini's connector is refused, and Mini stays connected", result.stderr[-300:])
+    air.cli("account", "--rpc", input=json.dumps({"action": "logout"}))
+    time.sleep(2)
+    check(mini.connector.poll() is None and mini_id in cloud.connected() and not (mini.config / old).with_suffix(".stop").exists(), "Air's sign-out leaves Mini's connector running, with no stop file")
+    air.sign_in()
+    read_again(air)
+    mini.stop()
 
     # 6. The stand-in id needs the test providers.
     desk = computer("Desk", "MACHINE-STUDIO", test_provider=False)
@@ -609,6 +624,7 @@ def main() -> None:
             restored = connected_as(loft, cloud, pid=wait_for(lambda: loft.identity().get("pid") if alive(loft.identity().get("pid")) else None, 60, "the restored connector"))
             check(again.get("state") == "on" and restored == loft_id and set(cloud.hosts) == hosts, "after it stopped, the next restore turns access back on with the same host", again)
             loft.cli("remote", "disable", loft_id)
+
         (root / "checks.json").write_text(json.dumps({"verdict": "PASS", "checks": checks}, indent=2))
     except BaseException as error:
         (root / "checks.json").write_text(json.dumps({"verdict": "FAIL", "error": str(error), "checks": checks}, indent=2))
