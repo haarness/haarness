@@ -4,7 +4,7 @@
  * agent works, and how a `computer` approval reads. Pure, so the rules are
  * pinned in tests rather than found in the panes.
  */
-import type { PendingPermissionInfo } from "@haarness/sdk";
+import type { PendingPermissionInfo, Thread } from "@haarness/sdk";
 
 export type ComputerRule = "allow" | "ask" | "deny";
 
@@ -28,6 +28,8 @@ export interface ComputerUseStatus {
   /** The app macOS charges the permissions to: Haarness, or a terminal. */
   host?: { bundle: string; name?: string | null; haarness?: boolean } | null;
   paused?: boolean;
+  /** The chat the person paused on the strip, while the pause lasts. */
+  pausedChat?: string | null;
   active?: { thread: string; here: boolean } | null;
   settings: {
     defaultAct: "ask" | "allow";
@@ -248,6 +250,28 @@ function allowedApp(request: Pick<PendingPermissionInfo, "detail" | "patterns">)
 export function lastingApp(request: Pick<PendingPermissionInfo, "detail" | "allowAlways" | "patterns">) {
   const mac = macDetail(request.detail);
   return request.allowAlways !== false && mac.kind === "act" && !mac.everyTime && !mac.console && !!allowedApp(request)?.bundle;
+}
+
+/** The chat a `computer-use` answer (its view's `data`) says the person paused, if any. */
+export function pausedChatIn(answer: unknown): string | undefined {
+  const chat = record(record(answer)?.data)?.pausedChat;
+  return typeof chat === "string" && chat ? chat : undefined;
+}
+
+/**
+ * Whether the chat on screen is the one paused on the strip: the paused chat is the conversation's root, so a child
+ * agent's chat counts too when it was started from it.
+ */
+export function pausedHere(paused: string | undefined, selected: string, threads: Pick<Thread, "id" | "parentId">[]) {
+  if (!paused || !selected) return false;
+  const parents = new Map(threads.map((thread) => [thread.id, thread.parentId]));
+  let chat: string | null | undefined = selected;
+  // A chat tree is shallow; the limit only guards against a cycle in bad data.
+  for (let depth = 0; chat && depth < 32; depth++) {
+    if (chat === paused) return true;
+    chat = parents.get(chat);
+  }
+  return false;
 }
 
 /** Catalog keys this module and its pane reach through variables, for the catalog guard. */

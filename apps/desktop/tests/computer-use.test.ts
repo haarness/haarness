@@ -8,6 +8,8 @@ import {
   computerUseKeys,
   isComputerPermission,
   macDetail,
+  pausedChatIn,
+  pausedHere,
   shownText,
   validBundle,
 } from "../src/renderer/computer-use";
@@ -162,6 +164,19 @@ test("a drag into another app names and allows the app it asks about, never the 
   // Within one app, the app it acts in, as before.
   const within = computerApproval(request({ kind: "act", action: "drag", app: "Notes", bundle: "com.apple.Notes", endApp: "Notes", endBundle: "com.apple.Notes", label: "note" }), english);
   assert.deepEqual(within.always, { label: "Always allow Notes", bundle: "com.apple.Notes" });
+});
+
+test("a pause is shown in the chat that holds the screen and in the agents it started, from any answer that names it", () => {
+  assert.equal(pausedChatIn({ title: "Computer use", data: { supported: true, paused: true, pausedChat: "root" } }), "root");
+  for (const answer of [{ data: { paused: false, pausedChat: null } }, { data: {} }, null, "root"]) assert.equal(pausedChatIn(answer), undefined);
+  const threads = [{ id: "root" }, { id: "child", parentId: "root" }, { id: "grandchild", parentId: "child" }, { id: "other" }];
+  assert.ok(pausedHere("root", "root", threads));
+  assert.ok(pausedHere("root", "grandchild", threads));
+  assert.ok(!pausedHere("root", "other", threads));
+  assert.ok(!pausedHere(undefined, "root", threads));
+  assert.ok(!pausedHere("root", "", threads));
+  // A parent loop in bad data ends the walk.
+  assert.ok(!pausedHere("root", "a", [{ id: "a", parentId: "b" }, { id: "b", parentId: "a" }]));
 });
 
 test("a whole-screen look says what goes to the model and shows no spot", () => {

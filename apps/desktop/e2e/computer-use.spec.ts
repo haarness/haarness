@@ -8,7 +8,7 @@
  * the pane sends, which the tests check.
  */
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
-import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -21,6 +21,9 @@ let env: Record<string, string>, client: Haarness, thread: Thread, directory: st
 const errors: string[] = [];
 const evidence = process.env.HAARNESS_COMPUTER_EVIDENCE;
 const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
+/** The stand-in for the Mac helper the computer use runtime tests use: it answers as the helper would and never
+ * touches the screen. A live run uses the real one. */
+const standIn = resolve("../../crates/haarness-computer/tests/fake-helper.py");
 test.describe.configure({ mode: "serial" });
 test.skip(process.platform !== "darwin", "Computer use is offered on macOS only");
 
@@ -69,6 +72,8 @@ test.beforeAll(async () => {
     HAARNESS_TEST_PROVIDER: "1",
     HAARNESS_DESKTOP_TEST: "1",
   });
+  if (!process.env.HAARNESS_COMPUTER_LIVE)
+    Object.assign(env, { HAARNESS_MAC_HELPER: standIn, FAKE_HELPER_LOG: join(temporary, "helper.log") });
   delete env.ELECTRON_RUN_AS_NODE;
   directory = join(temporary, "computer-project");
   await mkdir(join(directory, ".haarness"), { recursive: true });
@@ -486,6 +491,53 @@ test("typing shows its text, and a whole-screen look says what goes to the model
   await expect(dock.locator(".prompt-actions").getByRole("button")).toHaveText(["Deny", "Allow once", "Allow in this chat"]);
   await dock.getByRole("button", { name: "Allow once", exact: true }).click();
   await expect.poll(async () => (await fake()).replies.at(-1)).toEqual({ id: screen, decision: "once" });
+  expect(errors).toEqual([]);
+});
+
+/** Turns computer use on in the server's own settings, as agreeing in Settings would, with apps acting unasked. */
+async function computerUseOn(on: boolean) {
+  // With a data folder set, the server's global configuration lives in it.
+  const folder = join(env.HAARNESS_DATA_DIR, "config");
+  await mkdir(folder, { recursive: true });
+  await writeFile(
+    join(folder, "computer-use.json"),
+    JSON.stringify(on ? { enabled: true, terms: { version: "1", acceptedAt: "2026-11-07T00:00:00Z" }, defaultAct: "allow" } : { enabled: false }),
+  );
+}
+
+test("a pause on the strip shows as a still line in the chat, and its Resume lets the agent go on", async () => {
+  test.skip(!!process.env.HAARNESS_COMPUTER_LIVE, "Pauses through the stand-in helper");
+  test.setTimeout(150000);
+  await stub({ active: false, permissions: [] });
+  await computerUseOn(true);
+  await page.reload();
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  // The stand-in presses Pause on the strip as the agent starts typing, and stays paused until it hears Resume.
+  await page.locator("[data-composer-input]").fill(' !tool mac_type {"ref":"e2","text":"HOLD","snapshot":false}');
+  await page.locator(".send-button").click();
+  const line = page.locator(".assistant-activity");
+  await expect(line).toContainText("Paused", { timeout: 60000 });
+  const resume = line.getByRole("button", { name: "Resume", exact: true });
+  await expect(resume).toBeVisible();
+  // Nothing moves, nothing is asked, and the control is no taller than the line it sits on.
+  await expect(line.locator(".activity-shimmer")).toHaveCount(0);
+  await expect(page.getByRole("alert", { name: "Permission request" })).toHaveCount(0);
+  const [lineBox, buttonBox] = [await line.boundingBox(), await resume.boundingBox()];
+  expect(buttonBox!.height).toBeLessThanOrEqual(lineBox!.height);
+  const step = page.locator("details.tool-call").last();
+  await look("computer-use-paused", () => page.locator(".conversation"));
+  // A window that opens during the pause shows it from the start.
+  await page.reload();
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  await expect(line).toContainText("Paused", { timeout: 20000 });
+  await line.getByRole("button", { name: "Resume", exact: true }).click();
+  // The agent goes on: the strip heard Resume, the step ends, and the turn with it.
+  await expect(line).toHaveCount(0, { timeout: 30000 });
+  await expect(step).toHaveAttribute("data-status", /done|failed/);
+  const helper = (await readFile(join(temporary, "helper.log"), "utf8")).split("\n").filter(Boolean).map((row) => JSON.parse(row).op);
+  expect(helper.slice(helper.indexOf("type"))).toContain("resume");
+  await expect(page.locator(".message.assistant").last()).toContainText("running again");
+  await computerUseOn(false);
   expect(errors).toEqual([]);
 });
 

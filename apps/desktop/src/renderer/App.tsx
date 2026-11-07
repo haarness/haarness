@@ -3,7 +3,7 @@ import { AccountMenu } from "./AccountMenu";
 import { UpdateRow } from "./Updates";
 import { Notifications } from "./Notifications";
 import { formatNumber, t } from "./i18n";
-import { COMPUTER_USE_CAPABILITY, barWords } from "./computer-use";
+import { COMPUTER_USE_CAPABILITY, barWords, pausedChatIn } from "./computer-use";
 import { ServerConnect, openServerConnection } from "./ServerConnect";
 import { RemoteProjectPicker } from "./RemoteProjectPicker";
 import { ConnectProvider } from "./ConnectProvider";
@@ -305,6 +305,11 @@ export function App() {
     const bar = barWords((key) => t(key));
     void window.haarness
       .api(connection.id, "manageResource", ["computer-use", { action: "words", bar }])
+      // The answer names a chat paused before this window connected.
+      .then((answer) => {
+        const paused = pausedChatIn(answer);
+        if (paused && state.connection?.id === connection.id) set("computerPaused", paused);
+      })
       .catch(() => undefined);
   });
   let workbench!: HTMLDivElement;
