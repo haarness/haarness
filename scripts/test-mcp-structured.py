@@ -148,7 +148,22 @@ try:
     while run_state['status'] == 'running' and time.monotonic() < deadline:
         time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
     assert run_state['status'] == 'completed' and run_state.get('result') == ROWS, str(run_state.get('result'))[:200]
-    check('120 KB of one-line JSON reaches the model as its first 2,000 lines pretty-printed, saved readable by line, and a workflow gets it as the server wrote it')
+    check('120 KB of one-line JSON reaches the model as its first 2,000 lines laid out a value a line, saved readable by line, and a workflow gets it as the server wrote it')
+
+    # Laid out by adding spaces and line breaks only: no number rounded, no repeated key dropped.
+    for tool, start in [('ledger', '[\n  {\n    "wei": 1234567890123456789012345,\n    "rate": 0.12345678901234567890123,'),
+                        ('found', 'Found 800 entries:\n[\n  {\n    "wei": 1234567890123456789012345,')]:
+        result = call(thread, tool)
+        assert not result['is_error'] and result['output'].startswith(start), result['output'][:200]
+        assert '"key": 1,\n    "key": 2\n  },' in result['output'], result['output'][:300]
+        saved = pathlib.Path(result['metadata']['outputPath']).read_text()
+        sent = subprocess.run([sys.executable, str(fixture)], input=json.dumps(
+            {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': tool}}) + '\n',
+            text=True, capture_output=True, timeout=30, check=True).stdout
+        written = json.loads(sent)['result']['content'][0]['text']
+        assert saved.replace('\n', '').replace(' ', '') == written.replace('\n', '').replace(' ', ''), tool
+        assert max(len(line) for line in saved.splitlines()) < 80, tool
+    check('one-line JSON is laid out with every number and repeated key as the server wrote it, whole or after a heading')
 
     source = ("export const meta = { name: 'tree-metadata', phases: ['call'] };\nphase('call');\n"
               "const result = await tool('mcp__structured__tree', {});\n"

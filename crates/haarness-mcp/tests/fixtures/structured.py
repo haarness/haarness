@@ -31,6 +31,13 @@ TOOLS = {
     # 120 KB of JSON on one line, as JSON.stringify gives it.
     'rows': {'content': [{'type': 'text', 'text': json.dumps([{'id': n, 'title': 'row %d' % n, 'body': 'b' * 40}
                                                              for n in range(1500)], separators=(',', ':'))}]},
+    # 66 KB of one-line JSON holding what a parser would change: an integer past 64 bits, a
+    # decimal past 17 digits, a key given twice.
+    'ledger': {'content': [{'type': 'text', 'text': '[%s]' % ','.join(
+        ['{"wei":1234567890123456789012345,"rate":0.12345678901234567890123,"key":1,"key":2}'] * 800)}]},
+    # The same JSON after a heading line.
+    'found': {'content': [{'type': 'text', 'text': 'Found 800 entries:\n[%s]' % ','.join(
+        ['{"wei":1234567890123456789012345,"key":1,"key":2}'] * 1600)}]},
     # Structured content that names `truncated` itself, beside 80 KB of text.
     'tree': {'content': [{'type': 'text', 'text': 't' * 80 * 1024}],
              'structuredContent': {'tree': [{'path': 'a'}], 'truncated': False}},
