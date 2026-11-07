@@ -8,7 +8,6 @@ import { useApp } from "./state";
 
 const protocols = [
   ["openai-chat-completions", "OpenAI Chat Completions"],
-  ["openai-responses", "OpenAI Responses"],
   ["anthropic", "Anthropic Messages"],
   ["google-generative-ai", "Google Gemini"],
   ["azure-openai", "Azure OpenAI"],
@@ -31,6 +30,8 @@ export function ProviderForm(props: { close: () => void }) {
     models: [] as { value: string }[],
   });
   const [created, setCreated] = createSignal(false);
+  /** What the server found when it checked the endpoint, said once saved. */
+  let notes: string[] = [];
   async function save() {
     const id = form.id.trim();
     if (!/^[a-z0-9_-]+$/.test(id))
@@ -46,9 +47,13 @@ export function ProviderForm(props: { close: () => void }) {
       throw Error(
         t("This provider ID is already in use. Choose a different ID."),
       );
+    // An address without a scheme gets one from the server, and an
+    // endpoint pasted whole is saved as its base: only what can't be an
+    // address is refused here.
+    const typed = form.url.trim();
     let url: URL;
     try {
-      url = new URL(form.url.trim());
+      url = new URL(typed.includes("://") ? typed : `https://${typed}`);
     } catch {
       throw Error(t("Enter a valid provider URL."));
     }
@@ -75,9 +80,10 @@ export function ProviderForm(props: { close: () => void }) {
         "add",
         id,
         "--url",
-        form.url.trim(),
+        typed,
         "--protocol",
         form.protocol,
+        "--json",
       ];
       if (form.name.trim()) args.push("--name", form.name.trim());
       if (form.scope === "local") args.push("--project");
@@ -86,20 +92,28 @@ export function ProviderForm(props: { close: () => void }) {
         args.push("--api-key-env", form.env.trim());
       if (form.discovery === "manual")
         for (const model of models) args.push("--model", model);
-      await window.haarness.command(
+      const added = (await window.haarness.command(
         app.state.connection!.id,
         args,
         crypto.randomUUID(),
-      );
+      )) as { value?: { notes?: unknown } } | undefined;
+      const found = added?.value?.notes;
+      notes = Array.isArray(found) ? found.filter((note) => typeof note === "string") : [];
       setCreated(true);
     }
-    if (form.auth === "key" && form.key)
-      await app.native({
-        action: "set_credential",
-        provider: id,
-        key: form.key,
-      });
+    const key = form.key.trim();
+    if (form.auth === "key" && key) {
+      // The server asks the endpoint about the key before it keeps it.
+      const view = await app.api<{ data?: { warning?: unknown } }>(
+        "manageResource",
+        "providers",
+        { action: "credential", name: id, key },
+      );
+      const warning = view?.data?.warning;
+      if (typeof warning === "string" && warning) notes.push(warning);
+    }
     await app.catalogs(true);
+    if (notes.length) app.notify(notes.join(" "), "blocked");
   }
   return (
     <FormDialog

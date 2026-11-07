@@ -698,6 +698,11 @@ impl ManagementService {
                 warning = self.check_credential(input).await?;
                 self.provider_mutation(input)?;
             }
+            "providers" if matches!(action, "add" | "edit") => {
+                let (checked, notes) = self.check_endpoint(input).await?;
+                self.provider_mutation(&checked)?;
+                warning = (!notes.is_empty()).then(|| notes.join(" "));
+            }
             "providers" => self.provider_mutation(input)?,
             "mcp" => {
                 if action == "restart" {
@@ -776,11 +781,23 @@ impl ManagementService {
             .runtime()
             .ok()
             .and_then(|runtime| runtime.providers().get(id));
-        let Some(provider) = provider.filter(|_| !key.is_empty()) else {
+        if key.is_empty() {
             return Ok(None);
+        }
+        let Some(provider) = provider else {
+            // Added a moment ago, before the server took it up: ask its
+            // address with the key instead.
+            return Ok(self.check_new_endpoint(id, key).await);
         };
         let name = provider.info().name;
         Ok(match provider.check_api_key(key).await {
+            // An endpoint the person set up is also asked whether it serves
+            // the models they listed.
+            KeyCheck::Accepted | KeyCheck::Unsupported
+                if !haarness_providers::builtin_provider(id) =>
+            {
+                self.check_new_endpoint(id, key).await
+            }
             KeyCheck::Accepted | KeyCheck::Unsupported => None,
             KeyCheck::Rejected(reason) => bail!(
                 "{name} rejected this API key{}. Check that you copied all of it, then try again.",
@@ -792,6 +809,102 @@ impl ManagementService {
                 "Saved, but the key could not be checked: {reason}. If chats then fail to authenticate, replace the key."
             )),
         })
+    }
+
+    /// What the endpoint of a custom provider says of `key` and the models
+    /// its definition lists, as a warning; `None` when all is well, or when
+    /// there is no such definition.
+    async fn check_new_endpoint(&self, id: &str, key: &str) -> Option<String> {
+        let (_, _, section) = self.provider_sources(id).ok()?.into_iter().next()?;
+        if section.integration.is_some() {
+            return None;
+        }
+        let wire = haarness_providers::CompatibleProtocol::parse(&section.protocol).ok()?;
+        let headers = crate::provider_headers(&section.headers).ok()?;
+        let name = section.name.as_deref().unwrap_or(id);
+        let checked = haarness_providers::endpoint::check(
+            name,
+            wire,
+            section.base_url.as_deref()?,
+            Some(key),
+            &headers,
+            &section.models,
+        )
+        .await;
+        // Only the key is saved here, not the address.
+        let notes: Vec<_> = checked
+            .notes
+            .into_iter()
+            .filter(|note| !note.starts_with("Saved the address as "))
+            .collect();
+        (!notes.is_empty()).then(|| notes.join(" "))
+    }
+
+    /// Ask a custom endpoint for its models before its definition is saved
+    /// (see [`haarness_providers::endpoint::check`]): `input` with the
+    /// address to save, and what the person should know about it. A router
+    /// keeps its own address rules.
+    async fn check_endpoint(&self, input: &Value) -> Result<(Value, Vec<String>)> {
+        let id = required_string(input, "name")?;
+        let (protocol, headers, stored_key) = if text(input, "action") == "edit" {
+            let (_, _, section) = self.provider_source(input)?;
+            if section.integration.is_some() {
+                return Ok((input.clone(), Vec::new()));
+            }
+            let headers = crate::provider_headers(&section.headers).map_err(anyhow::Error::msg)?;
+            let key = CredentialStore::new(self.paths.auth.clone())
+                .get(id)
+                .ok()
+                .flatten()
+                .and_then(|credential| credential.api_key().map(str::to_owned))
+                .or_else(|| {
+                    section
+                        .api_key_env
+                        .iter()
+                        .chain(&section.api_key_envs)
+                        .find_map(|variable| std::env::var(variable).ok())
+                });
+            (section.protocol, headers, key)
+        } else {
+            (
+                required_string(input, "protocol")?.to_owned(),
+                haarness_providers::ProviderHeaders::default(),
+                None,
+            )
+        };
+        let wire =
+            haarness_providers::CompatibleProtocol::parse(&protocol).map_err(anyhow::Error::msg)?;
+        let url = crate::provider_url_with_scheme(required_string(input, "url")?)
+            .map_err(anyhow::Error::msg)?;
+        let key = optional_string(input, "key")
+            .filter(|key| !key.is_empty())
+            .map(str::to_owned)
+            .or(stored_key);
+        let name = optional_string(input, "label")
+            .filter(|label| !label.is_empty())
+            .unwrap_or(id);
+        let models = form_models(input);
+        let checked = haarness_providers::endpoint::check(
+            name,
+            wire,
+            &url,
+            key.as_deref(),
+            &headers,
+            &models,
+        )
+        .await;
+        let mut notes = checked.notes;
+        let needs_key = text(input, "action") == "add"
+            && text(input, "requiresAuth") != "false"
+            && key.is_none();
+        if needs_key {
+            notes.push(format!(
+                "{name} needs its API key before chats can use it: choose {name} in the list and add the key."
+            ));
+        }
+        let mut input = input.clone();
+        input["url"] = json!(checked.base_url);
+        Ok((input, notes))
     }
 
     async fn capabilities_view(&self, input: &Value) -> Result<View> {
@@ -1066,33 +1179,40 @@ impl ManagementService {
         let id = text(input, "name");
         let providers = self.runtime()?.providers().list();
         match text(input, "action") {
-            "form" if id.is_empty() => Ok(form(
-                "Custom endpoint",
-                json!({"action":"add"}),
-                vec![
-                    field("name", "Provider ID", "", true),
-                    choice("scope", "Scope", "global", &["global", "project"]),
-                    field("label", "Display name", "", true),
-                    field("url", "Endpoint URL (HTTPS or local HTTP)", "", true),
-                    choice(
-                        "protocol",
-                        "Protocol",
-                        "openai-chat-completions",
-                        &[
-                            "openai-chat-completions",
-                            "openai-responses",
-                            "anthropic-messages",
+            "form" if id.is_empty() => {
+                let mut key = field("key", "API key (optional)", "", false);
+                key.secret = true;
+                Ok(View {
+                    lines: vec![
+                        "Base URL: the address in the provider's API documentation, usually ending in /v1. http:// works only on this computer and your network.".into(),
+                        "Leave Model IDs empty to use the models the endpoint lists. Haarness checks the endpoint before saving.".into(),
+                    ],
+                    ..form(
+                        "Custom endpoint",
+                        json!({"action":"add"}),
+                        vec![
+                            field("name", "Provider ID", "", true),
+                            choice("scope", "Scope", "global", &["global", "project"]),
+                            field("label", "Display name", "", true),
+                            field("url", "Base URL", "", true),
+                            choice(
+                                "protocol",
+                                "Protocol",
+                                "openai-chat-completions",
+                                &["openai-chat-completions", "anthropic-messages"],
+                            ),
+                            key,
+                            field("models", "Model IDs (optional)", "", false),
+                            choice(
+                                "requiresAuth",
+                                "Requires authentication",
+                                "true",
+                                &["true", "false"],
+                            ),
                         ],
-                    ),
-                    field("models", "Model IDs (comma separated)", "", true),
-                    choice(
-                        "requiresAuth",
-                        "Requires authentication",
-                        "true",
-                        &["true", "false"],
-                    ),
-                ],
-            )),
+                    )
+                })
+            }
             "edit_form" => {
                 let (_, path, section) = self.provider_source(input)?;
                 Ok(form(
@@ -1107,7 +1227,7 @@ impl ManagementService {
                         ),
                         field(
                             "url",
-                            "Endpoint URL (HTTPS or local HTTP)",
+                            "Base URL",
                             section.base_url.as_deref().unwrap_or(""),
                             true,
                         ),
@@ -1380,23 +1500,12 @@ impl ManagementService {
                     !haarness_providers::builtin_provider(id),
                     "{id} is a built-in provider. Give your endpoint its own ID, for example {id}-proxy"
                 );
-                let url = required_string(input, "url")?;
-                ensure!(
-                    crate::valid_provider_url(url),
-                    "Use HTTPS, or HTTP on a loopback address"
-                );
                 let protocol = required_string(input, "protocol")?;
-                haarness_providers::CompatibleProtocol::parse(protocol)
+                let wire = haarness_providers::CompatibleProtocol::parse(protocol)
                     .map_err(anyhow::Error::msg)?;
-                let models = required_string(input, "models")?
-                    .split(',')
-                    .map(str::trim)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
-                ensure!(
-                    !models.is_empty() && models.iter().all(|s| !s.is_empty()),
-                    "Enter model IDs"
-                );
+                let url = crate::normalized_provider_url(wire, required_string(input, "url")?)
+                    .map_err(anyhow::Error::msg)?;
+                let models = form_models(input);
                 let current = crate::load_config(&self.paths, &self.workspace, self.trust_project)?;
                 ensure!(
                     !current.providers.contains_key(id),
@@ -1405,7 +1514,7 @@ impl ManagementService {
                 let section = crate::ProviderSection {
                     protocol: protocol.into(),
                     name: Some(required_string(input, "label")?.into()),
-                    base_url: Some(url.into()),
+                    base_url: Some(url),
                     models,
                     requires_auth: text(input, "requiresAuth") != "false",
                     ..crate::ProviderSection::default()
@@ -1421,6 +1530,9 @@ impl ManagementService {
                     id,
                     Some(&section),
                 )?;
+                if let Some(key) = optional_string(input, "key").filter(|key| !key.is_empty()) {
+                    store.set(id, &Credential::api(key.to_owned()))?;
+                }
             }
             "edit" | "remove" => {
                 let (scope, path, section) = self.provider_source(input)?;
@@ -1434,19 +1546,12 @@ impl ManagementService {
                     let base_url = if section.integration.is_some() {
                         crate::router_connection::normalize_url(url)?
                     } else {
-                        ensure!(
-                            crate::valid_provider_url(url),
-                            "Use HTTPS, or HTTP on a loopback address"
-                        );
-                        url.into()
+                        let wire = haarness_providers::CompatibleProtocol::parse(&section.protocol)
+                            .map_err(anyhow::Error::msg)?;
+                        crate::normalized_provider_url(wire, url).map_err(anyhow::Error::msg)?
                     };
                     let name = required_string(input, "label")?.to_owned();
-                    let models: Vec<String> = text(input, "models")
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .collect();
+                    let models = form_models(input);
                     // Only what the form changed is written: the entry's
                     // other settings (context window, tools, headers, keys
                     // Haarness does not know) stay as written.
@@ -2296,6 +2401,17 @@ impl ManagementService {
 }
 
 /// "Use an API key" → "Replace the API key": the action once one is stored.
+/// The model IDs a provider form lists, comma separated; none means the
+/// endpoint's own list decides.
+fn form_models(input: &Value) -> Vec<String> {
+    text(input, "models")
+        .split(',')
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn replace_label(label: &str) -> String {
     format!("Replace the {}", key_field_label(label))
 }
@@ -2520,6 +2636,109 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
             written["providers"]["plain"],
             json!({"protocol": "openai-chat-completions", "base_url": "https://plain.fixture.test/v1",
                 "models": ["m", "n"]})
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_custom_endpoint_is_checked_and_saved_where_it_answers() {
+        use axum::{Json, Router, http::StatusCode, routing::get};
+        // An API under `/openai/v1` that lists two models for `secret`.
+        let router = Router::new()
+            .route(
+                "/openai/v1/models",
+                get(|headers: axum::http::HeaderMap| async move {
+                    if headers
+                        .get("authorization")
+                        .is_some_and(|value| value == "Bearer secret")
+                    {
+                        (
+                            StatusCode::OK,
+                            Json(json!({"data":[{"id":"fast"},{"id":"big"}]})),
+                        )
+                    } else {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({"error":{"message":"Invalid API Key"}})),
+                        )
+                    }
+                }),
+            )
+            .fallback(|| async { StatusCode::NOT_FOUND });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let (root, workspace, paths, service) =
+            crate::management::tests::isolated_service("provider-add-check");
+        // The address pasted whole, without its version, and a model it
+        // does not serve; the key typed with the form.
+        // What the form's submit does before the page is drawn again.
+        let add = async |input: Value| -> anyhow::Result<String> {
+            let (checked, notes) = service.check_endpoint(&input).await?;
+            service.provider_mutation(&checked)?;
+            Ok(notes.join(" "))
+        };
+        let notes = add(
+            json!({"action": "add", "name": "my-gateway", "scope": "global",
+            "label": "My gateway", "url": format!(" {address}/openai/chat/completions "),
+            "protocol": "openai-chat-completions", "models": "fast, retired",
+            "key": " secret\n", "requiresAuth": "true"}),
+        )
+        .await
+        .unwrap();
+        let target = crate::provider_config_target(&paths, &workspace, false);
+        let saved = crate::jsonconfig::read_json(&target).unwrap().unwrap();
+        let gateway = &saved["providers"]["my-gateway"];
+        assert_eq!(gateway["base_url"], format!("http://{address}/openai/v1"));
+        assert_eq!(gateway["models"], json!(["fast", "retired"]));
+        assert_eq!(
+            notes,
+            format!(
+                "Saved the address as http://{address}/openai/v1: My gateway answers there, not at http://{address}/openai. My gateway does not list retired. It lists fast, big. Chats with a model it does not serve fail; edit the provider's models to match."
+            )
+        );
+        let stored = haarness_providers::CredentialStore::new(paths.auth.clone())
+            .get("my-gateway")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.api_key(), Some("secret"));
+        // Without a key, the form says one is still needed.
+        let notes = add(
+            json!({"action": "add", "name": "keyless", "scope": "global",
+            "label": "Keyless", "url": format!("http://{address}/openai/v1"),
+            "protocol": "openai-chat-completions", "models": "", "requiresAuth": "true"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            notes,
+            "Keyless needs its API key before chats can use it: choose Keyless in the list and add the key."
+        );
+        // An address on the internet without TLS is refused, saying why.
+        let refused = add(
+            json!({"action": "add", "name": "cleartext", "scope": "global",
+            "label": "Cleartext", "url": "http://api.example.com/v1",
+            "protocol": "openai-chat-completions", "requiresAuth": "true"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .starts_with("Use https:// for api.example.com"),
+            "{refused}"
+        );
+        // The Responses option the form once offered says what to use.
+        let refused = add(
+            json!({"action": "add", "name": "responses", "scope": "global",
+            "label": "Responses", "url": "https://api.example.com/v1",
+            "protocol": "openai-responses", "requiresAuth": "true"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("use openai-chat-completions"),
+            "{refused}"
         );
         fs::remove_dir_all(root).unwrap();
     }
