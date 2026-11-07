@@ -446,9 +446,10 @@ impl MacTool {
         let chat = thread.to_string();
         self.still_on().map_err(|error| tool_error(error.message))?;
         self.computer.lease().take(&chat).map_err(tool_error)?;
+        self.computer.claim(thread, cancel.clone());
         let waited = self
             .computer
-            .wait_while_paused(cancel)
+            .wait_while_paused(thread, cancel)
             .await
             .map_err(from_helper)?;
         if waited {
@@ -513,6 +514,7 @@ impl MacTool {
     /// the person resumes.
     async fn peek(
         &self,
+        thread: ThreadId,
         op: &str,
         input: Value,
         timeout: Duration,
@@ -521,7 +523,7 @@ impl MacTool {
         match self.helper(op, input.clone(), timeout, cancel).await {
             Err(error) if error.code == "paused" => {
                 self.computer
-                    .wait_after_refusal(cancel)
+                    .wait_after_refusal(thread, cancel)
                     .await
                     .map_err(from_helper)?;
                 self.helper(op, input, timeout, cancel)
@@ -551,7 +553,7 @@ impl MacTool {
         input["hidden"] = json!(self.hidden());
         let target = Target::from(
             &self
-                .peek("inspect", input, Duration::from_secs(15), cancel)
+                .peek(thread, "inspect", input, Duration::from_secs(15), cancel)
                 .await?,
         );
         if target.bundle.is_empty() {
@@ -671,7 +673,7 @@ impl MacTool {
                     json!({"name": name})
                 };
                 let found = self
-                    .peek("identify", key, Duration::from_secs(15), &cancel)
+                    .peek(thread, "identify", key, Duration::from_secs(15), &cancel)
                     .await?;
                 let bundle = found["bundle"].as_str().unwrap_or_default().to_owned();
                 let app = found["name"].as_str().unwrap_or(name).to_owned();
@@ -1048,7 +1050,13 @@ impl MacTool {
         input["ring"] = json!(settings.ring);
         input["bar"] = self.computer.bar_words();
         let data = self
-            .peek("snapshot", input, Duration::from_secs(30), &context.cancel)
+            .peek(
+                conversation(context),
+                "snapshot",
+                input,
+                Duration::from_secs(30),
+                &context.cancel,
+            )
             .await?;
         let width = data["size"]["width"].as_u64().unwrap_or(0);
         let height = data["size"]["height"].as_u64().unwrap_or(0);
@@ -1188,7 +1196,7 @@ impl MacTool {
             Ok(_) => Ok(()),
             Err(error) if error.code == "paused" => {
                 self.computer
-                    .wait_after_refusal(&context.cancel)
+                    .wait_after_refusal(conversation(context), &context.cancel)
                     .await
                     .map_err(from_helper)?;
                 // Switching off also ends the wait.
@@ -1359,7 +1367,13 @@ impl Tool for MacTool {
                     self.live(conversation(&context), &context.cancel).await?;
                     let settings = self.computer.settings();
                     let data = self
-                        .peek("apps", json!({}), Duration::from_secs(15), &context.cancel)
+                        .peek(
+                            conversation(&context),
+                            "apps",
+                            json!({}),
+                            Duration::from_secs(15),
+                            &context.cancel,
+                        )
                         .await?;
                     let apps: Vec<String> = data["apps"]
                         .as_array()

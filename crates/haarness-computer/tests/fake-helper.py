@@ -7,7 +7,8 @@ Reload button in Safari, e7 a button in Haarness itself, e6 text in Terminal, e5
 button in Notes. Typing "PAUSE" pauses the agent the way the bar would (and resumes half a second later); typing
 "HOLD" pauses it the same way until the server sends "resume", as Resume pressed in a client does; typing "STOP" pauses
 it and then presses the bar's Stop; typing "CRASH" pauses it and then quits, as a helper killed during a pause would;
-typing "ESCAPE" presses Escape and then hangs, as an action still under way would.
+typing "ESCAPE" presses Escape and then hangs, as an action still under way would. A look at pixel 13,13 is followed by
+Pause and then Stop on the bar, as pressed while the approval for that spot waits.
 """
 import json
 import os
@@ -87,6 +88,9 @@ def answer(op, request):
                 element["preview"] = JPEG
             return element
         if "x" in request:
+            if request["x"] == 13:
+                threading.Timer(0.3, lambda: send({"event": "pause"})).start()
+                threading.Timer(0.8, lambda: send({"event": "stop"})).start()
             return {"bundle": "com.apple.TextEdit", "app": "TextEdit", "role": "AXTextArea", "content": True, "point": {"x": request["x"], "y": request["y"]}}
         return dict(ELEMENTS[2], password=False)
     if op == "type" and request.get("text") == "PAUSE":

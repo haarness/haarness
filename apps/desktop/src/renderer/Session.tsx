@@ -2289,7 +2289,11 @@ export function Session() {
     return (
       !!turn &&
       pausedHere(state.computerPaused, state.selected, state.threads) &&
-      waitsOnScreen(state.items, turn.id)
+      waitsOnScreen(
+        state.items,
+        turn.id,
+        state.permissions.map((request) => request.callId),
+      )
     );
   });
   const [resuming, setResuming] = createSignal(false);

@@ -194,6 +194,9 @@ test("a pause holds the line only while the turn waits on the screen", () => {
   assert.ok(!waitsOnScreen([], "t1"));
   // Another turn's step says nothing about this one.
   assert.ok(!waitsOnScreen([call("a", "mac_type", "t0")], "t1"));
+  // A step whose approval is still open waits for the person's answer, not for the screen.
+  assert.ok(!waitsOnScreen([call("a", "mac_click")], "t1", ["a"]));
+  assert.ok(waitsOnScreen([call("a", "mac_click")], "t1", [null, "z"]));
 });
 
 test("a whole-screen look says what goes to the model and shows no spot", () => {

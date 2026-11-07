@@ -81,11 +81,12 @@ struct Pause {
     chat: Option<ThreadId>,
 }
 
-/// The chat whose turn uses the screen now, what stops that turn, and when it last used the screen.
+/// The chat whose turn uses the screen now, what stops that turn, and when it last used the screen (`None` while it has
+/// only claimed it: an action waiting for its approval, say).
 struct Active {
     thread: ThreadId,
     stop: CancellationToken,
-    used: std::time::Instant,
+    used: Option<std::time::Instant>,
 }
 
 pub struct Computer {
@@ -241,7 +242,7 @@ impl Computer {
         let mut slot = self.active.lock();
         if within.is_some_and(|limit| {
             slot.as_ref()
-                .is_some_and(|active| active.used.elapsed() > limit)
+                .is_some_and(|active| active.used.is_none_or(|used| used.elapsed() > limit))
         }) {
             return false;
         }
@@ -321,8 +322,9 @@ impl Computer {
             *active = None;
         }
         drop(active);
+        let paused_here = self.paused_chat() == Some(thread);
         // The turn is over, so the bar comes down and a pause ends with it, even if its lease was lost meanwhile.
-        if self.lease.release(&thread.to_string()) || held {
+        if self.lease.release(&thread.to_string()) || held || paused_here {
             self.helper.release();
             self.resume();
         }
@@ -371,14 +373,30 @@ impl Computer {
         *self.active.lock() = Some(Active {
             thread,
             stop,
-            used: std::time::Instant::now(),
+            used: Some(std::time::Instant::now()),
         });
+    }
+
+    /// Remembers which turn claims the screen, before it uses it (an action whose approval is still open), so the bar's
+    /// Stop can cancel it and a pause names its chat. Escape waits for the screen's use.
+    pub(crate) fn claim(&self, thread: ThreadId, stop: CancellationToken) {
+        let mut slot = self.active.lock();
+        match slot.as_mut() {
+            Some(active) if active.thread == thread => active.stop = stop,
+            _ => {
+                *slot = Some(Active {
+                    thread,
+                    stop,
+                    used: None,
+                });
+            }
+        }
     }
 
     /// Notes that the turn holding the screen still uses it: an action under way, or one that just ended.
     pub(crate) fn touch(&self) {
         if let Some(active) = self.active.lock().as_mut() {
-            active.used = std::time::Instant::now();
+            active.used = Some(std::time::Instant::now());
         }
     }
 
@@ -389,15 +407,24 @@ impl Computer {
 
     /// Blocks while the agent is paused, until the person resumes or stops it; cancelling ends the wait early. Returns
     /// true when it had to wait, since the screen may look different afterwards. Meanwhile the paused chat keeps the
-    /// screen: a pause hands it to the person, not to another chat.
+    /// screen: a pause hands it to the person, not to another chat. The waiting chat (`thread`, the conversation's
+    /// root) is the paused one, also when the person paused before it had used the screen.
     pub(crate) async fn wait_while_paused(
         &self,
+        thread: ThreadId,
         cancel: &CancellationToken,
     ) -> Result<bool, HelperError> {
         let mut paused = self.paused.subscribe();
         if !paused.borrow_and_update().on {
             return Ok(false);
         }
+        self.paused.send_if_modified(|pause| {
+            let named = pause.on && pause.chat != Some(thread);
+            if named {
+                pause.chat = Some(thread);
+            }
+            named
+        });
         let mut renewal = tokio::time::interval(PAUSED_RENEWAL);
         loop {
             tokio::select! {
@@ -426,6 +453,7 @@ impl Computer {
     /// while the strip still holds it, and the chat would never show the pause.
     pub(crate) async fn wait_after_refusal(
         &self,
+        thread: ThreadId,
         cancel: &CancellationToken,
     ) -> Result<bool, HelperError> {
         let mut paused = self.paused.subscribe();
@@ -442,7 +470,7 @@ impl Computer {
                 _ = tokio::time::timeout(PAUSE_HEARD, heard) => {}
             }
         }
-        self.wait_while_paused(cancel).await
+        self.wait_while_paused(thread, cancel).await
     }
 
     /// What clients show in Settings → Computer use.
@@ -935,6 +963,43 @@ mod tests {
         let answer = computer.manage(&json!({"action": "resume"})).await.unwrap();
         assert_eq!(answer["paused"], false);
         assert!(!computer.is_paused());
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_waits_for_a_pause_names_its_chat_and_its_turn_s_end_ends_the_pause() {
+        let root = tempfile::tempdir().unwrap();
+        let computer = computer(root.path());
+        let events = EventBus::new(16);
+        computer.watch(&events);
+        let mut heard = events.subscribe(None).receiver;
+        // Paused before any turn held the screen (an approval open past the lease, say): no chat to tell yet.
+        computer.pause();
+        assert!(computer.is_paused());
+        assert_eq!(computer.paused_chat(), None);
+        let chat = ThreadId::new();
+        let cancel = CancellationToken::new();
+        let waiter = {
+            let computer = computer.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move { computer.wait_while_paused(chat, &cancel).await })
+        };
+        let told = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = heard.recv().await.unwrap();
+                if event.event_type == UPDATED_EVENT {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("the waiting chat is told");
+        assert_eq!(told.thread_id, Some(chat));
+        assert_eq!(told.payload, json!({"paused": true}));
+        assert_eq!(computer.paused_chat(), Some(chat));
+        // Its turn ends with no lease and no screen use on record: the pause ends with it.
+        computer.turn_ended(chat);
+        assert!(!computer.is_paused());
+        assert!(waiter.await.unwrap().unwrap(), "the waiter went on");
     }
 
     #[tokio::test]

@@ -1019,6 +1019,40 @@ async fn switching_off_frees_an_agent_paused_without_a_helper() {
 }
 
 #[tokio::test]
+async fn stop_on_a_strip_paused_while_an_approval_waits_ends_the_turn() {
+    let lab = Lab::new(Lab::on());
+    let thread = lab.thread().await;
+    let mut events = lab.events.subscribe(None).receiver;
+    let turn = lab
+        .start(
+            thread,
+            vec![
+                vec![call("click", "mac_click", json!({"x": 13, "y": 13}))],
+                vec![call("never", "mac_snapshot", json!({}))],
+            ],
+        )
+        .await;
+    // The card is open when the person pauses: the chat hears it at once, then Stop ends the turn.
+    lab.permission().await;
+    let paused = next_update(&mut events).await;
+    assert_eq!(paused.thread_id, Some(thread));
+    assert_eq!(paused.payload, json!({"paused": true}));
+    assert_eq!(
+        next_update(&mut events).await.payload,
+        json!({"paused": false})
+    );
+    lab.finish(thread).await;
+    let turn = lab.runtime.turn(turn.id).await.unwrap();
+    assert_eq!(turn.status, TurnStatus::Interrupted, "{:?}", turn.error);
+    assert!(!lab.computer.is_paused());
+    let ops = lab.ops();
+    assert!(
+        !ops.contains(&"click".to_owned()) && !ops.contains(&"snapshot".to_owned()),
+        "{ops:?}"
+    );
+}
+
+#[tokio::test]
 async fn stop_on_a_paused_strip_still_ends_the_turn_and_the_paused_line_goes() {
     let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));
     let thread = lab.thread().await;
