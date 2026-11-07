@@ -218,10 +218,18 @@ export function createMarkdownDOM(
         host.append(block.start, block.end);
       }
       if (block.html === html) return;
+      // The app finds its own parts by tag, attribute and role (an open
+      // dialog, its message box, a data attribute, a tab stop), so a reply
+      // writes none of them: such an element gives way to its text, and
+      // such an attribute goes. The app writes its own data attributes after
+      // this, and task boxes replace every input (`taskBoxes`).
       const fragment = purifier.sanitize(html, {
         RETURN_DOM_FRAGMENT: true,
-        FORBID_TAGS: ["style", "form", "button", "iframe"],
-        FORBID_ATTR: ["style"],
+        FORBID_TAGS: ["style", "form", "button", "iframe", "dialog", "textarea", "select"],
+        FORBID_ATTR: [
+          "style", "role", "aria-modal", "popover", "popovertarget", "popovertargetaction", "inert", "autofocus", "tabindex",
+        ],
+        ALLOW_DATA_ATTR: false,
       });
       taskBoxes(fragment);
       spellCode(fragment);

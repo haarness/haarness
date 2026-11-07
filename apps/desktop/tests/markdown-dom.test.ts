@@ -125,7 +125,7 @@ test("an SVG attribute's url() may point only into the reply", async () => {
 // `<div class="modal-backdrop">` drew the app's blurred overlay over the chat
 // while the reply streamed, so Stop could not be clicked, and a README with it
 // did the same in the Files panel's preview.
-test("a reply keeps no class but the language Markdown writes on a code block's code", async () => {
+test("a reply keeps no class but the language Markdown writes on a code block's code", () => {
   for (const [element, value] of [
     ["DIV", "modal-backdrop"],
     ["DIV", "dialog-shell palette"],
@@ -146,17 +146,4 @@ test("a reply keeps no class but the language Markdown writes on a code block's 
   assert.equal(replyAttribute("CLASS", "language-py overlay", "code"), "language-py");
   // Other attributes stay as written.
   assert.equal(replyAttribute("title", "modal-backdrop", "DIV"), "modal-backdrop");
-
-  // The sanitizer asks it about every attribute, naming the element.
-  const markdown = await readFile(new URL("../src/renderer/markdown-dom.ts", import.meta.url), "utf8");
-  assert.match(markdown, /replyAttribute\(data\.attrName, data\.attrValue, node\.nodeName\)/);
-});
-
-// The second guard: what a reply's markup still places by itself (an open
-// <dialog>) is placed and stacked inside its own Markdown box.
-test("Markdown places and stacks what it draws inside its own box", async () => {
-  const css = await readFile(new URL("../src/renderer/chat.css", import.meta.url), "utf8");
-  const rule = /\n\.markdown \{([^}]*)\}/.exec(css)?.[1] ?? "";
-  assert.match(rule, /\bposition: relative;/);
-  assert.match(rule, /\bisolation: isolate;/);
 });

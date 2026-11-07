@@ -13786,12 +13786,15 @@ tools=false
   }
 });
 
-test("raw HTML in a reply stays inside it, so Stop, the message box and the sidebar take clicks as it streams and after, and a code block shows its control characters yet copies them as written", async () => {
+test("raw HTML in a reply stays inside it and passes for none of the app's parts, and a code block shows its control characters yet copies them as written", async () => {
   test.setTimeout(240_000);
   let output: import("node:http").ServerResponse | undefined;
-  // Markup wearing the app's own classes, among them the blurred overlay
-  // behind its dialogs, and an open <dialog>, which the browser places itself.
-  const hostile = '<div class="modal-backdrop"></div>\n\n<dialog open>An open dialog</dialog>\n\n';
+  // Markup wearing the app's own classes (the blurred overlay behind its
+  // dialogs), roles and data attributes, an open <dialog>, which the app
+  // looks for to know a dialog is up, and a text box named as its message box.
+  const hostile =
+    '<div class="modal-backdrop" role="dialog" aria-modal="true" tabindex="0" data-index="0"></div>\n\n' +
+    "<dialog open>An open dialog</dialog>\n\n<textarea data-composer-input>A forged box</textarea>\n\n";
   // An escape, a direction override and its end, and an emoji sequence.
   const code = "printf '\u001b[31mred\u001b[0m'\necho \u202eevil\u202c ok 👩\u200d👩\u200d👧\n";
   // A chip the reply writes itself is its text, never one of the app's.
@@ -13833,6 +13836,13 @@ test("raw HTML in a reply stays inside it, so Stop, the message box and the side
   const stop = page.getByRole("button", { name: "Stop response", exact: true });
   const newChat = page.getByRole("button", { name: "New chat", exact: true });
   const clipboard = () => app.evaluate(({ clipboard }) => clipboard.readText());
+  /** The markup the reply wrote keeps none of what the app looks for: its
+   * text is there, its elements and attributes are not. */
+  const plain = async (markdown: Locator) => {
+    await expect(markdown).toContainText("An open dialog");
+    await expect(markdown).toContainText("A forged box");
+    await expect(markdown.locator("dialog, textarea, [class]:not(.spelled-code, .code-copy, code[class^='language-']), [role], [tabindex], [data-index], [data-composer-input], [aria-modal]")).toHaveCount(0);
+  };
   const codes = ["\\u{1B}", "\\u{1B}", "\\u{202E}", "\\u{202C}"];
   const shots = process.env.HAARNESS_SCREENSHOTS ?? test.info().outputPath("");
   try {
@@ -13853,29 +13863,25 @@ test("raw HTML in a reply stays inside it, so Stop, the message box and the side
     const live = page.getByTestId("streaming-reply");
     await expect(live).toContainText("STILL_STREAMING");
     for (const target of [stop, composer, newChat]) expect(await reachable(target)).toBe(true);
-    await expect(live.locator(".markdown div")).toHaveCount(1);
-    await expect(live.locator(".markdown div")).not.toHaveAttribute("class");
-    await expect(live.locator("dialog[open]")).toHaveText("An open dialog");
+    await plain(live.locator(".markdown"));
+    // What markup still places by itself is placed and stacked in its box.
     expect(await live.locator(".markdown").evaluate((element) => {
       const style = getComputedStyle(element);
       return [style.position, style.isolation];
     })).toEqual(["relative", "isolate"]);
-    // The dialog is placed in the reply's own box.
-    expect(await live.locator(".markdown").evaluate((element) => element.querySelector("dialog")?.offsetParent === element)).toBe(true);
     // Its code block shows the escape and the override as codes on chips, and
     // the emoji as it is; the chip the reply wrote itself is plain text.
     await expect(live.locator("pre .spelled-code")).toHaveText(codes);
     await expect(live.locator("pre code").first()).toContainText("ok 👩\u200d👩\u200d👧");
-    await expect(live.locator("pre").last().locator("span")).not.toHaveAttribute("class");
-    await expect(live.locator("pre").last()).toHaveText("x\\u{1B}y");
+    await expect(live.locator("pre", { hasText: "x\\u{1B}y" }).locator("span")).not.toHaveAttribute("class");
+    await expect(live.locator("pre", { hasText: "x\\u{1B}y" })).toHaveText("x\\u{1B}y");
     await expect(live.getByRole("button", { name: "Copy code" })).toHaveCount(0);
 
     output!.end(finish);
     await expect(live).toHaveCount(0);
     const saved = page.locator(".transcript article.assistant").last();
     await expect(saved).toContainText("STILL_STREAMING");
-    await expect(saved.locator(".markdown div")).not.toHaveAttribute("class");
-    await expect(saved.locator("dialog[open]")).toHaveText("An open dialog");
+    await plain(saved.locator(".markdown"));
     for (const target of [composer, newChat]) expect(await reachable(target)).toBe(true);
     await expect(saved.locator("pre .spelled-code")).toHaveText(codes);
     // Copy copies each block as the reply wrote it.
@@ -13903,14 +13909,33 @@ test("raw HTML in a reply stays inside it, so Stop, the message box and the side
     await stop.click();
     await expect(stop).toHaveCount(0);
 
+    // With that reply on screen, the app still knows no dialog is up, and
+    // the keyboard goes to its own message box: a click on the chat's row
+    // gives the message box the keyboard, the command palette opens and Esc
+    // closes it, and Esc closes Settings.
+    await page.locator(".sessions").getByRole("button", { name: "Markup fixture", exact: true }).click();
+    await expect(composer).toBeFocused();
+    // What the command palette's key does: the menu tells the window.
+    await app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", { kind: "menu", data: "palette" }),
+    );
+    const palette = page.getByRole("dialog", { name: "Universal search" });
+    await expect(palette).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(palette).toHaveCount(0);
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+    await expect(settings).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(settings).toHaveCount(0);
+
     // A README previewed in the Files panel.
     await openProjectPanel("Files");
     await page.locator(".file-tree").getByRole("button", { name: "README.md", exact: true }).click();
     await page.locator(".file-actions").getByRole("button", { name: "Preview", exact: true }).click();
     const readme = page.locator(".file-preview .document-preview .markdown");
     await expect(readme).toContainText("README_END");
-    await expect(readme.locator("div")).not.toHaveAttribute("class");
-    await expect(readme.locator("dialog[open]")).toHaveText("An open dialog");
+    await plain(readme);
     for (const target of [composer, newChat, page.locator(".file-actions").getByRole("button", { name: "Code", exact: true })])
       expect(await reachable(target)).toBe(true);
     await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
@@ -13920,8 +13945,7 @@ test("raw HTML in a reply stays inside it, so Stop, the message box and the side
     await composer.press("Enter");
     const side = page.locator(".side-chat-panel");
     await expect(side).toContainText("SIDE_DONE");
-    await expect(side.locator(".markdown div")).not.toHaveAttribute("class");
-    await expect(side.locator("dialog[open]")).toHaveText("An open dialog");
+    for (const markdown of await side.locator(".side-chat-answer .markdown").all()) await plain(markdown);
     await expect(side.locator("pre .spelled-code")).toHaveText(codes);
     for (const target of [composer, newChat, side.getByRole("textbox", { name: "Ask a side question", exact: true })])
       expect(await reachable(target)).toBe(true);
