@@ -3103,7 +3103,7 @@
   "Operating any Mac, account or session that isn't yours to use.": "使う資格のない Mac、アカウント、セッションを操作すること。",
   "Whatever is visible while an agent works, notifications and unrelated windows too, may be sent to your chat's AI model and is kept in the chat history.": "エージェントの作業中に見えるもの（通知や関係のないウインドウも含む）はすべて、チャットの AI モデルに送られる可能性があり、チャットの履歴に保存されます。",
   "App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off.": "アプリの内容は信頼できません。ウェブページ、ファイル、メッセージにエージェント向けの指示が仕込まれていることがあります。様子を見守り、おかしいと感じたら「停止」を押してください。",
-  "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "エージェントは、許可していないアプリで操作する前に確認します。アプリを許可すると確認なしで操作しますが、その行為の責任は引き続きあなたにあります。",
+  "An agent asks before acting in an app you haven't allowed, except in a chat set to Yolo, which approves everything. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "許可していないアプリで操作する前に、エージェントは確認します。ただし、すべてを承認する Yolo に設定したチャットは例外です。アプリを許可すると、そのアプリでは確認せずに操作し、その結果の責任は引き続きあなたにあります。",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS はアクセシビリティと画面収録の許可を、Haarness が動作するアプリ（Haarness 自体またはターミナル）に与えます。そのアプリから起動したすべてのプログラムがその許可を引き継ぎます。",
   "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "コンピュータ操作は、設定 → コンピュータ操作 でいつでもオフにできます。haarness mac off を実行しても構いません。",
   "Always allow {app}": "{app} を常に許可",

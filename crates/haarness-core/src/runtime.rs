@@ -5722,6 +5722,16 @@ impl AgentRuntime {
                 .collect();
             let explicit = !explicit_operations.is_empty();
             let operation = plan.describe(asked);
+            let yolo_answers = yolo_may_answer(Some(tool.as_ref()), &arguments, &plan, &protected);
+            // As for model calls, a `--yolo` run approves computer use once.
+            if yolo_answers && stance.auto_approve {
+                tracing::info!(
+                    thread = %thread_id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (unattended run)"
+                );
+                continue;
+            }
             // Same rule as model calls: a scheduled run's workflow cannot
             // get a person's answer, so it fails now.
             if (explicit || forced) && stance.unattended {
@@ -5813,10 +5823,14 @@ impl AgentRuntime {
                 script_read = true;
             }
             let approval_gate = self.approval_modes.gate.lock().await;
-            let mode = if forced || explicit {
+            let chat_mode = self.approval_modes.mode(thread_id).await;
+            // What only a person answers stays with them, apart from computer
+            // use in a chat in Yolo.
+            let mode = if (forced || explicit) && !(yolo_answers && chat_mode == ApprovalMode::Yolo)
+            {
                 ApprovalMode::Review
             } else {
-                self.approval_modes.mode(thread_id).await
+                chat_mode
             };
             let auto = mode == ApprovalMode::Auto;
             if auto && (!review_on || !agent_work) {
@@ -11858,12 +11872,13 @@ impl RunnerTask {
                 .patterns
                 .iter()
                 .any(|pattern| personal.contains(&plan.operation(pattern)));
+            let yolo_answers = yolo_may_answer(tool.as_deref(), &arguments, &plan, &protected);
             let resolution = self
                 .ask_permission(
                     agent,
                     &plan,
                     &arguments,
-                    forced,
+                    (forced, yolo_answers),
                     explicit,
                     reviewable,
                     (name, call_id),
@@ -12138,20 +12153,41 @@ impl RunnerTask {
     /// `reviewable`: Auto's reviewer may answer it (no asked pattern is one
     /// a person configured an ask for). `tool`: the tool and call that raise
     /// it.
+    /// `asks`: whether the request asks every time, and whether Yolo answers
+    /// it all the same (see [`crate::Tool::yolo_answers`]).
     #[allow(clippy::too_many_arguments)]
     async fn ask_permission(
         &self,
         agent: &str,
         plan: &AskPlan,
         detail: &serde_json::Value,
-        forced: bool,
+        asks: (bool, bool),
         explicit_operations: Vec<String>,
         reviewable: bool,
         tool: (&str, &str),
     ) -> CoreResult<PermissionResolution> {
+        let (forced, yolo_answers) = asks;
         let operation = plan.describe(&plan.patterns);
         let always_rules = plan.always_rules();
         let explicit = !explicit_operations.is_empty();
+        // Yolo is yes to everything: a `--yolo` turn or a chat in Yolo
+        // approves computer use once too, also where it asks every time or
+        // nobody watches. Read under the gate, as below.
+        if yolo_answers {
+            let automatic = self.config.auto_approve || self.request.auto_approve;
+            let gate = self.approval_modes.gate.lock().await;
+            let yolo =
+                automatic || self.approval_modes.mode(self.thread.id).await == ApprovalMode::Yolo;
+            drop(gate);
+            if yolo {
+                tracing::info!(
+                    thread = %self.thread.id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (Yolo)"
+                );
+                return Ok(PermissionResolution::allowed());
+            }
+        }
         // A run nobody watches (a schedule) cannot get a person's answer:
         // fail now instead of waiting forever. That includes the requests
         // that ask every time, such as Cloud actions that spend money.
@@ -15478,6 +15514,25 @@ fn inherited_tool_refusal(tool: &str, rule: &str) -> String {
     format!(
         "tool {tool} is denied by the rule '{rule}' of the chat or agent that started this one, which no rule here can lift. Do not retry it; do this part another way or report it to that agent."
     )
+}
+
+/// Whether Yolo answers `plan` although it asks a person or asks every
+/// time: each of its operations is one the tool lets Yolo answer, and none
+/// touches a protected file.
+fn yolo_may_answer(
+    tool: Option<&dyn crate::Tool>,
+    arguments: &serde_json::Value,
+    plan: &AskPlan,
+    protected: &HashSet<String>,
+) -> bool {
+    let Some(tool) = tool else {
+        return false;
+    };
+    !plan.patterns.is_empty()
+        && plan.patterns.iter().all(|pattern| {
+            let operation = plan.operation(pattern);
+            !protected.contains(&operation) && tool.yolo_answers(arguments, &operation)
+        })
 }
 
 /// Why a scheduled run's Chrome site or computer use gate failed instead of waiting.
