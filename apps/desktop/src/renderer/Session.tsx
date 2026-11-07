@@ -18,7 +18,8 @@ import {
   createConversationControls,
   historyCommands,
 } from "./conversation-controls";
-import { retainedItems } from "./conversation-history";
+import { retainedItems, unrestoredFiles } from "./conversation-history";
+import { UnrestoredFiles } from "./UnrestoredFiles";
 import { PromptContextControls, pasteLabel } from "./PromptContext";
 import {
   carriedResource,
@@ -160,6 +161,8 @@ export function Session() {
   // Agents' own threads are archived when their work ends and never list in
   // the sidebar, so only a conversation the reader archived says so.
   const archived = () => !!thread()?.archived && !thread()?.isSubagent;
+  /** What a pending undo left as it is, said under its notice. */
+  const unrestored = () => unrestoredFiles(thread());
   /** Bring an archived chat back to the sidebar. */
   async function restore(
     connection = state.connection?.id,
@@ -2430,7 +2433,11 @@ export function Session() {
         />
       </Show>
       <Show when={thread()?.revert && editable()}>
-        <div class="conversation-history-notice" role="status">
+        <div
+          class="conversation-history-notice"
+          classList={{ "with-unrestored": unrestored().count > 0 }}
+          role="status"
+        >
           <span>
             {t("Turn undone. Sending a new message replaces the undone history.")}
           </span>
@@ -2440,6 +2447,9 @@ export function Session() {
           >
             {t("Redo turn")}
           </button>
+          <Show when={unrestored().count > 0}>
+            <UnrestoredFiles {...unrestored()} />
+          </Show>
         </div>
       </Show>
       <Show when={controls.busy()}>

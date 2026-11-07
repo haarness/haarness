@@ -1735,7 +1735,8 @@ async fn cli_main() -> Result<()> {
             .await
         }
         Some(Command::Run(args)) => {
-            run_command(
+            // Boxed: the chats it reads and waits on make its future large.
+            Box::pin(run_command(
                 &paths,
                 workspace,
                 project_config,
@@ -1743,7 +1744,7 @@ async fn cli_main() -> Result<()> {
                 cli.thread,
                 cli.continue_last,
                 args,
-            )
+            ))
             .await
         }
         Some(Command::Auth { command }) => {

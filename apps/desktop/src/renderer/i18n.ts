@@ -1,6 +1,6 @@
 import { createSignal, type JSX } from "solid-js";
 import { displayLanguage, translate } from "../localization";
-import { errorText, errorTextLine } from "./error-text";
+import { errorText, errorTextLine, isolatedValues } from "./error-text";
 export { languages, parseLanguage } from "../localization";
 const [language, setLanguage] = createSignal("en");
 export { language };
@@ -23,7 +23,7 @@ export function t(key: string, values: Record<string, string | number> = {}): st
 export function errorLine(error: unknown) {
   const text = errorText(error);
   const said = errorTextLine(text);
-  return text.known ? t(said) : said;
+  return text.known ? t(said, isolatedValues(text.values)) : said;
 }
 
 /**

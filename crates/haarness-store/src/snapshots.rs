@@ -25,8 +25,11 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use haarness_core::{CoreError, CoreResult, SnapshotInfo, SnapshotStore};
-use haarness_protocol::{FileDiff, FileDiffStatus, ThreadId};
+use haarness_core::{
+    ChangedFile, CoreError, CoreResult, DeltaRestore, Refusal, SnapshotInfo, SnapshotStore,
+    UndoStep,
+};
+use haarness_protocol::{FileDiff, FileDiffStatus, ThreadId, UnrestoredFile, UnrestoredReason};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -53,6 +56,24 @@ const BATCH: BatchLimits = BatchLimits {
 /// captures are never taken (see `CAPTURING`).
 const ABANDONED_AFTER_MS: i64 = 24 * 60 * 60 * 1000;
 const BLOB_STORED: &str = "SELECT EXISTS(SELECT 1 FROM snapshot_blobs WHERE hash=?1)";
+/// The largest file an undo keeps a copy of before it changes it (see
+/// [`Copies`]): a larger one stays as it is.
+const MAX_COPY_BYTES: u64 = 256 * 1024 * 1024;
+/// The most the copies of one database's pending undos hold together. Room
+/// is made by dropping the copies of undos that are confirmed or abandoned,
+/// the oldest first, and only then those of archived chats' pending undos,
+/// never those of an open chat's.
+const MAX_COPIES_BYTES: u64 = 1024 * 1024 * 1024;
+/// How long copies that no pending undo names are left when room is
+/// needed, in case another process sharing the database is still in the
+/// middle of that undo. Otherwise they are left as long as checkpoints are
+/// (see [`SqliteSnapshotStore::prune`]).
+const COPIES_GRACE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// What the disk keeps free beyond a new copy.
+const FREE_SPACE_MARGIN: u64 = 512 * 1024 * 1024;
+/// The file in a set of [`Copies`] naming the files its undo's steps left,
+/// each with what it held when it was left.
+const LEFT_RECORD: &str = "left.json";
 
 #[derive(Debug, Clone, Copy)]
 struct BatchLimits {
@@ -143,6 +164,11 @@ impl ManifestEntry {
     fn is_unreadable(&self) -> bool {
         self.kind == EntryKind::Omitted && self.hash == UNREADABLE
     }
+
+    /// A file over [`MAX_FILE_BYTES`]: its hash is kept, its content is not.
+    fn is_large(&self) -> bool {
+        self.kind == EntryKind::Omitted && !self.is_unreadable()
+    }
 }
 
 #[derive(Debug)]
@@ -205,12 +231,16 @@ fn walk_error_path(error: &ignore::Error) -> Option<&Path> {
 struct PreparedEntry {
     manifest: ManifestEntry,
     data: Vec<u8>,
+    /// A kept copy the content comes from instead of `data`: a file over
+    /// [`MAX_FILE_BYTES`], which no blob holds.
+    copy: Option<PathBuf>,
 }
 
 #[derive(Debug)]
 struct PreparedChange {
     path: String,
     desired: Option<ManifestEntry>,
+    copy: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -225,16 +255,19 @@ pub struct SqliteSnapshotStore {
     /// project; a folder in the chat home reads none
     /// ([`SqliteSnapshotFolders::open_in_chat_home`]).
     outer_ignores: bool,
+    /// The database's copies of large files for its pending undos.
+    copies: Copies,
 }
 
 impl SqliteSnapshotStore {
     pub fn open(database: impl AsRef<Path>, workspace: PathBuf) -> CoreResult<Self> {
         let workspace = snapshot_root(workspace)?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(open_connection(database)?)),
+            connection: Arc::new(Mutex::new(open_connection(database.as_ref())?)),
             workspace,
             warned: Arc::default(),
             outer_ignores: true,
+            copies: Copies::beside(database.as_ref()),
         })
     }
 
@@ -242,7 +275,11 @@ impl SqliteSnapshotStore {
     #[must_use]
     pub fn folders(&self) -> SqliteSnapshotFolders {
         // Already open, so no database path is needed to open it.
-        SqliteSnapshotFolders::with_connection(PathBuf::new(), Some(Arc::clone(&self.connection)))
+        SqliteSnapshotFolders::with_connection(
+            PathBuf::new(),
+            Some(Arc::clone(&self.connection)),
+            self.copies.clone(),
+        )
     }
 
     /// Walk the complete managed tree. `hidden(false)` means "do not filter
@@ -509,6 +546,359 @@ impl SqliteSnapshotStore {
         Ok(manifest)
     }
 
+    /// Restore the paths whose state differs between `expected_id` and
+    /// `desired_id` (see [`SnapshotStore::restore_delta`]); with `step`, as
+    /// that step of the pending undo backed up by its checkpoint, with copies
+    /// of large files (see [`SnapshotStore::restore_step`]).
+    fn restore_changes(
+        &self,
+        expected_id: &str,
+        desired_id: &str,
+        step: Option<(&str, UndoStep)>,
+    ) -> CoreResult<DeltaRestore> {
+        let expected = self.load_manifest(expected_id)?;
+        let desired = self.load_manifest(desired_id)?;
+        let paths: BTreeSet<&String> = expected.keys().chain(desired.keys()).collect();
+        let changed: Vec<String> = paths
+            .into_iter()
+            .filter(|path| expected.get(*path) != desired.get(*path))
+            .cloned()
+            .collect();
+        let _copying = step.and_then(|(backup, _)| self.copies.set(backup).map(Copying::start));
+        // The backup's entries, read only once a large file needs them.
+        let mut backup: Option<BTreeMap<String, ManifestEntry>> = None;
+        // The files earlier steps of this undo left, each as it was left,
+        // read only once a file is not as this step's start has it.
+        let mut left: Option<LeftRecord> = None;
+
+        let mut prepared = Vec::with_capacity(changed.len());
+        // The files this step leaves, each as it leaves it: as it found it,
+        // or, forward, as the backup has it.
+        let mut leaving = LeftRecord::new();
+        let mut settled = Vec::new();
+        // This is deliberately a separate complete preflight pass. If any
+        // path contains a later human edit, no earlier path is touched.
+        for path in &changed {
+            let target_path = safe_target(&self.workspace, path)?;
+            ensure_safe_ancestors(&self.workspace, path)?;
+            let (from, to) = (expected.get(path), desired.get(path));
+            // What was there when a snapshot could not read it is unknown:
+            // writing or deleting it could destroy work, so refuse.
+            if [from, to]
+                .into_iter()
+                .flatten()
+                .any(ManifestEntry::is_unreadable)
+            {
+                return Err(CoreError::Conflict(format!(
+                    "workspace path could not be read when a snapshot was taken: {path}"
+                )));
+            }
+            let actual = scan_live_entry(&target_path, path, &self.workspace)?;
+            let wanted = optional_entry_matches(to, actual.as_ref());
+            let large = [from, to]
+                .into_iter()
+                .flatten()
+                .any(ManifestEntry::is_large);
+            let mut expected_here = optional_entry_matches(from, actual.as_ref());
+            // A file an earlier step of this undo left as it was, or a step
+            // forward took to the backup's content, is as that step left
+            // it, not as this step's start has it. Only the steps' own
+            // record says which, and what each held: the first step's backup
+            // is the folder as it is, so a file matching it may well hold a
+            // person's (or another chat's) later edit, which is a conflict
+            // as it always was; and so is a file left that is no longer as
+            // it was left (rewritten, deleted, or put back by hand).
+            let mut left_earlier = false;
+            if !expected_here && let Some((backup_id, _)) = step {
+                left_earlier = self
+                    .copies
+                    .left(&mut left, backup_id)
+                    .get(path)
+                    .is_some_and(|left_as| {
+                        optional_entry_matches(left_as.as_ref(), actual.as_ref())
+                    });
+                expected_here = left_earlier;
+            }
+            if !expected_here {
+                // Forward, a large file already as desired needs nothing:
+                // its undo left it so.
+                let forward = step.is_none_or(|(_, kind)| kind != UndoStep::Undo);
+                if wanted && large && forward {
+                    settled.push(path.clone());
+                    continue;
+                }
+                return Err(CoreError::Conflict(format!(
+                    "workspace path changed since snapshot: {path}"
+                )));
+            }
+            if wanted {
+                settled.push(path.clone());
+                continue;
+            }
+            let last_redo = step
+                .is_some_and(|(backup_id, kind)| kind == UndoStep::Redo && desired_id == backup_id);
+            // Forward, a file an undo step left stays as it was left, named,
+            // until a later step finds it as that step wants it; the last
+            // redo takes it where it goes.
+            if left_earlier && !last_redo && step.is_some_and(|(_, kind)| kind != UndoStep::Undo) {
+                leaving.insert(path.clone(), actual);
+                continue;
+            }
+            let mut copy = None;
+            let mut target = to.cloned();
+            if large || left_earlier {
+                // No checkpoint holds the content of a file over the size
+                // limit: the one wanted comes from a kept copy, and the live
+                // one is kept before it goes, so a later step can bring it
+                // back.
+                let Some((backup_id, kind)) = step else {
+                    leaving.insert(path.clone(), actual);
+                    continue;
+                };
+                match self.content_for(backup_id, to) {
+                    Ok(found) => copy = found,
+                    // Back, the file stays as it is.
+                    Err(NoCopy) if kind == UndoStep::Undo => {
+                        leaving.insert(path.clone(), actual);
+                        continue;
+                    }
+                    Err(NoCopy) if last_redo => return Err(no_copy_for_redo(path)),
+                    // Forward (or putting a step back), the content this
+                    // step's checkpoint had existed only between two undone
+                    // turns: the file goes where the last redo takes it, as
+                    // the backup has it, and is named until then.
+                    Err(NoCopy) => {
+                        let at_backup = self.backup_entry(&mut backup, backup_id, path)?;
+                        if optional_entry_matches(at_backup.as_ref(), actual.as_ref()) {
+                            leaving.insert(path.clone(), actual);
+                            continue;
+                        }
+                        match self.content_for(backup_id, at_backup.as_ref()) {
+                            Ok(found) => {
+                                leaving.insert(path.clone(), at_backup.clone());
+                                (copy, target) = (found, at_backup);
+                            }
+                            // Nor does anything hold what the last redo
+                            // needs (its copy is gone): no redo can get
+                            // there, so this one says so now.
+                            Err(NoCopy) if kind == UndoStep::Redo => {
+                                return Err(no_copy_for_redo(path));
+                            }
+                            Err(NoCopy) => {
+                                leaving.insert(path.clone(), actual);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                if let Some(live) = actual
+                    .as_ref()
+                    .filter(|live| live.kind == EntryKind::Omitted)
+                {
+                    match self
+                        .copies
+                        .keep(&self.connection, backup_id, &target_path, live)
+                    {
+                        Ok(_) => {}
+                        Err(NotKept::Changed) => {
+                            return Err(CoreError::Conflict(format!(
+                                "workspace path changed since snapshot: {path}"
+                            )));
+                        }
+                        // What the last redo replaces is needed by no later
+                        // step: it goes without a copy.
+                        Err(NotKept::Full) if last_redo => {}
+                        Err(NotKept::Full) => {
+                            leaving.insert(path.clone(), actual);
+                            continue;
+                        }
+                    }
+                }
+            }
+            if let Some(entry) = target.as_ref().filter(|_| copy.is_none()) {
+                // Validate now and reload immediately before writing. This
+                // keeps restore memory bounded to one blob while retaining a
+                // fail-before-mutation validation pass.
+                let _ = self.load_blob(entry)?;
+            }
+            prepared.push(PreparedChange {
+                path: path.clone(),
+                desired: target,
+                copy,
+            });
+        }
+        // What this step leaves, and as what, is on record before anything
+        // changes, so the later steps of the undo, and putting this one
+        // back, meet it as left, not as a later edit.
+        if let Some((backup_id, _)) = step
+            && !leaving.is_empty()
+        {
+            let known = self.copies.left(&mut left, backup_id);
+            if leaving
+                .iter()
+                .any(|(path, left_as)| known.get(path) != Some(left_as))
+            {
+                let mut record = known.clone();
+                record.extend(
+                    leaving
+                        .iter()
+                        .map(|(path, left_as)| (path.clone(), left_as.clone())),
+                );
+                self.copies.note_left(backup_id, &record)?;
+                left = Some(record);
+            }
+        }
+
+        let mut touched = Vec::with_capacity(prepared.len());
+        // Delete delta-only paths first, then materialize desired entries. A
+        // replacement never removes anything outside this explicit path set.
+        // The journal makes the whole set one change: a path that fails part
+        // way (permissions, a locked file, a full disk) puts every earlier
+        // path back, so a retry meets the workspace its checks expect.
+        let mut journal = RestoreJournal::new(&self.workspace);
+        let mut failure = None;
+        let (removals, writes): (Vec<_>, Vec<_>) =
+            prepared.iter().partition(|change| change.desired.is_none());
+        for change in removals.into_iter().chain(writes) {
+            let result = match (&change.desired, &change.copy) {
+                (None, _) => journal.remove(&change.path),
+                (Some(entry), Some(copy)) => journal.write(&PreparedEntry {
+                    manifest: entry.clone(),
+                    data: Vec::new(),
+                    copy: Some(copy.clone()),
+                }),
+                (Some(entry), None) => self
+                    .prepare_entry(entry)
+                    .and_then(|desired| journal.write(&desired)),
+            };
+            if let Err(error) = result {
+                failure = Some((change.path.clone(), error));
+                break;
+            }
+            touched.push(change.path.clone());
+        }
+        journal.finish(failure)?;
+        // A file this step took where it wanted, or found there, is left no
+        // more and leaves the record. Should that fail, the step stands: the
+        // stale entry only takes a file put back exactly as it was left for
+        // one nobody touched, which loses nothing.
+        if let Some((backup_id, _)) = step {
+            let known = self.copies.left(&mut left, backup_id);
+            let done = touched
+                .iter()
+                .chain(&settled)
+                .filter(|path| known.contains_key(*path) && !leaving.contains_key(*path))
+                .collect::<BTreeSet<_>>();
+            if !done.is_empty() {
+                let mut record = known.clone();
+                record.retain(|path, _| !done.contains(path));
+                if let Err(error) = self.copies.note_left(backup_id, &record) {
+                    tracing::warn!(%error, "cannot update the record of the files an undo left");
+                }
+            }
+        }
+        Ok(DeltaRestore {
+            touched,
+            skipped: leaving.into_keys().collect(),
+            settled,
+        })
+    }
+
+    /// `path`'s entry in the backup checkpoint `backup_id`, its manifest
+    /// read once into `backup`.
+    fn backup_entry(
+        &self,
+        backup: &mut Option<BTreeMap<String, ManifestEntry>>,
+        backup_id: &str,
+        path: &str,
+    ) -> CoreResult<Option<ManifestEntry>> {
+        if backup.is_none() {
+            *backup = Some(self.load_manifest(backup_id)?);
+        }
+        Ok(backup.as_ref().and_then(|backup| backup.get(path)).cloned())
+    }
+
+    /// Where the content of `entry` comes from: `None` from its blob (or
+    /// nothing to write, for a removal), a kept copy of a large file, or
+    /// [`NoCopy`] when nothing holds it.
+    fn content_for(
+        &self,
+        backup_id: &str,
+        entry: Option<&ManifestEntry>,
+    ) -> Result<Option<PathBuf>, NoCopy> {
+        match entry {
+            Some(entry) if entry.is_large() => {
+                self.copies.find(backup_id, entry).map(Some).ok_or(NoCopy)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// See [`SnapshotStore::left_out`]: each file asked of the manifests by
+    /// its path, so neither is loaded whole.
+    fn left_out_sync(
+        &self,
+        snapshots: &[String],
+        changed: Vec<ChangedFile>,
+    ) -> CoreResult<Vec<UnrestoredFile>> {
+        let connection = self.connection.lock();
+        let mut held = connection
+            .prepare("SELECT EXISTS(SELECT 1 FROM snapshot_files WHERE snapshot_id=?1 AND path=?2)")
+            .map_err(storage)?;
+        let mut held_by_either = |relative: &str| -> CoreResult<bool> {
+            for snapshot in snapshots {
+                if held
+                    .query_row(params![snapshot, relative], |row| row.get(0))
+                    .map_err(storage)?
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        let mut left = Vec::new();
+        for file in changed {
+            let relative = |path: &Path| {
+                path.strip_prefix(&self.workspace)
+                    .ok()
+                    .and_then(|relative| encode_relative_path(relative).ok())
+                    .filter(|relative| !relative.is_empty())
+            };
+            let named = relative(&file.path);
+            if let Some(path) = &named {
+                if held_by_either(path)? {
+                    continue;
+                }
+                // A name the tool spelt in another letter case than the
+                // entry has, on a volume that does not tell them apart: the
+                // checkpoint names it as the folder does.
+                if let Some(on_disk) = entry_as_listed(&file.path)
+                    .filter(|on_disk| *on_disk != file.path)
+                    .and_then(|on_disk| relative(&on_disk))
+                    && held_by_either(&on_disk)?
+                {
+                    continue;
+                }
+            }
+            // Gone, and not there before its first change either: nothing
+            // to put back.
+            if file.created && fs::symlink_metadata(&file.path).is_err() {
+                continue;
+            }
+            left.push(match named {
+                Some(path) => UnrestoredFile {
+                    path,
+                    reason: UnrestoredReason::Ignored,
+                },
+                None => UnrestoredFile {
+                    path: file.path.display().to_string(),
+                    reason: UnrestoredReason::Outside,
+                },
+            });
+        }
+        Ok(left)
+    }
+
     fn load_blob(&self, entry: &ManifestEntry) -> CoreResult<Vec<u8>> {
         if entry.is_unreadable() {
             return Err(CoreError::Conflict(format!(
@@ -554,6 +944,7 @@ impl SqliteSnapshotStore {
         Ok(PreparedEntry {
             manifest: entry.clone(),
             data: self.load_blob(entry)?,
+            copy: None,
         })
     }
 
@@ -675,7 +1066,15 @@ impl SqliteSnapshotStore {
         retention: chrono::Duration,
         keep_per_thread: usize,
     ) -> CoreResult<PruneReport> {
-        prune(&self.connection, Some((retention, keep_per_thread)))
+        let report = prune(&self.connection, Some((retention, keep_per_thread)))?;
+        // Copies no chat names stay as long as checkpoints do.
+        self.copies.drop_unused(
+            &self.connection,
+            u64::MAX,
+            retention.to_std().unwrap_or_default(),
+            false,
+        );
+        Ok(report)
     }
 
     /// The retention pass that keeps every checkpoint: it removes only the
@@ -985,6 +1384,7 @@ struct FolderStores {
     stores: Mutex<BTreeMap<PathBuf, Arc<SqliteSnapshotStore>>>,
     /// See [`SqliteSnapshotStore::outer_ignores`].
     outer_ignores: bool,
+    copies: Copies,
 }
 
 impl SqliteSnapshotFolders {
@@ -992,7 +1392,11 @@ impl SqliteSnapshotFolders {
     /// database is opened when a chat's folder first is.
     #[must_use]
     pub fn open(database: impl AsRef<Path>) -> Self {
-        Self::with_connection(database.as_ref().to_path_buf(), None)
+        Self::with_connection(
+            database.as_ref().to_path_buf(),
+            None,
+            Copies::beside(database.as_ref()),
+        )
     }
 
     /// For the chat home, whose chats' folders stand alone: no ignore file
@@ -1007,17 +1411,23 @@ impl SqliteSnapshotFolders {
                 connection: Mutex::default(),
                 stores: Mutex::default(),
                 outer_ignores: false,
+                copies: Copies::beside(database.as_ref()),
             }),
         }
     }
 
-    fn with_connection(database: PathBuf, connection: Option<Arc<Mutex<Connection>>>) -> Self {
+    fn with_connection(
+        database: PathBuf,
+        connection: Option<Arc<Mutex<Connection>>>,
+        copies: Copies,
+    ) -> Self {
         Self {
             inner: Arc::new(FolderStores {
                 database,
                 connection: Mutex::new(connection),
                 stores: Mutex::default(),
                 outer_ignores: true,
+                copies,
             }),
         }
     }
@@ -1042,7 +1452,16 @@ impl SqliteSnapshotFolders {
     ) -> CoreResult<PruneReport> {
         let connection = self.inner.connection.lock().clone();
         match connection {
-            Some(connection) => prune(&connection, Some((retention, keep_per_thread))),
+            Some(connection) => {
+                let report = prune(&connection, Some((retention, keep_per_thread)))?;
+                self.inner.copies.drop_unused(
+                    &connection,
+                    u64::MAX,
+                    retention.to_std().unwrap_or_default(),
+                    false,
+                );
+                Ok(report)
+            }
             None => Ok(PruneReport::default()),
         }
     }
@@ -1069,6 +1488,7 @@ impl haarness_core::SnapshotFolders for SqliteSnapshotFolders {
             workspace: snapshot_root(folder.to_path_buf())?,
             warned: Arc::default(),
             outer_ignores: self.inner.outer_ignores,
+            copies: self.inner.copies.clone(),
         });
         self.inner
             .stores
@@ -1076,6 +1496,398 @@ impl haarness_core::SnapshotFolders for SqliteSnapshotFolders {
             .insert(folder.to_path_buf(), Arc::clone(&store));
         Ok(store)
     }
+}
+
+/// The sets of copies this process's undo steps are using: no pass drops
+/// one of those, however old it is.
+static COPYING: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+struct Copying(PathBuf);
+
+impl Copying {
+    fn start(set: PathBuf) -> Self {
+        COPYING.lock().insert(set.clone());
+        Self(set)
+    }
+}
+
+impl Drop for Copying {
+    fn drop(&mut self) {
+        COPYING.lock().remove(&self.0);
+    }
+}
+
+/// Copies of files over [`MAX_FILE_BYTES`], whose content no checkpoint
+/// holds, kept by an undo step before it changes them, so that a later step
+/// of the same undo (a redo, or putting back a step that could not be
+/// recorded) can bring them back. Beside the database in the data folder,
+/// one folder per pending undo, named by its backup checkpoint, holds each
+/// file by the SHA-256 of its content, and the record of the files its steps
+/// left and what each held then ([`LEFT_RECORD`]). A file over
+/// [`MAX_COPY_BYTES`] is not copied, and all of them together stay within
+/// [`MAX_COPIES_BYTES`].
+#[derive(Debug, Clone)]
+struct Copies {
+    root: PathBuf,
+    /// [`MAX_COPY_BYTES`], [`MAX_COPIES_BYTES`] and [`FREE_SPACE_MARGIN`],
+    /// other sizes in tests.
+    max_file: u64,
+    max_total: u64,
+    free_margin: u64,
+}
+
+/// No checkpoint or kept copy holds the content of a large file.
+struct NoCopy;
+
+/// The files the steps of one undo left, by path, each as it was left:
+/// its entry, or `None` when it was left absent.
+type LeftRecord = BTreeMap<String, Option<ManifestEntry>>;
+
+/// One file of a [`LEFT_RECORD`], as it is written.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LeftAs {
+    hash: String,
+    kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<u32>,
+    size: u64,
+}
+
+fn written_left_record(record: &LeftRecord) -> BTreeMap<&str, Option<LeftAs>> {
+    record
+        .iter()
+        .map(|(path, entry)| {
+            let left_as = entry.as_ref().map(|entry| LeftAs {
+                hash: entry.hash.clone(),
+                kind: entry.kind.database_name().to_owned(),
+                mode: entry.mode,
+                size: entry.size,
+            });
+            (path.as_str(), left_as)
+        })
+        .collect()
+}
+
+/// A [`LEFT_RECORD`] read back; none when any of it cannot be read, so no
+/// file counts as left.
+fn read_left_record(bytes: &[u8]) -> Option<LeftRecord> {
+    let written: BTreeMap<String, Option<LeftAs>> = serde_json::from_slice(bytes).ok()?;
+    written
+        .into_iter()
+        .map(|(path, left_as)| {
+            let entry = match left_as {
+                Some(left_as) => Some(ManifestEntry {
+                    path: path.clone(),
+                    hash: left_as.hash,
+                    kind: EntryKind::from_database(&left_as.kind).ok()?,
+                    mode: left_as.mode,
+                    size: left_as.size,
+                }),
+                None => None,
+            };
+            Some((path, entry))
+        })
+        .collect()
+}
+
+/// Why no copy of a file was kept.
+enum NotKept {
+    /// It is not what it was a moment ago: someone is changing it.
+    Changed,
+    /// It is over the bounds, or there is no room to copy it.
+    Full,
+}
+
+impl Copies {
+    fn beside(database: &Path) -> Self {
+        let name = database.file_name().map_or_else(
+            || "snapshots".into(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        Self {
+            root: database.with_file_name(format!("{name}.undo-copies")),
+            max_file: MAX_COPY_BYTES,
+            max_total: MAX_COPIES_BYTES,
+            free_margin: FREE_SPACE_MARGIN,
+        }
+    }
+
+    /// The folder of the undo backed up by checkpoint `backup`.
+    fn set(&self, backup: &str) -> Option<PathBuf> {
+        (!backup.is_empty()
+            && backup
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .then(|| self.root.join(backup))
+    }
+
+    /// The kept copy of `entry`'s content for the undo backed up by
+    /// `backup`, read back whole: a copy is never written unless it is what
+    /// it says.
+    fn find(&self, backup: &str, entry: &ManifestEntry) -> Option<PathBuf> {
+        let path = self.set(backup)?.join(&entry.hash);
+        let metadata = fs::metadata(&path).ok()?;
+        if !metadata.is_file() || metadata.len() != entry.size {
+            return None;
+        }
+        match hash_file(&path) {
+            Ok((hash, size)) if hash == entry.hash && size == entry.size => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Keep a copy of the live file `source`, as `entry` found it, for the
+    /// undo backed up by `backup`, flushed to disk with its folder before
+    /// the original changes, so a crash or a power loss right after never
+    /// leaves the file gone and its copy empty. Room is made as
+    /// [`MAX_COPIES_BYTES`] says; no copy is made on a disk without
+    /// [`FREE_SPACE_MARGIN`] to spare beyond the file.
+    fn keep(
+        &self,
+        connection: &Arc<Mutex<Connection>>,
+        backup: &str,
+        source: &Path,
+        entry: &ManifestEntry,
+    ) -> Result<PathBuf, NotKept> {
+        if let Some(found) = self.find(backup, entry) {
+            return Ok(found);
+        }
+        let set = self.set(backup).ok_or(NotKept::Full)?;
+        if entry.size > self.max_file {
+            return Err(NotKept::Full);
+        }
+        let needed = self.used().saturating_add(entry.size);
+        if needed > self.max_total {
+            // An archived chat's undo goes only when the undos that ended
+            // leave too little room.
+            let wanted = needed - self.max_total;
+            let freed = self.drop_unused(connection, wanted, COPIES_GRACE, false);
+            if freed < wanted {
+                self.drop_unused(connection, wanted - freed, COPIES_GRACE, true);
+            }
+            if self.used().saturating_add(entry.size) > self.max_total {
+                return Err(NotKept::Full);
+            }
+        }
+        fs::create_dir_all(&set).map_err(|_| NotKept::Full)?;
+        // A clone takes no room, but a copy to another volume does: either
+        // way the disk keeps a margin.
+        if fs2::available_space(&set)
+            .is_ok_and(|free| free < entry.size.saturating_add(self.free_margin))
+        {
+            return Err(NotKept::Full);
+        }
+        let target = set.join(&entry.hash);
+        let partial = set.join(format!(".{}.partial", uuid::Uuid::now_v7()));
+        let copied = fs::copy(source, &partial)
+            .and_then(|_| owner_writable(&partial))
+            .and_then(|()| OpenOptions::new().write(true).open(&partial)?.sync_all())
+            .map_err(|_| NotKept::Full)
+            .and_then(|()| match hash_file(&partial) {
+                Ok((hash, size)) if hash == entry.hash && size == entry.size => Ok(()),
+                _ => Err(NotKept::Changed),
+            })
+            .and_then(|()| fs::rename(&partial, &target).map_err(|_| NotKept::Full))
+            .and_then(|()| sync_folder(&set).map_err(|_| NotKept::Full))
+            .and_then(|()| sync_folder(&self.root).map_err(|_| NotKept::Full));
+        if let Err(not_kept) = copied {
+            let _ = fs::remove_file(&partial);
+            return Err(not_kept);
+        }
+        Ok(target)
+    }
+
+    /// The files the steps of the undo backed up by `backup` left as they
+    /// were, or took forward to the backup's content, each as it was left,
+    /// read once into `left`. None for an undo whose first step is still to
+    /// come, or whose record cannot be read.
+    fn left<'a>(&self, left: &'a mut Option<LeftRecord>, backup: &str) -> &'a LeftRecord {
+        left.get_or_insert_with(|| {
+            self.set(backup)
+                .and_then(|set| fs::read(set.join(LEFT_RECORD)).ok())
+                .and_then(|bytes| read_left_record(&bytes))
+                .unwrap_or_default()
+        })
+    }
+
+    /// Make `record` [`Self::left`]'s record for the undo backed up by
+    /// `backup`, flushed to disk with its folder.
+    fn note_left(&self, backup: &str, record: &LeftRecord) -> CoreResult<()> {
+        let Some(set) = self.set(backup) else {
+            return Ok(());
+        };
+        let text = serde_json::to_vec(&written_left_record(record)).map_err(storage)?;
+        fs::create_dir_all(&set).map_err(io_error)?;
+        let partial = set.join(format!(".{}.partial", uuid::Uuid::now_v7()));
+        let written = File::create(&partial)
+            .and_then(|mut file| {
+                file.write_all(&text)?;
+                file.sync_all()
+            })
+            .and_then(|()| fs::rename(&partial, set.join(LEFT_RECORD)))
+            .and_then(|()| sync_folder(&set))
+            .and_then(|()| sync_folder(&self.root));
+        if let Err(error) = written {
+            let _ = fs::remove_file(&partial);
+            return Err(CoreError::Storage(format!(
+                "cannot record the files an undo left: {error}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The bytes all the sets hold.
+    fn used(&self) -> u64 {
+        fs::read_dir(&self.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|set| folder_bytes(&set.path()))
+            .sum()
+    }
+
+    /// Drop the sets of copies no pending undo names, the oldest first, until
+    /// `wanted` bytes are free; `u64::MAX` drops every one. A set this
+    /// process is using, or one written within `grace`, stays: the first
+    /// step of an undo keeps its copies before the chat names the undo, so a
+    /// crash in between leaves a set no chat names. With `archived_ended`,
+    /// the pending undo of an archived chat counts as ended too.
+    fn drop_unused(
+        &self,
+        connection: &Arc<Mutex<Connection>>,
+        wanted: u64,
+        grace: std::time::Duration,
+        archived_ended: bool,
+    ) -> u64 {
+        let mut sets = fs::read_dir(&self.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|set| {
+                let modified = set.metadata().ok()?.modified().ok()?;
+                Some((
+                    modified,
+                    set.path(),
+                    set.file_name().to_string_lossy().into_owned(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        sets.sort();
+        let mut freed = 0_u64;
+        for (modified, set, backup) in sets {
+            if freed >= wanted {
+                break;
+            }
+            // A time in the future is a clock that moved: keep it.
+            let recent = modified.elapsed().map_or(true, |age| age < grace);
+            if recent || COPYING.lock().contains(&set) {
+                continue;
+            }
+            let query = if archived_ended {
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE revert_snapshot=?1 AND archived=0)"
+            } else {
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE revert_snapshot=?1)"
+            };
+            let pending: bool = connection
+                .lock()
+                .query_row(query, [&backup], |row| row.get(0))
+                .unwrap_or(true);
+            if pending {
+                continue;
+            }
+            let bytes = folder_bytes(&set);
+            match fs::remove_dir_all(&set) {
+                Ok(()) => freed = freed.saturating_add(bytes),
+                Err(error) => {
+                    tracing::warn!(path = %set.display(), %error, "cannot drop undo copies");
+                }
+            }
+        }
+        freed
+    }
+
+    /// Drop the copies of the undo backed up by `backup`: it is confirmed or
+    /// fully redone.
+    fn release(&self, backup: &str) {
+        if let Some(set) = self.set(backup)
+            && let Err(error) = fs::remove_dir_all(&set)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %set.display(), %error, "cannot drop undo copies");
+        }
+    }
+}
+
+/// Let only the owner read and write the copy `path`: a copy keeps its
+/// file's mode, and one of a read-only file could neither be flushed nor be
+/// copied back from.
+#[cfg(unix)]
+fn owner_writable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::permissions_set_readonly_false)] // no mode bits for others off Unix
+fn owner_writable(path: &Path) -> std::io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+}
+
+/// Flush `folder`'s entries, so a file renamed into it stays after a crash.
+#[cfg(unix)]
+fn sync_folder(folder: &Path) -> std::io::Result<()> {
+    File::open(folder)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_folder(_folder: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// The refusal of a redo that no step can take to where the last one goes,
+/// a copy it needs being gone: no retry can, and a new message keeps the
+/// chat as it is.
+fn no_copy_for_redo(path: &str) -> CoreError {
+    CoreError::Refused(Box::new(Refusal {
+        reason: haarness_protocol::RefusalReason::NoUndoCopy,
+        path: Some(path.to_owned()),
+        message: format!(
+            "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now."
+        ),
+    }))
+}
+
+/// `path` as its folder lists it: the entry whose name matches the last
+/// part with letter case ignored, when there is exactly one and none
+/// matches exactly. `None` when its folder cannot be read.
+fn entry_as_listed(path: &Path) -> Option<PathBuf> {
+    let (folder, name) = (path.parent()?, path.file_name()?.to_str()?);
+    let lower = name.to_lowercase();
+    let mut matches = fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|listed| {
+            listed
+                .to_str()
+                .is_some_and(|listed| listed.to_lowercase() == lower)
+        });
+    let first = matches.next()?;
+    (matches.next().is_none() || first == name).then(|| folder.join(first))
+}
+
+/// The bytes of the files directly in `folder`.
+fn folder_bytes(folder: &Path) -> u64 {
+    fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|file| file.metadata().ok())
+        .filter(fs::Metadata::is_file)
+        .map(|metadata| metadata.len())
+        .sum()
 }
 
 /// What one retention pass reclaimed.
@@ -1421,77 +2233,54 @@ impl SnapshotStore for SqliteSnapshotStore {
         &self,
         expected_snapshot_id: &str,
         desired_snapshot_id: &str,
-    ) -> CoreResult<Vec<String>> {
-        let expected = self.load_manifest(expected_snapshot_id)?;
-        let desired = self.load_manifest(desired_snapshot_id)?;
-        let paths: BTreeSet<&String> = expected.keys().chain(desired.keys()).collect();
-        let changed: Vec<String> = paths
-            .into_iter()
-            .filter(|path| expected.get(*path) != desired.get(*path))
-            .cloned()
-            .collect();
+    ) -> CoreResult<DeltaRestore> {
+        let (expected, desired) = (
+            expected_snapshot_id.to_owned(),
+            desired_snapshot_id.to_owned(),
+        );
+        self.blocking(move |store| store.restore_changes(&expected, &desired, None))
+            .await
+    }
 
-        let mut prepared = Vec::with_capacity(changed.len());
-        // This is deliberately a separate complete preflight pass. If any
-        // path contains a later human edit, no earlier path is touched.
-        for path in &changed {
-            let target = safe_target(&self.workspace, path)?;
-            ensure_safe_ancestors(&self.workspace, path)?;
-            // What was there when a snapshot could not read it is unknown:
-            // writing or deleting it could destroy work, so refuse.
-            if [expected.get(path), desired.get(path)]
-                .into_iter()
-                .flatten()
-                .any(ManifestEntry::is_unreadable)
-            {
-                return Err(CoreError::Conflict(format!(
-                    "workspace path could not be read when a snapshot was taken: {path}"
-                )));
-            }
-            let actual = scan_live_entry(&target, path, &self.workspace)?;
-            if !optional_entry_matches(expected.get(path), actual.as_ref()) {
-                return Err(CoreError::Conflict(format!(
-                    "workspace path changed since snapshot: {path}"
-                )));
-            }
-            let desired = desired.get(path).cloned();
-            if let Some(entry) = &desired {
-                // Validate now and reload immediately before writing. This
-                // keeps restore memory bounded to one blob while retaining a
-                // fail-before-mutation validation pass.
-                let _ = self.load_blob(entry)?;
-            }
-            prepared.push(PreparedChange {
-                path: path.clone(),
-                desired,
-            });
-        }
+    async fn restore_step(
+        &self,
+        backup_snapshot_id: &str,
+        expected_snapshot_id: &str,
+        desired_snapshot_id: &str,
+        kind: UndoStep,
+    ) -> CoreResult<DeltaRestore> {
+        let (backup, expected, desired) = (
+            backup_snapshot_id.to_owned(),
+            expected_snapshot_id.to_owned(),
+            desired_snapshot_id.to_owned(),
+        );
+        self.blocking(move |store| {
+            store.restore_changes(&expected, &desired, Some((&backup, kind)))
+        })
+        .await
+    }
 
-        let mut touched = Vec::with_capacity(prepared.len());
-        // Delete delta-only paths first, then materialize desired entries. A
-        // replacement never removes anything outside this explicit path set.
-        // The journal makes the whole set one change: a path that fails part
-        // way (permissions, a locked file, a full disk) puts every earlier
-        // path back, so a retry meets the workspace its checks expect.
-        let mut journal = RestoreJournal::new(&self.workspace);
-        let mut failure = None;
-        let (removals, writes): (Vec<_>, Vec<_>) =
-            prepared.iter().partition(|change| change.desired.is_none());
-        for change in removals.into_iter().chain(writes) {
-            let result = match &change.desired {
-                None => journal.remove(&change.path),
-                Some(entry) => self
-                    .prepare_entry(entry)
-                    .and_then(|desired| journal.write(&desired)),
-            };
-            if let Err(error) = result {
-                failure = Some((change.path.clone(), error));
-                break;
-            }
-            touched.push(change.path.clone());
-        }
-        journal.finish(failure)?;
-        Ok(touched)
+    async fn release_copies(&self, backup_snapshot_id: &str) -> CoreResult<()> {
+        let backup = backup_snapshot_id.to_owned();
+        self.blocking(move |store| {
+            store.copies.release(&backup);
+            Ok(())
+        })
+        .await
+    }
+
+    async fn left_out(
+        &self,
+        expected_snapshot_id: &str,
+        desired_snapshot_id: &str,
+        changed: Vec<ChangedFile>,
+    ) -> CoreResult<Vec<UnrestoredFile>> {
+        let snapshots = [
+            expected_snapshot_id.to_owned(),
+            desired_snapshot_id.to_owned(),
+        ];
+        self.blocking(move |store| store.left_out_sync(&snapshots, changed))
+            .await
     }
 
     async fn diff_live(&self, snapshot_id: &str) -> CoreResult<Vec<FileDiff>> {
@@ -2005,6 +2794,17 @@ fn write_temporary(temporary: &Path, prepared: &PreparedEntry) -> CoreResult<()>
             prepared.manifest.kind == EntryKind::SymlinkDirectory,
         );
     }
+    if let Some(copy) = &prepared.copy {
+        // A clone where the file system makes one (on one APFS volume) costs
+        // no time or room until it changes; elsewhere it is a full copy.
+        fs::copy(copy, temporary).map_err(io_error)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .open(temporary)
+            .map_err(io_error)?;
+        set_file_mode(&file, prepared.manifest.mode)?;
+        return file.sync_all().map_err(io_error);
+    }
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -2324,7 +3124,8 @@ mod tests {
         let after = store.capture(ThreadId::new()).await.unwrap();
 
         let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
-        assert_eq!(undone, vec!["added", "delete-me", "src/main.rs"]);
+        assert_eq!(undone.touched, vec!["added", "delete-me", "src/main.rs"]);
+        assert!(undone.skipped.is_empty());
         assert_eq!(
             fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
             "before\n"
@@ -2336,7 +3137,7 @@ mod tests {
         assert!(!workspace.join("added").exists());
 
         let redone = store.restore_delta(&before.id, &after.id).await.unwrap();
-        assert_eq!(redone, vec!["delete-me", "added", "src/main.rs"]);
+        assert_eq!(redone.touched, vec!["delete-me", "added", "src/main.rs"]);
         assert_eq!(
             fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
             "after\n"
@@ -2418,7 +3219,10 @@ mod tests {
         }
         for attempt in ["delta", "legacy overlay"] {
             let error = if attempt == "delta" {
-                store.restore_delta(&after.id, &before.id).await
+                store
+                    .restore_delta(&after.id, &before.id)
+                    .await
+                    .map(|restored| restored.touched)
             } else {
                 store.restore(&before.id).await
             }
@@ -2448,7 +3252,10 @@ mod tests {
         // Fixed, the same undo passes its checks and completes.
         drop(unlock);
         let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
-        assert_eq!(undone, vec!["added", "a", "dir-restored/d", "locked/b"]);
+        assert_eq!(
+            undone.touched,
+            vec!["added", "a", "dir-restored/d", "locked/b"]
+        );
         assert_eq!(fs::read_to_string(workspace.join("a")).unwrap(), "old-a");
         assert_eq!(
             fs::read_to_string(workspace.join("dir-restored/d")).unwrap(),
@@ -2561,21 +3368,1025 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn omitted_large_entry_is_explicit_and_restore_refuses_it() {
+    async fn a_large_file_stays_as_it_is_and_the_rest_is_restored() {
         let (guard, store) = fixture();
         let workspace = guard.0.join("ws");
-        fs::write(workspace.join("huge.bin"), vec![7_u8; 3 * 1024 * 1024]).unwrap();
-        let with_large = store.capture(ThreadId::new()).await.unwrap();
-        assert_eq!(with_large.file_count, 1);
-        fs::remove_file(workspace.join("huge.bin")).unwrap();
-        let without_large = store.capture(ThreadId::new()).await.unwrap();
+        let large = |byte| vec![byte; 3 * 1024 * 1024];
+        fs::write(workspace.join("huge.bin"), large(7)).unwrap();
+        fs::write(workspace.join("gone.bin"), large(8)).unwrap();
+        fs::write(workspace.join("small.txt"), "before\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        assert_eq!(before.file_count, 3);
+        assert_eq!(
+            store.load_manifest(&before.id).unwrap()["huge.bin"].kind,
+            EntryKind::Omitted
+        );
+        // The turn changes a large file, deletes another, makes a third and
+        // edits a small one.
+        fs::write(workspace.join("huge.bin"), large(9)).unwrap();
+        fs::remove_file(workspace.join("gone.bin")).unwrap();
+        fs::write(workspace.join("made.bin"), large(10)).unwrap();
+        fs::write(workspace.join("small.txt"), "after\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
 
+        let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
+        assert_eq!(undone.touched, vec!["small.txt"]);
+        assert_eq!(undone.skipped, vec!["gone.bin", "huge.bin", "made.bin"]);
+        assert_eq!(
+            fs::read_to_string(workspace.join("small.txt")).unwrap(),
+            "before\n"
+        );
+        assert_eq!(fs::read(workspace.join("huge.bin")).unwrap(), large(9));
+        assert!(!workspace.join("gone.bin").exists());
+        assert_eq!(fs::read(workspace.join("made.bin")).unwrap(), large(10));
+
+        // Redo finds the large files as it wants them and redoes the rest.
+        let redone = store.restore_delta(&before.id, &after.id).await.unwrap();
+        assert_eq!(redone.touched, vec!["small.txt"]);
+        assert!(redone.skipped.is_empty());
+        assert_eq!(
+            fs::read_to_string(workspace.join("small.txt")).unwrap(),
+            "after\n"
+        );
+
+        // A large file changed again since still stops the undo, as any
+        // later edit does.
+        fs::write(workspace.join("huge.bin"), large(11)).unwrap();
         let error = store
-            .restore_delta(&without_large.id, &with_large.id)
+            .restore_delta(&after.id, &before.id)
             .await
             .unwrap_err();
-        assert!(matches!(error, CoreError::Conflict(_)));
-        assert!(!workspace.join("huge.bin").exists());
+        assert!(matches!(error, CoreError::Conflict(_)), "{error}");
+        assert_eq!(
+            fs::read_to_string(workspace.join("small.txt")).unwrap(),
+            "after\n"
+        );
+    }
+
+    /// Three MiB of `byte`: over the checkpoints' size limit.
+    fn large(byte: u8) -> Vec<u8> {
+        vec![byte; 3 * 1024 * 1024]
+    }
+
+    /// The copies kept for the undo backed up by `backup`.
+    fn copies_of(store: &SqliteSnapshotStore, backup: &str) -> usize {
+        fs::read_dir(store.copies.set(backup).unwrap())
+            .map(|files| {
+                files
+                    .flatten()
+                    .filter(|file| file.file_name() != LEFT_RECORD)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// What a person (or another chat) does to the folder between a turn
+    /// and its undo, in [`a_later_edit_stops_the_undo_step_that_meets_it`].
+    #[derive(Debug, Clone, Copy)]
+    enum LaterEdit {
+        /// The turn makes a large file; the person appends to it.
+        AppendedToMade,
+        /// The turn grows a file past the limit; the person trims it.
+        TrimmedGrown,
+        /// The turn edits a small file; the person pastes 3 MiB into it.
+        PastedIntoSmall,
+        /// The turn rewrites a large file; the person appends to it.
+        AppendedToLarge,
+        /// One chat's turn makes a large file; another chat rewrites it.
+        RewrittenByAnotherChat,
+        /// The turn rewrites a large file; the person puts it back by hand.
+        PutBackByHand,
+    }
+
+    impl LaterEdit {
+        /// The file, what it holds before the turn and after it, and the
+        /// later edit.
+        fn contents(self) -> (&'static str, Option<Vec<u8>>, Vec<u8>, Vec<u8>) {
+            let appended = |byte| [large(byte), b"edit\n".to_vec()].concat();
+            match self {
+                Self::AppendedToMade => ("big.bin", None, large(1), appended(1)),
+                Self::TrimmedGrown => (
+                    "big.bin",
+                    Some(b"v0\n".to_vec()),
+                    large(1),
+                    b"trimmed\n".to_vec(),
+                ),
+                Self::PastedIntoSmall => {
+                    ("s.txt", Some(b"s0\n".to_vec()), b"s1\n".to_vec(), large(3))
+                }
+                Self::AppendedToLarge => ("big.bin", Some(large(0)), large(1), appended(1)),
+                Self::RewrittenByAnotherChat => ("big.bin", None, large(1), large(2)),
+                Self::PutBackByHand => ("big.bin", Some(large(0)), large(1), large(0)),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_later_edit_stops_the_undo_step_that_meets_it() {
+        for edit in [
+            LaterEdit::AppendedToMade,
+            LaterEdit::TrimmedGrown,
+            LaterEdit::PastedIntoSmall,
+            LaterEdit::AppendedToLarge,
+            LaterEdit::RewrittenByAnotherChat,
+            LaterEdit::PutBackByHand,
+        ] {
+            let (path, start, turn, later) = edit.contents();
+            for second_step in [false, true] {
+                let (guard, store) = fixture();
+                let workspace = guard.0.join("ws");
+                let read = |path: &str| fs::read(workspace.join(path)).ok();
+                if let Some(start) = &start {
+                    fs::write(workspace.join(path), start).unwrap();
+                }
+                fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+                let before = store.capture(ThreadId::new()).await.unwrap().id;
+                fs::write(workspace.join(path), &turn).unwrap();
+                fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+                let mut after = store.capture(ThreadId::new()).await.unwrap().id;
+                // On the second step, a later turn changed only `other.txt`,
+                // and the first step put that back.
+                let mut middle = None;
+                if second_step {
+                    fs::write(workspace.join("other.txt"), "o2\n").unwrap();
+                    middle = Some(after);
+                    after = store.capture(ThreadId::new()).await.unwrap().id;
+                }
+                fs::write(workspace.join(path), &later).unwrap();
+                // As the runtime does: the backup is the folder as it is.
+                let backup = store.capture(ThreadId::new()).await.unwrap().id;
+                let start_of_step = match &middle {
+                    Some(middle) => {
+                        step(&store, &backup, &after, middle, UndoStep::Undo)
+                            .await
+                            .unwrap_or_else(|error| panic!("{edit:?}: {error}"));
+                        assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+                        middle.clone()
+                    }
+                    None => after,
+                };
+
+                let error = step(&store, &backup, &start_of_step, &before, UndoStep::Undo)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(&error, CoreError::Conflict(message) if message.ends_with(path)),
+                    "{edit:?}, second step {second_step}: {error}"
+                );
+                assert_eq!(read(path), Some(later.clone()), "{edit:?}");
+                assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]), "{edit:?}");
+                assert_eq!(copies_of(&store, &backup), 0, "{edit:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_an_undo_step_left_and_a_person_edited_since_stops_the_next_one() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        let [before, middle, after, backup] =
+            two_turns(&store, &workspace, TwoTurns::MadeRewritten).await;
+        let undone = step(&store, &backup, &after, &middle, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert_eq!(undone.skipped, vec!["big.bin"]);
+        let edited = [large(2), b"edit\n".to_vec()].concat();
+        fs::write(workspace.join("big.bin"), &edited).unwrap();
+        let error = step(&store, &backup, &middle, &before, UndoStep::Undo)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Conflict(_)), "{error}");
+        assert_eq!(read("big.bin"), Some(edited));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+        assert_eq!(copies_of(&store, &backup), 0);
+    }
+
+    /// Turns that each make `big.bin` the next of `contents` (absent for
+    /// `None`) from `start`, and write `other.txt` `o1`, `o2` …: the
+    /// checkpoint before each, the one after the last, and the backup of an
+    /// undo taken after them.
+    async fn turns(
+        store: &SqliteSnapshotStore,
+        workspace: &Path,
+        start: Option<Vec<u8>>,
+        contents: &[Option<Vec<u8>>],
+    ) -> Vec<String> {
+        let put = |content: &Option<Vec<u8>>| match content {
+            Some(content) => fs::write(workspace.join("big.bin"), content).unwrap(),
+            None => {
+                let _ = fs::remove_file(workspace.join("big.bin"));
+            }
+        };
+        put(&start);
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let mut checkpoints = vec![store.capture(ThreadId::new()).await.unwrap().id];
+        for (turn, content) in contents.iter().enumerate() {
+            put(content);
+            fs::write(workspace.join("other.txt"), format!("o{}\n", turn + 1)).unwrap();
+            checkpoints.push(store.capture(ThreadId::new()).await.unwrap().id);
+        }
+        checkpoints.push(store.capture(ThreadId::new()).await.unwrap().id);
+        checkpoints
+    }
+
+    #[tokio::test]
+    async fn a_file_left_as_a_turn_between_shrank_it_is_no_conflict_at_the_next_step() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        let other = |turn: usize| Some(format!("o{turn}\n").into_bytes());
+        // Turn 1 makes the file, turn 2 shrinks it under the limit, turn 3
+        // grows it past it again.
+        let small = b"small\n".to_vec();
+        let checkpoints = turns(
+            &store,
+            &workspace,
+            None,
+            &[Some(large(1)), Some(small.clone()), Some(large(3))],
+        )
+        .await;
+        let backup = &checkpoints[4];
+        let walk = |from: usize, to: usize| (checkpoints[from].clone(), checkpoints[to].clone());
+
+        // Back over turn 3 the file shrinks as turn 2 left it; back over
+        // turn 2 nothing holds what turn 1 left, so it stays small, named.
+        let (expected, desired) = walk(3, 2);
+        let undone = step(&store, backup, &expected, &desired, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert!(undone.skipped.is_empty(), "{undone:?}");
+        assert_eq!(read("big.bin"), Some(small.clone()));
+        let (expected, desired) = walk(2, 1);
+        let undone = step(&store, backup, &expected, &desired, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert_eq!(undone.skipped, vec!["big.bin"]);
+        assert_eq!(read("big.bin"), Some(small.clone()));
+        assert_eq!(read("other.txt"), other(1));
+        // Nobody touched it since: back over turn 1, it goes.
+        let (expected, desired) = walk(1, 0);
+        let undone = step(&store, backup, &expected, &desired, UndoStep::Undo)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(undone.skipped.is_empty(), "{undone:?}");
+        assert_eq!(read("big.bin"), None);
+        assert_eq!(read("other.txt"), other(0));
+
+        // Forward all the way, to the bytes turn 3 left.
+        for (from, to, left) in [(0, 1, true), (1, 2, true), (2, 4, false)] {
+            let (expected, desired) = walk(from, to);
+            let redone = step(&store, backup, &expected, &desired, UndoStep::Redo)
+                .await
+                .unwrap_or_else(|error| panic!("{from} to {to}: {error}"));
+            assert_eq!(
+                redone.skipped.is_empty(),
+                !left,
+                "{from} to {to}: {redone:?}"
+            );
+        }
+        assert_eq!(read("big.bin"), Some(large(3)));
+        assert_eq!(read("other.txt"), other(3));
+    }
+
+    #[tokio::test]
+    async fn a_file_an_undo_step_left_and_a_person_deleted_or_put_back_stops_a_later_one() {
+        for deleted in [true, false] {
+            for third_step in [false, true] {
+                let case = format!("deleted {deleted}, third step {third_step}");
+                let (guard, store) = fixture();
+                let workspace = guard.0.join("ws");
+                let read = |path: &str| fs::read(workspace.join(path)).ok();
+                // Made (or grown past the limit) and rewritten by every
+                // turn: no step back has a copy of what the turn before left.
+                let start = (!deleted).then(|| b"v0\n".to_vec());
+                let mut contents = vec![Some(large(1)), Some(large(2))];
+                if third_step {
+                    contents.push(Some(large(3)));
+                }
+                let checkpoints = turns(&store, &workspace, start, &contents).await;
+                let backup = checkpoints.last().unwrap();
+                let mut at = contents.len();
+                while at > 1 {
+                    let undone = step(
+                        &store,
+                        backup,
+                        &checkpoints[at],
+                        &checkpoints[at - 1],
+                        UndoStep::Undo,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                    assert_eq!(undone.skipped, vec!["big.bin"], "{case}");
+                    at -= 1;
+                }
+                assert_eq!(
+                    read("big.bin"),
+                    contents.last().cloned().flatten(),
+                    "{case}"
+                );
+                // What the steps left the person deletes, or puts back by
+                // hand as it was before turn 1, which is where the next step
+                // takes it: that step stops all the same.
+                if deleted {
+                    fs::remove_file(workspace.join("big.bin")).unwrap();
+                } else {
+                    fs::write(workspace.join("big.bin"), "v0\n").unwrap();
+                }
+                let edited = read("big.bin");
+                let error = step(
+                    &store,
+                    backup,
+                    &checkpoints[1],
+                    &checkpoints[0],
+                    UndoStep::Undo,
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    matches!(&error, CoreError::Conflict(message) if message.ends_with("big.bin")),
+                    "{case}: {error}"
+                );
+                assert_eq!(read("big.bin"), edited, "{case}");
+                assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]), "{case}");
+                assert_eq!(copies_of(&store, backup), 0, "{case}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_made_again_by_hand_as_an_undo_step_left_it_stops_a_later_step() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        let [before, middle, after, backup] =
+            two_turns(&store, &workspace, TwoTurns::MadeRewritten).await;
+        // The first step leaves the file as turn 2 left it; the second
+        // takes it all the way back, with a copy.
+        for (expected, desired) in [(&after, &middle), (&middle, &before)] {
+            step(&store, &backup, expected, desired, UndoStep::Undo)
+                .await
+                .unwrap();
+        }
+        assert_eq!(read("big.bin"), None);
+        // The person makes it again, byte for byte as the first step left
+        // it: that is their file now, and redo stops at it.
+        fs::write(workspace.join("big.bin"), large(2)).unwrap();
+        let error = step(&store, &backup, &before, &middle, UndoStep::Redo)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Conflict(_)), "{error}");
+        assert_eq!(read("big.bin"), Some(large(2)));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+    }
+
+    #[tokio::test]
+    async fn the_last_redo_takes_a_file_left_as_something_else_where_it_goes() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        let [before, middle, after, backup] =
+            two_turns(&store, &workspace, TwoTurns::MadeRewritten).await;
+        for (expected, desired) in [(&after, &middle), (&middle, &before)] {
+            step(&store, &backup, expected, desired, UndoStep::Undo)
+                .await
+                .unwrap();
+        }
+        step(&store, &backup, &before, &middle, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert_eq!(read("big.bin"), Some(large(2)));
+        // However a file came to be left as something the backup does not
+        // hold (here the record and the file say so by hand), the last redo
+        // does not leave it so: the copies go with it.
+        fs::write(workspace.join("big.bin"), "x\n").unwrap();
+        let mut left = None;
+        let mut record = store.copies.left(&mut left, &backup).clone();
+        record.insert(
+            "big.bin".into(),
+            scan_live_entry(&workspace.join("big.bin"), "big.bin", &workspace).unwrap(),
+        );
+        store.copies.note_left(&backup, &record).unwrap();
+        let redone = step(&store, &backup, &middle, &backup, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert!(redone.skipped.is_empty(), "{redone:?}");
+        assert_eq!(read("big.bin"), Some(large(2)));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o2\n"[..]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_only_large_file_is_copied_and_comes_back_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let mode = |path: &str| {
+            fs::metadata(workspace.join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap().id;
+        fs::write(workspace.join("made.bin"), large(1)).unwrap();
+        fs::set_permissions(
+            workspace.join("made.bin"),
+            fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+
+        let undone = step(&store, &backup, &backup, &before, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert!(undone.skipped.is_empty(), "{undone:?}");
+        assert!(!workspace.join("made.bin").exists());
+        assert_eq!(copies_of(&store, &backup), 1);
+        let redone = step(&store, &backup, &before, &backup, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert!(redone.skipped.is_empty(), "{redone:?}");
+        assert_eq!(fs::read(workspace.join("made.bin")).unwrap(), large(1));
+        assert_eq!(mode("made.bin"), 0o444);
+    }
+
+    /// One step of the undo backed up by `backup`.
+    async fn step(
+        store: &SqliteSnapshotStore,
+        backup: &str,
+        expected: &str,
+        desired: &str,
+        kind: UndoStep,
+    ) -> CoreResult<DeltaRestore> {
+        store.restore_step(backup, expected, desired, kind).await
+    }
+
+    #[tokio::test]
+    async fn an_undo_through_a_large_file_keeps_a_copy_and_goes_all_the_way_back() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        fs::write(workspace.join("data.txt"), "v0\n").unwrap();
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        // Turn 1 edits both; turn 2 grows one past the limit and makes a
+        // large file of its own.
+        fs::write(workspace.join("data.txt"), "v1\n").unwrap();
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let middle = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("data.txt"), large(1)).unwrap();
+        fs::write(workspace.join("made.bin"), large(2)).unwrap();
+        fs::write(workspace.join("other.txt"), "o2\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+
+        let undone = step(&store, &backup, &after.id, &middle.id, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert!(undone.skipped.is_empty(), "{undone:?}");
+        assert_eq!(read("data.txt").as_deref(), Some(&b"v1\n"[..]));
+        assert_eq!(read("made.bin"), None);
+        assert_eq!(copies_of(&store, &backup), 2, "both large files kept first");
+        // The next step back meets the file as the first one left it.
+        let undone = step(&store, &backup, &middle.id, &before.id, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert!(undone.skipped.is_empty(), "{undone:?}");
+        assert_eq!(read("data.txt").as_deref(), Some(&b"v0\n"[..]));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+
+        step(&store, &backup, &before.id, &middle.id, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert_eq!(read("data.txt").as_deref(), Some(&b"v1\n"[..]));
+        let redone = step(&store, &backup, &middle.id, &backup, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert!(redone.skipped.is_empty(), "{redone:?}");
+        assert_eq!(read("data.txt"), Some(large(1)));
+        assert_eq!(read("made.bin"), Some(large(2)));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o2\n"[..]));
+
+        store.release_copies(&backup).await.unwrap();
+        assert!(!store.copies.set(&backup).unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn a_large_file_two_turns_changed_is_named_at_every_step_without_a_false_conflict() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        // A lockfile over the limit that two installs rewrote.
+        fs::write(workspace.join("package-lock.json"), large(0)).unwrap();
+        fs::write(workspace.join("package.json"), "0\n").unwrap();
+        let first = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("package-lock.json"), large(1)).unwrap();
+        fs::write(workspace.join("package.json"), "1\n").unwrap();
+        let second = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("package-lock.json"), large(2)).unwrap();
+        fs::write(workspace.join("package.json"), "2\n").unwrap();
+        let third = store.capture(ThreadId::new()).await.unwrap();
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+
+        // No checkpoint holds what the lockfile held before: it stays.
+        for (expected, desired, json) in [(&third, &second, "1\n"), (&second, &first, "0\n")] {
+            let undone = step(&store, &backup, &expected.id, &desired.id, UndoStep::Undo)
+                .await
+                .unwrap();
+            assert_eq!(undone.skipped, vec!["package-lock.json"]);
+            assert_eq!(read("package.json").as_deref(), Some(json.as_bytes()));
+            assert_eq!(read("package-lock.json"), Some(large(2)));
+        }
+        // Forward, it is already where the last redo takes it, and named
+        // until then.
+        for (expected, desired, json, left) in [
+            (
+                first.id.clone(),
+                second.id.clone(),
+                "1\n",
+                vec!["package-lock.json"],
+            ),
+            (second.id.clone(), backup.clone(), "2\n", Vec::new()),
+        ] {
+            let redone = step(&store, &backup, &expected, &desired, UndoStep::Redo)
+                .await
+                .unwrap();
+            assert_eq!(redone.skipped, left);
+            assert_eq!(read("package.json").as_deref(), Some(json.as_bytes()));
+        }
+        assert_eq!(read("package-lock.json"), Some(large(2)));
+    }
+
+    #[tokio::test]
+    async fn over_its_bounds_a_large_file_is_left_and_named_and_undo_goes_on() {
+        let (guard, mut store) = fixture();
+        store.copies.max_file = 1024 * 1024;
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        fs::write(workspace.join("data.txt"), "v0\n").unwrap();
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("data.txt"), "v1\n").unwrap();
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let middle = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("data.txt"), large(1)).unwrap();
+        fs::write(workspace.join("other.txt"), "o2\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+
+        for (expected, desired, other) in [(&after, &middle, "o1\n"), (&middle, &before, "o0\n")] {
+            let undone = step(&store, &backup, &expected.id, &desired.id, UndoStep::Undo)
+                .await
+                .unwrap();
+            assert_eq!(undone.skipped, vec!["data.txt"]);
+            assert_eq!(read("other.txt").as_deref(), Some(other.as_bytes()));
+            assert_eq!(read("data.txt"), Some(large(1)));
+        }
+        assert_eq!(
+            copies_of(&store, &backup),
+            0,
+            "nothing over the bound is copied"
+        );
+        step(&store, &backup, &before.id, &middle.id, UndoStep::Redo)
+            .await
+            .unwrap();
+        step(&store, &backup, &middle.id, &backup, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o2\n"[..]));
+        assert_eq!(read("data.txt"), Some(large(1)));
+    }
+
+    #[tokio::test]
+    async fn on_a_disk_short_of_room_a_large_file_is_left_and_named() {
+        let (guard, mut store) = fixture();
+        store.copies.free_margin = u64::MAX / 2;
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("made.bin"), large(1)).unwrap();
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+
+        let undone = step(&store, &backup, &backup, &before.id, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert_eq!(undone.skipped, vec!["made.bin"]);
+        assert_eq!(
+            read("made.bin"),
+            Some(large(1)),
+            "not removed without a copy"
+        );
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+        assert_eq!(copies_of(&store, &backup), 0);
+    }
+
+    #[tokio::test]
+    async fn a_redo_that_cannot_bring_a_large_file_back_says_so_and_changes_nothing() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        fs::write(workspace.join("data.txt"), "v1\n").unwrap();
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("data.txt"), large(1)).unwrap();
+        fs::write(workspace.join("other.txt"), "o2\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+        store
+            .restore_step(&backup, &after.id, &before.id, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert_eq!(read("data.txt").as_deref(), Some(&b"v1\n"[..]));
+        // The copy is gone (its data folder was cleared): redo finds the
+        // file as it was before the turn and nothing to bring it back from.
+        store.release_copies(&backup).await.unwrap();
+        let error = store
+            .restore_step(&backup, &before.id, &backup, UndoStep::Redo)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, CoreError::Refused(refusal) if refusal.message.starts_with("data.txt is over 2 MiB")),
+            "{error}"
+        );
+        assert_eq!(read("data.txt").as_deref(), Some(&b"v1\n"[..]));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+        // Putting a failed step back never refuses: it leaves what it cannot
+        // bring back.
+        let put_back = store
+            .restore_step(&backup, &before.id, &after.id, UndoStep::PutBack)
+            .await
+            .unwrap();
+        assert_eq!(put_back.skipped, vec!["data.txt"]);
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o2\n"[..]));
+    }
+
+    /// The ways two turns can take one file through the size limit, each
+    /// with the content `big.bin` starts with and turn 2's change to it.
+    #[derive(Debug, Clone, Copy)]
+    enum TwoTurns {
+        /// Turn 1 makes it, turn 2 rewrites it.
+        MadeRewritten,
+        /// Turn 1 grows it past the limit, turn 2 rewrites it.
+        GrownRewritten,
+        /// Turn 1 makes it, turn 2 deletes it.
+        MadeDeleted,
+        /// Turn 1 grows it past the limit, turn 2 shrinks it again.
+        GrownShrunk,
+        /// Turn 1 grows it past the limit, turn 2 deletes it.
+        GrownDeleted,
+    }
+
+    impl TwoTurns {
+        fn start(self) -> Option<Vec<u8>> {
+            matches!(
+                self,
+                Self::GrownRewritten | Self::GrownShrunk | Self::GrownDeleted
+            )
+            .then(|| b"v0\n".to_vec())
+        }
+
+        fn second(self) -> Option<Vec<u8>> {
+            match self {
+                Self::MadeRewritten | Self::GrownRewritten => Some(large(2)),
+                Self::MadeDeleted | Self::GrownDeleted => None,
+                Self::GrownShrunk => Some(b"v2\n".to_vec()),
+            }
+        }
+    }
+
+    /// The checkpoints of `scenario`'s two turns, each also editing
+    /// `other.txt`, and the backup of an undo taken after them.
+    async fn two_turns(
+        store: &SqliteSnapshotStore,
+        workspace: &Path,
+        scenario: TwoTurns,
+    ) -> [String; 4] {
+        let put = |content: Option<Vec<u8>>| match content {
+            Some(content) => fs::write(workspace.join("big.bin"), content).unwrap(),
+            None => {
+                let _ = fs::remove_file(workspace.join("big.bin"));
+            }
+        };
+        put(scenario.start());
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap().id;
+        put(Some(large(1)));
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let middle = store.capture(ThreadId::new()).await.unwrap().id;
+        put(scenario.second());
+        fs::write(workspace.join("other.txt"), "o2\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap().id;
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+        [before, middle, after, backup]
+    }
+
+    #[tokio::test]
+    async fn two_turns_through_a_large_file_undo_and_redo_all_the_way() {
+        for scenario in [
+            TwoTurns::MadeRewritten,
+            TwoTurns::GrownRewritten,
+            TwoTurns::MadeDeleted,
+            TwoTurns::GrownShrunk,
+            TwoTurns::GrownDeleted,
+        ] {
+            let (guard, store) = fixture();
+            let workspace = guard.0.join("ws");
+            let read = |path: &str| fs::read(workspace.join(path)).ok();
+            let [before, middle, after, backup] = two_turns(&store, &workspace, scenario).await;
+            let big = vec!["big.bin"];
+
+            // Back: nothing holds what turn 1 left, so the first step leaves
+            // the file as turn 2 did; the second takes it as that, not as a
+            // later edit, and back to before turn 1.
+            let undone = step(&store, &backup, &after, &middle, UndoStep::Undo)
+                .await
+                .unwrap();
+            assert_eq!(undone.skipped, big, "{scenario:?}");
+            assert_eq!(read("big.bin"), scenario.second(), "{scenario:?}");
+            let undone = step(&store, &backup, &middle, &before, UndoStep::Undo)
+                .await
+                .unwrap_or_else(|error| panic!("{scenario:?}: {error}"));
+            assert!(undone.skipped.is_empty(), "{scenario:?}: {undone:?}");
+            assert_eq!(read("big.bin"), scenario.start(), "{scenario:?}");
+            assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+
+            // Forward: what turn 1 left exists nowhere, so the first redo
+            // takes the file to where the last one does, and names it.
+            let redone = step(&store, &backup, &before, &middle, UndoStep::Redo)
+                .await
+                .unwrap_or_else(|error| panic!("{scenario:?}: {error}"));
+            assert_eq!(redone.skipped, big, "{scenario:?}");
+            assert_eq!(read("big.bin"), scenario.second(), "{scenario:?}");
+            assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+            let redone = step(&store, &backup, &middle, &backup, UndoStep::Redo)
+                .await
+                .unwrap_or_else(|error| panic!("{scenario:?}: {error}"));
+            assert!(redone.skipped.is_empty(), "{scenario:?}: {redone:?}");
+            assert_eq!(read("big.bin"), scenario.second(), "{scenario:?}");
+            assert_eq!(read("other.txt").as_deref(), Some(&b"o2\n"[..]));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redo_whose_copies_are_gone_says_so_at_its_first_step() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        let [before, middle, after, backup] =
+            two_turns(&store, &workspace, TwoTurns::MadeRewritten).await;
+        for (expected, desired) in [(&after, &middle), (&middle, &before)] {
+            step(&store, &backup, expected, desired, UndoStep::Undo)
+                .await
+                .unwrap();
+        }
+        // The data folder was cleared: nothing holds either turn's file any
+        // more, so the first redo refuses rather than leave the last one a
+        // conflict.
+        store.release_copies(&backup).await.unwrap();
+        let error = step(&store, &backup, &before, &middle, UndoStep::Redo)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                CoreError::Refused(refusal)
+                    if refusal.reason == haarness_protocol::RefusalReason::NoUndoCopy
+                        && refusal.path.as_deref() == Some("big.bin")
+                        && refusal.message.starts_with("big.bin is over 2 MiB")
+            ),
+            "{error}"
+        );
+        assert_eq!(read("big.bin"), None);
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+    }
+
+    #[tokio::test]
+    async fn a_step_that_could_not_be_recorded_is_put_back_with_its_large_file() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        let [before, middle, after, backup] =
+            two_turns(&store, &workspace, TwoTurns::MadeRewritten).await;
+        step(&store, &backup, &after, &middle, UndoStep::Undo)
+            .await
+            .unwrap();
+        // The second step back removes the file, and its state is not
+        // saved: putting the step back brings the file back from its copy,
+        // though nothing holds what turn 1 left.
+        step(&store, &backup, &middle, &before, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert_eq!(read("big.bin"), None);
+        step(&store, &backup, &before, &middle, UndoStep::PutBack)
+            .await
+            .unwrap();
+        assert_eq!(read("big.bin"), Some(large(2)));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+
+        // A redo step that is not saved goes back as an undo step does:
+        // the file it brought back from its copy goes again.
+        step(&store, &backup, &middle, &before, UndoStep::Undo)
+            .await
+            .unwrap();
+        step(&store, &backup, &before, &middle, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert_eq!(read("big.bin"), Some(large(2)));
+        step(&store, &backup, &middle, &before, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert_eq!(read("big.bin"), None);
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+    }
+
+    #[tokio::test]
+    async fn the_last_redo_goes_on_without_a_copy_of_what_it_replaces() {
+        let (guard, mut store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        fs::write(workspace.join("big.bin"), large(1)).unwrap();
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap().id;
+        fs::write(workspace.join("big.bin"), large(2)).unwrap();
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+        // Undone, with a copy of the newer content only, and no room left
+        // for one of the older content the last redo replaces.
+        let set = store.copies.set(&backup).unwrap();
+        fs::create_dir_all(&set).unwrap();
+        fs::write(
+            set.join(&store.load_manifest(&backup).unwrap()["big.bin"].hash),
+            large(2),
+        )
+        .unwrap();
+        fs::write(workspace.join("big.bin"), large(1)).unwrap();
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        store.copies.max_total = 4 * 1024 * 1024;
+        let redone = step(&store, &backup, &before, &backup, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert!(redone.skipped.is_empty(), "{redone:?}");
+        assert_eq!(read("big.bin"), Some(large(2)));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+    }
+
+    #[tokio::test]
+    async fn copies_of_undos_no_longer_pending_are_dropped_oldest_first_for_room() {
+        let (guard, mut store) = fixture();
+        let workspace = guard.0.join("ws");
+        let make = |backup: &str, byte: u8, age: std::time::Duration| {
+            let set = store.copies.set(backup).unwrap();
+            fs::create_dir_all(&set).unwrap();
+            fs::write(set.join("copy"), large(byte)).unwrap();
+            fs::File::open(&set)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - age)
+                .unwrap();
+            set
+        };
+        let pend = |set: &Path, archived: bool| {
+            store
+                .connection
+                .lock()
+                .execute(
+                    "INSERT INTO threads(id,title,created_at,updated_at,provider,model,agent,archived,\
+                     revert_sequence,revert_snapshot) VALUES(?1,'t','now','now','p','m','build',?2,1,?3)",
+                    params![
+                        ThreadId::new().to_string(),
+                        archived,
+                        set.file_name().unwrap().to_string_lossy()
+                    ],
+                )
+                .unwrap();
+        };
+        let day = std::time::Duration::from_secs(24 * 3600);
+        let pending = make("0199d0c4-0000-7000-8000-000000000001", 1, day * 3);
+        let old = make("0199d0c4-0000-7000-8000-000000000002", 2, day * 9);
+        let older = make("0199d0c4-0000-7000-8000-000000000003", 3, day * 10);
+        // The first step of an undo whose process stopped before the chat
+        // named it.
+        let unnamed = make("0199d0c4-0000-7000-8000-000000000004", 4, day / 24);
+        // The oldest of all, but its chat may come back from the archive.
+        let archived = make("0199d0c4-0000-7000-8000-000000000006", 6, day * 40);
+        pend(&pending, false);
+        pend(&archived, true);
+
+        // Room for one more copy: the oldest set no undo needs goes first,
+        // before an archived chat's.
+        store.copies.max_total = 15 * 1024 * 1024;
+        let keep = |byte: u8, backup: &str| {
+            fs::write(workspace.join("big.bin"), large(byte)).unwrap();
+            let entry = scan_live_entry(&workspace.join("big.bin"), "big.bin", &workspace)
+                .unwrap()
+                .unwrap();
+            store
+                .copies
+                .keep(
+                    &store.connection,
+                    backup,
+                    &workspace.join("big.bin"),
+                    &entry,
+                )
+                .is_ok()
+        };
+        assert!(keep(9, "0199d0c4-0000-7000-8000-000000000005"));
+        assert!(!older.exists(), "the oldest unneeded set made room");
+        assert!(old.exists() && pending.exists() && unnamed.exists() && archived.exists());
+
+        // A retention pass drops what no chat names once checkpoints of its
+        // age go, and leaves an archived chat's undo.
+        store.prune(chrono::Duration::days(7), 0).unwrap();
+        assert!(!old.exists());
+        assert!(pending.exists(), "a pending undo keeps its copies");
+        assert!(unnamed.exists(), "kept as long as checkpoints are");
+        assert!(archived.exists());
+        // A pass that keeps every checkpoint keeps every copy.
+        let _ = fs::File::open(&unnamed)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - day * 30);
+        store.sweep().unwrap();
+        assert!(unnamed.exists());
+
+        // Room again: the set no chat names goes first, though younger than
+        // the archived chat's; then that one counts as ended, but not an
+        // open chat's.
+        assert!(keep(10, "0199d0c4-0000-7000-8000-000000000007"));
+        assert!(keep(11, "0199d0c4-0000-7000-8000-000000000008"));
+        assert!(!unnamed.exists());
+        assert!(archived.exists());
+        assert!(keep(12, "0199d0c4-0000-7000-8000-000000000009"));
+        assert!(!archived.exists(), "an archived chat's undo made room");
+        assert!(pending.exists());
+    }
+
+    #[tokio::test]
+    async fn left_out_names_the_changed_files_no_checkpoint_holds() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::create_dir(workspace.join(".git")).unwrap();
+        fs::write(workspace.join(".gitignore"), ".env\nbuild/\n").unwrap();
+        fs::write(workspace.join(".env"), "TOKEN=old\n").unwrap();
+        fs::write(workspace.join("tracked.txt"), "before\n").unwrap();
+        fs::create_dir(workspace.join("build")).unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join(".env"), "TOKEN=new\n").unwrap();
+        fs::write(workspace.join("tracked.txt"), "after\n").unwrap();
+        fs::write(workspace.join("new.txt"), "made\n").unwrap();
+        fs::write(workspace.join("build/out.js"), "made\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+        let outside = guard.0.join("notes.txt");
+        fs::write(&outside, "outside\n").unwrap();
+
+        let root = dunce::canonicalize(&workspace).unwrap();
+        let file = |path: PathBuf, created| ChangedFile { path, created };
+        let left = store
+            .left_out(
+                &after.id,
+                &before.id,
+                vec![
+                    file(root.join(".env"), false),
+                    file(root.join("tracked.txt"), false),
+                    file(root.join("new.txt"), true),
+                    file(root.join("build/out.js"), true),
+                    // Made and gone again in the same turn: nothing to say.
+                    file(root.join("scratch.txt"), true),
+                    // An ignored file the turn deleted: its content is lost.
+                    file(root.join("build/old.js"), false),
+                    file(outside.clone(), false),
+                ],
+            )
+            .await
+            .unwrap();
+        let named = |path: &str, reason| UnrestoredFile {
+            path: path.to_owned(),
+            reason,
+        };
+        assert_eq!(
+            left,
+            vec![
+                named(".env", UnrestoredReason::Ignored),
+                named("build/out.js", UnrestoredReason::Ignored),
+                named("build/old.js", UnrestoredReason::Ignored),
+                named(&outside.display().to_string(), UnrestoredReason::Outside),
+            ]
+        );
+
+        // A deletion the tool spelt in another letter case than the file
+        // has: the checkpoint holds the file as the folder names it.
+        let left = store
+            .left_out(
+                &after.id,
+                &before.id,
+                vec![file(root.join("Tracked.TXT"), false)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(left, Vec::new());
     }
 
     #[tokio::test]
@@ -2830,7 +4641,7 @@ mod tests {
 
         // A path that stayed unreadable is no change: undo restores the rest.
         let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
-        assert_eq!(undone, vec!["src/main.rs"]);
+        assert_eq!(undone.touched, vec!["src/main.rs"]);
         assert_eq!(
             fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
             "before\n"
@@ -2982,7 +4793,11 @@ mod tests {
 
             // The recapture restores like any other.
             assert_eq!(
-                store.restore_delta(&edited_id, &unchanged).await.unwrap(),
+                store
+                    .restore_delta(&edited_id, &unchanged)
+                    .await
+                    .unwrap()
+                    .touched,
                 vec!["c"]
             );
             assert_eq!(fs::read_to_string(workspace.join("c")).unwrap(), "other\n");

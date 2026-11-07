@@ -13571,6 +13571,7 @@ fn todo_transcript_fallback_respects_a_pending_revert_boundary() {
         sequence: 1,
         snapshot_id: "backup".into(),
         base_snapshot_id: None,
+        ..Default::default()
     });
     let items = vec![
         message_item(
@@ -19200,6 +19201,7 @@ fn undo_and_redo_report_how_far_the_history_reaches() {
         sequence: 3,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     assert_eq!(app.undo_depth(), (1, 2));
     // At the earliest checkpoint there is nowhere further back to go.
@@ -19207,8 +19209,131 @@ fn undo_and_redo_report_how_far_the_history_reaches() {
         sequence: 1,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     assert_eq!(app.undo_depth(), (0, 3));
+}
+
+#[test]
+fn an_undo_that_left_files_says_so_under_its_marker() {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::UserMessage {
+                text: "first".into(),
+                attachments: vec![],
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::UserMessage {
+                text: "edit the env".into(),
+                attachments: vec![],
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = |app: &App| {
+        app.lines((100, 40))
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let undone = |unrestored: &[(&str, haarness_protocol::UnrestoredReason)], count| {
+        haarness_protocol::RevertState {
+            sequence: 1,
+            snapshot_id: "backup".into(),
+            base_snapshot_id: Some("base".into()),
+            unrestored: unrestored
+                .iter()
+                .map(|(path, reason)| haarness_protocol::UnrestoredFile {
+                    path: (*path).to_owned(),
+                    reason: *reason,
+                })
+                .collect(),
+            unrestored_count: count,
+        }
+    };
+    // An undo that put everything back: the marker alone.
+    app.thread.revert = Some(undone(&[], None));
+    let quiet = text(&app);
+    assert!(quiet.contains("↶ "), "{quiet}");
+    assert!(!quiet.contains("restored ·"), "{quiet}");
+    assert!(!quiet.contains("wasn't restored"), "{quiet}");
+
+    app.thread.revert = Some(undone(
+        &[(".env", haarness_protocol::UnrestoredReason::Ignored)],
+        None,
+    ));
+    let one = text(&app);
+    let marker = one
+        .lines()
+        .position(|line| line.contains("↶ "))
+        .expect("the undone marker");
+    assert_eq!(
+        one.lines().nth(marker + 1).map(str::trim_end),
+        Some("    1 file wasn't restored · .env"),
+        "{one}"
+    );
+
+    // A file left for its size comes first, in the text colour, with why;
+    // the ignored ones stay quiet, named up to what the server sent and the
+    // rest counted.
+    app.thread.revert = Some(undone(
+        &[
+            ("big.bin", haarness_protocol::UnrestoredReason::Large),
+            (
+                "src/\u{1b}[31mlog",
+                haarness_protocol::UnrestoredReason::Ignored,
+            ),
+        ],
+        Some(5),
+    ));
+    let lines = app.lines((100, 40));
+    let row = |needle: &str| {
+        lines
+            .iter()
+            .find(|line| line.text().contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle}"))
+    };
+    let large = row("left as it was");
+    assert_eq!(
+        large.text().trim_end(),
+        "    1 file left as it was · too large for Undo · big.bin"
+    );
+    assert!(large.spans.iter().any(|span| span.fg == app.theme.text));
+    let quiet = row("weren't restored");
+    assert_eq!(
+        quiet.text().trim_end(),
+        "    4 files weren't restored · src/[31mlog, +3 more"
+    );
+    assert!(quiet.spans.iter().all(|span| span.fg == app.theme.muted));
+    assert!(
+        !lines.iter().any(|line| line.text().contains('\u{1b}')),
+        "a name is never a terminal control"
+    );
+
+    // Read in the interface language, one counter word to a line.
+    app.language = crate::locale::Language::Japanese;
+    let japanese = text(&app);
+    assert!(
+        japanese.contains("1 件のファイルはそのままです · 大きすぎて元に戻せません · big.bin"),
+        "{japanese}"
+    );
+    assert!(
+        japanese.contains("4 件のファイルは復元されていません · src/[31mlog, あと 3 件"),
+        "{japanese}"
+    );
 }
 
 #[tokio::test]
@@ -20650,6 +20775,7 @@ fn a_slash_command_reads_as_the_line_typed_with_its_prompt_folded_below() {
         sequence: 0,
         snapshot_id: "backup".into(),
         base_snapshot_id: None,
+        ..Default::default()
     });
     assert_eq!(
         app.undone_prompt().map(|(text, _)| text),
@@ -23073,6 +23199,8 @@ fn undo_redo_and_diff_failures_read_as_what_to_do() {
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             code: Some(code.into()),
             message: message.into(),
+            reason: None,
+            path: None,
         }
         .into()
     };
@@ -23772,6 +23900,7 @@ async fn an_undo_whose_history_cannot_be_read_keeps_the_undone_prompt() {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     let error = serde_json::json!({
         "code": "storage",
@@ -23801,6 +23930,7 @@ async fn undo_restores_the_prompt_and_slash_starts_a_command_over_it() {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     let items = serde_json::to_string(&app.items).unwrap();
     let (client, server) = workspace_http_status_client(
@@ -23870,6 +24000,7 @@ async fn an_undone_prompt_with_a_reference_keeps_its_chip_under_a_slash_command(
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     // As /undo puts it back: the reference reads as its chip.
     app.composer.set_text(sent.clone());
@@ -23896,6 +24027,7 @@ async fn redo_typed_over_an_undone_prompt_runs_and_leaves_the_composer_empty() {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     // A draft that is still the undone prompt, as the composer holds it
     // after /undo or after coming back to the chat later.
@@ -23934,12 +24066,103 @@ async fn redo_typed_over_an_undone_prompt_runs_and_leaves_the_composer_empty() {
 }
 
 #[tokio::test]
+async fn a_redo_undo_has_no_copy_for_says_why_whole_in_the_persons_language() {
+    let english = "assets/big.bin is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.";
+    for language in [
+        crate::locale::Language::English,
+        crate::locale::Language::Japanese,
+        crate::locale::Language::Arabic,
+    ] {
+        let (mut app, _) = undo_fixture();
+        app.language = language;
+        app.thread.revert = Some(haarness_protocol::RevertState {
+            sequence: 2,
+            snapshot_id: "backup".into(),
+            base_snapshot_id: Some("base".into()),
+            ..Default::default()
+        });
+        let refusal = serde_json::json!({
+            "code": "refused",
+            "message": english,
+            "retryable": false,
+            "details": {"reason": "no_undo_copy", "path": "assets/big.bin"},
+        });
+        let (client, server) =
+            workspace_http_status_client(vec![(409, refusal.to_string())], false).await;
+        app.execute_command("/redo", &client).await.unwrap();
+        assert!(server.await.unwrap()[0].contains("/unrevert"));
+        let said = language.format(
+            "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
+            &[("path", "assets/big.bin")],
+        );
+        if language == crate::locale::Language::English {
+            assert_eq!(said, english);
+        } else {
+            assert_ne!(said, english, "{language:?} has its own words");
+        }
+        assert!(said.contains("assets/big.bin"), "{said}");
+        assert_eq!(app.notice, said);
+        let toast = app.notification_toast.as_ref().expect("a toast");
+        assert_eq!(toast.message, said);
+        assert!(toast.variant == crate::state::ToastVariant::Error);
+        // The band cuts it at these widths; the toast has it whole, every
+        // row it wraps to on screen.
+        for width in [80_u16, 100] {
+            let lines = app.lines((u32::from(width), 30));
+            let inner = 60.min(usize::from(width) - 6) - 6;
+            for row in textwrap::wrap(&said, inner) {
+                assert!(
+                    lines.iter().any(|line| line.text().contains(row.trim())),
+                    "{language:?} {width}: {row:?} in {:#?}",
+                    lines.iter().map(Line::text).collect::<Vec<_>>()
+                );
+            }
+            assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
+        }
+    }
+
+    // Relayed inside `error`, as a gateway writes it, it reads the same.
+    let (mut app, _) = undo_fixture();
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+        ..Default::default()
+    });
+    let relayed = serde_json::json!({"error": {
+        "code": "refused",
+        "message": english,
+        "details": {"reason": "no_undo_copy", "path": "assets/big.bin"},
+    }});
+    let (client, _server) =
+        workspace_http_status_client(vec![(409, relayed.to_string())], false).await;
+    app.execute_command("/redo", &client).await.unwrap();
+    assert_eq!(app.notice, english);
+
+    // A server that names no reason is said as before.
+    let (mut app, _) = undo_fixture();
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+        ..Default::default()
+    });
+    let refusal = serde_json::json!({"code": "refused", "message": english, "retryable": false});
+    let (client, _server) =
+        workspace_http_status_client(vec![(409, refusal.to_string())], false).await;
+    app.execute_command("/redo", &client).await.unwrap();
+    assert_eq!(app.notice, format!("Redo failed: {english}"));
+    assert!(app.notification_toast.is_none());
+}
+
+#[tokio::test]
 async fn redo_from_elsewhere_drops_the_undone_prompt_copy_from_the_composer() {
     let (mut app, thread) = undo_fixture();
     app.thread.revert = Some(haarness_protocol::RevertState {
         sequence: 2,
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
+        ..Default::default()
     });
     app.composer.set_text("write the file".into());
     // Moving the cursor is not an edit of the text: the copy still goes.

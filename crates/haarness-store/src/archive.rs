@@ -19,7 +19,7 @@ impl SqliteStore {
         let connection = self.connection.lock();
         let mut statement = connection
             .prepare(
-                "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory
+                "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json
                  FROM threads ORDER BY created_at,id",
             )
             .map_err(super::storage)?;
@@ -198,7 +198,7 @@ impl SqliteStore {
                 .ok_or_else(|| CoreError::Invalid(format!("archive thread {id} is missing")))?;
             let current = tx
                 .query_row(
-                    "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory
+                    "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json
                      FROM threads WHERE id=?1",
                     [id.to_string()],
                     raw_thread,
@@ -422,7 +422,7 @@ impl SqliteStore {
         for id in order {
             let raw = connection
                 .query_row(
-                    "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory
+                    "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json
                      FROM threads WHERE id=?1",
                     [id.to_string()],
                     raw_thread,

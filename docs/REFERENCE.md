@@ -354,7 +354,7 @@ Bare `/tools` opens the searchable runtime catalog with enabled, resident, defer
 
 `/diff` opens a full-screen review: a nested file tree, syntax-highlighted patches with real line numbers and word-level emphasis, and a line cursor. `/diff` starts on the Git working tree, `/diff branch` compares the current branch with its detected base, and `/diff last` shows the latest completed mutating turn — and `s` cycles between the three without leaving the viewer. Inside it, `tab` moves between the tree and the patches, `n`/`p` jump between edits, `]`/`[` between files, `v` switches side-by-side and stacked layouts, `x` cycles context lines (4, 12, 50, all), `t` hides the tree, `o` shows one patch at a time, `r` marks a file reviewed, `c` queues a comment on the line under the cursor, and `?` lists every shortcut. Queued comments are handed to the composer when the viewer closes, so a review travels with your next message. Layout choices persist between sessions.
 
-`/undo` and `/redo` walk paired, conflict-checked workspace checkpoints one change at a time and report how far the history reaches in either direction; undo safely stops an active turn first, and submitting new work after undo confirms that boundary. `/timeline` (`/history`) lists every checkpoint in the session by the request that produced it and undoes back to the one you pick, one conflict-checked step at a time — a human edit in the way stops the walk and says so rather than clobbering it.
+`/undo` and `/redo` walk paired, conflict-checked workspace checkpoints one change at a time and report how far the history reaches in either direction; undo safely stops an active turn first, and submitting new work after undo confirms that boundary. Ignored files and files outside the folder stay as the turn left them. A file over 2 MiB is first copied into the data folder (up to 256 MiB a file and 1 GiB a project while the disk has room, dropped when the undo is confirmed or fully redone), so undo and redo take it with the rest; one it cannot copy, or whose earlier content no copy holds, stays too, until the last `/redo`. Under the undone marker, a line in the text colour names the files left for their size (`1 file left as it was · too large for Undo · data/model.bin`) and a quiet one the others the agent changed (`2 files weren't restored · .env, ~/notes.txt`). If a copy `/redo` needs is gone, it changes nothing and a toast says so whole, in the interface language. `/timeline` (`/history`) lists every checkpoint in the session by the request that produced it and undoes back to the one you pick, one conflict-checked step at a time — a human edit in the way stops the walk and says so rather than clobbering it.
 
 Every discovered workflow is also a first-class slash command: a definition whose invocation is `release` runs as `/release [plain text or JSON]`; plugin workflows keep their namespaced invocation. `/workflow` opens a searchable dashboard of reusable definitions and durable runs and accepts run/inspect/pause/resume/cancel/delete commands.
 
@@ -729,7 +729,9 @@ max_turns = 20               # autonomous continuations after the initial turn
 
 # Workspace checkpoints behind /undo, /redo, and /diff last. Git projects
 # and chats' own folders are checkpointed unless this says false; other
-# folders only when it says true.
+# folders only when it says true. Checkpoints hold files up to 2 MiB; undo
+# copies a larger one into the data folder before it changes it (up to
+# 256 MiB a file and 1 GiB a project, dropped once the undo is confirmed).
 [snapshots]
 enabled = true
 retention_days = 7           # 0 keeps every checkpoint forever

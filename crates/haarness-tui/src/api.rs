@@ -2286,6 +2286,10 @@ pub struct ApiRefusal {
     pub status: reqwest::StatusCode,
     pub code: Option<String>,
     pub message: String,
+    /// Why, for the TUI to say in the person's language (`no_undo_copy`),
+    /// and the file it is about, from a server that names them.
+    pub reason: Option<String>,
+    pub path: Option<String>,
 }
 
 impl std::fmt::Display for ApiRefusal {
@@ -2302,6 +2306,16 @@ pub fn refusal_code(error: &anyhow::Error) -> Option<&str> {
     error
         .downcast_ref::<ApiRefusal>()
         .and_then(|refusal| refusal.code.as_deref())
+}
+
+/// The file over 2 MiB that a refused redo needs back and Undo has no copy
+/// of, when the server says that is why.
+#[must_use]
+pub fn missing_undo_copy(error: &anyhow::Error) -> Option<&str> {
+    error
+        .downcast_ref::<ApiRefusal>()
+        .filter(|refusal| refusal.reason.as_deref() == Some("no_undo_copy"))
+        .and_then(|refusal| refusal.path.as_deref())
 }
 
 /// The HTTP status of a refused request, whichever way it was checked.
@@ -2370,10 +2384,21 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
         }
         None => said.unwrap_or_default().to_owned(),
     };
+    // Why, and the file it is about, under `details` as Cloud's errors
+    // carry their reasons too.
+    let detail = |name: &str| {
+        record
+            .and_then(|record| record.get("details"))
+            .and_then(|details| details.get(name))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
     Err(ApiRefusal {
         status,
         code,
         message,
+        reason: detail("reason"),
+        path: detail("path"),
     }
     .into())
 }

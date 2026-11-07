@@ -3509,18 +3509,27 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
         ),
         CoreError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error", true),
         CoreError::Tool(_) => (StatusCode::UNPROCESSABLE_ENTITY, "tool_error", false),
+        CoreError::Refused(_) => (StatusCode::CONFLICT, "refused", false),
         CoreError::Cancelled => (StatusCode::CONFLICT, "cancelled", false),
     }
 }
 impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
         let (status, code, retryable) = failure_parts(&self.0);
+        let details = match &self.0 {
+            CoreError::Refused(refusal) => Some(haarness_protocol::ApiErrorDetails {
+                reason: Some(refusal.reason),
+                path: refusal.path.clone(),
+            }),
+            _ => None,
+        };
         (
             status,
             Json(ApiError {
                 code: code.into(),
                 message: self.1.unwrap_or_else(|| self.0.to_string()),
                 retryable,
+                details,
             }),
         )
             .into_response()
@@ -3598,6 +3607,31 @@ mod failure_tests {
         assert_eq!(invalid["message"], "invalid request: bad");
         let elsewhere = message(ApiFailure::from(CoreError::Tool("boom".into()))).await;
         assert_eq!(elsewhere["message"], "tool error: boom");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_reads_as_its_sentence_and_names_its_reason_for_clients() {
+        let refused = message(ApiFailure::from(CoreError::Refused(Box::new(
+            haarness_core::Refusal {
+                reason: haarness_protocol::RefusalReason::NoUndoCopy,
+                path: Some("assets/big.bin".into()),
+                message: "assets/big.bin is over 2 MiB and Undo has no copy of it.".into(),
+            },
+        ))))
+        .await;
+        assert_eq!(
+            refused["message"],
+            "assets/big.bin is over 2 MiB and Undo has no copy of it."
+        );
+        assert_eq!(refused["code"], "refused");
+        assert_eq!(refused["retryable"], false);
+        // Under `details`, where Cloud's errors carry their reasons too.
+        assert_eq!(refused["details"]["reason"], "no_undo_copy");
+        assert_eq!(refused["details"]["path"], "assets/big.bin");
+        assert!(refused.get("reason").is_none() && refused.get("path").is_none());
+        // Other failures say neither.
+        let conflict = message(ApiFailure::from(CoreError::Conflict("big.bin".into()))).await;
+        assert!(conflict.get("details").is_none());
     }
 }
 

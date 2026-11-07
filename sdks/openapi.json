@@ -97,6 +97,17 @@
           "code": {
             "type": "string"
           },
+          "details": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ApiErrorDetails",
+                "description": "What a client needs to say the failure in the person's own\nlanguage, where `message` says it in English: set on some refusals\n(`code` `refused`), absent from other failures and from older\nservers. Cloud's errors carry their reasons in the same object."
+              }
+            ]
+          },
           "message": {
             "type": "string"
           },
@@ -109,6 +120,30 @@
           "message",
           "retryable"
         ],
+        "type": "object"
+      },
+      "ApiErrorDetails": {
+        "description": "The parts of a failure a client says in its own words (see\n[`ApiError::details`]).",
+        "properties": {
+          "path": {
+            "description": "The file `reason` is about, relative to the folder.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RefusalReason",
+                "description": "Why the request was refused."
+              }
+            ]
+          }
+        },
         "type": "object"
       },
       "ApprovalMode": {
@@ -5152,6 +5187,14 @@
         ],
         "type": "object"
       },
+      "RefusalReason": {
+        "description": "Why a request was refused for good (see [`ApiErrorDetails::reason`]).",
+        "enum": [
+          "no_undo_copy",
+          "other"
+        ],
+        "type": "string"
+      },
       "Report": {
         "properties": {
           "databasesRead": {
@@ -5335,6 +5378,22 @@
           "snapshotId": {
             "description": "Pre-revert backup snapshot consumed by unrevert.",
             "type": "string"
+          },
+          "unrestored": {
+            "description": "Files the undone turns changed that undo left as they are, each with\nwhy: files the checkpoints never hold (ignored, or outside the\nfolder) that the agent's file tools wrote, and files over the\ncheckpoints' size limit whose content undo had no copy of. The ones\nleft for their size come first; at most [`MAX_UNRESTORED`]. Absent\nfrom older servers, and empty when undo put everything back.",
+            "items": {
+              "$ref": "#/components/schemas/UnrestoredFile"
+            },
+            "type": "array"
+          },
+          "unrestoredCount": {
+            "description": "How many such files there are in all, when `unrestored` names only\nthe first of them.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -6804,6 +6863,33 @@
           "completed",
           "failed",
           "interrupted"
+        ],
+        "type": "string"
+      },
+      "UnrestoredFile": {
+        "description": "A file an undo left as it is (see [`RevertState::unrestored`]).",
+        "properties": {
+          "path": {
+            "description": "Relative to the folder, as checkpoints name it, or absolute when\noutside it.",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/UnrestoredReason"
+          }
+        },
+        "required": [
+          "path",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "UnrestoredReason": {
+        "description": "Why undo left a file as it is, the one a person most needs to know\nabout first.",
+        "enum": [
+          "large",
+          "ignored",
+          "outside",
+          "other"
         ],
         "type": "string"
       },

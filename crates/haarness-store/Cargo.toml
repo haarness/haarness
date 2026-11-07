@@ -10,6 +10,7 @@ async-trait.workspace = true
 chrono.workspace = true
 dunce.workspace = true
 flate2.workspace = true
+fs2.workspace = true
 haarness-core = { path = "../haarness-core" }
 haarness-protocol = { path = "../haarness-protocol" }
 hex.workspace = true

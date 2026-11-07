@@ -64,3 +64,56 @@
     flex: 1;
   }
 }
+/* What an undo left as it is: one quiet line under the notice, its names
+   when opened. The notice's first line stays as it is without it. */
+.conversation-history-notice.with-unrestored {
+  display: grid;
+  grid-template-columns: minmax(min-content, max-content) auto;
+  justify-content: start;
+  column-gap: var(--s3);
+  row-gap: var(--s0);
+}
+.undo-unrestored {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.undo-unrestored > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  list-style: none;
+  font-size: var(--ui-xs);
+  border-radius: var(--r-sm);
+}
+.undo-unrestored > summary:hover,
+.undo-unrestored.pressing > summary {
+  color: var(--text);
+}
+.undo-unrestored > summary .icon {
+  transition: transform var(--fast) var(--ease);
+}
+.undo-unrestored[open] > summary .icon {
+  transform: rotate(90deg);
+}
+:root[dir="rtl"] .undo-unrestored:not([open]) > summary .icon {
+  transform: scaleX(-1);
+}
+/* The names line up with the summary's words, past its xs chevron (12px,
+   as --s3) and the gap after it. */
+.undo-unrestored > ul {
+  margin: var(--s1) 0 0;
+  padding-inline-start: calc(var(--s3) + var(--s1));
+  list-style: none;
+  max-height: min(160px, 22vh);
+  overflow-y: auto;
+}
+.undo-unrestored li {
+  overflow-wrap: anywhere;
+}
+.undo-unrestored li > bdi {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+}
+.undo-unrestored li > .reason {
+  color: var(--muted);
+}

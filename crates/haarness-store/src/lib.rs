@@ -627,6 +627,22 @@ impl SqliteStore {
                 .execute_batch("ALTER TABLE threads ADD COLUMN directory TEXT;")
                 .map_err(storage)?;
         }
+        // The files a pending undo left as they are, checked the same way:
+        // an older server ignores it, and a pending undo it records anew
+        // names another backup, which leaves these out (see
+        // `decode_unrestored`).
+        let has_unrestored: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='revert_unrestored_json')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if !has_unrestored {
+            connection
+                .execute_batch("ALTER TABLE threads ADD COLUMN revert_unrestored_json TEXT;")
+                .map_err(storage)?;
+        }
         connection
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_threads_directory ON threads(directory) WHERE directory IS NOT NULL;",
@@ -648,6 +664,49 @@ impl SqliteStore {
             )
             .map_err(storage)?;
         Ok(())
+    }
+
+    /// The thread's undo state, and the files each still-undone step of it
+    /// left as they are: those the same pending undo recorded for steps at
+    /// or after `state`'s sequence, with `step`'s for that sequence.
+    fn write_revert_state(
+        &self,
+        id: ThreadId,
+        state: Option<(u64, String, Option<String>)>,
+        step: Option<(haarness_core::UndoStepFiles, Vec<String>)>,
+    ) -> CoreResult<()> {
+        let mut connection = self.connection.lock();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let (sequence, snapshot, base_snapshot, unrestored) = match state {
+            Some((sequence, snapshot, base_snapshot)) => {
+                let recorded = tx
+                    .query_row(
+                        "SELECT revert_unrestored_json FROM threads WHERE id=?1",
+                        [id.to_string()],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .map_err(storage)?
+                    .flatten();
+                let unrestored =
+                    pending_unrestored(recorded.as_deref(), &snapshot, sequence, step)?;
+                (
+                    Some(i64::try_from(sequence).map_err(storage)?),
+                    Some(snapshot),
+                    base_snapshot,
+                    unrestored,
+                )
+            }
+            None => (None, None, None, None),
+        };
+        tx.execute(
+            "UPDATE threads SET revert_sequence=?2, revert_snapshot=?3, revert_base_snapshot=?4, revert_unrestored_json=?5, updated_at=?6 WHERE id=?1",
+            params![id.to_string(), sequence, snapshot, base_snapshot, unrestored, time(Utc::now())],
+        )
+        .map_err(storage)?;
+        tx.commit().map_err(storage)
     }
 
     fn start_turn_record(
@@ -687,7 +746,7 @@ impl SqliteStore {
             request.attachments = input.attachments;
         }
         let thread_raw = tx.query_row(
-            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory FROM threads WHERE id=?1",
+            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json FROM threads WHERE id=?1",
             [id.to_string()], raw_thread,
         ).optional().map_err(storage)?.ok_or_else(|| CoreError::NotFound(format!("thread {id}")))?;
         let thread = decode_thread(thread_raw)?;
@@ -706,7 +765,7 @@ impl SqliteStore {
             )
             .map_err(storage)?;
             tx.execute(
-                "UPDATE threads SET revert_sequence=NULL, revert_snapshot=NULL, revert_base_snapshot=NULL WHERE id=?1",
+                "UPDATE threads SET revert_sequence=NULL, revert_snapshot=NULL, revert_base_snapshot=NULL, revert_unrestored_json=NULL WHERE id=?1",
                 [id.to_string()],
             )
             .map_err(storage)?;
@@ -873,7 +932,7 @@ impl ThreadRepository for SqliteStore {
         let connection = self.connection.lock();
         let mut statement = connection
             .prepare(
-                "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory
+                "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json
              FROM threads WHERE (?1 OR archived = 0) ORDER BY updated_at DESC",
             )
             .map_err(storage)?;
@@ -908,7 +967,7 @@ impl ThreadRepository for SqliteStore {
 
     async fn get_thread(&self, id: ThreadId) -> CoreResult<Thread> {
         let raw = self.connection.lock().query_row(
-            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory FROM threads WHERE id=?1",
+            "SELECT id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json FROM threads WHERE id=?1",
             [id.to_string()], raw_thread,
         ).optional().map_err(storage)?.ok_or_else(|| CoreError::NotFound(format!("thread {id}")))?;
         decode_thread(raw)
@@ -975,7 +1034,7 @@ impl ThreadRepository for SqliteStore {
         };
         let raw = connection.query_row(
             "UPDATE threads SET title=?2,updated_at=?3 WHERE id=?1 AND title=?4
-             RETURNING id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory",
+             RETURNING id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory,revert_unrestored_json",
             params![id.to_string(), title, time(Utc::now()), stored], raw_thread,
         ).optional().map_err(storage)?;
         raw.map(decode_thread).transpose()
@@ -1489,22 +1548,17 @@ impl ThreadRepository for SqliteStore {
         id: ThreadId,
         state: Option<(u64, String, Option<String>)>,
     ) -> CoreResult<()> {
-        let (sequence, snapshot, base_snapshot) = match state {
-            Some((sequence, snapshot, base_snapshot)) => (
-                Some(i64::try_from(sequence).map_err(storage)?),
-                Some(snapshot),
-                base_snapshot,
-            ),
-            None => (None, None, None),
-        };
-        self.connection
-            .lock()
-            .execute(
-                "UPDATE threads SET revert_sequence=?2, revert_snapshot=?3, revert_base_snapshot=?4, updated_at=?5 WHERE id=?1",
-                params![id.to_string(), sequence, snapshot, base_snapshot, time(Utc::now())],
-            )
-            .map_err(storage)?;
-        Ok(())
+        self.write_revert_state(id, state, None)
+    }
+
+    async fn set_revert_state_unrestored(
+        &self,
+        id: ThreadId,
+        state: (u64, String, Option<String>),
+        unrestored: haarness_core::UndoStepFiles,
+        settled: Vec<String>,
+    ) -> CoreResult<()> {
+        self.write_revert_state(id, Some(state), Some((unrestored, settled)))
     }
 
     async fn confirm_revert(&self, id: ThreadId) -> CoreResult<bool> {
@@ -1531,7 +1585,7 @@ impl ThreadRepository for SqliteStore {
         )
         .map_err(storage)?;
         tx.execute(
-            "UPDATE threads SET revert_sequence=NULL, revert_snapshot=NULL, revert_base_snapshot=NULL, updated_at=?2 WHERE id=?1",
+            "UPDATE threads SET revert_sequence=NULL, revert_snapshot=NULL, revert_base_snapshot=NULL, revert_unrestored_json=NULL, updated_at=?2 WHERE id=?1",
             params![id.to_string(), time(Utc::now())],
         )
         .map_err(storage)?;
@@ -2041,6 +2095,7 @@ type RawThread = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 type RawTurn = (
     String,
@@ -2076,6 +2131,7 @@ fn raw_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawThread> {
         row.get(14)?,
         row.get(15)?,
         row.get(16)?,
+        row.get(17)?,
     ))
 }
 fn raw_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTurn> {
@@ -2133,12 +2189,19 @@ fn shown_title(stored: String) -> String {
 
 fn decode_thread(raw: RawThread) -> CoreResult<Thread> {
     let revert = match (raw.9, raw.10) {
-        (Some(sequence), Some(snapshot_id)) => Some(haarness_protocol::RevertState {
-            sequence: u64::try_from(sequence)
-                .map_err(|error| CoreError::Storage(error.to_string()))?,
-            snapshot_id,
-            base_snapshot_id: raw.11,
-        }),
+        (Some(sequence), Some(snapshot_id)) => {
+            let sequence =
+                u64::try_from(sequence).map_err(|error| CoreError::Storage(error.to_string()))?;
+            let (unrestored, unrestored_count) =
+                decode_unrestored(raw.17.as_deref(), &snapshot_id, sequence);
+            Some(haarness_protocol::RevertState {
+                sequence,
+                snapshot_id,
+                base_snapshot_id: raw.11,
+                unrestored,
+                unrestored_count,
+            })
+        }
         _ => None,
     };
     Ok(Thread {
@@ -2173,6 +2236,115 @@ fn decode_thread(raw: RawThread) -> CoreResult<Thread> {
         directory: raw.16,
     })
 }
+/// The files a pending undo left as they are, as `revert_unrestored_json`
+/// keeps them: per undo step, for the undo that `backup` is the backup of.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct PendingUnrestored {
+    backup: String,
+    steps: Vec<UnrestoredStep>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct UnrestoredStep {
+    /// The sequence the step undid back to.
+    boundary: u64,
+    #[serde(flatten)]
+    files: haarness_core::UndoStepFiles,
+}
+
+/// The steps of `recorded` that belong to the undo backed up by `backup`
+/// and are still undone at `sequence`.
+fn still_undone(recorded: Option<&str>, backup: &str, sequence: u64) -> Vec<UnrestoredStep> {
+    recorded
+        .and_then(|text| serde_json::from_str::<PendingUnrestored>(text).ok())
+        .filter(|pending| pending.backup == backup)
+        .map(|pending| {
+            pending
+                .steps
+                .into_iter()
+                .filter(|step| step.boundary >= sequence)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What `revert_unrestored_json` becomes when the undo backed up by
+/// `backup` moves to `sequence`, `step` being the files an undo or redo step
+/// to it left and the paths it settled (see
+/// [`ThreadRepository::set_revert_state_unrestored`]).
+fn pending_unrestored(
+    recorded: Option<&str>,
+    backup: &str,
+    sequence: u64,
+    step: Option<(haarness_core::UndoStepFiles, Vec<String>)>,
+) -> CoreResult<Option<String>> {
+    let mut steps = still_undone(recorded, backup, sequence);
+    if let Some((files, settled)) = step {
+        // A file this step wrote, removed or found as its checkpoint has it
+        // is so now, or named again in `files`: the steps before no longer
+        // left it.
+        for step in &mut steps {
+            let named = step.files.files.len();
+            step.files
+                .files
+                .retain(|file| !settled.contains(&file.path));
+            let dropped = u64::try_from(named - step.files.files.len()).unwrap_or(u64::MAX);
+            step.files.count = step.files.count.saturating_sub(dropped);
+        }
+        // A redo forward to a boundary an undo step left files at: what it
+        // left joins them.
+        let mut files = files;
+        if let Some(index) = steps.iter().position(|step| step.boundary == sequence) {
+            let earlier = steps.remove(index).files;
+            let unnamed = unnamed_count(&earlier).saturating_add(unnamed_count(&files));
+            files = haarness_core::UndoStepFiles::new(earlier.files.into_iter().chain(files.files));
+            files.count = files.count.saturating_add(unnamed);
+        }
+        steps.push(UnrestoredStep {
+            boundary: sequence,
+            files,
+        });
+        steps.retain(|step| !step.files.is_empty());
+    }
+    if steps.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(&PendingUnrestored {
+        backup: backup.to_owned(),
+        steps,
+    })
+    .map(Some)
+    .map_err(storage)
+}
+
+/// How many of `files` count without a name.
+fn unnamed_count(files: &haarness_core::UndoStepFiles) -> u64 {
+    files
+        .count
+        .saturating_sub(u64::try_from(files.files.len()).unwrap_or(u64::MAX))
+}
+
+/// [`RevertState::unrestored`] and [`RevertState::unrestored_count`] of the
+/// undo backed up by `backup` at `sequence`. Anything else recorded there
+/// (an older server's undo since, an unreadable value) names none.
+///
+/// [`RevertState::unrestored`]: haarness_protocol::RevertState::unrestored
+/// [`RevertState::unrestored_count`]: haarness_protocol::RevertState::unrestored_count
+fn decode_unrestored(
+    recorded: Option<&str>,
+    backup: &str,
+    sequence: u64,
+) -> (Vec<haarness_protocol::UnrestoredFile>, Option<u64>) {
+    let steps = still_undone(recorded, backup, sequence);
+    // A step names only its first files; the rest count, unnamed.
+    let unnamed: u64 = steps.iter().map(|step| unnamed_count(&step.files)).sum();
+    let all =
+        haarness_core::UndoStepFiles::new(steps.into_iter().flat_map(|step| step.files.files));
+    let count = all.count.saturating_add(unnamed);
+    let named = u64::try_from(all.files.len()).unwrap_or(u64::MAX);
+    (all.files, (count > named).then_some(count))
+}
+
 fn decode_turn(raw: RawTurn) -> CoreResult<Turn> {
     Ok(Turn {
         id: turn_id(&raw.0)?,
@@ -2269,6 +2441,196 @@ mod tests {
             .unwrap()
             .0
             .id
+    }
+
+    #[tokio::test]
+    async fn the_files_an_undo_left_follow_its_steps_until_it_is_confirmed() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let file = |path: &str| {
+            let reason = if path.starts_with('/') {
+                haarness_protocol::UnrestoredReason::Outside
+            } else if path.starts_with("big") {
+                haarness_protocol::UnrestoredReason::Large
+            } else {
+                haarness_protocol::UnrestoredReason::Ignored
+            };
+            haarness_protocol::UnrestoredFile {
+                path: path.to_owned(),
+                reason,
+            }
+        };
+        let files =
+            |paths: &[&str]| haarness_core::UndoStepFiles::new(paths.iter().map(|path| file(path)));
+        let left = |thread: Thread| {
+            let revert = thread.revert.expect("a pending undo");
+            (revert.sequence, revert.unrestored, revert.unrestored_count)
+        };
+        let step = |sequence, base: &str| (sequence, "backup".to_owned(), Some(base.to_owned()));
+        // Two undo steps, each with a file it could not put back.
+        store
+            .set_revert_state_unrestored(thread.id, step(9, "b9"), files(&[".env"]), Vec::new())
+            .await
+            .unwrap();
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(5, "b5"),
+                files(&["/outside/notes.txt", "big.bin", ".env"]),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        // The one left for its size first, then the ignored, then outside.
+        assert_eq!(
+            left(store.get_thread(thread.id).await.unwrap()),
+            (
+                5,
+                vec![file("big.bin"), file(".env"), file("/outside/notes.txt")],
+                None
+            )
+        );
+        // Redoing the earlier step drops its files only.
+        store
+            .set_revert_state(thread.id, Some(step(9, "after5")))
+            .await
+            .unwrap();
+        assert_eq!(
+            left(store.get_thread(thread.id).await.unwrap()),
+            (9, vec![file(".env")], None)
+        );
+        // Another undo (another backup) starts over, and a step that left
+        // everything in place names nothing.
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                (3, "other".to_owned(), Some("b3".to_owned())),
+                files(&[]),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let thread_now = store.get_thread(thread.id).await.unwrap();
+        assert_eq!(left(thread_now.clone()), (3, Vec::new(), None));
+        assert!(
+            !serde_json::to_string(&thread_now)
+                .unwrap()
+                .contains("unrestored"),
+            "an undo that left nothing says nothing"
+        );
+        // More files than are named: the rest are counted.
+        let many = (0..120)
+            .map(|index| format!("f{index:03}"))
+            .collect::<Vec<_>>();
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(2, "b2"),
+                haarness_core::UndoStepFiles::new(many.iter().map(|path| file(path))),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let (_, named, count) = left(store.get_thread(thread.id).await.unwrap());
+        assert_eq!(named.len(), haarness_protocol::MAX_UNRESTORED);
+        assert_eq!(named[0], file("f000"));
+        assert_eq!(count, Some(120));
+        // Confirming the undo clears them with it.
+        assert!(store.confirm_revert(thread.id).await.unwrap());
+        assert!(store.get_thread(thread.id).await.unwrap().revert.is_none());
+        let recorded: Option<String> = store
+            .connection
+            .lock()
+            .query_row(
+                "SELECT revert_unrestored_json FROM threads WHERE id=?1",
+                [thread.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, None);
+    }
+
+    #[tokio::test]
+    async fn a_file_a_later_step_puts_back_or_names_again_is_named_once() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let large = |paths: &[&str]| {
+            haarness_core::UndoStepFiles::new(paths.iter().map(|path| {
+                haarness_protocol::UnrestoredFile {
+                    path: (*path).to_owned(),
+                    reason: haarness_protocol::UnrestoredReason::Large,
+                }
+            }))
+        };
+        let settled = |paths: &[&str]| paths.iter().map(|path| (*path).to_owned()).collect();
+        let named = |thread: Thread| {
+            let revert = thread.revert.expect("a pending undo");
+            let paths = revert
+                .unrestored
+                .into_iter()
+                .map(|file| file.path)
+                .collect::<Vec<_>>();
+            (revert.sequence, paths)
+        };
+        let step = |sequence, base: &str| (sequence, "backup".to_owned(), Some(base.to_owned()));
+        // The first step back leaves two large files; the second puts one
+        // of them back as its checkpoint has it.
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(9, "b9"),
+                large(&["a.bin", "b.bin"]),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(5, "b5"),
+                large(&[]),
+                settled(&["a.bin", "c.txt"]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            named(store.get_thread(thread.id).await.unwrap()),
+            (5, vec!["b.bin".to_owned()])
+        );
+        // A step forward that takes a file to the backup's content names it
+        // with what the step still undone there left.
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(9, "after5"),
+                large(&["a.bin"]),
+                settled(&["a.bin"]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            named(store.get_thread(thread.id).await.unwrap()),
+            (9, vec!["a.bin".to_owned(), "b.bin".to_owned()])
+        );
+        // Back again, the step puts both as its checkpoint has them.
+        store
+            .set_revert_state_unrestored(
+                thread.id,
+                step(5, "b5"),
+                large(&[]),
+                settled(&["a.bin", "b.bin"]),
+            )
+            .await
+            .unwrap();
+        let thread_now = store.get_thread(thread.id).await.unwrap();
+        assert_eq!(named(thread_now.clone()), (5, Vec::new()));
+        assert_eq!(thread_now.revert.unwrap().unrestored_count, None);
     }
 
     #[tokio::test]

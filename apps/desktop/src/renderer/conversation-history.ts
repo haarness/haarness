@@ -1,10 +1,39 @@
-import type { Item, Thread } from "@haarness/sdk";
+import type { Item, Thread, UnrestoredFile } from "@haarness/sdk";
 import { plainMessage } from "./prompt-context";
 import { spelledOutPlain, withoutEscapes } from "./display-text";
+import { t } from "./i18n";
 
 export function retainedItems(items: Item[], thread?: Thread) {
   const boundary = thread?.revert?.sequence ?? Infinity;
   return items.filter((item) => item.sequence <= boundary);
+}
+/** The files a pending undo left as they are, as the server named them:
+ * those left for their size, which the folder no longer matches a
+ * checkpoint at, apart from the ignored and outside ones, and how many
+ * more there are than it named. An older server names none. */
+export function unrestoredFiles(thread?: Thread) {
+  const files = thread?.revert?.unrestored ?? [];
+  const count = Math.max(files.length, thread?.revert?.unrestoredCount ?? 0);
+  return {
+    large: files.filter((file) => file.reason === "large"),
+    quiet: files.filter((file) => file.reason !== "large"),
+    more: count - files.length,
+    count,
+  };
+}
+/** Why an undo left `file` as it was, in the interface language; nothing
+ * for a reason only a newer server knows. */
+export function unrestoredReason(file: UnrestoredFile) {
+  switch (file.reason) {
+    case "large":
+      return t("too large for Undo");
+    case "ignored":
+      return t("ignored");
+    case "outside":
+      return t("outside the folder");
+    default:
+      return undefined;
+  }
 }
 export function lastUserMessage(items: Item[], boundary = Infinity) {
   return items.findLast(

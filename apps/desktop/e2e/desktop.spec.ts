@@ -20,6 +20,7 @@ import {
   copyFile,
   chmod,
   rename,
+  readdir,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -11998,6 +11999,205 @@ test("conversation controls undo and redo real files, preserve drafts, and compa
   await page.reload();
   await expect(input).toHaveValue("Keep my unsent draft");
   expect((await client.listItems(thread.id)).some(item => item.data.type === "compaction" && !!item.data.summary)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test("an undo says which files it left, those left for their size first, under its notice", async () => {
+  await page.locator(".project-list .project-heading").filter({ hasText: /^workspace$/ }).click();
+  const expand = page.getByRole("button", { name: "Expand project workspace", exact: true });
+  if (await expand.count()) await expand.click();
+  const thread = await client.createThread({ title: "Undo left files fixture", provider: "echo", model: "echo-1", agent: "build" });
+  await page.getByRole("button", { name: thread.title, exact: true }).click();
+  const menu = async (name: string) => {
+    await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+    await page.getByRole("menuitem", { name, exact: true }).click();
+  };
+  const approval = page.getByRole("button", { name: /^Approvals: (Review|Auto|Yolo)$/ });
+  if (await approval.getAttribute("aria-label") !== "Approvals: Auto") await pickApprovals(page, "Auto");
+  // Ignored for this clone only, so no other test sees a changed Git status.
+  const exclude = join(workspace, ".git", "info", "exclude");
+  const excluded = await readFile(exclude, "utf8").catch(() => "");
+  await mkdir(dirname(exclude), { recursive: true });
+  await writeFile(exclude, excluded + "undo-left-*.env\n");
+  const kept = join(workspace, "undo-left-settings.env");
+  const made = join(workspace, "undo-left-tokens.env");
+  const tracked = join(workspace, "undo-left-tracked.txt");
+  // Over the checkpoints' 2 MiB: no checkpoint holds what it held before.
+  const big = join(workspace, "undo-left-big.bin");
+  await writeFile(kept, "TOKEN=old\n");
+  await writeFile(big, "x".repeat(3 * 1024 * 1024));
+  const calls = [
+    ["undo-left-settings.env", "TOKEN=new\n"],
+    ["undo-left-tokens.env", "SECRET=made\n"],
+    ["undo-left-tracked.txt", "turn output\n"],
+    ["undo-left-big.bin", "shrunk\n"],
+  ].map(([path, content]) => ({ name: "write", arguments: { path, content } }));
+  await send("!multi " + JSON.stringify(calls));
+  await expect.poll(() => readFile(tracked, "utf8").catch(() => "")).toBe("turn output\n");
+  await settled();
+  await expect(page.locator(".composer")).not.toHaveClass(/running/);
+  // The undo's notice, the one with Redo, not "Updating chat history…" that
+  // can stand beside it for a moment.
+  const notice = page.locator(".conversation-history-notice:has(> button)");
+  await menu("Undo last turn");
+  await expect(notice).toContainText("Turn undone");
+  await expect.poll(() => existsSync(tracked)).toBe(false);
+  // The toast says a file stays as the turn left it.
+  await expect(page.locator(".toast")).toContainText("Last turn undone · 1 file left as it was");
+  expect(await readFile(kept, "utf8")).toBe("TOKEN=new\n");
+  expect(await readFile(made, "utf8")).toBe("SECRET=made\n");
+  expect(await readFile(big, "utf8")).toBe("shrunk\n");
+  // First the one left for its size, in the text colour; then, quietly, the
+  // ignored ones.
+  const lines = notice.locator(".undo-unrestored");
+  await expect(lines).toHaveCount(2);
+  const pressing = lines.nth(0);
+  const quiet = lines.nth(1);
+  await expect(pressing).toHaveClass(/pressing/);
+  await expect(pressing.locator("summary")).toHaveText("1 file left as it was · too large for Undo");
+  await expect(pressing.locator("summary")).toHaveAttribute("title", "undo-left-big.bin");
+  const colour = (locator: Locator) => locator.evaluate((element) => getComputedStyle(element).color);
+  expect(await colour(pressing.locator("summary"))).toBe(await colour(notice.getByRole("button", { name: "Redo turn", exact: true })));
+  expect(await colour(pressing.locator("summary"))).not.toBe(await colour(quiet.locator("summary")));
+  await expect(quiet.locator("summary")).toHaveText("2 files weren't restored");
+  await expect(quiet.locator("summary")).toHaveAttribute("title", "undo-left-settings.env\nundo-left-tokens.env");
+  await expect(quiet.locator("li").first()).toBeHidden();
+  // The notice's first line is where it always is: the sentence, then Redo.
+  const sentence = await notice.locator("span").first().boundingBox();
+  const redo = await notice.getByRole("button", { name: "Redo turn", exact: true }).boundingBox();
+  expect(Math.abs(sentence!.y + sentence!.height / 2 - (redo!.y + redo!.height / 2))).toBeLessThan(2);
+  expect((await pressing.locator("summary").boundingBox())!.y).toBeGreaterThan(redo!.y + redo!.height - 1);
+  const shots = async (name: string) => {
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((value) => window.haarness.preferences({ theme: value }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.locator(".conversation").screenshot({ path: test.info().outputPath(`${name}-${theme}.png`) });
+    }
+  };
+  await shots("undo-unrestored-closed");
+  await pressing.locator("summary").click();
+  await quiet.locator("summary").click();
+  await expect(pressing.locator("li")).toHaveText(["undo-left-big.bin"]);
+  await expect(quiet.locator("li")).toHaveText(["undo-left-settings.env · ignored", "undo-left-tokens.env · ignored"]);
+  await shots("undo-unrestored-open");
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(quiet.locator("summary")).toHaveText(/^لم تتم استعادة (2|٢) ملفات$/);
+  await expect(pressing.locator("summary")).toHaveText("تُرك ملف واحد كما كان · أكبر من أن يستعيده التراجع");
+  await expect(quiet.locator("li bdi").first()).toHaveAttribute("dir", "ltr");
+  await shots("undo-unrestored-rtl");
+  await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "dark" }));
+  // Kept with the undo across a reload.
+  await page.reload();
+  await expect(notice.locator(".undo-unrestored summary")).toHaveText(["1 file left as it was · too large for Undo", "2 files weren't restored"]);
+  await menu("Redo turn");
+  await expect.poll(() => readFile(tracked, "utf8").catch(() => "")).toBe("turn output\n");
+  await expect(notice).toHaveCount(0);
+  await writeFile(exclude, excluded);
+  for (const path of [kept, made, tracked, big]) await rm(path);
+  expect(errors).toEqual([]);
+});
+
+test("undo and redo through two turns that took a file past 2 MiB name it until the last redo", async () => {
+  await page.locator(".project-list .project-heading").filter({ hasText: /^workspace$/ }).click();
+  const expand = page.getByRole("button", { name: "Expand project workspace", exact: true });
+  if (await expand.count()) await expand.click();
+  const thread = await client.createThread({ title: "Two large turns fixture", provider: "echo", model: "echo-1", agent: "build" });
+  // Its commands run without asking.
+  await client.setApprovalMode(thread.id, { mode: "yolo" });
+  await page.getByRole("button", { name: thread.title, exact: true }).click();
+  const menu = async (name: string) => {
+    await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+    await page.getByRole("menuitem", { name, exact: true }).click();
+  };
+  const big = join(workspace, "undo-two-big.bin");
+  const other = join(workspace, "undo-two-other.txt");
+  const said = () => readFile(other, "utf8").catch(() => "");
+  // What the file starts with, or "" when there is none.
+  const head = async () => (existsSync(big) ? (await readFile(big)).subarray(0, 1).toString() : "");
+  await writeFile(other, "o0\n");
+  // Turn 1 makes a file over the checkpoints' 2 MiB, turn 2 rewrites it.
+  for (const [byte, text] of [["a", "o1\n"], ["b", "o2\n"]]) {
+    await send("!multi " + JSON.stringify([
+      { name: "bash", arguments: { command: `head -c 2500000 /dev/zero | tr '\\0' ${byte} > undo-two-big.bin` } },
+      { name: "write", arguments: { path: "undo-two-other.txt", content: text } },
+    ]));
+    await expect.poll(said).toBe(text);
+    await settled();
+  }
+  expect(await head()).toBe("b");
+  // The undo's notice, not "Updating chat history…" beside it for a moment.
+  const notice = page.locator(".conversation-history-notice:has(> button)");
+  const pressing = notice.locator(".undo-unrestored.pressing summary");
+  const left = "1 file left as it was · too large for Undo";
+  // No copy holds what turn 1 left: the first undo leaves the file and
+  // names it; the second takes it back to before turn 1, and the name goes.
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o1\n");
+  await expect(pressing).toHaveText(left);
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o0\n");
+  await expect.poll(() => existsSync(big)).toBe(false);
+  await expect(notice).toContainText("Turn undone");
+  await expect(notice.locator(".undo-unrestored")).toHaveCount(0);
+  // The first redo brings turn 1 back with the file as turn 2 left it, named.
+  await menu("Redo turn");
+  await expect.poll(said).toBe("o1\n");
+  await expect(pressing).toHaveText(left);
+  await expect(pressing).toHaveAttribute("title", "undo-two-big.bin");
+  expect(await head()).toBe("b");
+  // The toast says so too, without saying the redo left it alone.
+  await expect(page.locator(".toast")).toHaveText("Turn restored · 1 file wasn't restored");
+  await expect(page.locator(".error-banner")).toHaveCount(0);
+  const shots = async (name: string, target = page.locator(".conversation")) => {
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((value) => window.haarness.preferences({ theme: value }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await target.screenshot({ path: test.info().outputPath(`${name}-${theme}.png`) });
+    }
+  };
+  await shots("redo-two-large-named");
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(pressing).toHaveText("تُرك ملف واحد كما كان · أكبر من أن يستعيده التراجع");
+  await shots("redo-two-large-named-rtl");
+  await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "dark" }));
+  // The last redo: both turns back, nothing named.
+  await menu("Redo turn");
+  await expect.poll(said).toBe("o2\n");
+  await expect(notice).toHaveCount(0);
+  await expect(page.locator(".toast")).toHaveText("Turn restored");
+  expect(await head()).toBe("b");
+
+  // Undone again, and the copies are lost: redo says why it cannot go on
+  // and what to do, and changes nothing.
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o1\n");
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o0\n");
+  const data = env.HAARNESS_DATA_DIR;
+  const folders = (await readdir(data, { recursive: true }))
+    .filter((path) => path.endsWith(".undo-copies"))
+    .map((path) => join(data, path));
+  expect(folders.length).toBeGreaterThan(0);
+  for (const folder of folders)
+    for (const set of await readdir(folder)) await rm(join(folder, set), { recursive: true });
+  await menu("Redo turn");
+  // The file is set apart from the sentence, which keeps it whole right to left.
+  await expect(page.locator(".error-banner")).toContainText(
+    "\u2068undo-two-big.bin\u2069 is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
+  );
+  expect(await said()).toBe("o0\n");
+  expect(existsSync(big)).toBe(false);
+  await shots("redo-two-large-refused", page.locator(".error-banner"));
+  // In the reader's language, the file kept whole in a right-to-left sentence.
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(page.locator(".error-banner")).toContainText("وليست لدى التراجع نسخة منه");
+  await expect(page.locator(".error-banner")).toContainText("\u2068undo-two-big.bin\u2069");
+  await shots("redo-two-large-refused-rtl", page.locator(".error-banner"));
+  await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "dark" }));
+  await rm(other);
   expect(errors).toEqual([]);
 });
 

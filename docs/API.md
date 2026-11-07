@@ -572,7 +572,42 @@ changes all of its files or none: when a path cannot be written part way (a
 read-only directory, a locked file, a full disk), every path already changed
 is put back, the chat keeps its previous undo state, and the same request
 succeeds once the cause is fixed. Undo and redo run one at a time across the
-chats of a workspace. The last-turn diff comes from the newest pair before any
+chats of a workspace. Checkpoints follow the folder's ignore files and keep
+only the hash of a file over 2 MiB. Before undo or redo changes such a file,
+it keeps a copy of it in the data folder, beside the database, so undo still
+takes the folder back to the checkpoint (a file a turn made over 2 MiB goes,
+one it grew past 2 MiB gets its earlier content back) and redo brings the
+file back from the copy. A copy is on disk before the file changes. Copies
+are kept up to 256 MiB per file and 1 GiB per database in all, and only while
+the disk would still have 512 MiB free; room is made by dropping the copies of
+undos that are no longer pending, the oldest first, and then those of
+archived chats' pending undos. An undo's copies go when it is confirmed (the
+next message, a compaction or a direct tool) or fully redone; copies that no
+chat's undo names, as after a process stopped part way through a step, stay
+as long as checkpoints do (`retention_days`). A file over 2 MiB that undo
+cannot handle so (past those bounds, or one whose earlier content no copy
+holds, as when a turn shrank it or two turns rewrote it) stays as it is while
+the rest is restored; the next step takes it as that step left it (the copy
+folder records which files those are and what each held). An edit a person or
+another chat made to any file after the turn, whatever its size, stops the
+step with `409 conflict` before anything changes; so does any change to a file
+a step left, deleting it or putting it back by hand included. Redo takes a file left so to where the last redo does, as it was
+before the undo, and names it until then. Redo refuses, before writing
+anything, only when a copy it needs is gone; its code is
+`refused` (409, not retryable), with `details.reason` `no_undo_copy` and the
+file in `details.path` beside the English `message` (the `details` object
+Cloud's errors carry their reasons in), so a client can say it in the
+person's language (Desktop and the terminal UI do), and a new message keeps
+the chat as it is now. The ignored and outside files that the
+undone turns' `write`, `edit`, `multiedit` and `apply_patch` calls (direct,
+in a `batch`, or a child agent's during those turns) changed stay as they
+are too. The thread's `revert` lists them in `unrestored` as `{path, reason}`,
+the reason `large`, `ignored` or `outside` (those left for their size first),
+the path relative to the folder or absolute when outside it, at most 50, with
+`unrestoredCount` when there are more; it follows the steps still undone (a
+file a later step puts back drops out) and is absent when undo put everything
+back, as it is from older servers. A file
+made and removed within those turns is not listed. The last-turn diff comes from the newest pair before any
 pending undo boundary that changed files: an undone turn drops out of it, and a
 later turn that only ran commands does not hide the edits before it. The VCS
 endpoint reports staged, unstaged, untracked, unborn-branch, and
