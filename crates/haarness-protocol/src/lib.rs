@@ -1419,6 +1419,32 @@ pub struct ThreadActivity {
     pub last_turn: Option<Turn>,
 }
 
+/// `POST /v1/threads/{id}/work/stop`: stop what some turns of a chat left
+/// running, telling the chat nothing, and leave every other turn's work
+/// alone. A scheduled run ends its own work this way.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StopTurnWorkRequest {
+    /// The turns whose work stops: any of them still running, the subagents
+    /// they started (and everything under those) and the commands they ran.
+    pub turns: Vec<TurnId>,
+    /// Workflow runs launched from the chat that stop too, with no result
+    /// delivered to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflows: Vec<WorkflowId>,
+}
+
+/// What a `StopTurnWorkRequest` began to stop.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StopTurnWorkResult {
+    /// The named turns that were still running.
+    pub turns: Vec<TurnId>,
+    pub subagents: Vec<BackgroundTaskInfo>,
+    pub commands: Vec<ShellCommandInfo>,
+    pub workflows: Vec<WorkflowId>,
+}
+
 /// User input against a thread that may already have a running turn. When a
 /// turn is active the text is persisted immediately and steered into that
 /// turn's next provider round; otherwise a normal turn starts.
@@ -1531,6 +1557,8 @@ pub struct ApiError {
         PendingQuestionInfo,
         BackgroundTaskInfo,
         ThreadActivity,
+        StopTurnWorkRequest,
+        StopTurnWorkResult,
         ShellCommandState,
         ShellCommandMovedBy,
         ShellCommandEndedBy,

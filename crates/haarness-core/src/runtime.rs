@@ -4654,6 +4654,74 @@ impl AgentRuntime {
         Ok((tasks.len() + active_turns.len()) as u64)
     }
 
+    /// Stop, telling the chat nothing, what the turns `turns` of `root` left
+    /// running: those of them still running, the subagents they started
+    /// (with everything under those) and the commands they ran. Every other
+    /// turn's work goes on, so a person's turn in the chat, and what it
+    /// started, are left alone. A scheduled run ends its own work this way.
+    pub async fn stop_turn_work(
+        &self,
+        root: ThreadId,
+        turns: &HashSet<TurnId>,
+    ) -> CoreResult<haarness_protocol::StopTurnWorkResult> {
+        self.repository.get_thread(root).await?;
+        let threads = self.repository.list_threads(true).await?;
+        let tree = descendant_thread_ids(&threads, root);
+        let theirs =
+            |thread: &ThreadId, turn: &TurnId| tree.contains(thread) && turns.contains(turn);
+        let started = self
+            .background_tasks
+            .iter()
+            .filter(|entry| {
+                let info = entry.value().info();
+                theirs(&info.parent_thread_id, &info.parent_turn_id)
+            })
+            .map(|entry| Arc::clone(entry.value()))
+            .collect::<Vec<_>>();
+        // The chats of those subagents and of theirs: all of it goes.
+        let under = started
+            .iter()
+            .flat_map(|task| descendant_thread_ids(&threads, task.info().child_thread_id))
+            .collect::<HashSet<_>>();
+        let nested = self
+            .background_tasks
+            .iter()
+            .filter(|entry| under.contains(&entry.value().info().parent_thread_id))
+            .map(|entry| Arc::clone(entry.value()))
+            .collect::<Vec<_>>();
+        let mut stopped = haarness_protocol::StopTurnWorkResult::default();
+        for task in started.iter().chain(&nested) {
+            task.cancel_with_parent();
+        }
+        stopped.subagents = started.iter().map(|task| task.info()).collect();
+        let running = self
+            .active
+            .iter()
+            .filter(|entry| theirs(entry.key(), &entry.value().id) || under.contains(entry.key()))
+            .map(|entry| (*entry.key(), Arc::clone(entry.value())))
+            .collect::<Vec<_>>();
+        for (_, active) in running {
+            // This turn alone: not the chat's other subagents, as a person's
+            // stop of the turn would, nor the input waiting in its queue.
+            active.cancel.cancel();
+            *active.accepting.lock().await = false;
+            if turns.contains(&active.id) {
+                stopped.turns.push(active.id);
+            }
+            if let Err(error) = self
+                .repository
+                .set_turn_status(active.id, TurnStatus::Interrupted, None)
+                .await
+                && !matches!(error, CoreError::NotFound(_))
+            {
+                return Err(error);
+            }
+        }
+        stopped.commands =
+            self.stop_turn_commands(|thread, turn| theirs(thread, turn) || under.contains(thread));
+        Ok(stopped)
+    }
+
     fn cancel_background_tasks_for_parent(&self, parent: ThreadId) -> usize {
         let tasks = self
             .background_tasks

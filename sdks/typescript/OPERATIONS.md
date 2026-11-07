@@ -71,6 +71,7 @@
 | `active_turn` | `activeTurn` | `GET /v1/threads/{id}/active` |
 | `thread_activity` | `threadActivity` | `GET /v1/threads/{id}/activity` |
 | `interrupt_thread_tree` | `interruptThreadTree` | `POST /v1/threads/{id}/interrupt` |
+| `stop_turn_work` | `stopTurnWork` | `POST /v1/threads/{id}/work/stop` |
 | `list_background_tasks` | `listBackgroundTasks` | `GET /v1/threads/{id}/background` |
 | `promote_background_tasks` | `promoteBackgroundTasks` | `POST /v1/threads/{id}/background` |
 | `pending_question` | `pendingQuestion` | `GET /v1/threads/{id}/pending-question` |

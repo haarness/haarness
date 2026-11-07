@@ -852,6 +852,20 @@
     }
   },
   {
+    "name": "stop_turn_work",
+    "method": "POST",
+    "path": "/v1/threads/{id}/work/stop",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/StopTurnWorkResult"
+    },
+    "body": {
+      "$ref": "#/components/schemas/StopTurnWorkRequest"
+    }
+  },
+  {
     "name": "list_background_tasks",
     "method": "GET",
     "path": "/v1/threads/{id}/background",

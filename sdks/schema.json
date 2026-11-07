@@ -5695,6 +5695,66 @@
         ],
         "type": "object"
       },
+      "StopTurnWorkRequest": {
+        "description": "`POST /v1/threads/{id}/work/stop`: stop what some turns of a chat left\nrunning, telling the chat nothing, and leave every other turn's work\nalone. A scheduled run ends its own work this way.",
+        "properties": {
+          "turns": {
+            "description": "The turns whose work stops: any of them still running, the subagents\nthey started (and everything under those) and the commands they ran.",
+            "items": {
+              "$ref": "#/components/schemas/TurnId"
+            },
+            "type": "array"
+          },
+          "workflows": {
+            "description": "Workflow runs launched from the chat that stop too, with no result\ndelivered to it.",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowId"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "turns"
+        ],
+        "type": "object"
+      },
+      "StopTurnWorkResult": {
+        "description": "What a `StopTurnWorkRequest` began to stop.",
+        "properties": {
+          "commands": {
+            "items": {
+              "$ref": "#/components/schemas/ShellCommandInfo"
+            },
+            "type": "array"
+          },
+          "subagents": {
+            "items": {
+              "$ref": "#/components/schemas/BackgroundTaskInfo"
+            },
+            "type": "array"
+          },
+          "turns": {
+            "description": "The named turns that were still running.",
+            "items": {
+              "$ref": "#/components/schemas/TurnId"
+            },
+            "type": "array"
+          },
+          "workflows": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowId"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "turns",
+          "subagents",
+          "commands",
+          "workflows"
+        ],
+        "type": "object"
+      },
       "Thread": {
         "properties": {
           "agent": {

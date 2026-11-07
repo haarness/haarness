@@ -28,13 +28,13 @@ use haarness_protocol::{
     ProviderInfo, PtyCreateRequest, PtyId, PtyInfo, PtyUpdateRequest, QuestionReply,
     QueueInputRequest, QueueInputResponse, ReviewFile, SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY,
     ServerInfo, SessionArchive, SessionArchiveImportRequest, SessionArchiveImportResult,
-    ShellCommandInfo, ShellCommandOutput, SkillInfo, StartTurnRequest, Thread, ThreadActivity,
-    ThreadId, ToolCatalogResponse, ToolSettingsUpdate, Turn, TurnId, UpdateThreadRequest,
-    WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY, WorkflowId, WorkflowRun,
-    WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest, WorkspaceCreateRequest,
-    WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse, WorkspaceRefsResponse,
-    WorkspaceRemoveRequest, WorkspaceResetRequest, WorkspaceResolveRefRequest,
-    WorkspaceResolveRefResponse,
+    ShellCommandInfo, ShellCommandOutput, SkillInfo, StartTurnRequest, StopTurnWorkRequest,
+    StopTurnWorkResult, Thread, ThreadActivity, ThreadId, ToolCatalogResponse, ToolSettingsUpdate,
+    Turn, TurnId, UpdateThreadRequest, WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY,
+    WorkflowId, WorkflowRun, WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest,
+    WorkspaceCreateRequest, WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse,
+    WorkspaceRefsResponse, WorkspaceRemoveRequest, WorkspaceResetRequest,
+    WorkspaceResolveRefRequest, WorkspaceResolveRefResponse,
 };
 use haarness_pty::{PtyManager, PtySubscription};
 use haarness_workflow_catalog::{CatalogError, WorkflowCatalog};
@@ -265,6 +265,7 @@ pub async fn serve_with_access(
         .route("/threads/{id}/active", get(active_turn))
         .route("/threads/{id}/activity", get(thread_activity))
         .route("/threads/{id}/interrupt", post(interrupt_thread_tree))
+        .route("/threads/{id}/work/stop", post(stop_turn_work))
         .route(
             "/threads/{id}/background",
             get(list_background_tasks).post(promote_background_tasks),
@@ -3018,6 +3019,28 @@ async fn interrupt_thread_tree(
         "workflows": workflows,
         "turnsAndTasks": turns_and_tasks,
     })))
+}
+/// Stop what some turns of a chat left running, telling the chat nothing:
+/// those turns if one still runs, their subagents and commands, and the
+/// named workflows launched from the chat. Other turns' work goes on.
+async fn stop_turn_work(
+    State(state): State<ServerState>,
+    Path(id): Path<ThreadId>,
+    Json(request): Json<StopTurnWorkRequest>,
+) -> ApiResult<Json<StopTurnWorkResult>> {
+    let tree = state.runtime.thread_tree_ids(id).await?;
+    let mut workflows = Vec::new();
+    if let Some(coordinator) = &state.workflows {
+        for run in request.workflows {
+            if coordinator.cancel_untold(run, &tree).await? {
+                workflows.push(run);
+            }
+        }
+    }
+    let turns = request.turns.into_iter().collect();
+    let mut stopped = state.runtime.stop_turn_work(id, &turns).await?;
+    stopped.workflows = workflows;
+    Ok(Json(stopped))
 }
 /// Every unanswered permission prompt, oldest first — including prompts from
 /// child-agent threads, so clients can repopulate after reconnects.

@@ -593,6 +593,41 @@ impl WorkflowCoordinator {
         first_error.map_or(Ok(cancelled), Err)
     }
 
+    /// Cancel one active run launched from a chat in `launch_threads`, and
+    /// deliver nothing to that chat: the work that started it (a scheduled
+    /// run) has ended and asked for it. Answers whether it was cancelled;
+    /// one that is not active, or launched elsewhere, is left as it is.
+    pub async fn cancel_untold(
+        &self,
+        id: WorkflowId,
+        launch_threads: &HashSet<ThreadId>,
+    ) -> CoreResult<bool> {
+        if !self.active.contains_key(&id) {
+            return Ok(false);
+        }
+        let run = self.owned_run(id).await?;
+        if !run
+            .definition
+            .launch_thread_id
+            .is_some_and(|thread_id| launch_threads.contains(&thread_id))
+        {
+            return Ok(false);
+        }
+        self.delivery_watches.remove(&id);
+        match self
+            .transition_to_stopped(
+                id,
+                WorkflowRunStatus::Cancelled,
+                "Workflow cancelled with the run that started it",
+            )
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(CoreError::Conflict(_)) if !self.active.contains_key(&id) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn pause(&self, id: WorkflowId) -> CoreResult<WorkflowRun> {
         self.transition_to_stopped(id, WorkflowRunStatus::Paused, "Workflow paused")
             .await

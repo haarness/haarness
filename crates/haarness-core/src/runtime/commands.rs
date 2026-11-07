@@ -358,6 +358,33 @@ impl AgentRuntime {
             .count()
     }
 
+    /// Stop the live commands whose chat and turn `of` picks, telling no
+    /// chat: the turns they belong to have ended their work (see
+    /// [`AgentRuntime::stop_turn_work`]). Answers them as they began to stop.
+    pub(super) fn stop_turn_commands(
+        &self,
+        of: impl Fn(&ThreadId, &haarness_protocol::TurnId) -> bool,
+    ) -> Vec<haarness_protocol::ShellCommandInfo> {
+        let grace = std::time::Duration::from_millis(
+            self.components().config.execution.shell_stop_grace_ms,
+        );
+        self.shell_commands
+            .live(|entry| {
+                let info = entry.info();
+                of(&info.thread_id, &info.turn_id)
+            })
+            .iter()
+            .filter(|entry| {
+                entry.stop(
+                    ShellCommandEndedBy::TurnEnded,
+                    ShellCommandState::Stopped,
+                    StopSequence::Graceful(grace),
+                )
+            })
+            .map(|entry| entry.info())
+            .collect()
+    }
+
     /// Stop every live command as the server shuts down (see
     /// [`CommandEntry::stop_for_shutdown`]), and answer them, to wait for.
     pub(super) async fn stop_commands_for_shutdown(&self) -> Vec<Arc<CommandEntry>> {

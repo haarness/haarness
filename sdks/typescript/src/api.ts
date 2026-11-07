@@ -277,6 +277,10 @@ export class Api extends Transport {
   interruptThreadTree(id: string, query: T.InterruptQuery = {}, options: RequestOptions = {}): Promise<T.InterruptResponse> {
     return this.request("POST", `/v1/threads/${this.segment(id)}/interrupt`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
+  /** POST /v1/threads/{id}/work/stop */
+  stopTurnWork(id: string, body: T.StopTurnWorkRequest, options: RequestOptions = {}): Promise<T.StopTurnWorkResult> {
+    return this.request("POST", `/v1/threads/${this.segment(id)}/work/stop`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /v1/threads/{id}/background */
   listBackgroundTasks(id: string, options: RequestOptions = {}): Promise<Array<T.BackgroundTaskInfo>> {
     return this.request("GET", `/v1/threads/${this.segment(id)}/background`, { binaryBody: false, binaryResponse: false, ...options });
