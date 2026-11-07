@@ -1931,7 +1931,56 @@ fn a_call_a_restart_cut_off_reads_quietly_that_it_did_not_finish() {
     app.language = crate::locale::Language::Japanese;
     let rows = frame_text(&app, (100, 30));
     assert!(
-        row_with(&rows, "bash sleep 30").contains("完了しませんでした"),
+        row_with(&rows, "bash sleep 30").contains("未完了"),
+        "{rows:#?}"
+    );
+}
+
+/// A row shows its call's first result: a later one for the same call (a
+/// stopped turn's own, after the one its shutdown stored) is not what the
+/// model was told.
+#[test]
+fn a_call_shows_only_its_first_result() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let item = |sequence, data| message_item_for_turn(sequence, &thread, turn, data);
+    let result = |output: &str, is_error, metadata| ItemData::ToolResult {
+        call_id: "call-1".into(),
+        name: "bash".into(),
+        output: output.into(),
+        is_error,
+        metadata,
+    };
+    let items = vec![
+        item(
+            1,
+            ItemData::ToolCall {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({ "command": "cat notes" }),
+                provider_metadata: serde_json::Value::Null,
+            },
+        ),
+        // What the shutdown stored, then the tool's own late result.
+        item(
+            2,
+            result(
+                "This call did not finish.",
+                true,
+                serde_json::json!({ "unfinished": true }),
+            ),
+        ),
+        // An error, which a row always shows when it is the call's result.
+        item(3, result("LATE_OUTPUT_LINE", true, serde_json::Value::Null)),
+    ];
+    let app = app_on(&thread, items);
+    let rows = frame_text(&app, (100, 30));
+    assert!(
+        row_with(&rows, "bash cat notes").contains("didn't finish"),
+        "{rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("LATE_OUTPUT_LINE")),
         "{rows:#?}"
     );
 }

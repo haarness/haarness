@@ -577,13 +577,15 @@ export function ToolActivity(props: {
                         when={liveOutput()}
                         fallback={
                           <Show
-                            when={props.result}
+                            when={props.result && !unfinished()}
                             fallback={
-                              <p class="tool-empty">
-                                {props.settled
-                                  ? t("No result was recorded.")
-                                  : t("Waiting for output…")}
-                              </p>
+                              <Show when={!props.result}>
+                                <p class="tool-empty">
+                                  {props.settled
+                                    ? t("No result was recorded.")
+                                    : t("Waiting for output…")}
+                                </p>
+                              </Show>
                             }
                           >
                             <Show

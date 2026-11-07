@@ -41,8 +41,15 @@ export function agentTasks(items: Item[]) {
     if (!("call_id" in data)) continue;
     const key = taskKey(item.turnId, data.call_id);
     const task = tasks.get(key) ?? { key, item };
-    if (data.type === "tool_call") task.call = data;
-    if (data.type === "tool_result") task.result = data;
+    // A call answered by its first result: a later one for the same call
+    // (a stopped turn's own, after the one the shutdown stored) is not what
+    // the model was told. A call made again under the key (a goal's next
+    // round) starts over.
+    if (data.type === "tool_call") {
+      if (task.result) task.result = undefined;
+      task.call = data;
+    }
+    if (data.type === "tool_result" && !task.result) task.result = data;
     if (data.type === "task_link" || data.type === "task_state")
       task.link = data;
     if (data.type === "task_state") {

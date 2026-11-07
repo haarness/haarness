@@ -138,7 +138,7 @@ test("a call a crash cut off says quietly that it did not finish", async () => {
   await pictures("unfinished-call", page.locator(".transcript, .conversation").first());
   try {
     await page.evaluate(() => (window as any).haarness.preferences({ language: "ja" }));
-    await expect(word).toHaveText("完了しませんでした");
+    await expect(word).toHaveText("未完了");
     await page.evaluate(() => (window as any).haarness.preferences({ language: "ar" }));
     await expect(word).toHaveText("لم يكتمل");
     await pictures("unfinished-call-rtl", page.locator(".transcript, .conversation").first());

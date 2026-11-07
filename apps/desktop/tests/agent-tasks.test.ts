@@ -198,3 +198,16 @@ test("a delegation a restart cut off reads stopped, not failed", () => {
   assert.equal(agentTaskStatus(other), "failed");
   assert.notEqual(agentTaskError(other), "");
 });
+
+test("a delegation keeps its first result, and a call made again under its key starts over", () => {
+  const result = (output: string, metadata: unknown = null) =>
+    ({ type: "tool_result", call_id: "task", name: "task", output, is_error: true, metadata }) as ItemData;
+  const stored = result("This call did not finish.", { unfinished: true });
+  const late = { ...result("<task state=\"completed\">done</task>"), is_error: false } as ItemData;
+  const [task] = [...agentTasks([item(1, call), item(2, link), item(3, stored), item(4, late)]).values()];
+  assert.equal(agentTaskStatus(task), "stopped", "the late result does not overrule what the model was told");
+  const again = [
+    ...agentTasks([item(1, call), item(2, stored), item(3, call), item(4, late)]).values(),
+  ][0];
+  assert.equal(agentTaskStatus(again), "completed");
+});
