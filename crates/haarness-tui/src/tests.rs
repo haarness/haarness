@@ -24738,6 +24738,91 @@ async fn a_catalog_read_after_assets_updated_does_not_hold_the_event_loop() {
     server.abort();
 }
 
+/// Agents reloaded after an agent file is added or removed come back in a
+/// new order: the agent picked with Tab stays picked, and one that is gone
+/// gives way to the chat's own agent.
+#[tokio::test]
+async fn the_chosen_agent_stays_chosen_when_agents_reload() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let profile = |id: &str| haarness_protocol::AgentProfile {
+        id: id.into(),
+        name: id.into(),
+        description: format!("{id} agent"),
+        hidden: false,
+        max_subagents: 4,
+        mode: Some("primary".into()),
+        model: None,
+    };
+    let lists = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+        vec![
+            profile("build"),
+            profile("plan"),
+            profile("b"),
+            profile("c"),
+        ],
+        vec![profile("build"), profile("plan"), profile("b")],
+    ])));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let answers = lists.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let read = socket.read(&mut request).await.unwrap_or(0);
+            let body = if String::from_utf8_lossy(&request[..read]).starts_with("GET /v1/agents ") {
+                serde_json::to_string(&answers.lock().unwrap().pop_front().unwrap()).unwrap()
+            } else {
+                "[]".to_owned()
+            };
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let thread = fixture_thread();
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        vec![],
+        vec![],
+        vec![profile("build"), profile("plan"), profile("c")],
+    );
+    while app.agent() != "c" {
+        app.cycle_agent();
+    }
+    let reload = |app: &App| {
+        fixture_event(
+            "assets.updated",
+            app.thread.id,
+            app.thread.id,
+            serde_json::json!({"resource": "agent", "action": "created"}),
+        )
+    };
+
+    // `b.md` added: it sorts before `c`, at the index `c` had.
+    let event = reload(&app);
+    app.reduce(event, &client).await.unwrap();
+    assert_eq!(app.agents.len(), 4);
+    assert_eq!(app.agent(), "c");
+    // `c.md` removed: the chat's own agent, quietly.
+    let notice = app.notice.clone();
+    let event = reload(&app);
+    app.reduce(event, &client).await.unwrap();
+    assert_eq!(app.agents.len(), 3);
+    assert_eq!(app.agent(), "build");
+    assert_eq!(app.notice, notice);
+    server.abort();
+}
+
 /// Ctrl+Y goes Review → Auto → Yolo → Review on a server that keeps Yolo,
 /// each notice naming where it goes next, and the band names Yolo in the
 /// danger colour.
