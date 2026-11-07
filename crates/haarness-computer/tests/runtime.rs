@@ -449,31 +449,69 @@ async fn an_action_asks_once_per_app_and_chat_with_a_picture_of_the_spot() {
     lab.finish(other).await;
 }
 
-#[tokio::test]
-async fn yolo_and_auto_never_answer_a_computer_use_approval() {
-    let lab = Lab::new(Lab::on());
-    let thread = lab.thread().await;
+async fn set_mode(lab: &Lab, thread: ThreadId, mode: haarness_protocol::ApprovalModeSetting) {
     lab.runtime
         .set_approval_mode(
             thread,
             haarness_protocol::SetApprovalModeRequest {
-                mode: haarness_protocol::ApprovalModeSetting::Yolo,
+                mode,
                 revision: None,
             },
         )
         .await
         .unwrap();
+}
+
+/// Yolo is yes to everything: in a chat in Yolo computer use asks nothing,
+/// not even where it would ask every time (an app set to ask, a terminal's
+/// text). Never still refuses, and Auto still leaves it to a person.
+#[tokio::test]
+async fn yolo_answers_computer_use_and_auto_leaves_it_to_a_person() {
+    let lab = Lab::new(Lab::with(
+        json!({"apps": {"com.apple.TextEdit": "ask", "com.apple.Notes": "deny"}}),
+    ));
+    let thread = lab.thread().await;
+    set_mode(&lab, thread, haarness_protocol::ApprovalModeSetting::Yolo).await;
+    for (id, element) in [("ruled", "e1"), ("terminal", "e6"), ("button", "e5")] {
+        let items = lab
+            .run(
+                thread,
+                vec![vec![call(id, "mac_click", json!({"ref": element}))]],
+            )
+            .await;
+        let (output, error, _) = result(&items, id);
+        assert!(!error, "{id}: {output}");
+    }
+    assert_eq!(
+        lab.ops().iter().filter(|op| *op == "click").count(),
+        3,
+        "{:?}",
+        lab.ops()
+    );
+    let items = lab
+        .run(
+            thread,
+            vec![vec![call("never", "mac_click", json!({"ref": "e4"}))]],
+        )
+        .await;
+    let (output, error, _) = result(&items, "never");
+    assert!(
+        error && output.contains("Notes is set to Never"),
+        "{output}"
+    );
+
+    let auto = lab.thread().await;
+    set_mode(&lab, auto, haarness_protocol::ApprovalModeSetting::Auto).await;
     lab.start(
-        thread,
-        vec![vec![call("yolo", "mac_click", json!({"ref": "e1"}))]],
+        auto,
+        vec![vec![call("auto", "mac_click", json!({"ref": "e5"}))]],
     )
     .await;
     let pending = lab.permission().await;
     assert_eq!(pending.permission, "computer");
     lab.answer(&pending, PermissionReplyDecision::Reject).await;
-    let items = lab.finish(thread).await;
-    assert!(result(&items, "yolo").1);
-    assert!(!lab.ops().contains(&"click".to_owned()));
+    let items = lab.finish(auto).await;
+    assert!(result(&items, "auto").1);
 }
 
 #[tokio::test]

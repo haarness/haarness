@@ -885,6 +885,13 @@ pub trait Tool: Send + Sync {
     fn explicit_approval(&self, _arguments: &Value, _operation: &str) -> bool {
         false
     }
+    /// A request only a person answers, or one that asks every time, that
+    /// Yolo answers all the same, as it does everything else: computer use,
+    /// where choosing Yolo is the person handing over the Mac. Auto's
+    /// reviewer and hooks still never answer it.
+    fn yolo_answers(&self, _arguments: &Value, _operation: &str) -> bool {
+        false
+    }
     async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput>;
 }
 

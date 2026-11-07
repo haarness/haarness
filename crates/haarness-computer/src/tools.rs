@@ -1298,7 +1298,12 @@ impl Tool for MacTool {
     }
 
     fn explicit_approval(&self, _arguments: &Value, operation: &str) -> bool {
-        // Only a person answers these: not Auto's reviewer, not Yolo, not a hook.
+        // A person answers these: never Auto's reviewer or a hook.
+        operation.starts_with("computer:")
+    }
+
+    fn yolo_answers(&self, _arguments: &Value, operation: &str) -> bool {
+        // Yolo approves everything, computer use included, even what asks every time.
         operation.starts_with("computer:")
     }
 

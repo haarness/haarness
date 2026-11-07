@@ -3103,7 +3103,7 @@
   "Operating any Mac, account or session that isn't yours to use.": "操作任何你无权使用的 Mac、账户或会话。",
   "Whatever is visible while an agent works, notifications and unrelated windows too, may be sent to your chat's AI model and is kept in the chat history.": "智能体工作时可见的任何内容（包括通知和无关的窗口）都可能发送给你对话所用的 AI 模型，并保存在对话记录中。",
   "App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off.": "应用中的内容不可信：网页、文件或消息可能夹带针对智能体的指令。请留意它的行为，一旦觉得不对就按“停止”。",
-  "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "智能体在你未允许的应用中操作前会先询问。一旦你允许某个应用，它就会在其中直接操作，而它所做的一切仍由你负责。",
+  "An agent asks before acting in an app you haven't allowed, except in a chat set to Yolo, which approves everything. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "智能体在你未允许的应用中操作前会先询问，设为 Yolo 的对话除外，Yolo 会批准一切。你允许某个应用后，智能体会在其中直接操作，其所作所为仍由你负责。",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS 会把辅助功能和屏幕录制权限授予 Haarness 运行所在的应用，即 Haarness 本身或你的终端，从该应用启动的每个程序都会继承这些权限。",
   "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "你可以随时在“设置 → 电脑操控”中关闭电脑操控，或运行 haarness mac off。",
   "Always allow {app}": "始终允许{app}",
