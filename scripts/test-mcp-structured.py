@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real server, echo provider: MCP results carried only as structured content reach the model and workflows;
 resources embedded as base64 reach the model as what they hold (an image as an attachment, text as text, anything
-else named), never as base64; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
+else named), never as base64; audio of a type Haarness does not carry is named rather than attached; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
 all of it.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
@@ -78,6 +78,13 @@ try:
     assert PIXEL not in output and 'blob' not in output, output
     assert result['metadata']['attachments'] == ['data:image/png;base64,' + PIXEL], result['metadata']
     check('embedded resources reach the model as what they hold: an image under IMAGE/PNG as an attachment, base64 JSON as its text, an archive named by type and size, and no base64 text')
+
+    result = call(thread, 'odd_media')
+    assert not result['is_error'] and result['output'].startswith('[audio/webm audio, about 6 bytes, left out: Haarness does not attach this type]'), result['output']
+    assert result['metadata']['attachments'] == ['data:image/png;base64,' + PIXEL], result['metadata']
+    again = call(thread, 'weather')
+    assert not again['is_error'], again
+    check('audio of a type Haarness does not carry is named, not attached, beside an image it does attach, and the chat goes on')
 
     WIDE = ''.join('row %05d %s\n' % (n, 'w' * 90) for n in range(2000))
     result = call(thread, 'wide')

@@ -25,6 +25,9 @@ TOOLS = {
         {'type': 'resource', 'resource': {'uri': 'files://pack.zip', 'mimeType': 'application/zip',
                                           'blob': base64.b64encode(bytes(300)).decode()}},
     ]},
+    # Audio of a type Haarness does not carry, beside an image it does.
+    'odd_media': {'content': [{'type': 'audio', 'data': 'GkXfo0AAAA==', 'mimeType': 'audio/webm'},
+                              {'type': 'image', 'data': PIXEL, 'mimeType': 'image/png'}]},
     # 200 KB of text, as a tool that returns a whole table does.
     'wide': {'content': [{'type': 'text', 'text': ''.join('row %05d %s\n' % (n, 'w' * 90) for n in range(2000))}],
              'structuredContent': {'rows': 2000}},

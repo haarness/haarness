@@ -2765,14 +2765,22 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
                 text_parts.push(text.text.clone());
             }
             rmcp::model::ContentBlock::Image(image) => {
-                count_mcp_attachment(&image.data, &mut attachment_bytes)?;
                 let mime = mcp_content::media_type(&image.mime_type);
+                if let Some(note) = unattachable(&mime, "image", &image.data) {
+                    text_parts.push(note);
+                    continue;
+                }
+                count_mcp_attachment(&image.data, &mut attachment_bytes)?;
                 attachments.push(format!("data:{mime};base64,{}", image.data));
                 text_parts.push(format!("[{mime} image attachment]"));
             }
             rmcp::model::ContentBlock::Audio(audio) => {
-                count_mcp_attachment(&audio.data, &mut attachment_bytes)?;
                 let mime = mcp_content::media_type(&audio.mime_type);
+                if let Some(note) = unattachable(&mime, "audio", &audio.data) {
+                    text_parts.push(note);
+                    continue;
+                }
+                count_mcp_attachment(&audio.data, &mut attachment_bytes)?;
                 attachments.push(format!("data:{mime};base64,{}", audio.data));
                 text_parts.push(format!("[{mime} audio attachment]"));
             }
@@ -2855,6 +2863,19 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
         }
         Ok(ToolOutput { text, metadata })
     }
+}
+
+/// The line that stands for an image or audio block of a type Haarness
+/// does not carry to providers (`audio/webm`, `image/svg+xml`), or `None`
+/// for one it does. Attached, such a block was refused each time a later
+/// request was built, so every turn of the chat failed after it.
+fn unattachable(mime: &str, kind: &str, data: &str) -> Option<String> {
+    (!haarness_core::attachments::is_supported_media_mime(mime)).then(|| {
+        let bytes = data.trim_end_matches('=').len() / 4 * 3;
+        format!(
+            "[{mime} {kind}, about {bytes} bytes, left out: Haarness does not attach this type]"
+        )
+    })
 }
 
 fn count_mcp_attachment(encoded: &str, total: &mut usize) -> CoreResult<()> {
@@ -4667,6 +4688,28 @@ mod tests {
                 .unwrap()
                 .text
                 .contains(r#""pages":2"#)
+        );
+    }
+
+    /// Media of a type Haarness does not carry was attached anyway, and every
+    /// later request of the chat failed to load it.
+    #[test]
+    fn mcp_media_of_a_type_haarness_does_not_carry_is_named_not_attached() {
+        let result = rmcp::model::CallToolResult::success(vec![
+            rmcp::model::ContentBlock::audio("GkXfo0AAAA==", "audio/webm"),
+            rmcp::model::ContentBlock::image("PHN2Zy8+", "image/svg+xml"),
+            rmcp::model::ContentBlock::audio("SUQz", "Audio/MPEG"),
+        ]);
+        let output = to_output(result, "media").unwrap();
+        assert_eq!(
+            output.metadata["attachments"],
+            json!(["data:audio/mpeg;base64,SUQz"])
+        );
+        assert_eq!(
+            output.text,
+            "[audio/webm audio, about 6 bytes, left out: Haarness does not attach this type]\n\
+             [image/svg+xml image, about 6 bytes, left out: Haarness does not attach this type]\n\
+             [audio/mpeg audio attachment]"
         );
     }
 
