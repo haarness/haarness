@@ -400,8 +400,11 @@ fn parser_input(command: &str) -> (std::borrow::Cow<'_, str>, bool, Option<tree_
 }
 
 /// How many times [`separated_delimiters`] parses a line: each parse shows
-/// the delimiters up to the first one the parser misreads inside another.
-const MAX_DELIMITER_PASSES: usize = 16;
+/// the delimiters up to the first one the parser misreads inside another. A
+/// line one parse leaves misread costs that parse each time (`cat <<EOF;`
+/// many times over), so the passes are few: a line that needs more is not
+/// read whole.
+const MAX_DELIMITER_PASSES: usize = 4;
 
 /// `text` with each here-document delimiter that is written against an
 /// operator (`cat <<EOF; rm -rf x`, `cat <<EOF>out.txt`, `cat <<EOF|sh`) set
@@ -7612,7 +7615,7 @@ mod readings {
                 "{command}"
             );
         }
-        // However many share a line, they are set apart in one pass.
+        // Many that share a line and a delimiter are set apart together.
         let chain = format!(
             "{}rm -rf ~/x\nbody\nEOF",
             "cat <<EOF; ".repeat(4 * MAX_DELIMITER_PASSES)
