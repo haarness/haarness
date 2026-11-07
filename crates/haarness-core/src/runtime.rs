@@ -17080,14 +17080,25 @@ mod shell_reading_tests {
                 .collect()
         };
         // After a document a `cd` opens, with no other command to read them
-        // for, and past a limit on what is read.
+        // for, and past a limit on what is read: its length, or how many
+        // wrappers or shells deep it runs a command.
         let long = "a".repeat(300 * 1024);
+        let after = |text: &str| format!("cat <<EOF ; {text}rm -rf ~/x\nbody\nEOF");
+        let mut shells = "rm -rf ~/x".to_owned();
+        for _ in 0..4 {
+            shells = format!("bash -c '{}'", shells.replace('\'', "'\\''"));
+        }
         for command in [
             "cd sub <<EOF ; rm -rf ../victim\nbody\nEOF".to_owned(),
             "cd -- sub <<EOF; rm -rf ../victim\nbody\nEOF".to_owned(),
             "cd sub 2>/dev/null <<EOF 2>&1 | rm -rf ../victim\nbody\nEOF".to_owned(),
             format!("cat <<EOF ; rm -rf victim {long}\nbody\nEOF"),
             format!("cat <<EOF; git push --force {long}\nbody\nEOF"),
+            after(&"env ".repeat(16)),
+            after(&"sudo ".repeat(16)),
+            after(&"nice ".repeat(16)),
+            after(&"command ".repeat(16)),
+            format!("cat <<EOF ; {shells}\nbody\nEOF"),
         ] {
             assert_eq!(
                 decisions(&defaults, &command),
@@ -17095,9 +17106,18 @@ mod shell_reading_tests {
                 "{}",
                 &command[..30]
             );
+            // The line asks first; the commands read after the operator
+            // that `*` asks about ask too.
+            let plan = plan(&command);
+            let asked = verdicts(&allowlist, &command);
             assert_eq!(
-                decisions(&allowlist, &command),
-                vec![Ask],
+                asked.first(),
+                Some(&(plan.patterns[0].clone(), Ask)),
+                "{}",
+                &command[..30]
+            );
+            assert!(
+                asked.iter().all(|(_, decision)| *decision == Ask),
                 "{}",
                 &command[..30]
             );
@@ -17107,7 +17127,6 @@ mod shell_reading_tests {
                 "{}",
                 &command[..30]
             );
-            let plan = plan(&command);
             assert!(plan.evaluate(&defaults, &plan.patterns[0]).protected);
         }
         // Next to another command they are read for it, and judged as

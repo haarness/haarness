@@ -43,10 +43,12 @@ pub struct BashAnalysis {
     /// [`MAX_PATTERN_BYTES`], it is longer than [`MAX_COMMAND_BYTES`], or a
     /// here-document delimiter in it could not be set apart from the operator
     /// written against it (see [`separated_delimiters`]), or what follows a
-    /// here-document's operator on its line comes after no command
-    /// (`X=1 <<EOF ; make`, `cd sub <<EOF ; make`) or is cut short by a limit
-    /// on what is read. Its written patterns may be clipped, and no rule
-    /// allows it.
+    /// here-document's operator on its line has no command of the line to
+    /// be read for (`X=1 <<EOF ; make`, `cd sub <<EOF ; make`, `export X=1
+    /// <<EOF ; make`) or is cut short by a limit on what is read, in it or
+    /// in what it runs (more wrappers or shells than [`MAX_HOPS`] or
+    /// [`MAX_NESTING`] allow, counting that text as one). Its written
+    /// patterns may be clipped, and no rule allows it.
     pub unreadable: bool,
     /// What the line deletes or overwrites, wherever it runs the program
     /// (behind a wrapper, in text run again): `rm`, `rmdir`, `unlink`,
@@ -1066,7 +1068,8 @@ struct Reader<'w> {
     /// A here-document delimiter in the text read could not be set apart
     /// from the operator written against it (see [`separated_delimiters`]),
     /// or what follows such an operator in the line as written has no
-    /// command of the line to be read for, or a limit stopped reading it.
+    /// command of the line to be read for, or a limit stopped reading it or
+    /// what it runs (see [`Self::cut`]).
     unseparated: bool,
 }
 
@@ -1110,6 +1113,11 @@ struct Depth {
     /// commands of that line. Its commands are the line's (see
     /// [`Derived::own`]); what they run again is not.
     own: bool,
+    /// The reading is in the line's own text or in what its commands run,
+    /// however deep (a wrapper's command, text a shell runs again), where a
+    /// limit that stops it leaves the line not read whole (see
+    /// [`Reader::cut`]).
+    in_own: bool,
 }
 
 /// Where a wrapper runs the command it is given: see
@@ -1376,8 +1384,7 @@ impl Reader<'_> {
             if depth.text > 0 {
                 self.nested_commands += 1;
                 if self.nested_commands > MAX_NESTED_COMMANDS {
-                    self.stopped();
-                    self.unseparated |= depth.own;
+                    self.cut(depth);
                     break;
                 }
             }
@@ -1751,11 +1758,21 @@ impl Reader<'_> {
         }
     }
 
-    /// One more wrapper or string around a reading, or `None` (and the
-    /// written command marked incomplete) past [`MAX_HOPS`].
+    /// A limit stopped reading what the written command being read runs. In
+    /// the line's own text, or in what its commands run, the line is not
+    /// read whole either: a command written after a here-document's
+    /// operator is judged as written, so no rule about the command before
+    /// it answers for what the limit left out.
+    fn cut(&mut self, depth: Depth) {
+        self.stopped();
+        self.unseparated |= depth.in_own;
+    }
+
+    /// One more wrapper or string around a reading, or `None` past
+    /// [`MAX_HOPS`], where the reading is [`Self::cut`].
     fn hop(&mut self, depth: Depth) -> Option<Depth> {
         if depth.hops >= MAX_HOPS {
-            self.stopped();
+            self.cut(depth);
             return None;
         }
         Some(Depth {
@@ -1903,9 +1920,9 @@ impl Reader<'_> {
 
     /// [`Self::nested`] for text that is the line's own when `own` (see
     /// [`Depth::own`]). The line's own text that is not read, for want of a
-    /// written command to read it for or because a limit stops it, leaves
-    /// the line not read whole: no rule about another command covers what
-    /// it runs.
+    /// written command to read it for or because a limit stops it or what
+    /// it runs (see [`Self::cut`]), leaves the line not read whole: no rule
+    /// about another command covers what it runs.
     fn nested_as(&mut self, text: &str, depth: Depth, own: bool) {
         if text.trim().is_empty() {
             return;
@@ -1926,13 +1943,13 @@ impl Reader<'_> {
         };
         depth.text += 1;
         depth.own = own;
+        depth.in_own |= own;
         if depth.text > MAX_NESTING
             || text.len() > MAX_NESTED_BYTES
             || self.read_bytes + text.len() > MAX_READ_BYTES
             || self.nested_commands >= MAX_NESTED_COMMANDS
         {
-            self.stopped();
-            self.unseparated |= own;
+            self.cut(depth);
             return;
         }
         self.read_bytes += text.len();
@@ -2217,7 +2234,7 @@ impl Reader<'_> {
     fn script(&mut self, input: Input, depth: Depth) {
         match input {
             Input::Text(text) => self.nested(&text, depth),
-            Input::Unread => self.stopped(),
+            Input::Unread => self.cut(depth),
             Input::Unknown => {}
         }
     }
@@ -7976,6 +7993,53 @@ mod readings {
         assert!(line.len() < MAX_COMMAND_BYTES);
         assert!(analyze(&line, &workspace).unreadable);
         assert!(!analyze(&line.replace(" <<EOF ;", ";"), &workspace).unreadable);
+        // And one whose wrappers or shells run deeper than a reading goes,
+        // there or in text it runs: the text after the operator takes one of
+        // the levels, so a chain one level shorter is read, its paths too.
+        let after = |text: &str| format!("cat <<EOF ; {text}\nbody\nEOF");
+        let wrapped = |wrapper: &str, count: u8| {
+            format!(
+                "{}rm -rf ~/x",
+                format!("{wrapper} ").repeat(usize::from(count))
+            )
+        };
+        let shells = |count: u8| {
+            let mut text = "rm -rf ~/x".to_owned();
+            for _ in 0..count {
+                text = format!("bash -c {}", quoted(&text));
+            }
+            text
+        };
+        for wrapper in ["env", "sudo", "nice", "command"] {
+            let analysis = analyze(&after(&wrapped(wrapper, MAX_HOPS)), &workspace);
+            assert!(analysis.unreadable, "{wrapper}");
+            let shorter = analyze(&after(&wrapped(wrapper, MAX_HOPS - 1)), &workspace);
+            assert!(!shorter.unreadable, "{wrapper}");
+            assert_eq!(shorter.external_dirs, home, "{wrapper}");
+        }
+        for command in [
+            after(&shells(MAX_NESTING)),
+            after(&format!(
+                "bash -c {}",
+                quoted(&wrapped("env", MAX_HOPS - 1))
+            )),
+            format!("cat <<EOF 2>&1 | {}\nbody\nEOF", wrapped("env", MAX_HOPS)),
+        ] {
+            assert!(
+                analyze(&command, &workspace).unreadable,
+                "{}",
+                &command[..40]
+            );
+        }
+        let shorter = analyze(&after(&shells(MAX_NESTING - 1)), &workspace);
+        assert!(!shorter.unreadable);
+        assert_eq!(shorter.external_dirs, home);
+        // Written alone, the same chains are read as before.
+        assert_eq!(
+            analyze(&wrapped("env", MAX_HOPS), &workspace).external_dirs,
+            home
+        );
+        assert!(!analyze(&shells(MAX_NESTING), &workspace).unreadable);
         // Each document on a line of its own needs a parse of its own, up to
         // the bytes the parses of one line may take in all.
         let documents = |count: usize, body: &str| -> String {
