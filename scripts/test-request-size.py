@@ -96,7 +96,8 @@ def documents(body):
 
 def is_summary(body):
     last = body['messages'][-1] if body.get('messages') else {}
-    return last.get('role') == 'user' and any(text.startswith(SUMMARY) for text in texts(last))
+    # The request to summarize ends the chat's last message when that is the person's too.
+    return last.get('role') == 'user' and any(SUMMARY in text for text in texts(last))
 
 
 class Provider(http.server.BaseHTTPRequestHandler):

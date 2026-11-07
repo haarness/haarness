@@ -19,6 +19,7 @@ image.workspace = true
 haarness-protocol = { path = "../haarness-protocol" }
 jsonschema.workspace = true
 parking_lot.workspace = true
+rand.workspace = true
 regex.workspace = true
 yaml-rust = "0.4.5"
 shell-words = "1.1"

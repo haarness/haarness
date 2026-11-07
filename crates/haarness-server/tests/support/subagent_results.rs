@@ -41,8 +41,15 @@ impl ModelProvider for Children {
         }
         let mut prompt = "";
         let mut answered = false;
+        // Asked to explain a failed call after an empty reply.
+        let mut asked = false;
         for message in &request.messages {
             match message {
+                ProviderMessage::Text { role, content }
+                    if role == "user" && content.starts_with("Your last reply was empty") =>
+                {
+                    asked = true;
+                }
                 ProviderMessage::Text { role, content } if role == "user" => {
                     prompt = content.as_str();
                     answered = false;
@@ -88,8 +95,8 @@ impl ModelProvider for Children {
                     ProviderEvent::TextDelta("Let me look.".into()),
                     ProviderEvent::ToolCall {
                         call_id: "child-call".into(),
-                        name: "missing_tool".into(),
-                        arguments: serde_json::json!({}),
+                        name: "glob".into(),
+                        arguments: serde_json::json!({"pattern":"*"}),
                         provider_metadata: Value::Null,
                     },
                     finish("tool_use"),
@@ -109,13 +116,45 @@ impl ModelProvider for Children {
                     ProviderEvent::TextDelta("Done. The bug is in parse.rs.".into()),
                     ProviderEvent::ToolCall {
                         call_id: "child-todo".into(),
+                        name: "glob".into(),
+                        arguments: serde_json::json!({"pattern":"*"}),
+                        provider_metadata: Value::Null,
+                    },
+                    finish("tool_use"),
+                ],
+                // A call that fails, then an empty step: asked, the child
+                // explains the failure.
+                "fail then stop" if !answered => vec![
+                    ProviderEvent::ToolCall {
+                        call_id: "child-failed".into(),
                         name: "missing_tool".into(),
                         arguments: serde_json::json!({}),
                         provider_metadata: Value::Null,
                     },
                     finish("tool_use"),
                 ],
-                "answer beside a call" => vec![finish("end_turn")],
+                "fail then stop" if asked => vec![
+                    ProviderEvent::TextDelta("That tool is not available here.".into()),
+                    finish("stop"),
+                ],
+                "fail then stop" => vec![finish("stop")],
+                // The answer beside a call that fails, then an empty step:
+                // the answer reaches the parent, never what the child would
+                // say if asked again.
+                "answer beside a failing call" if !answered => vec![
+                    ProviderEvent::TextDelta("Done. The bug is in parse.rs.".into()),
+                    ProviderEvent::ToolCall {
+                        call_id: "child-failed-todo".into(),
+                        name: "missing_tool".into(),
+                        arguments: serde_json::json!({}),
+                        provider_metadata: Value::Null,
+                    },
+                    finish("tool_use"),
+                ],
+                "answer beside a failing call" if asked => {
+                    vec![ProviderEvent::TextDelta("Noted.".into()), finish("stop")]
+                }
+                "answer beside a call" | "answer beside a failing call" => vec![finish("end_turn")],
                 // The answer, then more reasoning in the same last step.
                 "answer then think" => vec![
                     ProviderEvent::TextDelta("the answer".into()),
@@ -278,6 +317,43 @@ async fn an_answer_written_beside_a_last_call_reaches_the_parent_with_what_happe
     );
     assert!(
         !output.contains("ended without writing a reply"),
+        "{output}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn a_subagent_whose_empty_step_follows_a_failed_call_is_asked_to_explain_it() {
+    let (directory, runtime) = runtime();
+    let thread = echo_thread(&runtime).await;
+    let (turn, items) = delegate(
+        &runtime,
+        thread.id,
+        &serde_json::json!({"prompt":"fail then stop"}),
+    )
+    .await;
+    let (output, is_error) = task_result(&items, turn);
+    assert!(!is_error);
+    assert!(
+        output.contains("<task_result>\nThat tool is not available here.\n</task_result>"),
+        "{output}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn an_answer_beside_a_failing_call_reaches_the_parent_unasked() {
+    let (directory, runtime) = runtime();
+    let thread = echo_thread(&runtime).await;
+    let (turn, items) = delegate(
+        &runtime,
+        thread.id,
+        &serde_json::json!({"prompt":"answer beside a failing call"}),
+    )
+    .await;
+    let (output, _) = task_result(&items, turn);
+    assert!(
+        output.contains("Done. The bug is in parse.rs.") && !output.contains("Noted."),
         "{output}"
     );
     std::fs::remove_dir_all(directory).unwrap();

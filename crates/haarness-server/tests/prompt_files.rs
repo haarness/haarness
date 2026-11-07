@@ -250,8 +250,14 @@ async fn prompt_files_reach_every_request_that_sends_their_prompt() {
             .contains("Work autonomously, preserve unrelated user changes")
     );
     assert!(first.system.contains("\nPreview with care.\n"));
-    // The round after the one allowed tool round carries the notice.
+    // The round after the one allowed tool round carries the notice, with
+    // the system prompt (the preview section too) and tools left as they were.
     assert!(main[1].messages.iter().any(|message| matches!(message, ProviderMessage::Text { content, .. } if content == "Stop and report.")));
+    assert_eq!(main[1].system, first.system);
+    assert_eq!(
+        serde_json::to_value(&main[1].tools).unwrap(),
+        serde_json::to_value(&first.tools).unwrap()
+    );
     // The next turn sends the same system prompt byte for byte.
     assert_eq!(main[2].system, first.system);
     // The title and the summary take their prompt files.

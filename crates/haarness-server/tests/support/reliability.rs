@@ -1002,3 +1002,781 @@ async fn reliability_recovery_keeps_completed_tool_results_without_replaying_act
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+fn call(id: &str, name: &str, arguments: Value) -> ProviderEvent {
+    ProviderEvent::ToolCall {
+        call_id: id.into(),
+        name: name.into(),
+        arguments,
+        provider_metadata: Value::Null,
+    }
+}
+
+fn read_notes(id: &str) -> ProviderEvent {
+    call(id, "read", serde_json::json!({"path":"notes.txt"}))
+}
+
+#[tokio::test]
+async fn reliability_rate_limits_spread_over_tool_rounds_each_get_their_own_retries() {
+    // A provider that turns the request away before every round, five times
+    // in one turn: more than the four retries one round may spend.
+    let refused = || cut("HTTP 429 Too Many Requests: Please retry in 0s.");
+    let mut rounds = Vec::new();
+    for round in 0..4 {
+        rounds.push(vec![refused()]);
+        rounds.push(vec![
+            Ok(read_notes(&format!("read-{round}"))),
+            Ok(finish("tool_use")),
+        ]);
+    }
+    rounds.push(vec![refused()]);
+    rounds.push(vec![Ok(text("all rounds done")), Ok(finish("stop"))]);
+    let (directory, runtime, provider, hooks) =
+        setup_streams(rounds, RuntimeConfig::default(), true);
+    std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("many rounds"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 10);
+    assert!(runtime.items(thread.id, None).await.unwrap().iter().any(
+        |item| matches!(&item.data, ItemData::AssistantMessage {text} if text == "all rounds done")
+    ));
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_cuts_spread_over_tool_rounds_each_get_their_own_recoveries() {
+    // Each round is cut once after it began, four times in one turn: more
+    // than the three recoveries one round may spend.
+    let mut rounds = Vec::new();
+    for round in 0..3 {
+        rounds.push(vec![Ok(text(&format!("part {round}"))), cut(CUTS[0])]);
+        rounds.push(vec![
+            Ok(read_notes(&format!("read-{round}"))),
+            Ok(finish("tool_use")),
+        ]);
+    }
+    rounds.push(vec![Ok(text("part 3")), cut(CUTS[0])]);
+    rounds.push(vec![Ok(text("all rounds done")), Ok(finish("stop"))]);
+    let (directory, runtime, provider, hooks) =
+        setup_streams(rounds, RuntimeConfig::default(), true);
+    std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("many rounds"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 8);
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_a_turn_ends_once_its_rounds_together_spent_four_rounds_of_recoveries() {
+    // A cut in each of thirteen rounds: every round is within its own three
+    // recoveries, but the turn has twelve in all.
+    let mut rounds = Vec::new();
+    for round in 0..12 {
+        rounds.push(vec![Ok(text(&format!("part {round}"))), cut(CUTS[0])]);
+        rounds.push(vec![
+            Ok(read_notes(&format!("read-{round}"))),
+            Ok(finish("tool_use")),
+        ]);
+    }
+    rounds.push(vec![Ok(text("part 12")), cut(CUTS[0])]);
+    rounds.push(vec![Ok(text("never asked")), Ok(finish("stop"))]);
+    let (directory, runtime, provider, hooks) =
+        setup_streams(rounds, RuntimeConfig::default(), true);
+    std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("many rounds"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(finished.status, TurnStatus::Failed);
+    // The same words as when one round's recoveries run out.
+    assert_eq!(
+        finished.error.as_deref(),
+        Some(
+            "The connection to Echo kept breaking off mid-answer. Check the network connection, then send a message to continue."
+        )
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 25);
+    assert_eq!(hooks.failures.lock().unwrap().len(), 1);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_an_empty_reply_after_a_failed_tool_is_asked_to_explain_it_once() {
+    // The read fails (no such file), then the model's reply is empty.
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(usage()), Ok(finish("stop"))],
+            vec![
+                Ok(text("The file is not there.")),
+                Ok(usage()),
+                Ok(finish("stop")),
+            ],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    {
+        let requests = provider.requests.lock().unwrap();
+        // Asked to explain the failure, not to continue a partial answer.
+        assert!(explain_note(&requests[2]) && !recovery_note(&requests[2]));
+        assert!(!explain_note(&requests[1]));
+    }
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(|item| matches!(&item.data,
+        ItemData::ToolResult {call_id,is_error:true,..} if call_id == "missing")));
+    assert!(items.iter().any(|item| matches!(&item.data,
+        ItemData::AssistantMessage {text} if text == "The file is not there.")));
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+
+    // Once a turn: a second empty reply ends it.
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(finish("stop"))],
+            vec![Ok(finish("stop"))],
+            vec![Ok(text("never asked")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    std::fs::remove_dir_all(directory).unwrap();
+
+    // After a tool that worked, and at the output limit, an empty reply
+    // ends the turn as before.
+    for (present, last) in [(true, "stop"), (false, "max_tokens")] {
+        let (directory, runtime, provider, _) = setup_streams(
+            vec![
+                vec![Ok(read_notes("notes")), Ok(finish("tool_use"))],
+                vec![Ok(finish(last))],
+                vec![Ok(text("never asked")), Ok(finish("stop"))],
+            ],
+            RuntimeConfig::default(),
+            true,
+        );
+        if present {
+            std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+        }
+        let thread = echo_thread(&runtime).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request("read the notes"))
+            .await
+            .unwrap();
+        assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "{last}");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn reliability_a_retry_still_asks_the_model_to_explain_the_failure() {
+    // The read fails, the reply is empty, and the request to explain meets
+    // an overloaded provider: the request sent again still asks.
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(usage()), Ok(finish("stop"))],
+            vec![cut("HTTP 529: overloaded")],
+            vec![
+                Ok(text("The file is not there.")),
+                Ok(usage()),
+                Ok(finish("stop")),
+            ],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(!explain_note(&requests[1]));
+        assert!(explain_note(&requests[2]) && explain_note(&requests[3]));
+        assert_eq!(
+            serde_json::to_value(&requests[2].messages).unwrap(),
+            serde_json::to_value(&requests[3].messages).unwrap()
+        );
+    }
+    assert!(
+        runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| matches!(&item.data,
+                ItemData::AssistantMessage {text} if text == "The file is not there."))
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_a_cut_before_any_reply_still_asks_the_model_to_explain_the_failure() {
+    // The request to explain is cut off after the provider sent only its
+    // usage, as Anthropic's message_start carries it: the request sent
+    // again still asks, and the model's answer ends the turn.
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(usage()), Ok(finish("stop"))],
+            vec![Ok(usage())],
+            vec![
+                Ok(text("The file is not there.")),
+                Ok(usage()),
+                Ok(finish("stop")),
+            ],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    {
+        let requests = provider.requests.lock().unwrap();
+        let notes = requests.iter().map(explain_note).collect::<Vec<_>>();
+        assert_eq!(notes, [false, false, true, true]);
+        // Nothing arrived to continue from: the same request again.
+        assert!(!recovery_note(&requests[3]));
+        assert_eq!(
+            serde_json::to_value(&requests[2].messages).unwrap(),
+            serde_json::to_value(&requests[3].messages).unwrap()
+        );
+    }
+    assert!(
+        runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| matches!(&item.data,
+                ItemData::AssistantMessage {text} if text == "The file is not there."))
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_a_cut_after_only_reasoning_or_blank_text_still_asks_the_model_to_explain() {
+    // The reply to the request to explain begins with reasoning, as a
+    // thinking model's does, or with a bare line break, and is cut off
+    // there: nothing the person can read arrived, so the recovery request
+    // still asks, and the model's answer ends the turn.
+    for first in [
+        ProviderEvent::ReasoningDelta("The read failed because".into()),
+        text("\n"),
+    ] {
+        let label = format!("{first:?}");
+        let (directory, runtime, provider, hooks) = setup_streams(
+            vec![
+                vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+                vec![Ok(usage()), Ok(finish("stop"))],
+                vec![Ok(usage()), Ok(first), cut(CUTS[0])],
+                vec![
+                    Ok(text("The file is not there.")),
+                    Ok(usage()),
+                    Ok(finish("stop")),
+                ],
+            ],
+            RuntimeConfig::default(),
+            true,
+        );
+        let thread = echo_thread(&runtime).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request("read the notes"))
+            .await
+            .unwrap();
+        let finished = settled(&runtime, &turn).await;
+        assert_eq!(
+            finished.status,
+            TurnStatus::Completed,
+            "{label}: {:?}",
+            finished.error
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 4, "{label}");
+        {
+            let requests = provider.requests.lock().unwrap();
+            let notes = requests.iter().map(explain_note).collect::<Vec<_>>();
+            assert_eq!(notes, [false, false, true, true], "{label}");
+            // The partial reply is continued from, and the request to
+            // explain still comes last.
+            assert!(recovery_note(&requests[3]), "{label}");
+            assert!(
+                matches!(requests[3].messages.last(),
+                Some(ProviderMessage::Text {role,content}) if role == "user"
+                    && content.starts_with("Your last reply was empty")),
+                "{label}"
+            );
+        }
+        let items = runtime.items(thread.id, None).await.unwrap();
+        let said = items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::AssistantMessage { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(said.last(), Some(&"The file is not there."), "{label}");
+        assert!(hooks.failures.lock().unwrap().is_empty(), "{label}");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn reliability_words_sent_during_a_retry_wait_go_without_the_request_to_explain() {
+    // The request to explain meets an overloaded provider, and the person
+    // writes while the turn waits to try again: the request sent next ends
+    // with their words, not with the request to explain.
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(usage()), Ok(finish("stop"))],
+            vec![cut("HTTP 529: overloaded")],
+            vec![Ok(text("Using pnpm.")), Ok(usage()), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while provider.calls.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the request to explain was never sent");
+    let words = "Never mind the notes, use pnpm";
+    let queued = runtime
+        .queue_input(
+            thread.id,
+            haarness_protocol::QueueInputRequest {
+                preview: None,
+                reasoning_effort: None,
+                delivery: haarness_protocol::InputDelivery::Steer,
+                request_id: haarness_protocol::RequestId::new(),
+                text: words.into(),
+                attachments: Vec::new(),
+                resources: Vec::new(),
+                synthetic: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(queued.queued, "the words join the waiting turn");
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(explain_note(&requests[2]));
+        assert!(!explain_note(&requests[3]), "{:?}", requests[3].messages);
+        assert!(matches!(requests[3].messages.last(),
+            Some(ProviderMessage::Text {role,content}) if role == "user" && content.contains(words)));
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn explain_note(request: &ProviderRequest) -> bool {
+    request.messages.iter().any(|message| matches!(message, ProviderMessage::Text {role,content} if role == "user" && content.starts_with("Your last reply was empty")))
+}
+
+#[tokio::test]
+async fn reliability_an_empty_reply_after_a_person_rejected_the_call_ends_the_turn() {
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
+    config.base_rules.push(haarness_core::PermissionRule {
+        pattern: "write:*".into(),
+        decision: haarness_core::PermissionDecision::Ask,
+    });
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![
+                Ok(call(
+                    "asked",
+                    "write",
+                    serde_json::json!({"path":"rejected.txt","content":"no"}),
+                )),
+                Ok(finish("tool_use")),
+            ],
+            vec![Ok(finish("stop"))],
+            vec![Ok(text("never asked")), Ok(finish("stop"))],
+        ],
+        config,
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("write it"))
+        .await
+        .unwrap();
+    let permission = wait_permission(&runtime, thread.id).await;
+    runtime
+        .reply_permission(
+            &permission,
+            haarness_protocol::PermissionReply {
+                decision: haarness_protocol::PermissionReplyDecision::Reject,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert!(!directory.join("rejected.txt").exists());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Hooks whose `PreToolUse` blocks every call.
+struct BlockingHooks;
+#[async_trait]
+impl HookPort for BlockingHooks {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
+        HookDecision {
+            block: Some("not on this branch".into()),
+            ..HookDecision::default()
+        }
+    }
+    async fn post_tool_use(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn stop(&self, _: &HookCall) {}
+}
+
+#[tokio::test]
+async fn reliability_an_empty_reply_after_a_hook_blocked_the_call_ends_the_turn() {
+    let directory =
+        std::env::temp_dir().join(format!("haarness-reliability-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let provider = Arc::new(Script {
+        authenticated: true,
+        rounds: vec![
+            vec![Ok(read_notes("blocked")), Ok(finish("tool_use"))],
+            vec![Ok(finish("stop"))],
+            vec![Ok(text("never asked")), Ok(finish("stop"))],
+        ],
+        calls: AtomicUsize::new(0),
+        requests: Mutex::new(vec![]),
+    });
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            provider.clone() as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(NativeToolRegistry::new(directory.clone())),
+        EventBus::new(128),
+        directory.clone(),
+        String::new(),
+        RuntimeConfig::default(),
+    )
+    .with_hooks(Arc::new(BlockingHooks));
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert!(runtime.items(thread.id, None).await.unwrap().iter().any(|item| matches!(&item.data,
+        ItemData::ToolResult {call_id,is_error:true,output,..} if call_id == "blocked" && output.contains("not on this branch"))));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_the_step_limit_round_keeps_the_tools_and_closes_a_call_unrun() {
+    let config = RuntimeConfig {
+        max_rounds: Some(1),
+        ..RuntimeConfig::default()
+    };
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![Ok(read_notes("first")), Ok(finish("tool_use"))],
+            // At the limit, the model sums up and calls a tool anyway.
+            vec![
+                Ok(text("Here is where things stand.")),
+                Ok(call(
+                    "past-limit",
+                    "write",
+                    serde_json::json!({"path":"must-not-exist","content":"bad"}),
+                )),
+                Ok(finish("tool_use")),
+            ],
+            vec![Ok(text("never asked")), Ok(finish("stop"))],
+        ],
+        config,
+        true,
+    );
+    std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("work until the limit"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert!(!directory.join("must-not-exist").exists());
+    {
+        let requests = provider.requests.lock().unwrap();
+        // The prompt prefix the turn's earlier rounds cached stays as it was.
+        assert!(!requests[1].tools.is_empty());
+        assert_eq!(
+            serde_json::to_value(&requests[0].tools).unwrap(),
+            serde_json::to_value(&requests[1].tools).unwrap()
+        );
+        assert_eq!(requests[0].system, requests[1].system);
+        assert!(requests[1].messages.iter().any(|message| matches!(message,
+            ProviderMessage::Text {role,content}
+                if role == "user" && content.starts_with("The configured maximum number of tool steps"))));
+    }
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(|item| matches!(&item.data,
+        ItemData::AssistantMessage {text} if text == "Here is where things stand.")));
+    // Marked as never run, so nothing reads it back as the call's outcome.
+    assert!(items.iter().any(|item| matches!(&item.data,
+        ItemData::ToolResult {call_id,is_error:true,metadata,..}
+            if call_id == "past-limit" && metadata["notRun"] == true)));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::Error { .. }))
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_tool_calls_alone_at_the_step_limit_are_asked_once_more_for_a_summary() {
+    let past_limit = |id: &str| {
+        Ok(call(
+            id,
+            "write",
+            serde_json::json!({"path":"must-not-exist","content":"bad"}),
+        ))
+    };
+    // The model sums up when asked again; or calls tools again, and the
+    // turn ends there.
+    for summarises in [true, false] {
+        let last = if summarises {
+            vec![Ok(text("Here is the summary.")), Ok(finish("stop"))]
+        } else {
+            vec![past_limit("again"), Ok(finish("tool_use"))]
+        };
+        let (directory, runtime, provider, hooks) = setup_streams(
+            vec![
+                vec![Ok(read_notes("first")), Ok(finish("tool_use"))],
+                vec![past_limit("only-calls"), Ok(finish("tool_use"))],
+                last,
+                vec![Ok(text("never asked")), Ok(finish("stop"))],
+            ],
+            RuntimeConfig {
+                max_rounds: Some(1),
+                ..RuntimeConfig::default()
+            },
+            true,
+        );
+        std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+        let thread = echo_thread(&runtime).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request("work until the limit"))
+            .await
+            .unwrap();
+        let finished = settled(&runtime, &turn).await;
+        assert_eq!(
+            finished.status,
+            TurnStatus::Completed,
+            "{:?}",
+            finished.error
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3, "{summarises}");
+        assert!(!directory.join("must-not-exist").exists());
+        {
+            let requests = provider.requests.lock().unwrap();
+            // The asking again is a limit request too: the closed call, then
+            // the notice, with the tools as before.
+            let again = &requests[2];
+            assert!(
+                again.messages.iter().any(|message| matches!(message,
+                ProviderMessage::ToolResult {call_id,is_error:true,..} if call_id == "only-calls"))
+            );
+            assert!(
+                matches!(again.messages.last(), Some(ProviderMessage::Text {role,content})
+                if role == "user" && content.starts_with("The configured maximum number of tool steps"))
+            );
+            assert_eq!(
+                serde_json::to_value(&again.tools).unwrap(),
+                serde_json::to_value(&requests[0].tools).unwrap()
+            );
+        }
+        let items = runtime.items(thread.id, None).await.unwrap();
+        assert!(items.iter().any(|item| matches!(&item.data,
+            ItemData::ToolResult {call_id,metadata,..}
+                if call_id == "only-calls" && metadata["notRun"] == true)));
+        assert_eq!(
+            items.iter().any(|item| matches!(&item.data,
+                ItemData::AssistantMessage {text} if text == "Here is the summary.")),
+            summarises
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item.data, ItemData::Error { .. }))
+        );
+        assert!(hooks.failures.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn reliability_an_explained_failure_still_leaves_the_step_limit_its_summary() {
+    // A failed read and an empty reply use the one request to explain; the
+    // step limit later still asks once more for the summary.
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(finish("stop"))],
+            vec![Ok(read_notes("explained")), Ok(finish("tool_use"))],
+            vec![
+                Ok(call(
+                    "only-calls",
+                    "write",
+                    serde_json::json!({"path":"must-not-exist","content":"bad"}),
+                )),
+                Ok(finish("tool_use")),
+            ],
+            vec![Ok(text("Here is the summary.")), Ok(finish("stop"))],
+            vec![Ok(text("never asked")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig {
+            max_rounds: Some(2),
+            ..RuntimeConfig::default()
+        },
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read, then sum up"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 5);
+    assert!(!directory.join("must-not-exist").exists());
+    assert!(
+        runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| matches!(&item.data,
+        ItemData::AssistantMessage {text} if text == "Here is the summary."))
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}

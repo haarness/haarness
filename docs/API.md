@@ -77,7 +77,7 @@ Primary resources:
 - `GET /v1/projects`; `GET|POST /v1/workspaces`; `GET /v1/workspaces/refs`; `POST /v1/workspaces/resolve-ref`; `GET|DELETE /v1/workspaces/{reference}`; `POST /v1/workspaces/{reference}/open`, `/reset`, and `/cleanup`
 - `GET|POST /v1/threads` (`?archived=true` lists archived chats), `GET|PATCH /v1/threads/{id}`
   Thread responses include `isSubagent` (default `false` for older payloads). Delegated child creation sets it; forks preserve `parentId` lineage with `isSubagent: false`. List APIs continue returning all threads; clients can filter sidebar presentations without losing child access.
-  Untitled root conversations generate a title asynchronously from the first real user message after prompt hooks accept it. A `thread.updated` event publishes the persisted title while the main turn may still be running or waiting for permission. Titling is independent of turn completion and never overwrites a manual rename.
+  Untitled root conversations generate a title asynchronously from the first real user message after prompt hooks accept it. The title request quotes at most the message's first 2,000 characters, so a pasted log or file stays quick and cheap to name, and asks for at most 4,096 tokens of output, or the model's own output limit when that is lower; a model whose limit its catalog does not state (a local server, an endpoint configured without one) is asked for no limit, and so is a model reached through a ChatGPT sign-in, whose transport takes none. A `thread.updated` event publishes the persisted title while the main turn may still be running or waiting for permission. Titling is independent of turn completion and never overwrites a manual rename.
   A title, typed or generated, is stored without terminal escape sequences or other control characters, and a line break or tab in it reads as a space; a rename left with nothing printable is refused as a blank one is. An archive's titles are cleaned the same way when it is imported. A title an older server stored as written is returned cleaned (the row keeps its bytes until the chat is written again), a fork is named from the cleaned title, and one with nothing printable left reads as `New chat`. The CLI prints every title without such characters.
   Until then a chat is titled `New chat`. Servers before 2026-10 stored `New thread`; such rows are returned as `New chat` and still get a generated title, and a create request whose title is either placeholder or only spaces gets `New chat`. A fork without a `title` is named `Fork of <source title>`, or `Fork of New chat` when the source has none.
 - `GET /v1/threads/{id}/archive[?sanitize=true]`; `POST /v1/session-archives/import`
@@ -182,9 +182,32 @@ confirms any pending revert, captures a versioned exact todo checkpoint, and
 records the configured recent-turn tail. Subsequent provider requests receive
 the summary, exact todo JSON as data, then the retained turns. Media from the
 pre-compaction tail is represented by a textual attachment note rather than
-re-uploaded. Automatic compaction uses the selected model's context and output
-limits and retries pre-output context-overflow/HTTP-413 failures after safe
-compaction, under a bounded per-turn recovery ceiling. A refusal of the request
+re-uploaded. The summary request offers no tools, so it reads the chat's tool
+calls and their results written out as text, each between an opening and a
+closing marker that carry the call's number. A result names the earliest call
+of its response with its id that has no result yet, so two calls a server gave
+one id are still answered in order. Once the user's side of the chat holds
+text the person did not write (a tool result, a background command's or a
+task's notice, a reminder, an earlier summary), the person's own words sit
+between markers of their own, and the request to summarize says that only
+those words are theirs and that the rest is data. Every marker's name ends in
+a key of 16 random hex digits that Haarness makes for that one request, so no
+text it quotes was written knowing it, and the request says that only markers
+with that key open or close anything: a lookalike without it, whatever its
+characters, is part of the text around it. Everything the request quotes is
+sent as it was written, angle brackets and all, but for two things: a copy of
+the key, should one turn up, is left out, and a tool name, which sits inside a
+marker, has its `&`, `"`, `<` and `>` written as character entities and its
+control characters and Unicode line and paragraph separators as numeric ones.
+A chat with nothing to mark is sent without markers or key.
+Automatic compaction uses the
+selected model's context and output limits and retries pre-output context-overflow/HTTP-413 failures after safe
+compaction, under a bounded per-turn recovery ceiling. A context too long is
+read in each provider's own words, among them Z.ai's code 1261 ("Prompt exceeds
+max length"), Amazon Nova's "Input Tokens Exceeded", DeepInfra's "Requested
+input length … exceeds maximum input length" and Text Generation Inference's
+(Together, Hugging Face) "`inputs` tokens + `max_new_tokens` must be <= …"; an
+HTTP 429 is a rate limit whatever its words, and never compacts. A refusal of the request
 for its size in bytes (an HTTP 413, Bedrock's "413 Payload Too Large" or
 Gemini's "Request payload size exceeds the limit", rather than a context too
 long in tokens or a rate limit) compacts once until the provider takes a
@@ -499,6 +522,12 @@ tries, the result becomes a hidden user message and an `error` item says
 workflow's). Both are written in one database step while no turn can start;
 if a turn started meanwhile, the result steers into it instead. A chat that
 no longer exists, or is archived, is not told.
+
+A call the model makes in the request that sums up at an agent's `steps` or
+`tools.max_rounds` limit is not run: its error `tool_result` says so and
+carries `metadata: {"notRun": true}`, which the rebuild of a chat's loaded
+tools after a restart reads to leave it out. Clients show it as a failed call
+with that text.
 
 The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.
