@@ -1873,7 +1873,7 @@ impl App {
                 if response.workspace.exists =>
             {
                 format!(
-                    "Forgot worktree “{}” · it no longer links to its repository, so its folder was left on disk",
+                    "Worktree “{}” forgotten · it no longer links to its repository, so its folder was left on disk",
                     response.workspace.name
                 )
             }

@@ -8,7 +8,7 @@
 2. A worktree whose link to its repository broke (its `.git` names a Git folder that is gone): `haarness
    worktree remove` forgets it and says in one line that its folder was left on disk, with the work in
    it; the TUI's /workspace Remove says the same in its notice. A worktree whose link works is still
-   removed whole.
+   removed whole, and one whose repository is out of reach (moved) is kept, naming `git worktree repair`.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-worktree-repairs.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -143,13 +143,25 @@ try:
     forgot = cli(project, "worktree", "remove", "unlinked", "--confirm")
     lines = forgot.stdout.strip().splitlines()
     check("haarness worktree remove forgets it in one line and leaves its folder with the work in it",
-          len(lines) == 1 and "its folder was left on disk" in lines[0]
+          len(lines) == 1 and lines[0].startswith("worktree forgotten: ") and "its folder was left on disk" in lines[0]
           and (unlinked / "notes.txt").read_text() == "keep me\n"
           and all(item["name"] != "unlinked" for item in listed(project)["workspaces"]))
     cli(project, "worktree", "create", "linked")
     linked = Path(cli(project, "worktree", "open", "linked", "--path-only").stdout.strip())
     removed = cli(project, "worktree", "remove", "linked", "--confirm")
     check("A worktree whose link works is still removed whole", "removed worktree" in removed.stdout and not linked.exists())
+
+    # A repository out of reach (moved, or on a disk not connected) keeps its worktree.
+    elsewhere = repository("elsewhere")
+    cli(elsewhere, "worktree", "create", "away")
+    away = next(item for item in listed(elsewhere)["workspaces"] if item["name"] == "away")
+    moved = root / "elsewhere-moved"
+    elsewhere.rename(moved)
+    kept = cli(main, "worktree", "remove", away["id"], "--confirm", ok=False)
+    still = any(item["id"] == away["id"] for item in listed(main)["workspaces"])
+    moved.rename(elsewhere)
+    check("A worktree whose repository is out of reach is kept, saying how to repair it",
+          kept.returncode != 0 and "not reachable" in kept.stderr and "git worktree repair" in kept.stderr and still)
 
     # The TUI's /workspace Remove.
     cli(project, "worktree", "create", "tui unlinked")
@@ -174,7 +186,7 @@ try:
     subprocess.run(["tmux", "send-keys", "-t", session, "Down"], check=True)
     time.sleep(.3)
     subprocess.run(["tmux", "send-keys", "-t", session, "Enter"], check=True)
-    notice = until(lambda: next((line for line in pane(session).splitlines() if "Forgot worktree" in line), None),
+    notice = until(lambda: next((line for line in pane(session).splitlines() if "forgotten · it no longer links" in line), None),
                    "the TUI did not say the worktree was forgotten")
     (root / "tui-notice.txt").write_text(pane(session))
     check("The TUI says it forgot the worktree and left its folder on disk",

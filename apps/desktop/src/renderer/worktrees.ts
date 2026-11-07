@@ -171,7 +171,7 @@ export async function removeWorktree(
   if (dropped)
     app.notify(
       dropped === "kept"
-        ? t("Worktree removed. Its folder no longer links to its repository, so it was left on disk.")
+        ? t("Worktree forgotten. Its folder no longer links to its repository, so it was left on disk.")
         : t("Worktree removed."),
     );
 }

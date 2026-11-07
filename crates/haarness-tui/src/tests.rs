@@ -25198,7 +25198,7 @@ async fn a_forgotten_worktree_says_its_folder_was_left_on_disk() {
     assert!(app.finish_workspace_mutation(completion, false).is_none());
     assert_eq!(
         app.notice,
-        "Forgot worktree “review” · it no longer links to its repository, so its folder was left on disk"
+        "Worktree “review” forgotten · it no longer links to its repository, so its folder was left on disk"
     );
     let requests = server.await.unwrap();
     assert!(requests[0].starts_with("DELETE /v1/workspaces/workspace-review "));

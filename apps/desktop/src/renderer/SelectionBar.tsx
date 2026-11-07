@@ -150,10 +150,15 @@ export function SelectionBar() {
     setBusy(true);
     const failed: string[] = [];
     let done = 0;
+    // Worktrees only forgotten: their link to their repository broke, so
+    // their folders were left on disk.
+    let kept = 0;
     try {
       for (const location of picked) {
         try {
-          if (await dropWorktree(app, group, location)) done++;
+          const dropped = await dropWorktree(app, group, location);
+          if (dropped === "removed") done++;
+          else if (dropped === "kept") kept++;
         } catch (error) {
           failed.push(t("{name}: {reason}", { name: t(locationName(location)), reason: reason(error) }));
         }
@@ -162,7 +167,12 @@ export function SelectionBar() {
       setBusy(false);
     }
     settleAfter({ trees: picked.map((item) => item.id) });
-    report(done === 1 ? t("Removed 1 worktree") : t("Removed {count} worktrees", { count: done }), failed);
+    const removed = done === 1 ? t("Removed 1 worktree") : t("Removed {count} worktrees", { count: done });
+    const forgotten =
+      kept === 1
+        ? t("Worktree forgotten. Its folder no longer links to its repository, so it was left on disk.")
+        : t("{count} worktrees forgotten. Their folders no longer link to their repository, so they were left on disk.", { count: kept });
+    report(kept ? (done ? removed + " " + forgotten : forgotten) : removed, failed);
   }
   onMount(() => {
     const escape = (event: KeyboardEvent) => {

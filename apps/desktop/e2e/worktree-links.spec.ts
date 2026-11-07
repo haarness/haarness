@@ -72,13 +72,13 @@ test("removing a worktree whose link to its repository broke forgets it and keep
       await page.getByRole("menuitem", { name: "Remove worktree…", exact: true }).click();
       await page.getByRole("dialog", { name: "Remove worktree?", exact: true }).getByRole("button", { name: "Remove worktree", exact: true }).click();
       const toast = page.locator(".toast");
-      await expect(toast).toHaveText("Worktree removed. Its folder no longer links to its repository, so it was left on disk.");
+      await expect(toast).toHaveText("Worktree forgotten. Its folder no longer links to its repository, so it was left on disk.");
       await expect(tree).toHaveCount(0);
       if (language === "ar") {
         // The notice is read in the interface language as it is shown.
         await page.evaluate(() => (window as any).haarness.preferences({ language: "ar" }));
         await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-        await expect(toast).toHaveText("تمت إزالة شجرة العمل. لم يعد مجلدها مرتبطًا بمستودعها، لذا تُرك على القرص.");
+        await expect(toast).toHaveText("تم نسيان شجرة العمل. لم يعد مجلدها مرتبطًا بمستودعها، لذا تُرك على القرص.");
       }
       // Past the notice's fade-in.
       await page.waitForTimeout(400);
