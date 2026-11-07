@@ -239,6 +239,37 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
             "This request could cost more than a spending limit allows. Compact or shorten the \
              conversation, or {limit}."
         )
+    } else if message.contains("[concurrency_limited]") {
+        // A sign-in runs eight requests at once (a fan-out of agents can ask
+        // for more). A slot frees when one of them finishes, which no wait
+        // foretells, so the turn backs off from 2 to 16 seconds on "Try again
+        // in a moment" whatever wait the router names: that tries sooner and
+        // waits longer than a fixed one. "rate limit" makes it a usage limit.
+        "Haarness Cloud is already running as many of your requests at once as its rate limit \
+         allows. Try again in a moment, or once another chat or agent finishes."
+            .to_owned()
+    } else if message.contains("[router_overloaded]") {
+        // The router's own limit on requests at once, across every account.
+        "Haarness Cloud's router is at its rate limit for requests at once. Try again in a \
+         moment."
+            .to_owned()
+    } else if message.contains("[rate_limited]") {
+        // Requests a minute: the router says when the minute turns ("Please
+        // retry in 12s."), and that wait is kept.
+        let limit = message
+            .split_once("rate limit of ")
+            .map(|(_, rest)| {
+                rest.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+            })
+            .filter(|digits| !digits.is_empty())
+            .map_or_else(|| " for".to_owned(), |digits| format!(" of {digits}"));
+        let next = advised_seconds(&message).map_or_else(
+            || "Try again in a moment.".to_owned(),
+            |seconds| format!("Please retry in {seconds}s."),
+        );
+        format!("You've reached Haarness Cloud's rate limit{limit} requests a minute. {next}")
     } else if message.contains("[exposure_cap]") {
         "Too many requests are still settling on this Haarness Cloud account. Wait a moment, \
          then try again."
@@ -686,6 +717,67 @@ mod tests {
             message.ends_with("(in the terminal: /billing)."),
             "{message}"
         );
+    }
+
+    /// Cloud refuses a busy key or router with a 429 of its own. The runtime
+    /// (`retry_delay`) backs off on a usage limit ("rate limit") that says to
+    /// wait ("Try again in a moment", or "Please retry in 12s" for that long),
+    /// and the words are what the person reads once the retries run out.
+    #[test]
+    fn a_busy_key_or_router_is_waited_out() {
+        let concurrency = "Haarness Cloud is already running as many of your requests at once as \
+                           its rate limit allows. Try again in a moment, or once another chat or \
+                           agent finishes.";
+        let per_minute = "You've reached Haarness Cloud's rate limit of 300 requests a minute.";
+        for (raw, expected) in [
+            (
+                "HTTP 429 Too Many Requests: [concurrency_limited] per-key concurrency limit reached",
+                concurrency.to_owned(),
+            ),
+            // When a slot frees is not known: backing off beats the router's
+            // fixed wait, which serves clients that only read Retry-After.
+            (
+                "HTTP 429 Too Many Requests: [concurrency_limited] per-key concurrency limit \
+                 reached Please retry in 5s.",
+                concurrency.to_owned(),
+            ),
+            (
+                "HTTP 429 Too Many Requests: [router_overloaded] router concurrency limit reached",
+                "Haarness Cloud's router is at its rate limit for requests at once. Try again in \
+                 a moment."
+                    .to_owned(),
+            ),
+            (
+                "HTTP 429 Too Many Requests: [rate_limited] per-key rate limit of 300 requests \
+                 per minute reached",
+                format!("{per_minute} Try again in a moment."),
+            ),
+            // The minute's end, which the router names.
+            (
+                "HTTP 429 Too Many Requests: [rate_limited] per-key rate limit of 300 requests \
+                 per minute reached Please retry in 17s.",
+                format!("{per_minute} Please retry in 17s."),
+            ),
+            (
+                "HTTP 429 Too Many Requests: [rate_limited] slow down",
+                "You've reached Haarness Cloud's rate limit for requests a minute. Try again in \
+                 a moment."
+                    .to_owned(),
+            ),
+        ] {
+            for readable in [readable, readable_router] {
+                let CoreError::Provider(message) = readable(CoreError::Provider(raw.into())) else {
+                    panic!("still a provider error");
+                };
+                assert_eq!(message, expected, "{raw}");
+                let lower = message.to_ascii_lowercase();
+                assert!(lower.contains("rate limit"), "{message}");
+                assert!(
+                    lower.contains("try again in a moment") || lower.contains("retry in 17s"),
+                    "{message}"
+                );
+            }
+        }
     }
 
     #[derive(Clone)]

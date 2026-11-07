@@ -32,6 +32,14 @@ An exhausted pending-request allowance is reported separately from upstream
 provider quota. Provider outages, retired models and API-account restrictions
 can still prevent a listed model from serving a request.
 
+Cloud runs a sign-in's requests eight at a time and 300 a minute, and each
+router has a limit of its own. A request over one of them is not an error the
+turn ends on: it is sent again after 2, 4, 8 and 16 seconds, or once the minute
+has turned when Cloud says how long that is (`Retry-After`). A fan-out of more
+than eight agents waits this way for a free slot. If Cloud is still busy after
+that, the reply says so and suggests trying again once another chat or agent
+finishes.
+
 Each sign-in is named after the app and the computer in Cloud's **Settings → Devices**: `Haarness CLI on Studio`, or `Haarness Desktop on Studio` when Desktop signs in (it runs `haarness login` with `HAARNESS_LOGIN_APP=desktop`). The computer name is the one Remote control shows: macOS's computer name, else the host name.
 
 `haarness account` shows the signed-in user and selected account (`--json` for the full status); `haarness account --select <account-id>` switches it. `haarness logout` removes local credentials and revokes the login. Sign-out does not stop running Cloud workspaces; stop them separately to stop compute usage. If Cloud is unreachable during sign-out, credentials are removed locally and the command explains how to revoke the session online.

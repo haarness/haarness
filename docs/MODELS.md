@@ -126,6 +126,7 @@ then `--sync` copies the table here.
 | Provider | Change |
 | --- | --- |
 | Anthropic, OpenAI, Bedrock, Chat Completions | Audio, video or any other file a model can't take no longer fails the request when it came from a tool (an MCP server's recording) or with an earlier message: a one-line note stands in for it, and the chat goes on. Before, the request failed again on every later turn, until the chat changed model. Only the person's newest message is refused, naming the model ("Haarness can't send audio to Claude Sonnet 5.5. Send the message without the recording, …"). Chat Completions still sends MP3 and WAV as `input_audio`. A Bedrock model listed without image input (gpt-oss, a text-only Llama), or an Anthropic-compatible model set up with `images = false`, gets pictures the same way, as Chat Completions models already did. Gemini and Vertex AI take every type Haarness attaches, so nothing changed there (`Unreadable` in `crates/haarness-providers/src/media.rs`). |
+| Haarness Cloud | Cloud's own 429s no longer fail a turn at once. A sign-in already running as many requests at once as its key allows (eight by default, which a fan-out of agents can pass) or a full router is tried again after 2, 4, 8 and 16 seconds; a key's used-up minute (300 requests) waits for the `Retry-After` Cloud names. If Cloud is still busy, the reply says so and what helps. `scripts/test-cloud-busy-retry.py` drives the server against a Cloud stand-in. |
 
 ## Provider fixes: 2026-11-01
 
