@@ -428,7 +428,7 @@ impl ModelProvider for AnthropicProvider {
                         // A tool's file never refuses the turn: the model
                         // goes on without it.
                         for item in media {
-                            blocks.push(block(item, Unreadable::Note)?);
+                            blocks.push(block(item, Unreadable::FromTool)?);
                         }
                         Value::Array(blocks)
                     };

@@ -620,7 +620,7 @@ async fn notes_unreadable_media_and_refuses_only_the_newest(
     assert_eq!(
         error.to_string(),
         format!(
-            "provider error: Haarness can't send video to {name}. Send the message without the video, or switch to a model from the Gemini or Vertex AI provider."
+            "provider error: Haarness can't send video to {name}. Send the message without the video, or switch to a model that takes video."
         )
     );
     assert_eq!(captures.lock().unwrap().len(), sent_before, "{model}");
@@ -671,34 +671,55 @@ async fn openai_responses_notes_audio_and_video_and_refuses_only_the_newest() {
 #[tokio::test]
 async fn chat_completions_notes_audio_and_video_and_refuses_only_the_newest() {
     let (base, captures, task) = fixture().await;
-    let provider = OpenAiCompatibleProvider::new(CompatibleInstance {
-        id: "custom".into(),
-        name: "Fixture".into(),
-        base_url: base,
-        api_key: Some("fixture".into()),
-        models: vec!["fixture-model".into()],
-        discover_models: false,
-        server_output_limit: false,
-        replay_observed_reasoning: false,
-        model_defaults: CompatibleModelDefaults::default(),
-        assume_authenticated: false,
-        headers: ProviderHeaders::default(),
-    });
-    // MP3 and WAV go as `input_audio`; Chat Completions has no other format.
+    let provider = |model: &str| {
+        OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "custom".into(),
+            name: "Fixture".into(),
+            base_url: base.clone(),
+            api_key: Some("fixture".into()),
+            models: vec![model.into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: ProviderHeaders::default(),
+        })
+    };
+    // A model nothing says takes audio gets none, not even MP3.
     notes_unreadable_media_and_refuses_only_the_newest(
-        &provider,
+        &provider("fixture-model"),
         "fixture-model",
+        "data:audio/mpeg;name=meeting.mp3;base64,SUQz",
+        &captures,
+    )
+    .await;
+    // One known to take audio gets MP3 and WAV as `input_audio`; Chat
+    // Completions has no other format, so an Ogg recording is still a note.
+    let listens = provider("voxtral-small-latest");
+    notes_unreadable_media_and_refuses_only_the_newest(
+        &listens,
+        "voxtral-small-latest",
         "data:audio/ogg;name=meeting.ogg;base64,SUQz",
         &captures,
     )
     .await;
-    let mut req = request("fixture-model", None);
+    let mut req = request("voxtral-small-latest", None);
+    req.messages.push(ProviderMessage::Media {
+        role: "user".into(),
+        content: "Listen".into(),
+        attachments: vec!["data:audio/mpeg;name=meeting.mp3;base64,SUQz".into()],
+    });
+    events(&listens, req.clone()).await;
+    let sent = captures.lock().unwrap().last().unwrap().0.to_string();
+    assert!(sent.contains("input_audio"), "{sent}");
+    req.messages.pop();
     req.messages.push(ProviderMessage::Media {
         role: "user".into(),
         content: "Listen".into(),
         attachments: vec!["data:audio/ogg;name=meeting.ogg;base64,SUQz".into()],
     });
-    let Err(error) = provider.stream(req, CancellationToken::new()).await else {
+    let Err(error) = listens.stream(req, CancellationToken::new()).await else {
         panic!("an Ogg recording in the newest message must be refused");
     };
     assert!(

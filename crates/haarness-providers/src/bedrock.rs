@@ -1009,7 +1009,7 @@ fn bedrock_request(
                 // A tool's file never refuses the turn: the model goes on
                 // without it.
                 for item in media {
-                    content.push(block(item, Unreadable::Note)?);
+                    content.push(block(item, Unreadable::FromTool)?);
                 }
                 messages.push(json!({"role":"user","content":[{"toolResult":{"toolUseId":call_id,"content":content,"status":if is_error {"error"} else {"success"}}}]}));
             }
@@ -2493,7 +2493,7 @@ mod tests {
         assert_eq!(
             listed(chat(newest(audio()))).unwrap_err().to_string(),
             format!(
-                "provider error: Haarness can't send audio to {name}. Send the message without the recording, or switch to a model from the Gemini or Vertex AI provider."
+                "provider error: Haarness can't send audio to {name}. Send the message without the recording, or switch to a model that takes audio."
             )
         );
         assert_eq!(

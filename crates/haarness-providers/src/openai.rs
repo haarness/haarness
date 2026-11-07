@@ -655,7 +655,7 @@ impl ModelProvider for OpenAiProvider {
                         // A tool's file never refuses the turn: the model
                         // goes on without it.
                         for item in crate::media::load_all(&attachments)? {
-                            blocks.push(block(item, Unreadable::Note)?);
+                            blocks.push(block(item, Unreadable::FromTool)?);
                         }
                         json!({"type":"function_call_output","call_id":call_id,"output":blocks})
                     }

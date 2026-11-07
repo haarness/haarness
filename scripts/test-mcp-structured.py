@@ -86,6 +86,24 @@ finally:
     e2e_scratch.settle(root)
 
 
+def voice_server(base, clip):
+    """An MCP stdio server under `base` whose one tool, `clip`, answers with a recording."""
+    server = base/'voice.py'
+    server.write_text(
+        'import json, sys\n'
+        f'CLIP = {clip!r}\n'
+        'for line in sys.stdin:\n'
+        '    request = json.loads(line)\n'
+        "    if 'id' not in request: continue\n"
+        "    method = request.get('method')\n"
+        "    result = ({'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'voice', 'version': '1'}} if method == 'initialize'\n"
+        "        else {'tools': [{'name': 'clip', 'description': 'Records a clip', 'inputSchema': {'type': 'object'}}]} if method == 'tools/list'\n"
+        "        else {'content': [{'type': 'text', 'text': 'clip recorded'}, {'type': 'audio', 'data': CLIP, 'mimeType': 'audio/mpeg'}]} if method == 'tools/call'\n"
+        '        else {})\n'
+        "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)\n")
+    return server
+
+
 def audio_reaches_a_model_that_cannot_hear_it():
     """Built-in Anthropic provider against a mock: Claude takes no audio. An MCP tool's recording reaches it as a
     note and the chat goes on; a recording the person sends now is refused by the model's name, and the chat still
@@ -132,19 +150,7 @@ def audio_reaches_a_model_that_cannot_hear_it():
     (project/'.haarness/config.toml').write_text(
         f'[defaults]\nprovider="anthropic"\nmodel="{model}"\n[permissions]\n"mcp__voice__*"="allow"\n'
         '[lazy_tools]\nmode="off"\n[lsp]\nenabled=false\n')
-    server = base/'voice.py'
-    server.write_text(
-        'import json, sys\n'
-        f'CLIP = {clip!r}\n'
-        'for line in sys.stdin:\n'
-        '    request = json.loads(line)\n'
-        "    if 'id' not in request: continue\n"
-        "    method = request.get('method')\n"
-        "    result = ({'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'voice', 'version': '1'}} if method == 'initialize'\n"
-        "        else {'tools': [{'name': 'clip', 'description': 'Records a clip', 'inputSchema': {'type': 'object'}}]} if method == 'tools/list'\n"
-        "        else {'content': [{'type': 'text', 'text': 'clip recorded'}, {'type': 'audio', 'data': CLIP, 'mimeType': 'audio/mpeg'}]} if method == 'tools/call'\n"
-        '        else {})\n'
-        "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)\n")
+    server = voice_server(base, clip)
     voice_env = clean_env('ANTHROPIC_')
     voice_env.update(HAARNESS_DATA_DIR=str(base/'data'), HAARNESS_HOME=str(base/'home'), HOME=str(base/'home'),
                      ANTHROPIC_API_KEY='fixture-key', ANTHROPIC_BASE_URL=f'http://127.0.0.1:{mock.server_port}/v1')
@@ -180,7 +186,8 @@ def audio_reaches_a_model_that_cannot_hear_it():
         sent = len(chats)
         refused = turn(thread, 'Listen to this', [f'data:audio/mpeg;name=voice.mp3;base64,{clip}'])
         errors = [item['message'] for item in items(thread, 'error')]
-        assert refused['status'] == 'failed' and errors and "Haarness can't send audio to Claude Sonnet 4.6" in errors[-1], (refused, errors)
+        # The refusal is Haarness's own advice, not called a provider error.
+        assert refused['status'] == 'failed' and errors and errors[-1].startswith("Haarness can't send audio to Claude Sonnet 4.6."), (refused, errors)
         assert 'Send the message without the recording' in errors[-1] and len(chats) == sent, errors
         after = turn(thread, 'AFTER_REFUSAL')
         assert after['status'] == 'completed' and items(thread, 'assistant_message')[-1]['text'] == 'REPLY_OK', after
@@ -192,4 +199,99 @@ def audio_reaches_a_model_that_cannot_hear_it():
         e2e_scratch.settle(base)
 
 
+def audio_on_haarness_cloud():
+    """Haarness Cloud stand-in, as its router answers: Claude takes no `input_audio` ("… doesn't take audio") and
+    Gemini does. A tool's MP3 reaches Claude as a note and the chat goes on; Gemini gets the recording itself."""
+    import base64, datetime, http.server, re, threading
+    clip = base64.b64encode(b'ID3\x04\x00\x00\x00\x00\x00\x00haarness-cloud-clip').decode()
+    chats = []
+
+    class Cloud(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def answer(self, status, value):
+            body = json.dumps(value).encode()
+            self.send_response(status); self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+        def do_GET(self):
+            self.answer(200, {'object': 'list', 'data': [{'id': 'anthropic/claude-sonnet-5-5', 'supports_vision': True},
+                                                         {'id': 'google/gemini-3.5-flash'}]})
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if self.path.endswith('/router-session'):
+                expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+                return self.answer(200, {'token': 'fixture-router', 'routerUrl': cloud_url + '/', 'expiresAt': expires.isoformat()})
+            sent = json.dumps(body['messages'])
+            if body.get('tools'): chats.append(body)
+            if 'input_audio' in sent and not body['model'].startswith('google/'):
+                return self.answer(400, {'error': {'message': f"{body['model']} doesn't take audio", 'type': 'invalid_request_error',
+                                                   'code': 'unsupported_capability'}})
+            person = next(i for i, message in reversed(list(enumerate(body['messages'])))
+                          if message['role'] == 'user' and isinstance(message['content'], str))
+            answered = any(message['role'] == 'tool' for message in body['messages'][person:])
+            if body.get('tools') and not answered and 'PLAY_THE_CLIP' in body['messages'][person]['content']:
+                events = [{'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'call_clip', 'type': 'function',
+                           'function': {'name': 'mcp__voice__clip', 'arguments': '{}'}}]}, 'finish_reason': None}]},
+                          {'choices': [{'delta': {}, 'finish_reason': 'tool_calls'}]}]
+            else:
+                events = [{'choices': [{'delta': {'content': 'NOTED' if answered else 'REPLY_OK'}, 'finish_reason': None}]},
+                          {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 9, 'completion_tokens': 2}}]
+            self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
+            for event in events: self.wfile.write(('data: ' + json.dumps(event) + '\n\n').encode())
+            self.wfile.write(b'data: [DONE]\n\n'); self.wfile.flush()
+
+    stand_in = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Cloud)
+    cloud_url = f'http://127.0.0.1:{stand_in.server_port}'
+    threading.Thread(target=stand_in.serve_forever, daemon=True).start()
+    base = pathlib.Path(tempfile.mkdtemp(prefix='haarness-mcp-cloud-audio-', dir=os.environ.get('HAARNESS_E2E_DIR'))).resolve()
+    project = base/'project'; (project/'.haarness').mkdir(parents=True)
+    (project/'.haarness/config.toml').write_text('[permissions]\n"mcp__voice__*"="allow"\n[lazy_tools]\nmode="off"\n[lsp]\nenabled=false\n')
+    server = voice_server(base, clip)
+    account = base/'account'; account.mkdir()
+    credentials = account/'credentials.json'
+    credentials.write_text(json.dumps({'apiUrl': cloud_url + '/', 'accessToken': 'fixture-account', 'refreshToken': 'fixture-refresh',
+        'accessExpiresAt': (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).isoformat()}))
+    credentials.chmod(0o600)
+    cloud_env = clean_env()
+    cloud_env.update(HAARNESS_DATA_DIR=str(base/'data'), HAARNESS_HOME=str(base/'home'), HOME=str(base/'home'),
+                     HAARNESS_CLOUD_API_URL=cloud_url, HAARNESS_CLOUD_CONFIG_DIR=str(account))
+    (base/'home').mkdir()
+    args = [str(binary), '--workspace', str(project), '--trust-project']
+    connection = None
+    try:
+        connection = json.loads(run(args + ['desktop'], env=cloud_env, input='{"action":"connect"}'))
+        def request(path, body=None):
+            message = urllib.request.Request(connection['url'] + '/v1' + path, data=None if body is None else json.dumps(body).encode(),
+                headers={'Authorization': 'Bearer ' + connection['token'], 'Content-Type': 'application/json'})
+            with urllib.request.urlopen(message, timeout=15) as reply:
+                data = reply.read(); return json.loads(data) if data else None
+        def turn(thread, text):
+            started = request(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': text})
+            return until(lambda: (lambda now: now if now['status'] not in ('queued', 'running') else None)(request(f"/turns/{started['id']}")), f'{text}: turn did not end')
+        def items(thread, kind): return [item['data'] for item in request(f'/threads/{thread}/items') if item['data']['type'] == kind]
+        request('/mcp/voice', {'transport': 'stdio', 'command': sys.executable, 'args': [str(server)], 'enabled': True, 'timeout_ms': 5000})
+        until(lambda: any(item['name'] == 'voice' and item['status'] == 'connected' for item in request('/mcp')), 'voice fixture did not connect')
+
+        thread = request('/threads', {'title': 'Cloud audio', 'provider': 'haarness', 'model': 'anthropic/claude-sonnet-5-5'})['id']
+        played = turn(thread, 'PLAY_THE_CLIP')
+        assert played['status'] == 'completed', (played, items(thread, 'error'))
+        assert items(thread, 'assistant_message')[-1]['text'] == 'NOTED', items(thread, 'assistant_message')
+        sent = json.dumps(chats[-1]['messages'])
+        assert re.search(r'\[Audio \S+ is left out', sent) and 'input_audio' not in sent and clip not in sent, sent
+        later = turn(thread, 'SECOND_TURN')
+        assert later['status'] == 'completed' and items(thread, 'assistant_message')[-1]['text'] == 'REPLY_OK', later
+        check("on Haarness Cloud a tool's MP3 reaches Claude as a note, and the next turn is answered")
+
+        thread = request('/threads', {'title': 'Cloud audio, Gemini', 'provider': 'haarness', 'model': 'google/gemini-3.5-flash'})['id']
+        played = turn(thread, 'PLAY_THE_CLIP')
+        assert played['status'] == 'completed', (played, items(thread, 'error'))
+        sent = json.dumps(chats[-1]['messages'])
+        assert '"input_audio"' in sent and clip in sent and 'is left out' not in sent, sent
+        check("on Haarness Cloud Gemini gets the tool's recording itself")
+    finally:
+        if connection: subprocess.run(args + ['serve', '--stop'], env=cloud_env, capture_output=True, timeout=35)
+        stand_in.shutdown()
+        e2e_scratch.settle(base)
+
+
 audio_reaches_a_model_that_cannot_hear_it()
+audio_on_haarness_cloud()

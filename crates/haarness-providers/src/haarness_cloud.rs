@@ -1,6 +1,7 @@
 //! Managed models use a local account session, never a saved upstream API key.
 use crate::{
     CompatibleInstance, CompatibleModelDefaults, OpenAiCompatibleProvider, ProviderHeaders,
+    openai_compatible::ListedAudio,
 };
 use async_trait::async_trait;
 use haarness_account::{Client, Config, RouterSession};
@@ -19,6 +20,9 @@ pub struct HaarnessCloudProvider {
     client: Client,
     grant: Arc<Grant>,
     models: RwLock<Option<([u8; 32], Arc<crate::live_models::LiveModels>)>>,
+    /// Which listed models take audio, kept across the transports made for
+    /// each request.
+    listed_audio: ListedAudio,
 }
 impl HaarnessCloudProvider {
     pub fn from_environment() -> Option<Self> {
@@ -26,6 +30,7 @@ impl HaarnessCloudProvider {
             client: Client::new(Config::from_env().ok()?).ok()?,
             grant: Arc::default(),
             models: RwLock::new(None),
+            listed_audio: ListedAudio::default(),
         })
     }
     fn identity(&self) -> Option<[u8; 32]> {
@@ -85,7 +90,9 @@ impl HaarnessCloudProvider {
         catalog.clone()
     }
     async fn transport(&self) -> CoreResult<OpenAiCompatibleProvider> {
-        router_transport(&self.client, &self.grant).await
+        Ok(router_transport(&self.client, &self.grant)
+            .await?
+            .with_listed_audio(Arc::clone(&self.listed_audio)))
     }
 }
 
@@ -137,6 +144,7 @@ async fn router_transport(client: &Client, grant: &Grant) -> CoreResult<OpenAiCo
 fn unauthorized(error: &CoreError) -> bool {
     matches!(error, CoreError::Provider(message) if message.starts_with("HTTP 401"))
 }
+
 
 fn error(e: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(e.to_string())
@@ -404,6 +412,7 @@ impl ModelProvider for HaarnessCloudProvider {
             .map_err(readable)?;
         let client = self.client.clone();
         let grant = Arc::clone(&self.grant);
+        let listed_audio = Arc::clone(&self.listed_audio);
         let used = grant
             .lock()
             .await
@@ -431,6 +440,7 @@ impl ModelProvider for HaarnessCloudProvider {
                         }?;
                         stream = transport
                             .with_model_info(models.clone())
+                            .with_listed_audio(Arc::clone(&listed_audio))
                             .stream(request, cancel.clone())
                             .await
                             .map_err(readable)?;
@@ -510,6 +520,7 @@ mod tests {
             client: Client::new(config.clone()).unwrap(),
             grant: Arc::default(),
             models: RwLock::new(None),
+            listed_audio: ListedAudio::default(),
         });
         let refresh = || async {
             tokio::time::sleep(std::time::Duration::from_millis(1010)).await;
@@ -780,6 +791,144 @@ mod tests {
         }
     }
 
+    /// A Cloud stand-in listing a model that says nothing of audio and one
+    /// that takes it; it answers chats, or refuses them as a busy key.
+    #[derive(Clone, Default)]
+    struct Stand {
+        url: Arc<std::sync::Mutex<String>>,
+        refusing: Arc<std::sync::atomic::AtomicBool>,
+        sent: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    /// The provider signed in to a [`Stand`], its server and its folder.
+    async fn stand_in() -> (
+        HaarnessCloudProvider,
+        Stand,
+        tokio::task::JoinHandle<()>,
+        std::path::PathBuf,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let stand = Stand::default();
+        url.clone_into(&mut stand.url.lock().unwrap());
+        let app = Router::new()
+            .route(
+                "/api/v1/account/router-session",
+                post(|State(state): State<Stand>| async move {
+                    Json(json!({"token":"grant", "routerUrl":state.url.lock().unwrap().clone(),
+                        "expiresAt":chrono::Utc::now() + chrono::Duration::hours(1)}))
+                }),
+            )
+            .route(
+                "/models",
+                get(|| async {
+                    Json(json!({"data":[
+                        {"id":"anthropic/claude-sonnet-5-5"},
+                        {"id":"openai/gpt-listens", "architecture":{"input_modalities":["text","audio"]}},
+                    ]}))
+                }),
+            )
+            .route(
+                "/chat/completions",
+                post(
+                    |State(state): State<Stand>, Json(body): Json<serde_json::Value>| async move {
+                        state.sent.lock().unwrap().push(body);
+                        if state.refusing.load(Ordering::SeqCst) {
+                            return (
+                                StatusCode::TOO_MANY_REQUESTS,
+                                Json(json!({"error":{"message":"per-key concurrency limit reached",
+                                    "type":"rate_limit_error","code":"concurrency_limited"}})),
+                            )
+                                .into_response();
+                        }
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                        )
+                            .into_response()
+                    },
+                ),
+            )
+            .with_state(stand.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let root = std::env::temp_dir().join(format!("haarness-cloud-stand-{}", uuid_for_test()));
+        let config = Config::new(&url, root.clone(), "fixture").unwrap();
+        haarness_account::credentials::save(
+            &config.path(),
+            &haarness_account::Credentials {
+                api_url: url.clone(),
+                access_token: "signed-in".into(),
+                refresh_token: "fixture".into(),
+                access_expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        )
+        .unwrap();
+        let provider = HaarnessCloudProvider {
+            client: Client::new(config).unwrap(),
+            grant: Arc::default(),
+            models: RwLock::new(None),
+            listed_audio: ListedAudio::default(),
+        };
+        (provider, stand, server, root)
+    }
+
+    /// A tool round whose result is a recording.
+    fn recording(model: &str) -> ProviderRequest {
+        ProviderRequest {
+            model: model.into(),
+            system: "system".into(),
+            messages: vec![
+                haarness_core::ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "record it".into(),
+                },
+                haarness_core::ProviderMessage::ToolCall {
+                    call_id: "call".into(),
+                    name: "clip".into(),
+                    arguments: json!({}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+                haarness_core::ProviderMessage::ToolResult {
+                    call_id: "call".into(),
+                    name: "clip".into(),
+                    output: "recorded".into(),
+                    is_error: false,
+                    attachments: vec!["data:audio/mpeg;name=clip.mp3;base64,SUQz".into()],
+                },
+            ],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            output_schema: None,
+            parameters: haarness_core::RequestParameters::default(),
+        }
+    }
+
+    /// The Cloud provider makes a new transport for every request: what the
+    /// listing said of audio reaches each of them.
+    #[tokio::test]
+    async fn every_request_keeps_what_the_listing_says_of_audio() {
+        use futures::StreamExt as _;
+        let (provider, stand, server, root) = stand_in().await;
+        for (model, takes) in [
+            ("anthropic/claude-sonnet-5-5", false),
+            ("openai/gpt-listens", true),
+        ] {
+            let events = provider
+                .stream(recording(model), CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert!(events.iter().all(Result::is_ok), "{model}: {events:?}");
+            let sent = stand.sent.lock().unwrap().last().unwrap().to_string();
+            assert_eq!(sent.contains("input_audio"), takes, "{model}: {sent}");
+        }
+        server.abort();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[derive(Clone)]
     struct Grants {
         url: String,
@@ -862,6 +1011,7 @@ mod tests {
             client: Client::new(config).unwrap(),
             grant: Arc::default(),
             models: RwLock::new(None),
+            listed_audio: ListedAudio::default(),
         };
         let request = || ProviderRequest {
             model: "fixture-chat".into(),

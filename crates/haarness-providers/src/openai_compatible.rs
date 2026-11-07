@@ -14,7 +14,11 @@ use haarness_protocol::{ModelInfo, ModelPricing, ProviderInfo};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -53,7 +57,15 @@ pub struct OpenAiCompatibleProvider {
     headers: crate::ProviderHeaders,
     /// See [`CompatibleInstance::replay_observed_reasoning`].
     replay_observed_reasoning: bool,
+    /// Whether each model takes audio, for the models the last listing gave
+    /// input modalities for (see [`takes_audio`]).
+    listed_audio: ListedAudio,
 }
+
+/// Whether each listed model takes audio, by the input modalities its
+/// catalog entry lists. Shared with the Haarness Cloud provider, which makes
+/// a new transport for every request.
+pub(crate) type ListedAudio = Arc<std::sync::RwLock<HashMap<String, bool>>>;
 
 /// Declarative description of a compatible endpoint.
 #[derive(Clone)]
@@ -168,12 +180,19 @@ impl OpenAiCompatibleProvider {
             assume_authenticated: instance.assume_authenticated,
             headers: instance.headers,
             replay_observed_reasoning: instance.replay_observed_reasoning,
+            listed_audio: ListedAudio::default(),
         }
     }
 
     /// First-party router credentials must not follow redirects.
     pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.client = client;
+        self
+    }
+
+    /// Reads and writes what listings say of audio in `listed`.
+    pub(crate) fn with_listed_audio(mut self, listed: ListedAudio) -> Self {
+        self.listed_audio = listed;
         self
     }
 
@@ -309,6 +328,7 @@ impl OpenAiCompatibleProvider {
         if let Some(response) = discovered
             && let Ok(body) = response.json::<Value>().await
         {
+            let mut audio = HashMap::new();
             let models: Vec<_> = body["data"]
                 .as_array()?
                 .iter()
@@ -325,6 +345,12 @@ impl OpenAiCompatibleProvider {
                 .filter_map(|entry| {
                     let entry = &*entry;
                     let mut model = discovered_model_info(&self.id, entry, self.model_defaults)?;
+                    if let Some(inputs) = input_modalities(entry) {
+                        audio.insert(
+                            model.id.clone(),
+                            inputs.iter().any(|input| input.as_str() == Some("audio")),
+                        );
+                    }
                     if let Some(efforts) = entry["reasoning_efforts"].as_array() {
                         model.reasoning_efforts = efforts
                             .iter()
@@ -343,6 +369,10 @@ impl OpenAiCompatibleProvider {
                     Some(model)
                 })
                 .collect();
+            *self
+                .listed_audio
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = audio;
             let models = match self.id.as_str() {
                 "ollama" => self.ollama_details(base, models).await,
                 "lmstudio" => self.lmstudio_details(base, models).await,
@@ -539,6 +569,7 @@ impl OpenAiCompatibleProvider {
             assume_authenticated: false,
             headers: crate::ProviderHeaders::default(),
             replay_observed_reasoning: false,
+            listed_audio: ListedAudio::default(),
         }
     }
 
@@ -1061,13 +1092,7 @@ fn discovered_model_info(
     })
     .or(info.max_output_tokens);
 
-    if let Some(modalities) = entry
-        .pointer("/architecture/input_modalities")
-        .or_else(|| entry.pointer("/modalities/input"))
-        // DeepSeek's own listing, also through a Haarness router.
-        .or_else(|| entry.get("input_modalities"))
-        .and_then(Value::as_array)
-    {
+    if let Some(modalities) = input_modalities(entry) {
         info.images = modalities
             .iter()
             .any(|value| value.as_str() == Some("image"));
@@ -1826,6 +1851,37 @@ fn json_number(value: &Value) -> Option<f64> {
         .filter(|number| number.is_finite())
 }
 
+/// What a catalog entry says its model reads (OpenRouter's `architecture`,
+/// or DeepSeek's and xAI's own field), when it says.
+fn input_modalities(entry: &Value) -> Option<&Vec<Value>> {
+    entry
+        .pointer("/architecture/input_modalities")
+        .or_else(|| entry.pointer("/modalities/input"))
+        // DeepSeek's own listing, also through a Haarness router.
+        .or_else(|| entry.get("input_modalities"))
+        .and_then(Value::as_array)
+}
+
+/// Whether `model` takes `input_audio`. Its catalog entry decides when it
+/// lists input modalities. Otherwise only a family known to listen does:
+/// Gemini (which Haarness Cloud's router passes audio to), OpenAI's audio
+/// models, Voxtral and the omni models. A model that takes no audio refuses
+/// the whole request, and again on every later turn, so any other model gets
+/// a note instead.
+fn takes_audio(listed: &HashMap<String, bool>, model: &str) -> bool {
+    listed.get(model).copied().unwrap_or_else(|| {
+        let name = model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase();
+        name.starts_with("gemini")
+            || name.contains("audio")
+            || name.contains("voxtral")
+            || name.contains("omni")
+    })
+}
+
 fn override_bool(entry: &Value, key: &str, target: &mut bool) {
     if let Some(value) = entry.get(key).and_then(Value::as_bool) {
         *target = value;
@@ -2013,6 +2069,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let model_name = selected.map_or(model.as_str(), |model| model.display_name.as_str());
         let replay = self.reasoning_replay(&model);
         let newest = crate::media::newest_unanswered(&request.messages);
+        let audio = takes_audio(
+            &self
+                .listed_audio
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &model,
+        );
         let mut messages = vec![json!({"role":"system","content":request.system})];
         let mut tool_media = Vec::new();
         for (index, message) in request.messages.into_iter().enumerate() {
@@ -2048,6 +2111,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     &content,
                     &attachments,
                     supports_images,
+                    audio,
                     Unreadable::at(index, newest, model_name),
                 )?),
                 ProviderMessage::ToolCall {
@@ -2131,7 +2195,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
                             "The preceding tool result includes this binary document or media.",
                             &attachments,
                             supports_images,
-                            Unreadable::Note,
+                            audio,
+                            Unreadable::FromTool,
                         )?);
                     }
                 }
@@ -2545,15 +2610,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 }
 
-/// A message carrying media for Chat Completions. A model that reads no
-/// images, and media the protocol has no portable form for (video, audio
-/// other than MP3 or WAV), get what `place` says: the newest message is
-/// refused and anything else becomes a note.
+/// A message carrying media for Chat Completions. Images a model doesn't
+/// read, audio it doesn't take (see [`takes_audio`]) and media the protocol
+/// has no portable form for (video, audio other than MP3 or WAV) get what
+/// `place` says: the newest message is refused and anything else becomes a
+/// note.
 fn openai_compatible_media_message(
     role: &str,
     content: &str,
     attachments: &[String],
     images: bool,
+    audio: bool,
     place: Unreadable<'_>,
 ) -> CoreResult<Value> {
     // A photo sent on its own has no text. Claude refuses a blank text block,
@@ -2564,11 +2631,12 @@ fn openai_compatible_media_message(
         blocks.push(json!({"type":"text","text":content}));
     }
     for item in crate::media::load_all(attachments)? {
-        let audio = match item.mime_type.as_str() {
+        let format = match item.mime_type.as_str() {
             "audio/mpeg" => Some("mp3"),
             "audio/wav" => Some("wav"),
             _ => None,
-        };
+        }
+        .filter(|_| audio);
         if item.is_image() && images {
             blocks.push(json!({"type":"image_url","image_url":{"url":item.data_url()}}));
         } else if item.is_pdf() {
@@ -2576,12 +2644,13 @@ fn openai_compatible_media_message(
                 "type":"file",
                 "file":{"filename":item.filename,"file_data":item.data_url()}
             }));
-        } else if let Some(format) = audio {
+        } else if let Some(format) = format {
             blocks.push(json!({
                 "type":"input_audio",
                 "input_audio":{"data":item.base64,"format":format}
             }));
-        } else if item.is_audio()
+        } else if audio
+            && item.is_audio()
             && let Unreadable::Refuse(model) = place
         {
             return Err(CoreError::Provider(format!(
@@ -2623,9 +2692,9 @@ mod tests {
     use crate::auth::{Credential, CredentialStore, XaiOAuthClient, XaiOAuthConfig};
 
     use super::{
-        CompatibleInstance, CompatibleModelDefaults, OpenAiCompatibleProvider, Unreadable,
-        append_reasoning_details, apply_lmstudio_details, apply_ollama_details, deepseek_charge,
-        deepseek_peak, discovered_model_info, local_model_missing, model_info,
+        CompatibleInstance, CompatibleModelDefaults, ListedAudio, OpenAiCompatibleProvider,
+        Unreadable, append_reasoning_details, apply_lmstudio_details, apply_ollama_details,
+        deepseek_charge, deepseek_peak, discovered_model_info, local_model_missing, model_info,
         openai_compatible_media_message,
     };
 
@@ -3492,6 +3561,7 @@ mod tests {
                 content,
                 &["data:image/png;name=photo-1.png;base64,iVBORw0KGgo=".into()],
                 true,
+                false,
                 Unreadable::Refuse("fixture"),
             )
             .unwrap();
@@ -3504,6 +3574,7 @@ mod tests {
             "What is this?",
             &["data:image/png;base64,iVBORw0KGgo=".into()],
             true,
+            false,
             Unreadable::Refuse("fixture"),
         )
         .unwrap();
@@ -3521,18 +3592,50 @@ mod tests {
                 "data:audio/mpeg;name=meeting.mp3;base64,SUQz".into(),
             ],
             false,
-            Unreadable::Note,
+            true,
+            Unreadable::Earlier,
         )
         .unwrap();
         assert_eq!(message["content"][1]["type"], "file");
         assert_eq!(message["content"][1]["file"]["filename"], "agenda.pdf");
         assert_eq!(message["content"][2]["type"], "input_audio");
         assert_eq!(message["content"][2]["input_audio"]["format"], "mp3");
+        // A model that takes no audio gets a note, and the newest message is
+        // refused.
+        let message = openai_compatible_media_message(
+            "user",
+            "Review the meeting",
+            &["data:audio/mpeg;name=meeting.mp3;base64,SUQz".into()],
+            false,
+            false,
+            Unreadable::FromTool,
+        )
+        .unwrap();
+        assert_eq!(
+            message["content"][1]["text"],
+            "[Audio meeting.mp3 is left out, because it can't be sent to you. Don't guess what it says.]"
+        );
+        let error = openai_compatible_media_message(
+            "user",
+            "Review the meeting",
+            &["data:audio/mpeg;name=meeting.mp3;base64,SUQz".into()],
+            false,
+            false,
+            Unreadable::Refuse("Claude Sonnet 5.5"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Haarness can't send audio to Claude Sonnet 5.5."),
+            "{error}"
+        );
 
         let error = openai_compatible_media_message(
             "user",
             "Watch this",
             &["data:video/mp4;base64,AAAAIGZ0eXA=".into()],
+            true,
             true,
             Unreadable::Refuse("Fixture 7B"),
         )
@@ -4821,6 +4924,104 @@ mod tests {
             2,
             "{sent}"
         );
+    }
+
+    /// Haarness Cloud lists Claude, GPT and DeepSeek without input
+    /// modalities, and its router refuses `input_audio` for them ("… doesn't
+    /// take audio"), a refusal every later turn would meet again. A tool's
+    /// recording goes as audio only to a model whose listing says it takes
+    /// audio, or to a family known to (Gemini); the rest get a note.
+    #[tokio::test]
+    async fn a_tools_recording_goes_only_to_a_model_that_takes_audio() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route(
+                "/models",
+                get(|| async {
+                    Json(json!({"data": [
+                        {"id": "anthropic/claude-sonnet-5-5", "supports_vision": true},
+                        {"id": "google/gemini-3.5-flash"},
+                        {"id": "openai/gpt-audio", "architecture": {"input_modalities": ["text", "audio"]}},
+                        {"id": "google/gemini-listed", "architecture": {"input_modalities": ["text", "image"]}},
+                    ]}))
+                }),
+            )
+            .route("/chat/completions", post(completions))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let instance = || CompatibleInstance {
+            id: "haarness".into(),
+            name: "Haarness Cloud".into(),
+            base_url: format!("http://{address}"),
+            api_key: Some("fixture".into()),
+            models: Vec::new(),
+            discover_models: true,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        };
+        // As Haarness Cloud does: one transport lists the models, and a new
+        // one sends each request, sharing what the listing said.
+        let listed = ListedAudio::default();
+        let models = OpenAiCompatibleProvider::new(instance())
+            .with_listed_audio(listed.clone())
+            .fetch_models()
+            .await
+            .unwrap();
+        for (model, takes) in [
+            ("anthropic/claude-sonnet-5-5", false),
+            ("google/gemini-3.5-flash", true),
+            ("openai/gpt-audio", true),
+            ("google/gemini-listed", false),
+            ("deepseek/deepseek-v4-flash", false),
+        ] {
+            let request = ProviderRequest {
+                model: model.into(),
+                system: "sys".into(),
+                messages: vec![
+                    ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "record the demo".into(),
+                    },
+                    ProviderMessage::ToolCall {
+                        call_id: "call-1".into(),
+                        name: "mcp__voice__clip".into(),
+                        arguments: json!({}),
+                        provider_metadata: Value::Null,
+                    },
+                    ProviderMessage::ToolResult {
+                        call_id: "call-1".into(),
+                        name: "mcp__voice__clip".into(),
+                        output: "recorded".into(),
+                        attachments: vec!["data:audio/mpeg;name=clip.mp3;base64,SUQz".into()],
+                        is_error: false,
+                    },
+                ],
+                tools: vec![],
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            };
+            OpenAiCompatibleProvider::new(instance())
+                .with_model_info(models.clone())
+                .with_listed_audio(listed.clone())
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let sent = state.0.lock().last().unwrap()["messages"].to_string();
+            assert_eq!(sent.contains("input_audio"), takes, "{model}: {sent}");
+            assert_eq!(
+                sent.contains("[Audio clip.mp3 is left out"),
+                !takes,
+                "{model}: {sent}"
+            );
+        }
     }
 
     #[tokio::test]
