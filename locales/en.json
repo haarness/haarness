@@ -3127,5 +3127,6 @@
   "Drag {target} in {app}": "Drag {target} in {app}",
   "Drag {target} from {app} to {endApp}": "Drag {target} from {app} to {endApp}",
   "Always allow this app": "Always allow this app",
-  "Could not allow this app: {error}": "Could not allow this app: {error}"
+  "Could not allow this app: {error}": "Could not allow this app: {error}",
+  "No agent is paused": "No agent is paused"
 }

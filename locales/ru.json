@@ -3127,5 +3127,6 @@
   "Drag {target} in {app}": "Перетащить {target} в {app}",
   "Drag {target} from {app} to {endApp}": "Перетащить {target} из {app} в {endApp}",
   "Always allow this app": "Всегда разрешать это приложение",
-  "Could not allow this app: {error}": "Не удалось разрешить это приложение: {error}"
+  "Could not allow this app: {error}": "Не удалось разрешить это приложение: {error}",
+  "No agent is paused": "Нет приостановленных агентов"
 }

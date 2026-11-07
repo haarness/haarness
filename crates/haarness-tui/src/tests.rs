@@ -25153,6 +25153,152 @@ async fn a_computer_use_card_offers_the_app_in_every_chat_and_speaks_the_languag
     assert!(text.contains("このアプリを常に許可"), "{text}");
 }
 
+/// The person paused computer use on the strip at the top of the screen: the
+/// step it holds stops spinning, says so with the command that lets it go on,
+/// and a click on that command resumes the agent, as the strip's Resume does.
+#[tokio::test]
+async fn a_step_paused_on_the_strip_says_so_and_its_row_resumes_it() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let items = vec![message_item_for_turn(
+        1,
+        &thread,
+        turn,
+        ItemData::ToolCall {
+            call_id: "c1".into(),
+            name: "mac_type".into(),
+            arguments: serde_json::json!({"ref": "e2", "text": "milk"}),
+            provider_metadata: serde_json::Value::Null,
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    let spins = |text: &str| {
+        ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+            .iter()
+            .any(|frame| text.contains(*frame))
+    };
+    let paused = |on: bool| {
+        fixture_event(
+            crate::management::COMPUTER_USE_UPDATED,
+            thread.id,
+            thread.id,
+            serde_json::json!({"paused": on}),
+        )
+    };
+    assert!(spins(&frame_text(&app, (100, 30))));
+    app.reduce(paused(true), &offline_client()).await.unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("‖ mac_type"), "{text}");
+    assert!(text.contains("paused  ·  /mac resume"), "{text}");
+    assert!(!spins(&text), "nothing moves while paused: {text}");
+    // The band says it too, without a clock running.
+    let band = text
+        .lines()
+        .rev()
+        .find(|line| line.contains("paused"))
+        .unwrap();
+    assert!(!band.contains("mac_type"), "{band}");
+    // The command on the row is what a click runs.
+    let row = text
+        .lines()
+        .position(|line| line.contains("/mac resume"))
+        .unwrap();
+    let column = text.lines().nth(row).unwrap().find("/mac resume").unwrap();
+    let column = text.lines().nth(row).unwrap()[..column].width();
+    assert_eq!(
+        app.hit_at(row, column + 2),
+        Some(crate::view::frame::HitTarget::ComputerResume)
+    );
+    assert_ne!(
+        app.hit_at(row, 4),
+        Some(crate::view::frame::HitTarget::ComputerResume),
+        "only the command takes the click"
+    );
+    let (client, seen) = sign_in_server(vec![SignInReply::Json(
+        r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null}}"#,
+    )])
+    .await;
+    mouse_drag(
+        &mut app,
+        &client,
+        u16::try_from(row).unwrap(),
+        u16::try_from(column + 2).unwrap(),
+        u16::try_from(column + 2).unwrap(),
+    )
+    .await;
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0].starts_with("POST /v1/manage/computer-use ")
+            && requests[0].contains(r#""action":"resume""#),
+        "{requests:?}"
+    );
+    let text = frame_text(&app, (100, 30));
+    assert!(!text.contains("/mac resume") && spins(&text), "{text}");
+    // A pause heard later ends with the server's word, or with the turn.
+    app.reduce(paused(true), &offline_client()).await.unwrap();
+    app.reduce(paused(false), &offline_client()).await.unwrap();
+    assert!(!frame_text(&app, (100, 30)).contains("/mac resume"));
+    app.reduce(paused(true), &offline_client()).await.unwrap();
+    let mut finished = fixture_event("turn.finished", thread.id, thread.id, serde_json::json!({}));
+    finished.turn_id = Some(turn);
+    app.reduce(finished, &offline_client()).await.unwrap();
+    assert_eq!(app.computer_paused, None);
+}
+
+/// A pause is followed in every chat, so a chat opened while it lasts shows
+/// it; a child agent's view counts as its conversation's; `/mac resume` does
+/// what the row's click does, and says so when nothing is paused.
+#[tokio::test]
+async fn a_pause_reaches_the_paused_conversation_and_mac_resume_ends_it() {
+    let thread = fixture_thread();
+    let other = fixture_thread();
+    let turn = TurnId::new();
+    let mut app = App::new(
+        other.clone(),
+        vec![thread.clone(), other.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    app.reduce(
+        fixture_event(
+            crate::management::COMPUTER_USE_UPDATED,
+            thread.id,
+            thread.id,
+            serde_json::json!({"paused": true}),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.computer_paused, Some(thread.id));
+    app.active_turn = Some(turn);
+    assert!(!app.screen_paused(), "another chat is not paused");
+    app.root_thread_id = thread.id;
+    assert!(app.screen_paused(), "a child agent of the paused chat is");
+    let (client, seen) = sign_in_server(vec![
+        SignInReply::Json(r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null}}"#),
+        SignInReply::Json(r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null}}"#),
+    ])
+    .await;
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_eq!(app.computer_paused, None);
+    assert!(!app.screen_paused());
+    assert_ne!(app.notice, "No agent is paused");
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_eq!(app.notice, "No agent is paused");
+    let requests = seen.lock().unwrap().clone();
+    assert!(
+        requests.len() == 2
+            && requests
+                .iter()
+                .all(|request| request.contains(r#""action":"resume""#)),
+        "{requests:?}"
+    );
+}
+
 /// The server's own request for a drag from TextEdit, set to act without
 /// asking, into Notes (as `a_drag_into_another_app_asks_only_about_the_app_not_yet_allowed`
 /// in haarness-computer pins it): only Notes is asked about, so only Notes

@@ -321,6 +321,7 @@ async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> 
                 app.notice = "Edit cancelled · draft restored".into();
             }
         }
+        HitTarget::ComputerResume => crate::management::resume_computer(app, client).await?,
         HitTarget::DialogSurface | HitTarget::DialogItem(_) => {}
         HitTarget::ToastDismiss => {
             app.notification_toast = None;

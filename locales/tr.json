@@ -3127,5 +3127,6 @@
   "Drag {target} in {app}": "{app} içinde {target} öğesini sürükle",
   "Drag {target} from {app} to {endApp}": "{target} öğesini {app} uygulamasından {endApp} uygulamasına sürükle",
   "Always allow this app": "Bu uygulamaya her zaman izin ver",
-  "Could not allow this app: {error}": "Bu uygulamaya izin verilemedi: {error}"
+  "Could not allow this app: {error}": "Bu uygulamaya izin verilemedi: {error}",
+  "No agent is paused": "Duraklatılmış ajan yok"
 }

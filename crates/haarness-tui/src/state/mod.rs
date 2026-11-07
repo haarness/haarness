@@ -822,6 +822,9 @@ pub struct App {
     pub preview: String,
     pub reasoning_preview: String,
     pub live_threads: std::collections::HashMap<ThreadId, LiveThreadState>,
+    /// The chat the person paused on computer use's strip, while the pause
+    /// lasts: the conversation's root chat (`computer_use.updated`).
+    pub(crate) computer_paused: Option<ThreadId>,
     /// Every request waiting for a person on the server, by request id. The
     /// session list leads with the chats they wait in.
     pub waiting: std::collections::HashMap<String, WaitingRequest>,
@@ -1231,6 +1234,7 @@ impl App {
             preview: String::new(),
             reasoning_preview: String::new(),
             live_threads: std::collections::HashMap::new(),
+            computer_paused: None,
             waiting: std::collections::HashMap::new(),
             notice,
             notice_shown: None,
@@ -1494,6 +1498,16 @@ impl App {
 
     /// Delegated threads are inspection surfaces. Forks also have a parent
     /// for history lineage, but remain editable conversations.
+    /// Whether the person paused computer use on the strip while this chat's turn uses the screen: the paused chat is
+    /// the conversation's root, so a child agent's view counts too.
+    #[must_use]
+    pub fn screen_paused(&self) -> bool {
+        self.active_turn.is_some()
+            && self
+                .computer_paused
+                .is_some_and(|chat| chat == self.thread.id || chat == self.root_thread_id)
+    }
+
     pub fn is_child_view(&self) -> bool {
         self.thread.is_subagent
     }

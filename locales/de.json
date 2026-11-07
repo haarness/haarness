@@ -3127,5 +3127,6 @@
   "Drag {target} in {app}": "{target} in {app} ziehen",
   "Drag {target} from {app} to {endApp}": "{target} von {app} nach {endApp} ziehen",
   "Always allow this app": "Diese App immer erlauben",
-  "Could not allow this app: {error}": "Diese App konnte nicht erlaubt werden: {error}"
+  "Could not allow this app: {error}": "Diese App konnte nicht erlaubt werden: {error}",
+  "No agent is paused": "Kein Agent ist pausiert"
 }

@@ -3127,5 +3127,6 @@
   "Drag {target} in {app}": "在{app}中拖移{target}",
   "Drag {target} from {app} to {endApp}": "将{target}从{app}拖到{endApp}",
   "Always allow this app": "始终允许此应用",
-  "Could not allow this app: {error}": "无法允许此应用：{error}"
+  "Could not allow this app: {error}": "无法允许此应用：{error}",
+  "No agent is paused": "没有已暂停的智能体"
 }

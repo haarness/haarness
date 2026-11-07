@@ -2485,6 +2485,14 @@ impl App {
                 self.open_management("sharing", &serde_json::json!({"action":"view"}), client)
                     .await?;
             }
+            // What the strip's Resume does, for an agent paused there.
+            "mac" if arguments.eq_ignore_ascii_case("resume") => {
+                let paused = self.computer_paused.is_some();
+                crate::management::resume_computer(self, client).await?;
+                if !paused {
+                    self.notice = self.language.text("No agent is paused").into();
+                }
+            }
             "mac" => {
                 self.open_management(
                     "computer-use",

@@ -3127,5 +3127,6 @@
   "Drag {target} in {app}": "سحب {target} في {app}",
   "Drag {target} from {app} to {endApp}": "سحب {target} من {app} إلى {endApp}",
   "Always allow this app": "السماح بهذا التطبيق دائمًا",
-  "Could not allow this app: {error}": "تعذر السماح بهذا التطبيق: {error}"
+  "Could not allow this app: {error}": "تعذر السماح بهذا التطبيق: {error}",
+  "No agent is paused": "لا يوجد وكيل متوقف مؤقتًا"
 }
