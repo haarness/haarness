@@ -24801,7 +24801,7 @@ async fn a_catalog_read_after_assets_updated_does_not_hold_the_event_loop() {
 
 /// Agents reloaded after an agent file is added or removed come back in a
 /// new order: the agent picked with Tab stays picked, and one that is gone
-/// gives way to the chat's own agent.
+/// gives way to the chat's own agent until its file is back.
 #[tokio::test]
 async fn the_chosen_agent_stays_chosen_when_agents_reload() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -24823,6 +24823,12 @@ async fn the_chosen_agent_stays_chosen_when_agents_reload() {
             profile("c"),
         ],
         vec![profile("build"), profile("plan"), profile("b")],
+        vec![
+            profile("build"),
+            profile("plan"),
+            profile("b"),
+            profile("c"),
+        ],
     ])));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -24881,7 +24887,108 @@ async fn the_chosen_agent_stays_chosen_when_agents_reload() {
     assert_eq!(app.agents.len(), 3);
     assert_eq!(app.agent(), "build");
     assert_eq!(app.notice, notice);
+    // Back again (an editor that saves by writing a new file): picked again.
+    let event = reload(&app);
+    app.reduce(event, &client).await.unwrap();
+    assert_eq!(app.agent(), "c");
     server.abort();
+}
+
+/// An agent whose file is briefly gone (an editor saving it) is picked again
+/// when it is back; one that can no longer be picked (hidden, or only for
+/// child agents) is not taken up; and once another agent is picked, the one
+/// set aside stays out.
+#[test]
+fn an_agent_set_aside_on_reload_comes_back_unless_another_is_picked() {
+    let profile = |id: &str, mode: &str, hidden: bool| haarness_protocol::AgentProfile {
+        id: id.into(),
+        name: id.into(),
+        description: format!("{id} agent"),
+        hidden,
+        max_subagents: 4,
+        mode: Some(mode.into()),
+        model: None,
+    };
+    let with = |custom: Option<haarness_protocol::AgentProfile>| {
+        let mut agents = vec![
+            profile("build", "primary", false),
+            profile("plan", "primary", false),
+        ];
+        agents.extend(custom);
+        agents
+    };
+    let thread = fixture_thread();
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread],
+        vec![],
+        vec![],
+        with(Some(profile("charlie", "primary", false))),
+    );
+    while app.agent() != "charlie" {
+        app.cycle_agent();
+    }
+    let notice = app.notice.clone();
+
+    app.agents_reloaded(with(None));
+    assert_eq!(app.agent(), "build", "the chat's own agent stands in");
+    app.agents_reloaded(with(Some(profile("charlie", "primary", false))));
+    assert_eq!(app.agent(), "charlie", "picked again once its file is back");
+    assert_eq!(app.notice, notice, "quietly");
+
+    for unpickable in [
+        profile("charlie", "subagent", false),
+        profile("charlie", "primary", true),
+    ] {
+        app.agents_reloaded(with(Some(unpickable)));
+        assert_eq!(app.agent(), "build");
+    }
+    app.agents_reloaded(with(Some(profile("charlie", "primary", false))));
+    assert_eq!(app.agent(), "charlie");
+
+    app.agents_reloaded(with(None));
+    app.cycle_agent();
+    assert_eq!(app.agent(), "plan");
+    app.agents_reloaded(with(Some(profile("charlie", "primary", false))));
+    assert_eq!(app.agent(), "plan", "the agent picked meanwhile stays");
+}
+
+/// A message sent as the agent standing in for one set aside makes the
+/// stand-in the choice: the set-aside agent does not come back later.
+#[tokio::test]
+async fn sending_as_the_stand_in_forgets_the_agent_set_aside() {
+    let profile = |id: &str| haarness_protocol::AgentProfile {
+        id: id.into(),
+        name: id.into(),
+        description: format!("{id} agent"),
+        hidden: false,
+        max_subagents: 4,
+        mode: Some("primary".into()),
+        model: None,
+    };
+    let thread = fixture_thread();
+    let provider = ProviderInfo {
+        id: thread.provider.clone(),
+        name: "OpenAI".into(),
+        authenticated: true,
+        models: vec![],
+    };
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread],
+        vec![],
+        vec![provider],
+        vec![profile("build"), profile("plan"), profile("charlie")],
+    );
+    while app.agent() != "charlie" {
+        app.cycle_agent();
+    }
+    app.agents_reloaded(vec![profile("build"), profile("plan")]);
+    assert_eq!(app.agent(), "build");
+    // The server is out of reach; the message was still sent as `build`.
+    let _ = app.submit_prompt("hello".into(), &offline_client()).await;
+    app.agents_reloaded(vec![profile("build"), profile("plan"), profile("charlie")]);
+    assert_eq!(app.agent(), "build");
 }
 
 /// Ctrl+Y goes Review → Auto → Yolo → Review on a server that keeps Yolo,

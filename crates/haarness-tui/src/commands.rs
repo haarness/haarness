@@ -3764,7 +3764,7 @@ impl App {
                 source: None,
                 path: None,
                 args,
-                agent: Some(self.agent().into()),
+                agent: Some(self.sending_agent()),
                 model: Some(workflow_model(&self.thread.provider, &self.thread.model)),
                 variant: self.requested_effort(),
                 thread_id: Some(self.thread.id),
@@ -4042,7 +4042,7 @@ impl App {
                         self.attachments.clone()
                     },
                     resources: Vec::new(),
-                    agent: workflow.then(|| self.agent().to_owned()),
+                    agent: workflow.then(|| self.sending_agent()),
                     provider: workflow.then(|| self.thread.provider.clone()),
                     model: workflow.then(|| self.thread.model.clone()),
                     variant: workflow.then(|| self.requested_effort()).flatten(),
@@ -4120,7 +4120,7 @@ impl App {
             resources,
             synthetic: false,
             auto_approve: false,
-            agent: Some(self.agent().into()),
+            agent: Some(self.sending_agent()),
             provider: None,
             model: None,
             reasoning_effort: self.requested_effort(),
@@ -4188,11 +4188,12 @@ impl App {
             .filter(|_| !thread.is_subagent);
         let previous_root = self.root_thread_id;
         self.items = items;
-        self.agent_index = self
-            .agents
-            .iter()
-            .position(|agent| agent.id == thread.agent)
-            .unwrap_or(0);
+        self.pick_agent(
+            self.agents
+                .iter()
+                .position(|agent| agent.id == thread.agent)
+                .unwrap_or(0),
+        );
         self.thread = thread;
         if let Some(id) = abandoned {
             archive_untouched(
@@ -5042,7 +5043,7 @@ impl App {
                 },
             )
             .await?;
-        self.agent_index = index;
+        self.pick_agent(index);
         self.notice = format!("Agent: {agent}");
         Ok(())
     }

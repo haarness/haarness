@@ -420,21 +420,7 @@ impl App {
                     self.catalog_arrived(providers, client).await;
                 }
                 if let Ok(agents) = client.agents().await {
-                    // A new or removed agent file can move every agent after
-                    // it: the one chosen stays chosen by its ID, or the
-                    // chat's own agent takes over when it is gone.
-                    let chosen = self.agent().to_owned();
-                    self.agents = agents;
-                    self.agent_index = self
-                        .agents
-                        .iter()
-                        .position(|agent| agent.id == chosen)
-                        .or_else(|| {
-                            self.agents
-                                .iter()
-                                .position(|agent| agent.id == self.thread.agent)
-                        })
-                        .unwrap_or(0);
+                    self.agents_reloaded(agents);
                 }
                 if let Ok(catalog) = client.workflows().await {
                     self.workflow_definitions = catalog.workflows;
@@ -1243,7 +1229,7 @@ impl App {
                                 .iter()
                                 .position(|agent| agent.id == thread.agent)
                         {
-                            self.agent_index = index;
+                            self.pick_agent(index);
                         }
                         // Undo/redo elsewhere, or the next turn confirming an
                         // undo, changes which items are live: reload them.
