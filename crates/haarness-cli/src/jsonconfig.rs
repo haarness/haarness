@@ -2703,9 +2703,9 @@ fn unlinked_below(path: &Path, folder: &Path) -> bool {
 /// Where `folder` really is, as the system will find it: each part that is
 /// there resolved as the system resolves it (a link followed, `..` taken
 /// from where the link led), and the parts not made yet after it as written,
-/// since they hold no links. A `.` or `..` after a part not made yet is
-/// refused: such a path names one place now and another once the folders
-/// before it are made.
+/// since they hold no links. A `..` after a part not made yet is refused:
+/// such a path names one place now and another once the folders before it
+/// are made. (`Path::components` drops a `.` within a path.)
 fn real_path(folder: &Path) -> std::result::Result<PathBuf, &'static str> {
     use std::path::Component;
     let absolute = if folder.is_absolute() {
@@ -2720,8 +2720,8 @@ fn real_path(folder: &Path) -> std::result::Result<PathBuf, &'static str> {
     for part in absolute.components() {
         match part {
             Component::Prefix(_) | Component::RootDir => real.push(part.as_os_str()),
-            Component::CurDir | Component::ParentDir if !made => {
-                return Err("it goes through `.` or `..` after a folder that does not exist yet");
+            Component::ParentDir if !made => {
+                return Err("it goes through `..` after a folder that does not exist yet");
             }
             Component::CurDir => {}
             Component::ParentDir => {
@@ -5203,9 +5203,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
                 assert!(
-                    error.ends_with(
-                        "it goes through `.` or `..` after a folder that does not exist yet"
-                    ),
+                    error.ends_with("it goes through `..` after a folder that does not exist yet"),
                     "{file}: {error}"
                 );
                 assert_eq!(fs::read_to_string(&outside).unwrap(), "{}\n", "{file}");
@@ -5223,6 +5221,19 @@ mod tests {
         )
         .unwrap();
         assert!(project.join(".haarness/cloud/haarness.json").is_file());
+        // A `.` after a folder not made yet names the same place before and
+        // after, so a link through one saves.
+        let dotted = project.join(".haarness/dotted.json");
+        std::os::unix::fs::symlink("fresh/./dotted.json", &dotted).unwrap();
+        write_entry(
+            &dotted,
+            &SaveScope::project(&project),
+            "mcp",
+            "docs",
+            Some(serde_json::json!({"command":"true"})),
+        )
+        .unwrap();
+        assert!(project.join(".haarness/fresh/dotted.json").is_file());
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -11,7 +11,7 @@ test("only a worktree whose link broke is removed without its server", () => {
   for (const reason of [
     "Haarness server did not answer within 30 seconds",
     "The project's server is busy: 1 open terminal (npm run dev)",
-    "the worktree's repository is not reachable (/Volumes/SSD/app): connect the disk it is on",
+    "the worktree's repository is on a disk that is not connected (/Volumes/SSD/app); connect it to use the worktree, which is kept until then",
   ])
     assert.equal(removalSurvivesFailedStart("removeWorkspace", new Error(reason)), false, reason);
   assert.equal(removalSurvivesFailedStart("resetWorkspace", unlinked), false);
