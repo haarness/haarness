@@ -28,9 +28,10 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                 app.filtered_threads()
                     .into_iter()
                     .map(|thread| {
+                        let title = crate::escapes::without_escapes(&thread.title);
                         let title = match waiting.get(&thread.id).copied().map(waiting_sign) {
-                            Some(sign) => format!("{sign} {}", thread.title),
-                            None => thread.title.clone(),
+                            Some(sign) => format!("{sign} {title}"),
+                            None => title.into_owned(),
                         };
                         (title, short_id(&thread.id.to_string()).into())
                     })
@@ -399,8 +400,11 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
                     .into_iter()
                     .map(|thread| {
                         let waits = waiting.get(&thread.id).copied();
+                        // A title an older server kept as written loses
+                        // its escape sequences whole, not only their
+                        // control characters.
                         let row = SelectorRow::new(
-                            thread.title.clone(),
+                            crate::escapes::without_escapes(&thread.title),
                             app.session_detail(thread, waits),
                             thread.id == app.thread.id,
                         );

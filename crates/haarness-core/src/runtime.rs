@@ -3501,6 +3501,11 @@ impl AgentRuntime {
     /// chat is returned as it is, without events or hooks: a retried create
     /// (Cloud delivering a workspace's first prompt) cannot make a second one.
     pub async fn create_thread(&self, mut request: CreateThreadRequest) -> CoreResult<Thread> {
+        // A title given here is cleaned as a rename's is; one with nothing
+        // printable left leaves the chat untitled.
+        if let Some(title) = request.title.as_mut() {
+            *title = haarness_protocol::clean_chat_title(title);
+        }
         let chosen = request.id;
         if let Some(id) = chosen {
             match self.repository.get_thread(id).await {
@@ -3713,14 +3718,16 @@ impl AgentRuntime {
     ) -> CoreResult<Thread> {
         // Every client gets the rule Desktop's rename enforces: a title is
         // trimmed, and a blank one would leave a chat with no name to find.
+        // It also loses its control characters, which a terminal listing
+        // the chats would act on.
         if let Some(title) = request.title.take() {
-            let title = title.trim();
+            let title = haarness_protocol::clean_chat_title(&title);
             if title.is_empty() {
                 return Err(CoreError::Invalid(
                     "a chat title cannot be empty or only spaces".into(),
                 ));
             }
-            request.title = Some(title.to_owned());
+            request.title = Some(title);
         }
         let archiving =
             request.archived == Some(true) && !self.repository.get_thread(id).await?.archived;
@@ -4892,6 +4899,9 @@ impl AgentRuntime {
             (None, Some(revert)) => Some(revert.sequence),
             (requested, None) => requested,
         };
+        let title = title
+            .map(|title| haarness_protocol::clean_chat_title(&title))
+            .filter(|title| !title.is_empty());
         let fork = self.repository.fork_thread(id, title, limit).await?;
         self.publish_created_thread(&fork).await;
         Ok(fork)
@@ -8013,6 +8023,7 @@ impl Default for TaskProgress {
 }
 
 fn subagent_title(prompt: &str, agent: &str) -> String {
+    let prompt = haarness_protocol::without_escapes(prompt);
     let mut words = prompt.split_whitespace();
     let title = words.by_ref().take(12).collect::<Vec<_>>().join(" ");
     if title.is_empty() {
@@ -14360,14 +14371,14 @@ async fn generate_title(
     let text = regex::Regex::new(r"(?s)<think>.*?</think>")
         .expect("valid title cleanup pattern")
         .replace_all(&text, "");
-    let title = shorten_title(
-        text.lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or_default()
-            .trim_matches('"'),
-        50,
-    );
+    // Lines are cleaned before one is picked: when none has text left, the
+    // next model is tried.
+    let line = text
+        .lines()
+        .map(haarness_protocol::clean_chat_title)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let title = shorten_title(line.trim_matches('"'), 50);
     if title.is_empty() {
         return Err(CoreError::Provider(
             "title generation returned no text".into(),
@@ -18345,6 +18356,11 @@ mod tests {
             "audit the API boundary"
         );
         assert_eq!(subagent_title(" \n\t", "plan"), "plan agent");
+        assert_eq!(
+            subagent_title("\u{1b}]0;owned\u{7}audit\u{1b}[2J the API", "general"),
+            "audit the API"
+        );
+        assert_eq!(subagent_title("\u{1b}[2J", "plan"), "plan agent");
         assert!(
             subagent_title(
                 "one two three four five six seven eight nine ten eleven twelve thirteen",

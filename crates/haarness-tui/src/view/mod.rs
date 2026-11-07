@@ -18,7 +18,7 @@ use haarness_opentui::{Line, Span, attr};
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::state::{App, Overlay, ToastVariant};
-use crate::view::span::{compact_count, short_id, single_line};
+use crate::view::span::{compact_count, short_id, single_line, title_line};
 
 /// Prose wider than this stops feeling like an application.
 const MAX_CONTENT_WIDTH: usize = 100;
@@ -138,10 +138,10 @@ fn header_rows(app: &App, width: usize) -> (Vec<Line>, Vec<frame::HitRegion>) {
     // hiding the id made a successful Previous/Next click look like a no-op.
     let identity = format!("  #{}", short_id(&app.thread.id.to_string()));
     let lead = "  ";
-    let crumb = format!("{} › ", single_line(&parent.title, 24));
+    let crumb = format!("{} › ", title_line(&parent.title, 24));
     let path_width = breadcrumb_width.saturating_sub(lead.width() + identity.width());
     let crumb = single_line(&crumb, path_width);
-    let title = single_line(
+    let title = title_line(
         &app.thread.title,
         path_width.saturating_sub(crumb.width()).max(1),
     );

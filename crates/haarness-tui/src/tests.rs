@@ -15340,6 +15340,8 @@ async fn suspend_and_composer_history_shortcuts_do_not_overlap() {
     assert!(matches!(shifted_control, crate::input::AppAction::Continue));
     assert_eq!(app.composer.text(), "x");
 
+    // Over a dialog Ctrl+Z still suspends, and the dialog is there after
+    // `fg`; Ctrl+Shift+Z there does nothing.
     app.open_overlay(crate::state::Overlay::Models);
     let dialog_key = crate::input::handle_key(
         &mut app,
@@ -15348,7 +15350,131 @@ async fn suspend_and_composer_history_shortcuts_do_not_overlap() {
     )
     .await
     .unwrap();
-    assert!(matches!(dialog_key, crate::input::AppAction::Continue));
+    assert!(matches!(dialog_key, crate::input::AppAction::Suspend));
+    assert!(matches!(app.overlay, crate::state::Overlay::Models));
+    let shifted = crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(
+            KeyCode::Char('Z'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(shifted, crate::input::AppAction::Continue));
+    assert_eq!(app.composer.text(), "x");
+}
+
+/// A `y` still settling on an approval card when Ctrl+Z comes is sent
+/// first, as any other key sends it, and then the TUI suspends.
+#[tokio::test]
+async fn ctrl_z_sends_a_settling_answer_then_suspends() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        outside_write_event(&thread, "perm-suspend"),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    press_key(&mut app, KeyCode::Char('y')).await;
+    assert!(crate::input::settle_deadline(&app).is_some());
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    assert!(suspends(&mut app, &client).await);
+    assert!(app.pending_permissions.is_empty());
+    let requests = server.await.unwrap();
+    assert!(
+        requests[0].contains("/permissions/perm-suspend")
+            && requests[0].contains("\"decision\":\"once\""),
+        "{}",
+        requests[0]
+    );
+}
+
+/// An embedded terminal keeps Ctrl+Z for the program in it: the key goes to
+/// the shell (here, a terminal with no connection says so) and the TUI is
+/// not suspended.
+#[tokio::test]
+async fn ctrl_z_goes_to_an_embedded_terminal() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.terminal = Some(crate::pty_view::TerminalWorkspace::new(vec![
+        haarness_protocol::PtyInfo {
+            id: haarness_protocol::PtyId::new(),
+            title: "zsh".into(),
+            command: "zsh".into(),
+            args: Vec::new(),
+            cwd: "/tmp".into(),
+            status: haarness_protocol::PtyStatus::Running,
+            pid: None,
+            cols: 80,
+            rows: 24,
+            created: false,
+            directory: None,
+        },
+    ]));
+    let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(crate::pty_view::key_bytes(key), Some(vec![0x1a]));
+    let sent = crate::input::handle_key(&mut app, key, &offline_client()).await;
+    let error = sent
+        .err()
+        .expect("the key went to the terminal, not to suspend");
+    assert!(
+        error.to_string().contains("terminal is not connected"),
+        "{error}"
+    );
+    assert!(app.terminal.is_some());
+}
+
+/// Whether Ctrl+Z, pressed now, suspends the TUI.
+async fn suspends(app: &mut App, client: &crate::api::ApiClient) -> bool {
+    let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+    matches!(
+        crate::input::handle_key(app, key, client).await.unwrap(),
+        crate::input::AppAction::Suspend
+    )
+}
+
+#[tokio::test]
+async fn ctrl_z_suspends_over_the_session_list_an_approval_and_a_question() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+
+    app.open_overlay(crate::state::Overlay::Threads);
+    app.overlay_filter = "rel".into();
+    assert!(suspends(&mut app, &client).await);
+    assert!(matches!(app.overlay, crate::state::Overlay::Threads));
+    assert_eq!(app.overlay_filter, "rel", "the dialog is left as it was");
+    app.close_overlay();
+
+    app.pending_permissions
+        .push(pending_permission_fixture(&thread, "suspend-approval"));
+    app.permission_focus = true;
+    assert!(suspends(&mut app, &client).await);
+    assert_eq!(app.pending_permissions.len(), 1, "nothing is answered");
+    assert!(app.permission_focus);
+    app.pending_permissions.clear();
+    app.permission_focus = false;
+
+    app.pending_questions
+        .push(haarness_protocol::PendingQuestionInfo {
+            question_id: "suspend-question".into(),
+            prompt: "Which color?".into(),
+            choices: vec!["red".into(), "blue".into()],
+            multiple: false,
+            custom: true,
+            thread_id: thread.id,
+            root_thread_id: Some(thread.id),
+            turn_id: None,
+            call_id: None,
+            created_at: chrono::Utc::now(),
+        });
+    app.composer.set_text("my own".into());
+    assert!(suspends(&mut app, &client).await);
+    assert_eq!(app.pending_questions.len(), 1);
+    assert_eq!(app.composer.text(), "my own", "the typed answer stays");
 }
 
 #[tokio::test]
@@ -16955,6 +17081,207 @@ async fn resume_alias_targets_a_unique_short_session_id_without_an_extra_menu_st
     assert!(
         requests[1].contains(&format!("/{}/items", target.id)),
         "direct resume loaded the wrong session: {requests:?}"
+    );
+}
+
+/// A title an older server kept as written, escape sequences included,
+/// shows as its words in the sidebar and the session list, with no `]0;`
+/// fragment.
+#[test]
+fn a_title_with_escape_sequences_draws_as_its_words() {
+    let thread = Thread {
+        title: "\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}Escaped title".into(),
+        ..fixture_thread()
+    };
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::AssistantMessage {
+            text: "conversation".into(),
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = true;
+    let header = frame_text(&app, (140, 30));
+    assert!(header.contains("Escaped title"), "{header}");
+    app.open_overlay(crate::state::Overlay::Threads);
+    let list = frame_text(&app, (140, 30));
+    assert!(list.contains("Escaped title"), "{list}");
+    for shown in [&header, &list] {
+        assert!(!shown.contains("]0;") && !shown.contains("52;c"), "{shown}");
+    }
+}
+
+/// A server that answers each `PATCH /v1/threads/{id}` with that chat
+/// renamed as asked, and records which chat each rename went to.
+async fn renaming_server(
+    threads: Vec<Thread>,
+) -> (
+    crate::api::ApiClient,
+    std::sync::Arc<std::sync::Mutex<Vec<(ThreadId, String)>>>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let renames = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = renames.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let mut expected = None;
+            while expected.is_none_or(|length| request.len() < length) {
+                let read = socket.read(&mut chunk).await.unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if expected.is_none()
+                    && let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    expected = Some(end + 4 + length);
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let line = text.lines().next().unwrap_or_default();
+            let body = text.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+            let reply = line
+                .strip_prefix("PATCH /v1/threads/")
+                .and_then(|rest| rest.split(' ').next())
+                .and_then(|id| threads.iter().find(|thread| thread.id.to_string() == id))
+                .map_or_else(
+                    || "[]".to_owned(),
+                    |thread| {
+                        let title =
+                            serde_json::from_str::<serde_json::Value>(body).unwrap()["title"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned();
+                        log.lock().unwrap().push((thread.id, title.clone()));
+                        serde_json::to_string(&Thread {
+                            title,
+                            ..thread.clone()
+                        })
+                        .unwrap()
+                    },
+                );
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            let _ = socket.write_all(reply.as_bytes()).await;
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    (client, renames)
+}
+
+#[tokio::test]
+async fn rename_takes_a_first_word_as_a_chat_only_when_it_is_that_chats_id() {
+    let current = Thread {
+        id: ThreadId("018f0000-1111-7222-8333-444455556666".parse().unwrap()),
+        ..fixture_thread()
+    };
+    // Only the other chat has "db", "add" and "e2e" inside its ID.
+    let other = Thread {
+        id: ThreadId("018f0add-0000-7000-8000-0000db00e2e1".parse().unwrap()),
+        title: "Other".into(),
+        ..fixture_thread()
+    };
+    let (client, renames) = renaming_server(vec![current.clone(), other.clone()]).await;
+    let mut app = App::new(
+        current.clone(),
+        vec![current.clone(), other.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    let other_id = other.id.to_string();
+    let short = crate::view::span::short_id(&other_id).to_owned();
+    for (command, target, title) in [
+        (
+            "/rename db migration".to_owned(),
+            current.id,
+            "db migration",
+        ),
+        (
+            "/rename add e2e tests".to_owned(),
+            current.id,
+            "add e2e tests",
+        ),
+        ("/rename db".to_owned(), current.id, "db"),
+        (
+            format!("/rename {short} Schema work"),
+            other.id,
+            "Schema work",
+        ),
+        (
+            format!("/rename #{short} Schema plan"),
+            other.id,
+            "Schema plan",
+        ),
+        (
+            format!("/rename {} Full ID", other_id.to_uppercase()),
+            other.id,
+            "Full ID",
+        ),
+    ] {
+        renames.lock().unwrap().clear();
+        app.execute_command(&command, &client).await.unwrap();
+        assert_eq!(
+            renames.lock().unwrap().as_slice(),
+            [(target, title.to_owned())],
+            "{command}"
+        );
+        assert_eq!(app.notice, "Session renamed", "{command}");
+    }
+    assert_eq!(app.thread.title, "db");
+
+    // A chat's ID alone still asks for the title.
+    renames.lock().unwrap().clear();
+    app.execute_command(&format!("/rename {short}"), &client)
+        .await
+        .unwrap();
+    assert!(renames.lock().unwrap().is_empty());
+    assert_eq!(app.notice, "Type a title after the session ID");
+}
+
+/// Two chats whose IDs end alike: their short ID names neither, so the
+/// rename is refused instead of naming the open chat after the ID.
+#[tokio::test]
+async fn rename_refuses_a_short_id_two_chats_share() {
+    let chat = |id: &str, title: &str| Thread {
+        id: ThreadId(id.parse().unwrap()),
+        title: title.into(),
+        ..fixture_thread()
+    };
+    let current = chat("018f0000-1111-7222-8333-444455556666", "Current");
+    let first = chat("018f0aaa-0000-7000-8000-0000db00e2e1", "First");
+    let second = chat("018f0bbb-0000-7000-8000-0000db00e2e1", "Second");
+    let threads = vec![current.clone(), first.clone(), second.clone()];
+    let (client, renames) = renaming_server(threads.clone()).await;
+    let mut app = App::new(current.clone(), threads, vec![], vec![], vec![]);
+    app.execute_command("/rename db00e2e1 Schema work", &client)
+        .await
+        .unwrap();
+    assert!(renames.lock().unwrap().is_empty());
+    assert_eq!(
+        app.notice,
+        "More than one chat ends in db00e2e1 · type the full session ID"
+    );
+    assert_eq!(app.thread.title, "Current");
+    app.execute_command(&format!("/rename {} Schema work", second.id), &client)
+        .await
+        .unwrap();
+    assert_eq!(
+        renames.lock().unwrap().as_slice(),
+        [(second.id, "Schema work".to_owned())]
     );
 }
 
@@ -24470,6 +24797,198 @@ async fn a_catalog_read_after_assets_updated_does_not_hold_the_event_loop() {
         .unwrap();
     assert_eq!(arrived.map(|providers| providers.len()), Some(0));
     server.abort();
+}
+
+/// Agents reloaded after an agent file is added or removed come back in a
+/// new order: the agent picked with Tab stays picked, and one that is gone
+/// gives way to the chat's own agent until its file is back.
+#[tokio::test]
+async fn the_chosen_agent_stays_chosen_when_agents_reload() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let profile = |id: &str| haarness_protocol::AgentProfile {
+        id: id.into(),
+        name: id.into(),
+        description: format!("{id} agent"),
+        hidden: false,
+        max_subagents: 4,
+        mode: Some("primary".into()),
+        model: None,
+    };
+    let lists = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+        vec![
+            profile("build"),
+            profile("plan"),
+            profile("b"),
+            profile("c"),
+        ],
+        vec![profile("build"), profile("plan"), profile("b")],
+        vec![
+            profile("build"),
+            profile("plan"),
+            profile("b"),
+            profile("c"),
+        ],
+    ])));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let answers = lists.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let read = socket.read(&mut request).await.unwrap_or(0);
+            let body = if String::from_utf8_lossy(&request[..read]).starts_with("GET /v1/agents ") {
+                serde_json::to_string(&answers.lock().unwrap().pop_front().unwrap()).unwrap()
+            } else {
+                "[]".to_owned()
+            };
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let thread = fixture_thread();
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        vec![],
+        vec![],
+        vec![profile("build"), profile("plan"), profile("c")],
+    );
+    while app.agent() != "c" {
+        app.cycle_agent();
+    }
+    let reload = |app: &App| {
+        fixture_event(
+            "assets.updated",
+            app.thread.id,
+            app.thread.id,
+            serde_json::json!({"resource": "agent", "action": "created"}),
+        )
+    };
+
+    // `b.md` added: it sorts before `c`, at the index `c` had.
+    let event = reload(&app);
+    app.reduce(event, &client).await.unwrap();
+    assert_eq!(app.agents.len(), 4);
+    assert_eq!(app.agent(), "c");
+    // `c.md` removed: the chat's own agent, quietly.
+    let notice = app.notice.clone();
+    let event = reload(&app);
+    app.reduce(event, &client).await.unwrap();
+    assert_eq!(app.agents.len(), 3);
+    assert_eq!(app.agent(), "build");
+    assert_eq!(app.notice, notice);
+    // Back again (an editor that saves by writing a new file): picked again.
+    let event = reload(&app);
+    app.reduce(event, &client).await.unwrap();
+    assert_eq!(app.agent(), "c");
+    server.abort();
+}
+
+/// An agent whose file is briefly gone (an editor saving it) is picked again
+/// when it is back; one that can no longer be picked (hidden, or only for
+/// child agents) is not taken up; and once another agent is picked, the one
+/// set aside stays out.
+#[test]
+fn an_agent_set_aside_on_reload_comes_back_unless_another_is_picked() {
+    let profile = |id: &str, mode: &str, hidden: bool| haarness_protocol::AgentProfile {
+        id: id.into(),
+        name: id.into(),
+        description: format!("{id} agent"),
+        hidden,
+        max_subagents: 4,
+        mode: Some(mode.into()),
+        model: None,
+    };
+    let with = |custom: Option<haarness_protocol::AgentProfile>| {
+        let mut agents = vec![
+            profile("build", "primary", false),
+            profile("plan", "primary", false),
+        ];
+        agents.extend(custom);
+        agents
+    };
+    let thread = fixture_thread();
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread],
+        vec![],
+        vec![],
+        with(Some(profile("charlie", "primary", false))),
+    );
+    while app.agent() != "charlie" {
+        app.cycle_agent();
+    }
+    let notice = app.notice.clone();
+
+    app.agents_reloaded(with(None));
+    assert_eq!(app.agent(), "build", "the chat's own agent stands in");
+    app.agents_reloaded(with(Some(profile("charlie", "primary", false))));
+    assert_eq!(app.agent(), "charlie", "picked again once its file is back");
+    assert_eq!(app.notice, notice, "quietly");
+
+    for unpickable in [
+        profile("charlie", "subagent", false),
+        profile("charlie", "primary", true),
+    ] {
+        app.agents_reloaded(with(Some(unpickable)));
+        assert_eq!(app.agent(), "build");
+    }
+    app.agents_reloaded(with(Some(profile("charlie", "primary", false))));
+    assert_eq!(app.agent(), "charlie");
+
+    app.agents_reloaded(with(None));
+    app.cycle_agent();
+    assert_eq!(app.agent(), "plan");
+    app.agents_reloaded(with(Some(profile("charlie", "primary", false))));
+    assert_eq!(app.agent(), "plan", "the agent picked meanwhile stays");
+}
+
+/// A message sent as the agent standing in for one set aside makes the
+/// stand-in the choice: the set-aside agent does not come back later.
+#[tokio::test]
+async fn sending_as_the_stand_in_forgets_the_agent_set_aside() {
+    let profile = |id: &str| haarness_protocol::AgentProfile {
+        id: id.into(),
+        name: id.into(),
+        description: format!("{id} agent"),
+        hidden: false,
+        max_subagents: 4,
+        mode: Some("primary".into()),
+        model: None,
+    };
+    let thread = fixture_thread();
+    let provider = ProviderInfo {
+        id: thread.provider.clone(),
+        name: "OpenAI".into(),
+        authenticated: true,
+        models: vec![],
+    };
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread],
+        vec![],
+        vec![provider],
+        vec![profile("build"), profile("plan"), profile("charlie")],
+    );
+    while app.agent() != "charlie" {
+        app.cycle_agent();
+    }
+    app.agents_reloaded(vec![profile("build"), profile("plan")]);
+    assert_eq!(app.agent(), "build");
+    // The server is out of reach; the message was still sent as `build`.
+    let _ = app.submit_prompt("hello".into(), &offline_client()).await;
+    app.agents_reloaded(vec![profile("build"), profile("plan"), profile("charlie")]);
+    assert_eq!(app.agent(), "build");
 }
 
 /// Ctrl+Y goes Review → Auto → Yolo → Review on a server that keeps Yolo,

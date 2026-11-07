@@ -12,7 +12,7 @@ use crate::width::DisplayWidth as _;
 use haarness_opentui::{Line, Span, attr};
 
 use crate::state::App;
-use crate::view::span::single_line;
+use crate::view::span::{single_line, title_line};
 
 /// Left inset shared with the composer, so the wordmark, the prompt, and the
 /// band's chip all hang off one vertical.
@@ -101,7 +101,7 @@ pub fn masthead(app: &App, width: usize, identity_in_panel: bool) -> Vec<Line> {
         }
     } else {
         let mut title = indented(
-            single_line(&app.thread.title, width.saturating_sub(INSET)),
+            title_line(&app.thread.title, width.saturating_sub(INSET)),
             theme.text,
         );
         for span in &mut title.spans {

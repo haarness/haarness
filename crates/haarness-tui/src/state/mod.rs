@@ -785,6 +785,11 @@ pub struct App {
     pub providers: Vec<ProviderInfo>,
     pub agents: Vec<AgentProfile>,
     pub agent_index: usize,
+    /// The agent picked here whose file was gone at the last reload (an
+    /// editor that saves by writing a new file, say): another stands in, and
+    /// this one is picked again when it is back, unless one is picked or
+    /// something is sent as the stand-in meanwhile.
+    pub(crate) agent_set_aside: Option<String>,
     pub composer: Composer,
     /// Unsent prompt/media state follows its thread instead of disappearing
     /// or being sent into whichever session the user opens next.
@@ -1198,6 +1203,7 @@ impl App {
             providers,
             agents,
             agent_index,
+            agent_set_aside: None,
             composer: Composer::default(),
             drafts: std::collections::HashMap::new(),
             draft_baseline: std::cell::RefCell::default(),
@@ -2561,7 +2567,7 @@ impl App {
             .map(|offset| (self.agent_index + offset) % self.agents.len())
             .find(|&index| self.agents[index].selectable())
         {
-            self.agent_index = index;
+            self.pick_agent(index);
             self.notice = format!("Agent: {}", self.agent());
         }
     }
@@ -2571,9 +2577,52 @@ impl App {
             .map(|offset| (self.agent_index + self.agents.len() - offset) % self.agents.len())
             .find(|&index| self.agents[index].selectable())
         {
-            self.agent_index = index;
+            self.pick_agent(index);
             self.notice = format!("Agent: {}", self.agent());
         }
+    }
+
+    /// The agent at `index` is picked, here or for this chat elsewhere: one
+    /// a reload set aside is not taken up again.
+    pub(crate) fn pick_agent(&mut self, index: usize) {
+        self.agent_index = index;
+        self.agent_set_aside = None;
+    }
+
+    /// The agent a message, a command's workflow or a workflow is sent as.
+    /// Sending as the agent that stands in for one set aside makes it the
+    /// choice: the one set aside is not taken up again later.
+    pub(crate) fn sending_agent(&mut self) -> String {
+        self.agent_set_aside = None;
+        self.agent().to_owned()
+    }
+
+    /// A reloaded agent list: a new or removed agent file can move every
+    /// agent after it, so the one picked is found again by its ID, among
+    /// those that can still be picked (the chat's own agent always can). One
+    /// that is gone is set aside while the chat's own agent, or the first
+    /// that can be picked, stands in, quietly; it is picked again once it is
+    /// back.
+    pub(crate) fn agents_reloaded(&mut self, agents: Vec<AgentProfile>) {
+        let chosen = self
+            .agent_set_aside
+            .take()
+            .unwrap_or_else(|| self.agent().to_owned());
+        self.agents = agents;
+        let own = self.thread.agent.clone();
+        let find = |id: &str| {
+            self.agents
+                .iter()
+                .position(|agent| agent.id == id && (agent.selectable() || id == own))
+        };
+        if let Some(index) = find(&chosen) {
+            self.agent_index = index;
+            return;
+        }
+        self.agent_index = find(&own)
+            .or_else(|| self.agents.iter().position(AgentProfile::selectable))
+            .unwrap_or(0);
+        self.agent_set_aside = Some(chosen);
     }
 
     pub fn open_overlay(&mut self, overlay: Overlay) {

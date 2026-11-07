@@ -420,7 +420,7 @@ impl App {
                     self.catalog_arrived(providers, client).await;
                 }
                 if let Ok(agents) = client.agents().await {
-                    self.agents = agents;
+                    self.agents_reloaded(agents);
                 }
                 if let Ok(catalog) = client.workflows().await {
                     self.workflow_definitions = catalog.workflows;
@@ -1229,7 +1229,7 @@ impl App {
                                 .iter()
                                 .position(|agent| agent.id == thread.agent)
                         {
-                            self.agent_index = index;
+                            self.pick_agent(index);
                         }
                         // Undo/redo elsewhere, or the next turn confirming an
                         // undo, changes which items are live: reload them.

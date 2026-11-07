@@ -919,20 +919,27 @@ impl ThreadRepository for SqliteStore {
         expected: &str,
         title: &str,
     ) -> CoreResult<Option<Thread>> {
-        // Chats created before the placeholder became "New chat" still store
-        // the old one, and expecting either means expecting an untitled chat.
-        let (expected, also) = if haarness_protocol::is_untitled_chat_title(expected) {
-            (
-                haarness_protocol::UNTITLED_CHAT_TITLE,
-                haarness_protocol::LEGACY_UNTITLED_CHAT_TITLE,
+        // The title is replaced when it reads as the one expected, however it
+        // is stored: chats created before the placeholder became "New chat"
+        // still store the old one, and an older server kept a title made only
+        // of escape sequences, which reads as "New chat" too.
+        let connection = self.connection.lock();
+        let stored = connection
+            .query_row(
+                "SELECT title FROM threads WHERE id=?1",
+                [id.to_string()],
+                |row| row.get::<_, String>(0),
             )
-        } else {
-            (expected, expected)
+            .optional()
+            .map_err(storage)?
+            .filter(|stored| shown_title(stored.clone()) == shown_title(expected.to_owned()));
+        let Some(stored) = stored else {
+            return Ok(None);
         };
-        let raw = self.connection.lock().query_row(
-            "UPDATE threads SET title=?2,updated_at=?3 WHERE id=?1 AND title IN (?4,?5)
+        let raw = connection.query_row(
+            "UPDATE threads SET title=?2,updated_at=?3 WHERE id=?1 AND title=?4
              RETURNING id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json,directory",
-            params![id.to_string(), title, time(Utc::now()), expected, also], raw_thread,
+            params![id.to_string(), title, time(Utc::now()), stored], raw_thread,
         ).optional().map_err(storage)?;
         raw.map(decode_thread).transpose()
     }
@@ -2039,6 +2046,22 @@ fn fork_title(parent: &str) -> String {
     }
 }
 
+/// A stored title as every client gets it. Older servers stored "New
+/// thread" for an untitled chat, and titles as written, escape sequences
+/// included: those read as the one placeholder and as plain text. The row
+/// keeps its bytes until the chat is written again.
+fn shown_title(stored: String) -> String {
+    let title = match haarness_protocol::readable_chat_title(&stored) {
+        std::borrow::Cow::Borrowed(_) => stored,
+        std::borrow::Cow::Owned(readable) => readable,
+    };
+    if title == haarness_protocol::LEGACY_UNTITLED_CHAT_TITLE {
+        haarness_protocol::UNTITLED_CHAT_TITLE.into()
+    } else {
+        title
+    }
+}
+
 fn decode_thread(raw: RawThread) -> CoreResult<Thread> {
     let revert = match (raw.9, raw.10) {
         (Some(sequence), Some(snapshot_id)) => Some(haarness_protocol::RevertState {
@@ -2057,21 +2080,19 @@ fn decode_thread(raw: RawThread) -> CoreResult<Thread> {
             .transpose()
             .map_err(storage)?,
         id: thread_id(&raw.0)?,
-        // Older servers stored "New thread" for an untitled chat; every
-        // client sees one placeholder.
-        title: if raw.1 == haarness_protocol::LEGACY_UNTITLED_CHAT_TITLE {
-            haarness_protocol::UNTITLED_CHAT_TITLE.into()
-        } else {
-            raw.1
-        },
+        title: shown_title(raw.1),
         parent_id: raw.2.as_deref().map(thread_id).transpose()?,
         is_subagent: raw.13,
         fork_origin: raw
             .14
             .as_deref()
-            .map(serde_json::from_str)
+            .map(serde_json::from_str::<haarness_protocol::ForkOrigin>)
             .transpose()
-            .map_err(storage)?,
+            .map_err(storage)?
+            .map(|origin| haarness_protocol::ForkOrigin {
+                title: shown_title(origin.title),
+                ..origin
+            }),
         archived: raw.3,
         agent: raw.4,
         provider: raw.5,
@@ -2710,6 +2731,81 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Older servers stored titles as written. Such a row reads as plain
+    /// text everywhere, a fork is named from that text, and the row keeps
+    /// its bytes; one made only of escape sequences reads as untitled and
+    /// takes a generated title.
+    #[tokio::test]
+    async fn a_title_stored_with_escape_sequences_reads_clean() {
+        let store = SqliteStore::in_memory().unwrap();
+        let raw = "\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}Escaped";
+        let thread = store
+            .create_thread(CreateThreadRequest {
+                title: Some(raw.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.get_thread(thread.id).await.unwrap().title, "Escaped");
+        assert_eq!(store.list_threads(true).await.unwrap()[0].title, "Escaped");
+        let stored: String = store
+            .connection
+            .lock()
+            .query_row(
+                "SELECT title FROM threads WHERE id=?1",
+                [thread.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, raw);
+
+        let fork = store.fork_thread(thread.id, None, None).await.unwrap();
+        assert_eq!(fork.title, "Fork of Escaped");
+        assert_eq!(fork.fork_origin.unwrap().title, "Escaped");
+
+        let blank = store
+            .create_thread(CreateThreadRequest {
+                title: Some("\u{1b}]0;owned\u{7}\u{1b}[2J".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_thread(blank.id).await.unwrap().title,
+            haarness_protocol::UNTITLED_CHAT_TITLE
+        );
+        let named = store
+            .update_generated_title(blank.id, haarness_protocol::UNTITLED_CHAT_TITLE, "Named")
+            .await
+            .unwrap();
+        assert_eq!(named.unwrap().title, "Named");
+        assert!(
+            store
+                .update_generated_title(thread.id, haarness_protocol::UNTITLED_CHAT_TITLE, "No")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // The old placeholder inside sequences is the old placeholder.
+        let legacy = store
+            .create_thread(CreateThreadRequest {
+                title: Some("\u{1b}[1mNew thread\u{1b}[0m".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_thread(legacy.id).await.unwrap().title,
+            haarness_protocol::UNTITLED_CHAT_TITLE
+        );
+        let named = store
+            .update_generated_title(legacy.id, haarness_protocol::UNTITLED_CHAT_TITLE, "Named")
+            .await
+            .unwrap();
+        assert_eq!(named.unwrap().title, "Named");
     }
 
     #[tokio::test]
