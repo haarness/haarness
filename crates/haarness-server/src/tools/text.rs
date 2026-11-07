@@ -163,10 +163,91 @@ pub(super) fn shown(text: &str, long: bool) -> Cow<'_, str> {
     }
 }
 
+/// How a text file spells its characters on disk, so a tool that changes it
+/// writes it back the same way: UTF-8, UTF-8 behind a byte order mark (as
+/// Visual Studio and Notepad save files), or UTF-16 behind one (what Windows
+/// PowerShell 5.1's `>` and `Out-File` write).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Spelling {
+    #[default]
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+}
+
+const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
+
+/// The most bytes of a UTF-16 file `read` and `grep` decode: they cannot be
+/// read a line at a time as UTF-8 is.
+const UTF16_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+impl Spelling {
+    /// `text` (without a byte order mark: one it starts with is dropped) in
+    /// this spelling.
+    pub(super) fn encode(self, text: &str) -> Vec<u8> {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        match self {
+            Self::Utf8 => text.as_bytes().to_vec(),
+            Self::Utf8Bom => [UTF8_BOM, text.as_bytes()].concat(),
+            Self::Utf16Le => [0xff, 0xfe]
+                .into_iter()
+                .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+                .collect(),
+            Self::Utf16Be => [0xfe, 0xff]
+                .into_iter()
+                .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
+                .collect(),
+        }
+    }
+
+    /// The spelling a new text written over a file in this spelling takes:
+    /// its own, and a byte order mark when the new text starts with one.
+    pub(super) fn for_new_text(self, text: &str) -> Self {
+        match self {
+            Self::Utf8 if text.starts_with('\u{feff}') => Self::Utf8Bom,
+            spelling => spelling,
+        }
+    }
+}
+
+/// The text `bytes` spell, without a byte order mark, and how they spell it;
+/// `None` when they are neither UTF-8 nor UTF-16 behind a byte order mark.
+pub(super) fn decode(bytes: &[u8]) -> Option<(Cow<'_, str>, Spelling)> {
+    if let Some(rest) = bytes.strip_prefix(UTF8_BOM) {
+        return std::str::from_utf8(rest)
+            .ok()
+            .map(|text| (Cow::Borrowed(text), Spelling::Utf8Bom));
+    }
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16, spelling| {
+        if !rest.len().is_multiple_of(2) {
+            return None;
+        }
+        let units: Vec<u16> = rest
+            .chunks_exact(2)
+            .map(|pair| unit([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16(&units)
+            .ok()
+            .map(|text| (Cow::Owned(text), spelling))
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        return utf16(rest, u16::from_le_bytes, Spelling::Utf16Le);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        return utf16(rest, u16::from_be_bytes, Spelling::Utf16Be);
+    }
+    std::str::from_utf8(bytes)
+        .ok()
+        .map(|text| (Cow::Borrowed(text), Spelling::Utf8))
+}
+
 /// A file opened for its text, and whether a NUL near its start marks it as
 /// binary data (then only UTF-8 text is shown, as before lines were read one
-/// at a time; other text is shown with U+FFFD for what is not UTF-8).
-pub(super) fn open_text(path: &Path) -> CoreResult<(impl BufRead, bool)> {
+/// at a time; other text is shown with U+FFFD for what is not UTF-8). A
+/// UTF-8 byte order mark is passed over, and a UTF-16 file behind one is
+/// read as the UTF-8 its text is.
+pub(super) fn open_text(path: &Path) -> CoreResult<(Box<dyn BufRead>, bool)> {
     let tool = |error: io::Error| CoreError::Tool(error.to_string());
     // Before opening: opening a pipe waits for a writer.
     let metadata = std::fs::metadata(path).map_err(tool)?;
@@ -189,8 +270,29 @@ pub(super) fn open_text(path: &Path) -> CoreResult<(impl BufRead, bool)> {
         .take(BINARY_PROBE_BYTES as u64)
         .read_to_end(&mut head)
         .map_err(tool)?;
+    if head.starts_with(&[0xff, 0xfe]) || head.starts_with(&[0xfe, 0xff]) {
+        if metadata.len() <= UTF16_MAX_BYTES {
+            let mut bytes = head.clone();
+            file.read_to_end(&mut bytes).map_err(tool)?;
+            // UTF-16 text holds no NUL; data that only starts like it does.
+            if let Some((text, _)) = decode(&bytes).filter(|(text, _)| !text.contains('\0')) {
+                let text = text.into_owned().into_bytes();
+                return Ok((Box::new(io::Cursor::new(text)), false));
+            }
+        }
+        return Ok((
+            Box::new(BufReader::new(io::Cursor::new(head).chain(file))),
+            true,
+        ));
+    }
+    if head.starts_with(UTF8_BOM) {
+        head.drain(..UTF8_BOM.len());
+    }
     let binary = head.contains(&0);
-    Ok((BufReader::new(io::Cursor::new(head).chain(file)), binary))
+    Ok((
+        Box::new(BufReader::new(io::Cursor::new(head).chain(file))),
+        binary,
+    ))
 }
 
 /// What `read` shows of a text file: `limit` lines (2000 when none is
@@ -274,16 +376,27 @@ pub(super) fn read_text(
     })
 }
 
-/// A file's text for `edit` and `multiedit`, which change only UTF-8 text:
-/// a file that is not says so plainly.
-pub(super) async fn read_utf8(path: &Path, tool: &str) -> CoreResult<String> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(text) => Ok(text),
-        Err(error) if error.kind() == io::ErrorKind::InvalidData => Err(CoreError::Tool(format!(
-            "{} is not UTF-8 text, so {tool} cannot change it without replacing the bytes that do not decode",
-            path.display()
+/// A file's text for `edit`, `multiedit` and `apply_patch`, without a byte
+/// order mark, and how the file spells it, so the change is written back
+/// the same way. They change UTF-8 and UTF-16 text (see [`decode`]); a file
+/// in another encoding says so plainly, with what to do instead. `named` is
+/// the path as the call gave it.
+pub(super) async fn read_text_file(
+    path: &Path,
+    named: &str,
+    tool: &str,
+) -> CoreResult<(String, Spelling)> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| super::io_error(named, path, &error))?;
+    match decode(&bytes) {
+        Some((text, spelling)) => Ok((text.into_owned(), spelling)),
+        None => Err(CoreError::Tool(format!(
+            "{named} is not UTF-8 or UTF-16 text (it may use a legacy code page such as Shift_JIS or \
+             Windows-1252), so {tool} cannot change it without replacing the characters that do not decode; \
+             nothing was changed. Change it with a command that keeps its encoding, or ask the person to \
+             save it as UTF-8 first"
         ))),
-        Err(error) => Err(CoreError::Tool(error.to_string())),
     }
 }
 
@@ -406,7 +519,9 @@ pub(super) fn grep_walk(
             let Ok(bytes) = std::fs::read(entry.path()) else {
                 continue;
             };
-            let Ok(text) = std::str::from_utf8(&bytes) else {
+            // Without a byte order mark, so `^` finds the first line; UTF-16
+            // text is searched as the text it is, as ripgrep searches it.
+            let Some((text, _)) = decode(&bytes) else {
                 continue;
             };
             let mut passed = false;
@@ -527,10 +642,12 @@ fn grep_files(
 /// The folder among `root`'s parents that is the chat's own folder `chat`,
 /// written as `root` writes it.
 fn chat_folder_above(root: &Path, chat: &Path) -> Option<std::path::PathBuf> {
-    let chat = dunce::canonicalize(chat).ok()?;
+    let chat = haarness_core::paths::canonicalize(chat).ok()?;
     root.ancestors()
         .skip(1)
-        .find(|folder| dunce::canonicalize(folder).is_ok_and(|folder| folder == chat))
+        .find(|folder| {
+            haarness_core::paths::canonicalize(folder).is_ok_and(|folder| folder == chat)
+        })
         .map(Path::to_path_buf)
 }
 
@@ -718,9 +835,78 @@ pub(super) fn crlf_edit<'a>(
     (old, new)
 }
 
+/// Where an `old` of several lines is in `text` when the file's lines end
+/// in `\n` here and `\r\n` there (`read` shows neither, so an `old` copied
+/// from it matches no one spelling): each place its lines meet consecutive
+/// lines of the file, whatever each of them ends with. The `new` for each
+/// place takes the line ends of the first line it replaces. Only for an
+/// `old` [`crlf_edit`]'s spellings find nowhere.
+pub(super) fn any_line_ends(
+    text: &str,
+    old: &str,
+    new: &str,
+) -> Vec<(std::ops::Range<usize>, String)> {
+    let old = old.replace("\r\n", "\n");
+    if !old.contains('\n') {
+        return Vec::new();
+    }
+    let pattern = old
+        .split('\n')
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join("\r?\n");
+    let Ok(lines) = regex::Regex::new(&pattern) else {
+        return Vec::new();
+    };
+    let new = new.replace("\r\n", "\n");
+    lines
+        .find_iter(text)
+        .map(|found| {
+            let crlf = found
+                .as_str()
+                .find('\n')
+                .is_some_and(|end| found.as_str()[..end].ends_with('\r'));
+            let new = if crlf {
+                new.replace('\n', "\r\n")
+            } else {
+                new.clone()
+            };
+            (found.range(), new)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_across_mixed_line_ends_is_found_line_by_line() {
+        // As Git keeps a file committed with mixed ends; read showed the
+        // lines without them.
+        let text = "[network]\r\nhost = inventory.local\r\ntimeout = 30\n\n[storage]\r\n";
+        let old = "[network]\nhost = inventory.local\ntimeout = 30\n";
+        let (spelled, _) = crlf_edit(text, old, "x");
+        assert!(
+            !text.contains(spelled.as_ref()),
+            "the one spelling of old is not there"
+        );
+        let found = any_line_ends(
+            text,
+            old,
+            "[network]\nhost = inventory.local\ntimeout = 60\n",
+        );
+        assert_eq!(
+            found,
+            vec![(
+                0..text.find("\n[storage]").unwrap(),
+                "[network]\r\nhost = inventory.local\r\ntimeout = 60\r\n".to_owned()
+            )]
+        );
+        // A line of old is a line of the file, not text that runs on.
+        assert!(any_line_ends("a\r\nbc\n", "a\nb\nc", "x").is_empty());
+        assert!(any_line_ends("one line", "one line", "x").is_empty());
+    }
 
     fn split(text: &[u8], keep: usize) -> Vec<(Vec<u8>, bool)> {
         let cancel = CancellationToken::new();

@@ -164,7 +164,7 @@ def case_read_text():
     assert 'caf� au lait' in output, output
     assert 'this file is not UTF-8' in output and 'write would replace those bytes' in output, output
     output = tool(files, 'edit', {'path': 'latin1.txt', 'old': 'au', 'new': 'with'})
-    assert 'is not UTF-8 text, so edit cannot change it' in output, output
+    assert 'is not UTF-8 or UTF-16 text' in output and 'nothing was changed' in output, output
     assert (files / 'latin1.txt').read_bytes() == b'caf\xe9 au lait\n'
     passed('a Latin-1 file reads with U+FFFD and a note, and edit refuses it plainly')
     (files / 'wide.txt').write_text('日' * 3000 + '\nend\n')
@@ -373,7 +373,7 @@ def case_read_twin():
     (guarded / 'Both 2.00\u202fPM.md').write_text('one\n')
     (guarded / 'Both 2.00\u00a0PM.md').write_text('two\n')
     output = tool(guarded, 'read', {'path': 'Both 2.00 PM.md'})
-    assert 'No such file' in output, output
+    assert 'Both 2.00 PM.md does not exist' in output, output
     passed('two files that both fit leave the typed name not found')
     (guarded / 'Draft 3.00\u202fPM.md').write_text('original\n')
     tool(guarded, 'write', {'path': 'Draft 3.00 PM.md', 'content': 'typed\n'})

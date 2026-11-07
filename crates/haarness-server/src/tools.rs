@@ -948,7 +948,12 @@ async fn refresh_formatted_diffs(
 ) {
     let mut replacements = HashMap::new();
     for (requested, path, before) in before {
-        let replacement = match tokio::fs::read_to_string(&path).await {
+        let read = tokio::fs::read(&path).await.and_then(|bytes| {
+            text::decode(&bytes)
+                .map(|(text, _)| text.into_owned())
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))
+        });
+        let replacement = match read {
             Ok(after) => match &before {
                 ExistingDiffBody::Text(previous) if previous == &after => None,
                 _ => Some(replacement_diff(&requested, before, &after)),
@@ -3446,7 +3451,11 @@ impl Tool for BuiltinTool {
                 })
             }
             Kind::Grep => {
-                let regex = regex::Regex::new(string(&args, "pattern")?).map_err(tool_error)?;
+                let regex = regex::Regex::new(string(&args, "pattern")?).map_err(|error| {
+                    CoreError::Invalid(format!(
+                        "pattern is not a valid regular expression: {error}\nEscape ( ) [ ] {{ }} . * + ? | ^ $ and \\ with a backslash to search for them as written"
+                    ))
+                })?;
                 let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
                 let root = resolve_existing(requested, &context)?;
                 // A file a `read` rule denies is left out like a secret one.
@@ -3509,11 +3518,20 @@ impl Tool for BuiltinTool {
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent)
                         .await
-                        .map_err(tool_error)?;
+                        .map_err(|error| io_error(requested_path, parent, &error))?;
                 }
-                tokio::fs::write(&path, new_contents)
+                // A file replaced keeps its byte order mark and UTF-16, as
+                // the editor that made it saves it; a new one is written as
+                // given.
+                let spelling = tokio::fs::read(&path)
                     .await
-                    .map_err(tool_error)?;
+                    .ok()
+                    .and_then(|bytes| text::decode(&bytes).map(|(_, spelling)| spelling))
+                    .unwrap_or_default()
+                    .for_new_text(new_contents);
+                tokio::fs::write(&path, spelling.encode(new_contents))
+                    .await
+                    .map_err(|error| io_error(requested_path, &path, &error))?;
                 Ok(output_with_diffs(
                     format!("wrote {}", path.display()),
                     vec![replacement_diff(requested_path, existing, new_contents)],
@@ -3523,9 +3541,11 @@ impl Tool for BuiltinTool {
             Kind::Edit => {
                 let requested_path = string(&args, "path")?;
                 let path = resolve_existing(requested_path, &context)?;
-                let before = string(&args, "old")?;
-                let after = string(&args, "new")?;
-                let text = text::read_utf8(&path, "edit").await?;
+                // A byte order mark the model copied from an older read is
+                // not part of the text it means: the file keeps its own.
+                let before = without_bom(string(&args, "old")?);
+                let after = without_bom(string(&args, "new")?);
+                let (text, spelling) = text::read_text_file(&path, requested_path, "edit").await?;
                 // An empty old is found between every two characters; said
                 // plainly rather than as a count of those places. An empty
                 // file still takes its first text this way.
@@ -3535,18 +3555,32 @@ impl Tool for BuiltinTool {
                             .into(),
                     ));
                 }
-                let (before, after) = text::crlf_edit(&text, before, after);
-                let (before, after) = (before.as_ref(), after.as_ref());
-                let count = text.matches(before).count();
-                if count != 1 {
-                    return Err(CoreError::Tool(format!(
-                        "expected exactly one match, found {count}"
-                    )));
-                }
-                let updated = text.replacen(before, after, 1);
-                tokio::fs::write(&path, &updated)
+                let (spelled_before, spelled_after) = text::crlf_edit(&text, before, after);
+                let count = text.matches(spelled_before.as_ref()).count();
+                let updated = match count {
+                    1 => text.replacen(spelled_before.as_ref(), spelled_after.as_ref(), 1),
+                    // A file of mixed line ends, which no one spelling of old meets.
+                    0 => match text::any_line_ends(&text, before, after).as_slice() {
+                        [(range, replacement)] => {
+                            let mut updated = text.clone();
+                            updated.replace_range(range.clone(), replacement);
+                            updated
+                        }
+                        found => {
+                            return Err(CoreError::Tool(not_one_match(
+                                requested_path,
+                                found.len(),
+                                None,
+                            )));
+                        }
+                    },
+                    count => {
+                        return Err(CoreError::Tool(not_one_match(requested_path, count, None)));
+                    }
+                };
+                tokio::fs::write(&path, spelling.encode(&updated))
                     .await
-                    .map_err(tool_error)?;
+                    .map_err(|error| io_error(requested_path, &path, &error))?;
                 Ok(output_with_diffs(
                     format!("updated {}", path.display()),
                     vec![text_file_diff(
@@ -3568,44 +3602,55 @@ impl Tool for BuiltinTool {
                     .ok_or_else(|| {
                         CoreError::Invalid("edits must contain 1 to 100 entries".into())
                     })?;
-                let original = text::read_utf8(&path, "multiedit").await?;
+                let (original, spelling) =
+                    text::read_text_file(&path, requested_path, "multiedit").await?;
                 let mut updated = original.clone();
                 for (index, edit) in edits.iter().enumerate() {
-                    let before = string(edit, "old")?;
-                    let after = string(edit, "new")?;
+                    let before = without_bom(string(edit, "old")?);
+                    let after = without_bom(string(edit, "new")?);
                     if before.is_empty() {
                         return Err(CoreError::Invalid(format!(
                             "edit {} old must not be empty",
                             index + 1
                         )));
                     }
-                    let (before, after) = text::crlf_edit(&updated, before, after);
-                    let (before, after) = (before.as_ref(), after.as_ref());
-                    let count = updated.matches(before).count();
+                    let (spelled_before, spelled_after) = text::crlf_edit(&updated, before, after);
+                    let (spelled_before, spelled_after) =
+                        (spelled_before.as_ref(), spelled_after.as_ref());
+                    let count = updated.matches(spelled_before).count();
                     let replace_all = edit
                         .get("replaceAll")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    if count == 0 || (!replace_all && count != 1) {
-                        let expectation = if replace_all {
-                            "at least one match"
-                        } else {
-                            "exactly one match"
-                        };
-                        return Err(CoreError::Tool(format!(
-                            "edit {} expected {expectation}, found {count}; file was not changed",
-                            index + 1
+                    // A file of mixed line ends, which no one spelling of old meets.
+                    let mixed = if count == 0 {
+                        text::any_line_ends(&updated, before, after)
+                    } else {
+                        Vec::new()
+                    };
+                    let found = if count == 0 { mixed.len() } else { count };
+                    if found == 0 || (!replace_all && found != 1) {
+                        return Err(CoreError::Tool(not_one_match(
+                            requested_path,
+                            found,
+                            Some(index + 1),
                         )));
                     }
-                    updated = if replace_all {
-                        updated.replace(before, after)
+                    updated = if !mixed.is_empty() {
+                        let mut respelled = updated.clone();
+                        for (range, replacement) in mixed.iter().rev() {
+                            respelled.replace_range(range.clone(), replacement);
+                        }
+                        respelled
+                    } else if replace_all {
+                        updated.replace(spelled_before, spelled_after)
                     } else {
-                        updated.replacen(before, after, 1)
+                        updated.replacen(spelled_before, spelled_after, 1)
                     };
                 }
-                tokio::fs::write(&path, &updated)
+                tokio::fs::write(&path, spelling.encode(&updated))
                     .await
-                    .map_err(tool_error)?;
+                    .map_err(|error| io_error(requested_path, &path, &error))?;
                 Ok(output_with_diffs(
                     format!("applied {} edits to {}", edits.len(), path.display()),
                     vec![text_file_diff(
@@ -3820,9 +3865,9 @@ impl Tool for BuiltinTool {
     }
 }
 /// What a patch leaves at a path once its earlier operations are done: the
-/// new text, or nothing.
+/// new text and how the file spells it, or nothing.
 enum Planned {
-    Text(String),
+    Text(String, text::Spelling),
     Removed,
 }
 
@@ -3964,7 +4009,7 @@ enum PatchStep {
     Write {
         file: String,
         path: PathBuf,
-        content: String,
+        content: Vec<u8>,
     },
     Remove {
         file: String,
@@ -3978,7 +4023,7 @@ enum PatchStep {
         entry: PathBuf,
         destination: PathBuf,
         target_entry: PathBuf,
-        content: String,
+        content: Vec<u8>,
     },
 }
 
@@ -4011,13 +4056,14 @@ async fn plan_patch(
                     replacement_diff(&path, existing, &content),
                     &mut plan.diffs_truncated,
                 );
-                planned.insert(resolved.clone(), Planned::Text(content.clone()));
+                let spelling = text::Spelling::Utf8.for_new_text(&content);
+                planned.insert(resolved.clone(), Planned::Text(content.clone(), spelling));
                 plan.steps.push((
                     format!("added {path}"),
                     PatchStep::Write {
                         file: path,
                         path: resolved,
-                        content,
+                        content: spelling.encode(&content),
                     },
                 ));
             }
@@ -4033,21 +4079,21 @@ async fn plan_patch(
                 // A file an earlier operation writes is read as it leaves it.
                 let earlier = match resolve_new(&path, context) {
                     Ok(key) => match planned.find(&key) {
-                        Some((key, Planned::Text(text))) => Some((key.clone(), text.clone())),
+                        Some((key, Planned::Text(text, spelling))) => {
+                            Some((key.clone(), text.clone(), *spelling))
+                        }
                         Some((_, Planned::Removed)) => return Err(gone()),
                         None => None,
                     },
                     Err(_) => None,
                 };
-                let (resolved, text) = match earlier {
+                let (resolved, text, spelling) = match earlier {
                     Some(earlier) => earlier,
                     None => {
-                        let resolved =
-                            resolve_existing(&path, context).map_err(|error| at(&path, error))?;
-                        let text = tokio::fs::read_to_string(&resolved)
-                            .await
-                            .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
-                        (resolved, text)
+                        let resolved = resolve_existing(&path, context)?;
+                        let (text, spelling) =
+                            text::read_text_file(&resolved, &path, "apply_patch").await?;
+                        (resolved, text, spelling)
                     }
                 };
                 let updated = haarness_core::patch::apply_hunks(&text, &hunks)
@@ -4059,10 +4105,10 @@ async fn plan_patch(
                     let entry = match resolve_entry(&path, context) {
                         Ok(entry) => entry,
                         Err(_) if planned.get(&resolved).is_some() => resolved.clone(),
-                        Err(error) => return Err(at(&path, error)),
+                        Err(error) => return Err(error),
                     };
                     let removed = match planned.get(&entry) {
-                        Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+                        Some(Planned::Text(text, _)) => ExistingDiffBody::Text(text.clone()),
                         _ => entry_diff_body(&entry).await,
                     };
                     let destination = planned_target(&target, &planned, context)?;
@@ -4088,7 +4134,10 @@ async fn plan_patch(
                         &mut plan.diffs_truncated,
                     );
                     planned.insert(entry.clone(), Planned::Removed);
-                    planned.insert(destination.clone(), Planned::Text(updated.clone()));
+                    planned.insert(
+                        destination.clone(),
+                        Planned::Text(updated.clone(), spelling),
+                    );
                     plan.steps.push((
                         format!("moved {path} → {target}"),
                         PatchStep::Move {
@@ -4097,7 +4146,7 @@ async fn plan_patch(
                             entry,
                             destination,
                             target_entry,
-                            content: updated,
+                            content: spelling.encode(&updated),
                         },
                     ));
                 } else {
@@ -4111,13 +4160,13 @@ async fn plan_patch(
                         ),
                         &mut plan.diffs_truncated,
                     );
-                    planned.insert(resolved.clone(), Planned::Text(updated.clone()));
+                    planned.insert(resolved.clone(), Planned::Text(updated.clone(), spelling));
                     plan.steps.push((
                         format!("updated {path}"),
                         PatchStep::Write {
                             file: path,
                             path: resolved,
-                            content: updated,
+                            content: spelling.encode(&updated),
                         },
                     ));
                 }
@@ -4136,12 +4185,12 @@ async fn plan_patch(
                         .ok()
                         .and_then(|key| planned.find(&key))
                     {
-                        Some((key, Planned::Text(_))) => key.clone(),
-                        _ => return Err(at(&path, error)),
+                        Some((key, Planned::Text(..))) => key.clone(),
+                        _ => return Err(error),
                     },
                 };
                 let existing = match planned.get(&resolved) {
-                    Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+                    Some(Planned::Text(text, _)) => ExistingDiffBody::Text(text.clone()),
                     _ => entry_diff_body(&resolved).await,
                 };
                 push_tool_diff(
@@ -4193,7 +4242,7 @@ fn planned_target(path: &str, planned: &PatchFiles, context: &ToolContext) -> Co
 /// What `path` holds before an operation, as the earlier ones leave it.
 async fn planned_body(planned: &PatchFiles, path: &Path) -> ExistingDiffBody {
     match planned.get(path) {
-        Some(Planned::Text(text)) => ExistingDiffBody::Text(text.clone()),
+        Some(Planned::Text(text, _)) => ExistingDiffBody::Text(text.clone()),
         Some(Planned::Removed) => ExistingDiffBody::Missing,
         None => existing_diff_body(path).await,
     }
@@ -4252,19 +4301,11 @@ async fn write_patch(steps: Vec<(String, PatchStep)>) -> CoreResult<()> {
 }
 
 /// Write `content` to `path`, creating the folders it needs.
-async fn write_file(path: &Path, content: &str) -> std::io::Result<()> {
+async fn write_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::write(path, content).await
-}
-
-/// An I/O failure of one patch operation, naming its file.
-fn at(path: &str, error: CoreError) -> CoreError {
-    match error {
-        CoreError::Tool(message) => CoreError::Tool(format!("{path}: {message}")),
-        error => error,
-    }
 }
 
 /// A patch that failed before writing, saying so when it had other
@@ -4281,21 +4322,114 @@ fn unchanged(error: CoreError, several: bool) -> CoreError {
     }
 }
 
+/// A file system failure on `path`, which the call named `named`, in words
+/// that say what to do: a path that is not there names its missing folder
+/// or, when only the file is missing, names like it in its folder.
+pub(crate) fn io_error(named: &str, path: &Path, error: &std::io::Error) -> CoreError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => CoreError::Tool(missing_path(named, path)),
+        std::io::ErrorKind::PermissionDenied => CoreError::Tool(format!(
+            "{named}: the system refused access ({error}); another program may hold it open, or it is read-only"
+        )),
+        std::io::ErrorKind::InvalidFilename => CoreError::Tool(format!(
+            "{named} is not a path this system can open ({error}); give the path without quotes, wildcards or < > | characters"
+        )),
+        _ => CoreError::Tool(format!("{named}: {error}")),
+    }
+}
+
+/// `text` without the byte order mark a model may copy from a read.
+fn without_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
+/// Why an `edit` (or edit `number` of a `multiedit`) of `named` changed
+/// nothing: `old` is found `count` times, not once, and how to retry.
+fn not_one_match(named: &str, count: usize, number: Option<usize>) -> String {
+    let which = number.map_or_else(|| "old".to_owned(), |number| format!("edit {number}'s old"));
+    let unchanged = "nothing was changed";
+    if count == 0 {
+        format!(
+            "{which} was not found in {named}; {unchanged}. Read the file again and copy the text exactly as it is now, with its indentation and line breaks"
+        )
+    } else if number.is_some() {
+        format!(
+            "{which} occurs {count} times in {named}; {unchanged}. Add the lines around the place to change so old names one, or set replaceAll to change every one"
+        )
+    } else {
+        format!(
+            "{which} occurs {count} times in {named}; {unchanged}. Add the lines around the place to change so old names one, or use multiedit with replaceAll to change every one"
+        )
+    }
+}
+
+/// Why `path` (named `named`) is not there, and where to look instead.
+fn missing_path(named: &str, path: &Path) -> String {
+    const FIND: &str = "use glob or list to find the right path";
+    let mut gone = path;
+    let mut folder = path.parent();
+    while let Some(parent) = folder.filter(|parent| !parent.is_dir()) {
+        gone = parent;
+        folder = parent.parent();
+    }
+    let Some(folder) = folder else {
+        return format!("{named} does not exist; {FIND}");
+    };
+    let name = |path: &Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    };
+    if gone != path {
+        let missing = name(gone).unwrap_or_default();
+        return format!(
+            "{named} does not exist: there is no folder {missing} in {}; {FIND}",
+            folder.display()
+        );
+    }
+    // Names in the folder that hold the wanted one or are held in it, letter
+    // case aside (`readme.md` for `README.md`, `core.py` for `core.pyi`), or
+    // share its stem (`core.ts` for `core.js`).
+    let wanted = name(path).unwrap_or_default().to_lowercase();
+    let stem = wanted.split('.').next().unwrap_or(&wanted).to_owned();
+    let mut alike: Vec<String> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .take(10_000)
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|entry| {
+            let entry = entry.to_lowercase();
+            !wanted.is_empty()
+                && (entry.contains(&wanted)
+                    || wanted.contains(&entry)
+                    || (!stem.is_empty() && entry.split('.').next() == Some(stem.as_str())))
+        })
+        .collect();
+    alike.sort();
+    alike.truncate(3);
+    if alike.is_empty() {
+        return format!("{named} does not exist; {FIND}");
+    }
+    let prefix = named.rfind(['/', '\\']).map_or("", |end| &named[..=end]);
+    let alike: Vec<String> = alike
+        .iter()
+        .map(|entry| format!("{prefix}{entry}"))
+        .collect();
+    format!("{named} does not exist. Did you mean {}?", alike.join(", "))
+}
+
 // Paths resolve where the call works (`ToolContext::workspace`): a chat's own
 // folder, or the project folder.
 fn resolve_existing(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
-    let path = dunce::canonicalize(haarness_core::resolve_permission_path(
-        &context.workspace,
-        value,
-    ))
-    .map_err(tool_error)?;
+    let joined = haarness_core::resolve_permission_path(&context.workspace, value);
+    let path = haarness_core::paths::canonicalize(&joined)
+        .map_err(|error| io_error(value, &joined, &error))?;
     ensure_within(path, context)
 }
 /// A file the tool removes (a delete, the old name of a move): a link
 /// there is the entry itself, so only the folder holding it is followed.
 fn resolve_entry(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
     let path = haarness_core::resolve_permission_entry(&context.workspace, value);
-    std::fs::symlink_metadata(&path).map_err(tool_error)?;
+    std::fs::symlink_metadata(&path).map_err(|error| io_error(value, &path, &error))?;
     ensure_within(path, context)
 }
 fn resolve_new(value: &str, context: &ToolContext) -> CoreResult<PathBuf> {
@@ -5234,10 +5368,11 @@ enum ExistingDiffBody {
 
 async fn existing_diff_body(path: &Path) -> ExistingDiffBody {
     match tokio::fs::read(path).await {
-        Ok(bytes) => String::from_utf8(bytes).map_or(
-            ExistingDiffBody::Opaque { binary: true },
-            ExistingDiffBody::Text,
-        ),
+        // As the text tools read it: no byte order mark, UTF-16 as its text.
+        Ok(bytes) => text::decode(&bytes)
+            .map_or(ExistingDiffBody::Opaque { binary: true }, |(text, _)| {
+                ExistingDiffBody::Text(text.into_owned())
+            }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => ExistingDiffBody::Missing,
         Err(_) => ExistingDiffBody::Opaque { binary: false },
     }
@@ -7395,7 +7530,9 @@ export default workflow({
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains("second.txt: hunk context not found: \"absent\"; no file was changed"),
+            error.contains(
+                "second.txt: hunk context not found: \"absent\"; the file's lines differ"
+            ) && error.ends_with("; no file was changed"),
             "{error}"
         );
         assert_eq!(
@@ -9197,7 +9334,7 @@ export default workflow({
         assert!(
             refused
                 .to_string()
-                .contains("latin1.txt is not UTF-8 text, so edit cannot change it"),
+                .contains("latin1.txt is not UTF-8 or UTF-16 text"),
             "{refused}"
         );
         // A NUL near the start marks binary data: only UTF-8 shows, as before.
@@ -9389,6 +9526,295 @@ export default workflow({
             .await
     }
 
+    /// A file as Windows PowerShell 5.1's `>` and `Out-File` write it:
+    /// UTF-16LE behind a byte order mark.
+    fn utf16le(text: &str) -> Vec<u8> {
+        [0xff, 0xfe]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn utf16_text_is_read_searched_and_changed_in_utf16() {
+        let (root, file) = read_fixture(
+            "version.txt",
+            &utf16le("version=1.2.3\r\nchannel=stable\r\n"),
+        );
+        // Before, read said it held binary data, grep left it out and edit
+        // said it was not UTF-8.
+        let shown = read_text_of(&root, json!({"path":"version.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(shown.text, "version=1.2.3\nchannel=stable");
+        let found = edit_in(&root, "grep", json!({"pattern":"^channel"}))
+            .await
+            .unwrap();
+        assert_eq!(found.text, "version.txt:2:channel=stable");
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"version.txt","old":"1.2.3","new":"1.2.4"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            utf16le("version=1.2.4\r\nchannel=stable\r\n")
+        );
+        edit_in(
+            &root,
+            "multiedit",
+            json!({"path":"version.txt","edits":[{"old":"stable","new":"beta"}]}),
+        )
+        .await
+        .unwrap();
+        edit_in(
+            &root,
+            "apply_patch",
+            json!({"input":"*** Begin Patch\n*** Update File: version.txt\n@@\n-version=1.2.4\n+version=2.0.0\n*** End Patch\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            utf16le("version=2.0.0\r\nchannel=beta\r\n")
+        );
+        // A whole new text keeps the file's encoding.
+        edit_in(
+            &root,
+            "write",
+            json!({"path":"version.txt","content":"version=3\r\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), utf16le("version=3\r\n"));
+    }
+
+    #[tokio::test]
+    async fn a_byte_order_mark_is_neither_shown_nor_matched_and_the_file_keeps_it() {
+        const BOM: &str = "\u{feff}";
+        let body = format!(
+            "{BOM}using System;\r\nusing System.Collections.Generic;\r\n\r\nnamespace Inventory\r\n{{\r\n}}\r\n"
+        );
+        let (root, file) = read_fixture("Program.cs", body.as_bytes());
+        let shown = read_text_of(&root, json!({"path":"Program.cs"}))
+            .await
+            .unwrap();
+        assert!(
+            shown.text.starts_with("using System;\n"),
+            "{:?}",
+            shown.text
+        );
+        let found = edit_in(&root, "grep", json!({"pattern":"^using System;$"}))
+            .await
+            .unwrap();
+        assert_eq!(found.text, "Program.cs:1:using System;");
+        // A hunk for the first line written without the mark: before, its
+        // context was not found.
+        edit_in(
+            &root,
+            "apply_patch",
+            json!({"input":"*** Begin Patch\n*** Update File: Program.cs\n@@\n using System;\n+using System.Linq;\n using System.Collections.Generic;\n*** End Patch\n"}),
+        )
+        .await
+        .unwrap();
+        // An old and a new that copied the mark from an older read.
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"Program.cs","old":format!("{BOM}using System;\nusing System.Linq;"),"new":format!("{BOM}using System;\nusing System.IO;\nusing System.Linq;")}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            format!(
+                "{BOM}using System;\r\nusing System.IO;\r\nusing System.Linq;\r\nusing System.Collections.Generic;\r\n\r\nnamespace Inventory\r\n{{\r\n}}\r\n"
+            )
+        );
+        edit_in(
+            &root,
+            "write",
+            json!({"path":"Program.cs","content":"namespace Inventory {}\r\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            format!("{BOM}namespace Inventory {{}}\r\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_across_mixed_line_ends_finds_the_lines_read_showed() {
+        // config/legacy.ini of a Windows checkout, committed with mixed ends,
+        // and the old gpt-6-luna sent for it: before, "expected exactly one
+        // match, found 0".
+        let body = b"[network]\r\nhost = inventory.local\r\ntimeout = 30\n\n[storage]\r\npath = C:\\data\r\nbackup = false\n";
+        let (root, file) = read_fixture("legacy.ini", body);
+        edit_in(
+            &root,
+            "edit",
+            json!({"path":"legacy.ini","old":"[network]\nhost = inventory.local\ntimeout = 30\n","new":"[network]\nhost = inventory.local\ntimeout = 60\nretries = 3\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"[network]\r\nhost = inventory.local\r\ntimeout = 60\r\nretries = 3\r\n\n[storage]\r\npath = C:\\data\r\nbackup = false\n"
+        );
+        edit_in(
+            &root,
+            "multiedit",
+            json!({"path":"legacy.ini","edits":[{"old":"retries = 3\n\n[storage]\npath = C:\\data","new":"retries = 5\n\n[storage]\npath = D:\\data"}]}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("retries = 5\r\n\r\n[storage]\r\npath = D:\\data\r\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_path_says_which_part_is_missing_and_names_like_it() {
+        let (root, _) = read_fixture("README.md", b"# Inventory\n");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/core.py"), "x = 1\n").unwrap();
+        // Before, each said only "No such file or directory (os error 2)"
+        // ("File not found." on Windows), naming no path.
+        let missing = read_text_of(&root, json!({"path":"README.txt"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing.contains("README.txt does not exist. Did you mean README.md?"),
+            "{missing}"
+        );
+        let folder = edit_in(
+            &root,
+            "edit",
+            json!({"path":"lib/core.py","old":"x","new":"y"}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            folder.contains("lib/core.py does not exist: there is no folder lib in "),
+            "{folder}"
+        );
+        assert!(
+            folder.ends_with("use glob or list to find the right path"),
+            "{folder}"
+        );
+        let patch = edit_in(
+            &root,
+            "apply_patch",
+            json!({"input":"*** Begin Patch\n*** Update File: src/core.pyi\n@@\n-x = 1\n+x = 2\n*** End Patch\n"}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            patch.contains("src/core.pyi does not exist. Did you mean src/core.py?"),
+            "{patch}"
+        );
+        assert!(!patch.contains("src/core.pyi: src/core.pyi"), "{patch}");
+    }
+
+    #[tokio::test]
+    async fn a_pattern_that_is_not_a_regular_expression_says_how_to_search_as_written() {
+        let (root, _) = read_fixture("main.py", b"print(total)\n");
+        let refused = edit_in(&root, "grep", json!({"pattern":"print(total"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with("invalid request: pattern is not a valid regular expression: "),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("with a backslash to search for them as written"),
+            "{refused}"
+        );
+        let found = edit_in(&root, "grep", json!({"pattern":"print\\(total"}))
+            .await
+            .unwrap();
+        assert_eq!(found.text, "main.py:1:print(total)");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn git_bash_drive_paths_and_quoted_paths_reach_the_file_on_windows() {
+        let (root, file) = read_fixture("notes.txt", b"one\r\n");
+        let forward = file.display().to_string().replace('\\', "/");
+        let (drive, rest) = forward.split_once(':').unwrap();
+        let drive = drive.to_lowercase();
+        // Before, each was "Path not found. (os error 3)" or "Invalid name.
+        // (os error 123)".
+        for path in [
+            format!("/{drive}{rest}"),
+            format!("/cygdrive/{drive}{rest}"),
+            format!("\"{}\"", file.display()),
+            "\"notes.txt\"".to_owned(),
+        ] {
+            let shown = read_text_of(&root, json!({ "path": path })).await;
+            assert_eq!(
+                shown
+                    .map(|output| output.text)
+                    .map_err(|error| error.to_string()),
+                Ok("one".to_owned()),
+                "{path}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_shell_tool_says_its_commands_run_in_cmd_on_windows() {
+        let registry = NativeToolRegistry::new(std::env::temp_dir());
+        let description = registry.get("bash").unwrap().definition().description;
+        assert!(
+            description.contains("commands run in cmd.exe (Command Prompt), not a POSIX shell"),
+            "{description}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_file_deeper_than_260_characters_is_inside_the_project_on_windows() {
+        let (root, _) = read_fixture("a.txt", b"");
+        let deep = (1..=6)
+            .map(|level| format!("module_level_{level:02}_with_a_long_folder_name"))
+            .collect::<Vec<_>>()
+            .join("/");
+        std::fs::create_dir_all(root.join(&deep)).unwrap();
+        std::fs::write(
+            root.join(&deep).join("settings.json"),
+            b"{\"debug\": false}\r\n",
+        )
+        .unwrap();
+        let file = format!("{deep}/settings.json");
+        assert!(root.join(&file).as_os_str().len() > 260);
+        // Before, its canonical path kept `\\?\` and every tool refused it as
+        // outside the project, or left it out of a glob.
+        let shown = read_text_of(&root, json!({ "path": file })).await.unwrap();
+        assert_eq!(shown.text, "{\"debug\": false}");
+        edit_in(
+            &root,
+            "edit",
+            json!({"path": file, "old": "false", "new": "true"}),
+        )
+        .await
+        .unwrap();
+        let found = edit_in(&root, "glob", json!({"pattern": "**/settings.json"}))
+            .await
+            .unwrap();
+        assert_eq!(found.text, file);
+    }
+
     #[tokio::test]
     async fn an_edit_with_an_empty_old_says_what_to_do_instead() {
         let (root, file) = read_fixture("notes.md", b"# Notes\n");
@@ -9488,17 +9914,34 @@ export default workflow({
         )
         .await
         .unwrap_err();
-        assert!(ambiguous.to_string().contains("found 2"), "{ambiguous}");
-        // A file mostly of LF line ends is matched as written.
+        assert!(
+            ambiguous
+                .to_string()
+                .contains("old occurs 2 times in main.c"),
+            "{ambiguous}"
+        );
+        // A file mostly of LF line ends: an old across its one CRLF break
+        // is found line by line, as read showed those lines (before, it was
+        // not found), and lines that are not there are still not found.
         std::fs::write(&file, b"a\nb\nc\r\nd\n").unwrap();
         let missed = edit_in(
+            &root,
+            "edit",
+            json!({"path":"main.c","old":"c\nq","new":"z"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            missed.to_string().contains("old was not found in main.c"),
+            "{missed}"
+        );
+        edit_in(
             &root,
             "edit",
             json!({"path":"main.c","old":"c\nd","new":"z"}),
         )
         .await
-        .unwrap_err();
-        assert!(missed.to_string().contains("found 0"), "{missed}");
+        .unwrap();
         edit_in(
             &root,
             "edit",
@@ -9506,7 +9949,7 @@ export default workflow({
         )
         .await
         .unwrap();
-        assert_eq!(std::fs::read(&file).unwrap(), b"ab\nc\r\nd\n");
+        assert_eq!(std::fs::read(&file).unwrap(), b"ab\nz\n");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

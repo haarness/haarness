@@ -62,6 +62,9 @@ pub enum HunkLine {
 
 const END_OF_FILE: &str = "*** End of File";
 
+/// What a hunk whose lines are not in the file says to do.
+const RETRY: &str = "the file's lines differ from the hunk's ' ' and '-' lines. Read the file again and copy those lines exactly as they are now, indentation included";
+
 pub fn parse_patch(input: &str) -> Result<Vec<FileOp>, String> {
     let mut lines = input.trim_start().lines().peekable();
     // The header carries no information, so a stuttered marker such as
@@ -216,8 +219,33 @@ fn locate(lines: &[Line], from: usize, header: &str) -> Option<usize> {
 /// filesystem: returns the new content.
 ///
 /// Every line keeps its own line break, so a CRLF file stays CRLF; the
-/// lines a hunk adds take the break most of the file's lines end with.
+/// lines a hunk adds take the break most of the file's lines end with. A
+/// byte order mark is not part of the first line: a hunk finds that line
+/// without it (one a hunk line starts with, copied from a read, is dropped)
+/// and the file keeps it.
 pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
+    const BOM: char = '\u{feff}';
+    let (bom, content) = match content.strip_prefix(BOM) {
+        Some(rest) => (true, rest),
+        None => (false, content),
+    };
+    let unmarked = |text: &String| text.strip_prefix(BOM).unwrap_or(text).to_owned();
+    let hunks: Vec<Hunk> = hunks
+        .iter()
+        .map(|hunk| Hunk {
+            context_header: hunk.context_header.as_ref().map(unmarked),
+            lines: hunk
+                .lines
+                .iter()
+                .map(|line| match line {
+                    HunkLine::Context(text) => HunkLine::Context(unmarked(text)),
+                    HunkLine::Remove(text) => HunkLine::Remove(unmarked(text)),
+                    HunkLine::Add(text) => HunkLine::Add(unmarked(text)),
+                })
+                .collect(),
+            end_of_file: hunk.end_of_file,
+        })
+        .collect();
     let mut lines: Vec<Line> = content
         .split_inclusive('\n')
         .map(|line| {
@@ -248,7 +276,7 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
     // Lines a hunk only adds go at the end, after every other hunk.
     let mut appended = Vec::new();
     let mut cursor = 0usize;
-    for hunk in hunks {
+    for hunk in &hunks {
         let old: Vec<&str> = hunk
             .lines
             .iter()
@@ -297,7 +325,7 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
                 } else {
                     search_from
                 };
-                (first..=last)
+                let matches = (first..=last)
                     .filter(|&start| {
                         old.iter().enumerate().all(|(offset, expected)| {
                             lines
@@ -312,13 +340,13 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
         match matches.as_slice() {
             [] if hunk.end_of_file => {
                 return Err(format!(
-                    "hunk context not found at the end of the file: {:?}",
+                    "hunk context not found at the end of the file: {:?}; {RETRY}",
                     old.first().copied().unwrap_or_default()
                 ));
             }
             [] => {
                 return Err(format!(
-                    "hunk context not found: {:?}",
+                    "hunk context not found: {:?}; {RETRY}",
                     old.first().copied().unwrap_or_default()
                 ));
             }
@@ -362,7 +390,10 @@ pub fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
     if !ends_with_newline && let Some(last) = lines.last_mut() {
         last.ending = "";
     }
-    let mut result = String::with_capacity(content.len());
+    let mut result = String::with_capacity(content.len() + BOM.len_utf8());
+    if bom {
+        result.push(BOM);
+    }
     for line in &lines {
         result.push_str(&line.text);
         result.push_str(line.ending);
@@ -569,9 +600,40 @@ five\n\
         let error = patched("x\nend\n", eof).unwrap_err();
         assert!(error.contains("at the end of the file"), "{error}");
         // Lines after the marker start another hunk.
+        let error = patched("a\nx\n", "@@\n-x\n+y\n*** End of File\n-a\n+b\n").unwrap_err();
+        assert!(
+            error.starts_with("hunk context not found: \"a\"; "),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_not_part_of_the_first_line_and_the_file_keeps_it() {
+        // Visual Studio saves C# files this way. Before, a hunk naming the
+        // first line without the invisible mark was "not found".
+        let file = "\u{feff}using System;\r\nusing System.Collections.Generic;\r\n";
+        let body = "@@\n using System;\n+using System.Linq;\n using System.Collections.Generic;\n";
         assert_eq!(
-            patched("a\nx\n", "@@\n-x\n+y\n*** End of File\n-a\n+b\n").unwrap_err(),
-            "hunk context not found: \"a\""
+            patched(file, body).unwrap(),
+            "\u{feff}using System;\r\nusing System.Linq;\r\nusing System.Collections.Generic;\r\n"
+        );
+        // A hunk that copied the mark from a read finds the line too, and
+        // the mark is not written into the middle of the file.
+        let marked = "@@\n-\u{feff}using System;\n+\u{feff}using System.IO;\n";
+        assert_eq!(
+            patched(file, marked).unwrap(),
+            "\u{feff}using System.IO;\r\nusing System.Collections.Generic;\r\n"
+        );
+        let located = "@@ \u{feff}using System;\n+// first\n";
+        assert!(!patched(file, located).unwrap().contains("\u{feff}// first"));
+    }
+
+    #[test]
+    fn context_that_is_not_found_says_how_to_retry() {
+        let error = patched("a\nb\n", "@@\n-c\n+d\n").unwrap_err();
+        assert_eq!(
+            error,
+            "hunk context not found: \"c\"; the file's lines differ from the hunk's ' ' and '-' lines. Read the file again and copy those lines exactly as they are now, indentation included"
         );
     }
 
