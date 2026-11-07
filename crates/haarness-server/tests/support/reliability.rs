@@ -1123,3 +1123,219 @@ async fn reliability_a_turn_ends_once_its_rounds_together_spent_four_rounds_of_r
     assert_eq!(hooks.failures.lock().unwrap().len(), 1);
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[tokio::test]
+async fn reliability_an_empty_reply_after_a_failed_tool_is_asked_to_explain_it_once() {
+    // The read fails (no such file), then the model's reply is empty.
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(usage()), Ok(finish("stop"))],
+            vec![
+                Ok(text("The file is not there.")),
+                Ok(usage()),
+                Ok(finish("stop")),
+            ],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    {
+        let requests = provider.requests.lock().unwrap();
+        // Asked to explain the failure, not to continue a partial answer.
+        assert!(explain_note(&requests[2]) && !recovery_note(&requests[2]));
+        assert!(!explain_note(&requests[1]));
+    }
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(|item| matches!(&item.data,
+        ItemData::ToolResult {call_id,is_error:true,..} if call_id == "missing")));
+    assert!(items.iter().any(|item| matches!(&item.data,
+        ItemData::AssistantMessage {text} if text == "The file is not there.")));
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+
+    // Once a turn: a second empty reply ends it.
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(finish("stop"))],
+            vec![Ok(finish("stop"))],
+            vec![Ok(text("never asked")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    std::fs::remove_dir_all(directory).unwrap();
+
+    // After a tool that worked, and at the output limit, an empty reply
+    // ends the turn as before.
+    for (present, last) in [(true, "stop"), (false, "max_tokens")] {
+        let (directory, runtime, provider, _) = setup_streams(
+            vec![
+                vec![Ok(read_notes("notes")), Ok(finish("tool_use"))],
+                vec![Ok(finish(last))],
+                vec![Ok(text("never asked")), Ok(finish("stop"))],
+            ],
+            RuntimeConfig::default(),
+            true,
+        );
+        if present {
+            std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+        }
+        let thread = echo_thread(&runtime).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request("read the notes"))
+            .await
+            .unwrap();
+        assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "{last}");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+fn explain_note(request: &ProviderRequest) -> bool {
+    request.messages.iter().any(|message| matches!(message, ProviderMessage::Text {role,content} if role == "user" && content.starts_with("Your last reply was empty")))
+}
+
+#[tokio::test]
+async fn reliability_an_empty_reply_after_a_person_rejected_the_call_ends_the_turn() {
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
+    config.base_rules.push(haarness_core::PermissionRule {
+        pattern: "write:*".into(),
+        decision: haarness_core::PermissionDecision::Ask,
+    });
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![
+                Ok(call(
+                    "asked",
+                    "write",
+                    serde_json::json!({"path":"rejected.txt","content":"no"}),
+                )),
+                Ok(finish("tool_use")),
+            ],
+            vec![Ok(finish("stop"))],
+            vec![Ok(text("never asked")), Ok(finish("stop"))],
+        ],
+        config,
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("write it"))
+        .await
+        .unwrap();
+    let permission = wait_permission(&runtime, thread.id).await;
+    runtime
+        .reply_permission(
+            &permission,
+            haarness_protocol::PermissionReply {
+                decision: haarness_protocol::PermissionReplyDecision::Reject,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert!(!directory.join("rejected.txt").exists());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Hooks whose `PreToolUse` blocks every call.
+struct BlockingHooks;
+#[async_trait]
+impl HookPort for BlockingHooks {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
+        HookDecision {
+            block: Some("not on this branch".into()),
+            ..HookDecision::default()
+        }
+    }
+    async fn post_tool_use(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn stop(&self, _: &HookCall) {}
+}
+
+#[tokio::test]
+async fn reliability_an_empty_reply_after_a_hook_blocked_the_call_ends_the_turn() {
+    let directory =
+        std::env::temp_dir().join(format!("haarness-reliability-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let provider = Arc::new(Script {
+        authenticated: true,
+        rounds: vec![
+            vec![Ok(read_notes("blocked")), Ok(finish("tool_use"))],
+            vec![Ok(finish("stop"))],
+            vec![Ok(text("never asked")), Ok(finish("stop"))],
+        ],
+        calls: AtomicUsize::new(0),
+        requests: Mutex::new(vec![]),
+    });
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            provider.clone() as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(NativeToolRegistry::new(directory.clone())),
+        EventBus::new(128),
+        directory.clone(),
+        String::new(),
+        RuntimeConfig::default(),
+    )
+    .with_hooks(Arc::new(BlockingHooks));
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert!(runtime.items(thread.id, None).await.unwrap().iter().any(|item| matches!(&item.data,
+        ItemData::ToolResult {call_id,is_error:true,output,..} if call_id == "blocked" && output.contains("not on this branch"))));
+    std::fs::remove_dir_all(directory).unwrap();
+}

@@ -944,6 +944,26 @@ fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
     }
 }
 
+/// What the request after an empty reply says, when a call before it failed.
+const EXPLAIN_FAILURE: &str = "Your last reply was empty, but a tool call before it failed. Explain what went wrong and what happens next, then carry on with the task if you can.";
+
+/// Whether the model should still tell the person about a call that failed:
+/// the tool's own failure, or a configured rule's refusal. A stop, and a
+/// refusal by a person, Auto's reviewer or a hook, are decisions the person
+/// has already seen made.
+fn failure_to_explain(error: &CoreError) -> bool {
+    match error {
+        CoreError::PermissionRejected(_) | CoreError::ReviewBlocked(_) | CoreError::Cancelled => {
+            false
+        }
+        // Worded where a `PreToolUse` hook's block is turned into an error.
+        CoreError::PermissionDenied(message) => {
+            !message.starts_with("blocked by a PreToolUse hook")
+        }
+        _ => true,
+    }
+}
+
 /// Retries for a transient provider failure before any output, waiting 2,
 /// 4, 8 then 16 seconds, in each provider round.
 const TRANSIENT_RETRIES: u8 = 4;
@@ -9605,6 +9625,14 @@ impl RunnerTask {
             // One retry per turn after a provider refused an image.
             let mut image_retried = false;
             let mut recovering = false;
+            // Whether the latest round's calls include a failure the model
+            // has not explained yet, whether that round also wrote text, and
+            // whether the next request asks it to explain. A turn asks the
+            // model again after an empty reply once at most.
+            let mut unexplained_failure = false;
+            let mut failure_beside_text = false;
+            let mut explain_failure = false;
+            let mut asked_again = false;
             // UserPromptSubmit hooks may block the turn or inject context.
             let mut prompt_context: Option<String> = None;
             if self.depth == 0 {
@@ -9928,6 +9956,7 @@ impl RunnerTask {
                 if !consumed_now.is_empty() {
                     self.skill_rules.lock().clear();
                     tool_rounds = 0;
+                    unexplained_failure = false;
                 }
                 let current_attachments =
                     crate::image_budget::turn_attachments(&items, Some(self.turn.id));
@@ -9955,6 +9984,12 @@ impl RunnerTask {
                     messages.push(ProviderMessage::Text { role: "user".into(), content:
                         "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
                     recovering = false;
+                }
+                if std::mem::take(&mut explain_failure) {
+                    messages.push(ProviderMessage::Text {
+                        role: "user".into(),
+                        content: EXPLAIN_FAILURE.into(),
+                    });
                 }
                 let goal_for_request = if self.depth == 0 {
                     self.repository
@@ -10550,6 +10585,7 @@ impl RunnerTask {
                 // Only a request that finished cleanly is timed: one cut
                 // short or refused says nothing about the provider's pace.
                 let timing = clock.timing().filter(|_| finished && blocked.is_none());
+                let made_calls = !calls.is_empty();
                 let partial = saw_provider_event
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
                 self.flush_reasoning_segment(&mut reasoning, thought_from)
@@ -10658,6 +10694,7 @@ impl RunnerTask {
                     },
                 ))
                 .await?;
+                let stopped_at_output_limit = output_limit(&finish_reason);
                 *self.last_round.lock() = Some(LastRound {
                     reason: finish_reason,
                     output_tokens: usage.map(|(_, output_tokens, _, _)| output_tokens),
@@ -10695,6 +10732,28 @@ impl RunnerTask {
                 // often again.
                 retries.finished();
                 if calls.is_empty() {
+                    // An empty reply right after a failed call would end the
+                    // turn on an error the model never explained, so once a
+                    // turn it is asked to. After calls that worked the model
+                    // may simply be done, one cut at the output limit would be
+                    // cut there again, and a subagent that wrote text beside
+                    // the failed call hands that text to its parent.
+                    let empty = !made_calls && !wrote_text && self.output_schema.is_none();
+                    if empty
+                        && unexplained_failure
+                        && (self.depth == 0 || !failure_beside_text)
+                        && !asked_again
+                        && !stopped_at_output_limit
+                        && !self.has_unconsumed_queued().await
+                    {
+                        asked_again = true;
+                        explain_failure = true;
+                        tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "empty reply after a failed call; asking the model to explain it");
+                        continue 'provider_round;
+                    }
+                    if !empty {
+                        unexplained_failure = false;
+                    }
                     logical_turn.finish()?;
                     // A message can arrive after this round's request snapshot,
                     // including during a slow text-only stream. Continue for
@@ -10902,6 +10961,8 @@ impl RunnerTask {
                     ));
                 }
                 tool_rounds = tool_rounds.saturating_add(1);
+                unexplained_failure = false;
+                failure_beside_text = wrote_text;
                 // Tasks run concurrently. Consecutive observations run in bounded
                 // groups; mutations remain ordering barriers. Persist results in
                 // provider call order even when observations finish out of order.
@@ -10995,6 +11056,7 @@ impl RunnerTask {
                             .await?;
                         }
                         Err(error) => {
+                            unexplained_failure |= failure_to_explain(&error);
                             // Cancelled calls persist an error result too: the
                             // provider history must never carry a tool call
                             // without its result. Keep raw provider envelopes in
@@ -18913,6 +18975,32 @@ mod tests {
             "HTTP 400 Bad Request: field `query` exceeds maximum input length of 512",
         ] {
             assert!(!overflow(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn the_model_explains_a_tools_own_failure_and_a_rules_refusal_only() {
+        for error in [
+            CoreError::Tool("no such file: notes.txt".into()),
+            CoreError::PermissionDenied("permission denied for bash: rm -rf build".into()),
+            CoreError::Invalid("missing field `path`".into()),
+        ] {
+            assert!(super::failure_to_explain(&error), "{error}");
+        }
+        // A person, Auto's reviewer, a hook and a stop decided it themselves.
+        for error in [
+            CoreError::PermissionRejected("The user rejected this action.".into()),
+            CoreError::PermissionDenied("blocked by a PreToolUse hook: not on main".into()),
+            CoreError::ReviewBlocked(Box::new(haarness_protocol::PermissionReview {
+                status: haarness_protocol::PermissionReviewStatus::Blocked,
+                risk: None,
+                rule: None,
+                rationale: None,
+                reason: None,
+            })),
+            CoreError::Cancelled,
+        ] {
+            assert!(!super::failure_to_explain(&error), "{error}");
         }
     }
 
