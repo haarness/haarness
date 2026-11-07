@@ -7432,6 +7432,99 @@ async fn undo_answers_conflict_and_changes_nothing_at_a_later_edit_whatever_the_
 }
 
 #[tokio::test]
+async fn undo_answers_conflict_at_a_later_step_when_a_left_file_was_deleted_or_put_back() {
+    let make = |byte: char| {
+        serde_json::json!({"name": "bash", "arguments": {
+            "command": format!("head -c 2500000 /dev/zero | tr '\\0' {byte} > big.bin")}})
+    };
+    let other = |content: String| {
+        serde_json::json!({"name": "write", "arguments": {
+            "path": "other.txt", "content": content}})
+    };
+    for deleted in [true, false] {
+        for steps_before in [1, 2] {
+            let case = format!("deleted {deleted}, step {}", steps_before + 1);
+            let root =
+                std::env::temp_dir().join(format!("haarness-left-edit-{}", uuid::Uuid::now_v7()));
+            let workspace = root.join("ws");
+            tokio::fs::create_dir_all(&workspace).await.unwrap();
+            // Made (or grown from `v0`) and rewritten by every turn, so no
+            // step back has a copy of what the turn before left.
+            if !deleted {
+                std::fs::write(workspace.join("big.bin"), "v0\n").unwrap();
+            }
+            std::fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+            let (handle, base, client) =
+                undo_server(large_file_fixture(&root, &workspace), &workspace).await;
+            let chat = undo_chat(&client, &base).await;
+            for (turn, byte) in ['a', 'b', 'c']
+                .into_iter()
+                .take(steps_before + 1)
+                .enumerate()
+            {
+                let calls = serde_json::json!([make(byte), other(format!("o{}\n", turn + 1))]);
+                undo_turn(&client, &base, &chat, calls).await;
+            }
+            let undo = || {
+                client
+                    .post(format!("{base}/threads/{chat}/revert"))
+                    .json(&serde_json::json!({}))
+                    .send()
+            };
+            for _ in 0..steps_before {
+                let undone = undo().await.unwrap().error_for_status().unwrap();
+                let undone: Thread = undone.json().await.unwrap();
+                let left = undone.revert.unwrap().unrestored;
+                assert_eq!(left.len(), 1, "{case}: {left:?}");
+                assert_eq!(left[0].path, "big.bin", "{case}");
+            }
+            let read = |path: &str| std::fs::read(workspace.join(path)).ok();
+            assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]), "{case}");
+            // What the steps left, the person deletes or puts back by hand as
+            // it was before turn 1: where the next step would take it.
+            if deleted {
+                std::fs::remove_file(workspace.join("big.bin")).unwrap();
+            } else {
+                std::fs::write(workspace.join("big.bin"), "v0\n").unwrap();
+            }
+            let edited = read("big.bin");
+            let state = async || {
+                client
+                    .get(format!("{base}/threads/{chat}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<Thread>()
+                    .await
+                    .unwrap()
+                    .revert
+                    .map(|revert| (revert.sequence, revert.unrestored))
+            };
+            let undone_before = state().await;
+
+            let refused = undo().await.unwrap();
+            assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT, "{case}");
+            let body: haarness_protocol::ApiError = refused.json().await.unwrap();
+            assert_eq!(body.code, "conflict", "{case}: {}", body.message);
+            assert!(
+                body.message.ends_with("big.bin"),
+                "{case}: {}",
+                body.message
+            );
+            assert_eq!(read("big.bin"), edited, "{case}");
+            assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]), "{case}");
+            assert_eq!(state().await, undone_before, "{case}: the undo state stays");
+            // Nor does the next message lose the edit.
+            let calls = serde_json::json!([other("o9\n".into())]);
+            undo_turn(&client, &base, &chat, calls).await;
+            assert_eq!(read("big.bin"), edited, "{case}");
+            handle.shutdown().await.unwrap();
+            remove_test_folder(root).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_file_a_turn_shrank_between_two_that_grew_it_is_undone_and_redone_without_a_conflict() {
     let root = std::env::temp_dir().join(format!("haarness-grow-shrink-{}", uuid::Uuid::now_v7()));
     let workspace = root.join("ws");

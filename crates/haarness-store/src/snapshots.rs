@@ -606,8 +606,8 @@ impl SqliteSnapshotStore {
             // record says which, and what each held: the first step's backup
             // is the folder as it is, so a file matching it may well hold a
             // person's (or another chat's) later edit, which is a conflict
-            // as it always was; and so is a file left that a person
-            // rewrote since.
+            // as it always was; and so is a file left that is no longer as
+            // it was left (rewritten, deleted, or put back by hand).
             let mut left_earlier = false;
             if !expected_here && let Some((backup_id, _)) = step {
                 left_earlier = self
@@ -620,14 +620,10 @@ impl SqliteSnapshotStore {
                 expected_here = left_earlier;
             }
             if !expected_here {
-                // One already as desired needs nothing: a file an earlier
-                // step left there, or, forward, a large file as its undo
-                // left it.
+                // Forward, a large file already as desired needs nothing:
+                // its undo left it so.
                 let forward = step.is_none_or(|(_, kind)| kind != UndoStep::Undo);
-                let left_before = step.is_some_and(|(backup_id, _)| {
-                    self.copies.left(&mut left, backup_id).contains_key(path)
-                });
-                if wanted && (left_before || (large && forward)) {
+                if wanted && large && forward {
                     settled.push(path.clone());
                     continue;
                 }
@@ -3651,6 +3647,71 @@ mod tests {
         }
         assert_eq!(read("big.bin"), Some(large(3)));
         assert_eq!(read("other.txt"), other(3));
+    }
+
+    #[tokio::test]
+    async fn a_file_an_undo_step_left_and_a_person_deleted_or_put_back_stops_a_later_one() {
+        for deleted in [true, false] {
+            for third_step in [false, true] {
+                let case = format!("deleted {deleted}, third step {third_step}");
+                let (guard, store) = fixture();
+                let workspace = guard.0.join("ws");
+                let read = |path: &str| fs::read(workspace.join(path)).ok();
+                // Made (or grown past the limit) and rewritten by every
+                // turn: no step back has a copy of what the turn before left.
+                let start = (!deleted).then(|| b"v0\n".to_vec());
+                let mut contents = vec![Some(large(1)), Some(large(2))];
+                if third_step {
+                    contents.push(Some(large(3)));
+                }
+                let checkpoints = turns(&store, &workspace, start, &contents).await;
+                let backup = checkpoints.last().unwrap();
+                let mut at = contents.len();
+                while at > 1 {
+                    let undone = step(
+                        &store,
+                        backup,
+                        &checkpoints[at],
+                        &checkpoints[at - 1],
+                        UndoStep::Undo,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                    assert_eq!(undone.skipped, vec!["big.bin"], "{case}");
+                    at -= 1;
+                }
+                assert_eq!(
+                    read("big.bin"),
+                    contents.last().cloned().flatten(),
+                    "{case}"
+                );
+                // What the steps left the person deletes, or puts back by
+                // hand as it was before turn 1, which is where the next step
+                // takes it: that step stops all the same.
+                if deleted {
+                    fs::remove_file(workspace.join("big.bin")).unwrap();
+                } else {
+                    fs::write(workspace.join("big.bin"), "v0\n").unwrap();
+                }
+                let edited = read("big.bin");
+                let error = step(
+                    &store,
+                    backup,
+                    &checkpoints[1],
+                    &checkpoints[0],
+                    UndoStep::Undo,
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    matches!(&error, CoreError::Conflict(message) if message.ends_with("big.bin")),
+                    "{case}: {error}"
+                );
+                assert_eq!(read("big.bin"), edited, "{case}");
+                assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]), "{case}");
+                assert_eq!(copies_of(&store, backup), 0, "{case}");
+            }
+        }
     }
 
     #[tokio::test]

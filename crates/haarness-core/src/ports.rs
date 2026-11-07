@@ -1071,7 +1071,9 @@ pub struct DeltaRestore {
 pub enum UndoStep {
     /// Back one step. A file an earlier step of the same undo left is
     /// handled as if it were as expected while it is still as that step left
-    /// it. Also how a redo step that could not be recorded is put back.
+    /// it; changed since in any way (rewritten, deleted, put back by hand),
+    /// it is a conflict, as any later edit is. Also how a redo step that
+    /// could not be recorded is put back.
     Undo,
     /// Forward one step. A file an earlier undo step left is left so until a
     /// step finds it as that step wants it, and so is a large one whose
