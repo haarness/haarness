@@ -5639,7 +5639,7 @@ impl AgentRuntime {
                 let operation = plan.operation(pattern);
                 let constraint = tool.permission_constraint(&arguments, &operation);
                 let explicit = tool.explicit_approval(&arguments, &operation);
-                let evaluation = plan.evaluate(&engine, pattern);
+                let evaluation = plan.evaluate_call(&engine, pattern, &arguments);
                 let decision = if explicit {
                     crate::permissions::explicit_decision(
                         evaluation.decision,
@@ -11789,7 +11789,7 @@ impl RunnerTask {
                         "This tool is disabled by the active skill".into(),
                     ));
                 }
-                let evaluation = plan.evaluate(&engine, pattern);
+                let evaluation = plan.evaluate_call(&engine, pattern, &arguments);
                 let constraint = tool.as_ref().and_then(|tool| {
                     tool.permission_constraint(&arguments, &plan.operation(pattern))
                 });
@@ -12303,7 +12303,8 @@ impl RunnerTask {
                         refreshed.evaluate(&operation) != PermissionDecision::Deny
                             && crate::permissions::explicit_granted(&session_rules, &operation)
                     } else {
-                        plan.evaluate(&refreshed, pattern).decision == PermissionDecision::Allow
+                        plan.evaluate_call(&refreshed, pattern, detail).decision
+                            == PermissionDecision::Allow
                     }
                 })
             {
@@ -15121,6 +15122,43 @@ impl AskPlan {
             .iter()
             .any(|(resolved, _)| resolved == pattern)
     }
+    /// [`Self::evaluate`] for the call whose `arguments` raised this plan. A
+    /// resource read that no rule about resources decided (only a blanket
+    /// `*` allowed it) asks when a configured ask covers all of its server's
+    /// tools (`"mcp__docs__*": "ask"`), as a deny of all of them keeps its
+    /// resources away: the read's own card, whose Always keeps `<server>:*`.
+    fn evaluate_call(
+        &self,
+        engine: &PermissionEngine,
+        pattern: &str,
+        arguments: &serde_json::Value,
+    ) -> crate::permissions::Evaluation {
+        let evaluation = self.evaluate(engine, pattern);
+        let blanket = |rule: &str| {
+            rule.split_once(':')
+                .map_or(rule, |(permission, _)| permission)
+                == "*"
+        };
+        if self.permission != "mcp_resource_read"
+            || evaluation.decision != PermissionDecision::Allow
+            || !evaluation.matched.as_deref().is_none_or(blanket)
+        {
+            return evaluation;
+        }
+        let Some(server) = arguments["server"].as_str() else {
+            return evaluation;
+        };
+        let tools = engine.evaluate_detailed(&format!("{}:*", mcp_server_tools(server)));
+        if tools.decision == PermissionDecision::Ask && tools.configured {
+            crate::permissions::Evaluation {
+                protected: false,
+                ..tools
+            }
+        } else {
+            evaluation
+        }
+    }
+
     /// The verdict on `pattern` from `engine`. A pattern read from inside
     /// a written shell command is judged only by rules about it (see
     /// [`PermissionEngine::evaluate_reading`]): a deny or ask for `rm *`
@@ -20034,6 +20072,92 @@ mod tests {
         assert_eq!(
             tricky[0].evaluate(&engine, &tricky[0].patterns[0]).decision,
             crate::PermissionDecision::Allow
+        );
+    }
+
+    /// An ask written for all of a server's tools covers the model's reads of
+    /// that server's resources too, unless a rule or an answer about
+    /// resources says otherwise; without one, reads go on as before.
+    #[test]
+    fn a_whole_server_ask_asks_before_its_resources_are_read() {
+        use crate::PermissionDecision::{Allow, Ask, Deny};
+        let workspace = std::path::Path::new("/workspace");
+        let verdict =
+            |server: &str, rules: &[(&str, crate::PermissionDecision)], answered: bool| {
+                let mut engine = crate::permissions::PermissionEngine::build_defaults();
+                for (pattern, decision) in rules {
+                    engine.add_rule(crate::permissions::PermissionRule {
+                        pattern: (*pattern).into(),
+                        decision: *decision,
+                    });
+                }
+                if answered {
+                    // What Always on the read's card remembers.
+                    engine.approve_always("mcp_resource_read:docs:*");
+                }
+                let arguments = json!({"server": server, "uri": "docs://setup"});
+                let plan = super::ask_plans("mcp_resource_read", &arguments, workspace).remove(0);
+                let evaluation = plan.evaluate_call(&engine, &plan.patterns[0], &arguments);
+                (evaluation.decision, evaluation.matched)
+            };
+        let server_ask = ("mcp__docs__*:*", Ask);
+        assert_eq!(
+            verdict("docs", &[server_ask], false),
+            (Ask, Some("mcp__docs__*:*".into()))
+        );
+        assert_eq!(verdict("docs", &[("mcp__*:*", Ask)], false).0, Ask);
+        // A blanket allow before the server's ask leaves the ask; one after
+        // it allows the server's tools, and so its resources.
+        assert_eq!(verdict("docs", &[("*", Allow), server_ask], false).0, Ask);
+        assert_eq!(verdict("docs", &[server_ask, ("*", Allow)], false).0, Allow);
+        // A rule or an answer about resources decides as it did.
+        for rules in [
+            &[server_ask, ("mcp_resource_read:*", Allow)][..],
+            &[("mcp_resource_read:docs:*", Allow), server_ask],
+        ] {
+            assert_eq!(verdict("docs", rules, false).0, Allow, "{rules:?}");
+        }
+        assert_eq!(verdict("docs", &[server_ask], true).0, Allow);
+        assert_eq!(
+            verdict(
+                "docs",
+                &[server_ask, ("mcp_resource_read:docs:*", Deny)],
+                false
+            )
+            .0,
+            Deny
+        );
+        // Without an ask for all of the server's tools, nothing more asks.
+        for rules in [
+            &[][..],
+            &[("mcp__docs__search:*", Ask)],
+            &[("mcp__docs__*:secret", Ask)],
+            &[("mcp__other__*:*", Ask)],
+        ] {
+            assert_eq!(verdict("docs", rules, false).0, Allow, "{rules:?}");
+        }
+        // The server as its tools are named, whatever its resource patterns
+        // write for its other characters.
+        assert_eq!(
+            verdict("Docs Server", &[("mcp__Docs Server__*:*", Ask)], false).0,
+            Ask
+        );
+        assert_eq!(
+            verdict("Docs Server", &[("mcp__Docs_Server__*:*", Ask)], false).0,
+            Allow
+        );
+        // A listing names resources and reads none: it asks as before.
+        let mut engine = crate::permissions::PermissionEngine::build_defaults();
+        engine.add_rule(crate::permissions::PermissionRule {
+            pattern: "mcp__docs__*:*".into(),
+            decision: Ask,
+        });
+        let arguments = json!({"server": "docs"});
+        let plan = super::ask_plans("mcp_resource_list", &arguments, workspace).remove(0);
+        assert_eq!(
+            plan.evaluate_call(&engine, &plan.patterns[0], &arguments)
+                .decision,
+            Allow
         );
     }
 
