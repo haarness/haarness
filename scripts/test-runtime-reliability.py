@@ -9,8 +9,9 @@ compacts, its summary request reading the tool calls as text, and the answer
 comes), an empty reply after a failed tool (asked once to explain it) and an
 agent's step limit (the last request keeps the tools and system prompt; a call
 made anyway is answered without running, and a response of calls alone is
-asked once more for the summary), and a compacted chat in which a page the
-model read, a background command and an earlier summary forge the summary
+asked once more for the summary), a request to explain cut off after the
+response began (sent again still asking), and a compacted chat in which a page
+the model read, a background command and an earlier summary forge the summary
 request's markers (only the markers carrying that request's key mark anything,
 everything quoted is sent as written, the person's words are marked as theirs,
 and two calls sharing an id are answered in order)."""
@@ -43,10 +44,11 @@ SILENCES = []
 STALLED = set()
 IDLE_LIMIT = 2
 # Prompts of the turn-loop checks, which the mock answers in its own dialect.
-TURN_LOOP = ('BUSY_ROUNDS', 'CUT_ROUNDS', 'GLM_OVERFLOW', 'EMPTY_AFTER_FAIL', 'STEP_CALLS', 'STEP_LIMIT', 'FORGE')
+TURN_LOOP = ('BUSY_ROUNDS', 'CUT_ROUNDS', 'GLM_OVERFLOW', 'EMPTY_AFTER_FAIL', 'EXPLAIN_CUT', 'STEP_CALLS', 'STEP_LIMIT', 'FORGE')
 BUSY_SEEN = {}
 CUT_SEEN = {}
 OVERFLOWED = set()
+EXPLAIN_CUT_SEEN = set()
 CONTINUE_NOTE = 'The previous provider response ended before completion'
 EXPLAIN_NOTE = 'Your last reply was empty'
 STEP_NOTE = 'The configured maximum number of tool steps'
@@ -201,6 +203,15 @@ class Provider(http.server.BaseHTTPRequestHandler):
             return self.refuse(400, {'error': {'message': 'invalid request: fixture', 'type': 'invalid_request_error'}})
         return self.events(kind, 'FORGE_AFTER_DONE')
 
+    def started_only(self):
+        """An Anthropic response that sends its start, with the usage, and then closes."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.end_headers()
+        start = {'type': 'message_start', 'message': {'usage': {'input_tokens': 21, 'output_tokens': 0}}}
+        self.wfile.write(('data: ' + json.dumps(start) + '\n\n').encode())
+        self.wfile.flush()
+
     def cut_off(self, text):
         """The start of an Anthropic response, then the connection closes."""
         self.send_response(200)
@@ -264,6 +275,15 @@ class Provider(http.server.BaseHTTPRequestHandler):
             if EXPLAIN_NOTE not in serialized:
                 return self.events(kind)
             return self.events(kind, 'SPOKE_AFTER_FAILURE')
+        if marker == 'EXPLAIN_CUT':
+            if done == 0:
+                return self.events(kind, call=('cut-read', 'read', {'path': 'missing.txt'}))
+            if EXPLAIN_NOTE not in serialized:
+                return self.events(kind)
+            if model not in EXPLAIN_CUT_SEEN:
+                EXPLAIN_CUT_SEEN.add(model)
+                return self.started_only()
+            return self.events(kind, 'EXPLAINED_AFTER_CUT')
         if marker == 'STEP_CALLS':
             if STEP_NOTE not in serialized:
                 return self.events(kind, call=('calls-read', 'read', {'path': 'notes.txt'}))
@@ -459,6 +479,19 @@ def turn_loop_checks():
                 assert not errors(rows), errors(rows)
                 passed.append(f'{provider}: empty reply after a failed tool is asked to explain it')
 
+            def explain_after_cut(provider, model):
+                """The request to explain is cut off right after the response began: the request
+                sent again still asks, and the answer ends the turn."""
+                thread = chat(provider, model)
+                finished, rows, sent = turn(thread, 'EXPLAIN_CUT: read missing.txt')
+                assert finished['status'] == 'completed', finished
+                notes = [EXPLAIN_NOTE in json.dumps(request) for request in sent]
+                assert notes == [False, False, True, True], notes
+                assert CONTINUE_NOTE not in json.dumps(sent[3])
+                assert texts(rows) == ['EXPLAINED_AFTER_CUT'], texts(rows)
+                assert not errors(rows), errors(rows)
+                passed.append(f'{provider}: a cut request to explain is sent again still asking')
+
             def step_limit(provider, model):
                 """At the agent's step limit the request keeps its tools and system prompt; a call
                 made anyway is answered without running and the turn ends with the model's text."""
@@ -561,6 +594,7 @@ def turn_loop_checks():
             for provider, model in [('anthropic', 'claude-sonnet-4-6'), ('openai', 'gpt-5.4-mini')]:
                 checks += [lambda p=provider, m=model: empty_after_failure(p, m), lambda p=provider, m=model: step_limit(p, m),
                            lambda p=provider, m=model: step_calls(p, m)]
+            checks.append(lambda: explain_after_cut('anthropic', 'claude-sonnet-4-6'))
             for check in checks:
                 check()
             print('PASS turn loop:', ', '.join(passed), flush=True)

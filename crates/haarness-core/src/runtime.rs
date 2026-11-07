@@ -10438,12 +10438,16 @@ impl RunnerTask {
                     }
                     saw_provider_event = true;
                     // The provider took this request: a later one refused
-                    // for its size may compact again, a later one it turns
-                    // away while busy backs off from the first wait, and the
-                    // request to explain a failure has been made.
+                    // for its size may compact again, and a later one it
+                    // turns away while busy backs off from the first wait.
                     compacted_for_size = false;
                     retries.accepted();
-                    explain_failure = false;
+                    // The request to explain a failure is answered once the
+                    // reply holds anything or ends: one cut before that (after
+                    // only its usage, say) is sent again still asking.
+                    if content || matches!(event, ProviderEvent::Finished { .. }) {
+                        explain_failure = false;
+                    }
                     match event {
                         ProviderEvent::TextDelta(delta) => {
                             if delta.is_empty() {

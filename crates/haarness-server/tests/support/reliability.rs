@@ -1266,6 +1266,62 @@ async fn reliability_a_retry_still_asks_the_model_to_explain_the_failure() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[tokio::test]
+async fn reliability_a_cut_before_any_reply_still_asks_the_model_to_explain_the_failure() {
+    // The request to explain is cut off after the provider sent only its
+    // usage, as Anthropic's message_start carries it: the request sent
+    // again still asks, and the model's answer ends the turn.
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(usage()), Ok(finish("stop"))],
+            vec![Ok(usage())],
+            vec![
+                Ok(text("The file is not there.")),
+                Ok(usage()),
+                Ok(finish("stop")),
+            ],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    {
+        let requests = provider.requests.lock().unwrap();
+        let notes = requests.iter().map(explain_note).collect::<Vec<_>>();
+        assert_eq!(notes, [false, false, true, true]);
+        // Nothing arrived to continue from: the same request again.
+        assert!(!recovery_note(&requests[3]));
+        assert_eq!(
+            serde_json::to_value(&requests[2].messages).unwrap(),
+            serde_json::to_value(&requests[3].messages).unwrap()
+        );
+    }
+    assert!(
+        runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| matches!(&item.data,
+                ItemData::AssistantMessage {text} if text == "The file is not there."))
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn explain_note(request: &ProviderRequest) -> bool {
     request.messages.iter().any(|message| matches!(message, ProviderMessage::Text {role,content} if role == "user" && content.starts_with("Your last reply was empty")))
 }
