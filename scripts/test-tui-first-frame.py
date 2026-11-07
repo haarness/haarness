@@ -107,6 +107,8 @@ def phase(name, protocol, base_url, echo, extra=()):
         defaults
         + f'[providers.slowlist]\nprotocol="{protocol}"\nname="Slow list"\n'
         + f'base_url="{base_url}"\napi_key_env="SLOWLIST_KEY"\n[lsp]\nenabled=false\n'
+        # An Ollama or LM Studio running on this computer would win the new chat.
+        + '[providers.ollama]\nenabled=false\n[providers.lmstudio]\nenabled=false\n'
     )
     data, home = root / name / "data", root / name / "home"
     home.mkdir()
@@ -172,7 +174,8 @@ try:
     (workspace / ".haarness").mkdir(parents=True)
     (workspace / ".haarness/config.toml").write_text(
         '[providers.slowlist]\nprotocol="anthropic-messages"\nname="Slow list"\n'
-        + f'base_url="http://127.0.0.1:{late.server_port}/v1"\napi_key_env="SLOWLIST_KEY"\n[lsp]\nenabled=false\n')
+        + f'base_url="http://127.0.0.1:{late.server_port}/v1"\napi_key_env="SLOWLIST_KEY"\n[lsp]\nenabled=false\n'
+        + '[providers.ollama]\nenabled=false\n[providers.lmstudio]\nenabled=false\n')
     (root / "run" / "home").mkdir()
     env = {**os.environ, "HAARNESS_DATA_DIR": str(root / "run" / "data"), "HOME": str(root / "run" / "home"),
            "HAARNESS_HOME": str(root / "run" / "home"), "SLOWLIST_KEY": "fixture-key"}
