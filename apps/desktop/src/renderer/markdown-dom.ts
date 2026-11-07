@@ -4,7 +4,7 @@ import type { MarkdownPatch } from "./markdown-project";
 import { holdRemoteImages, madeHere, markMade, replyAttribute, type RemoteImageLabels } from "./remote-images";
 import { holdProjectImages, type ProjectImageLabels, type ShownImage } from "./project-images";
 import { openMark } from "./ImageViewer";
-import { codeBlockShows, spelledOutParts } from "./display-text";
+import { codeBlockShows, hasCodeCharacters, spelledCharacter, spelledOutParts } from "./display-text";
 
 type Block = { html: string; start: Comment; end: Comment };
 
@@ -159,15 +159,35 @@ function taskBoxes(fragment: DocumentFragment) {
 }
 
 /**
+ * Inside a code block, raw HTML that hides part of it without CSS (`hidden`,
+ * a closed `<details>`, a `<template>`) or turns its direction (`dir`) is
+ * taken away, so the block shows all it holds, in the order it holds it: a
+ * `<details>` or `<summary>` gives way to what it holds, and a `<template>`,
+ * which never shows, goes.
+ */
+function plainBlocks(fragment: DocumentFragment) {
+  for (const block of Array.from(fragment.querySelectorAll("pre"))) {
+    for (const element of [block, ...Array.from(block.querySelectorAll("*"))]) {
+      element.removeAttribute("hidden");
+      element.removeAttribute("dir");
+    }
+    for (const element of Array.from(block.querySelectorAll("template"))) element.remove();
+    for (const element of Array.from(block.querySelectorAll("details, summary")))
+      element.replaceWith(...Array.from(element.childNodes));
+  }
+}
+
+/**
  * A code block's characters that would not show, or would draw its code in
  * another order than the one it is copied in (an escape, a direction
  * override), each shown as its code (`\u{1B}`) on a quiet chip, as an
  * approval card shows them (display-text.ts). The chips are the app's own,
- * and Copy turns each back into its character (Markdown.tsx), so what it
- * copies is the code as the reply wrote it.
+ * and Copy turns each back into its character (`shownCode`).
  */
 function spellCode(fragment: DocumentFragment) {
   for (const block of Array.from(fragment.querySelectorAll("pre"))) {
+    // Most code holds none: it is not walked character by character.
+    if (!hasCodeCharacters(block.textContent ?? "")) continue;
     const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
     const texts: Text[] = [];
     for (let node = walker.nextNode(); node; node = walker.nextNode()) texts.push(node as Text);
@@ -187,6 +207,41 @@ function spellCode(fragment: DocumentFragment) {
     }
   }
 }
+
+/**
+ * The code a block's Copy copies, when the block shows it alone: one `code`
+ * holding only text and the app's chips, and nothing else in the block but
+ * whitespace and its Copy button. Markdown's code blocks are all so. Raw HTML
+ * with more in its `pre` (text beside the code, several codes, markup inside
+ * one) gets no Copy, since what Copy put on the clipboard could differ from
+ * what the block shows.
+ */
+export function copiedCode(block: Element): HTMLElement | undefined {
+  let code: HTMLElement | undefined;
+  for (const node of Array.from(block.childNodes)) {
+    if (node instanceof Comment || (node instanceof Text && !node.data.trim())) continue;
+    if (node instanceof HTMLButtonElement && node.classList.contains("code-copy")) continue;
+    if (!code && node instanceof HTMLElement && node.localName === "code") code = node;
+    else return undefined;
+  }
+  for (const node of Array.from(code?.childNodes ?? [])) {
+    if (node instanceof Comment || node instanceof Text) continue;
+    if (!(node instanceof HTMLElement && madeHere(node) && node.matches(".spelled-code"))) return undefined;
+  }
+  return code;
+}
+
+/** What a code block shows of `code`, as Copy copies it: its text, with
+ * each of the app's chips (`\u{1B}`) the character it stands for again. */
+export function shownCode(code: Element) {
+  let text = "";
+  for (const node of Array.from(code.childNodes)) {
+    if (node instanceof Text) text += node.data;
+    else if (node instanceof HTMLElement && madeHere(node)) text += spelledCharacter(node.textContent ?? "") ?? "";
+  }
+  return text;
+}
+
 export function createMarkdownDOM(
   host: HTMLElement,
   images?: {
@@ -232,6 +287,7 @@ export function createMarkdownDOM(
         ALLOW_DATA_ATTR: false,
       });
       taskBoxes(fragment);
+      plainBlocks(fragment);
       spellCode(fragment);
       const project = images?.project;
       if (project)

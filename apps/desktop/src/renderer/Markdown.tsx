@@ -2,7 +2,7 @@ import { language, t } from "./i18n";
 import { useApp } from "./state";
 import { createEffect, on, onCleanup, onMount } from "solid-js";
 import { createMarkdownClient } from "./markdown-client";
-import { createMarkdownDOM } from "./markdown-dom";
+import { copiedCode, createMarkdownDOM, shownCode } from "./markdown-dom";
 import { linkTarget } from "./link-target";
 import {
   imageLoading,
@@ -25,7 +25,6 @@ import {
   type ShownImage,
 } from "./project-images";
 import { watchOpenImages } from "./ImageViewer";
-import { spelledCharacter } from "./display-text";
 
 /**
  * What is read in the transcript's view: the first text that starts inside
@@ -118,22 +117,6 @@ function keepReading(element: HTMLElement, host: HTMLElement, change: () => void
   });
   measured.observe(host);
   requestAnimationFrame(() => requestAnimationFrame(done));
-}
-
-/**
- * A code block's code as the reply wrote it, which its Copy copies: each
- * code the block shows for a character it would not show (markdown-dom.ts)
- * is that character again. Only the app's own chips count.
- */
-function writtenCode(code: Element) {
-  let text = "";
-  const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    const chip = node.parentElement;
-    const written = chip && madeHere(chip) && chip.matches(".spelled-code") ? spelledCharacter(node.nodeValue ?? "") : undefined;
-    text += written ?? node.nodeValue ?? "";
-  }
-  return text;
 }
 
 /** Text up to this long is drawn on this thread (about 3 ms here); longer
@@ -334,7 +317,9 @@ export function Markdown(props: {
       if (language && !/^(text|plain|plaintext|txt|none|output|console)$/i.test(language))
         block.dataset.language = language;
       else delete block.dataset.language;
-      if (live) { block.querySelector(":scope > .code-copy")?.remove(); continue; }
+      // Copy comes once the block is written, and only for a block that
+      // shows its one code alone (`copiedCode`).
+      if (live || !copiedCode(block)) { block.querySelector(":scope > .code-copy")?.remove(); continue; }
       if (block.querySelector(":scope > .code-copy")) continue;
       const button = document.createElement("button");
       button.type = "button";
@@ -393,8 +378,9 @@ export function Markdown(props: {
         }
         const button = target.closest<HTMLButtonElement>(".code-copy");
         if (button && host.contains(button)) {
-          const code = button.parentElement?.querySelector("code");
-          void navigator.clipboard.writeText(code ? writtenCode(code) : "").then(() => {
+          const code = button.parentElement ? copiedCode(button.parentElement) : undefined;
+          if (!code?.checkVisibility()) return;
+          void navigator.clipboard.writeText(shownCode(code)).then(() => {
             if (disposed || !button.isConnected) return;
             button.textContent = t("Copied");
             button.classList.add("done");

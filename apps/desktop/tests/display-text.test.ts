@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { Item, ItemData } from "@haarness/sdk";
 import {
   codeBlockShows,
+  hasCodeCharacters,
   shortenSpelled,
   spelledCharacter,
   spelledOutParts,
@@ -197,6 +198,16 @@ test("a reply's code block shows its control characters and direction controls a
     assert.deepEqual(spelledOutParts(text, codeBlockShows), [{ text, code: false }]);
   for (const text of ["\\u{1B}", "\\u{110000}", "\\u{1b}", "u{1B}", "\\u{}", "\\u{1B}x"])
     assert.equal(spelledCharacter(text), text === "\\u{1B}" ? "\u001b" : undefined, text);
+});
+
+test("the quick test for a code block's characters finds exactly the ones it shows as codes", () => {
+  for (let code = 0; code <= 0x10ffff; code++) {
+    if (code >= 0xd800 && code <= 0xdfff) continue;
+    const character = String.fromCodePoint(code);
+    if (hasCodeCharacters(character) !== codeBlockShows(code)) assert.fail(`U+${code.toString(16).toUpperCase()}`);
+  }
+  assert.equal(hasCodeCharacters("const a = 1;\n\tb 👩\u200d👧"), false);
+  assert.equal(hasCodeCharacters("ok\u001b[0m"), true);
 });
 
 test("every kind of row target shows what would not show as a code", () => {

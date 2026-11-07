@@ -223,6 +223,12 @@ export const codeBlockShows = (code: number) =>
   code === 0x200f ||
   turnsDirection(code);
 
+/** Whether `text` holds a character `codeBlockShows` names: one test over
+ * the whole of it, so code without any is not walked character by
+ * character. */
+export const hasCodeCharacters = (text: string) =>
+  /[\0-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(text);
+
 /** The character a code such as `\u{1B}` stands for, or undefined for
  * anything else. */
 export function spelledCharacter(text: string): string | undefined {

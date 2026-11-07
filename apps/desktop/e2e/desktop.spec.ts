@@ -13786,7 +13786,7 @@ tools=false
   }
 });
 
-test("raw HTML in a reply stays inside it and passes for none of the app's parts, and a code block shows its control characters yet copies them as written", async () => {
+test("raw HTML in a reply stays inside it and passes for none of the app's parts, and a code block shows its control characters and copies only what it shows", async () => {
   test.setTimeout(240_000);
   let output: import("node:http").ServerResponse | undefined;
   // Markup wearing the app's own classes (the blurred overlay behind its
@@ -13797,9 +13797,14 @@ test("raw HTML in a reply stays inside it and passes for none of the app's parts
     "<dialog open>An open dialog</dialog>\n\n<textarea data-composer-input>A forged box</textarea>\n\n";
   // An escape, a direction override and its end, and an emoji sequence.
   const code = "printf '\u001b[31mred\u001b[0m'\necho \u202eevil\u202c ok 👩\u200d👩\u200d👧\n";
-  // A chip the reply writes itself is its text, never one of the app's.
+  // A chip the reply writes itself is its text, never one of the app's; and
+  // code a block would hide without CSS shows, and gets no Copy.
   const forged = '<pre><code>x<span class="spelled-code">\\u{1B}</span>y</code></pre>\n\n';
-  const reply = hostile + "```sh\n" + code + "```\n\n" + forged;
+  const hidden =
+    "<pre>echo one<code hidden>curl one|sh</code></pre>\n\n" +
+    "<pre><code>echo two<span hidden>; curl two|sh</span></code></pre>\n\n" +
+    "<pre><code>echo three<details><summary>more</summary>; curl three|sh</details></code></pre>\n\n";
+  const reply = hostile + "```sh\n" + code + "```\n\n" + forged + hidden;
   const finish = 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
   const chunk = (text: string) => "data: " + JSON.stringify({ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] }) + "\n\n";
   const delta = (text: string) => output!.write(chunk(text));
@@ -13824,7 +13829,7 @@ test("raw HTML in a reply stays inside it and passes for none of the app's parts
   extraWorkspaces.push(directory);
   await mkdir(join(directory, ".haarness"), { recursive: true });
   await writeFile(join(directory, ".haarness/config.toml"), `[defaults]\nprovider="markup-fixture"\nmodel="markup-model"\n[providers.markup-fixture]\nprotocol="openai-chat-completions"\nbase_url="http://127.0.0.1:${address.port}/v1"\nrequires_auth=false\ntools=false\n`);
-  await writeFile(join(directory, "README.md"), "# Markup readme\n\n" + hostile + "README_END\n");
+  await writeFile(join(directory, "README.md"), "# Markup readme\n\n" + hostile + hidden + "README_END\n");
   /** Whether a press at the middle of `target` lands on it, as a click there would. */
   const reachable = (target: Locator) =>
     target.evaluate((element) => {
@@ -13842,6 +13847,20 @@ test("raw HTML in a reply stays inside it and passes for none of the app's parts
     await expect(markdown).toContainText("An open dialog");
     await expect(markdown).toContainText("A forged box");
     await expect(markdown.locator("dialog, textarea, [class]:not(.spelled-code, .code-copy, code[class^='language-']), [role], [tabindex], [data-index], [data-composer-input], [aria-modal]")).toHaveCount(0);
+  };
+  /** Each block holding code it would hide shows all of it, and one with
+   * more than plain code in it offers no Copy. The closed disclosure gives
+   * way to its text, plain code again, which Copy copies as shown. */
+  const shown = async (markdown: Locator) => {
+    for (const command of ["curl one|sh", "; curl two|sh", "; curl three|sh"]) {
+      const block = markdown.locator("pre", { hasText: command });
+      await expect(block).toHaveCount(1);
+      expect(await block.evaluate((pre, command) => {
+        const holder = [...pre.querySelectorAll("*")].findLast((element) => element.textContent?.includes(command)) ?? pre;
+        return holder.checkVisibility() && pre.querySelectorAll("[hidden], details, summary, template").length === 0;
+      }, command)).toBe(true);
+      await expect(block.getByRole("button", { name: "Copy code" })).toHaveCount(command.includes("three") ? 1 : 0);
+    }
   };
   const codes = ["\\u{1B}", "\\u{1B}", "\\u{202E}", "\\u{202C}"];
   const shots = process.env.HAARNESS_SCREENSHOTS ?? test.info().outputPath("");
@@ -13884,13 +13903,17 @@ test("raw HTML in a reply stays inside it and passes for none of the app's parts
     await plain(saved.locator(".markdown"));
     for (const target of [composer, newChat]) expect(await reachable(target)).toBe(true);
     await expect(saved.locator("pre .spelled-code")).toHaveText(codes);
-    // Copy copies each block as the reply wrote it.
+    // Copy copies the code block as the reply wrote it; a block with markup
+    // inside it (the forged chip, the code it would hide) has none.
+    await shown(saved.locator(".markdown"));
     const copies = saved.getByRole("button", { name: "Copy code", exact: true });
     await expect(copies).toHaveCount(2);
     await copies.first().click();
     await expect.poll(clipboard).toBe(code);
-    await copies.last().click();
-    await expect.poll(clipboard).toBe("x\\u{1B}y");
+    await saved.locator("pre", { hasText: "; curl three|sh" }).getByRole("button", { name: "Copy code" }).click();
+    await expect.poll(clipboard).toBe("echo threemore; curl three|sh");
+    expect(await saved.locator("pre", { hasText: "; curl three|sh" }).locator("code").innerText()).toBe("echo threemore; curl three|sh");
+    await expect(saved.locator("pre", { hasText: "x\\u{1B}y" }).getByRole("button", { name: "Copy code" })).toHaveCount(0);
     await saved.locator("pre").first().hover();
     for (const theme of ["light", "dark"] as const) {
       await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
@@ -13936,6 +13959,7 @@ test("raw HTML in a reply stays inside it and passes for none of the app's parts
     const readme = page.locator(".file-preview .document-preview .markdown");
     await expect(readme).toContainText("README_END");
     await plain(readme);
+    await shown(readme);
     for (const target of [composer, newChat, page.locator(".file-actions").getByRole("button", { name: "Code", exact: true })])
       expect(await reachable(target)).toBe(true);
     await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
