@@ -142,23 +142,27 @@ async fn a_cloud_model_whose_output_takes_half_its_window_keeps_the_request_besi
         .unwrap();
     let done = wait_done(&runtime, &turn).await;
     assert_eq!(done.status, TurnStatus::Completed, "{done:?}");
-    let requests = requests.lock().unwrap();
+    let (compactions, kept_request, cut_output) = {
+        let requests = requests.lock().unwrap();
+        let after = after_compaction(&requests);
+        (
+            requests
+                .iter()
+                .filter(|request| is_compaction_request(request))
+                .count(),
+            after.messages.iter().any(|message| {
+                matches!(message, ProviderMessage::Text { role, content } if role == "user" && content == TASK)
+            }),
+            after.messages.iter().any(|message| {
+                matches!(message, ProviderMessage::ToolResult { call_id, output, .. }
+                    if call_id == "read-notes" && output.contains("characters are left out"))
+            }),
+        )
+    };
     // One compaction: what it kept fits, so the turn does not compact again.
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| is_compaction_request(request))
-            .count(),
-        1
-    );
-    let after = after_compaction(&requests);
-    assert!(after.messages.iter().any(|message| {
-        matches!(message, ProviderMessage::Text { role, content } if role == "user" && content == TASK)
-    }));
-    assert!(after.messages.iter().any(|message| {
-        matches!(message, ProviderMessage::ToolResult { call_id, output, .. }
-            if call_id == "read-notes" && output.contains("characters are left out"))
-    }));
+    assert_eq!(compactions, 1);
+    assert!(kept_request);
+    assert!(cut_output);
     let items = runtime.items(thread.id, None).await.unwrap();
     assert!(items.iter().any(|item| matches!(
         &item.data,
