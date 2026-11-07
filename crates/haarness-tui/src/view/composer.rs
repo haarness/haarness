@@ -1017,7 +1017,9 @@ fn child_lifecycle(app: &App, compact: bool) -> (String, Color) {
         ),
         "done" => (app.language.text("completed").into(), app.theme.success()),
         "failed" => (app.language.text("failed").into(), app.theme.danger),
-        "cancelled" | "interrupted" => (app.language.text("cancelled").into(), app.theme.muted),
+        "cancelled" => (app.language.text("cancelled").into(), app.theme.muted),
+        // Haarness stopped it before it finished, as its delegation's row says.
+        "interrupted" => (app.language.text("didn't finish").into(), app.theme.muted),
         state => (state.to_owned(), app.theme.muted),
     }
 }

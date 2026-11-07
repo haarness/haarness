@@ -4364,7 +4364,9 @@ impl App {
                 "waiting_permission" => "needs approval".into(),
                 "done" => "completed".into(),
                 "failed" => "failed".into(),
-                "cancelled" | "interrupted" => "cancelled".into(),
+                "cancelled" => "cancelled".into(),
+                // Haarness stopped it before it finished, as its row says.
+                "interrupted" => self.language.text("didn't finish").into(),
                 "running" => task.elapsed_seconds().map_or_else(
                     || "running".into(),
                     |seconds| format!("running · {seconds}s"),

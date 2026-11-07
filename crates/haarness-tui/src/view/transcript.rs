@@ -2084,11 +2084,12 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         "done" => Some("done"),
                         "failed" => Some("failed"),
                         // Haarness stopped the call before it finished: the
-                        // row says so as any call's does.
-                        "cancelled" | "interrupted" if result_status == Some("unfinished") => {
-                            Some("unfinished")
-                        }
-                        "cancelled" | "interrupted" => Some("cancelled"),
+                        // row says so as any call's does. Only Haarness
+                        // leaves a child interrupted (a restart, say), one in
+                        // the background too.
+                        "cancelled" if result_status == Some("unfinished") => Some("unfinished"),
+                        "interrupted" => Some("unfinished"),
+                        "cancelled" => Some("cancelled"),
                         _ => None,
                     }
                 } else {

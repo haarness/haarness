@@ -18,8 +18,9 @@ real, isolated workspace daemon runs against it:
    a result saying it did not finish.
 4. a delegation a crash cut off: an echo chat's subagent runs a `sleep` when
    the daemon is killed. Its `task` call gets the same result, and the TUI,
-   opened on the chat in a private tmux server, shows the row as one that
-   did not finish, in the dark and light palettes, not as a failure.
+   opened on the chat in a private tmux server, shows the row and the agents
+   panel entry as one that did not finish, in the dark and light palettes,
+   not as a failure or a cancel.
 
 Usage: python3 scripts/test-unfinished-calls.py   (HAARNESS_BIN picks the binary;
 HAARNESS_E2E_KEEP=1 keeps the fixture folder; UNFINISHED_CALLS_EVIDENCE names a
@@ -367,8 +368,12 @@ try:
         at = next(index for index, line in enumerate(lines) if "task !tool bash" in line)
         assert "⊘" in lines[at] and "failed" not in lines[at] and "✗" not in lines[at], lines[at]
         assert "└ didn't finish" in lines[at + 1], lines[at + 1]
+        # The sidebar's agents panel uses the row's words.
+        panel = [line[78:] for line in pane().splitlines()]
+        assert any("didn't finish" in line for line in panel), panel
+        assert not any("cancelled" in line or "failed" in line for line in panel), panel
     config.unlink()
-    print("PASS a delegation a crash cut off reads in the TUI that it did not finish", flush=True)
+    print("PASS a delegation a crash cut off reads in the TUI's row and panel that it did not finish", flush=True)
 
     assert not REFUSED, REFUSED
     print("PASS no request left a tool call without its result", flush=True)
