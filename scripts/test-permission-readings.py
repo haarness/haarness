@@ -50,7 +50,8 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    the next line after a backslash, meets the rules (`cat <<EOF; rm -rf victim` against an `rm *` deny) as a
    command of the line, so an allowed `cat *` under `"*": "ask"` does not open `cat <<EOF ; touch x`; plain
    lines of that shape run, `cat<<EOF; echo x` too, and one with no blank on either side of its operator
-   (`cat<<EOF;touch x`) asks.
+   (`cat<<EOF;touch x`) asks, as does one whose document a `cd` opens (`cd sub <<EOF ; touch ../x`), which
+   an `rm *` deny refuses with an `rm` after it.
 18. quoted_lines: a double-quoted script that `bash -c`, `sh -c` or `eval` runs keeps its line breaks, so an
    `rm *` deny refuses the `rm` on its own line of it.
 
@@ -638,6 +639,16 @@ def case_heredoc_line():
         assert (denied / 'victim').is_dir(), f'{command!r} deleted victim'
     passed('an rm deny refuses the rm after a here-document delimiter on its line, written against it or not, '
            "on the next line after a backslash, after a loop's document, and in the document a shell runs")
+    # A `cd` reads no document, and no command of the line is there to read what follows its operator for.
+    (denied / 'sub').mkdir(exist_ok=True)
+    (denied / 'victim').mkdir(exist_ok=True)
+    try:
+        output = bash(env, denied, 'cd sub <<EOF ; rm -rf ../victim\nbody\nEOF')
+    finally:
+        stop(env, denied)
+    assert "permission rule 'bash:rm *'" in output, output
+    assert (denied / 'victim').is_dir(), 'the rm after a document a cd opens deleted victim'
+    passed('an rm deny refuses a line whose here-document a cd opens, with an rm after its operator')
     asked = project('heredoc-line-ask', {**REVIEW, 'permission': {'bash': {'*': 'ask', 'cat *': 'allow'}}})
     try:
         output = bash(env, asked, 'cat <<EOF ; touch made.txt\nbody\nEOF', code=1)
@@ -657,10 +668,15 @@ def case_heredoc_line():
         output = bash(env, folder, 'cat<<EOF;touch made.txt\nbody\nEOF', code=1)
         assert 'Stopped:' in output, output
         assert not (folder / 'made.txt').exists(), 'a line whose delimiter could not be set apart ran unasked'
+        (folder / 'sub').mkdir(exist_ok=True)
+        output = bash(env, folder, 'cd sub <<EOF ; touch ../made.txt\nbody\nEOF', code=1)
+        assert 'Stopped:' in output, output
+        assert not (folder / 'made.txt').exists(), 'the command after a document a cd opens ran unasked'
     finally:
         stop(env, folder)
     passed('a here-document line with a command after its delimiter runs, also with no blank before `<<`, a '
-           'redirect against the delimiter writes, and a delimiter with no blank on either side of its operator asks')
+           'redirect against the delimiter writes, and a delimiter with no blank on either side of its operator, '
+           'or a document a cd opens, asks')
 
 
 
