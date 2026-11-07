@@ -70,6 +70,8 @@ const MAX_COPIES_BYTES: u64 = 1024 * 1024 * 1024;
 const COPIES_GRACE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// What the disk keeps free beyond a new copy.
 const FREE_SPACE_MARGIN: u64 = 512 * 1024 * 1024;
+/// The file in a set of [`Copies`] naming the paths its undo's steps left.
+const LEFT_RECORD: &str = "left.json";
 
 #[derive(Debug, Clone, Copy)]
 struct BatchLimits {
@@ -563,6 +565,9 @@ impl SqliteSnapshotStore {
         let _copying = step.and_then(|(backup, _)| self.copies.set(backup).map(Copying::start));
         // The backup's entries, read only once a large file needs them.
         let mut backup: Option<BTreeMap<String, ManifestEntry>> = None;
+        // The paths earlier steps of this undo left, read only once a file
+        // is not as this step's start has it.
+        let mut left: Option<BTreeSet<String>> = None;
 
         let mut prepared = Vec::with_capacity(changed.len());
         let mut skipped = Vec::new();
@@ -591,28 +596,30 @@ impl SqliteSnapshotStore {
                 .flatten()
                 .any(ManifestEntry::is_large);
             let mut expected_here = optional_entry_matches(from, actual.as_ref());
-            // A file an earlier step of this undo left as it was, for its
-            // size then or now, is as the backup has it, not as this step's
-            // start does.
+            // A file an earlier step of this undo left as it was, or a step
+            // forward took to the backup's content, is as the backup has it,
+            // not as this step's start does. Only the steps' own record says
+            // which: the first step's backup is the folder as it is, so a
+            // file matching it may well hold a person's (or another chat's)
+            // later edit, which is a conflict as it always was.
+            let mut left_before = false;
             let mut left_earlier = false;
-            if !expected_here
-                && !wanted
-                && let Some((backup_id, _)) = step
-            {
-                left_earlier = self
-                    .backup_entry(&mut backup, backup_id, path)?
-                    .is_some_and(|entry| {
-                        (large || entry.is_large())
-                            && actual
-                                .as_ref()
-                                .is_some_and(|actual| entries_match_live(&entry, actual))
-                    });
-                expected_here = left_earlier;
+            if !expected_here && let Some((backup_id, _)) = step {
+                left_before = self.copies.left(&mut left, backup_id).contains(path);
+                if left_before && !wanted {
+                    left_earlier = optional_entry_matches(
+                        self.backup_entry(&mut backup, backup_id, path)?.as_ref(),
+                        actual.as_ref(),
+                    );
+                    expected_here = left_earlier;
+                }
             }
             if !expected_here {
-                // One already as desired needs nothing, as a redo finds a
-                // large file its undo left.
-                if large && wanted {
+                // One already as desired needs nothing: a file an earlier
+                // step left there, or, forward, a large file as its undo
+                // left it.
+                let forward = step.is_none_or(|(_, kind)| kind != UndoStep::Undo);
+                if wanted && (left_before || (large && forward)) {
                     settled.push(path.clone());
                     continue;
                 }
@@ -709,6 +716,14 @@ impl SqliteSnapshotStore {
                 desired: target,
                 copy,
             });
+        }
+        // What this step leaves is on record before anything changes, so
+        // the later steps of the undo, and putting this one back, meet it
+        // as left, not as a later edit.
+        if let Some((backup_id, _)) = step
+            && !skipped.is_empty()
+        {
+            self.copies.note_left(backup_id, &skipped)?;
         }
 
         let mut touched = Vec::with_capacity(prepared.len());
@@ -1465,8 +1480,9 @@ impl Drop for Copying {
 /// of the same undo (a redo, or putting back a step that could not be
 /// recorded) can bring them back. Beside the database in the data folder,
 /// one folder per pending undo, named by its backup checkpoint, holds each
-/// file by the SHA-256 of its content. A file over [`MAX_COPY_BYTES`] is not
-/// copied, and all of them together stay within [`MAX_COPIES_BYTES`].
+/// file by the SHA-256 of its content, and the record of the paths its steps
+/// left ([`LEFT_RECORD`]). A file over [`MAX_COPY_BYTES`] is not copied, and
+/// all of them together stay within [`MAX_COPIES_BYTES`].
 #[derive(Debug, Clone)]
 struct Copies {
     root: PathBuf,
@@ -1584,6 +1600,56 @@ impl Copies {
             return Err(not_kept);
         }
         Ok(target)
+    }
+
+    /// The paths the steps of the undo backed up by `backup` left as they
+    /// were, or took forward to the backup's content, read once into
+    /// `left`. None for an undo whose first step is still to come, or whose
+    /// record cannot be read.
+    fn left<'a>(
+        &self,
+        left: &'a mut Option<BTreeSet<String>>,
+        backup: &str,
+    ) -> &'a BTreeSet<String> {
+        left.get_or_insert_with(|| {
+            self.set(backup)
+                .and_then(|set| fs::read(set.join(LEFT_RECORD)).ok())
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Add `paths` to [`Self::left`]'s record for the undo backed up by
+    /// `backup`, flushed to disk with its folder.
+    fn note_left(&self, backup: &str, paths: &[String]) -> CoreResult<()> {
+        let Some(set) = self.set(backup) else {
+            return Ok(());
+        };
+        let mut left = None;
+        let mut record = self.left(&mut left, backup).clone();
+        let known = record.len();
+        record.extend(paths.iter().cloned());
+        if record.len() == known {
+            return Ok(());
+        }
+        let text = serde_json::to_vec(&record).map_err(storage)?;
+        fs::create_dir_all(&set).map_err(io_error)?;
+        let partial = set.join(format!(".{}.partial", uuid::Uuid::now_v7()));
+        let written = File::create(&partial)
+            .and_then(|mut file| {
+                file.write_all(&text)?;
+                file.sync_all()
+            })
+            .and_then(|()| fs::rename(&partial, set.join(LEFT_RECORD)))
+            .and_then(|()| sync_folder(&set))
+            .and_then(|()| sync_folder(&self.root));
+        if let Err(error) = written {
+            let _ = fs::remove_file(&partial);
+            return Err(CoreError::Storage(format!(
+                "cannot record the files an undo left: {error}"
+            )));
+        }
+        Ok(())
     }
 
     /// The bytes all the sets hold.
@@ -3260,8 +3326,135 @@ mod tests {
     /// The copies kept for the undo backed up by `backup`.
     fn copies_of(store: &SqliteSnapshotStore, backup: &str) -> usize {
         fs::read_dir(store.copies.set(backup).unwrap())
-            .map(Iterator::count)
+            .map(|files| {
+                files
+                    .flatten()
+                    .filter(|file| file.file_name() != LEFT_RECORD)
+                    .count()
+            })
             .unwrap_or(0)
+    }
+
+    /// What a person (or another chat) does to the folder between a turn
+    /// and its undo, in [`a_later_edit_stops_the_undo_step_that_meets_it`].
+    #[derive(Debug, Clone, Copy)]
+    enum LaterEdit {
+        /// The turn makes a large file; the person appends to it.
+        AppendedToMade,
+        /// The turn grows a file past the limit; the person trims it.
+        TrimmedGrown,
+        /// The turn edits a small file; the person pastes 3 MiB into it.
+        PastedIntoSmall,
+        /// The turn rewrites a large file; the person appends to it.
+        AppendedToLarge,
+        /// One chat's turn makes a large file; another chat rewrites it.
+        RewrittenByAnotherChat,
+        /// The turn rewrites a large file; the person puts it back by hand.
+        PutBackByHand,
+    }
+
+    impl LaterEdit {
+        /// The file, what it holds before the turn and after it, and the
+        /// later edit.
+        fn contents(self) -> (&'static str, Option<Vec<u8>>, Vec<u8>, Vec<u8>) {
+            let appended = |byte| [large(byte), b"edit\n".to_vec()].concat();
+            match self {
+                Self::AppendedToMade => ("big.bin", None, large(1), appended(1)),
+                Self::TrimmedGrown => (
+                    "big.bin",
+                    Some(b"v0\n".to_vec()),
+                    large(1),
+                    b"trimmed\n".to_vec(),
+                ),
+                Self::PastedIntoSmall => {
+                    ("s.txt", Some(b"s0\n".to_vec()), b"s1\n".to_vec(), large(3))
+                }
+                Self::AppendedToLarge => ("big.bin", Some(large(0)), large(1), appended(1)),
+                Self::RewrittenByAnotherChat => ("big.bin", None, large(1), large(2)),
+                Self::PutBackByHand => ("big.bin", Some(large(0)), large(1), large(0)),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_later_edit_stops_the_undo_step_that_meets_it() {
+        for edit in [
+            LaterEdit::AppendedToMade,
+            LaterEdit::TrimmedGrown,
+            LaterEdit::PastedIntoSmall,
+            LaterEdit::AppendedToLarge,
+            LaterEdit::RewrittenByAnotherChat,
+            LaterEdit::PutBackByHand,
+        ] {
+            let (path, start, turn, later) = edit.contents();
+            for second_step in [false, true] {
+                let (guard, store) = fixture();
+                let workspace = guard.0.join("ws");
+                let read = |path: &str| fs::read(workspace.join(path)).ok();
+                if let Some(start) = &start {
+                    fs::write(workspace.join(path), start).unwrap();
+                }
+                fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+                let before = store.capture(ThreadId::new()).await.unwrap().id;
+                fs::write(workspace.join(path), &turn).unwrap();
+                fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+                let mut after = store.capture(ThreadId::new()).await.unwrap().id;
+                // On the second step, a later turn changed only `other.txt`,
+                // and the first step put that back.
+                let mut middle = None;
+                if second_step {
+                    fs::write(workspace.join("other.txt"), "o2\n").unwrap();
+                    middle = Some(after);
+                    after = store.capture(ThreadId::new()).await.unwrap().id;
+                }
+                fs::write(workspace.join(path), &later).unwrap();
+                // As the runtime does: the backup is the folder as it is.
+                let backup = store.capture(ThreadId::new()).await.unwrap().id;
+                let start_of_step = match &middle {
+                    Some(middle) => {
+                        step(&store, &backup, &after, middle, UndoStep::Undo)
+                            .await
+                            .unwrap_or_else(|error| panic!("{edit:?}: {error}"));
+                        assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+                        middle.clone()
+                    }
+                    None => after,
+                };
+
+                let error = step(&store, &backup, &start_of_step, &before, UndoStep::Undo)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(&error, CoreError::Conflict(message) if message.ends_with(path)),
+                    "{edit:?}, second step {second_step}: {error}"
+                );
+                assert_eq!(read(path), Some(later.clone()), "{edit:?}");
+                assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]), "{edit:?}");
+                assert_eq!(copies_of(&store, &backup), 0, "{edit:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_an_undo_step_left_and_a_person_edited_since_stops_the_next_one() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        let [before, middle, after, backup] =
+            two_turns(&store, &workspace, TwoTurns::MadeRewritten).await;
+        let undone = step(&store, &backup, &after, &middle, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert_eq!(undone.skipped, vec!["big.bin"]);
+        let edited = [large(2), b"edit\n".to_vec()].concat();
+        fs::write(workspace.join("big.bin"), &edited).unwrap();
+        let error = step(&store, &backup, &middle, &before, UndoStep::Undo)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Conflict(_)), "{error}");
+        assert_eq!(read("big.bin"), Some(edited));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+        assert_eq!(copies_of(&store, &backup), 0);
     }
 
     /// One step of the undo backed up by `backup`.
@@ -3488,17 +3681,23 @@ mod tests {
         MadeDeleted,
         /// Turn 1 grows it past the limit, turn 2 shrinks it again.
         GrownShrunk,
+        /// Turn 1 grows it past the limit, turn 2 deletes it.
+        GrownDeleted,
     }
 
     impl TwoTurns {
         fn start(self) -> Option<Vec<u8>> {
-            matches!(self, Self::GrownRewritten | Self::GrownShrunk).then(|| b"v0\n".to_vec())
+            matches!(
+                self,
+                Self::GrownRewritten | Self::GrownShrunk | Self::GrownDeleted
+            )
+            .then(|| b"v0\n".to_vec())
         }
 
         fn second(self) -> Option<Vec<u8>> {
             match self {
                 Self::MadeRewritten | Self::GrownRewritten => Some(large(2)),
-                Self::MadeDeleted => None,
+                Self::MadeDeleted | Self::GrownDeleted => None,
                 Self::GrownShrunk => Some(b"v2\n".to_vec()),
             }
         }
@@ -3537,6 +3736,7 @@ mod tests {
             TwoTurns::GrownRewritten,
             TwoTurns::MadeDeleted,
             TwoTurns::GrownShrunk,
+            TwoTurns::GrownDeleted,
         ] {
             let (guard, store) = fixture();
             let workspace = guard.0.join("ws");

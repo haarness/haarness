@@ -7048,6 +7048,11 @@ async fn two_turns_through_a_large_file_are_undone_and_redone_all_the_way() {
             Some("v0\n"),
             serde_json::json!({"name": "write", "arguments": {"path": "big.bin", "content": "v2\n"}}),
         ),
+        (
+            "grown, deleted",
+            Some("v0\n"),
+            serde_json::json!({"name": "bash", "arguments": {"command": "rm big.bin"}}),
+        ),
     ];
     for (scenario, start, second) in scenarios {
         let root =
@@ -7185,6 +7190,245 @@ async fn an_undo_or_redo_step_that_cannot_be_saved_puts_its_large_file_back() {
     assert_eq!(read("other.txt").as_deref(), Some(&b"o2\n"[..]));
     drop(database);
     remove_test_folder(root).await;
+}
+
+/// A server over `runtime`, its address and the token its client sends.
+async fn undo_server(
+    runtime: AgentRuntime,
+    workspace: &std::path::Path,
+) -> (haarness_server::ServerHandle, String, reqwest::Client) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let handle = serve(
+        listener,
+        "undo-token",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime: Arc::new(runtime),
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: workspace.to_path_buf(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base = format!("http://{}/v1", handle.address);
+    let client = reqwest::Client::builder()
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                "Bearer undo-token".parse().unwrap(),
+            );
+            headers
+        })
+        .build()
+        .unwrap();
+    (handle, base, client)
+}
+
+/// A new chat on `base`, by its id.
+async fn undo_chat(client: &reqwest::Client, base: &str) -> String {
+    let thread: Thread = client
+        .post(format!("{base}/threads"))
+        .json(&serde_json::json!({"title": "Undo chat", "provider": "echo", "model": "echo-1"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    thread.id.to_string()
+}
+
+/// A turn of `chat` that makes the tool `calls`, run to the end.
+async fn undo_turn(client: &reqwest::Client, base: &str, chat: &str, calls: serde_json::Value) {
+    let begun: Turn = client
+        .post(format!("{base}/threads/{chat}/turns"))
+        .json(&serde_json::json!({
+            "requestId": uuid::Uuid::now_v7().to_string(),
+            "text": format!("!multi {calls}"),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for _ in 0..1_000 {
+        let turn: Turn = client
+            .get(format!("{base}/turns/{}", begun.id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if !matches!(turn.status, TurnStatus::Queued | TurnStatus::Running) {
+            assert_eq!(turn.status, TurnStatus::Completed, "{calls}");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("turn did not finish");
+}
+
+/// An edit to the folder after a turn: the person's, or another chat's turn
+/// when `None`.
+type LaterEdit = Option<Box<dyn Fn(&std::path::Path)>>;
+
+#[tokio::test]
+async fn undo_answers_conflict_and_changes_nothing_at_a_later_edit_whatever_the_size() {
+    let make = |byte: char| {
+        serde_json::json!({"name": "bash", "arguments": {
+            "command": format!("head -c 2500000 /dev/zero | tr '\\0' {byte} > big.bin")}})
+    };
+    let other = |content: &str| {
+        serde_json::json!({"name": "write", "arguments": {
+            "path": "other.txt", "content": content}})
+    };
+    let append = |path: &str| {
+        let path = path.to_owned();
+        move |workspace: &std::path::Path| {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(workspace.join(&path))
+                .unwrap();
+            std::io::Write::write_all(&mut file, b"edit\n").unwrap();
+        }
+    };
+    let large = "z".repeat(2_500_000);
+    // The file, what it starts as, the turn's change to it, and the later
+    // edit.
+    let scenarios: Vec<(&str, &str, Option<&str>, serde_json::Value, LaterEdit)> = vec![
+        (
+            "made, appended",
+            "big.bin",
+            None,
+            make('a'),
+            Some(Box::new(append("big.bin"))),
+        ),
+        (
+            "grown, trimmed",
+            "big.bin",
+            Some("v0\n"),
+            make('a'),
+            Some(Box::new(|workspace: &std::path::Path| {
+                std::fs::write(workspace.join("big.bin"), "trimmed\n").unwrap();
+            })),
+        ),
+        (
+            "small, pasted into",
+            "s.txt",
+            Some("s0\n"),
+            serde_json::json!({"name": "write", "arguments": {"path": "s.txt", "content": "s1\n"}}),
+            Some(Box::new(|workspace: &std::path::Path| {
+                std::fs::write(workspace.join("s.txt"), vec![b'H'; 3_000_000]).unwrap();
+            })),
+        ),
+        (
+            "large both sides, appended",
+            "big.bin",
+            Some(large.as_str()),
+            make('a'),
+            Some(Box::new(append("big.bin"))),
+        ),
+        (
+            "made, rewritten by another chat",
+            "big.bin",
+            None,
+            make('a'),
+            None,
+        ),
+    ];
+    for (scenario, path, start, change, edit) in scenarios {
+        for second_step in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("haarness-later-edit-{}", uuid::Uuid::now_v7()));
+            let workspace = root.join("ws");
+            tokio::fs::create_dir_all(&workspace).await.unwrap();
+            if let Some(start) = start {
+                std::fs::write(workspace.join(path), start).unwrap();
+            }
+            std::fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+            let (handle, base, client) =
+                undo_server(large_file_fixture(&root, &workspace), &workspace).await;
+            let chat = undo_chat(&client, &base).await;
+            let turn = |calls| undo_turn(&client, &base, &chat, calls);
+            turn(serde_json::json!([change, other("o1\n")])).await;
+            // On the second step, a later turn changed only `other.txt`.
+            if second_step {
+                turn(serde_json::json!([other("o2\n")])).await;
+            }
+            match &edit {
+                Some(edit) => edit(&workspace),
+                None => {
+                    let another = undo_chat(&client, &base).await;
+                    undo_turn(&client, &base, &another, serde_json::json!([make('c')])).await;
+                }
+            }
+            let undo = || {
+                client
+                    .post(format!("{base}/threads/{chat}/revert"))
+                    .json(&serde_json::json!({}))
+                    .send()
+            };
+            if second_step {
+                assert!(undo().await.unwrap().status().is_success(), "{scenario}");
+                assert_eq!(
+                    std::fs::read_to_string(workspace.join("other.txt")).unwrap(),
+                    "o1\n"
+                );
+            }
+            let read = |path: &str| std::fs::read(workspace.join(path)).ok();
+            let (edited, other_before) = (read(path), read("other.txt"));
+            let state = async || {
+                client
+                    .get(format!("{base}/threads/{chat}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<Thread>()
+                    .await
+                    .unwrap()
+                    .revert
+                    .map(|revert| revert.sequence)
+            };
+            let undone_before = state().await;
+
+            let refused = undo().await.unwrap();
+            assert_eq!(
+                refused.status(),
+                reqwest::StatusCode::CONFLICT,
+                "{scenario}"
+            );
+            let body: haarness_protocol::ApiError = refused.json().await.unwrap();
+            assert_eq!(body.code, "conflict", "{scenario}: {}", body.message);
+            assert!(body.message.ends_with(path), "{scenario}: {}", body.message);
+            assert_eq!(read(path), edited, "{scenario}, second step {second_step}");
+            assert_eq!(read("other.txt"), other_before, "{scenario}");
+            assert_eq!(
+                state().await,
+                undone_before,
+                "{scenario}: the undo state stays"
+            );
+            // Nor does the next message lose the edit.
+            turn(serde_json::json!([other("o3\n")])).await;
+            assert_eq!(read(path), edited, "{scenario}, second step {second_step}");
+            handle.shutdown().await.unwrap();
+            remove_test_folder(root).await;
+        }
+    }
 }
 
 #[tokio::test]
