@@ -193,6 +193,9 @@ CORPUS = [
     'while read -r l; do echo "$l"; done <<EOF ; rm -rf victim\nbody\nEOF', 'bash <<EOF ; true\nrm -rf victim\nEOF',
     'cat <<EOF ; echo ../outside/secret\nbody\nEOF', 'cat<<EOF; ls\nbody\nEOF', 'python3 - <<EOF; ls\nprint(1)\nEOF',
     'git commit -F - <<EOF; git push --force\nmsg\nEOF', 'cat << -EOF; true\nbody\n-EOF\nrm -rf victim',
+    # A double-quoted script over several lines
+    'bash -c "true\nrm -rf victim"', 'bash -c "set -e\ncd src\nls"', 'git commit -m "fix: the thing\n\nBody line."',
+    'eval "true\nrm -rf ~/x"', 'echo "a\nb" > notes.txt',
 ]
 
 

@@ -4456,7 +4456,28 @@ fn unquote(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
                 .unwrap_or_default();
             (ansi_c(inner), true)
         }
-        "command_name" | "concatenation" | "string" | "translated_string" => {
+        // The parser leaves a string's line breaks out of its parts: they are
+        // its text too, so `bash -c "true<line feed>rm -rf x"` runs two
+        // commands.
+        "string" => {
+            let mut value = String::new();
+            let mut whole = true;
+            let mut at = node.start_byte();
+            for index in 0..node.child_count() {
+                let Some(child) = node.child(index) else {
+                    continue;
+                };
+                value.push_str(source.get(at..child.start_byte()).unwrap_or_default());
+                at = child.end_byte();
+                if child.is_named() {
+                    let (part, complete) = unquote(child, source);
+                    value.push_str(&part);
+                    whole &= complete;
+                }
+            }
+            (value, whole)
+        }
+        "command_name" | "concatenation" | "translated_string" => {
             let mut value = String::new();
             let mut whole = true;
             for index in 0..node.named_child_count() {
@@ -7659,6 +7680,43 @@ mod readings {
     }
 
     #[test]
+    fn a_double_quoted_script_keeps_its_line_breaks() {
+        let workspace = workspace();
+        let home = analyze("rm -rf ~/x", &workspace).external_dirs;
+        for command in [
+            "bash -c \"true\nrm -rf ~/x\"",
+            "bash -c \"true\r\nrm -rf ~/x\"",
+            "sh -c \"\nrm -rf ~/x\n\"",
+            "bash -c \"set -e\n  rm -rf ~/x\"",
+            "eval \"true\nrm -rf ~/x\"",
+        ] {
+            let analysis = analyze(command, &workspace);
+            assert!(
+                analysis
+                    .patterns
+                    .iter()
+                    .any(|pattern| pattern.trim() == "rm -rf ~/x"),
+                "{command:?}: {:?}",
+                analysis.patterns
+            );
+            assert!(
+                home.iter().all(|dir| analysis.external_dirs.contains(dir)),
+                "{command:?}"
+            );
+        }
+        // A message's lines are its own text, and nothing in it runs.
+        let message = analyze("git commit -m \"fix: a\n\nrm -rf ~/x\"", &workspace);
+        assert!(message.external_dirs.is_empty(), "{message:?}");
+        assert!(
+            message
+                .patterns
+                .contains(&"git commit -m fix: a\n\nrm -rf ~/x".to_owned()),
+            "{:?}",
+            message.patterns
+        );
+    }
+
+    #[test]
     fn plain_commands_read_no_more_than_they_say() {
         for command in [
             "git status --short",
@@ -8858,7 +8916,7 @@ mod backslash_lines {
         // text is read from the line as written.
         assert_eq!(written("echo 'a\n\\rm x'"), vec!["echo 'a\n\\rm x'"]);
         assert_eq!(readings("echo 'a\n\\rm x'"), vec!["echo a\n\\rm x"]);
-        assert_eq!(readings("echo \"a\n\\rm x\""), vec!["echo a\\rm x"]);
+        assert_eq!(readings("echo \"a\n\\rm x\""), vec!["echo a\n\\rm x"]);
         for command in [
             "echo 'a\n\\rm x'",
             "echo \"a\n\\rm x\"",

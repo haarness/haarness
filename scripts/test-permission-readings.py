@@ -49,11 +49,13 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 17. heredoc_line: what follows a here-document's delimiter on its line, written against it or not, meets the
    rules (`cat <<EOF; rm -rf victim` against an `rm *` deny), plain lines of that shape run, and one whose
    delimiter cannot be set apart (`cat<<EOF; touch x`) asks.
+18. quoted_lines: a double-quoted script that `bash -c`, `sh -c` or `eval` runs keeps its line breaks, so an
+   `rm *` deny refuses the `rm` on its own line of it.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
 toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always,
-workdir_home, wrappers, trap, owners_and_dots, cd_pipeline, auto_deletions, cdpath, heredoc_line). No model is
+workdir_home, wrappers, trap, owners_and_dots, cd_pipeline, auto_deletions, cdpath, heredoc_line, quoted_lines). No model is
 called; nothing outside the fixture is touched.
 """
 import grp
@@ -649,12 +651,30 @@ def case_heredoc_line():
            'writes, and a delimiter with no blank on either side of its operator asks')
 
 
+
+def case_quoted_lines():
+    """A double-quoted script keeps its line breaks: each line is a command of its own."""
+    _, env = environment('quoted-lines')
+    denied = project('quoted-lines', {'permission': {'bash': {'rm *': 'deny'}}})
+    for command in ['bash -c "true\nrm -rf victim"', 'sh -c "set -e\n  rm -rf victim\n"',
+                    'eval "true\nrm -rf victim"']:
+        (denied / 'victim').mkdir(exist_ok=True)
+        try:
+            output = bash(env, denied, command)
+        finally:
+            stop(env, denied)
+        assert "is denied by permission rule 'bash:rm *'" in output, (command, output)
+        assert (denied / 'victim').is_dir(), f'{command!r} deleted victim'
+    passed('an rm deny refuses the rm on its own line of a double-quoted script that bash, sh or eval runs')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
          'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
          'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always,
          'workdir_home': case_workdir_home, 'wrappers': case_wrappers, 'trap': case_trap,
          'owners_and_dots': case_owners_and_dots, 'cd_pipeline': case_cd_pipeline,
-         'auto_deletions': case_auto_deletions, 'cdpath': case_cdpath, 'heredoc_line': case_heredoc_line}
+         'auto_deletions': case_auto_deletions, 'cdpath': case_cdpath, 'heredoc_line': case_heredoc_line,
+         'quoted_lines': case_quoted_lines}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
