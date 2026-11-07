@@ -1031,6 +1031,11 @@ impl<'a> Remote<'a> {
                 result["permissions"] = json!(permissions);
                 return Ok((result, true));
             }
+            // The deadline passed during these reads: the turn as just read
+            // is the answer, not another round of reads after it.
+            if Instant::now() >= deadline {
+                return Ok((result, true));
+            }
             last = result;
             updates.wait(deadline, &self.cloud.cancel).await;
         }

@@ -57,6 +57,8 @@ struct Data {
     silent_history: bool,
     /// How long every runtime request takes to answer.
     runtime_delay: std::time::Duration,
+    /// How long a read of the pending approvals takes, on top.
+    permissions_delay: std::time::Duration,
 }
 type Shared = Arc<Mutex<Data>>;
 fn agent(d: &Data) -> Value {
@@ -93,10 +95,13 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
             d.requests
                 .push((method.clone(), format!("{path}?{query}"), body.clone()));
         }
-        (
-            silent,
-            path.starts_with("/runtime/").then_some(d.runtime_delay),
-        )
+        let delay = d.runtime_delay
+            + if path == "/runtime/v1/permissions" {
+                d.permissions_delay
+            } else {
+                std::time::Duration::ZERO
+            };
+        (silent, path.starts_with("/runtime/").then_some(delay))
     };
     match silent {
         (true, _) => return std::future::pending().await,
@@ -1697,4 +1702,30 @@ async fn an_ended_turn_whose_history_goes_unanswered_says_only_that() {
     assert_eq!(result["status"], "completed");
     let message = result["message"].as_str().unwrap();
     assert!(!message.contains("goes on"), "{result}");
+}
+
+#[tokio::test]
+async fn reads_that_run_past_the_deadline_end_the_wait_without_another_round() {
+    use std::time::Duration as Wall;
+    let f = Fixture::new(true).await;
+    {
+        let mut d = f.data.lock().unwrap();
+        d.running_turn = true;
+        // The approvals read starts before the deadline and ends after it.
+        d.permissions_delay = Wall::from_millis(1500);
+    }
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let (result, took) = answered_within(
+        Wall::from_secs(10),
+        cloud.workspace(json!({"action":"wait","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN,"timeoutSeconds":1})),
+    )
+    .await;
+    let result = result.unwrap();
+    assert!(took < Wall::from_secs(3), "{took:?}");
+    assert_eq!(result["status"], "running");
+    assert!(result["messages"]["items"].is_array(), "{result}");
+    // The turn read that checks it before the wait and the one poll: no
+    // further poll once the approvals read ran past the deadline.
+    assert_eq!(f.count("GET", &format!("/runtime/v1/turns/{TURN}")), 2);
+    assert_eq!(f.count("GET", "/runtime/v1/permissions"), 1);
 }
