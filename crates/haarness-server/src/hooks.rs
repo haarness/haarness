@@ -724,6 +724,7 @@ struct HookOutcome {
 impl From<HookOutcome> for HookDecision {
     fn from(outcome: HookOutcome) -> Self {
         Self {
+            failure: None,
             block: outcome.block,
             context: outcome.context,
             permission: outcome.permission,

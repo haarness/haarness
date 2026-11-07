@@ -2308,7 +2308,14 @@ impl Tool for WorkflowTool {
                 self.coordinator
                     .end_launch_wait(run_id, claimed, terminal)
                     .await;
-                workflow_run_output(&format!("Workflow {run_id}"), &result, None).await
+                let mut output =
+                    workflow_run_output(&format!("Workflow {run_id}"), &result, None).await?;
+                // This wait took the result the chat that started the run was
+                // owed: no message of its end follows (see `end_launch_wait`).
+                if claimed && terminal {
+                    output.metadata["handedOver"] = json!(true);
+                }
+                Ok(output)
             }
             "inspect" => {
                 let run_id = workflow_run_id(input, "inspect")?;
@@ -6766,6 +6773,96 @@ mod tests {
         assert!(!text.contains("private/workspace"), "{text}");
         assert!(!text.contains("large child transcript"), "{text}");
         assert!(!text.contains("return await agent"), "{text}");
+    }
+
+    /// The launching chat's `wait` that takes a workflow's result says so:
+    /// that chat gets no message of the run's end. A wait on a run whose
+    /// result was already sent to the chat, or from another chat, takes
+    /// nothing.
+    #[tokio::test]
+    async fn a_workflow_wait_says_when_it_took_the_result() {
+        let executor = WorkflowExecutor::new(ExecutorConfig::default());
+        if !executor.capability().executable {
+            eprintln!("skipping a workflow fixture: Bun is unavailable");
+            return;
+        }
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-workflow-wait-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let store = Arc::new(haarness_store::SqliteStore::in_memory().unwrap());
+        let events = haarness_core::EventBus::new(32);
+        let runtime = Arc::new(haarness_core::AgentRuntime::new(
+            store.clone(),
+            Arc::new(haarness_core::StaticProviderRegistry::new(Vec::new())),
+            Arc::new(haarness_core::EmptyToolRegistry),
+            events.clone(),
+        ));
+        let host = crate::WorkflowRuntimeAdapter::new();
+        host.attach(&runtime);
+        let tool = &WorkflowTool {
+            coordinator: Arc::new(WorkflowCoordinator::new(
+                store,
+                Arc::new(WorkflowCatalog::for_workspace(&workspace)),
+                executor,
+                host,
+                events,
+                workspace.clone(),
+                true,
+            )),
+        };
+        let chat = runtime
+            .create_thread(haarness_protocol::CreateThreadRequest::default())
+            .await
+            .unwrap()
+            .id;
+        let mut launcher = tool_context(&workspace);
+        launcher.thread_id = chat;
+        let context = &launcher;
+        let source = "import { workflow } from \"@haarness-ai/plugin\"\nexport default workflow({\n  name: \"brief\",\n  async run() {\n    await new Promise((done) => setTimeout(done, 300))\n    return \"done\"\n  },\n})\n";
+        let start = || async move {
+            tool.execute(
+                json!({"action": "start", "source": source}),
+                context.clone(),
+            )
+            .await
+            .unwrap()
+            .metadata["runID"]
+                .clone()
+        };
+        let wait = |run: Value, context: ToolContext| async move {
+            tool.execute(json!({"action": "wait", "runID": run}), context)
+                .await
+                .unwrap()
+                .metadata
+        };
+
+        let first = start().await;
+        let waited = wait(first.clone(), context.clone()).await;
+        let id = |run: &Value| WorkflowId(uuid::Uuid::parse_str(run.as_str().unwrap()).unwrap());
+        assert_eq!(
+            waited["workflowStatus"],
+            "completed",
+            "{:?}",
+            tool.coordinator.get(id(&first), None).await.unwrap().error
+        );
+        assert_eq!(waited["handedOver"], true);
+
+        let elsewhere = wait(start().await, tool_context(&workspace)).await;
+        assert_eq!(elsewhere["workflowStatus"], "completed");
+        assert!(elsewhere.get("handedOver").is_none(), "{elsewhere}");
+
+        let run = start().await;
+        let id = id(&run);
+        while tool.coordinator.pending_deliveries(chat) > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            tool.coordinator.get(id, None).await.unwrap().status,
+            WorkflowRunStatus::Completed
+        );
+        let late = wait(run, context.clone()).await;
+        assert!(late.get("handedOver").is_none(), "{late}");
+        let _ = tokio::fs::remove_dir_all(workspace).await;
     }
 
     #[tokio::test]

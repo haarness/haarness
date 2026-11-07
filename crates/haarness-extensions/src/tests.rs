@@ -828,10 +828,42 @@ async fn unsupported_hooks_and_malformed_results_are_rejected() {
     let decision = hooks
         .permission_request(&HookCall::new(thread), "bash", &[], None, &json!({}))
         .await;
+    // A malformed answer refuses, as the hook failing, not as its decision.
     assert_eq!(decision.permission, Some(PermissionDecision::Deny));
-    assert!(decision.block.unwrap().contains("status must be"));
+    assert_eq!(decision.block, None);
+    assert!(decision.failure.unwrap().contains("status must be"));
     // A malformed shell.env answer is logged and ignored rather than failing the tool.
     assert!(hooks.shell_env(thread, root.path()).await.is_empty());
+}
+
+/// A deny that gives no reason passes none on, and a handler that throws
+/// refuses as a failure of the hook, never as its decision.
+#[tokio::test]
+async fn a_permission_ask_deny_without_a_reason_gives_none_and_a_throw_is_a_failure() {
+    let (root, config) = fixture(
+        "export default {apiVersion:1,name:'fixture',hooks:{'permission.ask'(input){ if (input.permission === 'read') throw new Error('lookup down'); return input.permission === 'bash' ? {status:'deny'} : {status:'deny', reason:'  '}; }}}",
+    );
+    let extensions = Extensions::load(&config, root.path()).await.unwrap();
+    let hooks = extensions.wrap_hooks(None);
+    let call = HookCall::new(ThreadId::new());
+    for permission in ["bash", "edit"] {
+        let decision = hooks
+            .permission_request(&call, permission, &[], None, &json!({}))
+            .await;
+        assert_eq!(
+            decision.permission,
+            Some(PermissionDecision::Deny),
+            "{permission}"
+        );
+        assert_eq!(decision.block, None, "{permission}");
+        assert_eq!(decision.failure, None, "{permission}");
+    }
+    let thrown = hooks
+        .permission_request(&call, "read", &[], None, &json!({}))
+        .await;
+    assert_eq!(thrown.permission, Some(PermissionDecision::Deny));
+    assert_eq!(thrown.block, None);
+    assert!(thrown.failure.unwrap().contains("lookup down"));
 }
 
 #[test]

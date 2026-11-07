@@ -2877,6 +2877,8 @@
   "Auto review unavailable": "المراجعة التلقائية غير متاحة",
   "Auto review paused": "المراجعة التلقائية متوقفة مؤقتًا",
   "Stopped by Auto's reviewer": "أوقفه مراجِع الوضع التلقائي",
+  "Refused by a hook": "رفضه خطاف",
+  "A hook could not answer": "تعذّر على خطاف الرد",
   "reviewing…": "جارٍ المراجعة…",
   "Reviewing…": "جارٍ المراجعة…",
   "Auto review is deciding…": "المراجعة التلقائية تقرّر…",

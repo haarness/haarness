@@ -437,6 +437,38 @@ impl WorkflowCoordinator {
             .await
     }
 
+    /// Recent runs launched from any chat of `launch_threads`, newest first.
+    pub async fn list_launched_from(
+        &self,
+        launch_threads: &HashSet<ThreadId>,
+        limit: usize,
+    ) -> CoreResult<Vec<WorkflowRun>> {
+        let mut runs = std::collections::HashMap::new();
+        for thread in launch_threads {
+            for run in self.list(Some(*thread), limit).await? {
+                // A row from before launch chats were kept matches by the
+                // chat it ran in, which is not where it was launched from.
+                if run
+                    .definition
+                    .launch_thread_id
+                    .is_some_and(|launch| launch_threads.contains(&launch))
+                {
+                    runs.insert(run.id, run);
+                }
+            }
+        }
+        let mut runs = runs.into_values().collect::<Vec<_>>();
+        runs.sort_by(|left, right| {
+            right
+                .time
+                .created
+                .cmp(&left.time.created)
+                .then_with(|| right.id.to_string().cmp(&left.id.to_string()))
+        });
+        runs.truncate(limit);
+        Ok(runs)
+    }
+
     pub async fn get(
         &self,
         id: WorkflowId,
@@ -591,6 +623,66 @@ impl WorkflowCoordinator {
             }
         }
         first_error.map_or(Ok(cancelled), Err)
+    }
+
+    /// Cancel one run, running or paused, launched from a chat in
+    /// `launch_threads`, and deliver nothing to that chat: the work that
+    /// started it (a scheduled run) has ended and asked for it. Answers
+    /// whether it was cancelled; one that has ended, or was launched
+    /// elsewhere, is left as it is.
+    pub async fn cancel_untold(
+        &self,
+        id: WorkflowId,
+        launch_threads: &HashSet<ThreadId>,
+    ) -> CoreResult<bool> {
+        let run = match self.owned_run(id).await {
+            Ok(run) => run,
+            Err(CoreError::NotFound(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !matches!(
+            run.status,
+            WorkflowRunStatus::Running | WorkflowRunStatus::Paused
+        ) || !run
+            .definition
+            .launch_thread_id
+            .is_some_and(|thread_id| launch_threads.contains(&thread_id))
+        {
+            return Ok(false);
+        }
+        self.delivery_watches.remove(&id);
+        match self
+            .transition_to_stopped(
+                id,
+                WorkflowRunStatus::Cancelled,
+                "Workflow cancelled with the run that started it",
+            )
+            .await
+        {
+            Ok(_) => Ok(true),
+            // It ended meanwhile, or another process runs it.
+            Err(CoreError::Conflict(_)) if !self.active.contains_key(&id) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// [`Self::cancel_untold`] for every run, running or paused, launched
+    /// from a chat in `launch_threads`. Answers those it cancelled.
+    pub async fn cancel_untold_from(
+        &self,
+        launch_threads: &HashSet<ThreadId>,
+    ) -> CoreResult<Vec<WorkflowId>> {
+        let mut cancelled = Vec::new();
+        for run in self.list_launched_from(launch_threads, 500).await? {
+            if matches!(
+                run.status,
+                WorkflowRunStatus::Running | WorkflowRunStatus::Paused
+            ) && self.cancel_untold(run.id, launch_threads).await?
+            {
+                cancelled.push(run.id);
+            }
+        }
+        Ok(cancelled)
     }
 
     pub async fn pause(&self, id: WorkflowId) -> CoreResult<WorkflowRun> {

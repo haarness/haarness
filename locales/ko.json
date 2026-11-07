@@ -2877,6 +2877,8 @@
   "Auto review unavailable": "자동 검토를 사용할 수 없음",
   "Auto review paused": "자동 검토 일시 중지됨",
   "Stopped by Auto's reviewer": "자동 모드 검토자가 중지함",
+  "Refused by a hook": "훅이 거부함",
+  "A hook could not answer": "훅이 응답하지 못함",
   "reviewing…": "검토 중…",
   "Reviewing…": "검토 중…",
   "Auto review is deciding…": "자동 검토가 판단하는 중…",

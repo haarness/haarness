@@ -883,6 +883,16 @@ impl ApiClient {
     pub async fn workflow_runs(&self, limit: usize) -> Result<Vec<haarness_protocol::WorkflowRun>> {
         self.get(&format!("/v1/workflows/runs?limit={limit}")).await
     }
+    /// Recent runs launched from chat `root` or a chat under it, newest
+    /// first (servers with `turn-work-stop.v1`; older ones list every run).
+    pub async fn workflow_runs_in_tree(
+        &self,
+        root: haarness_protocol::ThreadId,
+        limit: usize,
+    ) -> Result<Vec<haarness_protocol::WorkflowRun>> {
+        self.get(&format!("/v1/workflows/runs?tree={root}&limit={limit}"))
+            .await
+    }
     /// Read an authoritative run snapshot. `after_sequence` lets callers
     /// request only newer log rows without changing the rest of the shape.
     pub async fn workflow_run(
@@ -986,6 +996,15 @@ impl ApiClient {
     pub async fn items(&self, id: haarness_protocol::ThreadId) -> Result<Vec<Item>> {
         self.get(&format!("/v1/threads/{id}/items")).await
     }
+    /// The chat's items after the one numbered `after`.
+    pub async fn items_after(
+        &self,
+        id: haarness_protocol::ThreadId,
+        after: u64,
+    ) -> Result<Vec<Item>> {
+        self.get(&format!("/v1/threads/{id}/items?after={after}"))
+            .await
+    }
     pub async fn todos(
         &self,
         id: haarness_protocol::ThreadId,
@@ -994,6 +1013,34 @@ impl ApiClient {
     }
     pub async fn active_turn(&self, id: haarness_protocol::ThreadId) -> Result<Option<Turn>> {
         self.get(&format!("/v1/threads/{id}/active")).await
+    }
+    /// Stop what the turns `turns` of a chat left running (and the workflows
+    /// named), telling the chat nothing; other turns' work goes on.
+    pub async fn stop_turn_work(
+        &self,
+        id: haarness_protocol::ThreadId,
+        request: &haarness_protocol::StopTurnWorkRequest,
+    ) -> Result<haarness_protocol::StopTurnWorkResult> {
+        Ok(self
+            .request(
+                reqwest::Method::POST,
+                &format!("/v1/threads/{id}/work/stop"),
+            )
+            .json(request)
+            .sent()
+            .await?
+            .checked()
+            .await?
+            .json()
+            .await?)
+    }
+    /// What a chat is doing now: its running turn, the background results
+    /// it is still owed, and its newest turn.
+    pub async fn thread_activity(
+        &self,
+        id: haarness_protocol::ThreadId,
+    ) -> Result<haarness_protocol::ThreadActivity> {
+        self.get(&format!("/v1/threads/{id}/activity")).await
     }
     /// Process-wide activity snapshot used after attach, session changes, and
     /// event-stream resynchronization. A client never owns these turns.

@@ -456,6 +456,24 @@ command that completed. Enums may gain values; an unknown one reads as
   `stopping` until the process has exited, then a
   `command.updated` event reports `stopped`. Stopping an ended command answers
   it unchanged.
+- `POST /v1/threads/{id}/work/stop` with `{"turns": [...], "workflows": [...],
+  "commands": [...], "keepCalls": [...]}` stops what those turns of the chat
+  left running, and tells the chat nothing: any of them still running, the
+  subagents they started (with everything under them), the commands they ran
+  (`endedBy: turn_ended`), the named workflows launched from the chat or a
+  chat under it, running or paused, cancelled with no result delivered, and
+  the named commands of the chat itself, whichever turn ran them. As
+  `/interrupt` does for a whole tree, every workflow launched from the chat of
+  a stopped subagent or workflow, or a chat under it, is cancelled too, with
+  no result delivered. What the calls named in `keepCalls` (by `tool_call` id)
+  started goes on, as does every other turn's work. A person's message steered
+  into a stopped turn that its agent had not answered is answered in a turn of
+  its own, as after the person's own Stop. Unlike that Stop, this one leaves
+  the chat's queue going: a message queued behind a stopped turn is sent once
+  it has stopped. It answers what began to stop (`StopTurnWorkResult`). A
+  scheduled run ends its own work this way, leaving a person's turns in its
+  chat alone, and what its turns started for a person who wrote into them;
+  servers that have the route list `turn-work-stop.v1`.
 - `POST /v1/threads/{id}/commands/background` sends every running foreground
   command of the chat tree to the background, the one named with
   `?commandId=` alone; it answers the commands moved. A named command that
@@ -898,7 +916,9 @@ ordered logs, warnings, child-agent records, result/error, and timestamps.
 `GET /v1/workflows/runs/{id}?afterSequence=N` returns only logs newer than the
 given sequence. `GET /v1/workflows/runs?threadId=...` scopes recent runs to the
 conversation that launched them (with execution-thread matching retained only
-for legacy rows that predate launch-session persistence); the wait endpoint
+for legacy rows that predate launch-session persistence), and `?tree=...` to
+those launched from a conversation or any under it (its subagents' and
+theirs; servers with `turn-work-stop.v1`); the wait endpoint
 accepts a bounded timeout. Pause/cancel stop
 the active execution, and resume restarts paused/interrupted source from the
 beginning. `workflow.updated`, `workflow.log`, and `workflow.deleted` are live
@@ -927,6 +947,7 @@ treats a missing one as an older server.
 | `remote-chat-scope.v1` | The server confines a published chat's requests to its chat tree; the Cloud connector does not serve through a server without it |
 | `session-archive.v1` | Portable session archives |
 | `thread-create-id.v1` | A client-chosen `id` on `POST /v1/threads` |
+| `turn-work-stop.v1` | `POST /v1/threads/{id}/work/stop`; a scheduled run on a server without it fails when it has work to stop, and leaves that work running |
 | `workspace-history.v1` | Git review and undo/redo; the CLI and TUI use a running folder server only when it has this and `pty.v1` |
 | `browser.v1`, `browser-drafts.v1` | The browser host routes (servers with a browser broker) |
 | `browser-extension.v1` | Haarness for Chrome: the extension host route and its settings |

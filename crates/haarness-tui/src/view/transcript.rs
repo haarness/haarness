@@ -554,6 +554,15 @@ fn rejected_by_user(output: &str) -> bool {
         .starts_with("The user rejected this action")
 }
 
+/// Whether a hook refused the call (`metadata.refusedBy` of `hook`); its
+/// own reason, when it gave one, is `metadata.reason`.
+fn refused_by_hook(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("refusedBy")
+        .and_then(serde_json::Value::as_str)
+        == Some("hook")
+}
+
 /// Auto's reviewer's note on a call it blocked (`metadata.review` of status
 /// `blocked`), or `None` when it did not block it. A note this client cannot
 /// read whole keeps what it can: its English reason.
@@ -1190,7 +1199,8 @@ fn render_tool_result(
                 && (rejected_by_user(output)
                     || output.trim() == "operation cancelled"
                     || unfinished(metadata)
-                    || review_block(metadata).is_some())))
+                    || review_block(metadata).is_some()
+                    || refused_by_hook(metadata))))
         && paired_call(app, item, call_id).is_some()
     {
         return;
@@ -2134,9 +2144,16 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         ..
                     } if unfinished(metadata) => Some("unfinished"),
                     ItemData::ToolResult {
-                        output, is_error, ..
+                        output,
+                        is_error,
+                        metadata,
+                        ..
                     } => Some(if *is_error && output.trim() == "operation cancelled" {
                         "cancelled"
+                    } else if *is_error && refused_by_hook(metadata) {
+                        // A hook decided, before anyone saw it: as quiet as
+                        // a person's reject, with the hook's reason.
+                        "refused"
                     } else if *is_error && rejected_by_user(output) {
                         "rejected"
                     } else if blocked.is_some() {
@@ -2232,9 +2249,10 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         None if queued => "  ○ ".into(),
                         None => format!("  {} ", spinner(app.tick)),
                         Some("failed") => "  ✗ ".into(),
-                        Some("cancelled" | "rejected" | "blocked" | "stopped" | "unfinished") => {
-                            "  ⊘ ".into()
-                        }
+                        Some(
+                            "cancelled" | "rejected" | "refused" | "blocked" | "stopped"
+                            | "unfinished",
+                        ) => "  ⊘ ".into(),
                         Some(_) => "  ● ".into(),
                     },
                     |state| format!("  {} ", task_state_style(state, app.tick, theme).0),
@@ -2255,6 +2273,28 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         format!("  {}", app.language.text(state))
                     }
                     Some("unfinished") => format!("  {}", app.language.text("didn't finish")),
+                    Some("refused") => {
+                        let metadata = result.and_then(|item| match &item.data {
+                            ItemData::ToolResult { metadata, .. } => Some(metadata),
+                            _ => None,
+                        });
+                        // A hook that failed refused nothing of its own.
+                        let lead = app.language.text(
+                            if metadata.is_some_and(|metadata| metadata["failed"] == true) {
+                                "A hook could not answer"
+                            } else {
+                                "Refused by a hook"
+                            },
+                        );
+                        let reason = metadata
+                            .and_then(|metadata| metadata["reason"].as_str())
+                            .map(str::trim)
+                            .filter(|reason| !reason.is_empty());
+                        match reason {
+                            Some(reason) => format!("  {lead}: {}", single_line(reason, 160)),
+                            None => format!("  {lead}"),
+                        }
+                    }
                     Some("blocked") => {
                         let lead = app.language.text("Stopped by Auto's reviewer");
                         let reason = blocked
@@ -2508,7 +2548,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 } else if let Some(id) = opens_output {
                     block.push_tagged(row, HitTarget::CommandOpen(id));
                 } else if let Some(result) = compact_result
-                    .or(result.filter(|_| matches!(status, Some("rejected" | "blocked"))))
+                    .or(result
+                        .filter(|_| matches!(status, Some("rejected" | "refused" | "blocked"))))
                 {
                     block.push_tagged(row, HitTarget::ToolToggle(result.id));
                 } else if let Some((start, end)) = resume_at {

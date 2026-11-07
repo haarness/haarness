@@ -219,7 +219,8 @@ struct ActiveTurn {
     /// reads as the user's own stop; a server shutdown must say so.
     stop_reason: Mutex<Option<String>>,
     /// The user stopped this turn and asked for steering it has not read yet
-    /// to be answered, rather than dropped.
+    /// to be answered, rather than dropped (as the end of a scheduled run
+    /// that stops it does).
     answer_steer: AtomicBool,
     /// The agent definition the turn runs with. Ceilings for work it starts
     /// (workflow agents, direct tools on its children) come from it, not
@@ -237,6 +238,13 @@ struct ActiveTurn {
 const STOP_CONTINUATION: &str = "<system-reminder>\nThe user stopped your previous work \
 before you read the message they sent while you were working. Reply to that message now. \
 Do not resume the stopped work unless the message asks you to.\n</system-reminder>";
+
+/// [`STOP_CONTINUATION`] when the end of a scheduled run stopped the work,
+/// not the user.
+const RUN_END_CONTINUATION: &str = "<system-reminder>\nThe scheduled run your previous work \
+belonged to has ended, and that work was stopped before you read the message the user sent \
+while it went on. Answer that message now; take the stopped work up again only if it asks \
+for that.\n</system-reminder>";
 
 /// The transcript line for a turn the runtime had to stop.
 fn stopped_turn_message(reason: &str) -> String {
@@ -623,6 +631,7 @@ fn failure_message(error: &mut CoreError) -> Option<&mut String> {
         | CoreError::Tool(message) => Some(message),
         CoreError::Refused(refusal) => Some(&mut refusal.message),
         CoreError::PermissionRejected(_)
+        | CoreError::HookRefused { .. }
         | CoreError::ReviewBlocked(_)
         | CoreError::Provider(_)
         | CoreError::ProviderBlocked(_)
@@ -2306,6 +2315,10 @@ pub struct AgentRuntime {
     /// Threads whose queued prompts wait for the user: after Stop, or after a
     /// queued prompt's own turn failed. A new message or Send resumes them.
     queue_pauses: Arc<DashMap<ThreadId, ()>>,
+    /// Turns the end of the scheduled run they belonged to stopped (see
+    /// [`AgentRuntime::stop_turn_work`]), until what follows them starts:
+    /// a message a person sent into one is answered as such.
+    run_ended: Arc<DashMap<TurnId, ()>>,
     approval_modes: Arc<crate::approval_mode::ApprovalModes>,
     /// Concurrent child agents' first requests for one prompt prefix: the
     /// first goes alone so the others can read the cache it writes.
@@ -2448,6 +2461,7 @@ impl AgentRuntime {
             chat_home: false,
             restore_gate: Arc::new(AsyncMutex::new(())),
             queue_pauses: Arc::new(DashMap::new()),
+            run_ended: Arc::new(DashMap::new()),
             approval_modes,
             prefix_warmup: crate::prefix_warmup::PrefixWarmup::default(),
             run_stances: Arc::new(RunStances::default()),
@@ -4893,6 +4907,96 @@ impl AgentRuntime {
         Ok((tasks.len() + active_turns.len()) as u64)
     }
 
+    /// Stop, telling the chat nothing, what the turns `turns` of `root` left
+    /// running: those of them still running, the subagents they started
+    /// (with everything under those) and the commands they ran, and the
+    /// commands of `root` itself named in `commands`. Every other turn's
+    /// work goes on, so a person's turn in the chat, and what it started,
+    /// are left alone, as is what the calls in `kept` of those turns started
+    /// (a person's, once they wrote into one). A scheduled run ends its own
+    /// work this way; a message a person sent into one of its turns that
+    /// the agent has not answered is answered in a turn of its own.
+    pub async fn stop_turn_work(
+        &self,
+        root: ThreadId,
+        turns: &HashSet<TurnId>,
+        commands: &HashSet<String>,
+        kept: &HashSet<String>,
+    ) -> CoreResult<haarness_protocol::StopTurnWorkResult> {
+        self.repository.get_thread(root).await?;
+        let threads = self.repository.list_threads(true).await?;
+        let tree = descendant_thread_ids(&threads, root);
+        // What a call in `kept` started is someone else's: it goes on.
+        let theirs = |thread: &ThreadId, turn: &TurnId, call: &str| {
+            tree.contains(thread) && turns.contains(turn) && !kept.contains(call)
+        };
+        let started = self
+            .background_tasks
+            .iter()
+            .filter(|entry| {
+                let info = entry.value().info();
+                theirs(&info.parent_thread_id, &info.parent_turn_id, &info.call_id)
+            })
+            .map(|entry| Arc::clone(entry.value()))
+            .collect::<Vec<_>>();
+        // The chats of those subagents and of theirs: all of it goes.
+        let under = started
+            .iter()
+            .flat_map(|task| descendant_thread_ids(&threads, task.info().child_thread_id))
+            .collect::<HashSet<_>>();
+        let nested = self
+            .background_tasks
+            .iter()
+            .filter(|entry| under.contains(&entry.value().info().parent_thread_id))
+            .map(|entry| Arc::clone(entry.value()))
+            .collect::<Vec<_>>();
+        let mut stopped = haarness_protocol::StopTurnWorkResult::default();
+        for task in started.iter().chain(&nested) {
+            task.cancel_with_parent();
+        }
+        stopped.subagents = started.iter().map(|task| task.info()).collect();
+        let running = self
+            .active
+            .iter()
+            .filter(|entry| {
+                (tree.contains(entry.key()) && turns.contains(&entry.value().id))
+                    || under.contains(entry.key())
+            })
+            .map(|entry| (*entry.key(), Arc::clone(entry.value())))
+            .collect::<Vec<_>>();
+        for (_, active) in running {
+            // Steering a person sent into one of the named turns, and that
+            // its agent has not answered, is answered once the turn stops, as
+            // after their own Stop. The turn's end checks for some, so one
+            // with none starts nothing.
+            if turns.contains(&active.id) {
+                self.run_ended.insert(active.id, ());
+                active.answer_steer.store(true, Ordering::SeqCst);
+            }
+            // This turn alone: not the chat's other subagents, as a person's
+            // stop of the turn would, nor the input waiting in its queue.
+            active.cancel.cancel();
+            *active.accepting.lock().await = false;
+            if turns.contains(&active.id) {
+                stopped.turns.push(active.id);
+            }
+            if let Err(error) = self
+                .repository
+                .set_turn_status(active.id, TurnStatus::Interrupted, None)
+                .await
+                && !matches!(error, CoreError::NotFound(_))
+            {
+                return Err(error);
+            }
+        }
+        stopped.commands = self.stop_turn_commands(|command| {
+            theirs(&command.thread_id, &command.turn_id, &command.call_id)
+                || under.contains(&command.thread_id)
+                || (command.thread_id == root && commands.contains(&command.id))
+        });
+        Ok(stopped)
+    }
+
     fn cancel_background_tasks_for_parent(&self, parent: ThreadId) -> usize {
         let tasks = self
             .background_tasks
@@ -5938,7 +6042,7 @@ impl AgentRuntime {
                 let operation = plan.operation(pattern);
                 let constraint = tool.permission_constraint(&arguments, &operation);
                 let explicit = tool.explicit_approval(&arguments, &operation);
-                let evaluation = plan.evaluate(&engine, pattern);
+                let evaluation = plan.evaluate_call(&engine, pattern, &arguments);
                 let decision = if explicit {
                     crate::permissions::explicit_decision(
                         evaluation.decision,
@@ -6199,7 +6303,7 @@ impl AgentRuntime {
                     Reviewed::Resolved(resolution) => {
                         allowed = if resolution.allowed {
                             Ok(())
-                        } else if resolution.refused {
+                        } else if resolution.answered_by == AnsweredBy::Nobody {
                             Err(refusal_message(resolution.feedback.as_deref()))
                         } else {
                             Err(resolution.feedback.unwrap_or_else(|| operation.clone()))
@@ -6322,7 +6426,7 @@ impl AgentRuntime {
                 Err(message)
             } else if resolution.allowed {
                 Ok(())
-            } else if resolution.refused {
+            } else if resolution.answered_by == AnsweredBy::Nobody {
                 Err(refusal_message(resolution.feedback.as_deref()))
             } else {
                 Err(resolution.feedback.unwrap_or_else(|| operation.clone()))
@@ -6647,7 +6751,11 @@ impl AgentRuntime {
             allowed,
             feedback: reply.feedback,
             review: None,
-            refused,
+            answered_by: if refused {
+                AnsweredBy::Nobody
+            } else {
+                AnsweredBy::Person
+            },
             once,
         });
         Ok(())
@@ -7569,6 +7677,7 @@ impl AgentRuntime {
             goal_accounting: Mutex::new(None),
             workflow_observations: Mutex::new(HashSet::new()),
             queue_pauses: self.queue_pauses.clone(),
+            run_ended: self.run_ended.clone(),
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
             reviews_running: std::sync::atomic::AtomicUsize::new(0),
@@ -7598,6 +7707,8 @@ impl AgentRuntime {
     /// steering gets a continuation that answers it. Otherwise the next queued
     /// prompt starts as its own turn, unless the user stopped the work or the
     /// failed turn was itself a queued prompt; those leave the queue paused.
+    /// A turn the end of its scheduled run stopped is followed as one that
+    /// ended: nobody stopped the queue behind it.
     // Boxed with an explicit `Send` bound: this starts turns, whose runners
     // call back here, and that recursion is otherwise opaque to `Send` checks.
     fn follow_turn(
@@ -7611,13 +7722,19 @@ impl AgentRuntime {
 
     async fn start_follow_up(&self, task: &RunnerTask, result: &CoreResult<()>, from_queue: bool) {
         let thread_id = task.thread.id;
+        let run_ended = self.run_ended.remove(&task.turn.id).is_some();
         if task.answer_steer.load(Ordering::SeqCst) {
             let request = QueueInputRequest {
                 preview: None,
                 reasoning_effort: None,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
-                text: STOP_CONTINUATION.into(),
+                text: if run_ended {
+                    RUN_END_CONTINUATION
+                } else {
+                    STOP_CONTINUATION
+                }
+                .into(),
                 attachments: Vec::new(),
                 resources: Vec::new(),
                 synthetic: true,
@@ -7639,6 +7756,9 @@ impl AgentRuntime {
             return;
         }
         match result {
+            // The end of a scheduled run stopped this turn, not a person: what
+            // they queued behind it starts, as after a turn that ended.
+            Err(CoreError::Cancelled) if run_ended => {}
             Err(CoreError::Cancelled) => return,
             Err(_) if from_queue => {
                 self.queue_pauses.insert(thread_id, ());
@@ -8056,6 +8176,7 @@ struct RunnerTask {
     /// repeated wait/inspect calls only burn context and provider tokens.
     workflow_observations: Mutex<HashSet<String>>,
     queue_pauses: Arc<DashMap<ThreadId, ()>>,
+    run_ended: Arc<DashMap<TurnId, ()>>,
     approval_modes: Arc<crate::approval_mode::ApprovalModes>,
     /// Set when a stop leaves unread steering for a continuation to answer.
     answer_steer: AtomicBool,
@@ -8851,11 +8972,8 @@ async fn review_waiting(
             }
             Some(crate::auto_review::Outcome::Allow) if auto => PermissionResolution::allowed(),
             Some(crate::auto_review::Outcome::Deny(review)) if auto => PermissionResolution {
-                allowed: false,
-                feedback: None,
                 review: Some(review),
-                refused: false,
-                once: false,
+                ..PermissionResolution::rejected(None)
             },
             // Left to the person, with the reviewer's note; or the chat left
             // Auto, and the card is plain again. Either way it is announced
@@ -9148,14 +9266,39 @@ fn refusal_message(feedback: Option<&str>) -> String {
 /// How much of an unattended run's reason the agent reads.
 const REFUSAL_REASON_CHARS: usize = 300;
 
+/// What the agent reads when a `PermissionRequest` hook or an extension's
+/// `permission.ask` refused its call, or `failed` to answer it: the hook's
+/// own reason, and that no person saw the request, so the agent does not
+/// take it for a person's answer, nor a failure for a decision.
+fn hook_refusal_message(reason: Option<&str>, failed: bool) -> String {
+    let reason = reason
+        .map(|reason| reason.trim().trim_end_matches('.').trim_end())
+        .filter(|reason| !reason.is_empty());
+    let lead = match (reason, failed) {
+        (Some(error), true) => format!(
+            "A permission hook could not answer ({error}), so this action was refused without asking the user."
+        ),
+        (None, true) => {
+            "A permission hook could not answer, so this action was refused without asking the user."
+                .to_owned()
+        }
+        (Some(reason), false) => {
+            format!("A permission hook refused this action without asking the user: {reason}.")
+        }
+        (None, false) => {
+            "A permission hook refused this action without asking the user.".to_owned()
+        }
+    };
+    format!("{lead} Take a different approach, or ask the user if you need it.")
+}
+
 struct PermissionResolution {
     allowed: bool,
     feedback: Option<String>,
     /// Auto's reviewer refused it (a request it reviewed while it waited).
     review: Option<haarness_protocol::PermissionReview>,
-    /// Nobody could answer it (`refuse`): `feedback` is Haarness's words,
-    /// not a person's.
-    refused: bool,
+    /// Whose answer it is, and so whose words `feedback` holds.
+    answered_by: AnsweredBy,
     /// A person allowed exactly this request, once (Allow once, or any
     /// allow of a request that offers nothing longer): nothing else lets it
     /// through again without a card. Never set by Auto's reviewer, a
@@ -9169,7 +9312,7 @@ impl PermissionResolution {
             allowed: true,
             feedback: None,
             review: None,
-            refused: false,
+            answered_by: AnsweredBy::Person,
             once: false,
         }
     }
@@ -9179,10 +9322,34 @@ impl PermissionResolution {
             allowed: false,
             feedback,
             review: None,
-            refused: false,
+            answered_by: AnsweredBy::Person,
             once: false,
         }
     }
+
+    fn refused_by_hook(reason: Option<String>, answered_by: AnsweredBy) -> Self {
+        Self {
+            answered_by,
+            ..Self::rejected(reason)
+        }
+    }
+}
+
+/// Who answered a permission request, as what the agent reads of a refusal
+/// tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnsweredBy {
+    /// A person, Auto's reviewer, or for an allow whatever allowed it.
+    Person,
+    /// Nobody could answer it (`refuse`): `feedback` is Haarness's words,
+    /// not a person's.
+    Nobody,
+    /// A `PermissionRequest` hook or an extension's `permission.ask`
+    /// refused it before anyone saw it: `feedback` is its reason, when it
+    /// gave one.
+    Hook,
+    /// A hook could not answer it, which refuses it: `feedback` is why.
+    HookFailure,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11406,6 +11573,14 @@ impl RunnerTask {
                                 {
                                     crate::not_run_metadata()
                                 }
+                                CoreError::HookRefused { reason, failed, .. } => {
+                                    let mut refusal =
+                                        json!({ "refusedBy": "hook", "reason": reason });
+                                    if *failed {
+                                        refusal["failed"] = json!(true);
+                                    }
+                                    refusal
+                                }
                                 _ => serde_json::Value::Null,
                             };
                             self.publish_item(ItemData::ToolResult {
@@ -12312,7 +12487,7 @@ impl RunnerTask {
                         "This tool is disabled by the active skill".into(),
                     ));
                 }
-                let evaluation = plan.evaluate(&engine, pattern);
+                let evaluation = plan.evaluate_call(&engine, pattern, &arguments);
                 let constraint = tool.as_ref().and_then(|tool| {
                     tool.permission_constraint(&arguments, &plan.operation(pattern))
                 });
@@ -12402,10 +12577,29 @@ impl RunnerTask {
                 return Err(CoreError::ReviewBlocked(Box::new(review)));
             }
             if !resolution.allowed {
+                // A hook answered: no person saw the request, and clients
+                // show it as the hook's.
+                if matches!(
+                    resolution.answered_by,
+                    AnsweredBy::Hook | AnsweredBy::HookFailure
+                ) {
+                    let failed = resolution.answered_by == AnsweredBy::HookFailure;
+                    let reason = resolution
+                        .feedback
+                        .map(|reason| reason.trim().to_owned())
+                        .filter(|reason| !reason.is_empty());
+                    return Err(CoreError::HookRefused {
+                        message: hook_refusal_message(reason.as_deref(), failed),
+                        reason,
+                        failed,
+                    });
+                }
                 let message = match resolution.feedback {
                     // Nobody answered: the reason is Haarness's, and no
                     // one is there to ask.
-                    feedback if resolution.refused => refusal_message(feedback.as_deref()),
+                    feedback if resolution.answered_by == AnsweredBy::Nobody => {
+                        refusal_message(feedback.as_deref())
+                    }
                     Some(feedback) if !feedback.trim().is_empty() => format!(
                         "The user rejected this action and said: {feedback}. Adjust your \
                          approach accordingly."
@@ -12763,8 +12957,17 @@ impl RunnerTask {
                 .then_some(plan.always.as_slice());
             let call = self.hook_call(Some(agent));
             match permission_hook_answer(hooks.as_ref(), &call, plan, always, detail).await {
-                HookAnswer::Refused(feedback) => {
-                    return Ok(PermissionResolution::rejected(Some(feedback)));
+                HookAnswer::Refused(reason) => {
+                    return Ok(PermissionResolution::refused_by_hook(
+                        reason,
+                        AnsweredBy::Hook,
+                    ));
+                }
+                HookAnswer::Failed(error) => {
+                    return Ok(PermissionResolution::refused_by_hook(
+                        Some(error),
+                        AnsweredBy::HookFailure,
+                    ));
                 }
                 HookAnswer::Allowed { always } if !forced && !explicit => {
                     if always {
@@ -12843,7 +13046,8 @@ impl RunnerTask {
                         refreshed.evaluate(&operation) != PermissionDecision::Deny
                             && crate::permissions::explicit_granted(&session_rules, &operation)
                     } else {
-                        plan.evaluate(&refreshed, pattern).decision == PermissionDecision::Allow
+                        plan.evaluate_call(&refreshed, pattern, detail).decision
+                            == PermissionDecision::Allow
                     }
                 })
             {
@@ -13766,6 +13970,7 @@ impl RunnerTask {
             goal_accounting: Mutex::new(None),
             workflow_observations: Mutex::new(HashSet::new()),
             queue_pauses: self.queue_pauses.clone(),
+            run_ended: self.run_ended.clone(),
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
             reviews_running: std::sync::atomic::AtomicUsize::new(0),
@@ -14087,6 +14292,7 @@ impl RunnerTask {
             chat_home: self.chat_home,
             restore_gate: self.restore_gate.clone(),
             queue_pauses: self.queue_pauses.clone(),
+            run_ended: self.run_ended.clone(),
             approval_modes: self.approval_modes.clone(),
             prefix_warmup: self.prefix_warmup.clone(),
             run_stances: self.run_stances.clone(),
@@ -15992,6 +16198,43 @@ impl AskPlan {
             .iter()
             .any(|(resolved, _)| resolved == pattern)
     }
+    /// [`Self::evaluate`] for the call whose `arguments` raised this plan. A
+    /// resource read that no rule about resources decided (only a blanket
+    /// `*` allowed it) asks when a configured ask covers all of its server's
+    /// tools (`"mcp__docs__*": "ask"`), as a deny of all of them keeps its
+    /// resources away: the read's own card, whose Always keeps `<server>:*`.
+    fn evaluate_call(
+        &self,
+        engine: &PermissionEngine,
+        pattern: &str,
+        arguments: &serde_json::Value,
+    ) -> crate::permissions::Evaluation {
+        let evaluation = self.evaluate(engine, pattern);
+        let blanket = |rule: &str| {
+            rule.split_once(':')
+                .map_or(rule, |(permission, _)| permission)
+                == "*"
+        };
+        if self.permission != "mcp_resource_read"
+            || evaluation.decision != PermissionDecision::Allow
+            || !evaluation.matched.as_deref().is_none_or(blanket)
+        {
+            return evaluation;
+        }
+        let Some(server) = arguments["server"].as_str() else {
+            return evaluation;
+        };
+        let tools = engine.evaluate_detailed(&format!("{}:*", mcp_server_tools(server)));
+        if tools.decision == PermissionDecision::Ask && tools.configured {
+            crate::permissions::Evaluation {
+                protected: false,
+                ..tools
+            }
+        } else {
+            evaluation
+        }
+    }
+
     /// The verdict on `pattern` from `engine`. A pattern read from inside
     /// a written shell command is judged only by rules about it (see
     /// [`PermissionEngine::evaluate_reading`]): a deny or ask for `rm *`
@@ -16213,7 +16456,10 @@ enum HookAnswer {
     Allowed {
         always: bool,
     },
-    Refused(String),
+    /// Refused, with the reason a hook gave, if any.
+    Refused(Option<String>),
+    /// A hook could not answer (its error): refused all the same.
+    Failed(String),
     Open,
 }
 
@@ -16252,12 +16498,15 @@ async fn permission_hook_answer(
             .permission_request(call, &plan.permission, &patterns, always, &input)
             .await;
         remembered &= decision.always;
+        if let Some(error) = decision.failure {
+            return HookAnswer::Failed(error);
+        }
         if let Some(reason) = decision.block {
-            return HookAnswer::Refused(reason);
+            return HookAnswer::Refused(Some(reason));
         }
         match decision.permission {
             Some(PermissionDecision::Deny) => {
-                return HookAnswer::Refused("denied by a PermissionRequest hook".into());
+                return HookAnswer::Refused(None);
             }
             // An allow for input the hook rewrote approves a different call
             // than the one asked about; the prompt rules were checked for
@@ -21905,6 +22154,92 @@ mod tests {
         assert_eq!(
             tricky[0].evaluate(&engine, &tricky[0].patterns[0]).decision,
             crate::PermissionDecision::Allow
+        );
+    }
+
+    /// An ask written for all of a server's tools covers the model's reads of
+    /// that server's resources too, unless a rule or an answer about
+    /// resources says otherwise; without one, reads go on as before.
+    #[test]
+    fn a_whole_server_ask_asks_before_its_resources_are_read() {
+        use crate::PermissionDecision::{Allow, Ask, Deny};
+        let workspace = std::path::Path::new("/workspace");
+        let verdict =
+            |server: &str, rules: &[(&str, crate::PermissionDecision)], answered: bool| {
+                let mut engine = crate::permissions::PermissionEngine::build_defaults();
+                for (pattern, decision) in rules {
+                    engine.add_rule(crate::permissions::PermissionRule {
+                        pattern: (*pattern).into(),
+                        decision: *decision,
+                    });
+                }
+                if answered {
+                    // What Always on the read's card remembers.
+                    engine.approve_always("mcp_resource_read:docs:*");
+                }
+                let arguments = json!({"server": server, "uri": "docs://setup"});
+                let plan = super::ask_plans("mcp_resource_read", &arguments, workspace).remove(0);
+                let evaluation = plan.evaluate_call(&engine, &plan.patterns[0], &arguments);
+                (evaluation.decision, evaluation.matched)
+            };
+        let server_ask = ("mcp__docs__*:*", Ask);
+        assert_eq!(
+            verdict("docs", &[server_ask], false),
+            (Ask, Some("mcp__docs__*:*".into()))
+        );
+        assert_eq!(verdict("docs", &[("mcp__*:*", Ask)], false).0, Ask);
+        // A blanket allow before the server's ask leaves the ask; one after
+        // it allows the server's tools, and so its resources.
+        assert_eq!(verdict("docs", &[("*", Allow), server_ask], false).0, Ask);
+        assert_eq!(verdict("docs", &[server_ask, ("*", Allow)], false).0, Allow);
+        // A rule or an answer about resources decides as it did.
+        for rules in [
+            &[server_ask, ("mcp_resource_read:*", Allow)][..],
+            &[("mcp_resource_read:docs:*", Allow), server_ask],
+        ] {
+            assert_eq!(verdict("docs", rules, false).0, Allow, "{rules:?}");
+        }
+        assert_eq!(verdict("docs", &[server_ask], true).0, Allow);
+        assert_eq!(
+            verdict(
+                "docs",
+                &[server_ask, ("mcp_resource_read:docs:*", Deny)],
+                false
+            )
+            .0,
+            Deny
+        );
+        // Without an ask for all of the server's tools, nothing more asks.
+        for rules in [
+            &[][..],
+            &[("mcp__docs__search:*", Ask)],
+            &[("mcp__docs__*:secret", Ask)],
+            &[("mcp__other__*:*", Ask)],
+        ] {
+            assert_eq!(verdict("docs", rules, false).0, Allow, "{rules:?}");
+        }
+        // The server as its tools are named, whatever its resource patterns
+        // write for its other characters.
+        assert_eq!(
+            verdict("Docs Server", &[("mcp__Docs Server__*:*", Ask)], false).0,
+            Ask
+        );
+        assert_eq!(
+            verdict("Docs Server", &[("mcp__Docs_Server__*:*", Ask)], false).0,
+            Allow
+        );
+        // A listing names resources and reads none: it asks as before.
+        let mut engine = crate::permissions::PermissionEngine::build_defaults();
+        engine.add_rule(crate::permissions::PermissionRule {
+            pattern: "mcp__docs__*:*".into(),
+            decision: Ask,
+        });
+        let arguments = json!({"server": "docs"});
+        let plan = super::ask_plans("mcp_resource_list", &arguments, workspace).remove(0);
+        assert_eq!(
+            plan.evaluate_call(&engine, &plan.patterns[0], &arguments)
+                .decision,
+            Allow
         );
     }
 

@@ -30,6 +30,16 @@ pub enum CoreError {
     /// the model should adjust course, not treat it as policy.
     #[error("{0}")]
     PermissionRejected(String),
+    /// A `PermissionRequest` hook or an extension's `permission.ask`
+    /// refused the call before anyone saw it (or `failed` to answer, which
+    /// refuses it too): `message` is what the model reads, `reason` the
+    /// hook's own words (or its error), which clients show.
+    #[error("{message}")]
+    HookRefused {
+        message: String,
+        reason: Option<String>,
+        failed: bool,
+    },
     /// Auto's reviewer refused the call. The model reads why, and that it
     /// should not reach the same result another way.
     #[error("{}", crate::auto_review::blocked_message(.0))]
@@ -93,6 +103,7 @@ impl CoreError {
             Self::Conflict(_) => "conflict",
             Self::PermissionDenied(_) => "permission_denied",
             Self::PermissionRejected(_) => "permission_rejected",
+            Self::HookRefused { .. } => "hook_refused",
             Self::ReviewBlocked(_) => "review_blocked",
             Self::Invalid(_) => "invalid_request",
             Self::Provider(_) => "provider_error",
@@ -1172,6 +1183,9 @@ pub trait CredentialStore: Send + Sync {
 /// permission decision, and inject extra context.
 #[derive(Debug, Default, Clone)]
 pub struct HookDecision {
+    /// The hook could not answer (an extension's handler threw): why. Its
+    /// request is refused all the same, never as the hook's own decision.
+    pub failure: Option<String>,
     /// Block the action with this reason. After a tool already ran
     /// ([`HookPort::post_tool_use`]) nothing is left to block: the reason is
     /// the hook's feedback, which the model reads after the tool's result.
