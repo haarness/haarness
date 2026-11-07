@@ -944,6 +944,10 @@ fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
     }
 }
 
+/// What a call the model made at its step limit says, unrun.
+const STEP_LIMIT_CALL: &str =
+    "This call was not run: the turn reached its step limit, so no more tools run in it.";
+
 /// What the request after an empty reply says, when a call before it failed.
 const EXPLAIN_FAILURE: &str = "Your last reply was empty, but a tool call before it failed. Explain what went wrong and what happens next, then carry on with the task if you can.";
 
@@ -10075,6 +10079,11 @@ impl RunnerTask {
                     ultracode.as_deref(),
                     self.output_schema.is_some(),
                 );
+                // At the step limit the model is asked to sum up. Its tools and
+                // the system prompt stay as every earlier round sent them, so
+                // the provider reads the cached prompt prefix (and Bedrock
+                // takes the tool calls in the history); a call it makes
+                // anyway is closed without running.
                 let tool_round_limit_reached = max_rounds.is_some_and(|limit| tool_rounds >= limit);
                 if tool_round_limit_reached {
                     // A user message: a trailing assistant message is a
@@ -10115,19 +10124,16 @@ impl RunnerTask {
                             && (resources_open || !is_resource_tool(&tool.name))
                     })
                     .collect::<Vec<_>>();
-                if !tool_round_limit_reached
-                    && eligible_tools.iter().any(|tool| tool.name == "preview")
-                {
+                if eligible_tools.iter().any(|tool| tool.name == "preview") {
                     // A line break before and after, as the built-in
                     // section has always been sent.
                     system.push('\n');
                     system.push_str(&self.config.prompts.text(crate::PromptName::Preview));
                     system.push('\n');
                 }
-                if !tool_round_limit_reached
-                    && eligible_tools
-                        .iter()
-                        .any(|tool| tool.name == "mac_snapshot")
+                if eligible_tools
+                    .iter()
+                    .any(|tool| tool.name == "mac_snapshot")
                 {
                     system.push('\n');
                     system.push_str(&self.config.prompts.text(crate::PromptName::ComputerUse));
@@ -10163,11 +10169,7 @@ impl RunnerTask {
                 if selection.response.lazy_active {
                     system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
                 }
-                let provider_tools = if tool_round_limit_reached {
-                    Vec::new()
-                } else {
-                    selection.advertised
-                };
+                let provider_tools = selection.advertised;
                 *self.advertised_tools.lock() = provider_tools
                     .iter()
                     .map(|tool| tool.name.clone())
@@ -10586,6 +10588,21 @@ impl RunnerTask {
                 // short or refused says nothing about the provider's pace.
                 let timing = clock.timing().filter(|_| finished && blocked.is_none());
                 let made_calls = !calls.is_empty();
+                if tool_round_limit_reached && blocked.is_none() {
+                    // Asked to sum up, the model called a tool anyway: the
+                    // call is answered without running, right after it, and
+                    // the turn ends with what the model wrote.
+                    for (call_id, name, _) in calls.drain(..) {
+                        self.publish_item(ItemData::ToolResult {
+                            call_id,
+                            name,
+                            output: STEP_LIMIT_CALL.into(),
+                            is_error: true,
+                            metadata: json!({"notRun": true}),
+                        })
+                        .await?;
+                    }
+                }
                 let partial = saw_provider_event
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
                 self.flush_reasoning_segment(&mut reasoning, thought_from)
@@ -10749,6 +10766,22 @@ impl RunnerTask {
                         asked_again = true;
                         explain_failure = true;
                         tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "empty reply after a failed call; asking the model to explain it");
+                        continue 'provider_round;
+                    }
+                    // Asked to sum up, the model only called tools, which did
+                    // not run: once a turn it is asked again, with those calls
+                    // answered and the step-limit notice after them, so the
+                    // turn does not end on them without a summary.
+                    if tool_round_limit_reached
+                        && made_calls
+                        && !wrote_text
+                        && self.output_schema.is_none()
+                        && !asked_again
+                        && !stopped_at_output_limit
+                        && !self.has_unconsumed_queued().await
+                    {
+                        asked_again = true;
+                        tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "only tool calls at the step limit; asking again for the summary");
                         continue 'provider_round;
                     }
                     if !empty {
@@ -10953,12 +10986,6 @@ impl RunnerTask {
                     active.changed.notify_waiters();
                     drop(accepting);
                     return Ok(());
-                }
-                if tool_round_limit_reached {
-                    return Err(CoreError::Invalid(
-                        "provider returned tool calls after the configured tool-step guard disabled tools"
-                            .into(),
-                    ));
                 }
                 tool_rounds = tool_rounds.saturating_add(1);
                 unexplained_failure = false;

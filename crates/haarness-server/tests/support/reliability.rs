@@ -1339,3 +1339,153 @@ async fn reliability_an_empty_reply_after_a_hook_blocked_the_call_ends_the_turn(
         ItemData::ToolResult {call_id,is_error:true,output,..} if call_id == "blocked" && output.contains("not on this branch"))));
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[tokio::test]
+async fn reliability_the_step_limit_round_keeps_the_tools_and_closes_a_call_unrun() {
+    let config = RuntimeConfig {
+        max_rounds: Some(1),
+        ..RuntimeConfig::default()
+    };
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![Ok(read_notes("first")), Ok(finish("tool_use"))],
+            // At the limit, the model sums up and calls a tool anyway.
+            vec![
+                Ok(text("Here is where things stand.")),
+                Ok(call(
+                    "past-limit",
+                    "write",
+                    serde_json::json!({"path":"must-not-exist","content":"bad"}),
+                )),
+                Ok(finish("tool_use")),
+            ],
+            vec![Ok(text("never asked")), Ok(finish("stop"))],
+        ],
+        config,
+        true,
+    );
+    std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("work until the limit"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert!(!directory.join("must-not-exist").exists());
+    {
+        let requests = provider.requests.lock().unwrap();
+        // The prompt prefix the turn's earlier rounds cached stays as it was.
+        assert!(!requests[1].tools.is_empty());
+        assert_eq!(
+            serde_json::to_value(&requests[0].tools).unwrap(),
+            serde_json::to_value(&requests[1].tools).unwrap()
+        );
+        assert_eq!(requests[0].system, requests[1].system);
+        assert!(requests[1].messages.iter().any(|message| matches!(message,
+            ProviderMessage::Text {role,content}
+                if role == "user" && content.starts_with("The configured maximum number of tool steps"))));
+    }
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(|item| matches!(&item.data,
+        ItemData::AssistantMessage {text} if text == "Here is where things stand.")));
+    // Marked as never run, so nothing reads it back as the call's outcome.
+    assert!(items.iter().any(|item| matches!(&item.data,
+        ItemData::ToolResult {call_id,is_error:true,metadata,..}
+            if call_id == "past-limit" && metadata["notRun"] == true)));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::Error { .. }))
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_tool_calls_alone_at_the_step_limit_are_asked_once_more_for_a_summary() {
+    let past_limit = |id: &str| {
+        Ok(call(
+            id,
+            "write",
+            serde_json::json!({"path":"must-not-exist","content":"bad"}),
+        ))
+    };
+    // The model sums up when asked again; or calls tools again, and the
+    // turn ends there.
+    for summarises in [true, false] {
+        let last = if summarises {
+            vec![Ok(text("Here is the summary.")), Ok(finish("stop"))]
+        } else {
+            vec![past_limit("again"), Ok(finish("tool_use"))]
+        };
+        let (directory, runtime, provider, hooks) = setup_streams(
+            vec![
+                vec![Ok(read_notes("first")), Ok(finish("tool_use"))],
+                vec![past_limit("only-calls"), Ok(finish("tool_use"))],
+                last,
+                vec![Ok(text("never asked")), Ok(finish("stop"))],
+            ],
+            RuntimeConfig {
+                max_rounds: Some(1),
+                ..RuntimeConfig::default()
+            },
+            true,
+        );
+        std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+        let thread = echo_thread(&runtime).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request("work until the limit"))
+            .await
+            .unwrap();
+        let finished = settled(&runtime, &turn).await;
+        assert_eq!(
+            finished.status,
+            TurnStatus::Completed,
+            "{:?}",
+            finished.error
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3, "{summarises}");
+        assert!(!directory.join("must-not-exist").exists());
+        {
+            let requests = provider.requests.lock().unwrap();
+            // The asking again is a limit request too: the closed call, then
+            // the notice, with the tools as before.
+            let again = &requests[2];
+            assert!(
+                again.messages.iter().any(|message| matches!(message,
+                ProviderMessage::ToolResult {call_id,is_error:true,..} if call_id == "only-calls"))
+            );
+            assert!(
+                matches!(again.messages.last(), Some(ProviderMessage::Text {role,content})
+                if role == "user" && content.starts_with("The configured maximum number of tool steps"))
+            );
+            assert_eq!(
+                serde_json::to_value(&again.tools).unwrap(),
+                serde_json::to_value(&requests[0].tools).unwrap()
+            );
+        }
+        let items = runtime.items(thread.id, None).await.unwrap();
+        assert!(items.iter().any(|item| matches!(&item.data,
+            ItemData::ToolResult {call_id,metadata,..}
+                if call_id == "only-calls" && metadata["notRun"] == true)));
+        assert_eq!(
+            items.iter().any(|item| matches!(&item.data,
+                ItemData::AssistantMessage {text} if text == "Here is the summary.")),
+            summarises
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item.data, ItemData::Error { .. }))
+        );
+        assert!(hooks.failures.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}

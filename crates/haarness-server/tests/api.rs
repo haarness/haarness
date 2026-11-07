@@ -166,9 +166,11 @@ impl ModelProvider for LongToolLoop {
                     && content.starts_with("The configured maximum number of tool steps"))
         });
         let mut events = if guard {
-            if !request.tools.is_empty() {
+            // The tools stay as every earlier round sent them, so the
+            // request reads the prompt prefix those rounds cached.
+            if request.tools.is_empty() {
                 return Err(CoreError::Invalid(
-                    "tool-step guard request still exposed ordinary tools".into(),
+                    "tool-step guard request dropped the tools".into(),
                 ));
             }
             self.guarded.store(true, Ordering::SeqCst);
