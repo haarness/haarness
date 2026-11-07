@@ -707,8 +707,10 @@ struct Reader<'w> {
     /// `None` behind any other wrapper and in text run again, where it
     /// starts where the shell started, as before.
     carried: Option<Rc<Path>>,
-    /// The text being read, or one it is read from, names `GIT_WORK_TREE`:
-    /// a `git clean` may clean a work tree set where it is not read.
+    /// The line sets or exports `GIT_WORK_TREE` (see [`sets_work_tree`]):
+    /// in the text being read, one it is read from, or text run again read
+    /// before. A `git clean` may then clean a work tree set where it is not
+    /// read.
     names_work_tree: bool,
     /// The `GIT_WORK_TREE` settings of the command being read, by where
     /// each starts: see [`work_tree_settings`].
@@ -833,8 +835,10 @@ impl Reader<'_> {
         // walking down from the root.
         let mut list_parents = HashMap::new();
         let mut loops = Vec::new();
+        let mut sets_tree = false;
         let mut cursor = tree.walk();
         while let Some((node, parent)) = stack.pop() {
+            sets_tree = sets_tree || sets_work_tree(node, parent, command);
             if node.kind() == "command" {
                 command_nodes.push((node, parent));
             }
@@ -979,8 +983,9 @@ impl Reader<'_> {
         let outer_here = self.here.take();
         let outer_carried = self.carried.take();
         let outer_lost = self.lost;
-        let outer_names_work_tree = self.names_work_tree;
-        self.names_work_tree |= command.contains("GIT_WORK_TREE");
+        // Kept for the rest of the line once set: `eval 'export
+        // GIT_WORK_TREE=…'` sets it for what follows.
+        self.names_work_tree |= sets_tree;
         let outer_work_trees = std::mem::take(&mut self.work_trees);
         let outer_loops = std::mem::replace(&mut self.loops, loops);
         let continued = command.contains("\\\n");
@@ -1203,7 +1208,6 @@ impl Reader<'_> {
         self.here = outer_here;
         self.carried = outer_carried;
         self.lost = outer_lost;
-        self.names_work_tree = outer_names_work_tree;
         self.work_trees = outer_work_trees;
         self.loops = outer_loops;
         true
@@ -2655,6 +2659,51 @@ fn work_tree_settings(command: tree_sitter::Node<'_>, source: &str) -> Vec<(usiz
         }
     }
     found
+}
+
+/// Whether `node` (with its `parent`) sets `GIT_WORK_TREE` to a value: an
+/// assignment (before a command, on its own, or made by `export`, `declare`,
+/// `local` or `readonly`), `export GIT_WORK_TREE` of a value set elsewhere, a
+/// word a command such as `env` or `sudo` is given (`GIT_WORK_TREE=x`), or
+/// `${GIT_WORK_TREE:=x}`. An empty value sets none (git refuses it), and
+/// reading it (`"$GIT_WORK_TREE"`) or `unset` sets nothing.
+fn sets_work_tree(
+    node: tree_sitter::Node<'_>,
+    parent: Option<tree_sitter::Node<'_>>,
+    source: &str,
+) -> bool {
+    const NAME: &str = "GIT_WORK_TREE";
+    // Read without copying: every node of the line comes here.
+    let text = |node: tree_sitter::Node<'_>| source.get(node.byte_range()).unwrap_or_default();
+    match node.kind() {
+        "variable_assignment" => {
+            node.child_by_field_name("name")
+                .is_some_and(|name| text(name) == NAME)
+                && node.child_by_field_name("value").is_some_and(|value| {
+                    let (text, literal) = unquote(value, source);
+                    !(literal && text.is_empty())
+                })
+        }
+        "variable_name" => {
+            parent.is_some_and(|parent| parent.kind() == "declaration_command")
+                && text(node) == NAME
+        }
+        "expansion" => text(node)
+            .strip_prefix("${")
+            .and_then(|rest| rest.strip_prefix(NAME))
+            .is_some_and(|rest| rest.starts_with('=') || rest.starts_with(":=")),
+        kind if WORD_KINDS.contains(&kind)
+            && parent.is_some_and(|parent| parent.kind() == "command")
+            && text(node).trim_start_matches(['"', '\'']).starts_with(NAME) =>
+        {
+            let (value, literal) = unquote(node, source);
+            value
+                .strip_prefix(NAME)
+                .and_then(|rest| rest.strip_prefix('='))
+                .is_some_and(|rest| !(literal && rest.is_empty()))
+        }
+        _ => false,
+    }
 }
 
 /// `path` from the folder `-C` names (`folder`), when it is relative.
@@ -7584,10 +7633,30 @@ mod readings {
             )),
             vec![placed(&cache)]
         );
-        assert_eq!(
-            found("export GIT_WORK_TREE=../outside/cache && git clean -fdx"),
-            vec![unplaced("$GIT_WORK_TREE")]
-        );
+        for command in [
+            "export GIT_WORK_TREE=../outside/cache && git clean -fdx",
+            "declare -x GIT_WORK_TREE=../outside/cache; git clean -fdx",
+            "export GIT_WORK_TREE; git clean -fdx",
+            ": \"${GIT_WORK_TREE:=../outside/cache}\"; git clean -fdx",
+            "eval 'export GIT_WORK_TREE=../outside/cache'; git clean -fdx",
+        ] {
+            assert_eq!(
+                found(command),
+                vec![unplaced("$GIT_WORK_TREE")],
+                "{command}"
+            );
+        }
+        // Reading it, unsetting it or setting it empty (git refuses that)
+        // moves nothing.
+        for command in [
+            "unset GIT_WORK_TREE && git clean -fd",
+            "echo \"$GIT_WORK_TREE\" && git clean -fdn",
+            "GIT_WORK_TREE= git clean -fd",
+            "env GIT_WORK_TREE= git clean -fd",
+            "grep -r GIT_WORK_TREE . && git clean -fd",
+        ] {
+            assert!(found(command).is_empty(), "{command}");
+        }
         assert_eq!(
             found("git --work-tree=\"$W\" clean -fdx"),
             vec![unplaced("--work-tree=\"$W\"")]

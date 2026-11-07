@@ -178,6 +178,9 @@ CORPUS = [
     'cd deep/er && cp ../../README.md . | true', 'cd src && diff <(cat ../README.md) main.rs',
     # Copies of dotfiles
     'cp -r .* build', 'cp .* build 2>/dev/null',
+    # What sets GIT_WORK_TREE
+    'unset GIT_WORK_TREE && git clean -fd', 'echo "$GIT_WORK_TREE" && git clean -fdn', 'GIT_WORK_TREE= git clean -fd',
+    'declare -x GIT_WORK_TREE=../outside; git clean -fdx', "eval 'export GIT_WORK_TREE=../outside'; git clean -fdx",
 ]
 
 
