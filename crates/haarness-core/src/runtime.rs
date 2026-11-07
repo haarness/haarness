@@ -1684,6 +1684,203 @@ fn describe_model_refusal(
     })
 }
 
+/// How a turn ends whose model on this computer answered with nothing at
+/// all; the model's id follows (see `describe_local_model_failure`).
+const EMPTY_LOCAL_REPLY: &str = "the local model sent back an empty reply: ";
+
+/// The model Haarness suggests downloading for a chat on Ollama when none on
+/// the computer can do the work: it calls tools, reads 40K tokens, and runs
+/// on an 8 GB GPU.
+const OLLAMA_SUGGESTED: &str = "qwen3:8b";
+
+/// The least window a model Haarness suggests on Ollama has: less leaves a
+/// chat little room beside the instructions and tools.
+const OLLAMA_SUGGESTED_ROOM: u64 = 16_384;
+
+/// What went wrong with a model on Ollama, in words that say what to do: a
+/// model that isn't downloaded, one that runs on Ollama's cloud while this
+/// computer isn't signed in there, one that can't use tools, and one too
+/// short for Haarness's instructions and tools. Models it suggests are ones
+/// on the computer that call tools; with none, it names one to download.
+/// `None` for any other failure, and for other providers.
+fn describe_local_model_failure(
+    error: &CoreError,
+    info: &haarness_protocol::ProviderInfo,
+    model: &str,
+    advice: bool,
+) -> Option<String> {
+    let CoreError::Provider(raw) = error else {
+        return None;
+    };
+    if info.id == "lmstudio" && raw.starts_with(EMPTY_LOCAL_REPLY) {
+        let name = haarness_protocol::model_display_name(
+            model,
+            model_metadata(&info.models, model).map(|listed| listed.display_name.as_str()),
+        );
+        let happened = format!("{name} sent back an empty reply.");
+        return Some(if advice {
+            format!(
+                "{happened} A small model often can't follow Haarness's instructions and tools: choose a larger model for this chat, or download one in LM Studio."
+            )
+        } else {
+            happened
+        });
+    }
+    if info.id != "ollama" {
+        return None;
+    }
+    let lower = raw.to_ascii_lowercase();
+    let listed = model_metadata(&info.models, model);
+    let name = haarness_protocol::model_display_name(
+        model,
+        listed.map(|listed| listed.display_name.as_str()),
+    );
+    let cloud = |id: &str| id.ends_with("-cloud") || id.ends_with(":cloud");
+    // Models here that could do the work instead, with at least `room`.
+    let instead = |room: u64| -> Vec<String> {
+        let mut names = Vec::new();
+        // The one Haarness would suggest downloading first, when it's here.
+        let mut models: Vec<_> = info.models.iter().collect();
+        models.sort_by_key(|other| other.id != OLLAMA_SUGGESTED);
+        for other in models {
+            if other.id == model
+                || !other.tools
+                || cloud(&other.id)
+                || other
+                    .context_window
+                    .is_some_and(|window| window < room.max(OLLAMA_SUGGESTED_ROOM))
+            {
+                continue;
+            }
+            let other =
+                haarness_protocol::model_display_name(&other.id, Some(other.display_name.as_str()));
+            if !names.contains(&other) {
+                names.push(other);
+            }
+            if names.len() == 2 {
+                break;
+            }
+        }
+        names
+    };
+    let choose = |room: u64, how: &str| match instead(room).as_slice() {
+        [] => format!(
+            "Download one {how} with `ollama pull {OLLAMA_SUGGESTED}`, then choose it for this chat."
+        ),
+        names => format!(
+            "Choose one {how} for this chat, such as {}.",
+            spoken_list(names, "or")
+        ),
+    };
+    // A picture for a model that reads none: the words are Haarness's own
+    // already; here they gain models that read pictures and use tools.
+    if raw.contains(" doesn't read images. ") && advice {
+        let readers: Vec<String> = info
+            .models
+            .iter()
+            .filter(|other| other.id != model && other.images && other.tools && !cloud(&other.id))
+            .take(2)
+            .map(|other| {
+                haarness_protocol::model_display_name(&other.id, Some(other.display_name.as_str()))
+            })
+            .collect();
+        return (!readers.is_empty()).then(|| {
+            format!(
+                "{}, such as {}.",
+                clean_error_text(raw.trim(), 600).trim_end_matches('.'),
+                spoken_list(&readers, "or")
+            )
+        });
+    }
+    let (happened, next) = if raw.starts_with(EMPTY_LOCAL_REPLY) {
+        (
+            format!("{name} sent back an empty reply."),
+            match instead(0).as_slice() {
+                [] => format!(
+                    "A small model often can't follow Haarness's instructions and tools. Download a larger one with `ollama pull {OLLAMA_SUGGESTED}`, then choose it for this chat."
+                ),
+                names => format!(
+                    "A small model often can't follow Haarness's instructions and tools. Choose a larger one that uses them for this chat, such as {}.",
+                    spoken_list(names, "or")
+                ),
+            },
+        )
+    } else if lower.contains("does not support tools") {
+        (
+            format!(
+                "{name} can't use tools in Ollama, so it can't read, change or run anything in your project."
+            ),
+            choose(0, "that can"),
+        )
+    } else if (lower.starts_with("http 401") || lower.contains("unauthorized"))
+        && (cloud(model) || lower.contains("ollama.com"))
+    {
+        (
+            format!(
+                "{name} runs on Ollama's cloud, and the Ollama on this computer isn't signed in to ollama.com."
+            ),
+            format!(
+                "Sign in with `ollama signin`, then send your message again. Or choose a model that runs on this computer{}.",
+                match instead(0).as_slice() {
+                    [] => String::new(),
+                    names => format!(", such as {}", spoken_list(names, "or")),
+                }
+            ),
+        )
+    } else if refuses_unknown_model(&lower, model) {
+        (
+            format!("{name} isn't downloaded in Ollama."),
+            format!(
+                "Download it with `ollama pull {model}`, then send your message again{}.",
+                match instead(0).as_slice() {
+                    [] => String::new(),
+                    names => format!(
+                        ", or choose a model you have, such as {}",
+                        spoken_list(names, "or")
+                    ),
+                }
+            ),
+        )
+    } else if let Some(window) = ollama_window_refused(&lower) {
+        (
+            format!(
+                "{name} reads at most {} tokens at once here, fewer than Haarness's instructions, tools and this message take.",
+                grouped_number(window)
+            ),
+            choose(window.saturating_add(1), "with a longer context"),
+        )
+    } else {
+        return None;
+    };
+    Some(if advice {
+        format!("{happened} {next}")
+    } else {
+        happened
+    })
+}
+
+/// The window Ollama said a request was over, when even a compacted chat
+/// was: "request (14000 tokens) exceeds the available context size (8192
+/// tokens), try increasing it".
+fn ollama_window_refused(lower: &str) -> Option<u64> {
+    let (_, rest) = lower.split_once("exceeds the available context size (")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// `8,192` for 8192: the way a number reads at a glance.
+fn grouped_number(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 /// Whether a provider's refusal says it does not know the model: a 404 about
 /// it, or words such as "model_not_found", "does not exist" or "not
 /// supported" about the model itself rather than a setting of the request.
@@ -9402,7 +9599,8 @@ impl RunnerTask {
         // A child agent's failure is read by the model that started it.
         let advice = self.depth == 0;
         if let Some(info) = &info
-            && let Some(words) = describe_model_refusal(error, info, &self.turn.model, advice)
+            && let Some(words) = describe_local_model_failure(error, info, &self.turn.model, advice)
+                .or_else(|| describe_model_refusal(error, info, &self.turn.model, advice))
         {
             return words;
         }
@@ -10096,6 +10294,8 @@ impl RunnerTask {
             let mut asked_to_explain = false;
             // Whether this turn asked again for the summary at its step limit.
             let mut asked_for_summary = false;
+            // Whether any round of this turn wrote text or called a tool.
+            let mut answered = false;
             // UserPromptSubmit hooks may block the turn or inject context.
             let mut prompt_context: Option<String> = None;
             if self.depth == 0 {
@@ -11237,6 +11437,22 @@ impl RunnerTask {
                     // cut there again, and a subagent that wrote text beside
                     // the failed call hands that text to its parent.
                     let empty = !made_calls && !wrote_text && self.output_schema.is_none();
+                    // A model on this computer that answers a person's
+                    // message with nothing at all (a small one lost in the
+                    // instructions and tools, or one that only thought)
+                    // would end the turn in silence: it says so instead.
+                    if empty
+                        && !answered
+                        && self.depth == 0
+                        && !stopped_at_output_limit
+                        && matches!(provider.id(), "ollama" | "lmstudio")
+                    {
+                        return Err(CoreError::Provider(format!(
+                            "{EMPTY_LOCAL_REPLY}{}",
+                            self.turn.model
+                        )));
+                    }
+                    answered |= !empty;
                     if empty
                         && unexplained_failure
                         && (self.depth == 0 || !failure_beside_text)
@@ -23455,6 +23671,143 @@ mod tests {
                 Some("Anthropic")
             ),
             "Anthropic is not connected. Connect it with an API key or by signing in, then try again."
+        );
+    }
+
+    #[test]
+    fn a_model_on_ollama_that_cannot_do_the_work_says_what_to_choose() {
+        let mut gemma = model_info("gemma3:latest", 32_768);
+        gemma.tools = false;
+        let mut cloud = model_info("gpt-oss:120b-cloud", 32_768);
+        cloud.display_name = "gpt-oss:120b-cloud".into();
+        let ollama = haarness_protocol::ProviderInfo {
+            id: "ollama".into(),
+            name: "Ollama".into(),
+            authenticated: true,
+            models: vec![
+                gemma.clone(),
+                cloud.clone(),
+                model_info("llama3:8b", 8_192),
+                model_info("qwen3:8b", 32_768),
+                model_info("gpt-oss:20b", 32_768),
+            ],
+        };
+        let words = |error: &str, model: &str| {
+            super::describe_local_model_failure(
+                &CoreError::Provider(error.into()),
+                &ollama,
+                model,
+                true,
+            )
+        };
+        // Not downloaded: how to get it, and what is here.
+        assert_eq!(
+            words("HTTP 404 Not Found: model 'qwen2.5-coder:14b' not found. Download it with `ollama pull qwen2.5-coder:14b`, or pick a model you have.", "qwen2.5-coder:14b").as_deref(),
+            Some("qwen2.5-coder:14b isn't downloaded in Ollama. Download it with `ollama pull qwen2.5-coder:14b`, then send your message again, or choose a model you have, such as qwen3:8b or gpt-oss:20b.")
+        );
+        // A cloud model while this computer's Ollama isn't signed in: not a
+        // key to connect again.
+        assert_eq!(
+            words("HTTP 401 Unauthorized: Unauthorized", "gpt-oss:120b-cloud").as_deref(),
+            Some(
+                "gpt-oss:120b-cloud runs on Ollama's cloud, and the Ollama on this computer isn't signed in to ollama.com. Sign in with `ollama signin`, then send your message again. Or choose a model that runs on this computer, such as qwen3:8b or gpt-oss:20b."
+            )
+        );
+        // A model without tools would only pretend to have done the work.
+        assert_eq!(
+            words("gemma3:latest does not support tools", "gemma3:latest").as_deref(),
+            Some(
+                "gemma3:latest can't use tools in Ollama, so it can't read, change or run anything in your project. Choose one that can for this chat, such as qwen3:8b or gpt-oss:20b."
+            )
+        );
+        // Too short for the instructions and tools, even compacted: models
+        // with more room, not the short one.
+        assert_eq!(
+            words("HTTP 400 Bad Request: request (14112 tokens) exceeds the available context size (8192 tokens), try increasing it", "llama3:8b").as_deref(),
+            Some("llama3:8b reads at most 8,192 tokens at once here, fewer than Haarness's instructions, tools and this message take. Choose one with a longer context for this chat, such as qwen3:8b or gpt-oss:20b.")
+        );
+        // With nothing here that could, one to download.
+        let alone = haarness_protocol::ProviderInfo {
+            models: vec![gemma, cloud],
+            ..ollama.clone()
+        };
+        assert_eq!(
+            super::describe_local_model_failure(
+                &CoreError::Provider("gemma3:latest does not support tools".into()),
+                &alone,
+                "gemma3:latest",
+                true,
+            )
+            .as_deref(),
+            Some(
+                "gemma3:latest can't use tools in Ollama, so it can't read, change or run anything in your project. Download one that can with `ollama pull qwen3:8b`, then choose it for this chat."
+            )
+        );
+        // The model that started a child agent reads only what happened.
+        assert_eq!(
+            super::describe_local_model_failure(
+                &CoreError::Provider("gemma3:latest does not support tools".into()),
+                &ollama,
+                "gemma3:latest",
+                false,
+            )
+            .as_deref(),
+            Some(
+                "gemma3:latest can't use tools in Ollama, so it can't read, change or run anything in your project."
+            )
+        );
+        // Nothing at all back from a small model.
+        assert_eq!(
+            words(
+                "the local model sent back an empty reply: smollm2:1.7b",
+                "smollm2:1.7b"
+            )
+            .as_deref(),
+            Some(
+                "smollm2:1.7b sent back an empty reply. A small model often can't follow Haarness's instructions and tools. Choose a larger one that uses them for this chat, such as qwen3:8b or gpt-oss:20b."
+            )
+        );
+        // A picture: models here that read them and use tools.
+        let mut seeing = model_info("qwen3-vl:8b", 32_768);
+        seeing.images = true;
+        let with_eyes = haarness_protocol::ProviderInfo {
+            models: [ollama.models.clone(), vec![seeing]].concat(),
+            ..ollama.clone()
+        };
+        assert_eq!(
+            super::describe_local_model_failure(
+                &CoreError::Provider("qwen3:8b doesn't read images. Send the message without the picture, or switch to a model that reads them.".into()),
+                &with_eyes,
+                "qwen3:8b",
+                true,
+            )
+            .as_deref(),
+            Some("qwen3:8b doesn't read images. Send the message without the picture, or switch to a model that reads them, such as qwen3-vl:8b.")
+        );
+        assert_eq!(
+            words(
+                "qwen3:8b doesn't read images. Send the message without the picture, or switch to a model that reads them.",
+                "qwen3:8b"
+            ),
+            None
+        );
+        // Other failures, and other providers, keep their own words.
+        assert_eq!(
+            words("HTTP 500 Internal Server Error: boom", "qwen3:8b"),
+            None
+        );
+        let other = haarness_protocol::ProviderInfo {
+            id: "openai".into(),
+            ..ollama
+        };
+        assert_eq!(
+            super::describe_local_model_failure(
+                &CoreError::Provider("HTTP 401 Unauthorized: Unauthorized".into()),
+                &other,
+                "gpt-oss:120b-cloud",
+                true,
+            ),
+            None
         );
     }
 
