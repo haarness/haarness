@@ -1634,6 +1634,7 @@
   "Working tree": "Árbol de trabajo",
   "Working…": "Trabajando…",
   "Worktree removed.": "Árbol de trabajo quitado.",
+  "Worktree removed. Its folder no longer links to its repository, so it was left on disk.": "Árbol de trabajo quitado. Su carpeta ya no está vinculada a su repositorio, así que se dejó en el disco.",
   "Worktree reset.": "Árbol de trabajo restablecido.",
   "Your tasks keep running when you close this window.": "Tus tareas siguen ejecutándose cuando cierras esta ventana.",
   "Zoom in": "Acercar",

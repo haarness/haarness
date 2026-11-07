@@ -1867,6 +1867,16 @@ impl App {
         self.workspace_refs = None;
         self.workspace_custom_ref.clear();
         self.notice = match operation {
+            // A worktree whose link to its repository broke is only
+            // forgotten: the server left its folder, which still exists.
+            WorkspaceMutation::Remove { .. } | WorkspaceMutation::Cleanup { .. }
+                if response.workspace.exists =>
+            {
+                format!(
+                    "Forgot worktree “{}” · it no longer links to its repository, so its folder was left on disk",
+                    response.workspace.name
+                )
+            }
             WorkspaceMutation::Create { .. } => format!(
                 "Created worktree “{}” from {}{} · folder switching is unavailable on attached clients",
                 response.workspace.name,

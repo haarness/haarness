@@ -1634,6 +1634,7 @@
   "Working tree": "Çalışma ağacı",
   "Working…": "Çalışıyor…",
   "Worktree removed.": "Çalışma ağacı kaldırıldı.",
+  "Worktree removed. Its folder no longer links to its repository, so it was left on disk.": "Çalışma ağacı kaldırıldı. Klasörü artık deposuna bağlı olmadığı için diskte bırakıldı.",
   "Worktree reset.": "Çalışma ağacı sıfırlandı.",
   "Your tasks keep running when you close this window.": "Bu pencereyi kapattığınızda görevleriniz çalışmaya devam eder.",
   "Zoom in": "Yakınlaştır",

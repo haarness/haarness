@@ -652,6 +652,9 @@ impl WorkspaceManager {
                     .into(),
             ));
         }
+        if broken_worktree_link(&path) {
+            return self.forget_unlinked(&mut registry, workspace);
+        }
         // The registry's branch is a discovery cache, not deletion authority:
         // users may switch branches inside a worktree between registry writes.
         // Resolve the live branch while the checkout still exists and use only
@@ -741,6 +744,9 @@ impl WorkspaceManager {
         ensure_managed_worktree(&workspace)?;
         let _activity = self.acquire_inactive_guard(&workspace.id)?;
         if Path::new(&workspace.path).exists() {
+            if broken_worktree_link(Path::new(&workspace.path)) {
+                return self.forget_unlinked(&mut registry, workspace);
+            }
             return Err(WorkspaceError::Conflict(
                 "workspace directory exists; stale-registration cleanup cannot remove a live checkout"
                     .into(),
@@ -761,6 +767,36 @@ impl WorkspaceManager {
         }
         Ok(WorkspaceOperationResponse {
             workspace: removed,
+            message,
+        })
+    }
+
+    /// Removes the record of a managed worktree whose link to its
+    /// repository is broken, and only that: nothing can confirm the folder
+    /// is still the checkout Haarness made, so it stays on disk as it is and
+    /// Git is not asked. The returned workspace still `exists`, which tells
+    /// a client the folder was left in place.
+    fn forget_unlinked(
+        &self,
+        registry: &mut Registry,
+        workspace: WorkspaceInfo,
+    ) -> Result<WorkspaceOperationResponse> {
+        registry
+            .workspaces
+            .retain(|candidate| candidate.id != workspace.id);
+        self.write_registry(registry)?;
+        let mut message = format!(
+            "forgot worktree {}; it no longer links to its repository, so its folder was left on disk",
+            workspace.path
+        );
+        if let Some(branch) = workspace.branch.as_deref() {
+            let _ = write!(&mut message, " and branch {branch} was kept");
+        }
+        Ok(WorkspaceOperationResponse {
+            workspace: WorkspaceInfo {
+                exists: true,
+                ..workspace
+            },
             message,
         })
     }
@@ -930,14 +966,7 @@ fn project_identity(path: &Path) -> Result<ProjectIdentity> {
             linked: false,
         });
     };
-    let common = git_checked(path, ["rev-parse", "--git-common-dir"])?;
-    let common = PathBuf::from(common.trim());
-    let common = if common.is_absolute() {
-        common
-    } else {
-        path.join(common)
-    };
-    let common = dunce::canonicalize(&common).map_err(io_error)?;
+    let common = git_common_dir(path)?;
     let root = common
         .file_name()
         .is_some_and(|name| name == ".git")
@@ -949,6 +978,64 @@ fn project_identity(path: &Path) -> Result<ProjectIdentity> {
         root: dunce::canonicalize(&root).map_err(io_error)?,
         git: true,
     })
+}
+
+/// The canonical Git folder every checkout of `path`'s repository shares:
+/// the repository's `.git`, or a bare repository itself.
+fn git_common_dir(path: &Path) -> Result<PathBuf> {
+    let common = PathBuf::from(git_checked(path, ["rev-parse", "--git-common-dir"])?.trim());
+    let common = if common.is_absolute() {
+        common
+    } else {
+        path.join(common)
+    };
+    dunce::canonicalize(&common).map_err(io_error)
+}
+
+/// Whether the checkouts at `left` and `right` belong to one repository. The
+/// worktrees of a bare repository each have a root of their own, so their
+/// roots differ although Git keeps them together.
+fn same_repository(left: &Path, right: &Path) -> bool {
+    match (git_common_dir(left), git_common_dir(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Whether the folder's `.git` no longer leads to a repository: it is gone,
+/// is not a `gitdir:` link, or names a Git folder that is not there (its
+/// repository moved, or Git's record of the worktree was pruned). Git
+/// refuses every command in such a folder. A `.git` folder is a repository
+/// of its own and a link that leads to one is a worktree Git can check, so
+/// neither counts, and nor does a `.git` that cannot be read.
+fn broken_worktree_link(path: &Path) -> bool {
+    let gone = |error: &std::io::Error| {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        )
+    };
+    let dot = path.join(".git");
+    match fs::metadata(&dot) {
+        Err(error) => return gone(&error),
+        Ok(metadata) if metadata.is_dir() => return false,
+        Ok(_) => {}
+    }
+    let Ok(text) = fs::read_to_string(&dot) else {
+        return false;
+    };
+    let Some(link) = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|link| !link.is_empty())
+    else {
+        return true;
+    };
+    // A relative link is read from where the folder really is, as Git reads it.
+    let folder = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    fs::symlink_metadata(folder.join(link).join("HEAD")).is_err_and(|error| gone(&error))
 }
 
 fn requested_worktree_path(
@@ -1119,6 +1206,8 @@ fn registry_changed() -> WorkspaceError {
     WorkspaceError::Conflict("the workspace changed while it was being checked; try again".into())
 }
 
+const BROKEN_LINK: &str = "the worktree no longer links to its repository, so Git cannot check it; remove it to forget it (its folder stays on disk)";
+
 fn verify_workspace_identity(workspace: &WorkspaceInfo, project: &ProjectInfo) -> Result<()> {
     let path = Path::new(&workspace.path);
     if !path.is_dir() {
@@ -1126,12 +1215,18 @@ fn verify_workspace_identity(workspace: &WorkspaceInfo, project: &ProjectInfo) -
             "workspace directory is missing; managed identity cannot be verified".into(),
         ));
     }
+    if broken_worktree_link(path) {
+        return Err(WorkspaceError::Conflict(BROKEN_LINK.into()));
+    }
     let identity = project_identity(path).map_err(|error| {
         WorkspaceError::Conflict(format!(
             "managed workspace identity could not be verified: {error}"
         ))
     })?;
-    if !identity.git || !same_path(&identity.root, Path::new(&project.root)) {
+    if !identity.git
+        || !(same_path(&identity.root, Path::new(&project.root))
+            || same_repository(path, Path::new(&project.root)))
+    {
         return Err(WorkspaceError::Conflict(
             "workspace path belongs to a different Git project; refusing destructive operation"
                 .into(),
@@ -2596,6 +2691,195 @@ mod tests {
             fixture.manager.get(&workspace.id),
             Err(WorkspaceError::NotFound(_))
         ));
+    }
+
+    /// The worktrees of a bare repository have roots of their own, yet one
+    /// Haarness creates from such a project is that project's: it opens,
+    /// resets and is removed like any other.
+    #[test]
+    fn a_worktree_of_a_bare_repository_opens_resets_and_is_removed() {
+        let fixture = Fixture::new();
+        let bare = fixture.root.join("bare.git");
+        command(
+            &fixture.root,
+            [
+                "clone",
+                "--quiet",
+                "--bare",
+                fixture.repository.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let main = fixture.root.join("main");
+        command(&bare, ["worktree", "add", main.to_str().unwrap(), "main"]);
+        let project = fixture.manager.register_local(&main).unwrap();
+        assert_eq!(project.kind, WorkspaceKind::Local);
+        let workspace = fixture
+            .manager
+            .create_worktree(
+                &project.id,
+                &WorkspaceCreateRequest {
+                    name: "bare feature".into(),
+                    ..WorkspaceCreateRequest::default()
+                },
+            )
+            .unwrap()
+            .workspace;
+        assert_eq!(workspace.project_id, project.project_id);
+        let opened = fixture.manager.open_workspace(&workspace.id).unwrap();
+        assert_eq!(opened.id, workspace.id);
+        fs::write(Path::new(&workspace.path).join("tracked.txt"), "changed\n").unwrap();
+        fixture
+            .manager
+            .reset_worktree(
+                &workspace.id,
+                &WorkspaceResetRequest {
+                    confirm: true,
+                    discard_changes: true,
+                    ..WorkspaceResetRequest::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(Path::new(&workspace.path).join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        fixture
+            .manager
+            .remove_worktree(
+                &workspace.id,
+                &WorkspaceRemoveRequest {
+                    confirm: true,
+                    ..WorkspaceRemoveRequest::default()
+                },
+            )
+            .unwrap();
+        assert!(!Path::new(&workspace.path).exists());
+        // Another repository's checkout is still refused.
+        let other = fixture.create("ordinary");
+        let mut moved = other.clone();
+        moved.project_id = project.project_id.clone();
+        let registry_project = ProjectInfo {
+            root: main.display().to_string(),
+            ..fixture.manager.read_registry().unwrap().projects[0].clone()
+        };
+        assert!(matches!(
+            verify_workspace_identity(&moved, &registry_project),
+            Err(WorkspaceError::Conflict(message)) if message.contains("different Git project")
+        ));
+    }
+
+    /// A worktree whose link to its repository broke (here its `.git` file
+    /// names a Git folder that is gone, as after the repository moved) can
+    /// be neither checked nor removed by Git. Removal and cleanup forget it
+    /// and leave its folder, with everything in it, where it is.
+    #[test]
+    fn a_worktree_whose_link_broke_is_forgotten_and_its_folder_kept() {
+        let fixture = Fixture::new();
+        for (index, cleanup) in [false, true].into_iter().enumerate() {
+            let workspace = fixture.create(&format!("unlinked {index}"));
+            let path = PathBuf::from(&workspace.path);
+            fs::write(path.join("work.txt"), "unsaved\n").unwrap();
+            fs::write(
+                path.join(".git"),
+                "gitdir: /nowhere/at/all/.git/worktrees/x\n",
+            )
+            .unwrap();
+            assert!(matches!(
+                fixture.manager.open_workspace(&workspace.id),
+                Err(WorkspaceError::Conflict(message)) if message == BROKEN_LINK
+            ));
+            let forgotten = if cleanup {
+                fixture.manager.cleanup_missing_workspace(
+                    &workspace.id,
+                    &WorkspaceCleanupRequest { confirm: true },
+                )
+            } else {
+                fixture.manager.remove_worktree(
+                    &workspace.id,
+                    &WorkspaceRemoveRequest {
+                        confirm: true,
+                        discard_changes: true,
+                        delete_branch: true,
+                    },
+                )
+            }
+            .unwrap();
+            assert!(forgotten.workspace.exists, "the folder was kept");
+            assert!(
+                forgotten.message.contains("its folder was left on disk"),
+                "{}",
+                forgotten.message
+            );
+            assert_eq!(
+                fs::read_to_string(path.join("work.txt")).unwrap(),
+                "unsaved\n"
+            );
+            assert!(matches!(
+                fixture.manager.get(&workspace.id),
+                Err(WorkspaceError::NotFound(_))
+            ));
+            let branch = workspace.branch.unwrap();
+            assert!(
+                git_success(
+                    &fixture.repository,
+                    [
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{branch}")
+                    ]
+                )
+                .unwrap(),
+                "the branch stays"
+            );
+        }
+        // A link that still leads to its repository is never forgotten.
+        let linked = fixture.create("linked");
+        assert!(matches!(
+            fixture
+                .manager
+                .cleanup_missing_workspace(&linked.id, &WorkspaceCleanupRequest { confirm: true }),
+            Err(WorkspaceError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn a_broken_worktree_link_is_told_from_a_working_one() {
+        let root = std::env::temp_dir().join(format!("haarness-git-link-{}", Uuid::now_v7()));
+        let folder = root.join("checkout");
+        let gitdir = root.join("repository/.git/worktrees/checkout");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        // No `.git` at all, a link to nowhere, and one that is not a link.
+        assert!(broken_worktree_link(&folder));
+        fs::write(
+            folder.join(".git"),
+            "gitdir: ../repository/.git/worktrees/gone\n",
+        )
+        .unwrap();
+        assert!(broken_worktree_link(&folder));
+        fs::write(folder.join(".git"), "not a link\n").unwrap();
+        assert!(broken_worktree_link(&folder));
+        // A relative link, and an absolute one, that lead to the Git folder.
+        fs::write(
+            folder.join(".git"),
+            "gitdir: ../repository/.git/worktrees/checkout\n",
+        )
+        .unwrap();
+        assert!(!broken_worktree_link(&folder));
+        fs::write(
+            folder.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        assert!(!broken_worktree_link(&folder));
+        // A repository of its own.
+        fs::remove_file(folder.join(".git")).unwrap();
+        fs::create_dir(folder.join(".git")).unwrap();
+        assert!(!broken_worktree_link(&folder));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -25139,3 +25139,67 @@ async fn a_terminal_text_click_card_says_it_asks_every_time() {
     assert!(text.contains("needs your approval"), "{text}");
     assert!(!text.contains("Allow in this chat"), "{text}");
 }
+
+/// A worktree whose link to its repository broke is only forgotten by the
+/// server, which leaves its folder; the notice says so instead of "Removed".
+#[tokio::test]
+async fn a_forgotten_worktree_says_its_folder_was_left_on_disk() {
+    let catalog = fixture_workspace_catalog();
+    let workspace = catalog.workspaces[1].clone();
+    let forgotten = haarness_protocol::WorkspaceOperationResponse {
+        workspace: workspace.clone(),
+        message: "forgot worktree".into(),
+    };
+    let mut after = catalog.clone();
+    after
+        .workspaces
+        .retain(|candidate| candidate.id != workspace.id);
+    let (client, server) = workspace_http_client(
+        vec![
+            serde_json::to_string(&forgotten).unwrap(),
+            serde_json::to_string(&after).unwrap(),
+        ],
+        false,
+    )
+    .await;
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.open_workspace_dashboard(catalog);
+    app.execute_choice(
+        crate::state::OverlayChoice::Option(
+            crate::state::OptionsKind::Workspaces,
+            format!("workspace:{}", workspace.id),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    app.execute_choice(
+        crate::state::OverlayChoice::Option(
+            crate::state::OptionsKind::WorkspaceActions,
+            "remove".into(),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    let action = app
+        .execute_choice(
+            crate::state::OverlayChoice::Option(
+                crate::state::OptionsKind::WorkspaceRemoveConfirmation,
+                "remove".into(),
+            ),
+            &client,
+        )
+        .await
+        .unwrap();
+    let operation = started_workspace_mutation(action);
+    let completion = crate::commands::run_workspace_mutation(client.clone(), operation).await;
+    assert!(app.finish_workspace_mutation(completion, false).is_none());
+    assert_eq!(
+        app.notice,
+        "Forgot worktree “review” · it no longer links to its repository, so its folder was left on disk"
+    );
+    let requests = server.await.unwrap();
+    assert!(requests[0].starts_with("DELETE /v1/workspaces/workspace-review "));
+}

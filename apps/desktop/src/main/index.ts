@@ -633,7 +633,14 @@ async function manageWorktree(owner: string, method: string, args: unknown[]) {
     try {
       if (workspace.exists) {
         const saved = data().recent.find((item) => item.id === id);
-        await connectLocal(workspace.path, saved?.trust ?? root.view.trust);
+        await connectLocal(workspace.path, saved?.trust ?? root.view.trust).catch(
+          (error) => {
+            // A worktree whose link to its repository broke cannot start a
+            // server, so it runs nothing a removal could cut off; the server
+            // still refuses to remove one whose own server is running.
+            if (method !== "removeWorkspace") throw error;
+          },
+        );
       }
       const cached = connections.get(id);
       const target =

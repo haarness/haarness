@@ -1634,6 +1634,7 @@
   "Working tree": "Working tree",
   "Working…": "กำลังทำงาน…",
   "Worktree removed.": "ลบเวิร์กทรีแล้ว",
+  "Worktree removed. Its folder no longer links to its repository, so it was left on disk.": "ลบเวิร์กทรีแล้ว โฟลเดอร์ของมันไม่ได้เชื่อมโยงกับที่เก็บอีกต่อไป จึงเก็บไว้บนดิสก์",
   "Worktree reset.": "รีเซ็ตเวิร์กทรีแล้ว",
   "Your tasks keep running when you close this window.": "งานของคุณจะทำงานต่อแม้ปิดหน้าต่างนี้",
   "Zoom in": "ซูมเข้า",

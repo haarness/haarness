@@ -315,6 +315,13 @@ Reset and removal apply only to Haarness-managed Git worktrees, always require
 `--confirm`, refuse active servers, and preserve dirty/untracked work unless
 the matching discard flags are supplied. Removal from inside the target
 directory is refused; branch deletion uses Git's safe merged-branch check.
+A worktree belongs to its project when the two share one Git repository, so a
+project that is itself a worktree of a bare repository (`git clone --bare`, then
+`git worktree add`) creates, opens, resets and removes worktrees like any other.
+A worktree whose link to its repository broke (its `.git` names a Git folder that
+is gone) cannot be opened or checked; `worktree remove` (and the stale-folder
+cleanup) then only forgets it, leaving its folder and its branch as they are,
+and says so in one line.
 
 ## Terminal UI
 

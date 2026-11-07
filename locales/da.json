@@ -1634,6 +1634,7 @@
   "Working tree": "Arbejdstræ",
   "Working…": "Arbejder…",
   "Worktree removed.": "Arbejdstræet er fjernet.",
+  "Worktree removed. Its folder no longer links to its repository, so it was left on disk.": "Arbejdstræet er fjernet. Dets mappe er ikke længere knyttet til sit repository, så den blev ladt tilbage på disken.",
   "Worktree reset.": "Arbejdstræet er nulstillet.",
   "Your tasks keep running when you close this window.": "Dine opgaver kører videre, når du lukker dette vindue.",
   "Zoom in": "Zoom ind",
