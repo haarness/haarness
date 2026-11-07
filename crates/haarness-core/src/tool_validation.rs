@@ -94,9 +94,10 @@ pub fn tool_call_arguments(raw: &str) -> Value {
         Ok(value) if value.is_object() => return value,
         // Some servers encode the arguments twice, as a JSON string that
         // holds the object.
-        Ok(Value::String(inner)) if serde_json::from_str::<Value>(&inner).is_ok_and(|value| value.is_object()) => {
-            return serde_json::from_str(&inner).unwrap_or_default();
-        }
+        Ok(Value::String(inner)) => match serde_json::from_str::<Value>(&inner) {
+            Ok(value) if value.is_object() => return value,
+            _ => "they are not a JSON object".to_owned(),
+        },
         Ok(_) => "they are not a JSON object".to_owned(),
         Err(error) => format!("they are not valid JSON: {error}"),
     };

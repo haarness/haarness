@@ -7284,7 +7284,10 @@ mod tests {
             calls,
             [
                 ("call_a", json!({"path": "a.txt"})),
-                ("call_b", haarness_core::tool_call_arguments("{\"path\":\"b.t")),
+                (
+                    "call_b",
+                    haarness_core::tool_call_arguments("{\"path\":\"b.t")
+                ),
                 ("call_c", json!({})),
                 ("call_d", json!({"path": "d.txt"}))
             ]
