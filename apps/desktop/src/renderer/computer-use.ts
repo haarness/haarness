@@ -84,6 +84,7 @@ export interface MacDetail {
   bundle?: string | null;
   app?: string | null;
   target?: string | null;
+  endBundle?: string | null;
   endApp?: string | null;
   preview?: string | null;
   text?: string | null;
@@ -115,6 +116,7 @@ export function macDetail(detail: unknown): MacDetail {
     bundle: text("bundle"),
     app: text("app"),
     target: text("target"),
+    endBundle: text("endBundle"),
     endApp: text("endApp"),
     // Only a JPEG or PNG the server made: never a page's or an app's own address.
     preview: /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(text("preview") ?? "") ? text("preview") : null,
@@ -182,11 +184,13 @@ export function shownText(text: string, limit = 160) {
  * time. `translate` is `t`, passed in so the rules stay pure.
  */
 export function computerApproval(
-  request: Pick<PendingPermissionInfo, "detail" | "allowAlways">,
+  request: Pick<PendingPermissionInfo, "detail" | "allowAlways" | "patterns">,
   translate: (key: string, values?: Record<string, string>) => string,
 ) {
   const mac = macDetail(request.detail);
   const app = mac.app ?? mac.bundle ?? translate("this app");
+  const allowed = allowedApp(request);
+  const allowedName = allowed?.app ?? allowed?.bundle ?? translate("this app");
   const lasting = lastingApp(request);
   const notes: string[] = [];
   if (mac.kind === "screen")
@@ -204,27 +208,46 @@ export function computerApproval(
     /** Label for the chat-wide allow; absent when the request must be approved each time. */
     inChat:
       request.allowAlways !== false && !mac.everyTime
-        ? lasting
+        ? lasting || mac.kind === "screen" || !allowed
           ? translate("Allow in this chat")
-          : mac.kind === "screen"
-            ? translate("Allow in this chat")
-            : translate("Allow in {app} for this chat", { app })
+          : translate("Allow in {app} for this chat", { app: allowedName })
         : null,
     /**
      * Allowing the app in every chat (an Allow rule in Settings → Computer use): offered for an action in an ordinary
      * app, never for opening one, the whole screen, or a request that asks every time.
      */
-    always: lasting ? { label: translate("Always allow {app}", { app }), bundle: mac.bundle! } : null,
+    always: lasting ? { label: translate("Always allow {app}", { app: allowedName }), bundle: allowed!.bundle! } : null,
     alwaysHint: lasting
-      ? translate("Agents won't ask before using {app} again, in any chat. You can change this in Settings → Computer use.", { app })
+      ? translate("Agents won't ask before using {app} again, in any chat. You can change this in Settings → Computer use.", {
+          app: allowedName,
+        })
       : null,
   };
 }
 
-/** Whether a computer use request may allow its app in every chat. */
-export function lastingApp(request: Pick<PendingPermissionInfo, "detail" | "allowAlways">) {
+/** The apps a request asks about, by bundle identifier: each of its patterns names one (`act:<chat>:<bundle>`). */
+function askedBundles(request: Pick<PendingPermissionInfo, "patterns">) {
+  const bundles = (request.patterns ?? []).map((pattern) => /^(?:computer:)?act:[^:]+:([^:]+)$/.exec(pattern)?.[1]);
+  return [...new Set(bundles.filter((bundle): bundle is string => !!bundle))];
+}
+
+/**
+ * The one app an answer to a request allows: the app it acts in or, for a drag into another app, whichever of the two
+ * it asks about. None for a drag that asks about both, where naming one app would leave the other unsaid.
+ */
+function allowedApp(request: Pick<PendingPermissionInfo, "detail" | "patterns">) {
   const mac = macDetail(request.detail);
-  return request.allowAlways !== false && mac.kind === "act" && !mac.everyTime && !mac.console && !!mac.bundle;
+  if (mac.action !== "drag" || !mac.endBundle || mac.endBundle === mac.bundle) return { bundle: mac.bundle, app: mac.app };
+  const asked = askedBundles(request);
+  if (asked.length !== 1) return null;
+  if (asked[0] === mac.endBundle) return { bundle: mac.endBundle, app: mac.endApp };
+  return asked[0] === mac.bundle ? { bundle: mac.bundle, app: mac.app } : null;
+}
+
+/** Whether a computer use request may allow its app in every chat. */
+export function lastingApp(request: Pick<PendingPermissionInfo, "detail" | "allowAlways" | "patterns">) {
+  const mac = macDetail(request.detail);
+  return request.allowAlways !== false && mac.kind === "act" && !mac.everyTime && !mac.console && !!allowedApp(request)?.bundle;
 }
 
 /** Catalog keys this module and its pane reach through variables, for the catalog guard. */

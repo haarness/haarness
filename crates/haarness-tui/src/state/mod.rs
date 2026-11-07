@@ -58,9 +58,35 @@ pub fn lasting_app(pending: &haarness_protocol::PendingPermissionInfo) -> Option
         && mac["kind"] == "act"
         && mac["everyTime"] != true
         && mac["console"] != true)
-        .then(|| mac["bundle"].as_str())
+        .then(|| allowed_app(pending))
         .flatten()
-        .filter(|bundle| !bundle.is_empty())
+        .map(|(bundle, _)| bundle)
+}
+
+/// The one app an answer to a computer use request allows, by bundle identifier and name: the app it acts in or, for a
+/// drag into another app, whichever of the two it asks about. None for a drag that asks about both, where naming one
+/// app would leave the other unsaid.
+#[must_use]
+pub fn allowed_app(pending: &haarness_protocol::PendingPermissionInfo) -> Option<(&str, &str)> {
+    let mac = &pending.detail["__mac"];
+    let text = |key: &str| mac[key].as_str().filter(|value| !value.is_empty());
+    let bundle = text("bundle")?;
+    let start = (bundle, text("app").unwrap_or(bundle));
+    let Some(end) = text("endBundle").filter(|end| *end != bundle) else {
+        return Some(start);
+    };
+    // Each pattern names one app the request asks about: `act:<chat>:<bundle id>`.
+    let mut asked = pending.patterns.iter().filter_map(|pattern| {
+        pattern
+            .strip_prefix("act:")?
+            .split_once(':')
+            .map(|(_, bundle)| bundle)
+    });
+    match (asked.next(), asked.next()) {
+        (Some(only), None) if only == end => Some((end, text("endApp").unwrap_or(end))),
+        (Some(only), None) if only == bundle => Some(start),
+        _ => None,
+    }
 }
 
 impl PermissionChoice {

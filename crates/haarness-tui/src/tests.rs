@@ -25153,6 +25153,99 @@ async fn a_computer_use_card_offers_the_app_in_every_chat_and_speaks_the_languag
     assert!(text.contains("このアプリを常に許可"), "{text}");
 }
 
+/// The server's own request for a drag from TextEdit, set to act without
+/// asking, into Notes (as `a_drag_into_another_app_asks_only_about_the_app_not_yet_allowed`
+/// in haarness-computer pins it): only Notes is asked about, so only Notes
+/// may be allowed in every chat, and the chip says which app that is.
+fn drag_into_notes(thread: &Thread, also_textedit: bool) -> haarness_protocol::EventEnvelope {
+    let chat = thread.id;
+    let mut patterns = vec![format!("act:{chat}:com.apple.Notes")];
+    if also_textedit {
+        patterns.insert(0, format!("act:{chat}:com.apple.TextEdit"));
+    }
+    let always: Vec<String> = patterns
+        .iter()
+        .map(|pattern| format!("computer:{pattern}"))
+        .collect();
+    fixture_event(
+        "permission.requested",
+        chat,
+        chat,
+        serde_json::json!({
+            "explicit": true,
+            "permissionId": "perm-drag",
+            "operation": format!("computer:{}", patterns[0]),
+            "detail": {"from": {"ref": "e1"}, "to": {"ref": "e4"}, "__mac": {
+                "kind": "act", "action": "drag", "bundle": "com.apple.TextEdit", "app": "TextEdit",
+                "target": "button \"Save\"", "label": "Save", "direction": null, "endBundle": "com.apple.Notes",
+                "endApp": "Notes", "point": {"x": 20, "y": 15}, "preview": "data:image/jpeg;base64,/9j/4AAQ",
+                "text": null, "keys": null, "console": false, "everyTime": false, "running": null,
+                "asks": patterns, "summary": "Drag button \"Save\" from TextEdit to Notes"}},
+            "permission": "computer",
+            "patterns": patterns,
+            "alwaysPatterns": always,
+            "threadId": chat,
+            "rootThreadId": chat,
+            "callId": "drag",
+            "agent": "build",
+            "createdAt": "2026-11-07T06:11:53.971429Z",
+        }),
+    )
+}
+
+#[tokio::test]
+async fn a_computer_use_drag_into_another_app_allows_in_every_chat_only_the_app_it_asks_about() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(drag_into_notes(&thread, false), &offline_client())
+        .await
+        .unwrap();
+    let pending = app.first_pending_permission().unwrap();
+    assert_eq!(crate::state::lasting_app(pending), Some("com.apple.Notes"));
+    let text = frame_text(&app, (130, 40));
+    assert!(
+        text.contains("Drag “Save” from TextEdit to Notes"),
+        "{text}"
+    );
+    assert!(text.contains("Always allow Notes"), "{text}");
+    assert!(
+        !text.contains("Always allow TextEdit") && !text.contains("this app"),
+        "{text}"
+    );
+    // `e` saves a rule for Notes, the app the card asked about, then allows this request once.
+    let (client, seen) = sign_in_server(vec![
+        SignInReply::Json(r#"{"title":"Computer use","data":{}}"#),
+        SignInReply::Json("null"),
+    ])
+    .await;
+    app.permission_focus = true;
+    crate::input::answer_permission(&mut app, &client, 'e')
+        .await
+        .unwrap();
+    let requests = seen.lock().unwrap().clone();
+    assert!(
+        requests[0].contains(r#""bundle":"com.apple.Notes""#)
+            && !requests[0].contains("com.apple.TextEdit"),
+        "{requests:?}"
+    );
+    // Asked about both apps, one rule would leave the other out: nothing lasting is offered.
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(drag_into_notes(&thread, true), &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::state::lasting_app(app.first_pending_permission().unwrap()),
+        None
+    );
+    assert!(
+        !crate::state::PermissionChoice::available(&app)
+            .contains(&crate::state::PermissionChoice::App)
+    );
+    let text = frame_text(&app, (130, 40));
+    assert!(!text.contains("Always allow"), "{text}");
+    assert!(text.contains("Allow in this chat"), "{text}");
+}
+
 /// A click on a terminal's text asks every time: the card says why and
 /// offers no answer that lasts.
 #[tokio::test]

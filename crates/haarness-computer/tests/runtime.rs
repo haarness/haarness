@@ -449,6 +449,32 @@ async fn an_action_asks_once_per_app_and_chat_with_a_picture_of_the_spot() {
     lab.finish(other).await;
 }
 
+#[tokio::test]
+async fn a_drag_into_another_app_asks_only_about_the_app_not_yet_allowed() {
+    let lab = Lab::new(Lab::with(json!({"apps": {"com.apple.TextEdit": "allow"}})));
+    let thread = lab.thread().await;
+    lab.start(
+        thread,
+        vec![vec![call(
+            "drag",
+            "mac_drag",
+            json!({"from": {"ref": "e1"}, "to": {"ref": "e4"}}),
+        )]],
+    )
+    .await;
+    let pending = lab.permission().await;
+    // Clients name and offer to allow the app the request asks about, which is the drop's, not the pickup's.
+    let mac = &pending.detail["__mac"];
+    assert_eq!(mac["bundle"], "com.apple.TextEdit");
+    assert_eq!(mac["endBundle"], "com.apple.Notes");
+    assert_eq!(mac["endApp"], "Notes");
+    assert_eq!(pending.patterns, [format!("act:{thread}:com.apple.Notes")]);
+    assert_eq!(mac["asks"], json!(pending.patterns));
+    lab.answer(&pending, PermissionReplyDecision::Always).await;
+    let items = lab.finish(thread).await;
+    assert!(!result(&items, "drag").1, "{}", result(&items, "drag").0);
+}
+
 async fn set_mode(lab: &Lab, thread: ThreadId, mode: haarness_protocol::ApprovalModeSetting) {
     lab.runtime
         .set_approval_mode(

@@ -102,6 +102,68 @@ test("a request that asks every time offers nothing lasting and says why", () =>
   assert.equal(computerApproval(request({ kind: "act", app: "Mail", everyTime: true }, true), english).inChat, null);
 });
 
+/**
+ * The server's own request for a drag from TextEdit, set to act without asking, into Notes (as the runtime test
+ * `a_drag_into_another_app_asks_only_about_the_app_not_yet_allowed` pins it): only Notes is asked about.
+ */
+const dragIntoNotes = (alsoTextEdit = false): PendingPermissionInfo => {
+  const chat = "01a1b4a2-8aa6-7801-8836-bd6474929036";
+  const patterns = [...(alsoTextEdit ? [`act:${chat}:com.apple.TextEdit`] : []), `act:${chat}:com.apple.Notes`];
+  return {
+    explicit: true,
+    permissionId: "01a1b4a2-8bf3-75b3-b1a3-5dc3ca3e3822",
+    operation: `computer:${patterns[0]}`,
+    detail: {
+      from: { ref: "e1" },
+      to: { ref: "e4" },
+      __mac: {
+        kind: "act",
+        action: "drag",
+        bundle: "com.apple.TextEdit",
+        app: "TextEdit",
+        target: 'button "Save"',
+        label: "Save",
+        direction: null,
+        endBundle: "com.apple.Notes",
+        endApp: "Notes",
+        point: { x: 20, y: 15 },
+        preview: "data:image/jpeg;base64,/9j/4AAQSkZJRgABA",
+        text: null,
+        keys: null,
+        console: false,
+        everyTime: false,
+        running: null,
+        asks: patterns,
+        summary: 'Drag button "Save" from TextEdit to Notes',
+      },
+    },
+    permission: "computer",
+    patterns,
+    alwaysPatterns: patterns.map((pattern) => `computer:${pattern}`),
+    threadId: chat,
+    rootThreadId: chat,
+    turnId: "01a1b4a2-8aa7-7421-a3dc-dac4e4688be7",
+    callId: "drag",
+    agent: "build",
+    createdAt: "2026-11-07T06:11:53.971429Z",
+  } as PendingPermissionInfo;
+};
+
+test("a drag into another app names and allows the app it asks about, never the one it starts in", () => {
+  const card = computerApproval(dragIntoNotes(), english);
+  assert.equal(card.summary, "Drag “Save” from TextEdit to Notes");
+  assert.deepEqual(card.always, { label: "Always allow Notes", bundle: "com.apple.Notes" });
+  assert.match(card.alwaysHint!, /using Notes again/);
+  assert.equal(card.inChat, "Allow in this chat");
+  // Asked about both apps, one rule would leave the other out: nothing lasting, and the chat-wide answer names neither.
+  const both = computerApproval(dragIntoNotes(true), english);
+  assert.equal(both.always, null);
+  assert.equal(both.inChat, "Allow in this chat");
+  // Within one app, the app it acts in, as before.
+  const within = computerApproval(request({ kind: "act", action: "drag", app: "Notes", bundle: "com.apple.Notes", endApp: "Notes", endBundle: "com.apple.Notes", label: "note" }), english);
+  assert.deepEqual(within.always, { label: "Always allow Notes", bundle: "com.apple.Notes" });
+});
+
 test("a whole-screen look says what goes to the model and shows no spot", () => {
   const card = computerApproval(request({ kind: "screen", preview: "data:image/jpeg;base64,AAAA" }), english);
   assert.equal(card.summary, "Look at every app's windows");
