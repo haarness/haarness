@@ -332,7 +332,9 @@ try:
     check(f"Pause on the bar holds the agent and the screen ({held - typed_before} characters before it), Resume lets go")
 
     # Pause on the bar, Resume in a client (what Desktop's paused line and /mac resume send): the status names the
-    # paused chat, the bar hears the Resume and shows the agent at work again, and the typing goes on.
+    # paused chat, the bar hears the Resume and shows the agent at work again, and the agent is told it may go on.
+    # The typing cut short by the pause does not pick up by itself: the person may have moved things meanwhile, so
+    # the agent hears how far it got and looks again before its next step.
     chat.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
     typed_before = len(state().get("name", ""))
     turn = api("/threads/" + chat.thread + "/turns",
@@ -351,7 +353,9 @@ try:
     finished = until(lambda: (value if (value := api("/turns/" + turn["id"]))["status"] not in ("running", "queued") else None),
                      "the turn resumed from a client ends", seconds=60)
     assert finished["status"] != "interrupted", finished
-    assert len(state().get("name", "")) > held, "typing went on after Resume"
+    output, error, _ = chat.result(turn["id"], "mac_type")
+    assert error and "Paused by the person after" in output and "running again" in output, output
+    assert len(state().get("name", "")) == held, "the typing cut short by the pause went on by itself"
     check("Resume in a client lets a paused agent go on, and the bar shows it at work again")
 
     # Stop on the bar ends the turn using the screen.
