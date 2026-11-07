@@ -74,21 +74,22 @@ export function createConversationControls(props: {
         props.restored(undone);
       } else if (action === "redo") props.redone();
       // A file left for its size is not as the checkpoint has it: said with
-      // the undo, not only under its notice.
+      // the undo or redo, not only under its notice.
       const left =
-        action === "undo" ? unrestoredFiles(value as Thread).large.length : 0;
+        action === "compact" ? 0 : unrestoredFiles(value as Thread).large.length;
+      const leftNote =
+        left === 0
+          ? ""
+          : " · " +
+            (left === 1
+              ? t("1 file left as it was")
+              : t("{count} files left as they were", { count: formatNumber(left) }));
       app.notify(
         action === "compact"
           ? t("Chat compacted")
           : action === "undo"
-            ? t("Last turn undone") +
-              (left === 0
-                ? ""
-                : " · " +
-                  (left === 1
-                    ? t("1 file left as it was")
-                    : t("{count} files left as they were", { count: formatNumber(left) })))
-            : t("Turn restored"),
+            ? t("Last turn undone") + leftNote
+            : t("Turn restored") + leftNote,
       );
     } finally {
       setPending((values) => values.filter((value) => value !== key));

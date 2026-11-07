@@ -20,6 +20,7 @@ import {
   copyFile,
   chmod,
   rename,
+  readdir,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -12092,6 +12093,101 @@ test("an undo says which files it left, those left for their size first, under i
   await expect(notice).toHaveCount(0);
   await writeFile(exclude, excluded);
   for (const path of [kept, made, tracked, big]) await rm(path);
+  expect(errors).toEqual([]);
+});
+
+test("undo and redo through two turns that took a file past 2 MiB name it until the last redo", async () => {
+  await page.locator(".project-list .project-heading").filter({ hasText: /^workspace$/ }).click();
+  const expand = page.getByRole("button", { name: "Expand project workspace", exact: true });
+  if (await expand.count()) await expand.click();
+  const thread = await client.createThread({ title: "Two large turns fixture", provider: "echo", model: "echo-1", agent: "build" });
+  // Its commands run without asking.
+  await client.setApprovalMode(thread.id, { mode: "yolo" });
+  await page.getByRole("button", { name: thread.title, exact: true }).click();
+  const menu = async (name: string) => {
+    await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+    await page.getByRole("menuitem", { name, exact: true }).click();
+  };
+  const big = join(workspace, "undo-two-big.bin");
+  const other = join(workspace, "undo-two-other.txt");
+  const said = () => readFile(other, "utf8").catch(() => "");
+  // What the file starts with, or "" when there is none.
+  const head = async () => (existsSync(big) ? (await readFile(big)).subarray(0, 1).toString() : "");
+  await writeFile(other, "o0\n");
+  // Turn 1 makes a file over the checkpoints' 2 MiB, turn 2 rewrites it.
+  for (const [byte, text] of [["a", "o1\n"], ["b", "o2\n"]]) {
+    await send("!multi " + JSON.stringify([
+      { name: "bash", arguments: { command: `head -c 2500000 /dev/zero | tr '\\0' ${byte} > undo-two-big.bin` } },
+      { name: "write", arguments: { path: "undo-two-other.txt", content: text } },
+    ]));
+    await expect.poll(said).toBe(text);
+    await settled();
+  }
+  expect(await head()).toBe("b");
+  const notice = page.locator(".conversation-history-notice");
+  const pressing = notice.locator(".undo-unrestored.pressing summary");
+  const left = "1 file left as it was · too large for Undo";
+  // No copy holds what turn 1 left: the first undo leaves the file and
+  // names it; the second takes it back to before turn 1, and the name goes.
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o1\n");
+  await expect(pressing).toHaveText(left);
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o0\n");
+  await expect.poll(() => existsSync(big)).toBe(false);
+  await expect(notice).toContainText("Turn undone");
+  await expect(notice.locator(".undo-unrestored")).toHaveCount(0);
+  // The first redo brings turn 1 back with the file as turn 2 left it, named.
+  await menu("Redo turn");
+  await expect.poll(said).toBe("o1\n");
+  await expect(pressing).toHaveText(left);
+  await expect(pressing).toHaveAttribute("title", "undo-two-big.bin");
+  expect(await head()).toBe("b");
+  // The toast says so too.
+  await expect(page.locator(".toast")).toHaveText("Turn restored · 1 file left as it was");
+  await expect(page.locator(".error-banner")).toHaveCount(0);
+  const shots = async (name: string, target = page.locator(".conversation")) => {
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((value) => window.haarness.preferences({ theme: value }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await target.screenshot({ path: test.info().outputPath(`${name}-${theme}.png`) });
+    }
+  };
+  await shots("redo-two-large-named");
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(pressing).toHaveText("تُرك ملف واحد كما كان · أكبر من أن يستعيده التراجع");
+  await shots("redo-two-large-named-rtl");
+  await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "dark" }));
+  // The last redo: both turns back, nothing named.
+  await menu("Redo turn");
+  await expect.poll(said).toBe("o2\n");
+  await expect(notice).toHaveCount(0);
+  await expect(page.locator(".toast")).toHaveText("Turn restored");
+  expect(await head()).toBe("b");
+
+  // Undone again, and the copies are lost: redo says why it cannot go on
+  // and what to do, and changes nothing.
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o1\n");
+  await menu("Undo last turn");
+  await expect.poll(said).toBe("o0\n");
+  const data = env.HAARNESS_DATA_DIR;
+  const folders = (await readdir(data, { recursive: true }))
+    .filter((path) => path.endsWith(".undo-copies"))
+    .map((path) => join(data, path));
+  expect(folders.length).toBeGreaterThan(0);
+  for (const folder of folders)
+    for (const set of await readdir(folder)) await rm(join(folder, set), { recursive: true });
+  await menu("Redo turn");
+  await expect(page.locator(".error-banner")).toContainText(
+    "undo-two-big.bin is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",
+  );
+  expect(await said()).toBe("o0\n");
+  expect(existsSync(big)).toBe(false);
+  await shots("redo-two-large-refused", page.locator(".error-banner"));
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await rm(other);
   expect(errors).toEqual([]);
 });
 
