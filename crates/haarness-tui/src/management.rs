@@ -399,9 +399,14 @@ impl App {
     }
 }
 
+/// The event a server sends when the person pauses computer use on the strip, and when the pause ends: it names the
+/// conversation's root chat and carries `{"paused": bool}`.
+pub(crate) const COMPUTER_USE_UPDATED: &str = "computer_use.updated";
+
 /// Hands the server the bar's words in this client's language as soon as it connects, so the bar an agent raises
-/// later speaks it even when `/mac` was never opened. Nothing happens on a server without computer use.
-pub(crate) fn send_computer_words(app: &App, client: &ApiClient) {
+/// later speaks it even when `/mac` was never opened. The answer names a chat the person paused before this client
+/// connected. Nothing happens on a server without computer use.
+pub(crate) async fn send_computer_words(app: &mut App, client: &ApiClient) {
     let offered = app.server_info.as_ref().is_some_and(|info| {
         info.capabilities
             .iter()
@@ -411,12 +416,25 @@ pub(crate) fn send_computer_words(app: &App, client: &ApiClient) {
         return;
     }
     let input = json!({"action": "words", "bar": computer_bar_words(app.language)});
-    let client = client.clone();
-    tokio::spawn(async move {
-        if let Err(error) = client.manage("computer-use", &input).await {
-            tracing::debug!(%error, "could not hand over the computer use bar's words");
-        }
-    });
+    match client.manage("computer-use", &input).await {
+        Ok(answer) => app.computer_paused = paused_chat(&answer),
+        Err(error) => tracing::debug!(%error, "could not hand over the computer use bar's words"),
+    }
+}
+
+/// The chat a `computer-use` answer says the person paused, if any.
+fn paused_chat(answer: &Value) -> Option<haarness_protocol::ThreadId> {
+    serde_json::from_value(answer["data"]["pausedChat"].clone()).ok()
+}
+
+/// Resume from this client (`/mac resume`, or a click on the paused step): the agent goes on, as with the strip's own
+/// Resume.
+pub(crate) async fn resume_computer(app: &mut App, client: &ApiClient) -> Result<Option<bool>> {
+    let answer = client
+        .manage("computer-use", &json!({"action": "resume"}))
+        .await?;
+    app.computer_paused = paused_chat(&answer);
+    Ok(answer["data"]["resumed"].as_bool())
 }
 
 /// The words of the bar computer use shows at the top of the screen, in

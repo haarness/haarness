@@ -1038,6 +1038,10 @@ function createApp(saved?: Preferences) {
       set("streams", {});
       set("tasks", {});
     }
+    // A restarted server has no pause. A first connection learns of one from
+    // the words it hands over (App), which may already have answered.
+    if (lastInstance && lastInstance !== info.serverInstanceId)
+      set("computerPaused", undefined);
     const cursor = resume ? lastCursor : (info.eventCursor ?? 0);
     lastInstance = info.serverInstanceId;
     lastCursor = cursor;
@@ -1368,6 +1372,7 @@ function createApp(saved?: Preferences) {
       set("questions", []);
       set("streams", {});
       set("tasks", {});
+      set("computerPaused", undefined);
       set("shellCommands", {});
       set("commandOutput", {});
       set("commandsListed", {});
@@ -2055,6 +2060,7 @@ function createApp(saved?: Preferences) {
         tabHistory = [];
         set("streams", {});
         set("tasks", {});
+        set("computerPaused", undefined);
         set("shellCommands", {});
         set("commandOutput", {});
         set("commandsListed", {});

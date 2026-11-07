@@ -98,7 +98,7 @@ import { useApp } from "./state";
 import { Button, Icon, ago, stringify } from "./ui";
 import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
 import { watchOpenImages } from "./ImageViewer";
-import { barWords, computerApproval, isComputerPermission } from "./computer-use";
+import { barWords, computerApproval, isComputerPermission, pausedChatIn, pausedHere, waitsOnScreen } from "./computer-use";
 import "./computer-use.css";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import type { FileContent } from "../shared";
@@ -2281,9 +2281,39 @@ export function Session() {
       : "",
   );
   const [reviewClock, setReviewClock] = createSignal(0);
+  // The person paused computer use on the strip at the top of the screen and
+  // this turn waits on it: the line stops moving and offers the strip's own
+  // Resume. A turn busy with anything else keeps its own line.
+  const screenPaused = createMemo(() => {
+    const turn = active();
+    return (
+      !!turn &&
+      pausedHere(state.computerPaused, state.selected, state.threads) &&
+      waitsOnScreen(
+        state.items,
+        turn.id,
+        state.permissions.map((request) => request.callId),
+      )
+    );
+  });
+  const [resuming, setResuming] = createSignal(false);
+  const resumeScreen = () =>
+    void app.run(async () => {
+      const paused = state.computerPaused;
+      setResuming(true);
+      try {
+        const answer = await app.api("manageResource", "computer-use", { action: "resume" });
+        // The event follows; the answer already says the pause is over.
+        if (!pausedChatIn(answer) && state.computerPaused === paused)
+          set("computerPaused", undefined);
+      } finally {
+        setResuming(false);
+      }
+    });
   const activity = createMemo(() => {
     const turn = active();
     if (!turn) return "";
+    if (screenPaused()) return t("Paused");
     const items = state.items.filter((item) => item.turnId === turn.id);
     const tools = items.filter(
       (item) =>
@@ -2627,12 +2657,22 @@ export function Session() {
               role="status"
               aria-live="polite"
             >
-              <Shimmer active={!thinkingShown()}>{activity()}</Shimmer>
+              <Shimmer active={!thinkingShown() && !screenPaused()}>{activity()}</Shimmer>
               {/* Compact: the newest line of thought ticks here, on the one
                   row already holding the activity, so nothing moves; screen
                   readers hear only the activity. */}
-              <Show when={thought()}>
+              <Show when={thought() && !screenPaused()}>
                 <ThoughtTicker text={thought()} />
+              </Show>
+              <Show when={screenPaused()}>
+                <button
+                  type="button"
+                  class="link activity-resume"
+                  disabled={resuming()}
+                  onClick={resumeScreen}
+                >
+                  {t("Resume")}
+                </button>
               </Show>
             </div>
           </Show>

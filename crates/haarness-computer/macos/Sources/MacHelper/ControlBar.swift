@@ -66,6 +66,16 @@ final class ControlBar {
         }
     }
 
+    /// Resume pressed in a Haarness window: the bar shows the agent at work again, as its own Resume would, without
+    /// reporting it back to the server that asked.
+    func resume() {
+        lock.lock()
+        let was = held
+        held = false
+        lock.unlock()
+        if was { DispatchQueue.main.async { self.redraw() } }
+    }
+
     /// The bar's frame in top-left-origin screen points, while it is visible.
     func frame() -> Box? {
         let read = { () -> Box? in

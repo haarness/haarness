@@ -3129,5 +3129,6 @@
   "Drag {target} in {app}": "Dra {target} i {app}",
   "Drag {target} from {app} to {endApp}": "Dra {target} fra {app} til {endApp}",
   "Always allow this app": "Tillat alltid denne appen",
-  "Could not allow this app: {error}": "Kunne ikke tillate denne appen: {error}"
+  "Could not allow this app: {error}": "Kunne ikke tillate denne appen: {error}",
+  "No agent is paused": "Ingen agent er satt på pause"
 }

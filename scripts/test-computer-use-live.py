@@ -2,8 +2,8 @@
 """Computer use on this Mac's real screen, end to end: a built Haarness (with its embedded helper) serves an isolated
 home, the deterministic test provider calls the mac_* tools, and a small lab app (computer-use-lab.swift) records
 what they did. It checks looking, approvals and their scope, clicking, typing, Return, scrolling, dragging, the
-password-field refusal, Escape stopping a turn mid-typing, the bar showing while the agent works, turning computer use
-off, and quitting an app.
+password-field refusal, Escape stopping a turn mid-typing, the bar showing while the agent works, Pause on the bar
+with Resume on the bar or in a client, turning computer use off, and quitting an app.
 
 It moves the pointer and types into the lab window only (the helper refuses an event whose spot belongs to another
 app), but it does use the screen: run it while nobody needs the Mac.
@@ -330,6 +330,29 @@ try:
                      "the paused turn ends after Resume", seconds=60)
     assert finished["status"] != "interrupted", finished
     check(f"Pause on the bar holds the agent and the screen ({held - typed_before} characters before it), Resume lets go")
+
+    # Pause on the bar, Resume in a client (what Desktop's paused line and /mac resume send): the status names the
+    # paused chat, the bar hears the Resume and shows the agent at work again, and the typing goes on.
+    chat.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
+    typed_before = len(state().get("name", ""))
+    turn = api("/threads/" + chat.thread + "/turns",
+               {"requestId": str(uuid.uuid4()), "text": "!tool mac_type " + json.dumps({"ref": refs["name"], "text": "x" * 1500})})
+    until(lambda: len(state().get("name", "")) > typed_before + 20, "typing started before the pause")
+    assert bar("press", "一時停止").returncode == 0
+    until(lambda: api("/manage/computer-use", {"action": "get"})["data"].get("pausedChat") == chat.thread,
+          "the status names the paused chat", seconds=5)
+    held = len(state().get("name", ""))
+    time.sleep(1)
+    assert len(state().get("name", "")) == held, "typing went on while paused"
+    assert "再開" in bar().get("buttons", []), bar()
+    resumed = api("/manage/computer-use", {"action": "resume"})["data"]
+    assert resumed["paused"] is False and resumed.get("pausedChat") is None, resumed
+    until(lambda: "一時停止" in bar().get("buttons", []), "the bar shows the agent at work again", seconds=5)
+    finished = until(lambda: (value if (value := api("/turns/" + turn["id"]))["status"] not in ("running", "queued") else None),
+                     "the turn resumed from a client ends", seconds=60)
+    assert finished["status"] != "interrupted", finished
+    assert len(state().get("name", "")) > held, "typing went on after Resume"
+    check("Resume in a client lets a paused agent go on, and the bar shows it at work again")
 
     # Stop on the bar ends the turn using the screen.
     chat.turn("mac_snapshot", {"app": LAB}, expect_ask=False)

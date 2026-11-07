@@ -1040,6 +1040,19 @@ fn phase_text(app: &App) -> String {
     } else {
         "thinking"
     };
+    // Waiting on computer use's strip, which the person paused: nothing moves
+    // until they resume, so no seconds count either. A question for the
+    // person still comes first, and other work shows as usual.
+    if app.screen_waiting()
+        && !app.phase.as_ref().is_some_and(|phase| {
+            matches!(
+                phase.state.as_str(),
+                "waiting_permission" | "waiting_question" | "stopping"
+            )
+        })
+    {
+        return app.language.text("paused").into();
+    }
     let Some(phase) = &app.phase else {
         return format!("{}   {turn_elapsed}s", app.language.text(waiting));
     };

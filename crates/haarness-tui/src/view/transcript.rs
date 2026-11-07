@@ -33,6 +33,8 @@ const SHELL_OUTPUT_ROWS: usize = 10;
 const USER_BLOCK_ROWS: usize = 12;
 const USER_PREVIEW_ROWS: usize = 8;
 const TOOL_BLOCK_ROWS: usize = 12;
+/// What a step paused on computer use's strip offers: the command that lets the agent go on, which a click on it runs.
+pub(crate) const RESUME_COMMAND: &str = "/mac resume";
 /// A tool name as the server matches it: without a `functions.` namespace,
 /// and compared ignoring ASCII case, so a model writing `Read` gets `read`.
 fn bare_tool(name: &str) -> &str {
@@ -2191,6 +2193,24 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     None if queued => "  queued".to_owned(),
                     _ => String::new(),
                 };
+                // The person paused computer use on the strip: the step holds
+                // still, and says how to let it go on from here.
+                let paused = unfinished
+                    && !awaiting
+                    && !queued
+                    && bare_tool(name).starts_with("mac_")
+                    && item.turn_id.is_some()
+                    && item.turn_id == app.active_turn
+                    && app.screen_paused();
+                let (marker, color, suffix) = if paused {
+                    (
+                        "  ‖ ".to_owned(),
+                        theme.muted,
+                        format!("  {}", app.language.text("paused")),
+                    )
+                } else {
+                    (marker, color, suffix)
+                };
                 // A command in the background takes a task's marker and
                 // says where it is (`in background · 1m 12s`), then how it
                 // ended; a narrow row keeps the part that matters.
@@ -2221,6 +2241,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         lead + 16 + hint.chars().count() <= width
                     })
                     .unwrap_or_default();
+                let resume = if paused {
+                    format!("  ·  {RESUME_COMMAND}")
+                } else {
+                    String::new()
+                };
                 // Child-agent tasks are alive: show what the child is doing
                 // right now, not just that it was spawned.
                 // A delegation's live detail goes on its own line below the
@@ -2340,7 +2365,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                             + suffix.chars().count()
                             + browser.chars().count()
                             + disclosure.chars().count()
-                            + hint.chars().count(),
+                            + hint.chars().count()
+                            + resume.chars().count(),
                     )
                     .max(16);
                 let argument = if name == "workflow" {
@@ -2351,7 +2377,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         .map(|value| format!(" {}", single_line(&value, argument_budget)))
                         .unwrap_or_default()
                 };
-                let row = Line::new(vec![
+                let mut row = Line::new(vec![
                     Span::new(marker, color),
                     Span::new(name.clone(), theme.text),
                     Span::new(format!("{argument}{suffix}"), color),
@@ -2360,6 +2386,14 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     Span::new(disclosure, theme.muted),
                     Span::new(hint, theme.muted),
                 ]);
+                // Where `/mac resume` sits on the row, for a click on it.
+                let resume_at = paused.then(|| {
+                    use crate::width::DisplayWidth as _;
+                    let start = row.width() + "  ·  ".width();
+                    row.spans.push(Span::new("  ·  ", theme.muted));
+                    row.spans.push(Span::new(RESUME_COMMAND, theme.text));
+                    (start, row.width())
+                });
                 // A command this client follows opens its output on a click:
                 // one in the background, and one still running.
                 let opens_output = command
@@ -2395,6 +2429,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     .or(result.filter(|_| matches!(status, Some("rejected" | "blocked"))))
                 {
                     block.push_tagged(row, HitTarget::ToolToggle(result.id));
+                } else if let Some((start, end)) = resume_at {
+                    block.push_ranged(row, [(start, end, HitTarget::ComputerResume)]);
                 } else {
                     block.push(row);
                 }

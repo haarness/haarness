@@ -440,6 +440,16 @@ pub const COMMANDS: &[CommandSpec] = &[
     command("exit", &["quit", "q"], "Exit Haarness"),
 ];
 
+/// Whether this build lists `spec` among its commands. Computer use exists only on macOS, so elsewhere `/mac` is left
+/// out of the palette and `/help`; typed, it still opens what the server says about it.
+pub(crate) fn listed(spec: &CommandSpec) -> bool {
+    listed_on(spec, std::env::consts::OS)
+}
+
+pub(crate) fn listed_on(spec: &CommandSpec, os: &str) -> bool {
+    spec.name != "mac" || os == "macos"
+}
+
 const fn command(
     name: &'static str,
     aliases: &'static [&'static str],
@@ -2492,6 +2502,15 @@ impl App {
             "share" => {
                 self.open_management("sharing", &serde_json::json!({"action":"view"}), client)
                     .await?;
+            }
+            // What the strip's Resume does, for an agent paused there.
+            "mac" if arguments.eq_ignore_ascii_case("resume") => {
+                let paused = self.computer_paused.is_some();
+                // The server says whether an agent was paused; from an older one, what this client heard stands in.
+                let resumed = crate::management::resume_computer(self, client).await?;
+                if !resumed.unwrap_or(paused) {
+                    self.notice = self.language.text("No agent is paused").into();
+                }
             }
             "mac" => {
                 self.open_management(

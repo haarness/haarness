@@ -1470,13 +1470,26 @@ fn chips(app: &App, staged: bool) -> Vec<(String, String)> {
         .is_some_and(|pending| pending.explicit);
     PermissionChoice::available(app)
         .iter()
-        .map(|choice| {
-            (
-                app.language.text(choice.label_for(explicit)).to_owned(),
-                choice.key().to_string(),
-            )
-        })
+        .map(|choice| (chip_label(app, *choice, explicit), choice.key().to_string()))
         .collect()
+}
+
+/// A chip's words in the person's language. Allowing an app in every chat names the app when the card's line names
+/// two, a drag from one app into another, so it is plain which one is meant.
+fn chip_label(app: &App, choice: PermissionChoice, explicit: bool) -> String {
+    if choice == PermissionChoice::App
+        && let Some(pending) = app.first_pending_permission()
+        && pending.detail["__mac"]["endBundle"]
+            .as_str()
+            .is_some_and(|end| Some(end) != pending.detail["__mac"]["bundle"].as_str())
+        && let Some((_, name)) = crate::state::allowed_app(pending)
+    {
+        return app
+            .language
+            .text("Always allow {app}")
+            .replace("{app}", &spelled_out(name));
+    }
+    app.language.text(choice.label_for(explicit)).to_owned()
 }
 
 fn chip_width(label: &str, key: &str) -> usize {
@@ -1687,11 +1700,11 @@ fn footer(app: &App, width: usize, staged: bool) -> Vec<Span> {
         let answer = PermissionChoice::available(app)
             .into_iter()
             .find(|choice| choice.key() == settling.letter)
-            .map(|choice| app.language.text(choice.label_for(explicit)))
+            .map(|choice| chip_label(app, choice, explicit))
             .unwrap_or_default();
         let text = app.language.format(
             "{answer} in a moment · enter now · esc cancels",
-            &[("answer", answer)],
+            &[("answer", &answer)],
         );
         return vec![Span::new(single_line(&text, width), theme.muted).on(surface)];
     }

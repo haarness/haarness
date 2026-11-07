@@ -1332,6 +1332,23 @@ html[dir="rtl"] .tool-target {
   font-size: var(--ui);
   color: var(--muted);
 }
+/* Paused on computer use's strip: the line holds still and offers Resume,
+   as quiet as the word beside it and no taller than the line. */
+.assistant-activity > .activity-resume {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: inherit;
+  line-height: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.assistant-activity > .activity-resume:hover:not(:disabled) {
+  background: none;
+  color: var(--primary-hover);
+}
 /* Show: the live thought above already says Thinking; the line keeps its
    place, and its word for screen readers. */
 .assistant-activity.activity-said > .activity-shimmer,

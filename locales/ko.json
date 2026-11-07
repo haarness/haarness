@@ -3129,5 +3129,6 @@
   "Drag {target} in {app}": "{app}에서 {target} 드래그",
   "Drag {target} from {app} to {endApp}": "{target}을(를) {app}에서 {endApp}(으)로 드래그",
   "Always allow this app": "이 앱 항상 허용",
-  "Could not allow this app: {error}": "이 앱을 허용하지 못했습니다: {error}"
+  "Could not allow this app: {error}": "이 앱을 허용하지 못했습니다: {error}",
+  "No agent is paused": "일시 중지된 에이전트가 없습니다"
 }

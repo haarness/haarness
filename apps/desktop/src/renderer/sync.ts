@@ -17,6 +17,9 @@ export interface Live {
   /** How much each command has printed, from `command.output`: an open row
    * reads on when it grows. */
   commandOutput?: Record<string, number>;
+  /** The chat the person paused on computer use's strip, while the pause
+   * lasts (`computer_use.updated`): the conversation's root chat. */
+  computerPaused?: string;
   threads: T.Thread[];
   turns: T.Turn[];
   permissions: T.PendingPermissionInfo[];
@@ -166,6 +169,11 @@ export function reduceEvent<S extends Live>(
       update("reviews", turn, undefined as unknown as TurnReview);
     }
   }
+  if (event.type === "computer_use.updated" && event.threadId) {
+    if (payload.paused === true) update("computerPaused", event.threadId);
+    else if (state.computerPaused === event.threadId)
+      update("computerPaused", undefined);
+  }
   if (event.type === "turn.started" && payload.id)
     update("turns", (items) => merge(items, payload as T.Turn));
   if (event.type === "turn.finished" && event.turnId) {
@@ -173,6 +181,9 @@ export function reduceEvent<S extends Live>(
       items.filter((item) => item.id !== event.turnId),
     );
     update("streams", event.turnId, { text: "", reasoning: "" });
+    // A pause ends with its turn, whatever became of the word saying so.
+    if (event.threadId && state.computerPaused === event.threadId)
+      update("computerPaused", undefined);
     if (state.reviews?.[event.turnId])
       update("reviews", event.turnId, undefined as unknown as TurnReview);
   }

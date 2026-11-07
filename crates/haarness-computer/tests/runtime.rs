@@ -79,6 +79,7 @@ struct Lab {
     provider: Arc<Scripted>,
     computer: Arc<Computer>,
     tools: Arc<NativeToolRegistry>,
+    events: EventBus,
 }
 
 impl Lab {
@@ -124,7 +125,7 @@ impl Lab {
                 provider.clone() as Arc<dyn ModelProvider>
             ])),
             tools.clone(),
-            events,
+            events.clone(),
             root.join("workspace"),
             String::new(),
             RuntimeConfig {
@@ -138,6 +139,7 @@ impl Lab {
             provider,
             computer,
             tools,
+            events,
         }
     }
 
@@ -447,6 +449,32 @@ async fn an_action_asks_once_per_app_and_chat_with_a_picture_of_the_spot() {
     let pending = lab.permission().await;
     lab.answer(&pending, PermissionReplyDecision::Once).await;
     lab.finish(other).await;
+}
+
+#[tokio::test]
+async fn a_drag_into_another_app_asks_only_about_the_app_not_yet_allowed() {
+    let lab = Lab::new(Lab::with(json!({"apps": {"com.apple.TextEdit": "allow"}})));
+    let thread = lab.thread().await;
+    lab.start(
+        thread,
+        vec![vec![call(
+            "drag",
+            "mac_drag",
+            json!({"from": {"ref": "e1"}, "to": {"ref": "e4"}}),
+        )]],
+    )
+    .await;
+    let pending = lab.permission().await;
+    // Clients name and offer to allow the app the request asks about, which is the drop's, not the pickup's.
+    let mac = &pending.detail["__mac"];
+    assert_eq!(mac["bundle"], "com.apple.TextEdit");
+    assert_eq!(mac["endBundle"], "com.apple.Notes");
+    assert_eq!(mac["endApp"], "Notes");
+    assert_eq!(pending.patterns, [format!("act:{thread}:com.apple.Notes")]);
+    assert_eq!(mac["asks"], json!(pending.patterns));
+    lab.answer(&pending, PermissionReplyDecision::Always).await;
+    let items = lab.finish(thread).await;
+    assert!(!result(&items, "drag").1, "{}", result(&items, "drag").0);
 }
 
 async fn set_mode(lab: &Lab, thread: ThreadId, mode: haarness_protocol::ApprovalModeSetting) {
@@ -790,6 +818,274 @@ async fn a_pause_holds_the_agent_and_after_resume_it_looks_again() {
         "{output}"
     );
     assert!(!lab.computer.is_paused(), "the stand-in resumed");
+}
+
+/// The next computer use event clients are sent.
+async fn next_update(
+    events: &mut tokio::sync::broadcast::Receiver<haarness_protocol::EventEnvelope>,
+) -> haarness_protocol::EventEnvelope {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.expect("the event stream stays open");
+            if event.event_type == haarness_computer::UPDATED_EVENT {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("clients hear about the pause")
+}
+
+/// The computer use events clients were sent and nobody has read yet.
+fn unread_updates(
+    events: &mut tokio::sync::broadcast::Receiver<haarness_protocol::EventEnvelope>,
+) -> Vec<haarness_protocol::EventEnvelope> {
+    std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| event.event_type == haarness_computer::UPDATED_EVENT)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_paused_chat_is_told_so_and_resume_from_a_client_lets_the_agent_go_on() {
+    let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));
+    let thread = lab.thread().await;
+    let mut events = lab.events.subscribe(None).receiver;
+    lab.start(
+        thread,
+        vec![
+            vec![call(
+                "held",
+                "mac_type",
+                json!({"ref": "e2", "text": "HOLD", "snapshot": false}),
+            )],
+            vec![call("after", "mac_snapshot", json!({}))],
+        ],
+    )
+    .await;
+    // The person pressed Pause on the strip: the chat holding the screen hears it, and nobody is asked anything.
+    let paused = next_update(&mut events).await;
+    assert_eq!(paused.thread_id, Some(thread));
+    assert_eq!(paused.payload, json!({"paused": true}));
+    assert_eq!(lab.computer.paused_chat(), Some(thread));
+    assert_eq!(lab.computer.status().await["pausedChat"], json!(thread));
+    // A client that connects meanwhile learns it from the answer to the words it hands over.
+    let words = lab
+        .computer
+        .manage(&json!({"action": "words"}))
+        .await
+        .unwrap();
+    assert_eq!(words["pausedChat"], json!(thread));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        lab.runtime.active_turn(thread).await.unwrap().is_some(),
+        "the agent waits for the person"
+    );
+    // Its action waits too, even though the strip's refusal came before the press reached the server.
+    let items = lab.runtime.items(thread, None).await.unwrap();
+    assert!(
+        !items.iter().any(
+            |item| matches!(&item.data, ItemData::ToolResult { call_id, .. } if call_id == "held")
+        ),
+        "the paused action ended before the person resumed"
+    );
+    assert!(lab.runtime.pending_permissions().is_empty());
+    // A program Haarness started, such as an agent's command, cannot end the person's pause.
+    let inside = haarness_computer::INSIDE_FIELD;
+    let refused = lab
+        .computer
+        .manage(&json!({"action": "resume", inside: true}))
+        .await
+        .unwrap_err();
+    assert_eq!(refused, haarness_computer::INSIDE_RESUME_REFUSAL);
+    assert!(lab.computer.is_paused());
+    // Resume in a client: the strip hears it first, then the chat, and the agent goes on.
+    let status = lab
+        .computer
+        .manage(&json!({"action": "resume"}))
+        .await
+        .unwrap();
+    assert_eq!(status["paused"], false);
+    assert_eq!(status["pausedChat"], Value::Null);
+    let resumed = next_update(&mut events).await;
+    assert_eq!(resumed.thread_id, Some(thread));
+    assert_eq!(resumed.payload, json!({"paused": false}));
+    let items = lab.finish(thread).await;
+    let (output, error, _) = result(&items, "held");
+    assert!(
+        error && output.contains("running again") && output.contains("Call mac_snapshot"),
+        "{output}"
+    );
+    let (output, error, _) = result(&items, "after");
+    assert!(!error, "{output}");
+    let ops = lab.ops();
+    let resume = ops
+        .iter()
+        .position(|op| op == "resume")
+        .expect("the strip is told");
+    assert!(
+        !ops[..resume].contains(&"snapshot".to_owned())
+            && ops[resume..].contains(&"snapshot".to_owned()),
+        "the agent looked only after the resume: {ops:?}"
+    );
+    // Said once: neither the turn's end nor a second Resume says it again.
+    lab.computer
+        .manage(&json!({"action": "resume"}))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(unread_updates(&mut events).is_empty());
+    assert_eq!(
+        ops.iter().filter(|op| *op == "resume").count(),
+        lab.ops().iter().filter(|op| *op == "resume").count(),
+        "nothing paused, nothing sent to the strip"
+    );
+}
+
+/// Starts a turn whose typing the stand-in pauses and whose helper then quits, as one an agent's `pkill` or a crash
+/// ends; returns once the helper has gone.
+async fn pause_then_lose_the_helper(
+    lab: &Lab,
+    thread: ThreadId,
+    events: &mut tokio::sync::broadcast::Receiver<haarness_protocol::EventEnvelope>,
+) {
+    lab.start(
+        thread,
+        vec![
+            vec![call(
+                "held",
+                "mac_type",
+                json!({"ref": "e2", "text": "CRASH", "snapshot": false}),
+            )],
+            vec![call("after", "mac_snapshot", json!({}))],
+        ],
+    )
+    .await;
+    assert_eq!(next_update(events).await.payload, json!({"paused": true}));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+}
+
+#[tokio::test]
+async fn a_helper_that_quits_during_a_pause_leaves_the_agent_paused_until_the_person_resumes() {
+    let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));
+    let thread = lab.thread().await;
+    let mut events = lab.events.subscribe(None).receiver;
+    pause_then_lose_the_helper(&lab, thread, &mut events).await;
+    assert!(lab.computer.is_paused(), "the pause outlives the helper");
+    assert_eq!(lab.computer.paused_chat(), Some(thread));
+    assert!(
+        unread_updates(&mut events).is_empty(),
+        "nobody is told it ended"
+    );
+    assert!(lab.runtime.active_turn(thread).await.unwrap().is_some());
+    let items = lab.runtime.items(thread, None).await.unwrap();
+    assert!(
+        !items.iter().any(
+            |item| matches!(&item.data, ItemData::ToolResult { call_id, .. } if call_id == "held")
+        ),
+        "the agent went on without the person"
+    );
+    // The person's Resume in the chat lets it go on, with a new helper.
+    let answer = lab
+        .computer
+        .manage(&json!({"action": "resume"}))
+        .await
+        .unwrap();
+    assert_eq!(answer["paused"], false);
+    let items = lab.finish(thread).await;
+    let (output, error, _) = result(&items, "held");
+    assert!(error && output.contains("running again"), "{output}");
+    let (output, error, _) = result(&items, "after");
+    assert!(!error, "{output}");
+    assert_eq!(
+        lab.ops().iter().filter(|op| *op == "hello").count(),
+        2,
+        "{:?}",
+        lab.ops()
+    );
+}
+
+#[tokio::test]
+async fn switching_off_frees_an_agent_paused_without_a_helper() {
+    let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));
+    let thread = lab.thread().await;
+    let mut events = lab.events.subscribe(None).receiver;
+    pause_then_lose_the_helper(&lab, thread, &mut events).await;
+    assert!(lab.computer.is_paused());
+    lab.computer.enable(false).unwrap();
+    let items = lab.finish(thread).await;
+    let (output, error, _) = result(&items, "held");
+    assert!(error && output.contains("switched off"), "{output}");
+    assert!(!lab.computer.is_paused());
+}
+
+#[tokio::test]
+async fn stop_on_a_strip_paused_while_an_approval_waits_ends_the_turn() {
+    let lab = Lab::new(Lab::on());
+    let thread = lab.thread().await;
+    let mut events = lab.events.subscribe(None).receiver;
+    let turn = lab
+        .start(
+            thread,
+            vec![
+                vec![call("click", "mac_click", json!({"x": 13, "y": 13}))],
+                vec![call("never", "mac_snapshot", json!({}))],
+            ],
+        )
+        .await;
+    // The card is open when the person pauses: the chat hears it at once, then Stop ends the turn.
+    lab.permission().await;
+    let paused = next_update(&mut events).await;
+    assert_eq!(paused.thread_id, Some(thread));
+    assert_eq!(paused.payload, json!({"paused": true}));
+    assert_eq!(
+        next_update(&mut events).await.payload,
+        json!({"paused": false})
+    );
+    lab.finish(thread).await;
+    let turn = lab.runtime.turn(turn.id).await.unwrap();
+    assert_eq!(turn.status, TurnStatus::Interrupted, "{:?}", turn.error);
+    assert!(!lab.computer.is_paused());
+    let ops = lab.ops();
+    assert!(
+        !ops.contains(&"click".to_owned()) && !ops.contains(&"snapshot".to_owned()),
+        "{ops:?}"
+    );
+}
+
+#[tokio::test]
+async fn stop_on_a_paused_strip_still_ends_the_turn_and_the_paused_line_goes() {
+    let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));
+    let thread = lab.thread().await;
+    let mut events = lab.events.subscribe(None).receiver;
+    let turn = lab
+        .start(
+            thread,
+            vec![
+                vec![call(
+                    "held",
+                    "mac_type",
+                    json!({"ref": "e2", "text": "STOP", "snapshot": false}),
+                )],
+                vec![call("never", "mac_snapshot", json!({}))],
+            ],
+        )
+        .await;
+    assert_eq!(
+        next_update(&mut events).await.payload,
+        json!({"paused": true})
+    );
+    let ended = next_update(&mut events).await;
+    assert_eq!(ended.thread_id, Some(thread));
+    assert_eq!(ended.payload, json!({"paused": false}));
+    lab.finish(thread).await;
+    let turn = lab.runtime.turn(turn.id).await.unwrap();
+    assert_eq!(turn.status, TurnStatus::Interrupted, "{:?}", turn.error);
+    assert!(!lab.computer.is_paused());
+    assert!(
+        !lab.ops().contains(&"snapshot".to_owned()),
+        "{:?}",
+        lab.ops()
+    );
 }
 
 #[tokio::test]

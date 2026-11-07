@@ -3129,5 +3129,6 @@
   "Drag {target} in {app}": "{app} で {target} をドラッグ",
   "Drag {target} from {app} to {endApp}": "{target} を {app} から {endApp} へドラッグ",
   "Always allow this app": "このアプリを常に許可",
-  "Could not allow this app: {error}": "このアプリを許可できませんでした: {error}"
+  "Could not allow this app: {error}": "このアプリを許可できませんでした: {error}",
+  "No agent is paused": "一時停止中のエージェントはありません"
 }

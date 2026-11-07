@@ -451,8 +451,9 @@ command that completed. Enums may gain values; an unknown one reads as
   output past `cursor` is there already; `settled` says the command has ended
   and `size` is final. Terminal escapes are left in for the client to strip.
 - `POST …/commands/{command}/stop` stops it for a person, with every process
-  it started (interrupt, terminate, then kill, `execution.shell_stop_grace_ms`
-  apart). The answer reads `stopping` until the process has exited, then a
+  in its process group, its process tree on Windows (interrupt, terminate,
+  then kill, `execution.shell_stop_grace_ms` apart). The answer reads
+  `stopping` until the process has exited, then a
   `command.updated` event reports `stopped`. Stopping an ended command answers
   it unchanged.
 - `POST /v1/threads/{id}/commands/background` sends every running foreground
@@ -896,7 +897,7 @@ treats a missing one as an older server.
 | `browser-extension.v1` | Haarness for Chrome: the extension host route and its settings |
 | `background-commands.v1` | Shell commands in the background: `run_in_background`, `bash_output`, `bash_stop`, the `/commands` routes and events, `followsBackground` and `backgroundCommands` |
 | `input-settings.v1`, `browser-settings.v1`, `usage-statistics.v1` | The management resources of those names |
-| `computer-use.v1` | The `computer-use` management resource: computer use settings and status on macOS (see [Computer use](COMPUTER-USE.md#settings-and-api)) |
+| `computer-use.v1` | The `computer-use` management resource: computer use settings, status and `resume` on macOS, and the `computer_use.updated` event when the person pauses an agent (see [Computer use](COMPUTER-USE.md#settings-and-api)) |
 
 `rest`, `sse`, `network.attach`, `attachments.inline-upload`, `files.base64-write.v1`,
 `files.preview.v1`, `mcp`, `skills`, `subagents`, `workflows`, `workflows.read`,

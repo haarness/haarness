@@ -330,6 +330,17 @@ impl App {
     }
 
     async fn reduce_event(&mut self, event: EventEnvelope, client: &ApiClient) -> Result<()> {
+        // Followed in every chat, so a chat opened during a pause shows it.
+        if event.event_type == crate::management::COMPUTER_USE_UPDATED {
+            if let Some(chat) = event.thread_id {
+                if event.payload["paused"] == true {
+                    self.computer_paused = Some(chat);
+                } else if self.computer_paused == Some(chat) {
+                    self.computer_paused = None;
+                }
+            }
+            return Ok(());
+        }
         if event.event_type == "approval_mode.changed" {
             if let Ok(info) = serde_json::from_value(event.payload.clone()) {
                 self.show_approval_mode(info);
@@ -1159,6 +1170,10 @@ impl App {
                 });
                 if let Some(thread_id) = event.thread_id {
                     self.live_threads.remove(&thread_id);
+                    // A pause ends with its turn.
+                    if self.computer_paused == Some(thread_id) {
+                        self.computer_paused = None;
+                    }
                 }
                 if event.thread_id == Some(self.root_thread_id) {
                     self.root_active_turn = None;

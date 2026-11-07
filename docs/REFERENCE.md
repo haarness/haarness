@@ -26,7 +26,7 @@ publishing, platform validation and rollback.
 - [Computer use](COMPUTER-USE.md): on macOS, agents see the screen and work in native apps
   with the `mac_*` tools. It stays off until you accept its terms (Settings → Computer use, `/mac` or
   `haarness mac on`); each app asks once per chat unless you allow it, a bar on the screen offers
-  Pause and Stop, and Escape stops the turn.
+  Pause and Stop, a paused chat offers Resume too, and Escape stops the turn.
 
 - [Haarness Router integration](ROUTER.md): connect a self-hosted router by
   address in Desktop, TUI, or CLI. Access keys are optional, models refresh
@@ -397,18 +397,20 @@ subagent's result does). The agent reads a command's output, lists the chat's
 commands or waits for one with `bash_output` (until it ends, prints nothing for
 a while, or prints a line matching a pattern, searching from where it last
 read) and stops one with `bash_stop` (interrupt, terminate, then kill,
-`execution.shell_stop_grace_ms` apart, with every process it started; on
-Windows the first two steps only ask the command's windows to close, which a
-console program does not heed, so it ends with the kill). Its
+`execution.shell_stop_grace_ms` apart, with every process in its process
+group, its process tree on Windows; there the first two steps only ask the
+command's windows to close, which a console program does not heed, so it ends
+with the kill). Its
 instructions say to run servers, watchers and multi-minute builds or test
 suites this way, and never to leave a process running with a trailing `&` or
 `nohup`. Any shell command, yours too, ends with its shell: something it
 started that still holds its output open (`(sleep 1; echo late) & echo
 early`) gets a quarter of a second of quiet, two seconds at most, to finish
 printing, and is then stopped with the command's process group, and the
-result says so. A process that left that group (a session of its own, as
-`ssh -f` makes) cannot be stopped that way: it runs on, its output is no
-longer read, and the result says that instead.
+result says so. A process that left that group (a job started with job
+control on, `set -m`, one started by `setsid`, or a session of its own, as
+`ssh -f` makes) cannot be stopped that way: it runs on, and when it holds the
+output open, that output is no longer read and the result says so instead.
 
 In a chat open in Desktop, the terminal UI or the phone and web apps, an
 agent's foreground command that has no `timeout` of its own moves to the

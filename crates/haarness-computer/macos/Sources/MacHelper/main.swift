@@ -48,6 +48,13 @@ Thread.detachNewThread {
             emit(["id": id, "ok": true, "data": [String: Any]()])
             continue
         }
+        // Resume pressed in a Haarness window rather than on the bar: answered straight away too, since the paused
+        // agent waits for it before its next request.
+        if op == "resume" {
+            ControlBar.shared.resume()
+            emit(["id": id, "ok": true, "data": [String: Any]()])
+            continue
+        }
         // Permission and lock state are answered straight away, even mid-action: the Settings page polls for them every
         // few seconds.
         if op == "status" {

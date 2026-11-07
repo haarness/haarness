@@ -3129,5 +3129,6 @@
   "Drag {target} in {app}": "ลาก {target} ใน {app}",
   "Drag {target} from {app} to {endApp}": "ลาก {target} จาก {app} ไปยัง {endApp}",
   "Always allow this app": "อนุญาตแอปนี้เสมอ",
-  "Could not allow this app: {error}": "ไม่สามารถอนุญาตแอปนี้ได้: {error}"
+  "Could not allow this app: {error}": "ไม่สามารถอนุญาตแอปนี้ได้: {error}",
+  "No agent is paused": "ไม่มีเอเจนต์ที่หยุดชั่วคราวอยู่"
 }

@@ -8,8 +8,11 @@ import {
   computerUseKeys,
   isComputerPermission,
   macDetail,
+  pausedChatIn,
+  pausedHere,
   shownText,
   validBundle,
+  waitsOnScreen,
 } from "../src/renderer/computer-use";
 import { describeTool, toolActivity, toolInput } from "../src/renderer/transcript";
 import { readToolImage, screenToolImage } from "../src/renderer/project-images";
@@ -91,6 +94,24 @@ test("the card's main line is said in the person's language from the request's p
   assert.equal(computerApproval(request({ kind: "act", action: "click", app: "メモ", label: "保存" }), translate).summary, "メモ で 「保存」 をクリック");
 });
 
+test("an app's label cannot turn the card's line around", () => {
+  const line = (mac: Record<string, unknown>) => computerApproval(request({ kind: "act", app: "Notes", label: null, ...mac }), english).summary;
+  // Each direction mark and isolate: Arabic letter mark, LRM, RLM, LRE…RLO, LRI…PDI.
+  const marks = "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069";
+  assert.equal(line({ action: "click", label: "Save\u2069\u202e" }), "Click “Save” in Notes");
+  assert.equal(line({ action: "press", keys: `Meta+S${marks}`, app: `No${marks}tes` }), "Press Meta+S in Notes");
+  assert.equal(
+    line({ action: "drag", label: `a${marks}b`, endApp: `\u202eFinder` }),
+    "Drag “ab” from Notes to Finder",
+  );
+  assert.equal(line({ action: "squeeze", summary: "Squeeze \u202eit in Notes" }), "Squeeze it in Notes");
+  // The translation's own marks stay: only the parts lose theirs.
+  const isolating = (key: string, values?: Record<string, string>) =>
+    `\u2067${Object.entries(values ?? {}).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, value), key)}\u2069`;
+  const card = computerApproval(request({ kind: "act", action: "click", app: "Notes", label: "Save\u202e" }), isolating);
+  assert.equal(card.summary, "\u2067Click \u2067“Save”\u2069 in Notes\u2069");
+});
+
 test("a request that asks every time offers nothing lasting and says why", () => {
   const console = computerApproval(request({ kind: "act", app: "Terminal", console: true, everyTime: true }, false), english);
   assert.equal(console.inChat, null);
@@ -100,6 +121,100 @@ test("a request that asks every time offers nothing lasting and says why", () =>
   assert.deepEqual(ruled.notes, ["You set this app to ask every time."]);
   // Even with Always on offer, an every-time request keeps to once.
   assert.equal(computerApproval(request({ kind: "act", app: "Mail", everyTime: true }, true), english).inChat, null);
+});
+
+/**
+ * The server's own request for a drag from TextEdit, set to act without asking, into Notes (as the runtime test
+ * `a_drag_into_another_app_asks_only_about_the_app_not_yet_allowed` pins it): only Notes is asked about.
+ */
+const dragIntoNotes = (alsoTextEdit = false): PendingPermissionInfo => {
+  const chat = "01a1b4a2-8aa6-7801-8836-bd6474929036";
+  const patterns = [...(alsoTextEdit ? [`act:${chat}:com.apple.TextEdit`] : []), `act:${chat}:com.apple.Notes`];
+  return {
+    explicit: true,
+    permissionId: "01a1b4a2-8bf3-75b3-b1a3-5dc3ca3e3822",
+    operation: `computer:${patterns[0]}`,
+    detail: {
+      from: { ref: "e1" },
+      to: { ref: "e4" },
+      __mac: {
+        kind: "act",
+        action: "drag",
+        bundle: "com.apple.TextEdit",
+        app: "TextEdit",
+        target: 'button "Save"',
+        label: "Save",
+        direction: null,
+        endBundle: "com.apple.Notes",
+        endApp: "Notes",
+        point: { x: 20, y: 15 },
+        preview: "data:image/jpeg;base64,/9j/4AAQSkZJRgABA",
+        text: null,
+        keys: null,
+        console: false,
+        everyTime: false,
+        running: null,
+        asks: patterns,
+        summary: 'Drag button "Save" from TextEdit to Notes',
+      },
+    },
+    permission: "computer",
+    patterns,
+    alwaysPatterns: patterns.map((pattern) => `computer:${pattern}`),
+    threadId: chat,
+    rootThreadId: chat,
+    turnId: "01a1b4a2-8aa7-7421-a3dc-dac4e4688be7",
+    callId: "drag",
+    agent: "build",
+    createdAt: "2026-11-07T06:11:53.971429Z",
+  } as PendingPermissionInfo;
+};
+
+test("a drag into another app names and allows the app it asks about, never the one it starts in", () => {
+  const card = computerApproval(dragIntoNotes(), english);
+  assert.equal(card.summary, "Drag “Save” from TextEdit to Notes");
+  assert.deepEqual(card.always, { label: "Always allow Notes", bundle: "com.apple.Notes" });
+  assert.match(card.alwaysHint!, /using Notes again/);
+  assert.equal(card.inChat, "Allow in this chat");
+  // Asked about both apps, one rule would leave the other out: nothing lasting, and the chat-wide answer names neither.
+  const both = computerApproval(dragIntoNotes(true), english);
+  assert.equal(both.always, null);
+  assert.equal(both.inChat, "Allow in this chat");
+  // Within one app, the app it acts in, as before.
+  const within = computerApproval(request({ kind: "act", action: "drag", app: "Notes", bundle: "com.apple.Notes", endApp: "Notes", endBundle: "com.apple.Notes", label: "note" }), english);
+  assert.deepEqual(within.always, { label: "Always allow Notes", bundle: "com.apple.Notes" });
+});
+
+test("a pause is shown in the chat that holds the screen and in the agents it started, from any answer that names it", () => {
+  assert.equal(pausedChatIn({ title: "Computer use", data: { supported: true, paused: true, pausedChat: "root" } }), "root");
+  for (const answer of [{ data: { paused: false, pausedChat: null } }, { data: {} }, null, "root"]) assert.equal(pausedChatIn(answer), undefined);
+  const threads = [{ id: "root" }, { id: "child", parentId: "root" }, { id: "grandchild", parentId: "child" }, { id: "other" }];
+  assert.ok(pausedHere("root", "root", threads));
+  assert.ok(pausedHere("root", "grandchild", threads));
+  assert.ok(!pausedHere("root", "other", threads));
+  assert.ok(!pausedHere(undefined, "root", threads));
+  assert.ok(!pausedHere("root", "", threads));
+  // A parent loop in bad data ends the walk.
+  assert.ok(!pausedHere("root", "a", [{ id: "a", parentId: "b" }, { id: "b", parentId: "a" }]));
+});
+
+test("a pause holds the line only while the turn waits on the screen", () => {
+  const call = (id: string, name: string, turnId = "t1") =>
+    ({ turnId, data: { type: "tool_call", call_id: id, name, arguments: {} } }) as const;
+  const done = (id: string, turnId = "t1") =>
+    ({ turnId, data: { type: "tool_result", call_id: id, name: "", output: "", is_error: false } }) as const;
+  // Typing that the strip holds.
+  assert.ok(waitsOnScreen([call("a", "mac_type")], "t1"));
+  assert.ok(waitsOnScreen([call("a", "functions.mac_click")], "t1"));
+  // It looked earlier and now runs a command, edits or writes: its own work shows.
+  assert.ok(!waitsOnScreen([call("a", "mac_snapshot"), done("a"), call("b", "bash")], "t1"));
+  assert.ok(!waitsOnScreen([call("a", "mac_snapshot"), done("a")], "t1"));
+  assert.ok(!waitsOnScreen([], "t1"));
+  // Another turn's step says nothing about this one.
+  assert.ok(!waitsOnScreen([call("a", "mac_type", "t0")], "t1"));
+  // A step whose approval is still open waits for the person's answer, not for the screen.
+  assert.ok(!waitsOnScreen([call("a", "mac_click")], "t1", ["a"]));
+  assert.ok(waitsOnScreen([call("a", "mac_click")], "t1", [null, "z"]));
 });
 
 test("a whole-screen look says what goes to the model and shows no spot", () => {

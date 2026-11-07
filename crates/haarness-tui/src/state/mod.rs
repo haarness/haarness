@@ -58,9 +58,35 @@ pub fn lasting_app(pending: &haarness_protocol::PendingPermissionInfo) -> Option
         && mac["kind"] == "act"
         && mac["everyTime"] != true
         && mac["console"] != true)
-        .then(|| mac["bundle"].as_str())
+        .then(|| allowed_app(pending))
         .flatten()
-        .filter(|bundle| !bundle.is_empty())
+        .map(|(bundle, _)| bundle)
+}
+
+/// The one app an answer to a computer use request allows, by bundle identifier and name: the app it acts in or, for a
+/// drag into another app, whichever of the two it asks about. None for a drag that asks about both, where naming one
+/// app would leave the other unsaid.
+#[must_use]
+pub fn allowed_app(pending: &haarness_protocol::PendingPermissionInfo) -> Option<(&str, &str)> {
+    let mac = &pending.detail["__mac"];
+    let text = |key: &str| mac[key].as_str().filter(|value| !value.is_empty());
+    let bundle = text("bundle")?;
+    let start = (bundle, text("app").unwrap_or(bundle));
+    let Some(end) = text("endBundle").filter(|end| *end != bundle) else {
+        return Some(start);
+    };
+    // Each pattern names one app the request asks about: `act:<chat>:<bundle id>`.
+    let mut asked = pending.patterns.iter().filter_map(|pattern| {
+        pattern
+            .strip_prefix("act:")?
+            .split_once(':')
+            .map(|(_, bundle)| bundle)
+    });
+    match (asked.next(), asked.next()) {
+        (Some(only), None) if only == end => Some((end, text("endApp").unwrap_or(end))),
+        (Some(only), None) if only == bundle => Some(start),
+        _ => None,
+    }
 }
 
 impl PermissionChoice {
@@ -855,6 +881,9 @@ pub struct App {
     pub preview: String,
     pub reasoning_preview: String,
     pub live_threads: std::collections::HashMap<ThreadId, LiveThreadState>,
+    /// The chat the person paused on computer use's strip, while the pause
+    /// lasts: the conversation's root chat (`computer_use.updated`).
+    pub(crate) computer_paused: Option<ThreadId>,
     /// Every request waiting for a person on the server, by request id. The
     /// session list leads with the chats they wait in.
     pub waiting: std::collections::HashMap<String, WaitingRequest>,
@@ -1265,6 +1294,7 @@ impl App {
             preview: String::new(),
             reasoning_preview: String::new(),
             live_threads: std::collections::HashMap::new(),
+            computer_paused: None,
             waiting: std::collections::HashMap::new(),
             notice,
             notice_shown: None,
@@ -1524,6 +1554,44 @@ impl App {
                     && compute_root(&self.threads, **thread_id) == self.root_thread_id
             })
             .count()
+    }
+
+    /// Whether the person paused computer use on the strip while this chat's turn uses the screen: the paused chat is
+    /// the conversation's root, so a child agent's view counts too.
+    #[must_use]
+    pub fn screen_paused(&self) -> bool {
+        self.active_turn.is_some()
+            && self
+                .computer_paused
+                .is_some_and(|chat| chat == self.thread.id || chat == self.root_thread_id)
+    }
+
+    /// Whether this chat's turn waits on the screen while the person paused computer use on the strip: one of its
+    /// `mac_*` steps has no result yet. A turn busy with anything else (a command, an edit, its reply) shows that work.
+    #[must_use]
+    pub fn screen_waiting(&self) -> bool {
+        let Some(turn) = self.active_turn.filter(|_| self.screen_paused()) else {
+            return false;
+        };
+        let mut open = std::collections::HashSet::new();
+        for item in self.items.iter().filter(|item| item.turn_id == Some(turn)) {
+            match &item.data {
+                ItemData::ToolCall { call_id, name, .. }
+                    if name
+                        .get(..10)
+                        .filter(|prefix| prefix.eq_ignore_ascii_case("functions."))
+                        .map_or(name.as_str(), |_| &name[10..])
+                        .starts_with("mac_") =>
+                {
+                    open.insert(call_id.as_str());
+                }
+                ItemData::ToolResult { call_id, .. } => {
+                    open.remove(call_id.as_str());
+                }
+                _ => {}
+            }
+        }
+        !open.is_empty()
     }
 
     /// Delegated threads are inspection surfaces. Forks also have a parent
@@ -2895,6 +2963,7 @@ impl App {
         let query = query.trim().to_ascii_lowercase();
         let mut entries: Vec<SlashEntry> = COMMANDS
             .iter()
+            .filter(|entry| crate::commands::listed(entry))
             .filter(|entry| {
                 query.is_empty()
                     || entry.name.starts_with(&query)

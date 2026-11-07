@@ -5,7 +5,10 @@ request to $FAKE_HELPER_LOG, and never touches the screen.
 Refs name fixed elements: e1 a Save button and e2 a Name field in TextEdit, e8 a password field in TextEdit, e9 a
 Reload button in Safari, e7 a button in Haarness itself, e6 text in Terminal, e5 Terminal's New Tab button, e4 a
 button in Notes. Typing "PAUSE" pauses the agent the way the bar would (and resumes half a second later); typing
-"ESCAPE" presses Escape and then hangs, as an action still under way would.
+"HOLD" pauses it the same way until the server sends "resume", as Resume pressed in a client does; typing "STOP" pauses
+it and then presses the bar's Stop; typing "CRASH" pauses it and then quits, as a helper killed during a pause would;
+typing "ESCAPE" presses Escape and then hangs, as an action still under way would. A look at pixel 13,13 is followed by
+Pause and then Stop on the bar, as pressed while the approval for that spot waits.
 """
 import json
 import os
@@ -85,12 +88,24 @@ def answer(op, request):
                 element["preview"] = JPEG
             return element
         if "x" in request:
+            if request["x"] == 13:
+                threading.Timer(0.3, lambda: send({"event": "pause"})).start()
+                threading.Timer(0.8, lambda: send({"event": "stop"})).start()
             return {"bundle": "com.apple.TextEdit", "app": "TextEdit", "role": "AXTextArea", "content": True, "point": {"x": request["x"], "y": request["y"]}}
         return dict(ELEMENTS[2], password=False)
     if op == "type" and request.get("text") == "PAUSE":
         send({"event": "pause"})
         threading.Timer(0.5, lambda: send({"event": "resume"})).start()
         return {"__error": ("paused", "Paused by the person after 0 of 5 characters.")}
+    if op == "type" and request.get("text") in ("HOLD", "STOP", "CRASH"):
+        # The press reaches the server just after the refusal here, as it can when the server takes the two in out of
+        # order.
+        threading.Timer(0.1, lambda: send({"event": "pause"})).start()
+        if request["text"] == "STOP":
+            threading.Timer(0.6, lambda: send({"event": "stop"})).start()
+        if request["text"] == "CRASH":
+            threading.Timer(0.6, lambda: os._exit(9)).start()
+        return {"__error": ("paused", "Paused by the person after 0 of 4 characters.")}
     if op == "type" and request.get("text") == "ESCAPE":
         send({"event": "escape"})
         time.sleep(30)
@@ -107,7 +122,7 @@ for line in sys.stdin:
         with open(LOG, "a") as log:
             log.write(line + "\n")
     op = request.get("op")
-    if op == "release":
+    if op in ("release", "resume"):
         send({"id": request.get("id"), "ok": True, "data": {}})
         continue
     result = answer(op, request)

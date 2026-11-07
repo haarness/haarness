@@ -25672,6 +25672,351 @@ async fn a_computer_use_card_offers_the_app_in_every_chat_and_speaks_the_languag
     assert!(text.contains("このアプリを常に許可"), "{text}");
 }
 
+/// The person paused computer use on the strip at the top of the screen: the
+/// step it holds stops spinning, says so with the command that lets it go on,
+/// and a click on that command resumes the agent, as the strip's Resume does.
+#[tokio::test]
+async fn a_step_paused_on_the_strip_says_so_and_its_row_resumes_it() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let items = vec![message_item_for_turn(
+        1,
+        &thread,
+        turn,
+        ItemData::ToolCall {
+            call_id: "c1".into(),
+            name: "mac_type".into(),
+            arguments: serde_json::json!({"ref": "e2", "text": "milk"}),
+            provider_metadata: serde_json::Value::Null,
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    let spins = |text: &str| {
+        ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+            .iter()
+            .any(|frame| text.contains(*frame))
+    };
+    let paused = |on: bool| {
+        fixture_event(
+            crate::management::COMPUTER_USE_UPDATED,
+            thread.id,
+            thread.id,
+            serde_json::json!({"paused": on}),
+        )
+    };
+    assert!(spins(&frame_text(&app, (100, 30))));
+    app.reduce(paused(true), &offline_client()).await.unwrap();
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("‖ mac_type"), "{text}");
+    assert!(text.contains("paused  ·  /mac resume"), "{text}");
+    assert!(!spins(&text), "nothing moves while paused: {text}");
+    // The band says it too, without a clock running.
+    let band = text
+        .lines()
+        .rev()
+        .find(|line| line.contains("paused"))
+        .unwrap();
+    assert!(!band.contains("mac_type"), "{band}");
+    // The command on the row is what a click runs.
+    let row = text
+        .lines()
+        .position(|line| line.contains("/mac resume"))
+        .unwrap();
+    let column = text.lines().nth(row).unwrap().find("/mac resume").unwrap();
+    let column = text.lines().nth(row).unwrap()[..column].width();
+    assert_eq!(
+        app.hit_at(row, column + 2),
+        Some(crate::view::frame::HitTarget::ComputerResume)
+    );
+    assert_ne!(
+        app.hit_at(row, 4),
+        Some(crate::view::frame::HitTarget::ComputerResume),
+        "only the command takes the click"
+    );
+    let (client, seen) = sign_in_server(vec![SignInReply::Json(
+        r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null}}"#,
+    )])
+    .await;
+    mouse_drag(
+        &mut app,
+        &client,
+        u16::try_from(row).unwrap(),
+        u16::try_from(column + 2).unwrap(),
+        u16::try_from(column + 2).unwrap(),
+    )
+    .await;
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(
+        requests[0].starts_with("POST /v1/manage/computer-use ")
+            && requests[0].contains(r#""action":"resume""#),
+        "{requests:?}"
+    );
+    let text = frame_text(&app, (100, 30));
+    assert!(!text.contains("/mac resume") && spins(&text), "{text}");
+    // A pause heard later ends with the server's word, or with the turn.
+    app.reduce(paused(true), &offline_client()).await.unwrap();
+    app.reduce(paused(false), &offline_client()).await.unwrap();
+    assert!(!frame_text(&app, (100, 30)).contains("/mac resume"));
+    app.reduce(paused(true), &offline_client()).await.unwrap();
+    let mut finished = fixture_event("turn.finished", thread.id, thread.id, serde_json::json!({}));
+    finished.turn_id = Some(turn);
+    app.reduce(finished, &offline_client()).await.unwrap();
+    assert_eq!(app.computer_paused, None);
+}
+
+/// A pause on the strip holds only a turn that waits on the screen: one that
+/// looked earlier and now runs a command keeps its own band and rows.
+#[tokio::test]
+async fn a_pause_says_paused_only_while_a_step_waits_on_the_screen() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let call = |sequence: u64, id: &str, name: &str| {
+        message_item_for_turn(
+            sequence,
+            &thread,
+            turn,
+            ItemData::ToolCall {
+                call_id: id.into(),
+                name: name.into(),
+                arguments: serde_json::json!({}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let done = message_item_for_turn(
+        2,
+        &thread,
+        turn,
+        ItemData::ToolResult {
+            call_id: "c1".into(),
+            name: "mac_snapshot".into(),
+            output: "TextEdit".into(),
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        },
+    );
+    let items = vec![call(1, "c1", "mac_snapshot"), done, call(3, "c2", "bash")];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    app.active_turn = Some(turn);
+    app.reduce(
+        fixture_event(
+            crate::management::COMPUTER_USE_UPDATED,
+            thread.id,
+            thread.id,
+            serde_json::json!({"paused": true}),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.screen_paused());
+    assert!(
+        !app.screen_waiting(),
+        "the command is not waiting on the screen"
+    );
+    let text = frame_text(&app, (100, 30));
+    assert!(
+        !text.contains("paused") && !text.contains("/mac resume"),
+        "{text}"
+    );
+    // The next screen step is the one the pause holds.
+    app.items.push(call(4, "c3", "functions.mac_click"));
+    assert!(app.screen_waiting());
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("paused  ·  /mac resume"), "{text}");
+}
+
+/// `/mac resume` words its notice from the server's answer: an agent this
+/// client never heard was paused (another chat's, or a missed event) was
+/// still resumed, and one it thought paused may have gone on already.
+#[tokio::test]
+async fn mac_resume_says_what_the_server_did() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let (client, _) = sign_in_server(vec![
+        SignInReply::Json(
+            r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null,"resumed":true}}"#,
+        ),
+        SignInReply::Json(
+            r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null,"resumed":false}}"#,
+        ),
+    ])
+    .await;
+    app.notice.clear();
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_ne!(app.notice, "No agent is paused", "it did resume one");
+    app.computer_paused = Some(thread.id);
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_eq!(app.notice, "No agent is paused");
+    assert_eq!(app.computer_paused, None);
+}
+
+/// A pause is followed in every chat, so a chat opened while it lasts shows
+/// it; a child agent's view counts as its conversation's; `/mac resume` does
+/// what the row's click does, and says so when nothing is paused.
+#[tokio::test]
+async fn a_pause_reaches_the_paused_conversation_and_mac_resume_ends_it() {
+    let thread = fixture_thread();
+    let other = fixture_thread();
+    let turn = TurnId::new();
+    let mut app = App::new(
+        other.clone(),
+        vec![thread.clone(), other.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    app.reduce(
+        fixture_event(
+            crate::management::COMPUTER_USE_UPDATED,
+            thread.id,
+            thread.id,
+            serde_json::json!({"paused": true}),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.computer_paused, Some(thread.id));
+    app.active_turn = Some(turn);
+    assert!(!app.screen_paused(), "another chat is not paused");
+    app.root_thread_id = thread.id;
+    assert!(app.screen_paused(), "a child agent of the paused chat is");
+    let (client, seen) = sign_in_server(vec![
+        SignInReply::Json(r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null}}"#),
+        SignInReply::Json(r#"{"title":"Computer use","data":{"supported":true,"paused":false,"pausedChat":null}}"#),
+    ])
+    .await;
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_eq!(app.computer_paused, None);
+    assert!(!app.screen_paused());
+    assert_ne!(app.notice, "No agent is paused");
+    app.execute_command("/mac resume", &client).await.unwrap();
+    assert_eq!(app.notice, "No agent is paused");
+    let requests = seen.lock().unwrap().clone();
+    assert!(
+        requests.len() == 2
+            && requests
+                .iter()
+                .all(|request| request.contains(r#""action":"resume""#)),
+        "{requests:?}"
+    );
+}
+
+/// `/mac` is listed only where computer use exists: on macOS.
+#[test]
+fn mac_is_listed_on_macos_only() {
+    let mac = COMMANDS.iter().find(|spec| spec.name == "mac").unwrap();
+    assert!(crate::commands::listed_on(mac, "macos"));
+    assert!(!crate::commands::listed_on(mac, "linux"));
+    assert!(!crate::commands::listed_on(mac, "windows"));
+    let help = COMMANDS.iter().find(|spec| spec.name == "help").unwrap();
+    assert!(crate::commands::listed_on(help, "linux"));
+    let thread = fixture_thread();
+    let app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    assert_eq!(
+        app.filtered_slash_entries("mac")
+            .iter()
+            .any(|entry| entry.name == "mac"),
+        cfg!(target_os = "macos")
+    );
+}
+
+/// The server's own request for a drag from TextEdit, set to act without
+/// asking, into Notes (as `a_drag_into_another_app_asks_only_about_the_app_not_yet_allowed`
+/// in haarness-computer pins it): only Notes is asked about, so only Notes
+/// may be allowed in every chat, and the chip says which app that is.
+fn drag_into_notes(thread: &Thread, also_textedit: bool) -> haarness_protocol::EventEnvelope {
+    let chat = thread.id;
+    let mut patterns = vec![format!("act:{chat}:com.apple.Notes")];
+    if also_textedit {
+        patterns.insert(0, format!("act:{chat}:com.apple.TextEdit"));
+    }
+    let always: Vec<String> = patterns
+        .iter()
+        .map(|pattern| format!("computer:{pattern}"))
+        .collect();
+    fixture_event(
+        "permission.requested",
+        chat,
+        chat,
+        serde_json::json!({
+            "explicit": true,
+            "permissionId": "perm-drag",
+            "operation": format!("computer:{}", patterns[0]),
+            "detail": {"from": {"ref": "e1"}, "to": {"ref": "e4"}, "__mac": {
+                "kind": "act", "action": "drag", "bundle": "com.apple.TextEdit", "app": "TextEdit",
+                "target": "button \"Save\"", "label": "Save", "direction": null, "endBundle": "com.apple.Notes",
+                "endApp": "Notes", "point": {"x": 20, "y": 15}, "preview": "data:image/jpeg;base64,/9j/4AAQ",
+                "text": null, "keys": null, "console": false, "everyTime": false, "running": null,
+                "asks": patterns, "summary": "Drag button \"Save\" from TextEdit to Notes"}},
+            "permission": "computer",
+            "patterns": patterns,
+            "alwaysPatterns": always,
+            "threadId": chat,
+            "rootThreadId": chat,
+            "callId": "drag",
+            "agent": "build",
+            "createdAt": "2026-11-07T06:11:53.971429Z",
+        }),
+    )
+}
+
+#[tokio::test]
+async fn a_computer_use_drag_into_another_app_allows_in_every_chat_only_the_app_it_asks_about() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(drag_into_notes(&thread, false), &offline_client())
+        .await
+        .unwrap();
+    let pending = app.first_pending_permission().unwrap();
+    assert_eq!(crate::state::lasting_app(pending), Some("com.apple.Notes"));
+    let text = frame_text(&app, (130, 40));
+    assert!(
+        text.contains("Drag “Save” from TextEdit to Notes"),
+        "{text}"
+    );
+    assert!(text.contains("Always allow Notes"), "{text}");
+    assert!(
+        !text.contains("Always allow TextEdit") && !text.contains("this app"),
+        "{text}"
+    );
+    // `e` saves a rule for Notes, the app the card asked about, then allows this request once.
+    let (client, seen) = sign_in_server(vec![
+        SignInReply::Json(r#"{"title":"Computer use","data":{}}"#),
+        SignInReply::Json("null"),
+    ])
+    .await;
+    app.permission_focus = true;
+    crate::input::answer_permission(&mut app, &client, 'e')
+        .await
+        .unwrap();
+    let requests = seen.lock().unwrap().clone();
+    assert!(
+        requests[0].contains(r#""bundle":"com.apple.Notes""#)
+            && !requests[0].contains("com.apple.TextEdit"),
+        "{requests:?}"
+    );
+    // Asked about both apps, one rule would leave the other out: nothing lasting is offered.
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(drag_into_notes(&thread, true), &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::state::lasting_app(app.first_pending_permission().unwrap()),
+        None
+    );
+    assert!(
+        !crate::state::PermissionChoice::available(&app)
+            .contains(&crate::state::PermissionChoice::App)
+    );
+    let text = frame_text(&app, (130, 40));
+    assert!(!text.contains("Always allow"), "{text}");
+    assert!(text.contains("Allow in this chat"), "{text}");
+}
+
 /// A click on a terminal's text asks every time: the card says why and
 /// offers no answer that lasts.
 #[tokio::test]
