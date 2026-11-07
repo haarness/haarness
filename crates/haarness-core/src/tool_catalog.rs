@@ -135,6 +135,28 @@ fn classify(name: &str) -> Classification {
     }
 }
 
+/// The window at or under which a chat leaves the browser's tools out until
+/// the model loads them, as it does other optional groups. Chrome's and
+/// Desktop's browser take some 45 schemas, about 9K tokens: a quarter of a
+/// local model's 32K, which Haarness's other instructions and tools already
+/// share with the chat, for tools a small model seldom needs.
+pub const SMALL_WINDOW: u64 = 65_536;
+
+/// [`classify`] for a model with `context_window`: the browser's tools are
+/// optional in a small window.
+fn classify_in(name: &str, context_window: Option<u64>) -> Classification {
+    if name.starts_with("browser_")
+        && context_window.is_some_and(|window| window > 0 && window <= SMALL_WINDOW)
+    {
+        return Classification {
+            group: "browser",
+            title: "Browser",
+            essential: false,
+        };
+    }
+    classify(name)
+}
+
 #[must_use]
 pub fn is_essential_tool(name: &str) -> bool {
     classify(name).essential
@@ -257,7 +279,7 @@ where
     let deferred_tokens = definitions
         .iter()
         .filter(|tool| {
-            let classification = classify(&tool.name);
+            let classification = classify_in(&tool.name, context_window);
             effective_enabled(configured, live, &tool.name)
                 && !classification.essential
                 && !pinned(settings, &tool.name)
@@ -285,7 +307,7 @@ where
     let mut total = 0_u64;
     let mut visible = 0_u64;
     for tool in definitions {
-        let classification = classify(&tool.name);
+        let classification = classify_in(&tool.name, context_window);
         let enabled = effective_enabled(configured, live, &tool.name);
         let loaded = promoted.contains(&tool.name);
         let is_advertised = enabled
@@ -678,6 +700,62 @@ mod tests {
                 .iter()
                 .any(|tool| tool.name == "session_manage")
         );
+    }
+
+    #[test]
+    fn a_small_window_loads_the_browser_when_the_model_asks() {
+        let definitions: Vec<_> = ["read", "bash", "browser_navigate", "browser_snapshot"]
+            .into_iter()
+            .map(|name| definition(name, &"a long description ".repeat(200)))
+            .collect();
+        let select = |window| {
+            select_tools(
+                definitions.clone(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &LazyToolSettings::default(),
+                &HashSet::new(),
+                Some(window),
+                false,
+            )
+        };
+        // A local model's 32K: the browser waits behind the loader.
+        let small = select(32_768);
+        let names: Vec<_> = small
+            .advertised
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert_eq!(names, ["bash", "read", LOAD_TOOL_NAME]);
+        assert_eq!(
+            search_deferred_tools(&definitions, &small.response, &["browser".into()]),
+            ["browser_navigate", "browser_snapshot"]
+        );
+        // Once loaded, it stays.
+        let loaded = select_tools(
+            definitions.clone(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings::default(),
+            &HashSet::from(["browser_navigate".to_owned()]),
+            Some(32_768),
+            true,
+        );
+        assert!(
+            loaded
+                .advertised
+                .iter()
+                .any(|tool| tool.name == "browser_navigate")
+        );
+        // A large window keeps it at hand, as before.
+        let large = select(200_000);
+        assert!(
+            large
+                .advertised
+                .iter()
+                .any(|tool| tool.name == "browser_snapshot")
+        );
+        assert!(!large.response.lazy_active);
     }
 
     #[test]

@@ -135,6 +135,28 @@ Found by running coding chats on each provider with the owner's own keys, on the
 | Gemini | A new Gemini connection, and a chat that names no Gemini model, starts on Google's newest Flash model (Gemini 3.8 Flash today), which free Google AI Studio keys can use; Gemini 4 Argon is listed next and stays choosable. A model someone chose, or set as the default, stays as it is. |
 | All | `marketplace_manage` and `capability_manage` wait behind `load_tool` like the other managers instead of going out with every request (4.5 KB). The `browser_*` tools (44 schemas, about 36 KB) are sent only while a browser can serve the chat ([Browser](BROWSER.md#tools)): a terminal chat's request to Groq's free tier went from 10,618 to about 5,400 tokens. |
 
+## Ollama on smaller computers: 2026-11-08
+
+Ollama sets a model's context by the computer's GPU memory: 4K tokens under
+24 GiB, as on most laptops and gaming PCs, 32K up to 48 GiB, 256K above. Its
+OpenAI-style endpoint, which Haarness used, has no way to ask for more, and it
+cuts a longer prompt from the front without a word. Haarness's instructions and
+tools come first and took 8K to 16K tokens with a small model, so on most
+computers every Ollama model answered a question it never saw: it printed a
+tool call as text, called tools that don't exist, or said it had changed files
+it never opened.
+
+| Area | Change |
+| --- | --- |
+| Context | Haarness talks to Ollama through its own chat API (`/api/chat`) and asks for a 32K context (`num_ctx`), or the model's longest when that is shorter, or more when `OLLAMA_CONTEXT_LENGTH` or the model's own `num_ctx` asks for more. That window is the one the picker shows and the chat compacts against. A prompt that still doesn't fit is refused (`truncate: false`) and the chat is compacted, instead of the model reading its end only. A model too short even then says so, with models here that have room ("llama3:8b reads at most 8,192 tokens at once here, fewer than Haarness's instructions, tools and this message take. Choose one with a longer context for this chat, such as qwen3:8b."). |
+| Tools | A model Ollama runs without tools (Gemma 3, Llama 3 8B) is refused in a chat with tools, naming models here that use them, or one to download: "gemma3:latest can't use tools in Ollama, so it can't read, change or run anything in your project. Download one that can with `ollama pull qwen3:8b`, then choose it for this chat." Before, it answered as if it had done the work. A reply that is nothing but a call to an offered tool written out as text (Qwen2.5 Coder writes `{"name": "read", "arguments": {…}}` with no `<tool_call>` around it) is that call. |
+| The model a new chat gets | Every client gives a new chat a provider's first model. Ollama and LM Studio now list first the newest model that calls tools, runs on this computer, has 4B parameters or more and 16K of context; before, Ollama's newest download came first whatever it was (SmolLM2 1.7B, which answers with nothing). Small models, models LM Studio says aren't trained for tools, cloud models and models without tools follow, in that order. A model there that answers with nothing says so: "smollm2:1.7b sent back an empty reply. A small model often can't follow Haarness's instructions and tools. Choose a larger one that uses them for this chat, such as qwen3:8b." |
+| Missing and cloud models | A model Ollama hasn't downloaded says so, with `ollama pull`, instead of "Ollama no longer offers". A cloud model (`gpt-oss:120b-cloud`) while this computer's Ollama isn't signed in says to run `ollama signin`, instead of "rejected the API key… Connect Ollama again". |
+| Room | In a window of 64K or less, the browser's 45 tools wait behind `load_tool` like the other optional groups, until the model asks for them. They were half the tool schemas, about 9K tokens; the instructions and tools now take 5K to 7K tokens of a local model's 32K. |
+| Where Ollama listens | `OLLAMA_HOST` is read as Ollama reads it, a port of its own included; `0.0.0.0` and `localhost` are reached at `127.0.0.1`. A runtime that answers its port gets five seconds to list its models; it had a quarter of a second, which a busy computer can miss, and its models were then left out ("Provider ollama is not available"). |
+| LM Studio | A model LM Studio won't load with 64K (short of memory) is loaded with 32K, the least that leaves the chat room, instead of with LM Studio's own default of 4K or 8K, which refuses every request. |
+| Pictures | A picture for a model that reads none names models here that read pictures and use tools. |
+
 ## Provider fixes: 2026-11-07
 
 | Provider | Change |

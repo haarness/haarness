@@ -6919,29 +6919,40 @@ fn not_connected_provider(info: &haarness_protocol::ProviderInfo) -> String {
 }
 
 fn unavailable_provider(id: &str) -> String {
-    // A local runtime is listed only while it answers on its port.
+    // A local runtime is listed only while it answers where it listens.
     let local = match id {
         "ollama" => Some((
             "Ollama",
-            11_434,
+            haarness_providers::ollama_url(),
             "open the Ollama app or run `ollama serve`",
         )),
         "lmstudio" => Some((
             "LM Studio's server",
-            1_234,
+            "http://127.0.0.1:1234".to_owned(),
             "turn it on in LM Studio's Developer tab or run `lms server start`",
         )),
         _ => None,
     };
-    if let Some((name, port, start)) = local {
-        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
+    if let Some((name, url, start)) = local {
+        if !accepts_connections(&url, Duration::from_millis(200)) {
             return format!(
                 "{name} isn't running on this computer. To start it, {start}, then try again."
             );
         }
     }
     format!("Provider {id} is not available. `haarness providers` lists the ones you can use.")
+}
+
+/// Whether something accepts a connection at `url`'s host and port.
+fn accepts_connections(url: &str, timeout: Duration) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.socket_addrs(|| None).ok())
+        .is_some_and(|addresses| {
+            addresses
+                .iter()
+                .any(|address| std::net::TcpStream::connect_timeout(address, timeout).is_ok())
+        })
 }
 
 fn qualified_run_model(provider: &str, model: &str) -> Result<(String, String)> {
@@ -9554,10 +9565,10 @@ fn runtime_source_fingerprint_for(
     })
 }
 
-/// Which local model runtimes accept connections on their usual ports
-/// (Ollama 11434, LM Studio 1234), checked at most every few seconds: a
-/// refused connection on this computer answers at once and sends nothing
-/// to a runtime that is up.
+/// Which local model runtimes accept connections where they listen (Ollama
+/// on 11434 or where `OLLAMA_HOST` says, LM Studio on 1234), checked at
+/// most every few seconds: a refused connection on this computer answers at
+/// once and sends nothing to a runtime that is up.
 fn local_runtimes_listening() -> String {
     static LAST: parking_lot::Mutex<Option<(Instant, String)>> = parking_lot::Mutex::new(None);
     let mut last = LAST.lock();
@@ -9566,18 +9577,15 @@ fn local_runtimes_listening() -> String {
     {
         return listening.clone();
     }
-    let listening = [("ollama", 11_434), ("lmstudio", 1_234)]
-        .into_iter()
-        .filter(|(_, port)| {
-            std::net::TcpStream::connect_timeout(
-                &std::net::SocketAddr::from(([127, 0, 0, 1], *port)),
-                Duration::from_millis(100),
-            )
-            .is_ok()
-        })
-        .map(|(name, _)| name)
-        .collect::<Vec<_>>()
-        .join(",");
+    let listening = [
+        ("ollama", haarness_providers::ollama_url()),
+        ("lmstudio", "http://127.0.0.1:1234".to_owned()),
+    ]
+    .into_iter()
+    .filter(|(_, url)| accepts_connections(url, Duration::from_millis(100)))
+    .map(|(name, _)| name)
+    .collect::<Vec<_>>()
+    .join(",");
     *last = Some((Instant::now(), listening.clone()));
     listening
 }

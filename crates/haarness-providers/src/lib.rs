@@ -16,6 +16,7 @@ mod key_check;
 mod live_models;
 mod media;
 mod model_order;
+mod ollama;
 mod openai;
 mod openai_compatible;
 mod sse;
@@ -890,13 +891,43 @@ fn preset_environment_key(preset: &CompatiblePreset) -> Option<String> {
         .find_map(|variable| std::env::var(variable).ok())
 }
 
-/// Detect local model runtimes on their conventional loopback ports with a
-/// short timeout so startup stays fast when nothing is listening.
+/// Where Ollama listens: `OLLAMA_HOST`, as Ollama reads it, else
+/// `http://127.0.0.1:11434`.
+#[must_use]
+pub fn ollama_url() -> String {
+    ollama::root_url(std::env::var("OLLAMA_HOST").ok().as_deref())
+}
+
+/// Whether something accepts a connection at `root`'s host and port within a
+/// quarter of a second: nothing listening is told at once (Windows takes
+/// seconds to refuse a connection), so startup stays fast.
+async fn accepts_connections(root: &str) -> bool {
+    let Some(address) = reqwest::Url::parse(root).ok().and_then(|url| {
+        Some(format!(
+            "{}:{}",
+            url.host_str()?,
+            url.port_or_known_default()?
+        ))
+    }) else {
+        return false;
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    .is_ok_and(|connected| connected.is_ok())
+}
+
+/// Detect local model runtimes on their conventional loopback ports. Only
+/// the connection has a short limit; a runtime that is there gets time to
+/// list its models, which a busy or slow computer can need more than a
+/// quarter of a second for.
 async fn detect_local_runtimes(
     disabled: &std::collections::HashSet<String>,
 ) -> Vec<CompatibleInstance> {
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(250))
+        .timeout(std::time::Duration::from_secs(5))
         .build()
     {
         Ok(client) => client,
@@ -906,8 +937,13 @@ async fn detect_local_runtimes(
         if disabled.contains("ollama") {
             return None;
         }
+        // Where Ollama itself listens, `OLLAMA_HOST` saying otherwise.
+        let root = ollama_url();
+        if !accepts_connections(&root).await {
+            return None;
+        }
         let body: serde_json::Value = client
-            .get("http://127.0.0.1:11434/api/tags")
+            .get(format!("{root}/api/tags"))
             .send()
             .await
             .ok()?
@@ -926,7 +962,7 @@ async fn detect_local_runtimes(
         Some(CompatibleInstance {
             id: "ollama".into(),
             name: "Ollama".into(),
-            base_url: "http://127.0.0.1:11434/v1".into(),
+            base_url: format!("{root}/v1"),
             api_key: None,
             models,
             discover_models: true,
@@ -938,7 +974,7 @@ async fn detect_local_runtimes(
         })
     };
     let lmstudio = async {
-        if disabled.contains("lmstudio") {
+        if disabled.contains("lmstudio") || !accepts_connections("http://127.0.0.1:1234").await {
             return None;
         }
         let body: serde_json::Value = client
