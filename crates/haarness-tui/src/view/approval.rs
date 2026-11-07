@@ -1245,8 +1245,9 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
 fn change_preview(pending: &PendingPermissionInfo, width: usize) -> Vec<(char, String)> {
     let detail = &pending.detail;
     let text = |key: &str| detail.get(key).and_then(serde_json::Value::as_str);
-    // A direction override or isolate in a changed line is a code, so the
-    // line cannot read as something it is not; the rest is the file's text.
+    // A direction override or isolate, or a control character, in a changed
+    // line is a code, so the line cannot read as something it is not or
+    // hide what an escape string holds; the rest is the file's text.
     let clip =
         |line: &str| single_line(&marked_directions(line.trim_end()), width.saturating_sub(2));
     if let (Some(old), Some(new)) = (text("old"), text("new")) {

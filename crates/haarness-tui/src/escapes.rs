@@ -65,11 +65,19 @@ const FLAG_TAGS: [&str; 3] = [
 ];
 
 /// Whether `character` overrides or isolates the direction of the text
-/// after it (U+202A–U+202E, U+2066–U+2069). In the lines of a file an edit
-/// changes, only these are codes: they can make a changed line read as
-/// something it is not, while marks and joiners there belong to the text.
+/// after it (U+202A–U+202E, U+2066–U+2069).
 fn turns_direction(character: char) -> bool {
     matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Whether `character` shows as a code in a line of a file, as an edit
+/// changes it or a diff shows it: a direction override or isolate, which
+/// can make the line read as something it is not, or a control character
+/// other than tab. An escape there would start a string a terminal never
+/// shows, and taking it out whole would hide the text inside it, which the
+/// file still holds. Marks and joiners belong to the text.
+fn shows_as_code_in_file(character: char) -> bool {
+    turns_direction(character) || (character.is_control() && character != '\t')
 }
 
 /// `text` with each character `is_code` names handed to `code`, which
@@ -126,21 +134,29 @@ pub(crate) fn marked(text: &str) -> String {
 }
 
 /// [`marked`] for the lines of a file an edit changes: only what
-/// [`turns_direction`] names is a code there. A function application or
-/// invisible times of the file's own (U+2061, U+2062, as a formula copied
+/// [`shows_as_code_in_file`] names is a code there. A function application
+/// or invisible times of the file's own (U+2061, U+2062, as a formula copied
 /// from a word processor holds them) shows nothing either way, so it is
 /// left out rather than read as a marker.
 #[must_use]
 pub(crate) fn marked_directions(text: &str) -> String {
     with_codes(
         text,
-        |character| turns_direction(character) || matches!(character, CODE_START | CODE_END),
+        |character| shows_as_code_in_file(character) || matches!(character, CODE_START | CODE_END),
         |shown, character| {
-            if turns_direction(character) {
+            if shows_as_code_in_file(character) {
                 push_marked(shown, character);
             }
         },
     )
+}
+
+/// [`spelled_out`] for a line of a file in a diff: what
+/// [`shows_as_code_in_file`] names is written as its code, and everything
+/// else as it is.
+#[must_use]
+pub(crate) fn spelled_in_file(text: &str) -> String {
+    with_codes(text, shows_as_code_in_file, push_code)
 }
 
 fn push_marked(shown: &mut String, character: char) {
