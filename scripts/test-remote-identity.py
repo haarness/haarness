@@ -26,9 +26,14 @@ connects again, as Cloud does.
    other. Each bridge lists the other only; restarts keep each id.
 4. Mini and Air share one folder: started and each restarted twice, they keep
    two ids, and each `remote status` lists only its own.
-5. A computer that cannot tell its hardware id (an empty override) keeps the
-   identity under the old name as it is; one whose id fails for a single
-   start keeps its host, under the old name or in the one file it has.
+5. A computer that cannot tell its hardware id (an empty override) keeps an
+   unstamped identity under the old name as it is. A start whose id cannot be
+   read never connects as another computer: Laptop, with the copy of
+   Studio's identity still beside its own, keeps its own host while Studio
+   stays connected, and so does Air in the shared folder; Studio and Mini,
+   whose stamped identity a second computer could hold too, do not connect,
+   Desktop's restore says why, and once the id reads again it turns access
+   back on with the same host.
 6. Without `HAARNESS_TEST_PROVIDER` the override is ignored.
 
 With HAARNESS_BASE_BIN:
@@ -415,15 +420,59 @@ def computers_apart(root, cloud, computer, check, old) -> None:
     check(connected_as(attic, cloud) == first, "without a hardware id the identity under the old name keeps its host")
     check("machine" not in attic.identity(), "and gets no stamp")
     attic.stop()
-    for each, id in ((studio, first), (laptop, second)):
+
+    def unread(each) -> None:
         each.env["HAARNESS_TEST_MACHINE_ID"] = ""
-        if each is laptop:
-            # Only Laptop's own file: the copy of Studio's is gone.
-            (laptop.config / old).unlink()
-        each.start()
-        check(connected_as(each, cloud) == id, f"a start of {each.name} that cannot read its hardware id keeps its host")
-        each.stop()
+
+    def read_again(each) -> None:
         each.env["HAARNESS_TEST_MACHINE_ID"] = f"MACHINE-{each.name.upper()}"
+
+    def refused(each, what: str) -> None:
+        files = {path.name: path.read_text() for path in each.identities()}
+        hosts = set(cloud.hosts)
+        mark = each.log.stat().st_size if each.log.exists() else 0
+        each.start()
+        wait_for(lambda: each.connector.poll() is not None, 90, f"{each.name}'s connector to give up")
+        said = each.log.read_text()[mark:]
+        check(each.connector.returncode != 0 and "hardware ID could not be read" in said, f"{what} does not connect, and says why", said[-400:])
+        check(set(cloud.hosts) == hosts and {path.name: path.read_text() for path in each.identities()} == files, "registering nothing and changing no identity")
+        each.connector = None
+
+    # Laptop, the copy of Studio's identity still beside its own: its own
+    # host, by its name, while Studio stays connected.
+    studio.start()
+    check(connected_as(studio, cloud) == first, "Studio connected")
+    settled = time.time()
+    unread(laptop)
+    laptop.start()
+    check(connected_as(laptop, cloud) == second, "a start of Laptop that cannot read its hardware id keeps its own host beside the copy of Studio's")
+    time.sleep(5)
+    takeovers = [id for at, id in cloud.takeovers if at >= settled]
+    check(first in cloud.connected() and not takeovers, "and never takes Studio's connection", takeovers)
+    laptop.stop()
+    read_again(laptop)
+    studio.stop()
+    # Studio: its stamped identity under the old name is just what a
+    # computer it was copied to holds, so nothing tells them apart.
+    unread(studio)
+    refused(studio, "a start of Studio that cannot read its hardware id")
+    restored = studio.restore()
+    check(restored.get("state") == "off" and "hardware ID" in (restored.get("error") or "") and first not in cloud.connected(), "Desktop's restore leaves access off and says why", restored)
+    read_again(studio)
+    restored = studio.restore()
+    pid = wait_for(lambda: studio.identity().get("pid") if alive(studio.identity().get("pid")) else None, 60, "Studio's restored connector")
+    check(restored.get("state") == "on" and connected_as(studio, cloud, pid=pid) == first, "once the id reads again, the next restore turns access on with the same host", restored)
+    studio.cli("remote", "disable", first)
+    # The shared folder: Air keeps its own by its name; Mini, under the old
+    # name, does not connect.
+    unread(air)
+    air.start()
+    check(connected_as(air, cloud) == next(iter(ids["Air"])), "in the shared folder, a start of Air that cannot read its hardware id keeps its own host")
+    air.stop()
+    read_again(air)
+    unread(mini)
+    refused(mini, "a start of Mini, whose identity is the shared one, that cannot read its hardware id")
+    read_again(mini)
 
     # 6. The stand-in id needs the test providers.
     desk = computer("Desk", "MACHINE-STUDIO", test_provider=False)

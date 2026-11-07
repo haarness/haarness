@@ -1371,13 +1371,7 @@ fn identity_path_for(
 ) -> Result<std::path::PathBuf> {
     let shared = identity_file_for(paths, client, account, workspace, session, None);
     let Some(hardware) = hardware else {
-        // A start that cannot read the hardware id cannot tell computers
-        // apart: the old name, or this connector's one identity when there
-        // is only one, never a new host for a moment's failure.
-        if shared.exists() {
-            return Ok(shared);
-        }
-        return Ok(only_identity(paths, client, account, workspace, session)?.unwrap_or(shared));
+        return unchecked_identity_path(paths, client, account, workspace, session, shared, name);
     };
     let identity = std::fs::read(&shared)
         .ok()
@@ -1404,29 +1398,71 @@ fn identity_path_for(
     };
     Ok(if ours { shared } else { own })
 }
-/// The one identity in this data folder of the connector for `account`
-/// (and the shared chat of `workspace`, when given), if there is just one.
-fn only_identity(
+/// [`identity_path`] on a computer whose hardware id cannot be read, where
+/// no stamp can be checked: `shared` (the old name) when nothing else is
+/// there and it carries no stamp, as every release used it; else the one
+/// file of a computer's own that carries the name this connector starts
+/// under, when the old name's does not. Anything else may be another
+/// computer's identity, so this start refuses ([`UncheckedIdentity`])
+/// rather than connect as that computer, and changes nothing: the next one
+/// tries again.
+fn unchecked_identity_path(
     paths: &Paths,
     client: &haarness_account::Client,
     account: &str,
     workspace: &Path,
     session: Option<Uuid>,
-) -> Result<Option<std::path::PathBuf>> {
+    shared: std::path::PathBuf,
+    name: &str,
+) -> Result<std::path::PathBuf> {
     let chat = session.map(|id| id.to_string());
-    let mut found = identities_in(paths.config_dir())?
+    let others = identities_in(paths.config_dir())?
         .into_iter()
-        .filter(|(_, identity)| {
-            identity["apiUrl"].as_str() == Some(client.config.api_url.as_str())
+        .filter(|(file, identity)| {
+            *file != shared
+                && identity["apiUrl"].as_str() == Some(client.config.api_url.as_str())
                 && identity["accountId"].as_str() == Some(account)
                 && identity["chatId"].as_str() == chat.as_deref()
                 && (session.is_none() || identity["workspace"].as_str() == workspace.to_str())
         })
-        .map(|(file, _)| file);
-    Ok(match (found.next(), found.next()) {
-        (Some(file), None) => Some(file),
-        _ => None,
-    })
+        .collect::<Vec<_>>();
+    let earlier = read_identity(&shared);
+    if others.is_empty() {
+        if earlier
+            .as_ref()
+            .is_none_or(|identity| identity["machine"].is_null())
+        {
+            return Ok(shared);
+        }
+    } else {
+        let named = |identity: &Value| identity["name"].as_str() == Some(name);
+        let mut found = others.iter().filter(|(_, identity)| named(identity));
+        if let (Some((file, _)), None) = (found.next(), found.next())
+            && !earlier.as_ref().is_some_and(named)
+        {
+            return Ok(file.clone());
+        }
+    }
+    Err(UncheckedIdentity.into())
+}
+/// Why a connector does not start on a computer whose hardware id cannot
+/// be read (see [`unchecked_identity_path`]).
+#[derive(Debug)]
+struct UncheckedIdentity;
+impl std::fmt::Display for UncheckedIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "This computer's hardware ID could not be read, so remote access did not start rather than risk connecting as another computer. Try again in a moment.",
+        )
+    }
+}
+impl std::error::Error for UncheckedIdentity {}
+/// The identity in `file`, if it can be read.
+fn read_identity(file: &Path) -> Option<Value> {
+    std::fs::read(file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(Value::is_object)
 }
 /// A connector running here proves its identity is this computer's: stamp
 /// it in place, so it stays so after the connector stops. An earlier release
@@ -1461,9 +1497,10 @@ fn vouch_for(file: &Path, hardware: Option<&str>) -> Result<()> {
 }
 /// This machine's hardware id, which tells a connector identity copied from
 /// another computer (a migrated or synced configuration folder) from its own.
-/// `None` when it cannot be told, which never counts as another computer.
-/// Under the test providers (`HAARNESS_TEST_PROVIDER`)
-/// `HAARNESS_TEST_MACHINE_ID` stands in for it, empty for none.
+/// `None` when it cannot be read, and then no stamp can be checked (see
+/// [`unchecked_identity_path`]). Under the test providers
+/// (`HAARNESS_TEST_PROVIDER`) `HAARNESS_TEST_MACHINE_ID` stands in for it,
+/// empty for none.
 fn machine_id() -> Option<String> {
     if std::env::var_os("HAARNESS_TEST_PROVIDER").is_some()
         && let Some(id) = std::env::var_os("HAARNESS_TEST_MACHINE_ID")
@@ -1471,7 +1508,12 @@ fn machine_id() -> Option<String> {
         let id = id.to_string_lossy().trim().to_owned();
         return (!id.is_empty()).then_some(id);
     }
-    haarness_opentui::hardware_id()
+    read_twice(haarness_opentui::hardware_id)
+}
+/// `read`, and once more when that fails: macOS waits at most a second for
+/// its hardware id, which early in a boot may not be known yet.
+fn read_twice(read: impl Fn() -> Option<String>) -> Option<String> {
+    read().or_else(read)
 }
 /// The `machine` an identity carries: SHA-256 of the hardware id and the host
 /// id. It does not name the machine, and no two hosts' stamps match.
@@ -2480,7 +2522,22 @@ pub(crate) async fn restore_host(
     let Some((account, _)) = host_account(client).await? else {
         return Ok(HostAccess::new(AccessState::SignedOut));
     };
-    let file = host_file(paths, client, &account, gateway)?;
+    let file = match host_file(paths, client, &account, gateway) {
+        Ok(file) => file,
+        // This start cannot tell this computer's identity: access stays off
+        // until the next one, saying why unless it was turned off anyway.
+        Err(error) if error.downcast_ref::<UncheckedIdentity>().is_some() => {
+            let mut access = host_access(client, paths, false).await?;
+            let on = host_identities(paths, client, Some(&account))?
+                .iter()
+                .any(|(file, _)| !file.with_extension("stop").exists());
+            if access.state == AccessState::Off && on {
+                access.error = Some(error.to_string());
+            }
+            return Ok(access);
+        }
+        Err(error) => return Err(error),
+    };
     let Some(identity) = std::fs::read(&file)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -2822,23 +2879,6 @@ mod tests {
         std::fs::remove_file(&laptop).unwrap();
         assert_eq!(path(Some("LAPTOP"), "Laptop"), shared);
         drop(lock);
-        write(&shared, &stamped);
-        write(&laptop, &json!({"id": Uuid::now_v7(), "name": "Laptop"}));
-
-        // A start that cannot read the hardware id: the old name while it
-        // is there, else the one identity of this connector, else a new one
-        // under the old name.
-        assert_eq!(path(None, "Laptop"), shared);
-        std::fs::remove_file(&shared).unwrap();
-        assert_eq!(
-            path(None, "Laptop"),
-            shared,
-            "no identity of this account yet"
-        );
-        write(&laptop, &identity("Laptop"));
-        assert_eq!(path(None, "Laptop"), laptop);
-        write(&file(Some("STUDIO")), &identity("Studio"));
-        assert_eq!(path(None, "Laptop"), shared, "two: no telling which");
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -2885,6 +2925,103 @@ mod tests {
         assert_eq!(vouched["registered"], true);
         assert_eq!(path(), shared);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_start_that_cannot_read_the_hardware_id_never_connects_as_another_computer() {
+        let root = std::env::temp_dir().join(format!("haarness-unread-{}", Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        let client = offline_client(&root);
+        let gateway = root.join("Chat folders");
+        let file = |hardware: Option<&str>| {
+            identity_file_for(&paths, &client, "a1", &gateway, None, hardware)
+        };
+        let path =
+            |name: &str| identity_path_for(&paths, &client, "a1", &gateway, None, None, name);
+        let refused = |name: &str| {
+            let error = path(name).expect_err("a start that cannot tell its identity connected");
+            assert!(error.to_string().contains("hardware ID"), "{error}");
+        };
+        let read = |file: &Path| -> Value {
+            serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap()
+        };
+        let write = |file: &Path, identity: &Value| {
+            std::fs::write(file, identity.to_string()).unwrap();
+        };
+        let identity = |id: &str, name: &str, machine: Option<&str>| {
+            let mut identity = json!({"id": id, "name": name, "chatId": null,
+                "apiUrl": client.config.api_url, "accountId": "a1"});
+            if let Some(machine) = machine {
+                identity["machine"] = json!(machine_stamp(machine, id));
+            }
+            identity
+        };
+        let [studio_id, laptop_id, air_id] = [(); 3].map(|()| Uuid::now_v7().to_string());
+        let shared = file(None);
+
+        // Nothing yet, or an earlier release's identity: the old name, as
+        // every release used it, and no stamp without the hardware id.
+        assert_eq!(path("Laptop").unwrap(), shared);
+        write(&shared, &identity(&studio_id, "Studio", None));
+        assert_eq!(path("Laptop").unwrap(), shared);
+        assert!(read(&shared)["machine"].is_null());
+
+        // Stamped, it cannot be checked and may be another computer's: this
+        // start does not connect, and the identity stays as it is.
+        let studio = identity(&studio_id, "Studio", Some("STUDIO"));
+        write(&shared, &studio);
+        refused("Studio");
+        // The copy of Studio's beside Laptop's own: Laptop's own, by its name.
+        let laptop = file(Some("LAPTOP"));
+        write(&laptop, &identity(&laptop_id, "Laptop", Some("LAPTOP")));
+        assert_eq!(path("Laptop").unwrap(), laptop);
+        // In a folder both share Studio sees that file too: never Laptop's.
+        refused("Studio");
+        // Two computers of one name: no telling which.
+        write(&shared, &identity(&studio_id, "Laptop", Some("STUDIO")));
+        refused("Laptop");
+        write(&shared, &studio);
+        // Several computers' own files: the one with this computer's name.
+        let air = file(Some("AIR"));
+        write(&air, &identity(&air_id, "Air", Some("AIR")));
+        assert_eq!(path("Air").unwrap(), air);
+        assert_eq!(path("Laptop").unwrap(), laptop);
+        refused("Mini");
+        // Without the old name's file, still only by name.
+        std::fs::remove_file(&shared).unwrap();
+        assert_eq!(path("Laptop").unwrap(), laptop);
+        refused("Studio");
+        // None of it stamped or changed a thing.
+        assert_eq!(
+            read(&laptop),
+            identity(&laptop_id, "Laptop", Some("LAPTOP"))
+        );
+        assert_eq!(read(&air), identity(&air_id, "Air", Some("AIR")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_hardware_id_that_fails_once_is_read_again() {
+        let tries = std::cell::Cell::new(0);
+        let late = || {
+            tries.set(tries.get() + 1);
+            (tries.get() > 1).then(|| "STUDIO".to_owned())
+        };
+        assert_eq!(read_twice(late).as_deref(), Some("STUDIO"));
+        assert_eq!(tries.get(), 2);
+        tries.set(0);
+        let unknown = || {
+            tries.set(tries.get() + 1);
+            None
+        };
+        assert_eq!(read_twice(unknown), None);
+        assert_eq!(tries.get(), 2, "read more than twice");
+        tries.set(0);
+        let known = || {
+            tries.set(tries.get() + 1);
+            Some("STUDIO".to_owned())
+        };
+        assert_eq!(read_twice(known).as_deref(), Some("STUDIO"));
+        assert_eq!(tries.get(), 1, "read again after it was known");
     }
     #[test]
     fn exit_reason_prefers_the_final_error_after_the_offset() {
