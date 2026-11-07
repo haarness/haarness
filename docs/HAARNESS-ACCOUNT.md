@@ -168,7 +168,7 @@ Production credentials live in `~/.config/haarness-cloud` (or `$XDG_CONFIG_HOME/
 
 Only HTTPS and loopback HTTP are accepted for account/router traffic; token-bearing requests do not follow redirects.
 
-The API exchanges an authenticated native sign-in for a five-minute router credential. The router checks the login family, current membership, billing status and model restrictions. When the router refuses a cached credential before it expires (401), the client fetches a new one and sends the request once more. Automatic refresh does not create a user-visible developer API key. Explicit developer keys retain their own lifecycle.
+The API exchanges an authenticated native sign-in for a five-minute router credential. The router checks the login family, current membership, billing status and model restrictions. When the router refuses a cached credential before it expires (401), the client fetches a new one and sends the request once more. Automatic refresh does not create a user-visible developer API key. Explicit developer keys retain their own lifecycle. When a model's provider refuses because the account behind the key has no credit left (`provider_out_of_credit`), the chat says so at once, without retrying: on Cloud's own keys it says Haarness Cloud's account with that provider ran out and to choose a model from another provider; with your own provider key it says to add credit with that provider. A self-hosted Haarness Router's words are shown the same way.
 
 Deploy the Cloud migration and API/router changes before distributing the native client. No production configuration or deployment is performed by the local test suite.
 
