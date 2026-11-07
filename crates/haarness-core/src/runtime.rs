@@ -10837,7 +10837,7 @@ impl RunnerTask {
                             name,
                             output: STEP_LIMIT_CALL.into(),
                             is_error: true,
-                            metadata: json!({"notRun": true}),
+                            metadata: crate::not_run_metadata(),
                         })
                         .await?;
                     }
