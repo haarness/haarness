@@ -5886,7 +5886,7 @@ impl AgentRuntime {
                     Reviewed::Resolved(resolution) => {
                         allowed = if resolution.allowed {
                             Ok(())
-                        } else if resolution.refused {
+                        } else if resolution.answered_by == AnsweredBy::Nobody {
                             Err(refusal_message(resolution.feedback.as_deref()))
                         } else {
                             Err(resolution.feedback.unwrap_or_else(|| operation.clone()))
@@ -6009,7 +6009,7 @@ impl AgentRuntime {
                 Err(message)
             } else if resolution.allowed {
                 Ok(())
-            } else if resolution.refused {
+            } else if resolution.answered_by == AnsweredBy::Nobody {
                 Err(refusal_message(resolution.feedback.as_deref()))
             } else {
                 Err(resolution.feedback.unwrap_or_else(|| operation.clone()))
@@ -6334,7 +6334,11 @@ impl AgentRuntime {
             allowed,
             feedback: reply.feedback,
             review: None,
-            refused,
+            answered_by: if refused {
+                AnsweredBy::Nobody
+            } else {
+                AnsweredBy::Person
+            },
             once,
         });
         Ok(())
@@ -8493,11 +8497,8 @@ async fn review_waiting(
             }
             Some(crate::auto_review::Outcome::Allow) if auto => PermissionResolution::allowed(),
             Some(crate::auto_review::Outcome::Deny(review)) if auto => PermissionResolution {
-                allowed: false,
-                feedback: None,
                 review: Some(review),
-                refused: false,
-                once: false,
+                ..PermissionResolution::rejected(None)
             },
             // Left to the person, with the reviewer's note; or the chat left
             // Auto, and the card is plain again. Either way it is announced
@@ -8790,14 +8791,30 @@ fn refusal_message(feedback: Option<&str>) -> String {
 /// How much of an unattended run's reason the agent reads.
 const REFUSAL_REASON_CHARS: usize = 300;
 
+/// What the agent reads when a `PermissionRequest` hook or an extension's
+/// `permission.ask` refused its call: the hook's own reason, and that no
+/// person saw the request, so the agent does not take it for a person's
+/// answer.
+fn hook_refusal_message(reason: Option<&str>) -> String {
+    let reason = reason
+        .map(|reason| reason.trim().trim_end_matches('.').trim_end())
+        .filter(|reason| !reason.is_empty());
+    let lead = match reason {
+        Some(reason) => {
+            format!("A permission hook refused this action without asking the user: {reason}.")
+        }
+        None => "A permission hook refused this action without asking the user.".to_owned(),
+    };
+    format!("{lead} Take a different approach, or ask the user if you need it.")
+}
+
 struct PermissionResolution {
     allowed: bool,
     feedback: Option<String>,
     /// Auto's reviewer refused it (a request it reviewed while it waited).
     review: Option<haarness_protocol::PermissionReview>,
-    /// Nobody could answer it (`refuse`): `feedback` is Haarness's words,
-    /// not a person's.
-    refused: bool,
+    /// Whose answer it is, and so whose words `feedback` holds.
+    answered_by: AnsweredBy,
     /// A person allowed exactly this request, once (Allow once, or any
     /// allow of a request that offers nothing longer): nothing else lets it
     /// through again without a card. Never set by Auto's reviewer, a
@@ -8811,7 +8828,7 @@ impl PermissionResolution {
             allowed: true,
             feedback: None,
             review: None,
-            refused: false,
+            answered_by: AnsweredBy::Person,
             once: false,
         }
     }
@@ -8821,10 +8838,32 @@ impl PermissionResolution {
             allowed: false,
             feedback,
             review: None,
-            refused: false,
+            answered_by: AnsweredBy::Person,
             once: false,
         }
     }
+
+    fn refused_by_hook(reason: Option<String>) -> Self {
+        Self {
+            answered_by: AnsweredBy::Hook,
+            ..Self::rejected(reason)
+        }
+    }
+}
+
+/// Who answered a permission request, as what the agent reads of a refusal
+/// tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnsweredBy {
+    /// A person, Auto's reviewer, or for an allow whatever allowed it.
+    Person,
+    /// Nobody could answer it (`refuse`): `feedback` is Haarness's words,
+    /// not a person's.
+    Nobody,
+    /// A `PermissionRequest` hook or an extension's `permission.ask`
+    /// refused it before anyone saw it: `feedback` is its reason, when it
+    /// gave one.
+    Hook,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11842,7 +11881,13 @@ impl RunnerTask {
                 let message = match resolution.feedback {
                     // Nobody answered: the reason is Haarness's, and no
                     // one is there to ask.
-                    feedback if resolution.refused => refusal_message(feedback.as_deref()),
+                    feedback if resolution.answered_by == AnsweredBy::Nobody => {
+                        refusal_message(feedback.as_deref())
+                    }
+                    // A hook answered: no person saw the request.
+                    feedback if resolution.answered_by == AnsweredBy::Hook => {
+                        hook_refusal_message(feedback.as_deref())
+                    }
                     Some(feedback) if !feedback.trim().is_empty() => format!(
                         "The user rejected this action and said: {feedback}. Adjust your \
                          approach accordingly."
@@ -12178,8 +12223,8 @@ impl RunnerTask {
                 .then_some(plan.always.as_slice());
             let call = self.hook_call(Some(agent));
             match permission_hook_answer(hooks.as_ref(), &call, plan, always, detail).await {
-                HookAnswer::Refused(feedback) => {
-                    return Ok(PermissionResolution::rejected(Some(feedback)));
+                HookAnswer::Refused(reason) => {
+                    return Ok(PermissionResolution::refused_by_hook(reason));
                 }
                 HookAnswer::Allowed { always } if !forced && !explicit => {
                     if always {
@@ -15292,7 +15337,8 @@ enum HookAnswer {
     Allowed {
         always: bool,
     },
-    Refused(String),
+    /// Refused, with the reason a hook gave, if any.
+    Refused(Option<String>),
     Open,
 }
 
@@ -15332,11 +15378,11 @@ async fn permission_hook_answer(
             .await;
         remembered &= decision.always;
         if let Some(reason) = decision.block {
-            return HookAnswer::Refused(reason);
+            return HookAnswer::Refused(Some(reason));
         }
         match decision.permission {
             Some(PermissionDecision::Deny) => {
-                return HookAnswer::Refused("denied by a PermissionRequest hook".into());
+                return HookAnswer::Refused(None);
             }
             // An allow for input the hook rewrote approves a different call
             // than the one asked about; the prompt rules were checked for

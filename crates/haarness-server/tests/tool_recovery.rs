@@ -997,6 +997,136 @@ async fn a_permission_request_hooks_allow_without_always_is_asked_again() {
     assert_eq!(hook.offered.lock().unwrap().len(), 2);
 }
 
+/// A `PermissionRequest` hook that refuses every request, with its reason
+/// when it gives one.
+struct Refuses(Option<&'static str>);
+#[async_trait]
+impl HookPort for Refuses {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn post_tool_use(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision {
+            block: self.0.map(str::to_owned),
+            permission: Some(PermissionDecision::Deny),
+            ..HookDecision::default()
+        }
+    }
+    async fn stop(&self, _: &HookCall) {}
+}
+
+/// The model reads a hook's refusal as the hook's, and a person's Reject as
+/// it always read.
+#[tokio::test]
+async fn a_hooks_refusal_reads_as_the_hooks_and_a_persons_reject_as_theirs() {
+    let asks = || {
+        let mut config = RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        };
+        config.base_rules.push(PermissionRule {
+            pattern: "bash:*".into(),
+            decision: PermissionDecision::Ask,
+        });
+        config
+    };
+    let echo = || vec![vec![call("one", "bash", json!({"command": "echo one"}))]];
+    for (reason, said) in [
+        (
+            Some("not on this machine."),
+            "A permission hook refused this action without asking the user: not on this \
+             machine. Take a different approach, or ask the user if you need it.",
+        ),
+        (
+            None,
+            "A permission hook refused this action without asking the user. Take a different \
+             approach, or ask the user if you need it.",
+        ),
+    ] {
+        let fixture = Fixture::with_hooks(asks(), Some(Arc::new(Refuses(reason))));
+        let items = fixture.run(echo()).await;
+        assert_eq!(tool_results(&items), vec![(said.to_owned(), true)]);
+        assert!(fixture.runtime.pending_permissions().is_empty());
+    }
+    for (feedback, said) in [
+        (
+            None,
+            "The user rejected this action. Ask a question or take a different approach instead \
+             of retrying.",
+        ),
+        (
+            Some("not now"),
+            "The user rejected this action and said: not now. Adjust your approach accordingly.",
+        ),
+    ] {
+        let fixture = Fixture::new(asks());
+        *fixture.provider.rounds.lock().unwrap() = echo().into();
+        let thread = fixture.thread().await;
+        fixture
+            .runtime
+            .start_turn(
+                thread,
+                StartTurnRequest {
+                    request_id: RequestId::new(),
+                    text: "Run it".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let asked = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(asked) = fixture.runtime.pending_permissions().into_iter().next() {
+                    break asked;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the command asks a person");
+        fixture
+            .runtime
+            .reply_permission(
+                &asked.permission_id,
+                haarness_protocol::PermissionReply {
+                    decision: haarness_protocol::PermissionReplyDecision::Reject,
+                    feedback: feedback.map(str::to_owned),
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while fixture.runtime.active_turn(thread).await.unwrap().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the turn goes on after the Reject");
+        let items = fixture.runtime.items(thread, None).await.unwrap();
+        assert_eq!(tool_results(&items), vec![(said.to_owned(), true)]);
+    }
+}
+
 #[tokio::test]
 async fn a_permission_request_hook_cannot_answer_always_for_an_edit_of_haarness_config() {
     let hook = FirstAllow::new(true);

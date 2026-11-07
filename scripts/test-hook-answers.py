@@ -3,7 +3,9 @@
 
 - Always: a PermissionRequest hook told it may answer Always (with the pattern Always keeps and
   Claude Code's permission_suggestions) answers Always for `echo one`; `echo two` then runs without
-  asking it or anyone. An edit of Haarness's own config offers the hook no Always and still asks.
+  asking it or anyone. Its refusal of `ls -a` reaches the agent as a hook's, with its reason, and
+  shows in the TUI. An edit of Haarness's own config offers the hook no Always and still asks; the
+  person's Reject reads to the agent as it always did.
 - Questions: a PreToolUse hook answers a known question; the agent gets the answer, nobody is asked,
   and the attached TUI shows "Answered by hook". Another question is left to the person, who answers
   it in the TUI.
@@ -230,6 +232,14 @@ tools=true
           chat.finish(t)['status'] == 'completed' and len(entries('PermissionRequest')) == 1
           and any('two' in r['output'] and not r['is_error'] for r in chat.results('bash')), chat.results('bash'))
     check('no approval card reached the TUI', 'Allow once' not in capture() and not api(c, '/permissions'), capture())
+    t = chat.turn('!tool bash ' + json.dumps({'command': 'ls -a'}))
+    chat.finish(t)
+    refused = chat.results('bash')[-1]
+    check('the agent reads the hook\'s refusal as the hook\'s, with its reason, not as the user\'s', refused['is_error']
+          and refused['output'] == 'A permission hook refused this action without asking the user: asked again. '
+          'Take a different approach, or ask the user if you need it.', refused)
+    until(lambda: 'permission hook refused' in capture(), 'TUI shows the hook\'s refusal')
+    (root / 'tui-hook-refusal.txt').write_text(capture())
     t = chat.turn('!tool write ' + json.dumps({'path': 'haarness.json', 'content': '{}'}))
     pending = until(lambda: api(c, '/permissions'), 'config edit asks')[0]
     config_ask = entries('PermissionRequest')[-1]
@@ -238,6 +248,9 @@ tools=true
     api(c, '/permissions/' + pending['permissionId'], {'decision': 'reject'})
     chat.finish(t)
     check('the rejected config edit changed nothing', json.loads((ws / 'haarness.json').read_text()).get('hooks'))
+    rejected = chat.results('write')[-1]
+    check('the person\'s Reject reads as it always did', rejected['is_error'] and rejected['output']
+          == 'The user rejected this action. Ask a question or take a different approach instead of retrying.', rejected)
 
     # --- Questions ------------------------------------------------------------------------
     question = {'prompt': 'Which test suite should I run?', 'choices': ['Unit tests', 'Full suite']}

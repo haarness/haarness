@@ -221,7 +221,8 @@ Where each hook fires:
   ignored by signed transports such as Bedrock.
 - `permission.ask` runs before the user is prompted and before command
   `PermissionRequest` hooks; `allow` and `deny` resolve the prompt, `ask` or
-  no result keeps it, and a thrown error denies. A configured `deny` rule is
+  no result keeps it, and a thrown error denies. The agent reads a `deny` as
+  a permission hook's refusal, with its `reason`, never as the user's. A configured `deny` rule is
   never reopened. `patterns` are what the prompt asks about and `detail` is
   the tool's arguments. When a prompt asks about the file a path really opens
   (a link `notes.txt -> .env` asks for `.env`), that file is asked about in a
