@@ -12036,7 +12036,9 @@ test("an undo says which files it left, those left for their size first, under i
   await expect.poll(() => readFile(tracked, "utf8").catch(() => "")).toBe("turn output\n");
   await settled();
   await expect(page.locator(".composer")).not.toHaveClass(/running/);
-  const notice = page.locator(".conversation-history-notice");
+  // The undo's notice, the one with Redo, not "Updating chat history…" that
+  // can stand beside it for a moment.
+  const notice = page.locator(".conversation-history-notice:has(> button)");
   await menu("Undo last turn");
   await expect(notice).toContainText("Turn undone");
   await expect.poll(() => existsSync(tracked)).toBe(false);
@@ -12124,7 +12126,8 @@ test("undo and redo through two turns that took a file past 2 MiB name it until 
     await settled();
   }
   expect(await head()).toBe("b");
-  const notice = page.locator(".conversation-history-notice");
+  // The undo's notice, not "Updating chat history…" beside it for a moment.
+  const notice = page.locator(".conversation-history-notice:has(> button)");
   const pressing = notice.locator(".undo-unrestored.pressing summary");
   const left = "1 file left as it was · too large for Undo";
   // No copy holds what turn 1 left: the first undo leaves the file and
