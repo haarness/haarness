@@ -286,14 +286,15 @@ fn resource_contents(result: &Value, attached: &mut usize) -> (String, Vec<Strin
 }
 
 /// What the model gets for a `resources/read` result: its contents, the text
-/// cut with a note when long (the whole text saved in `directory`).
+/// cut with a note when long (the whole text saved in `directory`), as an
+/// MCP tool's is, so a resource of one long JSON line is pretty-printed.
 async fn resource_output(
     result: &Value,
     directory: &std::path::Path,
     attached: &mut usize,
 ) -> CoreResult<ToolOutput> {
     let (text, attachments) = resource_contents(result, attached);
-    let mut output = crate::tools::truncate_output_at(text, directory).await?;
+    let (mut output, _) = crate::tools::cut_mcp_text(text, directory, false).await?;
     if !attachments.is_empty() {
         if !output.metadata.is_object() {
             output.metadata = json!({});
