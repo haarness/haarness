@@ -48,8 +48,14 @@ try:
     command('/models')
     until(lambda:'Future Reasoner' in capture(),'Picker did not refresh provider catalog')
     screen=capture()
-    assert 'catalog-test/gpt-6-astra' not in screen
     (root/'refreshed.txt').write_text(screen)
+    # The provider stopped listing the chat's model: the chat keeps it, in view with a note, and none
+    # of the old list's details are left on it.
+    kept=next(line for line in screen.splitlines() if 'catalog-test/gpt-6-astra' in line)
+    assert 'no longer listed' in kept and 'context' not in kept and '1–2 of 2' in screen,screen
+    # The picker opens on the chat's model; filter to the new one before picking it.
+    run(['tmux','send-keys','-l','-t',name+':0.0','future'])
+    until(lambda:'1–1 of 1' in capture(),'Filter did not narrow the picker to the new model')
     keys('Enter')
     until(lambda:'Future Reasoner' in capture() and 'Select model' not in capture(),'New model was not selected')
     # A second terminal on the same config folder, started before either
@@ -82,7 +88,7 @@ try:
     models.clear();keys('Escape');time.sleep(1.1);command('/models')
     until(lambda:'Welcome to Haarness' in capture() and 'Haarness needs an AI model' in capture(),'Empty catalog did not offer provider setup')
     (root/'empty.txt').write_text(capture())
-    print('PASS real TUI: friendly name, connected-only picker, refresh, selection, two terminals keep both favorites and recents, empty catalog.',flush=True)
+    print('PASS real TUI: friendly name, connected-only picker, refresh keeping a retired chat model in view, selection, two terminals keep both favorites and recents, empty catalog.',flush=True)
 finally:
     subprocess.run(['tmux','kill-session','-t',name],capture_output=True)
     if endpoint:

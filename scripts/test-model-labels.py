@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real CLI and server, no network: Bedrock Claude models are listed by name whatever their region prefix
-and version tag, and ids the name table does not know stay as written.
+and version tag, and a Claude id the name table does not know reads by its words like its siblings.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-model-labels.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -20,8 +20,8 @@ EXPECTED = {
     'apac.anthropic.claude-sonnet-5-5-v1:0': 'Claude Sonnet 5.5',
     'jp.anthropic.claude-opus-4-6-v1': 'Claude Opus 4.6',
     'us-gov.anthropic.claude-haiku-4-5-20251001-v1:0': 'Claude Haiku 4.5 (2025-10-01)',
-    # Not in the name table: shown as written, never guessed.
-    'apac.anthropic.claude-sonnet-9-9-v1:0': 'apac.anthropic.claude-sonnet-9-9-v1:0',
+    # Not in the name table: a Claude id reads by its words, like its siblings.
+    'apac.anthropic.claude-sonnet-9-9-v1:0': 'Claude Sonnet 9.9',
 }
 url = None
 
