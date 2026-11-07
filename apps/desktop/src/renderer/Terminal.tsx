@@ -155,17 +155,20 @@ export function TerminalPanel() {
     terminalKeyboard.claim();
     setSelected(id);
   };
-  let listed: { place: string; folderless: boolean } | undefined;
+  let listed: { place: string; folderless: boolean; chat: string } | undefined;
   createEffect(() => {
     const connection = app.state.connection?.id;
     const shown = folder();
     if (!connection) return;
     // Another chat's folder or another project lists its own terminals,
     // and the keyboard stays where it is. A new chat of This computer that
-    // gets its folder as its first message goes is the same chat.
+    // gets its folder as its first message goes is the same chat, as long
+    // as it is still the chat open.
     const place = connection + "\n" + (shown ?? "");
-    terminalKeyboard.shown(hasKeyboard(), !!listed && listed.place !== place && !listed.folderless);
-    listed = { place, folderless: unfoldered() };
+    const chat = app.state.selected;
+    const same = !!listed && (listed.place === place || (listed.folderless && listed.chat === chat));
+    terminalKeyboard.shown(hasKeyboard(), !!listed && !same);
+    listed = { place, folderless: unfoldered(), chat };
     setTabs([]);
     setSelected("");
     setStarting(true);

@@ -823,5 +823,19 @@ test("with the terminal open, opening another chat by pointer or keyboard leaves
   await composer().click();
   await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
   await expect(terminal).toBeFocused();
+
+  // A terminal opened in a new chat, which has no folder and so no terminal
+  // yet, then another chat opened from the keyboard: that chat's message box
+  // keeps the keyboard once its shell connects.
+  await section().getByRole("button", { name: "New chat in This computer", exact: true }).click();
+  await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(page.locator(".terminal-empty")).toContainText("This chat gets a folder of its own");
+  await composer().focus();
+  await page.keyboard.press("Alt+ArrowDown");
+  await expect(section().locator('.session-row > button[aria-current="true"]')).toHaveCount(1);
+  await expect.poll(async () => ((await shown.textContent()) ?? "").trim().length, { timeout: 30000 }).toBeGreaterThan(0);
+  await page.waitForTimeout(800);
+  await expect(composer()).toBeFocused();
   for (const pty of await client!.listPtys()) await client!.deletePty(pty.id);
 });
