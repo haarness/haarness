@@ -20608,9 +20608,10 @@ mod tests {
             summary_result("dup", "read", "beta", false),
             summary_reply("Both read."),
             summary_user("And c.txt", false),
-            // A call left without a result (Haarness stopped while it ran),
-            // then the same id in the next response: the result is the
-            // later call's.
+            // A call left without a result (Haarness stopped while it ran)
+            // gets the "did not finish" result it is owed, then the same id
+            // in the next response: the result that comes is the later
+            // call's.
             summary_call("dup", "read", read("c.txt")),
             summary_user("Read d.txt instead", false),
             summary_call("dup", "read", read("d.txt")),
@@ -20630,6 +20631,10 @@ mod tests {
                 keyed(
                     "<tool_result-{K} call=\"2\" name=\"read\" status=\"ok\">\nbeta\n</tool_result-{K}>"
                 ),
+                keyed(&format!(
+                    "<tool_result-{{K}} call=\"3\" name=\"read\" status=\"error\">\n{}\n</tool_result-{{K}}>",
+                    crate::UNFINISHED_CALL_RESULT
+                )),
                 keyed(
                     "<tool_result-{K} call=\"4\" name=\"read\" status=\"ok\">\ndelta\n</tool_result-{K}>"
                 ),
