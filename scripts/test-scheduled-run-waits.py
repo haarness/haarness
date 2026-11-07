@@ -14,6 +14,8 @@ provider may do that):
 - workflow: a workflow the turn starts in the background is waited for, and the turn its result
   starts; one still going at the limit is cancelled and named.
 - limit: what is left at the limit is stopped without telling the chat, and the run fails, naming it.
+- ceiling: nothing holds a run past its ceiling (12 hours, shortened to 4 s), not even a command
+  with a time limit of its own; the run fails, naming it.
 - person: a person's turn and dev server in the run's chat are neither waited for nor stopped.
 """
 import json
@@ -100,10 +102,12 @@ def schedule(name, prompt):
         "--prompt", prompt)
 
 
-def runner(name, limit_ms):
+def runner(name, limit_ms, ceiling_ms=None):
+    limits = {"HAARNESS_SCHEDULE_BACKGROUND_LIMIT_MS": str(limit_ms)}
+    if ceiling_ms:
+        limits["HAARNESS_SCHEDULE_CEILING_MS"] = str(ceiling_ms)
     return subprocess.Popen(args + ["schedule", "run", name, "--json"], stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True,
-                            env={**env, "HAARNESS_SCHEDULE_BACKGROUND_LIMIT_MS": str(limit_ms)})
+                            stderr=subprocess.PIPE, text=True, env={**env, **limits})
 
 
 def record_of(process):
@@ -114,10 +118,10 @@ def record_of(process):
     return record
 
 
-def run(name, limit_ms=LIMIT):
+def run(name, limit_ms=LIMIT, ceiling_ms=None):
     """`schedule run --json`: the run's record, how long it took, and the chat's turns once it ended."""
     began = time.monotonic()
-    record = record_of(runner(name, limit_ms))
+    record = record_of(runner(name, limit_ms, ceiling_ms))
     return record, time.monotonic() - began, turns(record["threadId"])
 
 
@@ -210,6 +214,19 @@ try:
     assert "never" not in record["response"], record["response"]
     settled_after(record, before)
     ok("past its limit a run stops what is left of its work, untold, and records failed, naming it")
+
+    # ceiling
+    schedule("long-command", tool("bash", {"command": "sleep 40", "run_in_background": True, "timeout": 60000}))
+    record, took, before = run("long-command", ceiling_ms=4000)
+    assert took < 20, f"a command with a time limit held the run for {took:.1f} s past a 4 s ceiling"
+    assert record["status"] == "failed", record
+    assert record["error"] == ("The run was stopped after 4 seconds, the longest a scheduled run may last: "
+                               "command “sleep 40”."), record
+    commands = api(f"/threads/{record['threadId']}/commands")
+    assert [(c["state"], c.get("endedBy")) for c in commands] == [("stopped", "turn_ended")], commands
+    settled_after(record, before)
+    assert not notices(record["threadId"]), notices(record["threadId"])
+    ok("nothing holds a run past its ceiling, not even a command with a time limit of its own")
 
     # person
     schedule("person-check", tool("task", {"description": "Person check", "prompt": "!linger 60000 never",

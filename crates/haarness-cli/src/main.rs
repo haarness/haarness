@@ -3977,7 +3977,14 @@ async fn execute_schedule(
             )
             .await?;
         turn_id = Some(turn.id.0);
-        follow_scheduled_run(&client, thread.id, turn.id, schedule_background_limit()).await
+        follow_scheduled_run(
+            &client,
+            thread.id,
+            turn.id,
+            schedule_background_limit(),
+            schedule_run_ceiling(),
+        )
+        .await
     };
     // A run may last longer than a lock nothing can check is trusted for
     // (an hour unwritten), so it keeps its lock fresh while it goes.
@@ -4049,17 +4056,21 @@ struct ScheduledEnd {
 /// of their own, until that limit, however long it is. A command with no
 /// time limit holds nothing: once the rest has settled it is stopped and
 /// named in the run's note. When `limit` runs out, what is left is stopped
-/// and the run fails, naming it. A first turn that fails, or a wait that
-/// fails, stops what the run left too and names it in the error.
+/// and the run fails, naming it. Nothing of the run outlasts `ceiling` from
+/// its start, its first turn and timed commands included. A first turn that
+/// fails, or a wait that fails, stops what the run left too and names it in
+/// the error.
 async fn follow_scheduled_run(
     client: &haarness_tui::api::ApiClient,
     thread: ThreadId,
     first: TurnId,
     limit: Duration,
+    ceiling: Duration,
 ) -> Result<ScheduledEnd> {
     let mut work = RunWork::new(thread, first);
-    let outcome = match wait_for_first_turn(client, &mut work).await {
-        Ok(()) => wait_for_run_work(client, &mut work, limit).await,
+    let deadline = chrono::Utc::now() + to_delta(ceiling);
+    let outcome = match wait_for_first_turn(client, &mut work, deadline).await {
+        Ok(()) => wait_for_run_work(client, &mut work, limit, ceiling, deadline).await,
         Err(error) => Err(error),
     };
     match outcome {
@@ -4083,10 +4094,12 @@ async fn follow_scheduled_run(
     }
 }
 
-/// Wait for the run's first turn to end, declining its questions.
+/// Wait for the run's first turn to end, declining its questions, or until
+/// `deadline`, when what follows stops it.
 async fn wait_for_first_turn(
     client: &haarness_tui::api::ApiClient,
     work: &mut RunWork,
+    deadline: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     let first = work.turns[0];
     loop {
@@ -4098,21 +4111,27 @@ async fn wait_for_first_turn(
             }
             return Ok(());
         }
+        if chrono::Utc::now() >= deadline {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-/// [`follow_scheduled_run`] once the first turn completed.
+/// [`follow_scheduled_run`] once the first turn ended, or `deadline` came.
 async fn wait_for_run_work(
     client: &haarness_tui::api::ApiClient,
     work: &mut RunWork,
     limit: Duration,
+    ceiling: Duration,
+    deadline: chrono::DateTime<chrono::Utc>,
 ) -> Result<ScheduledEnd> {
     let started = chrono::Utc::now();
     // The clock that `limit` counts on: later for each of the run's
     // commands with a time limit that ends (its end may start a turn).
     let mut until = started + to_delta(limit);
-    let mut stopped = Vec::new();
+    // Why the wait stopped what was left, for the run's record.
+    let mut cut = None;
     let mut loose = Vec::new();
     // Nothing held at the last look: the next one, at once, makes sure (a
     // result may have moved between two of that look's reads).
@@ -4139,20 +4158,32 @@ async fn wait_for_run_work(
             continue;
         }
         quiet = false;
-        // Nothing stops while a command of the run with a time limit runs.
-        if left.timed.is_empty() && chrono::Utc::now() >= until {
-            stopped = end_run_work(client, work).await?;
+        let now = chrono::Utc::now();
+        // Nothing stops while a command of the run with a time limit runs,
+        // short of the run's ceiling.
+        let reached = if now >= deadline {
+            Some(RunCut::Ceiling(ceiling))
+        } else if left.timed.is_empty() && now >= until {
+            Some(RunCut::Limit(limit))
+        } else {
+            None
+        };
+        if let Some(reached) = reached {
+            let stopped = end_run_work(client, work).await?;
+            if !stopped.is_empty() {
+                cut = Some(reached.line(&stopped));
+            }
             break;
         }
         // Closely while the work is young, then every few seconds.
-        let every = if chrono::Utc::now() - started < chrono::TimeDelta::minutes(1) {
+        let every = if now - started < chrono::TimeDelta::minutes(1) {
             Duration::from_millis(250)
         } else {
             Duration::from_secs(2)
         };
         tokio::time::sleep(every).await;
     }
-    if stopped.is_empty() {
+    if cut.is_none() {
         end_loose_commands(client, work, &mut loose).await?;
     }
     let last = match work.last_turn() {
@@ -4161,7 +4192,7 @@ async fn wait_for_run_work(
     };
     Ok(ScheduledEnd {
         response: work.said.join("\n"),
-        error: schedule_outcome(&stopped, limit, last.as_ref(), &work.failed).err(),
+        error: schedule_outcome(cut.as_deref(), last.as_ref(), &work.failed).err(),
         note: (!loose.is_empty()).then(|| {
             format!(
                 "Stopped as the run ended, having no time limit: {}.",
@@ -4829,11 +4860,32 @@ fn schedule_background_limit() -> Duration {
 }
 
 fn schedule_background_limit_from(testing: bool, value: Option<&str>) -> Duration {
+    test_milliseconds(testing, value).unwrap_or(SCHEDULE_BACKGROUND_LIMIT)
+}
+
+/// The longest a scheduled run lasts, from its start: past it, whatever of
+/// the run is still going is stopped, commands with a time limit included.
+const SCHEDULE_RUN_CEILING: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// [`SCHEDULE_RUN_CEILING`], or, with the test provider on, the
+/// milliseconds `HAARNESS_SCHEDULE_CEILING_MS` gives.
+fn schedule_run_ceiling() -> Duration {
+    test_milliseconds(
+        std::env::var_os("HAARNESS_TEST_PROVIDER").is_some(),
+        std::env::var("HAARNESS_SCHEDULE_CEILING_MS")
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or(SCHEDULE_RUN_CEILING)
+}
+
+/// A positive number of milliseconds, read only while testing.
+fn test_milliseconds(testing: bool, value: Option<&str>) -> Option<Duration> {
     value
         .filter(|_| testing)
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|milliseconds| *milliseconds > 0)
-        .map_or(SCHEDULE_BACKGROUND_LIMIT, Duration::from_millis)
+        .map(Duration::from_millis)
 }
 
 /// A command's first line, short enough for a run's record.
@@ -4846,23 +4898,45 @@ fn command_line(command: &str) -> String {
     }
 }
 
+/// The limit a scheduled run's wait reached, with its length.
+#[derive(Debug, Clone, Copy)]
+enum RunCut {
+    /// The time its background work has.
+    Limit(Duration),
+    /// The longest the run lasts.
+    Ceiling(Duration),
+}
+
+impl RunCut {
+    /// The line for the run's record, naming what was `stopped`.
+    fn line(self, stopped: &[String]) -> String {
+        match self {
+            Self::Limit(limit) => format!(
+                "Background work was still going after {} and was stopped: {}.",
+                wait_length(limit),
+                stopped.join(", ")
+            ),
+            Self::Ceiling(ceiling) => format!(
+                "The run was stopped after {}, the longest a scheduled run may last: {}.",
+                wait_length(ceiling),
+                stopped.join(", ")
+            ),
+        }
+    }
+}
+
 /// How a scheduled run ended once nothing it started is left going: failed
-/// when its wait stopped work at its limit (`stopped` names it), when its
-/// last turn failed or was stopped, or when a subagent it ran in the
-/// background failed (as `haarness run --wait-background` fails);
-/// otherwise a success. The error is a line for the run's record.
+/// when its wait stopped work at a limit (`cut` says so), when its last
+/// turn failed or was stopped, or when a subagent it ran in the background
+/// failed (as `haarness run --wait-background` fails); otherwise a success.
+/// The error is a line for the run's record.
 fn schedule_outcome(
-    stopped: &[String],
-    limit: Duration,
+    cut: Option<&str>,
     last: Option<&haarness_protocol::Turn>,
     failed: &[String],
 ) -> Result<(), String> {
-    if !stopped.is_empty() {
-        return Err(format!(
-            "Background work was still going after {} and was stopped: {}.",
-            wait_length(limit),
-            stopped.join(", ")
-        ));
+    if let Some(cut) = cut {
+        return Err(cut.to_owned());
     }
     if let Some(turn) =
         last.filter(|turn| matches!(turn.status, TurnStatus::Failed | TurnStatus::Interrupted))
@@ -4893,11 +4967,14 @@ fn schedule_outcome(
     }
 }
 
-/// A wait's length in words: whole minutes as minutes, anything else in
-/// seconds.
+/// A wait's length in words: whole hours as hours, whole minutes as
+/// minutes, anything else in seconds.
 fn wait_length(limit: Duration) -> String {
     let plural = |count: &str| if count == "1" { "" } else { "s" };
-    if limit >= Duration::from_secs(60) && limit.as_millis().is_multiple_of(60_000) {
+    if limit >= Duration::from_secs(3600) && limit.as_millis().is_multiple_of(3_600_000) {
+        let hours = (limit.as_secs() / 3600).to_string();
+        format!("{hours} hour{}", plural(&hours))
+    } else if limit >= Duration::from_secs(60) && limit.as_millis().is_multiple_of(60_000) {
         let minutes = (limit.as_secs() / 60).to_string();
         format!("{minutes} minute{}", plural(&minutes))
     } else {
@@ -19593,7 +19670,7 @@ request_timeout = 0
 
     #[test]
     fn a_scheduled_run_ends_as_its_wait_and_its_last_turn_say() {
-        use super::{schedule_background_limit_from, schedule_outcome, wait_length};
+        use super::{RunCut, schedule_background_limit_from, schedule_outcome, wait_length};
         let turn = |status, error: Option<&str>| haarness_protocol::Turn {
             id: TurnId::new(),
             thread_id: ThreadId::new(),
@@ -19609,40 +19686,52 @@ request_timeout = 0
         };
         let limit = Duration::from_secs(30 * 60);
         let completed = turn(TurnStatus::Completed, None);
-        assert_eq!(schedule_outcome(&[], limit, Some(&completed), &[]), Ok(()));
+        assert_eq!(schedule_outcome(None, Some(&completed), &[]), Ok(()));
         // A server that does not say which turn came last.
-        assert_eq!(schedule_outcome(&[], limit, None, &[]), Ok(()));
+        assert_eq!(schedule_outcome(None, None, &[]), Ok(()));
         let stopped = [
             "subagent \u{201c}Index the docs\u{201d}".to_owned(),
             "command \u{201c}sleep 600\u{201d}".to_owned(),
         ];
+        let at_limit = RunCut::Limit(limit).line(&stopped);
+        assert_eq!(
+            at_limit,
+            "Background work was still going after 30 minutes and was stopped: subagent \u{201c}Index the docs\u{201d}, command \u{201c}sleep 600\u{201d}."
+        );
+        assert_eq!(
+            RunCut::Ceiling(Duration::from_secs(12 * 3600)).line(&stopped[1..]),
+            "The run was stopped after 12 hours, the longest a scheduled run may last: command \u{201c}sleep 600\u{201d}."
+        );
         let failed_turn = turn(TurnStatus::Failed, Some("provider error: overloaded"));
         // What the wait stopped is the reason, whatever came after it.
         assert_eq!(
-            schedule_outcome(&stopped, limit, Some(&failed_turn), &[]),
-            Err("Background work was still going after 30 minutes and was stopped: subagent \u{201c}Index the docs\u{201d}, command \u{201c}sleep 600\u{201d}.".into())
+            schedule_outcome(Some(&at_limit), Some(&failed_turn), &[]),
+            Err(at_limit.clone())
         );
         assert_eq!(
-            schedule_outcome(&[], limit, Some(&failed_turn), &["bg".into()]),
+            schedule_outcome(None, Some(&failed_turn), &["bg".into()]),
             Err("provider error: overloaded".into())
         );
         assert_eq!(
-            schedule_outcome(&[], limit, Some(&turn(TurnStatus::Failed, Some(" "))), &[]),
+            schedule_outcome(None, Some(&turn(TurnStatus::Failed, Some(" "))), &[]),
             Err("The run's last turn failed.".into())
         );
         assert_eq!(
-            schedule_outcome(&[], limit, Some(&turn(TurnStatus::Interrupted, None)), &[]),
+            schedule_outcome(None, Some(&turn(TurnStatus::Interrupted, None)), &[]),
             Err("The run's last turn was stopped.".into())
         );
         assert_eq!(
-            schedule_outcome(&[], limit, Some(&completed), &["bg".into()]),
+            schedule_outcome(None, Some(&completed), &["bg".into()]),
             Err("The background subagent \u{201c}bg\u{201d} failed.".into())
         );
         assert_eq!(
-            schedule_outcome(&[], limit, Some(&completed), &["a".into(), "b".into()]),
+            schedule_outcome(None, Some(&completed), &["a".into(), "b".into()]),
             Err("The background subagents \u{201c}a\u{201d}, \u{201c}b\u{201d} failed.".into())
         );
         for (limit, words) in [
+            (Duration::from_secs(12 * 3600), "12 hours"),
+            (Duration::from_secs(3600), "1 hour"),
+            (Duration::from_secs(90 * 60), "90 minutes"),
             (Duration::from_secs(30 * 60), "30 minutes"),
             (Duration::from_secs(60), "1 minute"),
             (Duration::from_secs(90), "90 seconds"),
@@ -19660,6 +19749,12 @@ request_timeout = 0
         for value in [None, Some("0"), Some("soon")] {
             assert_eq!(schedule_background_limit_from(true, value), limit);
         }
+        assert_eq!(super::SCHEDULE_RUN_CEILING, Duration::from_secs(12 * 3600));
+        assert_eq!(super::test_milliseconds(false, Some("2000")), None);
+        assert_eq!(
+            super::test_milliseconds(true, Some("2000")),
+            Some(Duration::from_secs(2))
+        );
     }
 
     /// What a scheduled run counts as its own: its first turn, the turns
@@ -20082,6 +20177,9 @@ request_timeout = 0
             .id
     }
 
+    /// The ceiling of a scheduled run in tests that do not reach it.
+    const CEILING: Duration = Duration::from_secs(12 * 3600);
+
     /// Follow a scheduled run of `prompt` with `limit`, as `execute_schedule`
     /// does: its chat, its first turn, and how it ended.
     async fn follow(
@@ -20093,7 +20191,7 @@ request_timeout = 0
         let turn = start(client, thread, prompt).await;
         let end = tokio::time::timeout(
             Duration::from_secs(40),
-            super::follow_scheduled_run(client, thread, turn, limit),
+            super::follow_scheduled_run(client, thread, turn, limit, CEILING),
         )
         .await
         .expect("the run waited past its limit");
@@ -20179,7 +20277,8 @@ request_timeout = 0
         let run = {
             let client = client.clone();
             tokio::spawn(async move {
-                super::follow_scheduled_run(&client, thread, first, Duration::from_secs(2)).await
+                super::follow_scheduled_run(&client, thread, first, Duration::from_secs(2), CEILING)
+                    .await
             })
         };
         settles(&client, first).await;
@@ -20221,7 +20320,14 @@ request_timeout = 0
         let run = {
             let client = client.clone();
             tokio::spawn(async move {
-                super::follow_scheduled_run(&client, thread, first, Duration::from_secs(60)).await
+                super::follow_scheduled_run(
+                    &client,
+                    thread,
+                    first,
+                    Duration::from_secs(60),
+                    CEILING,
+                )
+                .await
             })
         };
         settles(&client, first).await;
@@ -20325,6 +20431,65 @@ request_timeout = 0
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Nothing of a scheduled run outlasts its ceiling: not a command with
+    /// a time limit of its own past it, nor a first turn that runs on.
+    #[tokio::test]
+    async fn a_scheduled_run_stops_at_its_ceiling_whatever_holds_it() {
+        let (client, server, runtime, root) = scheduled_client(0).await;
+        let thread = scheduled_chat(&client).await;
+        let turn = start(&client, thread, "command: sleep 30 within 60000").await;
+        let began = std::time::Instant::now();
+        let end = tokio::time::timeout(
+            Duration::from_secs(40),
+            super::follow_scheduled_run(
+                &client,
+                thread,
+                turn,
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+            ),
+        )
+        .await
+        .expect("a command with a time limit held the run past its ceiling")
+        .unwrap();
+        assert!(began.elapsed() < Duration::from_secs(15));
+        assert_eq!(
+            end.error.as_deref(),
+            Some(
+                "The run was stopped after 2 seconds, the longest a scheduled run may last: command \u{201c}sleep 30\u{201d}."
+            )
+        );
+        assert_eq!(end.note, None);
+        let command = client.shell_commands(thread).await.unwrap()[0].clone();
+        assert!(!command.state.is_live(), "{command:?}");
+
+        let thread = scheduled_chat(&client).await;
+        let turn = start(&client, thread, "person: linger 30000").await;
+        let end = tokio::time::timeout(
+            Duration::from_secs(20),
+            super::follow_scheduled_run(
+                &client,
+                thread,
+                turn,
+                Duration::from_secs(60),
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("the first turn held the run past its ceiling")
+        .unwrap();
+        assert_eq!(
+            end.error.as_deref(),
+            Some(
+                "The run was stopped after 1 second, the longest a scheduled run may last: the turn in progress."
+            )
+        );
+        assert_eq!(settles(&client, turn).await, TurnStatus::Interrupted);
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// While the first turn runs, a question a person asks in a chat under
     /// the run's is theirs: the run does not decline it.
     #[tokio::test]
@@ -20373,7 +20538,7 @@ request_timeout = 0
         assert_eq!(question.root_thread_id, Some(thread));
         let end = tokio::time::timeout(
             Duration::from_secs(20),
-            super::follow_scheduled_run(&client, thread, first, Duration::from_secs(60)),
+            super::follow_scheduled_run(&client, thread, first, Duration::from_secs(60), CEILING),
         )
         .await
         .unwrap()
