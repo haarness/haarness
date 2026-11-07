@@ -4738,11 +4738,16 @@ impl App {
             .map_or((self.thread.id, arguments), |id| (id, title))
     }
 
+    /// The chat `candidate` names: its full ID, or the short ID the TUI
+    /// shows (`#` optional), when exactly one chat has it. Any other word,
+    /// even a piece of an ID ("db", "add"), is the start of a title.
     fn matching_session_id(&self, candidate: &str) -> Option<haarness_protocol::ThreadId> {
-        let mut matches = self
-            .threads
-            .iter()
-            .filter(|thread| thread.id.to_string().contains(candidate));
+        let candidate = candidate.strip_prefix('#').unwrap_or(candidate);
+        let mut matches = self.threads.iter().filter(|thread| {
+            let id = thread.id.to_string();
+            id.eq_ignore_ascii_case(candidate)
+                || crate::view::span::short_id(&id).eq_ignore_ascii_case(candidate)
+        });
         let first = matches.next()?.id;
         matches.next().is_none().then_some(first)
     }

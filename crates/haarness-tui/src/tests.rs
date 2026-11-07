@@ -17084,6 +17084,146 @@ async fn resume_alias_targets_a_unique_short_session_id_without_an_extra_menu_st
     );
 }
 
+/// A server that answers each `PATCH /v1/threads/{id}` with that chat
+/// renamed as asked, and records which chat each rename went to.
+async fn renaming_server(
+    threads: Vec<Thread>,
+) -> (
+    crate::api::ApiClient,
+    std::sync::Arc<std::sync::Mutex<Vec<(ThreadId, String)>>>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let renames = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = renames.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let mut expected = None;
+            while expected.is_none_or(|length| request.len() < length) {
+                let read = socket.read(&mut chunk).await.unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if expected.is_none()
+                    && let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    expected = Some(end + 4 + length);
+                }
+            }
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let line = text.lines().next().unwrap_or_default();
+            let body = text.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+            let reply = line
+                .strip_prefix("PATCH /v1/threads/")
+                .and_then(|rest| rest.split(' ').next())
+                .and_then(|id| threads.iter().find(|thread| thread.id.to_string() == id))
+                .map_or_else(
+                    || "[]".to_owned(),
+                    |thread| {
+                        let title =
+                            serde_json::from_str::<serde_json::Value>(body).unwrap()["title"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned();
+                        log.lock().unwrap().push((thread.id, title.clone()));
+                        serde_json::to_string(&Thread {
+                            title,
+                            ..thread.clone()
+                        })
+                        .unwrap()
+                    },
+                );
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            let _ = socket.write_all(reply.as_bytes()).await;
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    (client, renames)
+}
+
+#[tokio::test]
+async fn rename_takes_a_first_word_as_a_chat_only_when_it_is_that_chats_id() {
+    let current = Thread {
+        id: ThreadId("018f0000-1111-7222-8333-444455556666".parse().unwrap()),
+        ..fixture_thread()
+    };
+    // Only the other chat has "db", "add" and "e2e" inside its ID.
+    let other = Thread {
+        id: ThreadId("018f0add-0000-7000-8000-0000db00e2e1".parse().unwrap()),
+        title: "Other".into(),
+        ..fixture_thread()
+    };
+    let (client, renames) = renaming_server(vec![current.clone(), other.clone()]).await;
+    let mut app = App::new(
+        current.clone(),
+        vec![current.clone(), other.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    let other_id = other.id.to_string();
+    let short = crate::view::span::short_id(&other_id).to_owned();
+    for (command, target, title) in [
+        (
+            "/rename db migration".to_owned(),
+            current.id,
+            "db migration",
+        ),
+        (
+            "/rename add e2e tests".to_owned(),
+            current.id,
+            "add e2e tests",
+        ),
+        ("/rename db".to_owned(), current.id, "db"),
+        (
+            format!("/rename {short} Schema work"),
+            other.id,
+            "Schema work",
+        ),
+        (
+            format!("/rename #{short} Schema plan"),
+            other.id,
+            "Schema plan",
+        ),
+        (
+            format!("/rename {} Full ID", other_id.to_uppercase()),
+            other.id,
+            "Full ID",
+        ),
+    ] {
+        renames.lock().unwrap().clear();
+        app.execute_command(&command, &client).await.unwrap();
+        assert_eq!(
+            renames.lock().unwrap().as_slice(),
+            [(target, title.to_owned())],
+            "{command}"
+        );
+        assert_eq!(app.notice, "Session renamed", "{command}");
+    }
+    assert_eq!(app.thread.title, "db");
+
+    // A chat's ID alone still asks for the title.
+    renames.lock().unwrap().clear();
+    app.execute_command(&format!("/rename {short}"), &client)
+        .await
+        .unwrap();
+    assert!(renames.lock().unwrap().is_empty());
+    assert_eq!(app.notice, "Type a title after the session ID");
+}
+
 #[tokio::test]
 async fn sessions_all_discovers_archived_sessions_without_deleting_or_restoring_them() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
