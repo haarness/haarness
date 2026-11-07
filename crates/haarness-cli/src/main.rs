@@ -1703,11 +1703,25 @@ async fn cli_main() -> Result<()> {
         Some(Command::Acp(args)) => {
             let discovery =
                 ensure_workspace_server(&paths, &workspace, project_config).await?;
+            let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
+            // `-m provider/model` names its provider, as for `haarness run`:
+            // left whole, the id would go to the default provider, which can be
+            // another account's.
+            let (provider, model) = if args.provider.is_some() || args.model.is_some() {
+                let (provider, model) = requested_run_model(
+                    args.provider.as_deref(),
+                    args.model.as_deref(),
+                    &client.providers().await?,
+                )?;
+                (Some(provider), Some(model))
+            } else {
+                (None, None)
+            };
             acp::serve(acp::Config {
-                client: haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?,
+                client,
                 workspace,
-                provider: args.provider,
-                model: args.model,
+                provider,
+                model,
                 agent: args.agent,
                 auto_approve: cli.yolo,
             })

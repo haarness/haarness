@@ -1316,3 +1316,61 @@ async fn prompts_sent_while_a_server_starts_keep_their_order() {
     assert!(status.success(), "Haarness ACP process failed");
     daemon_guard.stop().await;
 }
+
+/// `haarness acp -m provider/model`, the form the docs show, names that
+/// provider as `haarness run` does: the bare id went to the default provider,
+/// which could be another account's (Haarness Cloud spending its credit for a
+/// model the person meant to run on their own sign-in).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_model_named_with_its_provider_runs_on_that_provider() {
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness")).expect("create ACP workspace config");
+    std::fs::create_dir_all(&home).expect("create isolated ACP home");
+    let mut server = DaemonGuard::new(workspace.clone(), data.clone(), home.clone());
+    let mut command = base_command(&workspace, &data, &home);
+    command
+        .arg("acp")
+        .arg("-m")
+        .arg("echo/echo-1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn().expect("launch Haarness ACP agent");
+    let mut stdin = child.stdin.take().expect("ACP stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("ACP stdout")).lines();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":1, "method":"initialize",
+               "params":{"protocolVersion":1, "clientCapabilities":{}}}),
+    )
+    .await;
+    assert_eq!(receive(&mut lines).await["id"], 1);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":2, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[]}}),
+    )
+    .await;
+    let created = receive(&mut lines).await;
+    let session = created["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("ACP session id: {created}"))
+        .to_owned();
+    let thread = daemon(
+        &daemon_api(&data),
+        reqwest::Method::GET,
+        &format!("/threads/{session}"),
+        None,
+    )
+    .await;
+    let thread = thread.get("thread").unwrap_or(&thread);
+    assert_eq!(thread["provider"], "echo", "{thread}");
+    assert_eq!(thread["model"], "echo-1", "{thread}");
+    drop(stdin);
+    let _ = child.wait().await;
+    server.stop().await;
+}
