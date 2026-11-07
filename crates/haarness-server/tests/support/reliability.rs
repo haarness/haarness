@@ -1002,3 +1002,124 @@ async fn reliability_recovery_keeps_completed_tool_results_without_replaying_act
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+fn call(id: &str, name: &str, arguments: Value) -> ProviderEvent {
+    ProviderEvent::ToolCall {
+        call_id: id.into(),
+        name: name.into(),
+        arguments,
+        provider_metadata: Value::Null,
+    }
+}
+
+fn read_notes(id: &str) -> ProviderEvent {
+    call(id, "read", serde_json::json!({"path":"notes.txt"}))
+}
+
+#[tokio::test]
+async fn reliability_rate_limits_spread_over_tool_rounds_each_get_their_own_retries() {
+    // A provider that turns the request away before every round, five times
+    // in one turn: more than the four retries one round may spend.
+    let refused = || cut("HTTP 429 Too Many Requests: Please retry in 0s.");
+    let mut rounds = Vec::new();
+    for round in 0..4 {
+        rounds.push(vec![refused()]);
+        rounds.push(vec![
+            Ok(read_notes(&format!("read-{round}"))),
+            Ok(finish("tool_use")),
+        ]);
+    }
+    rounds.push(vec![refused()]);
+    rounds.push(vec![Ok(text("all rounds done")), Ok(finish("stop"))]);
+    let (directory, runtime, provider, hooks) =
+        setup_streams(rounds, RuntimeConfig::default(), true);
+    std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("many rounds"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 10);
+    assert!(runtime.items(thread.id, None).await.unwrap().iter().any(
+        |item| matches!(&item.data, ItemData::AssistantMessage {text} if text == "all rounds done")
+    ));
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_cuts_spread_over_tool_rounds_each_get_their_own_recoveries() {
+    // Each round is cut once after it began, four times in one turn: more
+    // than the three recoveries one round may spend.
+    let mut rounds = Vec::new();
+    for round in 0..3 {
+        rounds.push(vec![Ok(text(&format!("part {round}"))), cut(CUTS[0])]);
+        rounds.push(vec![
+            Ok(read_notes(&format!("read-{round}"))),
+            Ok(finish("tool_use")),
+        ]);
+    }
+    rounds.push(vec![Ok(text("part 3")), cut(CUTS[0])]);
+    rounds.push(vec![Ok(text("all rounds done")), Ok(finish("stop"))]);
+    let (directory, runtime, provider, hooks) =
+        setup_streams(rounds, RuntimeConfig::default(), true);
+    std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("many rounds"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 8);
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_a_turn_ends_once_its_rounds_together_spent_four_rounds_of_recoveries() {
+    // A cut in each of thirteen rounds: every round is within its own three
+    // recoveries, but the turn has twelve in all.
+    let mut rounds = Vec::new();
+    for round in 0..12 {
+        rounds.push(vec![Ok(text(&format!("part {round}"))), cut(CUTS[0])]);
+        rounds.push(vec![
+            Ok(read_notes(&format!("read-{round}"))),
+            Ok(finish("tool_use")),
+        ]);
+    }
+    rounds.push(vec![Ok(text("part 12")), cut(CUTS[0])]);
+    rounds.push(vec![Ok(text("never asked")), Ok(finish("stop"))]);
+    let (directory, runtime, provider, hooks) =
+        setup_streams(rounds, RuntimeConfig::default(), true);
+    std::fs::write(directory.join("notes.txt"), "notes").unwrap();
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("many rounds"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(finished.status, TurnStatus::Failed);
+    // The same words as when one round's recoveries run out.
+    assert_eq!(
+        finished.error.as_deref(),
+        Some(
+            "The connection to Echo kept breaking off mid-answer. Check the network connection, then send a message to continue."
+        )
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 25);
+    assert_eq!(hooks.failures.lock().unwrap().len(), 1);
+    std::fs::remove_dir_all(directory).unwrap();
+}

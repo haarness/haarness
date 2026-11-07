@@ -945,8 +945,75 @@ fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
 }
 
 /// Retries for a transient provider failure before any output, waiting 2,
-/// 4, 8 then 16 seconds.
+/// 4, 8 then 16 seconds, in each provider round.
 const TRANSIENT_RETRIES: u8 = 4;
+
+/// Recoveries of a response cut short, in each provider round.
+const RECOVERIES: u8 = 3;
+
+/// How many rounds' worth of retries after a failure, and of recoveries,
+/// one turn may spend in all, however its rounds share them. A provider or
+/// gateway that keeps failing round after round then ends the turn, instead
+/// of quietly multiplying what a long turn costs.
+const TURN_RETRY_ROUNDS: u8 = 4;
+
+/// What a turn has spent on retrying a busy or unreachable provider and on
+/// recovering responses cut short. Each round has its own budget, back once
+/// the provider takes a request (retries) or a response finishes
+/// (recoveries), so failures spread over a long turn of tool rounds do not
+/// add up to fail it; the turn's totals bound the failures. A provider that
+/// is busy or at its rate limit is waited out in each round but not counted
+/// for the turn: it refused the request, so nothing ran or was charged, and
+/// a fan-out of agents can wait on a free slot for a long time.
+#[derive(Debug, Default)]
+struct RetryBudget {
+    retries: u8,
+    recoveries: u8,
+    turn_retries: u8,
+    turn_recoveries: u8,
+}
+
+impl RetryBudget {
+    /// The attempt number and wait before sending the request again after
+    /// `error`, which came before the provider took it, or `None` to fail.
+    fn retry(&mut self, error: &CoreError) -> Option<(u8, std::time::Duration)> {
+        if self.retries >= TRANSIENT_RETRIES {
+            return None;
+        }
+        // An unreachable or failing server, not a busy or rate-limited one.
+        let failure = is_provider_transient(error);
+        if failure && self.turn_retries >= TRANSIENT_RETRIES * TURN_RETRY_ROUNDS {
+            return None;
+        }
+        let delay = retry_delay(error, self.retries + 1)?;
+        self.retries += 1;
+        self.turn_retries += u8::from(failure);
+        Some((self.retries, delay))
+    }
+
+    /// The pause before continuing a response cut short, or `None` to fail.
+    fn recover(&mut self) -> Option<std::time::Duration> {
+        if self.recoveries >= RECOVERIES || self.turn_recoveries >= RECOVERIES * TURN_RETRY_ROUNDS {
+            return None;
+        }
+        self.recoveries += 1;
+        self.turn_recoveries += 1;
+        Some(std::time::Duration::from_millis(
+            250 << (self.recoveries - 1),
+        ))
+    }
+
+    /// The provider took a request: a later refusal backs off from the
+    /// first wait again.
+    fn accepted(&mut self) {
+        self.retries = 0;
+    }
+
+    /// A response finished: the next one may be recovered as often again.
+    fn finished(&mut self) {
+        self.recoveries = 0;
+    }
+}
 
 /// The longest wait a provider may ask for ("Please retry in 17.2s") that a
 /// turn sits out instead of failing: a per-minute limit, not a daily quota.
@@ -9507,12 +9574,13 @@ impl RunnerTask {
             // request too large, more summaries would only summarize the
             // last one.
             let mut compacted_for_size = false;
-            let mut recoveries = 0_u8;
+            // Retries of a busy or unreachable provider and recoveries of a
+            // response cut short, counted for each round and for the turn.
+            let mut retries = RetryBudget::default();
             // Corrective rounds after a structured-output turn answered in the
             // wrong shape: without a forced tool choice a model can reply in
             // prose, and no provider validates the schema for us.
             let mut structured_retries = 0_u8;
-            let mut transient_retries = 0_u8;
             // One retry per turn after a provider refused an image.
             let mut image_retried = false;
             let mut recovering = false;
@@ -10174,12 +10242,8 @@ impl RunnerTask {
                             compacted_for_size |= oversized;
                             continue 'provider_round;
                         }
-                        if transient_retries < TRANSIENT_RETRIES
-                            && let Some(delay) = retry_delay(&error_value, transient_retries + 1)
-                        {
-                            transient_retries += 1;
-                            self.wait_before_retry(transient_retries, delay, &error_value)
-                                .await?;
+                        if let Some((attempt, delay)) = retries.retry(&error_value) {
+                            self.wait_before_retry(attempt, delay, &error_value).await?;
                             continue 'provider_round;
                         }
                         return Err(error_value);
@@ -10268,16 +10332,12 @@ impl RunnerTask {
                             // Providers report an HTTP failure as the stream's
                             // first item; nothing has reached the person yet.
                             if !saw_provider_event
-                                && transient_retries < TRANSIENT_RETRIES
-                                && let Some(delay) =
-                                    retry_delay(&error_value, transient_retries + 1)
+                                && let Some((attempt, delay)) = retries.retry(&error_value)
                             {
-                                transient_retries += 1;
                                 // Close this request before waiting, not when
                                 // the next round replaces it.
                                 drop(stream);
-                                self.wait_before_retry(transient_retries, delay, &error_value)
-                                    .await?;
+                                self.wait_before_retry(attempt, delay, &error_value).await?;
                                 continue 'provider_round;
                             }
                             // A response that broke off after it began (its
@@ -10314,8 +10374,10 @@ impl RunnerTask {
                     }
                     saw_provider_event = true;
                     // The provider took this request: a later one refused
-                    // for its size may compact again.
+                    // for its size may compact again, and a later one it
+                    // turns away while busy backs off from the first wait.
                     compacted_for_size = false;
+                    retries.accepted();
                     match event {
                         ProviderEvent::TextDelta(delta) => {
                             if delta.is_empty() {
@@ -10594,19 +10656,23 @@ impl RunnerTask {
                             .await?;
                         }
                     }
-                    if matches!(error, CoreError::ProviderIncomplete(_)) && recoveries < 3 {
-                        recoveries += 1;
+                    if matches!(error, CoreError::ProviderIncomplete(_))
+                        && let Some(pause) = retries.recover()
+                    {
                         recovering |= partial;
                         self.set_status("retrying", None);
                         tokio::select! {
                             biased;
                             () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                            () = tokio::time::sleep(std::time::Duration::from_millis(250 * (1 << (recoveries - 1)))) => {}
+                            () = tokio::time::sleep(pause) => {}
                         }
                         continue 'provider_round;
                     }
                     return Err(error);
                 }
+                // This response finished: the next one may be recovered as
+                // often again.
+                retries.finished();
                 if calls.is_empty() {
                     logical_turn.finish()?;
                     // A message can arrive after this round's request snapshot,
@@ -18696,6 +18762,86 @@ mod tests {
             ),
             "The provider did not accept this API key: it is not valid, or not a key for this provider. Connect it again to replace it."
         );
+    }
+
+    #[test]
+    fn each_round_has_its_own_retries_and_the_turn_a_ceiling_on_them() {
+        let busy = CoreError::Provider("HTTP 503 Service Unavailable".into());
+        let seconds =
+            |retry: Option<(u8, std::time::Duration)>| retry.map(|(_, wait)| wait.as_secs());
+        let mut budget = super::RetryBudget::default();
+        // Four retries in a round, backing off from 2 seconds; then none.
+        for wait in [2, 4, 8, 16] {
+            assert_eq!(seconds(budget.retry(&busy)), Some(wait));
+        }
+        assert_eq!(budget.retry(&busy), None);
+        // A request the provider took gives the next round its own, from
+        // the first wait.
+        budget.accepted();
+        assert_eq!(
+            budget.retry(&busy),
+            Some((1, std::time::Duration::from_secs(2)))
+        );
+        // An error no retry helps spends nothing.
+        assert_eq!(
+            budget.retry(&CoreError::Provider("HTTP 400 Bad Request".into())),
+            None
+        );
+        // Four rounds' worth of failures in all, however the rounds share
+        // them.
+        let mut budget = super::RetryBudget::default();
+        for _ in 0..16 {
+            assert!(budget.retry(&busy).is_some());
+            budget.accepted();
+        }
+        assert_eq!(budget.retry(&busy), None);
+        // A busy or rate-limited provider refused the request: a fan-out of
+        // agents waits on it in every round however long the turn, and the
+        // failures stay bounded beside it.
+        let refusals = [
+            "Haarness Cloud is already running as many of your requests at once as its rate limit allows. Try again in a moment, or once another chat or agent finishes.",
+            "Haarness Cloud's router is at its rate limit for requests at once. Please retry in 17s.",
+            "HTTP 429 Too Many Requests: Please retry in 3s.",
+        ]
+        .map(|message| CoreError::Provider(message.into()));
+        let mut budget = super::RetryBudget::default();
+        for _ in 0..40 {
+            for refusal in &refusals {
+                assert!(budget.retry(refusal).is_some(), "{refusal}");
+            }
+            budget.accepted();
+        }
+        for _ in 0..16 {
+            assert!(budget.retry(&busy).is_some());
+            budget.accepted();
+        }
+        assert_eq!(budget.retry(&busy), None);
+        assert!(budget.retry(&refusals[0]).is_some());
+
+        let pause =
+            |budget: &mut super::RetryBudget| budget.recover().map(|pause| pause.as_millis());
+        let mut budget = super::RetryBudget::default();
+        assert_eq!(
+            [
+                pause(&mut budget),
+                pause(&mut budget),
+                pause(&mut budget),
+                pause(&mut budget)
+            ],
+            [Some(250), Some(500), Some(1000), None]
+        );
+        // Only a response that finished gives the next ones back; a request
+        // the provider took does not.
+        budget.accepted();
+        assert_eq!(pause(&mut budget), None);
+        budget.finished();
+        assert_eq!(pause(&mut budget), Some(250));
+        let mut budget = super::RetryBudget::default();
+        for _ in 0..12 {
+            assert!(budget.recover().is_some());
+            budget.finished();
+        }
+        assert_eq!(budget.recover(), None);
     }
 
     #[test]
