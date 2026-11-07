@@ -507,7 +507,24 @@ async fn a_long_first_message_is_quoted_in_part_and_the_title_output_is_capped()
             )
             .await
             .unwrap();
-        finished(&runtime, &turn).await;
+        // 400 KB is more than the model's window holds: the turn says so
+        // instead of answering a summary of it. Its title comes all the same.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while runtime.turn(turn.id).await.unwrap().status == TurnStatus::Running {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let done = runtime.turn(turn.id).await.unwrap();
+        assert!(
+            done.status == TurnStatus::Completed
+                || done
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("The latest message is too long")),
+            "{done:?}"
+        );
         assert_eq!(
             updated(&mut receiver, thread.id).await.title,
             "Security review"

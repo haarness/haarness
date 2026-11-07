@@ -70,6 +70,37 @@ test("context estimates use the newest summary and retained tail, respecting und
     undefined,
   );
 });
+test("context estimates count the request a summary kept and the tool output it cut", () => {
+  const result = contextUsage(
+    [
+      item(1, { type: "user_message", text: "a".repeat(400) }),
+      item(2, { type: "user_message", text: "b".repeat(40) }),
+      item(3, { type: "assistant_message", text: "c".repeat(400) }),
+      item(4, {
+        type: "tool_result",
+        call_id: "call",
+        name: "webfetch",
+        is_error: false,
+        output: "d".repeat(4000),
+      }),
+      item(5, {
+        type: "compaction",
+        summary: "12345678",
+        files_touched: [],
+        outstanding: [],
+        tail_start_sequence: 4,
+        kept_sequences: [2],
+        tool_output_chars: 400,
+      }),
+    ],
+    thread,
+  );
+  const tokens = (label: string) =>
+    result.breakdown.find((row) => row.label === label)?.tokens;
+  assert.equal(tokens("User messages"), 10);
+  assert.equal(tokens("Assistant messages"), 0);
+  assert.equal(tokens("Tool results"), 100);
+});
 test("context estimates exclude media payloads, reasoning and accounting rows", () => {
   const result = contextUsage(
     [

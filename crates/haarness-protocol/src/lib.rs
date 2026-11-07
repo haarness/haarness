@@ -495,6 +495,18 @@ pub enum ItemData {
         /// Sequence numbers remain stable inside a thread and across forks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tail_start_sequence: Option<u64>,
+        /// Raw items before the retained tail that stay in view all the
+        /// same, in sequence order: the person's latest request and what
+        /// else they wrote in its turn, when the tail had to start after
+        /// them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kept_sequences: Vec<u64>,
+        /// The most characters a tool result kept from before this
+        /// compaction shows the model. A longer one shows its start and end,
+        /// with a note on how much was left out and how to read the rest.
+        /// Absent: every kept result is shown whole.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_output_chars: Option<u64>,
     },
     Plan {
         markdown: String,
@@ -830,6 +842,14 @@ pub struct CompactRequest {
     /// server computes it from the configured recent-turn count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_start_sequence: Option<u64>,
+    /// Runtime-owned: items before the tail kept in view (the latest
+    /// request). API callers may omit this; the server computes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_sequences: Vec<u64>,
+    /// Runtime-owned: how many characters each kept tool result shows. API
+    /// callers may omit this; the server computes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output_chars: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]

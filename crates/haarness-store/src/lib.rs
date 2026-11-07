@@ -1337,6 +1337,8 @@ impl ThreadRepository for SqliteStore {
                 outstanding: request.outstanding,
                 todo_checkpoint: request.todo_checkpoint,
                 tail_start_sequence: request.tail_start_sequence,
+                kept_sequences: request.kept_sequences,
+                tool_output_chars: request.tool_output_chars,
             },
             created_at: now,
         };
@@ -3408,6 +3410,8 @@ mod tests {
                     outstanding: Vec::new(),
                     todo_checkpoint: None,
                     tail_start_sequence: None,
+                    kept_sequences: Vec::new(),
+                    tool_output_chars: None,
                 },
                 Some((summarized_tail.id, summarized_tail.sequence)),
             )
@@ -3431,6 +3435,8 @@ mod tests {
                     outstanding: Vec::new(),
                     todo_checkpoint: None,
                     tail_start_sequence: None,
+                    kept_sequences: Vec::new(),
+                    tool_output_chars: None,
                 },
                 Some((concurrent_writer.id, concurrent_writer.sequence)),
             )

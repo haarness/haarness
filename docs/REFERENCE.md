@@ -703,8 +703,8 @@ pin = []                     # exact ids or '*' wildcard patterns
 [compaction]
 enabled = true              # false disables automatic compaction; /compact remains available
 threshold = 0.85            # optional early trigger, 0 < threshold <= 1
-tail_turns = 2              # recent user turns retained verbatim after the summary
-preserve_recent_tokens = 24000 # upper bound; also capped to half the model-safe input
+tail_turns = 2              # recent user turns kept verbatim after the summary when they fit; the latest request always is
+preserve_recent_tokens = 24000 # upper bound; also capped to half the model-safe input, less instructions and tools
 # reserve_output = 32000    # optional extra reserve; model output metadata is always honored
 
 # Built-in language servers are enabled by default and start lazily only for

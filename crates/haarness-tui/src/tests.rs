@@ -604,6 +604,8 @@ async fn bare_compact_requests_a_server_generated_summary_over_real_http() {
             outstanding: Vec::new(),
             todo_checkpoint: None,
             tail_start_sequence: None,
+            kept_sequences: Vec::new(),
+            tool_output_chars: None,
         },
         created_at: Utc::now(),
     };
@@ -2368,6 +2370,8 @@ fn new_item_kinds_render_in_the_transcript() {
                 outstanding: vec![],
                 todo_checkpoint: None,
                 tail_start_sequence: None,
+                kept_sequences: Vec::new(),
+                tool_output_chars: None,
             },
         ),
         message_item(

@@ -1244,6 +1244,15 @@
             },
             "type": "array"
           },
+          "keptSequences": {
+            "description": "Runtime-owned: items before the tail kept in view (the latest\nrequest). API callers may omit this; the server computes it.",
+            "items": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
           "outstanding": {
             "items": {
               "type": "string"
@@ -1275,6 +1284,15 @@
                 "$ref": "#/components/schemas/TodoCheckpoint",
                 "description": "Runtime-owned exact task state. API callers may omit this; the server\nalways replaces it with the current durable state before committing."
               }
+            ]
+          },
+          "toolOutputChars": {
+            "description": "Runtime-owned: how many characters each kept tool result shows. API\ncallers may omit this; the server computes it.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
             ]
           }
         },
@@ -3270,6 +3288,15 @@
                 },
                 "type": "array"
               },
+              "kept_sequences": {
+                "description": "Raw items before the retained tail that stay in view all the\nsame, in sequence order: the person's latest request and what\nelse they wrote in its turn, when the tail had to start after\nthem.",
+                "items": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "array"
+              },
               "outstanding": {
                 "items": {
                   "type": "string"
@@ -3297,6 +3324,15 @@
                     "$ref": "#/components/schemas/TodoCheckpoint",
                     "description": "Exact task-list state at this compaction boundary. Older records\ndecode without a checkpoint; a present checkpoint with an empty\nlist intentionally clears all prior todos."
                   }
+                ]
+              },
+              "tool_output_chars": {
+                "description": "The most characters a tool result kept from before this\ncompaction shows the model. A longer one shows its start and end,\nwith a note on how much was left out and how to read the rest.\nAbsent: every kept result is shown whole.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
                 ]
               },
               "type": {
