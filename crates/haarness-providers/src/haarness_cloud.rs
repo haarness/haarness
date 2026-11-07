@@ -26,7 +26,57 @@ pub struct HaarnessCloudProvider {
     listed_audio: ListedAudio,
     /// How long a busy refusal is held back ([`random_busy_jitter`]).
     busy_jitter: fn() -> Duration,
+    /// Whether the signed-in account can pay ([`ModelProvider::can_pay`]).
+    paying: Arc<std::sync::Mutex<Paying>>,
 }
+
+/// What the provider last learned about the account paying: from its billing
+/// summary, or from Cloud admitting or refusing a request.
+#[derive(Default)]
+struct Paying {
+    /// The sign-in it was learned for ([`HaarnessCloudProvider::identity`]).
+    identity: Option<[u8; 32]>,
+    can_pay: Option<bool>,
+    checked: Option<std::time::Instant>,
+}
+
+impl Paying {
+    /// Learned now, for `identity`.
+    fn learn(&mut self, identity: [u8; 32], can_pay: Option<bool>) {
+        *self = Self {
+            identity: Some(identity),
+            can_pay,
+            checked: Some(std::time::Instant::now()),
+        };
+    }
+}
+
+/// The paying state, also after a panic elsewhere held its lock.
+fn lock(paying: &std::sync::Mutex<Paying>) -> std::sync::MutexGuard<'_, Paying> {
+    paying
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// How long a billing summary stands before a catalog refresh reads it
+/// again: briefly for an account that cannot pay yet (a trial may start
+/// any moment, and Cloud should come back as soon as it does), longer for
+/// one that can, whose next refusal says so at once.
+fn billing_check_after(can_pay: Option<bool>) -> Duration {
+    if can_pay == Some(true) {
+        Duration::from_secs(300)
+    } else {
+        Duration::from_secs(15)
+    }
+}
+
+/// Whether Cloud's answer says the account cannot pay: no credit covers the
+/// request, or the account is suspended. A spending limit is not this.
+fn unpaid(error: &CoreError) -> bool {
+    matches!(error, CoreError::Provider(message)
+        if message.contains("[insufficient_credits]") || message.contains("[account_suspended]"))
+}
+
 impl HaarnessCloudProvider {
     pub fn from_environment() -> Option<Self> {
         Some(Self {
@@ -35,7 +85,83 @@ impl HaarnessCloudProvider {
             models: RwLock::new(None),
             listed_audio: ListedAudio::default(),
             busy_jitter: random_busy_jitter,
+            paying: Arc::default(),
         })
+    }
+
+    /// The model list, refreshed as [`ModelProvider::refresh_models`] asks.
+    async fn refresh_catalog(&self, force: bool) {
+        let Some((identity, catalog)) = self.catalog() else {
+            return;
+        };
+        catalog
+            .refresh(force, || async {
+                let provider = self.transport().await.ok()?;
+                let models = provider.fetch_models().await?;
+                (self.identity() == Some(identity)).then_some(models)
+            })
+            .await;
+        // Token renewal can change identity while acquiring the router grant. The
+        // old request must not populate a new account's cache; refresh that cache now.
+        if self.identity().is_some_and(|current| current != identity) {
+            if let Some((identity, catalog)) = self.catalog() {
+                catalog
+                    .refresh(force, || async {
+                        let provider = self.transport().await.ok()?;
+                        let models = provider.fetch_models().await?;
+                        (self.identity() == Some(identity)).then_some(models)
+                    })
+                    .await;
+            }
+        }
+    }
+
+    /// Read whether the account can pay from its billing summary, unless a
+    /// recent reading for this sign-in still stands. A summary that cannot
+    /// be read (an API key without billing access, an outage) says nothing,
+    /// and Cloud keeps its usual place.
+    async fn check_billing(&self, force: bool) {
+        let Some(identity) = self.identity() else {
+            return;
+        };
+        {
+            let paying = lock(&self.paying);
+            if !force
+                && paying.identity == Some(identity)
+                && paying
+                    .checked
+                    .is_some_and(|at| at.elapsed() < billing_check_after(paying.can_pay))
+            {
+                return;
+            }
+        }
+        let can_pay = self
+            .client
+            .billing_summary()
+            .await
+            .ok()
+            .and_then(|state| state.summary)
+            .map(|summary| summary.can_pay());
+        // A sign-in that changed meanwhile is read on its own next refresh.
+        if self.identity() == Some(identity) {
+            lock(&self.paying).learn(identity, can_pay);
+        }
+    }
+
+    /// What Cloud's answer to a request says about the account paying.
+    fn note(
+        paying: &std::sync::Mutex<Paying>,
+        identity: Option<[u8; 32]>,
+        outcome: Result<(), &CoreError>,
+    ) {
+        let Some(identity) = identity else {
+            return;
+        };
+        match outcome {
+            Ok(()) => lock(paying).learn(identity, Some(true)),
+            Err(error) if unpaid(error) => lock(paying).learn(identity, Some(false)),
+            Err(_) => {}
+        }
     }
     fn identity(&self) -> Option<[u8; 32]> {
         if let Some(key) = self.client.config.api_key() {
@@ -421,30 +547,19 @@ impl ModelProvider for HaarnessCloudProvider {
                 .map_or_else(Vec::new, |(_, catalog)| catalog.get(&[])),
         }
     }
-    async fn refresh_models(&self, force: bool) {
-        let Some((identity, catalog)) = self.catalog() else {
-            return;
+    /// `false` once this sign-in's billing summary, or Cloud's answer to a
+    /// request, says no credit can pay; unknown counts as paying.
+    fn can_pay(&self) -> bool {
+        let Some(identity) = self.identity() else {
+            return true;
         };
-        catalog
-            .refresh(force, || async {
-                let provider = self.transport().await.ok()?;
-                let models = provider.fetch_models().await?;
-                (self.identity() == Some(identity)).then_some(models)
-            })
-            .await;
-        // Token renewal can change identity while acquiring the router grant. The
-        // old request must not populate a new account's cache; refresh that cache now.
-        if self.identity().is_some_and(|current| current != identity) {
-            if let Some((identity, catalog)) = self.catalog() {
-                catalog
-                    .refresh(force, || async {
-                        let provider = self.transport().await.ok()?;
-                        let models = provider.fetch_models().await?;
-                        (self.identity() == Some(identity)).then_some(models)
-                    })
-                    .await;
-            }
-        }
+        let paying = lock(&self.paying);
+        !(paying.identity == Some(identity) && paying.can_pay == Some(false))
+    }
+    async fn refresh_models(&self, force: bool) {
+        // The catalog and whether the account can pay are read together, so
+        // a new chat's automatic model sees both.
+        tokio::join!(self.refresh_catalog(force), self.check_billing(force));
     }
     async fn stream(
         &self,
@@ -461,18 +576,23 @@ impl ModelProvider for HaarnessCloudProvider {
         {
             tokio::select! {
                 () = cancel.cancelled() => return Err(error("Request cancelled")),
-                () = self.refresh_models(false) => {}
+                () = self.refresh_catalog(false) => {}
             }
         }
         let models = self
             .catalog()
             .map_or_else(Vec::new, |(_, catalog)| catalog.get(&[]));
         let place = billing_place(&self.client);
-        let mut stream = transport
+        // Cloud admitting or refusing the request says whether the account
+        // can pay, sooner than the next billing summary would.
+        let identity = self.identity();
+        let paying = Arc::clone(&self.paying);
+        let started = transport
             .with_model_info(models.clone())
             .stream(request.clone(), cancel.clone())
-            .await
-            .map_err(|failure| readable(failure, &place))?;
+            .await;
+        Self::note(&paying, identity, started.as_ref().map(|_| ()));
+        let mut stream = started.map_err(|failure| readable(failure, &place))?;
         let client = self.client.clone();
         let grant = Arc::clone(&self.grant);
         let listed_audio = Arc::clone(&self.listed_audio);
@@ -502,12 +622,13 @@ impl ModelProvider for HaarnessCloudProvider {
                             () = cancel.cancelled() => Err(CoreError::Cancelled),
                             result = router_transport(&client, &grant) => result,
                         }?;
-                        stream = transport
+                        let started = transport
                             .with_model_info(models.clone())
                             .with_listed_audio(Arc::clone(&listed_audio))
                             .stream(request, cancel.clone())
-                            .await
-                            .map_err(|failure| readable(failure, &place))?;
+                            .await;
+                        Self::note(&paying, identity, started.as_ref().map(|_| ()));
+                        stream = started.map_err(|failure| readable(failure, &place))?;
                     }
                     Err(failure) if busy(&failure) => {
                         retry = None;
@@ -522,6 +643,9 @@ impl ModelProvider for HaarnessCloudProvider {
                     }
                     event => {
                         retry = None;
+                        if let Err(failure) = &event {
+                            Self::note(&paying, identity, Err(failure));
+                        }
                         yield event.map_err(|failure| readable(failure, &place))?;
                     }
                 }
@@ -605,6 +729,7 @@ mod tests {
             models: RwLock::new(None),
             listed_audio: ListedAudio::default(),
             busy_jitter: random_busy_jitter,
+            paying: Arc::default(),
         });
         let refresh = || async {
             tokio::time::sleep(std::time::Duration::from_millis(1010)).await;
@@ -996,7 +1121,13 @@ mod tests {
         url: Arc<std::sync::Mutex<String>>,
         refusing: Arc<std::sync::atomic::AtomicBool>,
         sent: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        /// Included AI credits the wallet shows, in whole credits.
+        credits: Arc<AtomicUsize>,
+        /// Chats are refused as no credit can pay.
+        unfunded: Arc<std::sync::atomic::AtomicBool>,
     }
+
+    const STAND_ACCOUNT: &str = "01930000-0000-7000-8000-0000000000aa";
 
     /// The provider signed in to a [`Stand`], its server and its folder.
     async fn stand_in() -> (
@@ -1031,6 +1162,14 @@ mod tests {
                 post(
                     |State(state): State<Stand>, Json(body): Json<serde_json::Value>| async move {
                         state.sent.lock().unwrap().push(body);
+                        if state.unfunded.load(Ordering::SeqCst) {
+                            return (
+                                StatusCode::PAYMENT_REQUIRED,
+                                Json(json!({"error":{"message":"insufficient credits: unit Nanos requested 1, available 0, overage opt-in false",
+                                    "type":"billing_error","code":"insufficient_credits"}})),
+                            )
+                                .into_response();
+                        }
                         if state.refusing.load(Ordering::SeqCst) {
                             return (
                                 StatusCode::TOO_MANY_REQUESTS,
@@ -1047,6 +1186,24 @@ mod tests {
                     },
                 ),
             )
+            .route(
+                "/api/v1/me",
+                get(|| async {
+                    Json(json!({"defaultAccountId":STAND_ACCOUNT,"accounts":[{"id":STAND_ACCOUNT,"name":"Sam Rivera"}],
+                        "user":{"email":"sam@example.com"}}))
+                }),
+            )
+            .route(
+                "/api/v1/billing/wallet",
+                get(|State(state): State<Stand>| async move {
+                    let credits = state.credits.load(Ordering::SeqCst);
+                    Json(json!({"status":"active","includedAi":{"credits":format!("{credits}.000000"),"nanos":(credits * 1_000_000_000).to_string()},
+                        "purchased":{"credits":"0.000000","nanos":"0"},"heldReserve":{"credits":"0"},
+                        "cloudUnitSecondsAvailable":0,"cloudUnitSecondsReserved":0,"overageOptIn":false,"trialAvailable":credits == 0}))
+                }),
+            )
+            .route("/api/v1/billing/subscription", get(|| async { StatusCode::NOT_FOUND }))
+            .route("/api/v1/billing/entitlements", get(|| async { StatusCode::NOT_FOUND }))
             .with_state(stand.clone());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -1069,8 +1226,71 @@ mod tests {
             models: RwLock::new(None),
             listed_audio: ListedAudio::default(),
             busy_jitter: random_busy_jitter,
+            paying: Arc::default(),
         };
         (provider, stand, server, root)
+    }
+
+    /// Whether the account can pay follows its billing summary, read with
+    /// the catalog, and Cloud's answers: refused for credits, it cannot;
+    /// admitted, it can. A new chat's automatic model reads it
+    /// ([`ModelProvider::can_pay`]).
+    #[tokio::test]
+    async fn whether_the_account_can_pay_follows_billing_and_answers() {
+        use futures::StreamExt as _;
+        let (provider, stand, server, root) = stand_in().await;
+        assert!(provider.can_pay(), "nothing known yet");
+        provider.refresh_models(true).await;
+        assert!(!provider.can_pay(), "a new account holds nothing");
+        // The trial starts: the next refresh puts Cloud back.
+        stand.credits.store(2_000, Ordering::SeqCst);
+        provider.refresh_models(true).await;
+        assert!(provider.can_pay());
+        // A reading stands for a while: an ordinary refresh does not ask again.
+        stand.credits.store(0, Ordering::SeqCst);
+        provider.refresh_models(false).await;
+        assert!(provider.can_pay());
+        // Refused for credits: it cannot pay, at once.
+        stand.unfunded.store(true, Ordering::SeqCst);
+        let request = ProviderRequest {
+            model: "anthropic/claude-sonnet-5-5".into(),
+            system: "system".into(),
+            messages: vec![haarness_core::ProviderMessage::Text {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            output_schema: None,
+            parameters: haarness_core::RequestParameters::default(),
+        };
+        let refused = match provider
+            .stream(request.clone(), CancellationToken::new())
+            .await
+        {
+            Err(error) => Some(error),
+            Ok(mut stream) => stream.next().await.and_then(Result::err),
+        };
+        assert!(
+            matches!(&refused, Some(CoreError::Provider(message)) if message.starts_with("Your included Haarness Cloud credits")),
+            "{refused:?}"
+        );
+        assert!(!provider.can_pay());
+        // Admitted again: it can.
+        stand.unfunded.store(false, Ordering::SeqCst);
+        let mut stream = provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        assert!(provider.can_pay());
+        // Signed out: nothing is known of the next account.
+        std::fs::remove_file(root.join("credentials.json")).unwrap();
+        assert!(provider.can_pay());
+        server.abort();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A tool round whose result is a recording.
@@ -1290,6 +1510,7 @@ mod tests {
             models: RwLock::new(None),
             listed_audio: ListedAudio::default(),
             busy_jitter: random_busy_jitter,
+            paying: Arc::default(),
         };
         let request = || ProviderRequest {
             model: "fixture-chat".into(),

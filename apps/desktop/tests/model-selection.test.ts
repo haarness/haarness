@@ -202,3 +202,39 @@ test("a configured default the provider retired falls back to a recent, then the
     { provider: "openai", model: "preferred" },
   );
 });
+
+test("an automatic model passes over a Cloud account that cannot pay while another provider can answer", () => {
+  const providers = [provider("haarness"), provider("ollama")];
+  const thread = (provider: string, updatedAt: string) =>
+    ({ id: provider, provider, model: "preferred", updatedAt, isSubagent: false }) as unknown as Thread;
+  // Paying: Cloud has its usual place.
+  assert.deepEqual(selectModel({ ...base, providers }), { provider: "haarness", model: "preferred" });
+  // Cannot pay: the other connected provider answers.
+  assert.deepEqual(selectModel({ ...base, providers, unpaid: ["haarness"] }), {
+    provider: "ollama",
+    model: "preferred",
+  });
+  // A chat that was on Cloud, chosen for it or not, does not pull new chats back to it.
+  assert.deepEqual(
+    selectModel({ ...base, providers, unpaid: ["haarness"], threads: [thread("haarness", "2026-11-07T10:00:00Z")] }),
+    { provider: "ollama", model: "preferred" },
+  );
+  // A model picked, configured or chosen for this chat is kept.
+  assert.deepEqual(
+    selectModel({ ...base, providers, unpaid: ["haarness"], recent: [{ provider: "haarness", model: "other" }] }),
+    { provider: "haarness", model: "other" },
+  );
+  assert.deepEqual(
+    selectModel({ ...base, providers, unpaid: ["haarness"], defaultProvider: "haarness", defaultModel: "other" }),
+    { provider: "haarness", model: "other" },
+  );
+  assert.deepEqual(
+    selectModel({ ...base, providers, unpaid: ["haarness"], explicit: { provider: "haarness", model: "other" } }),
+    { provider: "haarness", model: "other" },
+  );
+  // Cloud alone stays the choice.
+  assert.deepEqual(selectModel({ ...base, providers: [provider("haarness")], unpaid: ["haarness"] }), {
+    provider: "haarness",
+    model: "preferred",
+  });
+});

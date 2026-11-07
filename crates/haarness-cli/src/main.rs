@@ -6668,9 +6668,41 @@ async fn default_run_model_client(
         );
         return Ok((chosen != configured).then_some(chosen));
     }
-    haarness_tui::default_connected_model(&providers)
+    automatic_run_model(&providers, cloud_can_pay)
+        .await
         .map(Some)
         .context(NO_MODEL_CONNECTED)
+}
+
+/// The model a run takes when nothing names one: the terminal UI's choice,
+/// passing over a Haarness Cloud account that cannot pay (every request
+/// would be refused) while another connected provider can answer. Whether
+/// it can pay is asked only when that choice depends on it.
+async fn automatic_run_model<F: std::future::Future<Output = bool>>(
+    providers: &[haarness_protocol::ProviderInfo],
+    can_pay: impl FnOnce() -> F,
+) -> Option<(String, String)> {
+    let chosen = haarness_tui::default_connected_model(providers)?;
+    let without_cloud = haarness_tui::default_model_for(providers, false);
+    if chosen.0 == "haarness" && without_cloud.as_ref() != Some(&chosen) && !can_pay().await {
+        return without_cloud;
+    }
+    Some(chosen)
+}
+
+/// Whether the signed-in Haarness Cloud account can pay, from its billing
+/// summary; signed out, or with billing unreadable within 5 s, it counts as
+/// able, as before.
+async fn cloud_can_pay() -> bool {
+    let Ok(client) = haarness_account::Config::from_env().and_then(haarness_account::Client::new)
+    else {
+        return true;
+    };
+    tokio::time::timeout(Duration::from_secs(5), client.billing_summary())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_none_or(|state| state.cloud_can_pay())
 }
 
 /// The provider and model `--provider`/`--model` name, checked against the
@@ -15352,9 +15384,9 @@ mod tests {
     };
     use super::{
         Approver, NO_MODEL_CONNECTED, Refusals, RunWatch, TurnStatus, allow_rule_example,
-        auto_review_line, default_run_model_client, describe_permission, discard_refused_chat,
-        printed_request, refusal_feedback, requested_run_model, review_note, run_attachments,
-        run_tree, wait_for_turn_client,
+        auto_review_line, automatic_run_model, default_run_model_client, describe_permission,
+        discard_refused_chat, printed_request, refusal_feedback, requested_run_model, review_note,
+        run_attachments, run_tree, wait_for_turn_client,
     };
     use super::{
         HashMap, merge_file_config, provider_instances, stream_limits,
@@ -18058,6 +18090,63 @@ request_timeout = 0
             chosen(None, Some("haarness-cloud/openai/gpt-6-sol")),
             Err("Haarness Cloud is not connected. Sign in with `haarness login`, then run this again.".into())
         );
+    }
+
+    /// A run's automatic model passes over a Haarness Cloud account that
+    /// cannot pay for another connected provider, asks about billing only
+    /// when the choice depends on it, and keeps Cloud when nothing else can
+    /// answer.
+    #[tokio::test]
+    async fn a_run_passes_over_a_cloud_account_that_cannot_pay() {
+        let provider = |id: &str, model: &str| ProviderInfo {
+            id: id.into(),
+            name: id.into(),
+            authenticated: true,
+            models: vec![haarness_protocol::ModelInfo {
+                id: model.into(),
+                display_name: model.into(),
+                reasoning: false,
+                reasoning_efforts: Vec::new(),
+                images: false,
+                video: false,
+                tools: true,
+                context_window: None,
+                max_output_tokens: None,
+                pricing: None,
+            }],
+        };
+        let cloud = provider("haarness", "openai/gpt-6.1-sol");
+        let ollama = provider("ollama", "qwen3:8b");
+        let both = [cloud.clone(), ollama.clone()];
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let answer = |pays: bool| {
+            let asked = &asked;
+            move || async move {
+                asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                pays
+            }
+        };
+        assert_eq!(
+            automatic_run_model(&both, answer(false)).await,
+            Some(("ollama".into(), "qwen3:8b".into()))
+        );
+        assert_eq!(
+            automatic_run_model(&both, answer(true)).await,
+            Some(("haarness".into(), "openai/gpt-6.1-sol".into()))
+        );
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // Cloud alone: kept, and billing is not asked.
+        assert_eq!(
+            automatic_run_model(std::slice::from_ref(&cloud), answer(false)).await,
+            Some(("haarness".into(), "openai/gpt-6.1-sol".into()))
+        );
+        // Another provider chosen anyway: billing is not asked either.
+        let openai = provider("openai", "gpt-6.1-sol");
+        assert_eq!(
+            automatic_run_model(&[cloud, openai], answer(false)).await,
+            Some(("openai".into(), "gpt-6.1-sol".into()))
+        );
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

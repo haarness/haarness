@@ -17,6 +17,7 @@ import { useApp } from "./state";
 import { Button, confirm, dismissOnBackdrop, Empty, Icon } from "./ui";
 import { cancelled } from "./error-text";
 import { parseModel, selectModel } from "./model-selection";
+import { unpaidProviders } from "./cloud-billing";
 import {
   describeSchedule,
   triggerArgs,
@@ -166,6 +167,7 @@ function ScheduleForm(props: {
       defaultModel: app.state.connection?.info.defaultModel,
       recent: app.state.modelRecents,
       threads: app.state.threads,
+      unpaid: unpaidProviders(app.state.connection?.remote),
     });
   const initialModel =
     item?.model ??

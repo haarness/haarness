@@ -435,6 +435,9 @@ impl ModelProvider for Limited {
     async fn refresh_models(&self, force: bool) {
         self.inner.refresh_models(force).await;
     }
+    fn can_pay(&self) -> bool {
+        self.inner.can_pay()
+    }
     async fn check_api_key(&self, key: &str) -> haarness_core::KeyCheck {
         self.inner.check_api_key(key).await
     }

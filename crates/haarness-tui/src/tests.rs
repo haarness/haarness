@@ -24876,6 +24876,164 @@ fn a_new_cloud_account_is_told_how_to_start_before_its_first_prompt() {
     assert!(!home(&app, 100).contains("Haarness Cloud credits"));
 }
 
+/// A Haarness Cloud account that cannot pay refuses every request: the
+/// automatic model comes from another connected provider that can answer,
+/// Cloud stays the choice when it is the only one, and it comes back as soon
+/// as the account can pay, while nobody has used the chat or picked a model.
+#[tokio::test]
+async fn the_automatic_model_follows_whether_the_cloud_account_can_pay() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let model = |id: &str| haarness_protocol::ModelInfo {
+        id: id.into(),
+        display_name: id.into(),
+        reasoning: false,
+        reasoning_efforts: Vec::new(),
+        images: false,
+        video: false,
+        tools: true,
+        context_window: None,
+        max_output_tokens: None,
+        pricing: None,
+    };
+    let provider = |id: &str, models: &[&str]| ProviderInfo {
+        id: id.into(),
+        name: id.into(),
+        authenticated: true,
+        models: models.iter().map(|id| model(id)).collect(),
+    };
+    let cloud = provider("haarness", &["openai/gpt-6.1-sol"]);
+    let ollama = provider("ollama", &["qwen3:8b"]);
+    let unpaid = |can_pay: bool| -> haarness_account::billing::State {
+        serde_json::from_value(serde_json::json!({
+            "loggedIn": true, "error": null, "summary": {
+                "accountId": "a", "accountName": "Sam Rivera", "plan": if can_pay { "trial" } else { "No plan" },
+                "subscriptionStatus": null, "accountStatus": "active",
+                "includedCredits": if can_pay { "2000.000000" } else { "0.000000" },
+                "purchasedCredits": "0.000000", "heldCredits": "0", "cloudUnits": "0.00", "cloudUnitsHeld": "0.00",
+                "cancelAtPeriodEnd": false, "overageOptIn": false, "trialAvailable": !can_pay,
+                "billingUrl": "https://haarness.ai/app/billing", "usageUrl": "https://haarness.ai/app/billing/usage"
+            }
+        }))
+        .unwrap()
+    };
+
+    // The rule itself.
+    let both = vec![cloud.clone(), ollama.clone()];
+    assert_eq!(
+        crate::state::default_model_for(&both, false),
+        Some(("ollama".into(), "qwen3:8b".into()))
+    );
+    assert_eq!(
+        crate::state::default_model_for(&both, true),
+        Some(("haarness".into(), "openai/gpt-6.1-sol".into()))
+    );
+    assert_eq!(
+        crate::state::default_model_for(std::slice::from_ref(&cloud), false),
+        Some(("haarness".into(), "openai/gpt-6.1-sol".into())),
+        "Cloud alone stays the default"
+    );
+    let mut silent = ollama.clone();
+    silent.models.clear();
+    assert_eq!(
+        crate::state::default_model_for(&[cloud.clone(), silent], false),
+        Some(("haarness".into(), "openai/gpt-6.1-sol".into())),
+        "a provider with no model to answer is no alternative"
+    );
+
+    // A server that gives the chat whichever model it is asked for.
+    let thread = Thread {
+        provider: "haarness".into(),
+        model: "openai/gpt-6.1-sol".into(),
+        ..fixture_thread()
+    };
+    let template = serde_json::to_value(&thread).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            let body_at = loop {
+                let read = socket.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break request.len();
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break end + 4;
+                }
+            };
+            let mut answer = template.clone();
+            if request.starts_with(b"PATCH /v1/threads/") {
+                let asked: serde_json::Value =
+                    serde_json::from_slice(&request[body_at..]).unwrap_or_default();
+                answer["provider"] = asked["provider"].clone();
+                answer["model"] = asked["model"].clone();
+            }
+            let body = answer.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let client = crate::api::ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], both, vec![]);
+    app.auto_model = Some((thread.id, thread.provider.clone(), thread.model.clone()));
+
+    // Billing says the account cannot pay: the chat moves to Ollama.
+    app.billing = unpaid(false);
+    app.follow_automatic_model(&client).await;
+    assert_eq!(
+        (app.thread.provider.as_str(), app.thread.model.as_str()),
+        ("ollama", "qwen3:8b")
+    );
+    // The trial starts: Cloud comes back, without a restart.
+    app.billing = unpaid(true);
+    app.follow_automatic_model(&client).await;
+    assert_eq!(
+        (app.thread.provider.as_str(), app.thread.model.as_str()),
+        ("haarness", "openai/gpt-6.1-sol")
+    );
+    // A model picked on purpose is kept.
+    app.auto_model = None;
+    app.billing = unpaid(false);
+    app.follow_automatic_model(&client).await;
+    assert_eq!(app.thread.provider, "haarness");
+    // So is the model of a chat already used.
+    app.auto_model = Some((thread.id, thread.provider.clone(), thread.model.clone()));
+    app.items = vec![Item {
+        id: ItemId::new(),
+        thread_id: thread.id,
+        turn_id: None,
+        sequence: 1,
+        data: ItemData::UserMessage {
+            text: "hi".into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+            command_line: None,
+        },
+        created_at: Utc::now(),
+    }];
+    app.follow_automatic_model(&client).await;
+    assert_eq!(app.thread.provider, "haarness");
+    assert!(app.auto_model.is_none());
+    server.abort();
+}
+
 /// A model list that came after the first frame (Haarness Cloud, or an
 /// endpoint that lists its models only when asked, on a slow network): the
 /// TUI said it was loading models, not that nothing is connected, and the

@@ -14913,9 +14913,10 @@ fn resolve_definition_model(
 /// names both, from the providers' lists as they are now: for a provider
 /// alone, its first model that can use tools; for a model alone, the
 /// provider that lists it; for neither, the first connected provider's
-/// first model that can use tools (OpenAI, Anthropic and Gemini before the
-/// rest, as the clients choose), else the first listed provider's. `None`
-/// when no list has one.
+/// first model that can use tools (one whose account can pay before one
+/// whose account cannot, then OpenAI, Anthropic and Gemini before the rest,
+/// as the clients choose), else the first listed provider's. `None` when no
+/// list has one.
 fn catalog_default_model(
     registry: &dyn ProviderRegistry,
     provider: Option<&str>,
@@ -14936,10 +14937,23 @@ fn catalog_default_model(
         return Some((provider.to_owned(), model));
     }
     let mut listed = registry.list();
+    // A provider whose account cannot pay refuses every request: it is the
+    // default only when no other connected provider can answer.
+    let unpaid: HashSet<String> = listed
+        .iter()
+        .filter(|info| {
+            info.authenticated
+                && registry
+                    .get(&info.id)
+                    .is_some_and(|provider| !provider.can_pay())
+        })
+        .map(|info| info.id.clone())
+        .collect();
     // Stable: equal ranks keep the registry's order.
     listed.sort_by_key(|info| {
         (
             !info.authenticated,
+            unpaid.contains(&info.id),
             match info.id.as_str() {
                 "openai" => 0,
                 "anthropic" => 1,
@@ -19181,6 +19195,106 @@ mod tests {
             max_output_tokens: None,
             pricing: None,
         }
+    }
+
+    /// A new chat with no model configured takes a provider whose account
+    /// can pay: a signed-in Haarness Cloud account with no credit that can
+    /// pay gives way to any other connected provider, such as a model Ollama
+    /// runs here, and is still the default when nothing else is connected.
+    #[test]
+    fn the_automatic_model_passes_over_an_account_that_cannot_pay() {
+        struct Fake {
+            id: &'static str,
+            models: Vec<&'static str>,
+            authenticated: bool,
+            pays: std::sync::atomic::AtomicBool,
+        }
+        #[async_trait::async_trait]
+        impl crate::ModelProvider for Fake {
+            fn id(&self) -> &str {
+                self.id
+            }
+            fn info(&self) -> haarness_protocol::ProviderInfo {
+                haarness_protocol::ProviderInfo {
+                    id: self.id.into(),
+                    name: self.id.into(),
+                    authenticated: self.authenticated,
+                    models: self
+                        .models
+                        .iter()
+                        .map(|id| model_info(id, 200_000))
+                        .collect(),
+                }
+            }
+            fn can_pay(&self) -> bool {
+                self.pays.load(std::sync::atomic::Ordering::SeqCst)
+            }
+            async fn stream(
+                &self,
+                _: crate::ProviderRequest,
+                _: tokio_util::sync::CancellationToken,
+            ) -> crate::CoreResult<crate::ProviderStream> {
+                Err(CoreError::Provider("not used".into()))
+            }
+        }
+        /// Lists its providers by id, as the native registry does.
+        struct Sorted(super::StaticProviderRegistry);
+        impl crate::ProviderRegistry for Sorted {
+            fn get(&self, id: &str) -> Option<Arc<dyn crate::ModelProvider>> {
+                self.0.get(id)
+            }
+            fn list(&self) -> Vec<haarness_protocol::ProviderInfo> {
+                let mut listed = self.0.list();
+                listed.sort_by(|a, b| a.id.cmp(&b.id));
+                listed
+            }
+        }
+        let fake = |id, models: &[&'static str], authenticated, pays| {
+            Arc::new(Fake {
+                id,
+                models: models.to_vec(),
+                authenticated,
+                pays: std::sync::atomic::AtomicBool::new(pays),
+            })
+        };
+        let cloud = fake("haarness", &["openai/gpt-6.1-sol"], true, false);
+        let ollama = fake("ollama", &["qwen3:8b"], true, true);
+        let anthropic = fake("anthropic", &["claude-sonnet-5-5"], false, true);
+        let registry = Sorted(super::StaticProviderRegistry::new(vec![
+            cloud.clone() as Arc<dyn crate::ModelProvider>,
+            ollama.clone(),
+            anthropic.clone(),
+        ]));
+        assert_eq!(
+            super::catalog_default_model(&registry, None, None),
+            Some(("ollama".into(), "qwen3:8b".into()))
+        );
+        // A configured provider or model is kept: only the automatic choice moves.
+        assert_eq!(
+            super::catalog_default_model(&registry, Some("haarness"), None),
+            Some(("haarness".into(), "openai/gpt-6.1-sol".into()))
+        );
+        assert_eq!(
+            super::catalog_default_model(&registry, None, Some("openai/gpt-6.1-sol")),
+            Some(("haarness".into(), "openai/gpt-6.1-sol".into()))
+        );
+        // Once the account can pay, Cloud has its usual place again.
+        cloud.pays.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            super::catalog_default_model(&registry, None, None),
+            Some(("haarness".into(), "openai/gpt-6.1-sol".into()))
+        );
+        // Nothing else connected: Cloud stays the default, and its refusal
+        // says how to start.
+        cloud.pays.store(false, std::sync::atomic::Ordering::SeqCst);
+        let alone = Sorted(super::StaticProviderRegistry::new(vec![
+            cloud as Arc<dyn crate::ModelProvider>,
+            anthropic,
+        ]));
+        assert_eq!(
+            super::catalog_default_model(&alone, None, None),
+            Some(("haarness".into(), "openai/gpt-6.1-sol".into()))
+        );
     }
 
     #[test]

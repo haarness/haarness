@@ -3927,9 +3927,24 @@ pub fn listed_default_model(
 }
 
 pub fn default_connected_model(providers: &[ProviderInfo]) -> Option<(String, String)> {
+    default_model_for(providers, true)
+}
+
+/// [`default_connected_model`] knowing whether the Haarness Cloud account can
+/// pay (`haarness_account::billing::State::cloud_can_pay`): one that cannot
+/// refuses every request, so it gives way to any other connected provider
+/// with a model to answer, and stays the choice when there is none.
+pub fn default_model_for(
+    providers: &[ProviderInfo],
+    cloud_can_pay: bool,
+) -> Option<(String, String)> {
+    let elsewhere = !cloud_can_pay
+        && providers.iter().any(|provider| {
+            provider.id != "haarness" && provider.authenticated && !provider.models.is_empty()
+        });
     providers
         .iter()
-        .filter(|provider| provider.authenticated)
+        .filter(|provider| provider.authenticated && !(elsewhere && provider.id == "haarness"))
         .min_by_key(|provider| match provider.id.as_str() {
             "openai" => 0,
             "anthropic" => 1,

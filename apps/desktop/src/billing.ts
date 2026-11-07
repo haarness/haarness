@@ -41,6 +41,19 @@ export type BillingState = {
   } | null;
 };
 
+/** Whether Haarness Cloud models can be paid for, as far as `state` says: false only for a signed-in account
+ * whose summary shows no credit that can pay (nothing included left, and purchased credits none, waiting on
+ * overage or on hold), or that is not active. Signed out or still loading, nothing is known. */
+export function cloudCanPay(state: BillingState): boolean {
+  const s = state.summary;
+  if (!state.loggedIn || !s) return true;
+  const some = (value: string) => /[1-9]/.test(value);
+  return (
+    s.accountStatus === "active" &&
+    (some(s.includedCredits) || (s.overageOptIn && !s.purchasedFrozen && some(s.purchasedCredits)))
+  );
+}
+
 /** Round down at the display boundary so tiny balances never become overspendable. */
 export function credits(value: string): string {
   const match = /^(\d+)(?:\.(\d+))?$/.exec(value);

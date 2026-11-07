@@ -5044,6 +5044,9 @@ impl App {
     }
 
     pub async fn set_model(&mut self, model: &str, client: &ApiClient) -> Result<()> {
+        // A model given on purpose is kept: the automatic choice no longer
+        // follows the lists or the Cloud account's billing for this chat.
+        self.auto_model = None;
         let Some((provider, model)) = model.split_once('/') else {
             self.notice = "Use /models or /models provider/model".into();
             return Ok(());
