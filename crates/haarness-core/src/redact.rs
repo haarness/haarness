@@ -589,14 +589,29 @@ pub fn text(text: &str) -> String {
     const KEYS: &str = r"token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth|cookie|credential|session";
     // A quoted value, or one written as Rust's `{:?}` writes `Some("…")`.
     const VALUE: &str = r#"Some\("(?:[^"\\\r\n]|\\.)*"?\)?|"[^"\r\n]*"?|'[^'\r\n]*'?"#;
+    // A quoted value written against its option (`-p'…'`): the quote opens
+    // on what it holds, never on a blank, which a quote that closes the text
+    // around the option (`cmd="mysql -p" detail="…"`) is followed by.
+    const GLUED: &str = r#"Some\("(?:[^"\\\r\n]|\\.)*"?\)?|"[^"\s][^"\r\n]*"?|'[^'\s][^'\r\n]*'?"#;
     // Where a program stands in a command line: at its start, after `;`,
     // `&`, `|`, `(`, `{`, `!`, a backquote, `$(`, a quote, `:` (as in a
     // logged `bash:…`), two blanks (a logged request names its commands
-    // apart with them) or a lone `--`, past the assignments and wrappers
-    // before it (`sudo -u x`, `env`, `timeout 5`, `nice -n 5`, `docker exec
-    // -it <container>` …) and the program's folder. Never a word's value,
-    // such as `--name mysql`.
-    const AT: &str = r#"((?:^|[;&|(){}`!\n]|\$\(|["':]|[ \t]{2}|[ \t]--[ \t])[ \t]*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|(?:sudo|doas|env|nohup|nice|time|exec|command|builtin|xargs|stdbuf|caffeinate|setsid|ionice|chrt|taskset)(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*|g?timeout(?:[ \t]+-[^\s;&|]+)*[ \t]+[^\s;&|]+|(?:docker|podman|nerdctl)[ \t]+exec(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*[ \t]+[^\s;&|-][^\s;&|]*)[ \t]+)*(?:[^\s;&|'"]*/)?)"#;
+    // apart with them) or a lone `--`, past the assignments, the shell's
+    // words that open a command (`if`, `do`, `then` …) and the wrappers
+    // before it (`sudo -u x`, `env`, `timeout 5`, `nice -n 5`, `watch -n 5`,
+    // `docker exec -it <container>`, `docker compose run <service>`,
+    // `docker run <image>`, `ssh <host>` …), each from any folder, and the
+    // program's folder. Never a word's value, such as `--name mysql`.
+    const AT: &str = concat!(
+        r#"((?:^|[;&|(){}`!\n]|\$\(|["':]|[ \t]{2}|[ \t]--[ \t])[ \t]*(?:(?:"#,
+        r#"[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|if|then|else|elif|do|while|until|(?:[^\s;&|'"]*/)?(?:"#,
+        r#"(?:sudo|doas|env|nohup|nice|time|exec|command|builtin|xargs|stdbuf|caffeinate|setsid|ionice|chrt|taskset|watch)(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*"#,
+        r#"|g?timeout(?:[ \t]+-[^\s;&|]+)*[ \t]+[^\s;&|]+"#,
+        r#"|(?:(?:docker|podman|nerdctl)(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*(?:[ \t]+(?:compose|container))?|docker-compose|podman-compose)"#,
+        r#"(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*[ \t]+(?:exec|run)(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*[ \t]+[^\s;&|-][^\s;&|]*"#,
+        r#"|ssh(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*[ \t]+[^\s;&|-][^\s;&|]*"#,
+        r#"))[ \t]+)*(?:[^\s;&|'"]*/)?)"#,
+    );
     // One word of a command, its quotes whole: a `;`, `|` or `&` in quotes
     // does not end the command.
     const WORD: &str = r#"(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|"'])+"#;
@@ -627,13 +642,14 @@ pub fn text(text: &str) -> String {
             // 7-Zip's `-pPASSWORD` is written in one word: a bare `-p`
             // prompts for it, and `-P` is a port.
             (
-                format!(r#"{AT}(?i:(mysql[a-z]*|mariadb(?:-[a-z]+)?|7z[a-z]?))((?:[ \t]+{WORD})*?[ \t]+-p)({VALUE}|[^\s"',;&|]+)"#),
+                format!(r#"{AT}(?i:(mysql[a-z]*|mariadb(?:-[a-z]+)?|7z[a-z]?))((?:[ \t]+{WORD})*?[ \t]+-p)({GLUED}|[^\s"',;&|]+)"#),
                 "${1}${2}${3}[redacted]",
             ),
-            // `docker login -p PASSWORD` and `az login -p`, but not `docker
-            // run -p 8080:80`: `login` is the command's subcommand.
+            // `docker login -p PASSWORD`, `az login -p` and `az acr login
+            // -p`, but not `docker run -p 8080:80`: `login` is the command's
+            // subcommand.
             (
-                format!(r#"{AT}(?i:(docker|podman|nerdctl|buildah|skopeo|helm|oc|cf|az)\b)((?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*[ \t]+(?:registry[ \t]+)?login\b(?:[ \t]+{WORD})*?[ \t]+-p(?:[ \t]+|=)?)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
+                format!(r#"{AT}(?i:(docker|podman|nerdctl|buildah|skopeo|helm|oc|cf|az)\b)((?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*[ \t]+(?:(?:registry|acr)[ \t]+)?login\b(?:[ \t]+{WORD})*?[ \t]+-p(?:[ \t]+|=)?)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
                 "${1}${2}${3}[redacted]",
             ),
             // `redis-cli -a PASSWORD`, `sqlcmd -P PASSWORD`, `zip -P
@@ -2133,6 +2149,58 @@ mod tests {
                 "ldapsearch -x -D cn=admin -w PRIVATE -b dc=x",
                 "ldapsearch -x -D cn=admin -w [redacted] -b dc=x",
             ),
+            // Where else a program stands: in a compose service, a new
+            // container, on another computer, under `watch`, behind a
+            // wrapper's folder, after the shell's words.
+            (
+                "docker compose exec db mysql -uroot -pPRIVATE",
+                "docker compose exec db mysql -uroot -p[redacted]",
+            ),
+            (
+                "docker compose -f dev.yml run --rm db mysql -pPRIVATE",
+                "docker compose -f dev.yml run --rm db mysql -p[redacted]",
+            ),
+            (
+                "docker-compose exec -T db mysqldump -pPRIVATE app",
+                "docker-compose exec -T db mysqldump -p[redacted] app",
+            ),
+            (
+                "docker run --rm -it mysql:8 mysql -h db -pPRIVATE",
+                "docker run --rm -it mysql:8 mysql -h db -p[redacted]",
+            ),
+            (
+                "docker run --rm -e A=1 redis redis-cli -h cache -a PRIVATE",
+                "docker run --rm -e A=1 redis redis-cli -h cache -a [redacted]",
+            ),
+            ("ssh db1 mysql -pPRIVATE", "ssh db1 mysql -p[redacted]"),
+            (
+                "ssh -p 2222 -i key sam@db1 mysql -pPRIVATE",
+                "ssh -p 2222 -i key sam@db1 mysql -p[redacted]",
+            ),
+            (
+                "watch -n 5 mysql -pPRIVATE -e 'show processlist'",
+                "watch -n 5 mysql -p[redacted] -e 'show processlist'",
+            ),
+            (
+                "/usr/bin/env mysql -pPRIVATE",
+                "/usr/bin/env mysql -p[redacted]",
+            ),
+            (
+                "az acr login -n reg -u sam -p PRIVATE",
+                "az acr login -n reg -u sam -p [redacted]",
+            ),
+            (
+                "if mysql -pPRIVATE -e 'select 1'; then echo up; fi",
+                "if mysql -p[redacted] -e 'select 1'; then echo up; fi",
+            ),
+            (
+                "for d in a b; do mysqldump -pPRIVATE $d > $d.sql; done",
+                "for d in a b; do mysqldump -p[redacted] $d > $d.sql; done",
+            ),
+            (
+                "until mysqladmin ping -pPRIVATE; do sleep 1; done",
+                "until mysqladmin ping -p[redacted]; do sleep 1; done",
+            ),
         ] {
             assert_eq!(text(input), output, "{input}");
             assert_eq!(text(output), output, "{output}");
@@ -2170,6 +2238,14 @@ mod tests {
             "7z a -p x.7z dir",
             "ldapsearch -x -W -D cn=admin",
             "gzip -P x",
+            "ssh -p 2222 mysql",
+            "docker run --rm -p 3306:3306 mysql:8",
+            "docker compose run --rm -p 8080:80 web",
+            "watch -n 5 ls",
+            "if true; then mysql -p app; fi",
+            "for f in a; do echo -p; done",
+            // A bare `-p` before the quote that closes the text around it.
+            "cmd=\"mysql -p\" exit=1 detail=\"Access denied\"",
         ] {
             assert_eq!(text(kept), kept);
         }

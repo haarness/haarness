@@ -3,8 +3,8 @@
 in a server's URL or command arguments, while the rest stays readable. Nor do a failed marketplace
 clone, a remote instruction URL that cannot be reached, or the log line of a request Auto approved or
 one waiting for a person, database and registry passwords given as options (`mysql -p…`, `docker
-login -p`, `redis-cli -a`, `sqlcmd -P`, `mongosh -p`, `az login -p`, `unzip -P`) included, while a
-container's published port beside `--name mongo` stays.
+login -p`, `redis-cli -a`, `sqlcmd -P`, `mongosh -p`, `az login -p`, `unzip -P`) included, also in a
+compose service, over ssh or under watch, while a container's published port beside `--name mongo` stays.
 An MCP entry's `${TOKEN}` reference reaches its server resolved once and stays in the file through
 `haarness mcp disable/enable`, which write only the flag, in the entry's own (opencode) shape. A
 headersHelper's `${VAR}` holding `$(…)` reaches the server as text and never runs. `haarness mcp auth
@@ -27,7 +27,8 @@ SECRETS = ['hunter2', 'fixture-url-secret', 'fixture-arg-secret', 'fixture-flag-
            'fixture-clone-secret', 'fixture-instruction-secret', 'fixture-command-secret',
            'fixture-review-secret', 'fixture-inner-secret', 'fixture-at', 'fixture-proxy-secret',
            'fixture-mysql-secret', 'fixture-docker-secret', 'fixture-redis-secret', 'fixture-sqlcmd-secret',
-           'fixture-mongo-secret', 'fixture-az-secret', 'fixture-zip-secret']
+           'fixture-mongo-secret', 'fixture-az-secret', 'fixture-zip-secret', 'fixture-compose-secret',
+           'fixture-ssh-secret', 'fixture-watch-secret']
 
 # A remote MCP server that wants OAuth and offers a `file:` sign-in link, and one that writes down the
 # headers its client sent.
@@ -288,8 +289,13 @@ try:
                                      'sqlcmd -S db -U sa -P fixture-sqlcmd-secret; mongosh -u sam -p fixture-mongo-secret'})
     more = json.dumps({'command': 'az login -u id -p fixture-az-secret; unzip -P fixture-zip-secret x.zip; '
                                   'docker run -d --name mongo -p 27017:27017 mongo:7'})
+    # Also where the client runs in a container, on another computer or under watch.
+    placed = json.dumps({'command': 'docker compose exec db mysql -uroot -pfixture-compose-secret app; '
+                                    'ssh db1 mysqldump -pfixture-ssh-secret app; '
+                                    'watch -n 5 mysql -pfixture-watch-secret -e status'})
     for title, line, logged in [('Clients log', clients, 'mysql -u root -p[redacted] app'),
-                                ('More clients log', more, 'az login -u id -p [redacted]')]:
+                                ('More clients log', more, 'az login -u id -p [redacted]'),
+                                ('Placed clients log', placed, 'docker compose exec db mysql -uroot -p[redacted] app')]:
         clients_chat = api('/threads', {'title': title, 'provider': 'echo', 'model': 'echo-1', 'agent': 'build'})['id']
         api(f'/threads/{clients_chat}/turns', {'requestId': str(uuid.uuid4()), 'text': f'!tool bash {line}'})
         waiting = until(lambda: [item for item in api('/permissions') if item['threadId'] == clients_chat],
@@ -300,8 +306,10 @@ try:
     clean(logs(), 'daemon log')
     assert 'redis-cli -h cache -p 6379 -a [redacted] ping' in logs(), 'redis-cli was not logged with its port shown and only its password hidden'
     assert '--name mongo -p 27017:27017 mongo:7' in logs(), "a container's published port was hidden"
+    assert 'watch -n 5 mysql -p[redacted] -e status' in logs(), 'mysql under watch was not logged with its password hidden'
     check('the log hides the passwords of mysql -p, docker login -p, redis-cli -a, sqlcmd -P, mongosh -p, az login -p '
-          'and unzip -P, and keeps a port beside a container named mongo')
+          'and unzip -P, also in a compose service, over ssh and under watch, and keeps a port beside a container '
+          'named mongo')
     assert 'skipped remote instructions http://<redacted>@127.0.0.1:9/rules.md?token=<redacted>' in logs(), \
         'no redacted notice for the unreachable instruction URL'
     check('an unreachable instruction URL is logged without its credentials')
