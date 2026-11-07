@@ -1586,7 +1586,8 @@ impl Copies {
         let target = set.join(&entry.hash);
         let partial = set.join(format!(".{}.partial", uuid::Uuid::now_v7()));
         let copied = fs::copy(source, &partial)
-            .and_then(|_| OpenOptions::new().write(true).open(&partial)?.sync_all())
+            .and_then(|_| owner_writable(&partial))
+            .and_then(|()| OpenOptions::new().write(true).open(&partial)?.sync_all())
             .map_err(|_| NotKept::Full)
             .and_then(|()| match hash_file(&partial) {
                 Ok((hash, size)) if hash == entry.hash && size == entry.size => Ok(()),
@@ -1732,6 +1733,23 @@ impl Copies {
             tracing::warn!(path = %set.display(), %error, "cannot drop undo copies");
         }
     }
+}
+
+/// Let only the owner read and write the copy `path`: a copy keeps its
+/// file's mode, and one of a read-only file could neither be flushed nor be
+/// copied back from.
+#[cfg(unix)]
+fn owner_writable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::permissions_set_readonly_false)] // no mode bits for others off Unix
+fn owner_writable(path: &Path) -> std::io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
 }
 
 /// Flush `folder`'s entries, so a file renamed into it stays after a crash.
@@ -3455,6 +3473,44 @@ mod tests {
         assert_eq!(read("big.bin"), Some(edited));
         assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
         assert_eq!(copies_of(&store, &backup), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_only_large_file_is_copied_and_comes_back_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let mode = |path: &str| {
+            fs::metadata(workspace.join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap().id;
+        fs::write(workspace.join("made.bin"), large(1)).unwrap();
+        fs::set_permissions(
+            workspace.join("made.bin"),
+            fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+
+        let undone = step(&store, &backup, &backup, &before, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert!(undone.skipped.is_empty(), "{undone:?}");
+        assert!(!workspace.join("made.bin").exists());
+        assert_eq!(copies_of(&store, &backup), 1);
+        let redone = step(&store, &backup, &before, &backup, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert!(redone.skipped.is_empty(), "{redone:?}");
+        assert_eq!(fs::read(workspace.join("made.bin")).unwrap(), large(1));
+        assert_eq!(mode("made.bin"), 0o444);
     }
 
     /// One step of the undo backed up by `backup`.
