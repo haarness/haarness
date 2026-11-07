@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use haarness_core::{CoreError, CoreResult};
+use haarness_core::{CoreError, CoreResult, ProviderMessage};
 
 /// Shared inline media cap. Adapters with a smaller request envelope (Gemini)
 /// retain their own aggregate budget for base64, JSON and conversation text.
@@ -36,6 +36,98 @@ impl LoadedMedia {
     pub fn is_video(&self) -> bool {
         self.mime_type.starts_with("video/")
     }
+}
+
+/// What a request does with media its model can't take in, by where the
+/// media is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unreadable<'a> {
+    /// In the person's newest message, which nothing has answered yet: the
+    /// request is refused, naming the model, so they can send the message
+    /// without the file or switch models.
+    Refuse(&'a str),
+    /// With an earlier message, perhaps sent to a model that took it: a
+    /// one-line note stands in for it, so one file does not fail every later
+    /// turn.
+    Earlier,
+    /// From a tool: a note too, and the model goes on without the file.
+    FromTool,
+}
+
+impl<'a> Unreadable<'a> {
+    /// How media in the message at `index` is treated; `newest` is what
+    /// [`newest_unanswered`] found. `model` names the model to the person.
+    pub(crate) fn at(index: usize, newest: Option<usize>, model: &'a str) -> Self {
+        if newest == Some(index) {
+            Self::Refuse(model)
+        } else {
+            Self::Earlier
+        }
+    }
+
+    /// The text that stands in for `item`, or the refusal.
+    pub(crate) fn stand_in(self, item: &LoadedMedia) -> CoreResult<String> {
+        let name = &item.filename;
+        let (kind, verb) = if item.is_image() {
+            ("Image", "shows")
+        } else if item.is_audio() {
+            ("Audio", "says")
+        } else if item.is_video() {
+            ("Video", "shows")
+        } else {
+            ("File", "holds")
+        };
+        // Only a file that came with a message may have reached another model
+        // before; "this model" would read as if none had.
+        let earlier = if !matches!(self, Self::Earlier) {
+            ""
+        } else if item.is_audio() {
+            "; earlier answers may come from a model that heard it"
+        } else if item.is_image() || item.is_video() {
+            "; earlier answers may come from a model that saw it"
+        } else {
+            "; earlier answers may come from a model that read it"
+        };
+        match self {
+            Self::Refuse(model) => Err(CoreError::Provider(if item.is_image() {
+                format!(
+                    "{model} doesn't read images. Send the message without the picture, or switch to a model that reads them."
+                )
+            } else if item.is_audio() {
+                format!(
+                    "Haarness can't send audio to {model}. Send the message without the recording, or switch to a model that takes audio."
+                )
+            } else if item.is_video() {
+                format!(
+                    "Haarness can't send video to {model}. Send the message without the video, or switch to a model that takes video."
+                )
+            } else {
+                format!(
+                    "Haarness can't send {name} to {model}. Send the message without the file, or switch to another model."
+                )
+            })),
+            Self::Earlier | Self::FromTool if item.is_image() => Ok(format!(
+                "[Image {name} is not shown to you, because you don't read images. Don't guess what it shows{earlier}.]"
+            )),
+            Self::Earlier | Self::FromTool => Ok(format!(
+                "[{kind} {name} is left out, because it can't be sent to you. Don't guess what it {verb}{earlier}.]"
+            )),
+        }
+    }
+}
+
+/// The index of the person's newest message while nothing has answered it:
+/// the only media a request refuses. Once a reply or a call follows it, the
+/// message is history, and refusing it would fail every later turn.
+pub(crate) fn newest_unanswered(messages: &[ProviderMessage]) -> Option<usize> {
+    let newest = messages.iter().rposition(|message| {
+        matches!(message, ProviderMessage::Text { role, .. } | ProviderMessage::Media { role, .. } if role == "user")
+    })?;
+    let answered = messages[newest..].iter().any(|message| {
+        matches!(message, ProviderMessage::Text { role, .. } if role == "assistant")
+            || matches!(message, ProviderMessage::ToolCall { .. })
+    });
+    (!answered).then_some(newest)
 }
 
 pub fn load_all(sources: &[String]) -> CoreResult<Vec<LoadedMedia>> {
@@ -241,6 +333,70 @@ fn default_filename(mime_type: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_message_nothing_answered_is_the_persons_newest() {
+        let text = |role: &str, content: &str| ProviderMessage::Text {
+            role: role.into(),
+            content: content.into(),
+        };
+        let recording = |content: &str| ProviderMessage::Media {
+            role: "user".into(),
+            content: content.into(),
+            attachments: vec!["data:audio/mpeg;name=clip.mp3;base64,SUQz".into()],
+        };
+        let call = ProviderMessage::ToolCall {
+            call_id: "call".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+            provider_metadata: serde_json::Value::Null,
+        };
+        let result = ProviderMessage::ToolResult {
+            call_id: "call".into(),
+            name: "read".into(),
+            output: "done".into(),
+            is_error: false,
+            attachments: Vec::new(),
+        };
+        assert_eq!(newest_unanswered(&[recording("listen")]), Some(0));
+        // A tool round answered the message: its recording is history.
+        assert_eq!(
+            newest_unanswered(&[recording("listen"), call.clone(), result.clone()]),
+            None
+        );
+        // A message steered in while a tool round ran is the newest, and
+        // nothing has answered it yet.
+        assert_eq!(
+            newest_unanswered(&[
+                text("user", "record it"),
+                call.clone(),
+                result,
+                recording("and this one")
+            ]),
+            Some(3)
+        );
+        // A compaction summary goes after the messages it kept, as a user
+        // message: it is the newest, so a recording before it is a note.
+        assert_eq!(
+            newest_unanswered(&[
+                recording("listen"),
+                text("user", "<compaction-summary>…</compaction-summary>")
+            ]),
+            Some(1)
+        );
+        // A reply of only whitespace still answered the message, though the
+        // adapters leave it out; one the chat dropped leaves the person's next
+        // message the newest.
+        assert_eq!(
+            newest_unanswered(&[recording("listen"), text("assistant", "\n\n")]),
+            None
+        );
+        assert_eq!(
+            newest_unanswered(&[recording("listen"), text("user", "and now?")]),
+            Some(1)
+        );
+        assert_eq!(newest_unanswered(&[text("assistant", "hello"), call]), None);
+    }
 
     #[test]
     fn reads_image_data_urls() {

@@ -1,6 +1,7 @@
 //! Managed models use a local account session, never a saved upstream API key.
 use crate::{
     CompatibleInstance, CompatibleModelDefaults, OpenAiCompatibleProvider, ProviderHeaders,
+    openai_compatible::ListedAudio,
 };
 use async_trait::async_trait;
 use haarness_account::{Client, Config, RouterSession};
@@ -8,6 +9,7 @@ use haarness_core::{CoreError, CoreResult, ModelProvider, ProviderRequest, Provi
 use haarness_protocol::ProviderInfo;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -19,6 +21,11 @@ pub struct HaarnessCloudProvider {
     client: Client,
     grant: Arc<Grant>,
     models: RwLock<Option<([u8; 32], Arc<crate::live_models::LiveModels>)>>,
+    /// Which listed models take audio, kept across the transports made for
+    /// each request.
+    listed_audio: ListedAudio,
+    /// How long a busy refusal is held back ([`random_busy_jitter`]).
+    busy_jitter: fn() -> Duration,
 }
 impl HaarnessCloudProvider {
     pub fn from_environment() -> Option<Self> {
@@ -26,6 +33,8 @@ impl HaarnessCloudProvider {
             client: Client::new(Config::from_env().ok()?).ok()?,
             grant: Arc::default(),
             models: RwLock::new(None),
+            listed_audio: ListedAudio::default(),
+            busy_jitter: random_busy_jitter,
         })
     }
     fn identity(&self) -> Option<[u8; 32]> {
@@ -85,7 +94,9 @@ impl HaarnessCloudProvider {
         catalog.clone()
     }
     async fn transport(&self) -> CoreResult<OpenAiCompatibleProvider> {
-        router_transport(&self.client, &self.grant).await
+        Ok(router_transport(&self.client, &self.grant)
+            .await?
+            .with_listed_audio(Arc::clone(&self.listed_audio)))
     }
 }
 
@@ -136,6 +147,23 @@ async fn router_transport(client: &Client, grant: &Grant) -> CoreResult<OpenAiCo
 /// The router's answer to a grant it no longer accepts.
 fn unauthorized(error: &CoreError) -> bool {
     matches!(error, CoreError::Provider(message) if message.starts_with("HTTP 401"))
+}
+
+/// The router's refusals for a busy key or router (see [`readable_with`]).
+fn busy(error: &CoreError) -> bool {
+    matches!(error, CoreError::Provider(message) if
+        ["[concurrency_limited]", "[router_overloaded]", "[rate_limited]"]
+            .iter()
+            .any(|code| message.contains(code)))
+}
+
+/// The most a busy refusal is held back, in milliseconds, so that agents
+/// refused together spread out their next tries.
+const BUSY_JITTER_MS: u64 = 1_000;
+
+/// A random part of [`BUSY_JITTER_MS`].
+fn random_busy_jitter() -> Duration {
+    Duration::from_millis(rand::random_range(0..BUSY_JITTER_MS))
 }
 
 fn error(e: impl std::fmt::Display) -> CoreError {
@@ -239,9 +267,48 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
             "This request could cost more than a spending limit allows. Compact or shorten the \
              conversation, or {limit}."
         )
+    } else if message.contains("[concurrency_limited]") {
+        // A sign-in runs eight requests at once (a fan-out of agents can ask
+        // for more). A slot frees when one of them finishes, which no wait
+        // foretells, so the turn backs off from 2 to 16 seconds on "Try again
+        // in a moment" whatever wait the router names: that tries sooner and
+        // waits longer than a fixed one. "rate limit" makes it a usage limit.
+        "Haarness Cloud is already running as many of your requests at once as its rate limit \
+         allows. Try again in a moment, or once another chat or agent finishes."
+            .to_owned()
+    } else if message.contains("[router_overloaded]") {
+        // The router's own limit on requests at once, across every account:
+        // the wait it names spares a router that is already full.
+        let next = advised_seconds(&message).map_or_else(
+            || "Try again in a moment.".to_owned(),
+            |seconds| format!("Please retry in {seconds}s."),
+        );
+        format!("Haarness Cloud's router is at its rate limit for requests at once. {next}")
+    } else if message.contains("[rate_limited]") {
+        // Requests a minute: the router says when the minute turns ("Please
+        // retry in 12s."), and that wait is kept.
+        let limit = message
+            .split_once("rate limit of ")
+            .map(|(_, rest)| {
+                rest.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+            })
+            .filter(|digits| !digits.is_empty())
+            .map_or_else(|| " for".to_owned(), |digits| format!(" of {digits}"));
+        let next = advised_seconds(&message).map_or_else(
+            || "Try again in a moment.".to_owned(),
+            |seconds| format!("Please retry in {seconds}s."),
+        );
+        format!("You've reached Haarness Cloud's rate limit{limit} requests a minute. {next}")
     } else if message.contains("[exposure_cap]") {
-        "Too many requests are still settling on this Haarness Cloud account. Wait a moment, \
-         then try again."
+        // The router's words name only the cap, not whether this request
+        // alone could cost more than it, and Cloud before Retry-After sent
+        // none on any of these: the advice covers both. "usage limit" lets the
+        // words read on their own, and nothing in them asks the turn to retry.
+        "Too many requests are still settling on this Haarness Cloud account, past its usage \
+         limit for requests in flight. Wait a moment, then try again; if nothing else is running, \
+         lower the output limit or shorten the conversation."
             .to_owned()
     } else if message.contains("[account_suspended]") {
         format!(
@@ -373,6 +440,8 @@ impl ModelProvider for HaarnessCloudProvider {
             .map_err(readable)?;
         let client = self.client.clone();
         let grant = Arc::clone(&self.grant);
+        let listed_audio = Arc::clone(&self.listed_audio);
+        let busy_jitter = self.busy_jitter;
         let used = grant
             .lock()
             .await
@@ -400,9 +469,21 @@ impl ModelProvider for HaarnessCloudProvider {
                         }?;
                         stream = transport
                             .with_model_info(models.clone())
+                            .with_listed_audio(Arc::clone(&listed_audio))
                             .stream(request, cancel.clone())
                             .await
                             .map_err(readable)?;
+                    }
+                    Err(failure) if busy(&failure) => {
+                        retry = None;
+                        // Agents refused together would all try again at the
+                        // same moment, and be refused together again: each
+                        // waits a random part of a second more first.
+                        tokio::select! {
+                            () = cancel.cancelled() => {}
+                            () = tokio::time::sleep(busy_jitter()) => {}
+                        }
+                        Err::<(), _>(readable(failure))?;
                     }
                     event => {
                         retry = None;
@@ -479,6 +560,8 @@ mod tests {
             client: Client::new(config.clone()).unwrap(),
             grant: Arc::default(),
             models: RwLock::new(None),
+            listed_audio: ListedAudio::default(),
+            busy_jitter: random_busy_jitter,
         });
         let refresh = || async {
             tokio::time::sleep(std::time::Duration::from_millis(1010)).await;
@@ -688,6 +771,326 @@ mod tests {
         );
     }
 
+    /// Cloud's refusal for its cap on requests in flight says the same with
+    /// or without a Retry-After (today's Cloud sends none), since its words
+    /// don't say whether this request alone is over the cap. They read as a
+    /// usage limit (`describe_error` shows them as they are) and ask for no
+    /// retry.
+    #[test]
+    fn an_exposure_cap_reads_right_on_every_cloud() {
+        let today = "HTTP 429 Too Many Requests: [exposure_cap] too many unsettled requests for this \
+                     account (cap 5000000000 nanos)";
+        for raw in [today.to_owned(), format!("{today} Please retry in 5s.")] {
+            for readable in [readable, readable_router] {
+                let CoreError::Provider(message) = readable(CoreError::Provider(raw.clone()))
+                else {
+                    panic!("still a provider error");
+                };
+                assert_eq!(
+                    message,
+                    "Too many requests are still settling on this Haarness Cloud account, past its \
+                     usage limit for requests in flight. Wait a moment, then try again; if nothing \
+                     else is running, lower the output limit or shorten the conversation.",
+                    "{raw}"
+                );
+                let lower = message.to_ascii_lowercase();
+                assert!(lower.contains("usage limit"), "{message}");
+                assert!(
+                    !["try again in a moment", "retry in", "won't help"]
+                        .iter()
+                        .any(|words| lower.contains(words)),
+                    "{message}"
+                );
+            }
+        }
+    }
+
+    /// Cloud refuses a busy key or router with a 429 of its own. The runtime
+    /// (`retry_delay`) backs off on a usage limit ("rate limit") that says to
+    /// wait ("Try again in a moment", or "Please retry in 12s" for that long),
+    /// and the words are what the person reads once the retries run out.
+    #[test]
+    fn a_busy_key_or_router_is_waited_out() {
+        let concurrency = "Haarness Cloud is already running as many of your requests at once as \
+                           its rate limit allows. Try again in a moment, or once another chat or \
+                           agent finishes.";
+        let per_minute = "You've reached Haarness Cloud's rate limit of 300 requests a minute.";
+        for (raw, expected) in [
+            (
+                "HTTP 429 Too Many Requests: [concurrency_limited] per-key concurrency limit reached",
+                concurrency.to_owned(),
+            ),
+            // When a slot frees is not known: backing off beats the router's
+            // fixed wait, which serves clients that only read Retry-After.
+            (
+                "HTTP 429 Too Many Requests: [concurrency_limited] per-key concurrency limit \
+                 reached Please retry in 5s.",
+                concurrency.to_owned(),
+            ),
+            (
+                "HTTP 429 Too Many Requests: [router_overloaded] router concurrency limit reached",
+                "Haarness Cloud's router is at its rate limit for requests at once. Try again in \
+                 a moment."
+                    .to_owned(),
+            ),
+            // A full router's own wait spares it a retry at 2 seconds.
+            (
+                "HTTP 429 Too Many Requests: [router_overloaded] router concurrency limit reached \
+                 Please retry in 17s.",
+                "Haarness Cloud's router is at its rate limit for requests at once. Please retry \
+                 in 17s."
+                    .to_owned(),
+            ),
+            (
+                "HTTP 429 Too Many Requests: [rate_limited] per-key rate limit of 300 requests \
+                 per minute reached",
+                format!("{per_minute} Try again in a moment."),
+            ),
+            // The minute's end, which the router names.
+            (
+                "HTTP 429 Too Many Requests: [rate_limited] per-key rate limit of 300 requests \
+                 per minute reached Please retry in 17s.",
+                format!("{per_minute} Please retry in 17s."),
+            ),
+            (
+                "HTTP 429 Too Many Requests: [rate_limited] slow down",
+                "You've reached Haarness Cloud's rate limit for requests a minute. Try again in \
+                 a moment."
+                    .to_owned(),
+            ),
+        ] {
+            for readable in [readable, readable_router] {
+                let CoreError::Provider(message) = readable(CoreError::Provider(raw.into())) else {
+                    panic!("still a provider error");
+                };
+                assert_eq!(message, expected, "{raw}");
+                let lower = message.to_ascii_lowercase();
+                assert!(lower.contains("rate limit"), "{message}");
+                assert!(
+                    lower.contains("try again in a moment") || lower.contains("retry in 17s"),
+                    "{message}"
+                );
+            }
+        }
+    }
+
+    /// A Cloud stand-in listing a model that says nothing of audio and one
+    /// that takes it; it answers chats, or refuses them as a busy key.
+    #[derive(Clone, Default)]
+    struct Stand {
+        url: Arc<std::sync::Mutex<String>>,
+        refusing: Arc<std::sync::atomic::AtomicBool>,
+        sent: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    /// The provider signed in to a [`Stand`], its server and its folder.
+    async fn stand_in() -> (
+        HaarnessCloudProvider,
+        Stand,
+        tokio::task::JoinHandle<()>,
+        std::path::PathBuf,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let stand = Stand::default();
+        url.clone_into(&mut stand.url.lock().unwrap());
+        let app = Router::new()
+            .route(
+                "/api/v1/account/router-session",
+                post(|State(state): State<Stand>| async move {
+                    Json(json!({"token":"grant", "routerUrl":state.url.lock().unwrap().clone(),
+                        "expiresAt":chrono::Utc::now() + chrono::Duration::hours(1)}))
+                }),
+            )
+            .route(
+                "/models",
+                get(|| async {
+                    Json(json!({"data":[
+                        {"id":"anthropic/claude-sonnet-5-5"},
+                        {"id":"openai/gpt-listens", "architecture":{"input_modalities":["text","audio"]}},
+                    ]}))
+                }),
+            )
+            .route(
+                "/chat/completions",
+                post(
+                    |State(state): State<Stand>, Json(body): Json<serde_json::Value>| async move {
+                        state.sent.lock().unwrap().push(body);
+                        if state.refusing.load(Ordering::SeqCst) {
+                            return (
+                                StatusCode::TOO_MANY_REQUESTS,
+                                Json(json!({"error":{"message":"per-key concurrency limit reached",
+                                    "type":"rate_limit_error","code":"concurrency_limited"}})),
+                            )
+                                .into_response();
+                        }
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                        )
+                            .into_response()
+                    },
+                ),
+            )
+            .with_state(stand.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let root = std::env::temp_dir().join(format!("haarness-cloud-stand-{}", uuid_for_test()));
+        let config = Config::new(&url, root.clone(), "fixture").unwrap();
+        haarness_account::credentials::save(
+            &config.path(),
+            &haarness_account::Credentials {
+                api_url: url.clone(),
+                access_token: "signed-in".into(),
+                refresh_token: "fixture".into(),
+                access_expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        )
+        .unwrap();
+        let provider = HaarnessCloudProvider {
+            client: Client::new(config).unwrap(),
+            grant: Arc::default(),
+            models: RwLock::new(None),
+            listed_audio: ListedAudio::default(),
+            busy_jitter: random_busy_jitter,
+        };
+        (provider, stand, server, root)
+    }
+
+    /// A tool round whose result is a recording.
+    fn recording(model: &str) -> ProviderRequest {
+        ProviderRequest {
+            model: model.into(),
+            system: "system".into(),
+            messages: vec![
+                haarness_core::ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "record it".into(),
+                },
+                haarness_core::ProviderMessage::ToolCall {
+                    call_id: "call".into(),
+                    name: "clip".into(),
+                    arguments: json!({}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+                haarness_core::ProviderMessage::ToolResult {
+                    call_id: "call".into(),
+                    name: "clip".into(),
+                    output: "recorded".into(),
+                    is_error: false,
+                    attachments: vec!["data:audio/mpeg;name=clip.mp3;base64,SUQz".into()],
+                },
+            ],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            output_schema: None,
+            parameters: haarness_core::RequestParameters::default(),
+        }
+    }
+
+    /// The Cloud provider makes a new transport for every request: what the
+    /// listing said of audio reaches each of them.
+    #[tokio::test]
+    async fn every_request_keeps_what_the_listing_says_of_audio() {
+        use futures::StreamExt as _;
+        let (provider, stand, server, root) = stand_in().await;
+        for (model, takes) in [
+            ("anthropic/claude-sonnet-5-5", false),
+            ("openai/gpt-listens", true),
+        ] {
+            let events = provider
+                .stream(recording(model), CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert!(events.iter().all(Result::is_ok), "{model}: {events:?}");
+            let sent = stand.sent.lock().unwrap().last().unwrap().to_string();
+            assert_eq!(sent.contains("input_audio"), takes, "{model}: {sent}");
+        }
+        server.abort();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Busy refusals are held back a random part of a second, so agents
+    /// refused together do not try again together.
+    #[test]
+    fn busy_jitter_is_a_random_part_of_a_second() {
+        let draws: std::collections::HashSet<_> = (0..200).map(|_| random_busy_jitter()).collect();
+        assert!(draws.len() > 10, "{draws:?}");
+        assert!(
+            draws
+                .iter()
+                .all(|draw| *draw < Duration::from_millis(BUSY_JITTER_MS)),
+            "{draws:?}"
+        );
+    }
+
+    static JITTERED: AtomicUsize = AtomicUsize::new(0);
+
+    fn counted_jitter() -> Duration {
+        JITTERED.fetch_add(1, Ordering::SeqCst);
+        Duration::ZERO
+    }
+
+    static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn held_jitter() -> Duration {
+        HELD.store(true, Ordering::SeqCst);
+        Duration::from_secs(3_600)
+    }
+
+    /// Each busy refusal waits its jitter before the turn sees it, and a stop
+    /// ends the wait.
+    #[tokio::test]
+    async fn a_busy_refusal_waits_its_jitter_first() {
+        use futures::StreamExt as _;
+        let (mut provider, stand, server, root) = stand_in().await;
+        stand.refusing.store(true, Ordering::SeqCst);
+        provider.busy_jitter = counted_jitter;
+        for count in 1..=3 {
+            let events = provider
+                .stream(
+                    recording("anthropic/claude-sonnet-5-5"),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let error = events.into_iter().find_map(Result::err).unwrap();
+            assert!(
+                error.to_string().contains("as its rate limit allows"),
+                "{error}"
+            );
+            assert_eq!(JITTERED.load(Ordering::SeqCst), count);
+        }
+        // Held back for an hour, the refusal comes as soon as the turn stops.
+        provider.busy_jitter = held_jitter;
+        let cancel = CancellationToken::new();
+        let mut events = provider
+            .stream(recording("anthropic/claude-sonnet-5-5"), cancel.clone())
+            .await
+            .unwrap();
+        let next = tokio::spawn(async move { events.next().await });
+        while !HELD.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        cancel.cancel();
+        let event = tokio::time::timeout(Duration::from_secs(30), next)
+            .await
+            .expect("a stop ends the wait")
+            .unwrap();
+        let error = event.unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("as its rate limit allows"),
+            "{error}"
+        );
+        server.abort();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[derive(Clone)]
     struct Grants {
         url: String,
@@ -770,6 +1173,8 @@ mod tests {
             client: Client::new(config).unwrap(),
             grant: Arc::default(),
             models: RwLock::new(None),
+            listed_audio: ListedAudio::default(),
+            busy_jitter: random_busy_jitter,
         };
         let request = || ProviderRequest {
             model: "fixture-chat".into(),

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::CredentialStore;
+use crate::media::Unreadable;
 use crate::sse::json_stream;
 
 pub struct AnthropicProvider {
@@ -345,10 +346,36 @@ impl ModelProvider for AnthropicProvider {
         if cached {
             system[0]["cache_control"] = json!({"type":"ephemeral"});
         }
+        let catalog = self.live_models.get(&self.models);
+        let selected = catalog.iter().find(|info| info.id == request.model);
+        let model_name = selected.map_or_else(
+            || haarness_protocol::model_display_name(&request.model, None),
+            |info| info.display_name.clone(),
+        );
+        // An Anthropic-compatible endpoint can be set up with a model that
+        // reads no images; Claude reads them all.
+        let reads_images = selected.is_none_or(|info| info.images);
+        let newest = crate::media::newest_unanswered(&request.messages);
+        // Claude takes images and PDFs. Anything else is refused in the
+        // person's newest message and is a note everywhere else.
+        let block = |item: crate::media::LoadedMedia, place: Unreadable<'_>| -> CoreResult<Value> {
+            Ok(if item.is_image() && reads_images {
+                json!({"type":"image","source":{"type":"base64","media_type":item.mime_type,"data":item.base64}})
+            } else if item.is_pdf() {
+                json!({
+                    "type":"document",
+                    "source":{"type":"base64","media_type":"application/pdf","data":item.base64},
+                    "title":item.filename
+                })
+            } else {
+                json!({"type":"text","text":place.stand_in(&item)?})
+            })
+        };
         let mut messages: Vec<_> = request
             .messages
             .into_iter()
-            .filter_map(|message| match message {
+            .enumerate()
+            .filter_map(|(index, message)| match message {
                 // Claude refuses whitespace-only text blocks, so blank text
                 // is left out wherever it would stand alone.
                 ProviderMessage::Text { role, content }
@@ -363,25 +390,13 @@ impl ModelProvider for AnthropicProvider {
                     content,
                     attachments,
                 } => Some(crate::media::load_all(&attachments).and_then(|media| {
+                    let place = Unreadable::at(index, newest, &model_name);
                     let mut blocks = Vec::with_capacity(media.len() + 1);
                     if !content.trim().is_empty() {
                         blocks.push(json!({"type":"text","text":content}));
                     }
                     for item in media {
-                        if item.is_image() {
-                            blocks.push(json!({"type":"image","source":{"type":"base64","media_type":item.mime_type,"data":item.base64}}));
-                        } else if item.is_pdf() {
-                            blocks.push(json!({
-                                "type":"document",
-                                "source":{"type":"base64","media_type":"application/pdf","data":item.base64},
-                                "title":item.filename
-                            }));
-                        } else {
-                            return Err(CoreError::Provider(
-                                "Anthropic accepts Haarness image and PDF attachments; use Gemini for audio or video input"
-                                    .into(),
-                            ));
-                        }
+                        blocks.push(block(item, place)?);
                     }
                     Ok(json!({"role":role,"content":blocks}))
                 })),
@@ -410,21 +425,10 @@ impl ModelProvider for AnthropicProvider {
                         if !output.trim().is_empty() {
                             blocks.push(json!({"type":"text","text":output}));
                         }
+                        // A tool's file never refuses the turn: the model
+                        // goes on without it.
                         for item in media {
-                            if item.is_image() {
-                                blocks.push(json!({"type":"image","source":{"type":"base64","media_type":item.mime_type,"data":item.base64}}));
-                            } else if item.is_pdf() {
-                                blocks.push(json!({
-                                    "type":"document",
-                                    "source":{"type":"base64","media_type":"application/pdf","data":item.base64},
-                                    "title":item.filename
-                                }));
-                            } else {
-                                return Err(CoreError::Provider(
-                                    "Anthropic tool results support Haarness images and PDFs, not audio or video"
-                                        .into(),
-                                ));
-                            }
+                            blocks.push(block(item, Unreadable::FromTool)?);
                         }
                         Value::Array(blocks)
                     };
@@ -447,7 +451,6 @@ impl ModelProvider for AnthropicProvider {
                 }
             }
         }
-        let catalog = self.live_models.get(&self.models);
         let max_output = catalog
             .iter()
             .find(|info| request.model.starts_with(&info.id) || info.id == request.model)

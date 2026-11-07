@@ -1,5 +1,6 @@
 use crate::{
     auth::{Credential, CredentialStore, XaiOAuthClient, unix_millis, xai_access_token_expiring},
+    media::Unreadable,
     sse::json_stream,
 };
 use async_stream::try_stream;
@@ -13,7 +14,11 @@ use haarness_protocol::{ModelInfo, ModelPricing, ProviderInfo};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -52,7 +57,15 @@ pub struct OpenAiCompatibleProvider {
     headers: crate::ProviderHeaders,
     /// See [`CompatibleInstance::replay_observed_reasoning`].
     replay_observed_reasoning: bool,
+    /// Whether each model takes audio, for the models the last listing gave
+    /// input modalities for (see [`takes_audio`]).
+    listed_audio: ListedAudio,
 }
+
+/// Whether each listed model takes audio, by the input modalities its
+/// catalog entry lists. Shared with the Haarness Cloud provider, which makes
+/// a new transport for every request.
+pub(crate) type ListedAudio = Arc<std::sync::RwLock<HashMap<String, bool>>>;
 
 /// Declarative description of a compatible endpoint.
 #[derive(Clone)]
@@ -167,12 +180,19 @@ impl OpenAiCompatibleProvider {
             assume_authenticated: instance.assume_authenticated,
             headers: instance.headers,
             replay_observed_reasoning: instance.replay_observed_reasoning,
+            listed_audio: ListedAudio::default(),
         }
     }
 
     /// First-party router credentials must not follow redirects.
     pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.client = client;
+        self
+    }
+
+    /// Reads and writes what listings say of audio in `listed`.
+    pub(crate) fn with_listed_audio(mut self, listed: ListedAudio) -> Self {
+        self.listed_audio = listed;
         self
     }
 
@@ -308,6 +328,7 @@ impl OpenAiCompatibleProvider {
         if let Some(response) = discovered
             && let Ok(body) = response.json::<Value>().await
         {
+            let mut audio = HashMap::new();
             let models: Vec<_> = body["data"]
                 .as_array()?
                 .iter()
@@ -324,6 +345,12 @@ impl OpenAiCompatibleProvider {
                 .filter_map(|entry| {
                     let entry = &*entry;
                     let mut model = discovered_model_info(&self.id, entry, self.model_defaults)?;
+                    if let Some(inputs) = input_modalities(entry) {
+                        audio.insert(
+                            model.id.clone(),
+                            inputs.iter().any(|input| input.as_str() == Some("audio")),
+                        );
+                    }
                     if let Some(efforts) = entry["reasoning_efforts"].as_array() {
                         model.reasoning_efforts = efforts
                             .iter()
@@ -342,6 +369,10 @@ impl OpenAiCompatibleProvider {
                     Some(model)
                 })
                 .collect();
+            *self
+                .listed_audio
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = audio;
             let models = match self.id.as_str() {
                 "ollama" => self.ollama_details(base, models).await,
                 "lmstudio" => self.lmstudio_details(base, models).await,
@@ -538,6 +569,7 @@ impl OpenAiCompatibleProvider {
             assume_authenticated: false,
             headers: crate::ProviderHeaders::default(),
             replay_observed_reasoning: false,
+            listed_audio: ListedAudio::default(),
         }
     }
 
@@ -764,7 +796,7 @@ fn long_context_override(entry: &Value) -> Option<haarness_protocol::LongContext
         tier.1
             .get(key)
             .and_then(json_number)
-            .map(|value| value * 1_000_000.0)
+            .and_then(|value| price(value * 1_000_000.0))
     };
     Some(haarness_protocol::LongContextPricing {
         above_input_tokens: tier.0.saturating_sub(1),
@@ -1060,13 +1092,7 @@ fn discovered_model_info(
     })
     .or(info.max_output_tokens);
 
-    if let Some(modalities) = entry
-        .pointer("/architecture/input_modalities")
-        .or_else(|| entry.pointer("/modalities/input"))
-        // DeepSeek's own listing, also through a Haarness router.
-        .or_else(|| entry.get("input_modalities"))
-        .and_then(Value::as_array)
-    {
+    if let Some(modalities) = input_modalities(entry) {
         info.images = modalities
             .iter()
             .any(|value| value.as_str() == Some("image"));
@@ -1165,21 +1191,21 @@ fn discovered_model_info(
             entry.pointer("/pricing/completion").and_then(json_number),
         )
     {
-        info.pricing = (input >= 0.0 && output >= 0.0).then(|| ModelPricing {
-            input: input * 1_000_000.0,
-            output: output * 1_000_000.0,
-            cache_read: entry
-                .pointer("/pricing/input_cache_read")
+        let rate = |pointer: &str| {
+            entry
+                .pointer(pointer)
                 .and_then(json_number)
-                .unwrap_or(0.0)
-                * 1_000_000.0,
-            cache_write: entry
-                .pointer("/pricing/input_cache_write")
-                .and_then(json_number)
-                .unwrap_or(0.0)
-                * 1_000_000.0,
-            long_context: long_context_override(entry),
-        });
+                .and_then(|value| price(value * 1_000_000.0))
+        };
+        info.pricing = price(input * 1_000_000.0)
+            .zip(price(output * 1_000_000.0))
+            .map(|(input, output)| ModelPricing {
+                input,
+                output,
+                cache_read: rate("/pricing/input_cache_read").unwrap_or(0.0),
+                cache_write: rate("/pricing/input_cache_write").unwrap_or(0.0),
+                long_context: long_context_override(entry),
+            });
     }
     // xAI prices in hundredths of a cent per million tokens (12500 is $1.25),
     // with a long-context tier from `long_context_threshold` prompt tokens.
@@ -1195,29 +1221,32 @@ fn discovered_model_info(
             entry
                 .get(key)
                 .and_then(json_number)
-                .map(|value| value / 10_000.0)
+                .and_then(|value| price(value / 10_000.0))
         };
-        info.pricing = Some(ModelPricing {
-            input: input / 10_000.0,
-            output: output / 10_000.0,
-            cache_read: rate("cached_prompt_text_token_price").unwrap_or(0.0),
-            cache_write: 0.0,
-            long_context: entry
-                .get("long_context_threshold")
-                .and_then(Value::as_u64)
-                .zip(rate("prompt_text_token_price_long_context"))
-                .zip(rate("completion_text_token_price_long_context"))
-                .map(
-                    |((threshold, input), output)| haarness_protocol::LongContextPricing {
-                        above_input_tokens: threshold.saturating_sub(1),
-                        input,
-                        output,
-                        cache_read: rate("cached_prompt_text_token_price_long_context")
-                            .unwrap_or(0.0),
-                        cache_write: 0.0,
-                    },
-                ),
-        });
+        info.pricing =
+            price(input / 10_000.0)
+                .zip(price(output / 10_000.0))
+                .map(|(input, output)| ModelPricing {
+                    input,
+                    output,
+                    cache_read: rate("cached_prompt_text_token_price").unwrap_or(0.0),
+                    cache_write: 0.0,
+                    long_context: entry
+                        .get("long_context_threshold")
+                        .and_then(Value::as_u64)
+                        .zip(rate("prompt_text_token_price_long_context"))
+                        .zip(rate("completion_text_token_price_long_context"))
+                        .map(|((threshold, input), output)| {
+                            haarness_protocol::LongContextPricing {
+                                above_input_tokens: threshold.saturating_sub(1),
+                                input,
+                                output,
+                                cache_read: rate("cached_prompt_text_token_price_long_context")
+                                    .unwrap_or(0.0),
+                                cache_write: 0.0,
+                            }
+                        }),
+                })
     }
     if provider == "xai" {
         // A model that reasons at a fixed depth says so in its id only.
@@ -1251,16 +1280,19 @@ fn discovered_model_info(
                 .and_then(json_number),
         )
     {
-        info.pricing = Some(ModelPricing {
-            input,
-            output,
-            cache_read: entry
-                .pointer("/metadata/pricing/cache_read_tokens")
-                .and_then(json_number)
-                .unwrap_or(0.0),
-            cache_write: 0.0,
-            long_context: None,
-        });
+        info.pricing = price(input)
+            .zip(price(output))
+            .map(|(input, output)| ModelPricing {
+                input,
+                output,
+                cache_read: entry
+                    .pointer("/metadata/pricing/cache_read_tokens")
+                    .and_then(json_number)
+                    .and_then(price)
+                    .unwrap_or(0.0),
+                cache_write: 0.0,
+                long_context: None,
+            });
     }
     Some(apply_model_defaults(info, defaults))
 }
@@ -1815,10 +1847,56 @@ fn first_window(entry: &Value, keys: &[&str]) -> Option<u64> {
         .find_map(|key| first_u64(entry, &[key]).filter(|window| *window > 0))
 }
 
+/// A number a catalog wrote as a number or a string. Rust parses "NaN",
+/// "inf" and "1e999" as floats; none is a price, and a NaN would make every
+/// turn's cost NaN.
 fn json_number(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str()?.parse::<f64>().ok())
+        .filter(|number| number.is_finite())
+}
+
+/// A rate in USD per million tokens, once a catalog's unit is brought to it:
+/// finite and not below zero. A per-token "1e303" is infinite a million, and
+/// a negative rate (a router's `-1` for a price it doesn't know) is none.
+fn price(rate: f64) -> Option<f64> {
+    (rate.is_finite() && rate >= 0.0).then_some(rate)
+}
+
+/// What a catalog entry says its model reads (OpenRouter's `architecture`,
+/// or DeepSeek's and xAI's own field), when it says.
+fn input_modalities(entry: &Value) -> Option<&Vec<Value>> {
+    entry
+        .pointer("/architecture/input_modalities")
+        .or_else(|| entry.pointer("/modalities/input"))
+        // DeepSeek's own listing, also through a Haarness router.
+        .or_else(|| entry.get("input_modalities"))
+        .and_then(Value::as_array)
+}
+
+/// Whether `model` takes `input_audio`. Its catalog entry decides when it
+/// lists input modalities. Otherwise only a family known to listen does:
+/// Gemini, OpenAI's audio models, Voxtral and the omni models. On Haarness
+/// Cloud only `google/` and `openai/` models can: its router sends every
+/// other vendor through a route that takes no audio, whatever the model
+/// does. A model that takes no audio refuses the whole request, and again on
+/// every later turn, so any other model gets a note instead.
+fn takes_audio(provider: &str, listed: &HashMap<String, bool>, model: &str) -> bool {
+    if provider == "haarness" && !model.starts_with("google/") && !model.starts_with("openai/") {
+        return false;
+    }
+    listed.get(model).copied().unwrap_or_else(|| {
+        let name = model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase();
+        name.starts_with("gemini")
+            || name.contains("audio")
+            || name.contains("voxtral")
+            || name.contains("omni")
+    })
 }
 
 fn override_bool(entry: &Value, key: &str, target: &mut bool) {
@@ -2007,25 +2085,15 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let model = request.model;
         let model_name = selected.map_or(model.as_str(), |model| model.display_name.as_str());
         let replay = self.reasoning_replay(&model);
-        // The person's newest message: nothing has answered it yet.
-        let newest = request.messages.iter().rposition(|message| {
-            matches!(message, ProviderMessage::Text { role, .. } | ProviderMessage::Media { role, .. } if role == "user")
-        });
-        let answered = newest.is_some_and(|newest| {
-            request.messages[newest..].iter().any(|message| {
-                matches!(message, ProviderMessage::Text { role, .. } if role == "assistant")
-                    || matches!(message, ProviderMessage::ToolCall { .. })
-            })
-        });
-        let images = |index: usize| {
-            if supports_images {
-                ImageInput::Read
-            } else if Some(index) == newest && !answered {
-                ImageInput::Refuse(model_name)
-            } else {
-                ImageInput::Note
-            }
-        };
+        let newest = crate::media::newest_unanswered(&request.messages);
+        let audio = takes_audio(
+            &self.id,
+            &self
+                .listed_audio
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &model,
+        );
         let mut messages = vec![json!({"role":"system","content":request.system})];
         let mut tool_media = Vec::new();
         for (index, message) in request.messages.into_iter().enumerate() {
@@ -2060,7 +2128,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     &role,
                     &content,
                     &attachments,
-                    images(index),
+                    supports_images,
+                    audio,
+                    Unreadable::at(index, newest, model_name),
                 )?),
                 ProviderMessage::ToolCall {
                     call_id,
@@ -2136,11 +2206,15 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     if !attachments.is_empty() {
                         // Keep every tool result adjacent to its assistant batch;
                         // user media messages may only follow the completed batch.
+                        // A tool's file never refuses the turn: the model
+                        // goes on without it.
                         tool_media.push(openai_compatible_media_message(
                             "user",
                             "The preceding tool result includes this binary document or media.",
                             &attachments,
-                            images(index).note_only(),
+                            supports_images,
+                            audio,
+                            Unreadable::FromTool,
                         )?);
                     }
                 }
@@ -2554,33 +2628,18 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 }
 
-/// What a request does with an image, by whether its model reads them.
-#[derive(Debug, Clone, Copy)]
-enum ImageInput<'a> {
-    Read,
-    /// In the person's newest message: they are told, by the model's name,
-    /// and can send it without the picture or switch models.
-    Refuse(&'a str),
-    /// Earlier in the chat (sent to another model) or from a tool: a note
-    /// stands in for it, so one picture does not fail every later turn.
-    Note,
-}
-
-impl ImageInput<'_> {
-    /// A tool's picture never refuses the turn: the model goes on without it.
-    fn note_only(self) -> Self {
-        match self {
-            Self::Refuse(_) => Self::Note,
-            other => other,
-        }
-    }
-}
-
+/// A message carrying media for Chat Completions. Images a model doesn't
+/// read, audio it doesn't take (see [`takes_audio`]) and media the protocol
+/// has no portable form for (video, audio other than MP3 or WAV) get what
+/// `place` says: the newest message is refused and anything else becomes a
+/// note.
 fn openai_compatible_media_message(
     role: &str,
     content: &str,
     attachments: &[String],
-    images: ImageInput<'_>,
+    images: bool,
+    audio: bool,
+    place: Unreadable<'_>,
 ) -> CoreResult<Value> {
     // A photo sent on its own has no text. Claude refuses a blank text block,
     // including through a router that passes the request on to Anthropic, so
@@ -2590,48 +2649,33 @@ fn openai_compatible_media_message(
         blocks.push(json!({"type":"text","text":content}));
     }
     for item in crate::media::load_all(attachments)? {
-        if item.is_image() {
-            match images {
-                ImageInput::Read => {
-                    blocks.push(json!({"type":"image_url","image_url":{"url":item.data_url()}}));
-                }
-                ImageInput::Refuse(model) => {
-                    return Err(CoreError::Provider(format!(
-                        "{model} doesn't read images. Send the message without the picture, or switch to a model that reads them."
-                    )));
-                }
-                // Earlier answers in the chat may come from a model that saw
-                // the picture; "this model" read as if none had.
-                ImageInput::Note => blocks.push(json!({
-                    "type":"text",
-                    "text":format!("[Image {} is not shown to you, because you don't read images. Don't guess what it shows; earlier answers may come from a model that saw it.]", item.filename)
-                })),
-            }
+        let format = match item.mime_type.as_str() {
+            "audio/mpeg" => Some("mp3"),
+            "audio/wav" => Some("wav"),
+            _ => None,
+        }
+        .filter(|_| audio);
+        if item.is_image() && images {
+            blocks.push(json!({"type":"image_url","image_url":{"url":item.data_url()}}));
         } else if item.is_pdf() {
             blocks.push(json!({
                 "type":"file",
                 "file":{"filename":item.filename,"file_data":item.data_url()}
             }));
-        } else if item.is_audio() {
-            let format = match item.mime_type.as_str() {
-                "audio/mpeg" => "mp3",
-                "audio/wav" => "wav",
-                _ => {
-                    return Err(CoreError::Provider(
-                        "OpenAI-compatible audio input supports MP3 and WAV; use Gemini for other audio formats"
-                            .into(),
-                    ));
-                }
-            };
+        } else if let Some(format) = format {
             blocks.push(json!({
                 "type":"input_audio",
                 "input_audio":{"data":item.base64,"format":format}
             }));
-        } else if item.is_video() {
-            return Err(CoreError::Provider(
-                "OpenAI-compatible video input is not portable; use Gemini for video understanding"
-                    .into(),
-            ));
+        } else if audio
+            && item.is_audio()
+            && let Unreadable::Refuse(model) = place
+        {
+            return Err(CoreError::Provider(format!(
+                "Haarness can send {model} audio only as MP3 or WAV. Send the message without the recording, or with it as MP3 or WAV."
+            )));
+        } else {
+            blocks.push(json!({"type":"text","text":place.stand_in(&item)?}));
         }
     }
     Ok(json!({"role":role,"content":blocks}))
@@ -2666,9 +2710,9 @@ mod tests {
     use crate::auth::{Credential, CredentialStore, XaiOAuthClient, XaiOAuthConfig};
 
     use super::{
-        CompatibleInstance, CompatibleModelDefaults, ImageInput, OpenAiCompatibleProvider,
-        append_reasoning_details, apply_lmstudio_details, apply_ollama_details, deepseek_charge,
-        deepseek_peak, discovered_model_info, local_model_missing, model_info,
+        CompatibleInstance, CompatibleModelDefaults, ListedAudio, OpenAiCompatibleProvider,
+        Unreadable, append_reasoning_details, apply_lmstudio_details, apply_ollama_details,
+        deepseek_charge, deepseek_peak, discovered_model_info, local_model_missing, model_info,
         openai_compatible_media_message,
     };
 
@@ -3138,6 +3182,46 @@ mod tests {
     }
 
     #[test]
+    fn a_price_that_is_not_a_finite_number_is_no_price() {
+        let price = |prompt: &str, cache_read: &str| {
+            discovered_model_info(
+                "openrouter",
+                &json!({"id": "vendor/model", "pricing": {
+                    "prompt": prompt, "completion": "0.000002", "input_cache_read": cache_read
+                }}),
+                CompatibleModelDefaults::default(),
+            )
+            .unwrap()
+            .pricing
+        };
+        // "1e303" a token is finite, but infinite a million.
+        for broken in ["NaN", "inf", "-inf", "1e999", "1e303", "-0.5"] {
+            assert!(price(broken, "0").is_none(), "{broken}");
+            // A broken cache rate is no rate, not a NaN in every cost.
+            let pricing = price("0.000001", broken).unwrap();
+            assert!(pricing.cache_read.abs() < 1e-12, "{broken}");
+            assert!((pricing.input - 1.0).abs() < 1e-9);
+        }
+        // xAI and DeepInfra list their own units; a negative rate is none.
+        let xai = discovered_model_info(
+            "xai",
+            &json!({"id": "grok-fixture", "prompt_text_token_price": -12500,
+                "completion_text_token_price": 25000}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert!(xai.pricing.is_none(), "{:?}", xai.pricing);
+        let deepinfra = discovered_model_info(
+            "deepinfra",
+            &json!({"id": "vendor/fixture", "metadata": {"tags": ["chat"], "pricing": {
+                "input_tokens": 0.2, "output_tokens": -1, "cache_read_tokens": 0.1}}}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert!(deepinfra.pricing.is_none(), "{:?}", deepinfra.pricing);
+    }
+
+    #[test]
     fn groq_speech_models_stay_out_of_the_picker() {
         let model = |id: &str, output: Value| {
             discovered_model_info(
@@ -3512,7 +3596,9 @@ mod tests {
                 "user",
                 content,
                 &["data:image/png;name=photo-1.png;base64,iVBORw0KGgo=".into()],
-                ImageInput::Read,
+                true,
+                false,
+                Unreadable::Refuse("fixture"),
             )
             .unwrap();
             let blocks = message["content"].as_array().unwrap();
@@ -3523,7 +3609,9 @@ mod tests {
             "user",
             "What is this?",
             &["data:image/png;base64,iVBORw0KGgo=".into()],
-            ImageInput::Read,
+            true,
+            false,
+            Unreadable::Refuse("fixture"),
         )
         .unwrap();
         assert_eq!(message["content"][0]["text"], "What is this?");
@@ -3539,22 +3627,61 @@ mod tests {
                 "data:application/pdf;name=agenda.pdf;base64,JVBERi0xLjQK".into(),
                 "data:audio/mpeg;name=meeting.mp3;base64,SUQz".into(),
             ],
-            ImageInput::Note,
+            false,
+            true,
+            Unreadable::Earlier,
         )
         .unwrap();
         assert_eq!(message["content"][1]["type"], "file");
         assert_eq!(message["content"][1]["file"]["filename"], "agenda.pdf");
         assert_eq!(message["content"][2]["type"], "input_audio");
         assert_eq!(message["content"][2]["input_audio"]["format"], "mp3");
+        // A model that takes no audio gets a note, and the newest message is
+        // refused.
+        let message = openai_compatible_media_message(
+            "user",
+            "Review the meeting",
+            &["data:audio/mpeg;name=meeting.mp3;base64,SUQz".into()],
+            false,
+            false,
+            Unreadable::FromTool,
+        )
+        .unwrap();
+        assert_eq!(
+            message["content"][1]["text"],
+            "[Audio meeting.mp3 is left out, because it can't be sent to you. Don't guess what it says.]"
+        );
+        let error = openai_compatible_media_message(
+            "user",
+            "Review the meeting",
+            &["data:audio/mpeg;name=meeting.mp3;base64,SUQz".into()],
+            false,
+            false,
+            Unreadable::Refuse("Claude Sonnet 5.5"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Haarness can't send audio to Claude Sonnet 5.5."),
+            "{error}"
+        );
 
         let error = openai_compatible_media_message(
             "user",
             "Watch this",
             &["data:video/mp4;base64,AAAAIGZ0eXA=".into()],
-            ImageInput::Read,
+            true,
+            true,
+            Unreadable::Refuse("Fixture 7B"),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("not portable"));
+        assert!(
+            error
+                .to_string()
+                .contains("Haarness can't send video to Fixture 7B."),
+            "{error}"
+        );
     }
 
     #[test]
@@ -4833,6 +4960,111 @@ mod tests {
             2,
             "{sent}"
         );
+    }
+
+    /// Haarness Cloud lists Claude, GPT and DeepSeek without input
+    /// modalities, and its router refuses `input_audio` for them ("… doesn't
+    /// take audio"), a refusal every later turn would meet again. A tool's
+    /// recording goes as audio only to a model whose listing says it takes
+    /// audio, or to a family known to (Gemini); the rest get a note. Other
+    /// vendors than Google and OpenAI go through a route that takes no audio.
+    #[tokio::test]
+    async fn a_tools_recording_goes_only_to_a_model_that_takes_audio() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route(
+                "/models",
+                get(|| async {
+                    Json(json!({"data": [
+                        {"id": "anthropic/claude-sonnet-5-5", "supports_vision": true},
+                        {"id": "google/gemini-3.5-flash"},
+                        {"id": "openai/gpt-audio", "architecture": {"input_modalities": ["text", "audio"]}},
+                        {"id": "google/gemini-listed", "architecture": {"input_modalities": ["text", "image"]}},
+                        {"id": "mistralai/voxtral-listed", "architecture": {"input_modalities": ["text", "audio"]}},
+                    ]}))
+                }),
+            )
+            .route("/chat/completions", post(completions))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let instance = || CompatibleInstance {
+            id: "haarness".into(),
+            name: "Haarness Cloud".into(),
+            base_url: format!("http://{address}"),
+            api_key: Some("fixture".into()),
+            models: Vec::new(),
+            discover_models: true,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        };
+        // As Haarness Cloud does: one transport lists the models, and a new
+        // one sends each request, sharing what the listing said.
+        let listed = ListedAudio::default();
+        let models = OpenAiCompatibleProvider::new(instance())
+            .with_listed_audio(listed.clone())
+            .fetch_models()
+            .await
+            .unwrap();
+        for (model, takes) in [
+            ("anthropic/claude-sonnet-5-5", false),
+            ("google/gemini-3.5-flash", true),
+            ("openai/gpt-audio", true),
+            ("google/gemini-listed", false),
+            ("deepseek/deepseek-v4-flash", false),
+            ("openai/gpt-audio-mini", true),
+            // Cloud sends these through a route that takes no audio.
+            ("mistralai/voxtral-small-24b-2507", false),
+            ("qwen/qwen3.8-omni-flash", false),
+            ("mistralai/voxtral-listed", false),
+        ] {
+            let request = ProviderRequest {
+                model: model.into(),
+                system: "sys".into(),
+                messages: vec![
+                    ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "record the demo".into(),
+                    },
+                    ProviderMessage::ToolCall {
+                        call_id: "call-1".into(),
+                        name: "mcp__voice__clip".into(),
+                        arguments: json!({}),
+                        provider_metadata: Value::Null,
+                    },
+                    ProviderMessage::ToolResult {
+                        call_id: "call-1".into(),
+                        name: "mcp__voice__clip".into(),
+                        output: "recorded".into(),
+                        attachments: vec!["data:audio/mpeg;name=clip.mp3;base64,SUQz".into()],
+                        is_error: false,
+                    },
+                ],
+                tools: vec![],
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            };
+            OpenAiCompatibleProvider::new(instance())
+                .with_model_info(models.clone())
+                .with_listed_audio(listed.clone())
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let sent = state.0.lock().last().unwrap()["messages"].to_string();
+            assert_eq!(sent.contains("input_audio"), takes, "{model}: {sent}");
+            assert_eq!(
+                sent.contains("[Audio clip.mp3 is left out"),
+                !takes,
+                "{model}: {sent}"
+            );
+        }
     }
 
     #[tokio::test]
