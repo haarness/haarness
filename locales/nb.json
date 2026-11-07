@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "Dra {target} fra {app} til {endApp}",
   "Always allow this app": "Tillat alltid denne appen",
   "Could not allow this app: {error}": "Kunne ikke tillate denne appen: {error}",
-  "No agent is paused": "Ingen agent er satt på pause"
+  "No agent is paused": "Ingen agent er satt på pause",
+  "Its URL is not a web address (http or https) with a host.": "URL-en er ikke en nettadresse (http eller https) med en vert.",
+  "Its URL names an environment variable that is not set: {variable}.": "URL-en nevner en miljøvariabel som ikke er satt: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "URL-en nevner miljøvariabler som ikke er satt: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Utelatt fordi de ikke er gyldige MCP-verktøy: {tools}"
 }

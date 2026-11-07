@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "Arrastar {target} de {app} para {endApp}",
   "Always allow this app": "Sempre permitir este app",
   "Could not allow this app: {error}": "Não foi possível permitir este app: {error}",
-  "No agent is paused": "Nenhum agente está pausado"
+  "No agent is paused": "Nenhum agente está pausado",
+  "Its URL is not a web address (http or https) with a host.": "A URL não é um endereço web (http ou https) com host.",
+  "Its URL names an environment variable that is not set: {variable}.": "A URL cita uma variável de ambiente que não está definida: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "A URL cita variáveis de ambiente que não estão definidas: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Deixadas de fora por não serem ferramentas MCP válidas: {tools}"
 }

@@ -45,6 +45,60 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// The fields of a listed tool MCP leaves optional, in the order they are
+/// put back on a tool that fails to read (see [`lenient_tool`]).
+const OPTIONAL_TOOL_FIELDS: [&str; 6] = [
+    "outputSchema",
+    "annotations",
+    "icons",
+    "title",
+    "description",
+    "_meta",
+];
+
+/// A listed tool, read on its own: as it is, or else with the optional
+/// fields that can be read put back one at a time, so a tool whose only
+/// fault is, say, an `outputSchema` that is not an object is offered
+/// without it, its description and the rest kept. A tool whose `_meta`
+/// cannot be read is left out instead: `_meta` is where a page marks a tool
+/// as one only it calls, and offered without it such a tool would reach the
+/// model. Gives the fields left out, or why the tool cannot be read (no
+/// name, no `inputSchema`, a `_meta` that is not an object).
+fn lenient_tool(item: &Value) -> Result<(rmcp::model::Tool, Vec<&'static str>), serde_json::Error> {
+    let error = match serde_json::from_value(item.clone()) {
+        Ok(tool) => return Ok((tool, Vec::new())),
+        Err(error) => error,
+    };
+    let Some(object) = item.as_object() else {
+        return Err(error);
+    };
+    let readable = |fields: &serde_json::Map<String, Value>| {
+        serde_json::from_value::<rmcp::model::Tool>(Value::Object(fields.clone())).ok()
+    };
+    let mut kept = object.clone();
+    kept.retain(|field, _| !OPTIONAL_TOOL_FIELDS.contains(&field.as_str()));
+    let Some(mut tool) = readable(&kept) else {
+        return Err(error);
+    };
+    let mut left_out = Vec::new();
+    for field in OPTIONAL_TOOL_FIELDS {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        let mut with = kept.clone();
+        with.insert(field.to_owned(), value.clone());
+        match readable(&with) {
+            Some(read) => (kept, tool) = (with, read),
+            None if field == "_meta" => return Err(error),
+            None => left_out.push(field),
+        }
+    }
+    if left_out.is_empty() {
+        return Err(error);
+    }
+    Ok((tool, left_out))
+}
+
 /// Connection, discovery and header-helper deadline for a server that sets
 /// no `timeout_ms`.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -237,6 +291,10 @@ struct CatalogClient {
     /// Whether the server's interactive apps are on (its `apps` setting).
     /// Off, it is a plain MCP server to Haarness.
     apps_on: bool,
+    /// The tools the last listing left out because they are not valid MCP
+    /// tools, by the names they gave, quoted (`None` for one with no name;
+    /// see [`Self::list_tools`]).
+    skipped: Arc<RwLock<Vec<Option<String>>>>,
 }
 impl CatalogClient {
     fn new(
@@ -254,7 +312,118 @@ impl CatalogClient {
             apps: Arc::default(),
             resources: Arc::default(),
             apps_on,
+            skipped: Arc::default(),
         }
+    }
+    /// Every tool the server lists, across its pages. rmcp reads a page
+    /// whole, so a single tool listed in a form MCP does not allow (no
+    /// `inputSchema`, a schema that is not an object) made the page
+    /// unreadable as a tool listing ("Unexpected response type") and failed
+    /// the whole server. The pages are then asked for again and read one tool
+    /// at a time: a tool that cannot be read is left out, with a warning
+    /// that names it, and the others are offered.
+    async fn list_tools(
+        &self,
+        peer: &rmcp::service::Peer<RoleClient>,
+    ) -> Result<Vec<rmcp::model::Tool>, rmcp::ServiceError> {
+        match peer.list_all_tools().await {
+            Err(rmcp::ServiceError::UnexpectedResponse) => {}
+            listed => {
+                self.skipped.write().clear();
+                return listed;
+            }
+        }
+        let mut tools = Vec::new();
+        let mut skipped = Vec::new();
+        let mut cursor = None;
+        loop {
+            let request = rmcp::model::ClientRequest::ListToolsRequest(
+                rmcp::model::ListToolsRequest::with_param(
+                    rmcp::model::PaginatedRequestParams::default().with_cursor(cursor),
+                ),
+            );
+            // A page rmcp cannot read as a listing comes back as the JSON it
+            // is; one it reads as some other result has no tools to read.
+            let page = match peer.send_request(request).await? {
+                rmcp::model::ServerResult::ListToolsResult(page) => {
+                    tools.extend(page.tools);
+                    cursor = page.next_cursor;
+                    if cursor.is_none() {
+                        break;
+                    }
+                    continue;
+                }
+                rmcp::model::ServerResult::CustomResult(rmcp::model::CustomResult(page)) => page,
+                _ => return Err(rmcp::ServiceError::UnexpectedResponse),
+            };
+            let listed = page
+                .get("tools")
+                .and_then(Value::as_array)
+                .ok_or(rmcp::ServiceError::UnexpectedResponse)?;
+            for item in listed {
+                let tool = item.get("name").and_then(Value::as_str);
+                match lenient_tool(item) {
+                    Ok((parsed, dropped)) => {
+                        if !dropped.is_empty() {
+                            tracing::warn!(
+                                server = %self.name,
+                                tool = tool.unwrap_or_default(),
+                                fields = ?dropped,
+                                "an MCP server listed a tool with fields that are not valid MCP; it is offered without them"
+                            );
+                        }
+                        tools.push(parsed);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            server = %self.name,
+                            tool = tool.unwrap_or("<unnamed>"),
+                            %error,
+                            "an MCP server listed a tool that is not a valid MCP tool; it is left out"
+                        );
+                        skipped.push(tool.map(|tool| {
+                            format!("{:?}", tool.chars().take(64).collect::<String>())
+                        }));
+                    }
+                }
+            }
+            cursor = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        *self.skipped.write() = skipped;
+        Ok(tools)
+    }
+    /// The status of a server whose listing just came to `count` tools,
+    /// naming the tools it left out (see [`Self::list_tools`]): at most
+    /// three by name, the rest (and those without one) counted, as in
+    /// `3 tools discovered; left out as not valid MCP tools: "broken" +1`.
+    /// Desktop reads the part after `; ` to say it in the person's language.
+    fn discovered(&self, count: usize) -> String {
+        let skipped = self.skipped.read();
+        if skipped.is_empty() {
+            return format!("{count} tools discovered");
+        }
+        let named: Vec<&str> = skipped
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .take(3)
+            .collect();
+        let mut listed = named.join(", ");
+        let rest = skipped.len() - named.len();
+        if rest > 0 {
+            if !listed.is_empty() {
+                listed.push(' ');
+            }
+            listed.push('+');
+            listed.push_str(&rest.to_string());
+        }
+        format!("{count} tools discovered; left out as not valid MCP tools: {listed}")
     }
     /// [`Self::catalog`] for a connection that just started, which also
     /// records what the server declared it offers.
@@ -304,7 +473,7 @@ impl rmcp::ClientHandler for CatalogClient {
             }
             entry.forget_catalog();
         }
-        let Ok(tools) = context.peer.list_all_tools().await else {
+        let Ok(tools) = self.list_tools(&context.peer).await else {
             return;
         };
         let Some(servers) = self.home.read().upgrade() else {
@@ -321,7 +490,7 @@ impl rmcp::ClientHandler for CatalogClient {
             return;
         }
         entry.set_catalog(&self.name, self.catalog(&tools));
-        entry.info.detail = Some(format!("{} tools discovered", entry.tools.len()));
+        entry.info.detail = Some(self.discovered(entry.tools.len()));
         entry.info.app_tools = self.app_tools();
     }
 }
@@ -370,6 +539,10 @@ impl McpOAuthSession {
 enum ActivationError {
     Core(CoreError),
     AuthorizationRequired(Option<String>),
+    /// A setting keeps the server from starting at all (see
+    /// [`reachable_url`]): its status says so as it is, with no
+    /// "connection failed" before it, since nothing was connected to.
+    NotStarted(String),
 }
 
 impl From<CoreError> for ActivationError {
@@ -1038,8 +1211,9 @@ impl NativeMcpRegistry {
             .url
             .as_deref()
             .ok_or_else(|| CoreError::Invalid("Streamable HTTP MCP requires url".into()))?;
+        let url = reachable_url(url).map_err(|problem| unreachable_server(name, &problem))?;
         let (manager, _) =
-            authorization_manager(url, manager_store(name, self.auth_dir.as_deref())).await?;
+            authorization_manager(&url, manager_store(name, self.auth_dir.as_deref())).await?;
         let mut request = AuthorizationRequest::new(redirect_uri).with_client_name("Haarness");
         if let Some(client_id) = config.oauth_client_id {
             request = request.with_preregistered_client(client_id);
@@ -1357,9 +1531,22 @@ impl McpStart {
             config.apps != Some(false),
         );
         let oversized = (config.transport == "stdio").then(Arc::<AtomicBool>::default);
-        let launch = launch_config(&config, folder.as_deref());
+        let mut launch = launch_config(&config, folder.as_deref());
+        // Read and checked before any header, helper or OAuth step uses it.
+        let mut not_started = None;
+        if launch.transport != "stdio"
+            && let Some(url) = launch.url.as_deref()
+        {
+            match reachable_url(url) {
+                Ok(url) => launch.url = Some(url),
+                Err(problem) => not_started = Some(problem),
+            }
+        }
         let activation = async {
             let config = &launch;
+            if let Some(problem) = not_started {
+                return Err(ActivationError::NotStarted(problem));
+            }
             match config.transport.as_str() {
                 "stdio" => {
                     let result = async {
@@ -1389,7 +1576,11 @@ impl McpStart {
                                 CoreError::Tool(format!("cannot start {program}: {error}"))
                             })?;
                         let client = handler.clone().serve(transport).await.map_err(mcp_error)?;
-                        let tools = client.list_all_tools().await.map_err(mcp_error)?;
+                        let tools = client
+                            .service()
+                            .list_tools(client.peer())
+                            .await
+                            .map_err(mcp_error)?;
                         let definitions = client.service().connected(client.peer(), &tools);
                         let limit = Limit {
                             name: name.to_owned(),
@@ -1463,6 +1654,12 @@ impl McpStart {
                     stop_oversized(name, entry, oversized);
                     return (Err(oversized_error(name)), None);
                 }
+                Err(ActivationError::NotStarted(problem)) => {
+                    entry.info.status = "failed".into();
+                    let error = unreachable_server(name, &problem);
+                    entry.info.detail = Some(problem);
+                    return (Err(error), None);
+                }
                 Err(ActivationError::Core(error)) => {
                     entry.info.status = "failed".into();
                     // Clients, the model's `mcp_manage` and logs show this:
@@ -1494,7 +1691,7 @@ impl McpStart {
             entry.resources = handler.resources.load(Ordering::Acquire);
             entry.info.app_tools = handler.app_tools();
             entry.info.status = "connected".into();
-            entry.info.detail = Some(format!("{count} tools discovered"));
+            entry.info.detail = Some(handler.discovered(count));
             (Ok(entry.info.clone()), Some(servers.clone()))
         });
         let Some((result, connected)) = settled else {
@@ -1611,6 +1808,7 @@ fn effective_config(config: &McpConfigureRequest) -> McpConfigureRequest {
         .env
         .values_mut()
         .chain(effective.headers.values_mut())
+        .chain(effective.url.iter_mut())
     {
         *value = expand_env_reference(value);
     }
@@ -1922,6 +2120,103 @@ fn describe_timeout(timeout: Duration) -> String {
     }
 }
 
+/// The status of a remote server whose url, its references read, names no
+/// web address (http or https) with a host. A status sits under the
+/// server's name, so it does not repeat it.
+const URL_WITHOUT_HOST: &str = "Its URL is not a web address (http or https) with a host.";
+
+/// The address remote server is asked at: `url` with each `${VAR}` and
+/// `${VAR:-fallback}` read from the environment when the server starts, as
+/// its headers' and environment's are, or its status when it cannot be
+/// asked there. Unchecked, such a URL failed deep in the transport with an
+/// error that named the transport's own types and quoted it. The status
+/// never holds the URL, which may carry a token; it names a variable that
+/// is not set, since setting it is the fix. This is the one pass for a url
+/// from any setting (the JSON loader leaves it as written), and what a
+/// variable holds is used as it is: a `${OTHER}` in its value is never read,
+/// so text from outside (a branch name, say) cannot have another variable's
+/// value, a key, put into the address.
+fn reachable_url(url: &str) -> Result<String, String> {
+    reachable_url_with(url, &|name| std::env::var(name).ok())
+}
+
+fn reachable_url_with(
+    url: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    match unset_references(url, lookup).as_slice() {
+        [] => {}
+        [one] => {
+            return Err(format!(
+                "Its URL names an environment variable that is not set: {one}."
+            ));
+        }
+        many => {
+            return Err(format!(
+                "Its URL names environment variables that are not set: {}.",
+                many.join(", ")
+            ));
+        }
+    }
+    let resolved = expand_env_reference_with(url, &|name| {
+        if name.starts_with("keychain:") {
+            Some(format!("${{{name}}}"))
+        } else {
+            lookup(name)
+        }
+    });
+    let usable = haarness_core::links::http_url(&resolved)
+        .is_some_and(|parsed| parsed.parse::<http::Uri>().is_ok())
+        && !without_host(&resolved);
+    if usable {
+        Ok(resolved)
+    } else {
+        Err(URL_WITHOUT_HOST.into())
+    }
+}
+
+/// What a request to remote server `name` says when its url cannot be
+/// asked (see [`reachable_url`]).
+fn unreachable_server(name: &str, problem: &str) -> CoreError {
+    CoreError::Invalid(format!(
+        "MCP server \"{name}\" cannot be reached. {problem}"
+    ))
+}
+
+/// Whether `url` is written with nothing where its host goes, as
+/// `https:///mcp` is: the URL parser reads that as host `mcp`.
+fn without_host(url: &str) -> bool {
+    url.trim()
+        .split_once(':')
+        .and_then(|(_, rest)| rest.strip_prefix("//"))
+        .is_some_and(|authority| {
+            authority.is_empty() || authority.starts_with(['/', '\\', '?', '#'])
+        })
+}
+
+/// The variables `value` names in a `${NAME}` without a fallback that
+/// `lookup` has no value for, each once in the order they come. Only names
+/// a variable may have are read.
+fn unset_references(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let name = &after[..end];
+        let variable = name.len() <= 64
+            && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if variable && lookup(name).is_none() && !names.iter().any(|seen| seen == name) {
+            names.push(name.to_owned());
+        }
+        rest = &after[end + 1..];
+    }
+    names
+}
+
 async fn activate_remote(
     name: &str,
     config: &McpConfigureRequest,
@@ -2025,7 +2320,8 @@ where
         Err(error) => return Err(ActivationError::Core(initialize_error(&error, url))),
     };
     let tools = client
-        .list_all_tools()
+        .service()
+        .list_tools(client.peer())
         .await
         .map_err(mcp_error)
         .map_err(ActivationError::Core)?;
@@ -2350,7 +2646,11 @@ async fn activate_legacy_sse(
             )
             .await?;
             let client = handler.clone().serve(transport).await.map_err(mcp_error)?;
-            let tools = client.list_all_tools().await.map_err(mcp_error)?;
+            let tools = client
+                .service()
+                .list_tools(client.peer())
+                .await
+                .map_err(mcp_error)?;
             let definitions = client.service().connected(client.peer(), &tools);
             let tx = spawn_worker(client, None, None);
             CoreResult::Ok((definitions, tx))
@@ -2564,37 +2864,81 @@ fn parse_sse_event(event: &[u8]) -> Option<(String, String)> {
 }
 
 fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<ToolOutput> {
+    use haarness_core::mcp_content::{self, Blob};
     let mut text_parts = Vec::new();
     let mut attachments = Vec::new();
     let mut attachment_bytes = 0usize;
+    // Whether the result says anything in text, apart from the lines that
+    // stand for its media and blobs.
+    let mut has_text = false;
     for content in &result.content {
         match content {
-            rmcp::model::ContentBlock::Text(text) => text_parts.push(text.text.clone()),
+            rmcp::model::ContentBlock::Text(text) => {
+                has_text |= !text.text.is_empty();
+                text_parts.push(text.text.clone());
+            }
             rmcp::model::ContentBlock::Image(image) => {
-                count_mcp_attachment(&image.data, &mut attachment_bytes)?;
-                attachments.push(format!("data:{};base64,{}", image.mime_type, image.data));
-                text_parts.push(format!("[{} image attachment]", image.mime_type));
+                let (attachment, line) = media_block(
+                    &image.mime_type,
+                    &image.data,
+                    "image",
+                    &mut attachment_bytes,
+                )?;
+                attachments.extend(attachment);
+                text_parts.push(line);
             }
             rmcp::model::ContentBlock::Audio(audio) => {
-                count_mcp_attachment(&audio.data, &mut attachment_bytes)?;
-                attachments.push(format!("data:{};base64,{}", audio.mime_type, audio.data));
-                text_parts.push(format!("[{} audio attachment]", audio.mime_type));
+                let (attachment, line) = media_block(
+                    &audio.mime_type,
+                    &audio.data,
+                    "audio",
+                    &mut attachment_bytes,
+                )?;
+                attachments.extend(attachment);
+                text_parts.push(line);
             }
+            // A resource's text reaches the model as text on lines of its
+            // own under a line naming it, so a long one can be cut and read
+            // back by line; a blob as what it holds (text, an image or PDF
+            // attached, anything else named).
+            rmcp::model::ContentBlock::Resource(embedded) => match &embedded.resource {
+                rmcp::model::ResourceContents::TextResourceContents {
+                    uri,
+                    mime_type,
+                    text,
+                    ..
+                } => {
+                    has_text |= !text.is_empty();
+                    text_parts.push(resource_text(uri, mime_type.as_deref(), text));
+                }
+                rmcp::model::ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    ..
+                } => {
+                    match mcp_content::blob(uri, mime_type.as_deref(), blob, &mut attachment_bytes)
+                    {
+                        Blob::Text(text) => {
+                            has_text |= !text.is_empty();
+                            text_parts.push(resource_text(uri, mime_type.as_deref(), &text));
+                        }
+                        Blob::Attached { data_url, note } => {
+                            attachments.push(data_url);
+                            text_parts.push(note);
+                        }
+                        Blob::Note(note) => text_parts.push(note),
+                    }
+                }
+                _ => text_parts.push(serde_json::to_string(content).unwrap_or_default()),
+            },
             other => text_parts.push(serde_json::to_string(other).unwrap_or_default()),
         }
     }
     // A tool that declares an output schema may return its result only as
     // structured content, with no text beside it (no content at all, or only
-    // images, audio or links). The model and workflows read text, so it
-    // becomes the text.
-    let has_text = result.content.iter().any(|content| match content {
-        rmcp::model::ContentBlock::Text(text) => !text.text.is_empty(),
-        rmcp::model::ContentBlock::Resource(embedded) => matches!(
-            &embedded.resource,
-            rmcp::model::ResourceContents::TextResourceContents { text, .. } if !text.is_empty()
-        ),
-        _ => false,
-    });
+    // images, audio, links or blobs that are not text). The model and
+    // workflows read text, so it becomes the text.
     if !has_text && let Some(structured) = &result.structured_content {
         text_parts.push(structured.to_string());
     }
@@ -2631,13 +2975,64 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
     }
 }
 
+/// A resource's text as a tool result holds it: a line naming the
+/// resource (`[notes://today: text/markdown]`), then the text.
+fn resource_text(uri: &str, mime: Option<&str>, text: &str) -> String {
+    match mime.filter(|mime| !mime.trim().is_empty()) {
+        Some(mime) => format!(
+            "[{uri}: {}]\n{text}",
+            haarness_core::mcp_content::media_type(mime)
+        ),
+        None => format!("[{uri}]\n{text}"),
+    }
+}
+
+/// An image or audio block as the model takes it: the attachment and the
+/// line that stands for it, or, for a type Haarness does not carry to
+/// providers (`audio/webm`), only a line that names it. An image whose
+/// type is mislabelled (`image/jpg`) is attached as what its bytes are, and
+/// one of a text type (an SVG) is attached as before, which the model reads
+/// as its text. Base64 broken over lines is read without the breaks.
+fn media_block(
+    declared: &str,
+    data: &str,
+    kind: &str,
+    total: &mut usize,
+) -> CoreResult<(Option<String>, String)> {
+    use haarness_core::{attachments::is_supported_media_mime, mcp_content};
+    let data = mcp_content::base64_text(data);
+    let mut mime = mcp_content::media_type(declared);
+    if !is_supported_media_mime(&mime) && !mcp_content::textual(&mime) {
+        let sniffed = mime
+            .starts_with("image/")
+            .then(|| STANDARD.decode(data.as_bytes()).ok())
+            .flatten()
+            .and_then(|bytes| haarness_core::images::sniff(&bytes))
+            .filter(|sniffed| is_supported_media_mime(sniffed));
+        let Some(sniffed) = sniffed else {
+            let bytes = data.trim_end_matches('=').len() / 4 * 3;
+            return Ok((
+                None,
+                format!(
+                    "[{mime} {kind}, about {bytes} bytes, left out: Haarness does not attach this type]"
+                ),
+            ));
+        };
+        sniffed.clone_into(&mut mime);
+    }
+    count_mcp_attachment(&data, total)?;
+    Ok((
+        Some(format!("data:{mime};base64,{data}")),
+        format!("[{mime} {kind} attachment]"),
+    ))
+}
+
 fn count_mcp_attachment(encoded: &str, total: &mut usize) -> CoreResult<()> {
-    const MAX_MCP_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
     let decoded = STANDARD
         .decode(encoded)
         .map_err(|error| CoreError::Tool(format!("invalid MCP media base64: {error}")))?;
     *total = total.saturating_add(decoded.len());
-    if *total > MAX_MCP_ATTACHMENT_BYTES {
+    if *total > haarness_core::mcp_content::MAX_ATTACHMENT_BYTES {
         return Err(CoreError::Tool(
             "MCP media attachments exceed the 10 MiB request limit".into(),
         ));
@@ -3380,6 +3775,152 @@ mod tests {
             server.abort();
             let _ = std::fs::remove_dir_all(auth_dir);
         }
+    }
+
+    #[test]
+    fn a_remote_url_is_usable_only_as_an_http_or_https_address_with_a_host() {
+        let environment = |name: &str| match name {
+            "DOCS_HOST" => Some("docs.fixture.test".to_owned()),
+            "DOCS_PORT" => Some("8443".to_owned()),
+            // A value from outside that names another variable.
+            "DOCS_BRANCH" => Some("x.evil.example/${DOCS_SECRET}#".to_owned()),
+            "DOCS_SECRET" => Some("key-secret".to_owned()),
+            _ => None,
+        };
+        let reach = |url: &str| reachable_url_with(url, &environment);
+        for (usable, asked) in [
+            ("http://127.0.0.1:8123/mcp", "http://127.0.0.1:8123/mcp"),
+            (
+                "https://docs.fixture.test/mcp?api_key=k",
+                "https://docs.fixture.test/mcp?api_key=k",
+            ),
+            (
+                "https://sam:secret@docs.fixture.test/mcp",
+                "https://sam:secret@docs.fixture.test/mcp",
+            ),
+            (
+                " HTTPS://Docs.Fixture.Test/mcp ",
+                " HTTPS://Docs.Fixture.Test/mcp ",
+            ),
+            ("http://[::1]:9000/mcp", "http://[::1]:9000/mcp"),
+            // A TOML or API url's references are read when the server starts.
+            (
+                "https://${DOCS_HOST}:${DOCS_PORT}/mcp",
+                "https://docs.fixture.test:8443/mcp",
+            ),
+            (
+                "https://${DOCS_MIRROR:-docs.fixture.test}/mcp",
+                "https://docs.fixture.test/mcp",
+            ),
+            (
+                "https://${DOCS_HOST}/mcp?api_key=${DOCS_KEY:-none}",
+                "https://docs.fixture.test/mcp?api_key=none",
+            ),
+            // What a variable holds is used as it is, never read again.
+            (
+                "https://${DOCS_BRANCH}.docs.fixture.test/mcp",
+                "https://x.evil.example/${DOCS_SECRET}#.docs.fixture.test/mcp",
+            ),
+        ] {
+            assert_eq!(reach(usable).as_deref(), Ok(asked), "{usable}");
+        }
+        for (unusable, said) in [
+            ("not a url", URL_WITHOUT_HOST),
+            ("", URL_WITHOUT_HOST),
+            ("ftp://docs.fixture.test/mcp", URL_WITHOUT_HOST),
+            ("http:", URL_WITHOUT_HOST),
+            ("file:///tmp/mcp.sock", URL_WITHOUT_HOST),
+            // `https://${DOCS_HOST}/mcp` from a JSON setting, its unset
+            // variable filled with nothing.
+            ("https:///mcp?api_key=tok-secret", URL_WITHOUT_HOST),
+            // An unset reference is named wherever it is: host, path,
+            // query or user name, before anything is sent.
+            (
+                "https://${DOCS_SPARE}/mcp?token=tok-secret",
+                "Its URL names an environment variable that is not set: DOCS_SPARE.",
+            ),
+            (
+                "https://${DOCS_HOST}/${DOCS_SPARE}/mcp",
+                "Its URL names an environment variable that is not set: DOCS_SPARE.",
+            ),
+            (
+                "https://docs.fixture.test/mcp?api_key=${DOCS_SPARE}",
+                "Its URL names an environment variable that is not set: DOCS_SPARE.",
+            ),
+            (
+                "https://${DOCS_SPARE}:tok-secret@docs.fixture.test/mcp",
+                "Its URL names an environment variable that is not set: DOCS_SPARE.",
+            ),
+            (
+                "${DOCS_SCHEME}://${DOCS_HOST}:${DOCS_SPARE}/${DOCS_SCHEME}",
+                "Its URL names environment variables that are not set: DOCS_SCHEME, DOCS_SPARE.",
+            ),
+        ] {
+            let problem = reach(unusable).expect_err(unusable);
+            assert_eq!(problem, said, "{unusable}");
+            assert!(
+                !problem.contains("tok-secret") && !problem.contains("fixture.test"),
+                "{problem}"
+            );
+        }
+    }
+
+    /// Neither transport reaches OAuth or the network with a URL that cannot
+    /// be asked, and a sign-in for it is refused the same way.
+    #[tokio::test]
+    async fn a_remote_server_whose_url_cannot_be_asked_fails_saying_so_plainly() {
+        let auth_dir =
+            std::env::temp_dir().join(format!("haarness-mcp-bad-url-{}", uuid::Uuid::now_v7()));
+        let registry = NativeMcpRegistry::with_auth_dir(&auth_dir);
+        let said =
+            "Its URL names an environment variable that is not set: HAARNESS_TEST_UNSET_HOST.";
+        for transport in ["streamable_http", "sse"] {
+            let config: McpConfigureRequest = serde_json::from_value(json!({
+                "transport": transport,
+                "url": "https://${HAARNESS_TEST_UNSET_HOST}/mcp?api_key=tok-secret",
+                "enabled": true,
+                "timeoutMs": 2000
+            }))
+            .unwrap();
+            let error = registry.configure(transport, config).await.unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("invalid request: MCP server \"{transport}\" cannot be reached. {said}")
+            );
+            let info = registry
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|info| info.name == transport)
+                .unwrap();
+            assert_eq!(info.status, "failed");
+            assert_eq!(info.detail.as_deref(), Some(said));
+        }
+        let error = registry
+            .begin_oauth(
+                "streamable_http",
+                "http://127.0.0.1:19876/mcp/oauth/callback",
+            )
+            .await
+            .err()
+            .expect("the sign-in is refused");
+        assert!(
+            error.to_string().ends_with(&format!(
+                "MCP server \"streamable_http\" cannot be reached. {said}"
+            )),
+            "{error}"
+        );
+        // A server that is off stays off, whatever its URL.
+        let off: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http", "url": "not a url", "enabled": false
+        }))
+        .unwrap();
+        assert_eq!(
+            registry.configure("off", off).await.unwrap().status,
+            "disabled"
+        );
+        let _ = std::fs::remove_dir_all(auth_dir);
     }
 
     #[tokio::test]
@@ -4257,6 +4798,110 @@ mod tests {
         );
     }
 
+    /// An embedded blob went to the model as its JSON, base64 and all: a
+    /// 1 MB image was 1.4 M characters of text and no attachment.
+    #[test]
+    fn embedded_blobs_reach_the_model_as_what_they_hold() {
+        use rmcp::model::{ContentBlock, ResourceContents};
+        let png = STANDARD.encode(b"\x89PNG\r\n\x1a\nfixture");
+        let blob = |uri: &str, mime: &str, data: &str| {
+            ContentBlock::resource(ResourceContents::blob(data, uri).with_mime_type(mime))
+        };
+        let result = rmcp::model::CallToolResult::success(vec![
+            ContentBlock::text("Here is the chart."),
+            blob("ui://chart.png", "IMAGE/PNG; charset=binary", &png),
+            blob(
+                "data://row.json",
+                "application/json",
+                &STANDARD.encode(r#"{"id":7}"#),
+            ),
+            blob(
+                "files://a.zip",
+                "application/zip",
+                &STANDARD.encode([0u8; 300]),
+            ),
+            ContentBlock::embedded_text("notes://today", "Ship on Friday."),
+        ]);
+        let output = to_output(result, "chart").unwrap();
+        assert_eq!(
+            output.metadata["attachments"],
+            json!([format!("data:image/png;base64,{png}")])
+        );
+        assert!(!output.text.contains(&png), "{}", output.text);
+        // Text, decoded or sent as text, on lines of its own under its name.
+        assert_eq!(
+            output.text,
+            "Here is the chart.\n\
+             [image/png attachment: ui://chart.png]\n\
+             [data://row.json: application/json]\n{\"id\":7}\n\
+             [files://a.zip: application/zip, 300 bytes]\n\
+             [notes://today: text/plain]\nShip on Friday."
+        );
+        // Images past the 10 MiB a result attaches are named, not attached,
+        // and an image block's type is compared the same way.
+        let big = STANDARD.encode(vec![0u8; 10 * 1024 * 1024 + 1]);
+        let result = rmcp::model::CallToolResult::success(vec![
+            blob("files://scan.pdf", "application/pdf", &big),
+            ContentBlock::image(&png, "Image/PNG"),
+        ]);
+        let output = to_output(result, "scan").unwrap();
+        assert_eq!(
+            output.metadata["attachments"],
+            json!([format!("data:image/png;base64,{png}")])
+        );
+        assert!(
+            output
+                .text
+                .starts_with("[files://scan.pdf: application/pdf, ")
+                && output.text.ends_with("[image/png image attachment]"),
+            "{}",
+            output.text
+        );
+        // Structured content is the text when the blobs say nothing in text.
+        let mut result = rmcp::model::CallToolResult::structured(json!({"pages": 2}));
+        result.content = vec![blob("files://a.zip", "application/zip", "AAAA")];
+        assert!(
+            to_output(result, "pack")
+                .unwrap()
+                .text
+                .contains(r#""pages":2"#)
+        );
+    }
+
+    /// Media of a type Haarness does not carry was attached anyway, and every
+    /// later request of the chat failed to load it.
+    #[test]
+    fn mcp_media_of_a_type_haarness_does_not_carry_is_named_not_attached() {
+        let jpeg = STANDARD.encode(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00fixture");
+        let result = rmcp::model::CallToolResult::success(vec![
+            rmcp::model::ContentBlock::audio("GkXfo0AAAA==", "audio/webm"),
+            rmcp::model::ContentBlock::audio("SUQz", "Audio/MPEG"),
+            // An SVG goes as before, for the model to read as its text.
+            rmcp::model::ContentBlock::image("PHN2Zy8+", "image/svg+xml"),
+            // A JPEG labelled `image/jpg`, its base64 broken over lines.
+            rmcp::model::ContentBlock::image(
+                format!("{}\n{}", &jpeg[..8], &jpeg[8..]),
+                "image/jpg",
+            ),
+        ]);
+        let output = to_output(result, "media").unwrap();
+        assert_eq!(
+            output.metadata["attachments"],
+            json!([
+                "data:audio/mpeg;base64,SUQz",
+                "data:image/svg+xml;base64,PHN2Zy8+",
+                format!("data:image/jpeg;base64,{jpeg}")
+            ])
+        );
+        assert_eq!(
+            output.text,
+            "[audio/webm audio, about 6 bytes, left out: Haarness does not attach this type]\n\
+             [audio/mpeg audio attachment]\n\
+             [image/svg+xml image attachment]\n\
+             [image/jpeg image attachment]"
+        );
+    }
+
     #[test]
     fn invalid_mcp_media_is_rejected_before_it_reaches_the_transcript() {
         let result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::image(
@@ -4731,6 +5376,122 @@ mod recovery_tests {
         })
         .await
         .unwrap();
+        registry.disconnect("catalog").await.unwrap();
+    }
+
+    /// One tool listed in a form MCP does not allow made rmcp refuse the
+    /// whole page, and the server failed with "Unexpected response type".
+    /// Now such a tool is left out by name, on every page, and the rest are
+    /// offered and answer; a listing changed later is read the same way.
+    #[tokio::test]
+    async fn a_tool_that_is_not_a_valid_mcp_tool_is_left_out_and_the_rest_are_offered() {
+        use serde_json::json;
+        let registry = NativeMcpRegistry::default();
+        let mut config = names_config("shelf", &["first", "second", "third"]);
+        config.env.insert(
+            "LISTED".into(),
+            json!([
+                {"name": "broken", "description": "no input schema"},
+                {"name": "odd", "inputSchema": "not an object"},
+                {"description": "no name"},
+                // Only optional fields are wrong: offered without them, and
+                // only them.
+                {"name": "lenient", "inputSchema": {"type": "object"}, "outputSchema": "not an object"},
+                {"name": "loose", "description": "kept", "inputSchema": {"type": "object"},
+                 "outputSchema": [], "annotations": {"readOnlyHint": "yes"}},
+                // Its page alone calls it: kept from the model with its `_meta`.
+                {"name": "paged", "inputSchema": {"type": "object"}, "outputSchema": [],
+                 "annotations": {"readOnlyHint": "yes"}, "_meta": {"ui": {"visibility": ["app"]}}},
+                // A `_meta` that cannot be read leaves the tool out.
+                {"name": "unmarked", "inputSchema": {"type": "object"}, "_meta": "app only"}
+            ])
+            .to_string(),
+        );
+        config.env.insert("PAGE".into(), "2".into());
+        let info = registry.configure("shelf", config).await.unwrap();
+        assert_eq!(info.status, "connected");
+        assert_eq!(
+            info.detail.as_deref(),
+            Some(
+                "5 tools discovered; left out as not valid MCP tools: \"broken\", \"odd\", \"unmarked\" +1"
+            )
+        );
+        let mut offered: Vec<_> = registry
+            .tool_snapshot()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        offered.sort();
+        assert_eq!(
+            offered,
+            [
+                "mcp__shelf__first",
+                "mcp__shelf__lenient",
+                "mcp__shelf__loose",
+                "mcp__shelf__second",
+                "mcp__shelf__third"
+            ]
+        );
+        assert_eq!(
+            reached(&registry, "mcp__shelf__loose").await["tool"],
+            "loose"
+        );
+        // Only the bad fields went: its description stayed, and the tool its
+        // page alone calls is kept from the model.
+        let snapshot = registry.tool_snapshot();
+        assert_eq!(
+            snapshot
+                .iter()
+                .find(|tool| tool.name == "mcp__shelf__loose")
+                .map(|tool| tool.description.as_str()),
+            Some("kept")
+        );
+        assert!(!snapshot.iter().any(|tool| tool.name == "mcp__shelf__paged"));
+        assert_eq!(
+            reached(&registry, "mcp__shelf__third").await["tool"],
+            "third"
+        );
+        // A listing of valid tools across pages reads as before.
+        let mut paged = names_config("paged", &["one", "two", "three"]);
+        paged.env.insert("PAGE".into(), "1".into());
+        let info = registry.configure("paged", paged).await.unwrap();
+        assert_eq!(info.detail.as_deref(), Some("3 tools discovered"));
+        registry.disconnect("shelf").await.unwrap();
+        registry.disconnect("paged").await.unwrap();
+
+        let catalog: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "stdio", "command": PYTHON,
+            "args": [concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/catalog.py")],
+            "env": {"BROKEN_REFRESH": "1"}, "enabled": true
+        }))
+        .unwrap();
+        registry.configure("catalog", catalog).await.unwrap();
+        registry
+            .call("catalog", "refresh", json!({}))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !registry
+                .tool_snapshot()
+                .iter()
+                .any(|tool| tool.name == "mcp__catalog__new_tool")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the changed listing was read");
+        assert!(
+            !registry
+                .tool_snapshot()
+                .iter()
+                .any(|tool| tool.name.contains("broken_tool"))
+        );
+        let info = registry.list().await.unwrap();
+        assert_eq!(
+            info[0].detail.as_deref(),
+            Some("2 tools discovered; left out as not valid MCP tools: \"broken_tool\"")
+        );
         registry.disconnect("catalog").await.unwrap();
     }
 

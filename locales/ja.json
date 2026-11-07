@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "{target} を {app} から {endApp} へドラッグ",
   "Always allow this app": "このアプリを常に許可",
   "Could not allow this app: {error}": "このアプリを許可できませんでした: {error}",
-  "No agent is paused": "一時停止中のエージェントはありません"
+  "No agent is paused": "一時停止中のエージェントはありません",
+  "Its URL is not a web address (http or https) with a host.": "URL がホストを含む Web アドレス (http または https) ではありません。",
+  "Its URL names an environment variable that is not set: {variable}.": "URL が設定されていない環境変数を参照しています: {variable}。",
+  "Its URL names environment variables that are not set: {variables}.": "URL が設定されていない環境変数を参照しています: {variables}。",
+  "Left out as not valid MCP tools: {tools}": "有効な MCP ツールではないため除外: {tools}"
 }

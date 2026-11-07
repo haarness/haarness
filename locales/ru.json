@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "Перетащить {target} из {app} в {endApp}",
   "Always allow this app": "Всегда разрешать это приложение",
   "Could not allow this app: {error}": "Не удалось разрешить это приложение: {error}",
-  "No agent is paused": "Нет приостановленных агентов"
+  "No agent is paused": "Нет приостановленных агентов",
+  "Its URL is not a web address (http or https) with a host.": "Его URL — не веб-адрес (http или https) с хостом.",
+  "Its URL names an environment variable that is not set: {variable}.": "Его URL ссылается на незаданную переменную окружения: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "Его URL ссылается на незаданные переменные окружения: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Пропущены, так как это не корректные инструменты MCP: {tools}"
 }

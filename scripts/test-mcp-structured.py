@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Real server, echo provider: MCP results carried only as structured content reach the model and workflows.
+"""Real server, echo provider: MCP results carried only as structured content reach the model and workflows;
+resources embedded as base64 reach the model as what they hold (an image as an attachment, text as text, anything
+else named), never as base64; audio of a type Haarness does not carry is named rather than attached; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
+all of it. One-line JSON is laid out a value a line, whole when it then fits, and within a few times its length however deep
+it nests; what a Code Mode script returns is cut too, a string as its own lines, a list whole on one line when only that
+fits. A script gets the server's metadata for its own call, never an earlier call's with the same text.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -40,6 +45,20 @@ def call(thread, tool):
     result = until(lambda: (values[before] if len(values := results(thread)) > before else None), f'{tool}: no result')
     until(lambda: not api('/turns/active'), 'turn still active')
     return result
+def execute(thread, code):
+    before = len(results(thread))
+    api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': '!tool execute ' + json.dumps({'code': code})})
+    until(lambda: not api('/turns/active') and any(item['name'] == 'execute' for item in results(thread)[before:]), 'execute: no result', 60)
+    coded = next(item for item in results(thread)[before:] if item['name'] == 'execute')
+    assert not coded['is_error'], coded['output'][:400]
+    return coded
+def workflow(source):
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed', run_state
+    return run_state.get('result')
 def check(label):
     checks.append(label); print('PASS ' + label, flush=True)
 
@@ -67,6 +86,31 @@ try:
     assert result['is_error'] and 'E42-refused-proof' in result['output'], result
     check('a failure without text names the tool, or gives its structured reason')
 
+    PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+    result = call(thread, 'embedded')
+    output = result['output']
+    assert not result['is_error'] and output.startswith('Three files.\n[image/png attachment: ui://chart.png]\n'), output
+    assert '\n[data://row.json: application/json]\n{"proof": "embedded-text-proof"}\n' in output, output
+    assert '[files://pack.zip: application/zip, 300 bytes]' in output, output
+    assert PIXEL not in output and 'blob' not in output, output
+    assert result['metadata']['attachments'] == ['data:image/png;base64,' + PIXEL], result['metadata']
+    check('embedded resources reach the model as what they hold: an image under IMAGE/PNG as an attachment, base64 JSON as its text, an archive named by type and size, and no base64 text')
+
+    result = call(thread, 'odd_media')
+    assert not result['is_error'] and result['output'].startswith('[audio/webm audio, about 6 bytes, left out: Haarness does not attach this type]'), result['output']
+    assert result['metadata']['attachments'] == ['data:image/png;base64,' + PIXEL], result['metadata']
+    again = call(thread, 'weather')
+    assert not again['is_error'], again
+    check('audio of a type Haarness does not carry is named, not attached, beside an image it does attach, and the chat goes on')
+
+    WIDE = ''.join('row %05d %s\n' % (n, 'w' * 90) for n in range(2000))
+    result = call(thread, 'wide')
+    assert not result['is_error'] and len(result['output']) < 52 * 1024, len(result['output'])
+    assert result['output'].startswith('row 00000 ') and 'Full output saved to: ' in result['output'], result['output'][-300:]
+    saved = pathlib.Path(result['metadata']['outputPath'])
+    assert saved.read_text() == WIDE and result['metadata']['truncated'] is True and result['metadata']['rows'] == 2000, result['metadata']
+    check('a 200 KB result reaches the model as its first 50 KiB, the whole saved where the note says, its structured content kept')
+
     source = ("export const meta = { name: 'structured-mcp', phases: ['call'] };\n"
               "phase('call');\n"
               "const result = await tool('mcp__structured__weather', {});\n"
@@ -78,6 +122,138 @@ try:
     assert run_state['status'] == 'completed', run_state
     assert 'structured-only-proof' in json.dumps(run_state.get('result')), run_state.get('result')
     check('a workflow tool() call to that MCP tool returns the structured content as its output')
+
+    source = ("export const meta = { name: 'whole-mcp-text', phases: ['call'] };\n"
+              "phase('call');\n"
+              "const result = await tool('mcp__structured__wide', {});\n"
+              "return result.output.length;\n")
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed' and run_state.get('result') == len(WIDE), run_state.get('result')
+    check('a workflow tool() call to the 200 KB tool gets all of its text')
+
+    before = len(results(thread))
+    code = "return (await tool('mcp__structured__wide', {})).text.length;"
+    api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': '!tool execute ' + json.dumps({'code': code})})
+    until(lambda: not api('/turns/active') and any(item['name'] == 'execute' for item in results(thread)[before:]), 'execute: no result', 60)
+    coded = next(item for item in results(thread)[before:] if item['name'] == 'execute')
+    assert not coded['is_error'] and json.loads(coded['output']) == len(WIDE), coded['output'][:400]
+    check('Code Mode gets all of the 200 KB tool\'s text too')
+
+    # What Code Mode hands back is cut for the model in turn.
+    before = len(results(thread))
+    code = "return (await tool('mcp__structured__wide', {})).text;"
+    api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': '!tool execute ' + json.dumps({'code': code})})
+    until(lambda: not api('/turns/active') and any(item['name'] == 'execute' for item in results(thread)[before:]), 'execute: no result', 60)
+    coded = next(item for item in results(thread)[before:] if item['name'] == 'execute')
+    assert not coded['is_error'] and len(coded['output']) < 52 * 1024 and 'Full output saved to: ' in coded['output'], len(coded['output'])
+    # A string comes as its own lines, the model's and the saved file's, not as one escaped JSON line.
+    assert coded['output'].startswith('row 00000 ' + 'w' * 90 + '\nrow 00001 '), coded['output'][:200]
+    saved = pathlib.Path(coded['metadata']['outputPath']).read_text()
+    assert saved == WIDE and max(len(line) for line in saved.splitlines()) < 200, (len(saved), saved[:200])
+    check('what a Code Mode script returns is cut for the model too, a string as lines read and grep can take')
+
+    ROWS = json.dumps([{'id': n, 'title': 'row %d' % n, 'body': 'b' * 40} for n in range(1500)], separators=(',', ':'))
+    result = call(thread, 'rows')
+    assert not result['is_error'] and result['output'].startswith('[\n  {\n    "id": 0,'), result['output'][:200]
+    assert result['output'].count('\n') > 1900, result['output'].count('\n')
+    saved = pathlib.Path(result['metadata']['outputPath']).read_text()
+    assert json.loads(saved) == json.loads(ROWS) and max(len(line) for line in saved.splitlines()) < 200
+    source = ("export const meta = { name: 'compact-rows', phases: ['call'] };\nphase('call');\n"
+              "return (await tool('mcp__structured__rows', {})).output;\n")
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed' and run_state.get('result') == ROWS, str(run_state.get('result'))[:200]
+    check('120 KB of one-line JSON reaches the model as its first 2,000 lines laid out a value a line, saved readable by line, and a workflow gets it as the server wrote it')
+
+    # Laid out by adding spaces and line breaks only: no number rounded, no repeated key dropped.
+    for tool, start in [('ledger', '[\n  {\n    "wei": 1234567890123456789012345,\n    "rate": 0.12345678901234567890123,'),
+                        ('found', 'Found 800 entries:\n[\n  {\n    "wei": 1234567890123456789012345,')]:
+        result = call(thread, tool)
+        assert not result['is_error'] and result['output'].startswith(start), result['output'][:200]
+        assert '"key": 1,\n    "key": 2\n  },' in result['output'], result['output'][:300]
+        saved = pathlib.Path(result['metadata']['outputPath']).read_text()
+        sent = subprocess.run([sys.executable, str(fixture)], input=json.dumps(
+            {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': tool}}) + '\n',
+            text=True, capture_output=True, timeout=30, check=True).stdout
+        written = json.loads(sent)['result']['content'][0]['text']
+        assert saved.replace('\n', '').replace(' ', '') == written.replace('\n', '').replace(' ', ''), tool
+        assert max(len(line) for line in saved.splitlines()) < 80, tool
+    check('one-line JSON is laid out with every number and repeated key as the server wrote it, whole or after a heading')
+
+    source = ("export const meta = { name: 'tree-metadata', phases: ['call'] };\nphase('call');\n"
+              "const result = await tool('mcp__structured__tree', {});\n"
+              "return { tree: result.metadata.tree.length, truncated: result.metadata.truncated, text: result.output.length };\n")
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed' and run_state.get('result') == {'tree': 1, 'truncated': False, 'text': 80 * 1024}, run_state.get('result')
+    check('a workflow gets the server\'s own metadata for a cut result, its own `truncated` included')
+
+    # Indented four spaces it passes 50 KiB; laid out at two it fits, so it is not cut.
+    SPACED = json.dumps([{'id': n, 'title': 't' * 50, 'body': 'b' * 50, 'owner': 'o' * 50, 'state': 'open'}
+                         for n in range(200)], indent=4)
+    result = call(thread, 'spaced')
+    assert not result['is_error'] and len(SPACED) > 50 * 1024, len(SPACED)
+    assert result['output'] == json.dumps(json.loads(SPACED), indent=2), result['output'][-300:]
+    assert 'truncated' not in result['output'] and 'outputPath' not in (result.get('metadata') or {}), result.get('metadata')
+    source = ("export const meta = { name: 'spaced-rows', phases: ['call'] };\nphase('call');\n"
+              "return (await tool('mcp__structured__spaced', {})).output;\n")
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed' and run_state.get('result') == SPACED, str(run_state.get('result'))[:200]
+    check('JSON that fits once laid out reaches the model whole, with no truncation note or saved file, and a workflow gets it as the server wrote it')
+
+    # Two spaces a level would make this 1.8 GB; past 32 levels the rest stays on its line.
+    started = time.monotonic()
+    result = call(thread, 'nested')
+    assert not result['is_error'] and len(result['output']) < 52 * 1024, len(result['output'])
+    saved = pathlib.Path(result['metadata']['outputPath']).read_text()
+    assert len(saved) < 2 * 60000 and len(saved.splitlines()) == 65, (len(saved), len(saved.splitlines()))
+    assert saved.replace('\n', '').replace(' ', '') == '[' * 30000 + ']' * 30000
+    assert time.monotonic() - started < 20, time.monotonic() - started
+    check('JSON nested 30,000 deep is laid out 32 levels down, its saved file about as long as the server\'s text')
+
+    # Each call of `stamp` gives the same text, laid out to fit, and its own number as structured content.
+    stamp = "return (await tool('mcp__structured__stamp', {})).metadata;"
+    assert json.loads(execute(thread, stamp)['output']) == {'call': 1}
+    assert call(thread, 'stamp')['metadata'] == {'call': 2}
+    call(thread, 'spaced')
+    assert json.loads(execute(thread, stamp)['output']) == {'call': 3}
+    assert call(thread, 'stamp')['metadata'] == {'call': 4}
+    spaced = execute(thread, "return (await tool('mcp__structured__spaced', {})).metadata;")
+    assert json.loads(spaced['output']) is None, spaced['output']
+    source = ("export const meta = { name: 'stamp-metadata', phases: ['call'] };\nphase('call');\n"
+              "return (await tool('mcp__structured__stamp', {})).metadata;\n")
+    assert workflow(source) == {'call': 5}
+    check('a script gets the server\'s metadata for its own call, not for the model\'s earlier call of that tool or of one with the same text')
+
+    SERIES = json.dumps({'result': {'series': [n % 10 for n in range(40000)]}}, separators=(',', ':'))
+    result = call(thread, 'series')
+    assert not result['is_error'] and result['output'].startswith('{\n  "result": {\n    "series": [\n    0,\n'), result['output'][:200]
+    saved = pathlib.Path(result['metadata']['outputPath']).read_text()
+    assert len(saved.splitlines()) == 40006 and max(len(line) for line in saved.splitlines()) < 20, len(saved.splitlines())
+    assert len(saved) <= 4 * len(SERIES) and saved.replace('\n', '').replace(' ', '') == SERIES, len(saved)
+    nested = execute(thread, "return { m: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] };")
+    assert nested['output'] == json.dumps({'m': [[0, 0, 0]] * 3}, indent=2), nested['output']
+    check('JSON that indenting every level would make too long is still laid out a value a line, indented less deep, and a short nested value a script returns is laid out in full')
+
+    ids = execute(thread, "return Array.from({ length: 2500 }, (_, n) => n);")
+    assert ids['output'] == json.dumps(list(range(2500)), separators=(',', ':')), ids['output'][:200]
+    assert 'outputPath' not in (ids.get('metadata') or {}), ids.get('metadata')
+    check('a Code Mode list past 2,000 lines laid out comes whole on one line when that fits')
+
+    result = call(thread, 'loud_failure')
+    assert result['is_error'] and len(result['output']) < 52 * 1024, len(result['output'])
+    assert 'The tool call failed and its output was truncated. Full output saved to: ' in result['output'], result['output'][-300:]
+    check('a long failure is cut for the model as well, and says the call failed')
 
     (root/'result.json').write_text(json.dumps({'passed': True, 'checks': checks}, indent=2))
     print(f'PASS {len(checks)} MCP structured-content scenarios.', flush=True)

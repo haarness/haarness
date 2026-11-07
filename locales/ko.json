@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "{target}을(를) {app}에서 {endApp}(으)로 드래그",
   "Always allow this app": "이 앱 항상 허용",
   "Could not allow this app: {error}": "이 앱을 허용하지 못했습니다: {error}",
-  "No agent is paused": "일시 중지된 에이전트가 없습니다"
+  "No agent is paused": "일시 중지된 에이전트가 없습니다",
+  "Its URL is not a web address (http or https) with a host.": "URL이 호스트가 있는 웹 주소(http 또는 https)가 아닙니다.",
+  "Its URL names an environment variable that is not set: {variable}.": "URL이 설정되지 않은 환경 변수를 사용합니다: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "URL이 설정되지 않은 환경 변수를 사용합니다: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "유효한 MCP 도구가 아니어서 제외됨: {tools}"
 }

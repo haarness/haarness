@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "سحب {target} من {app} إلى {endApp}",
   "Always allow this app": "السماح بهذا التطبيق دائمًا",
   "Could not allow this app: {error}": "تعذر السماح بهذا التطبيق: {error}",
-  "No agent is paused": "لا يوجد وكيل متوقف مؤقتًا"
+  "No agent is paused": "لا يوجد وكيل متوقف مؤقتًا",
+  "Its URL is not a web address (http or https) with a host.": "عنوان URL الخاص به ليس عنوان ويب (http أو https) يتضمن مضيفًا.",
+  "Its URL names an environment variable that is not set: {variable}.": "يذكر عنوان URL متغير بيئة غير مضبوط: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "يذكر عنوان URL متغيرات بيئة غير مضبوطة: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "استُبعدت لأنها ليست أدوات MCP صالحة: {tools}"
 }

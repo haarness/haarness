@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "{target} öğesini {app} uygulamasından {endApp} uygulamasına sürükle",
   "Always allow this app": "Bu uygulamaya her zaman izin ver",
   "Could not allow this app: {error}": "Bu uygulamaya izin verilemedi: {error}",
-  "No agent is paused": "Duraklatılmış ajan yok"
+  "No agent is paused": "Duraklatılmış ajan yok",
+  "Its URL is not a web address (http or https) with a host.": "URL'si ana makine içeren bir web adresi (http veya https) değil.",
+  "Its URL names an environment variable that is not set: {variable}.": "URL'si tanımlı olmayan bir ortam değişkenini kullanıyor: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "URL'si tanımlı olmayan ortam değişkenlerini kullanıyor: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Geçerli MCP aracı olmadıkları için dışarıda bırakıldı: {tools}"
 }

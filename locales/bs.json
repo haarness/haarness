@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "Prevuci {target} iz {app} u {endApp}",
   "Always allow this app": "Uvijek dozvoli ovu aplikaciju",
   "Could not allow this app: {error}": "Nije moguće dozvoliti ovu aplikaciju: {error}",
-  "No agent is paused": "Nijedan agent nije pauziran"
+  "No agent is paused": "Nijedan agent nije pauziran",
+  "Its URL is not a web address (http or https) with a host.": "Njegov URL nije web adresa (http ili https) s hostom.",
+  "Its URL names an environment variable that is not set: {variable}.": "Njegov URL navodi varijablu okruženja koja nije postavljena: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "Njegov URL navodi varijable okruženja koje nisu postavljene: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Izostavljeno jer nisu ispravni MCP alati: {tools}"
 }

@@ -25,6 +25,12 @@
 - A local server that takes 12 s to answer `initialize` (as a first `npx -y` download does) no longer keeps Haarness
   from starting: Desktop's connect and a first `haarness run` succeed at once, the server reads `connecting` and then
   `connected`, and the first turn waits for it and calls its tool.
+- A remote server whose url holds an unset `${VAR}` is not started: the API, `haarness mcp ls` and the TUI's server
+  page give the same sentence, which names the server (and the variable where the setting keeps the reference) but
+  not the url.
+- A tool listed without an `inputSchema` is left out by name and the server's other tools work.
+- A 20 MB tool result reaches the model cut to 50 KiB with the whole saved to a file; base64 text and an image in
+  capitals read from a resource come back as text and as an attachment.
 
 The keychain is a test file (HAARNESS_TEST_KEYCHAIN_FILE, honoured by debug builds only), so the script never
 touches the system's keychain, and it fails if a secret reaches anything else.
@@ -43,6 +49,11 @@ root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-mcp-servers-', dir=os.envi
 workspace = root/'project'; (workspace/'.haarness').mkdir(parents=True); (workspace/'tools/mcp').mkdir(parents=True)
 keychain = root/'keychain.json'
 SECRET = 'ghp_e2e-' + uuid.uuid4().hex
+URL_SECRET = 'url-e2e-' + uuid.uuid4().hex
+# A url is read once, when its server starts, whatever setting it comes from (the JSON loader leaves it as written).
+BAD_URL = 'Its URL names an environment variable that is not set: HAARNESS_E2E_UNSET_HOST.'
+BAD_VAR = BAD_URL
+NO_HOST = 'Its URL is not a web address (http or https) with a host.'
 # Quotes, backslashes and length the old `security -i` path split or mangled.
 AWKWARD = 'a"b\\c\\"d \'e\' $(f) %g% ' + 'x' * 4096
 python = sys.executable
@@ -161,12 +172,18 @@ settings.write_text(json.dumps({
         'google_drive': names('google_drive', ['search']),
         # Answers `initialize` after 12 s, past the 8 s launchers wait for the server to answer.
         'cold': server('recovery.py', env={'INIT_DELAY': '12', 'CALL_LOG': str(root/'cold-calls')}),
+        # Its host is a variable that is not set, so the reference stays as written.
+        'badurl': {'type': 'http', 'url': 'https://${HAARNESS_E2E_UNSET_HOST}/mcp?api_key=' + URL_SECRET},
+        # Lists a tool without an inputSchema beside two good ones.
+        'shelf': server('names.py', env={'LABEL': 'shelf', 'TOOLS': json.dumps(['first', 'second']),
+                                         'LISTED': json.dumps([{'name': 'broken', 'description': 'no input schema'}])}),
     },
 }, indent=2) + '\n')
 (workspace/'.haarness/config.toml').write_text('[tool_availability]\n"mcp__Docs_Server__plain" = false\n')
 env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(root/'data'), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
-           HAARNESS_TEST_KEYCHAIN_FILE=str(keychain), LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
+           HAARNESS_TEST_KEYCHAIN_FILE=str(keychain), LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8',
+           HAARNESS_E2E_MCP_HOST='127.0.0.1:9')
 session = f'haarness-mcp-servers-{os.getpid()}'
 connection = None; foreground = None; stand_in = None; first_run = None; checks = []
 
@@ -234,7 +251,7 @@ try:
     assert servers()['cold']['status'] == 'connected', servers()['cold']
     check(f'Desktop\'s connect answers in {connected_in:.1f} s while a server takes 12 s to start; it reads connecting, '
           f'then connected, and the first turn waited {time.monotonic() - started:.1f} s for it and called its tool')
-    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing', 'silent', 'a', 'a__b', 'Docs Server', 'Docs_Server', 'api.internal', 'billing_internal', 'notes', 'Google Drive', 'google_drive'}
+    until(lambda: {name: item['status'] for name, item in servers().items()}.keys() >= {'flood', 'docs', 'hidden', 'app', 'keyed', 'missing', 'silent', 'a', 'a__b', 'Docs Server', 'Docs_Server', 'api.internal', 'billing_internal', 'notes', 'Google Drive', 'google_drive', 'badurl', 'shelf'}
           and all(item['status'] in ('connected', 'failed') for item in servers().values()), 'servers did not settle', 60)
     port = connection['url'].rsplit(':', 1)[1].strip('/')
     daemon = int(subprocess.run(['lsof', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN', '-t'], text=True, capture_output=True).stdout.split()[0])
@@ -261,6 +278,57 @@ try:
     assert api('/mcp/missing/reconnect', {})['status'] == 'connected'
     assert call(thread, 'mcp__missing__env', {'name': 'TOKEN'})['output'] == 'Bearer desktop-secret'
     check('Desktop\'s store request keeps a secret for a reference, and a reconnect then starts the server')
+
+    # --- a remote url that cannot be asked, and a tool that is not a valid MCP tool
+    bad = servers()['badurl']
+    assert bad['status'] == 'failed' and bad['detail'] == BAD_URL, bad
+    listed = cli('mcp', 'ls')
+    assert re.search(r'^badurl\tstreamable_http\tfailed\t' + re.escape(BAD_URL) + '$', listed, re.M), listed
+    try:
+        api('/mcp/badvar', {'transport': 'streamable_http', 'enabled': True,
+                            'url': 'https://${HAARNESS_E2E_UNSET_HOST}/mcp?api_key=' + URL_SECRET})
+        raise AssertionError('a server whose url cannot be asked was configured')
+    except urllib.error.HTTPError as error:
+        assert json.loads(error.read())['message'].endswith('MCP server "badvar" cannot be reached. ' + BAD_VAR), error.code
+    assert servers()['badvar']['status'] == 'failed' and servers()['badvar']['detail'] == BAD_VAR, servers()['badvar']
+    listed = cli('mcp', 'ls')
+    assert re.search(r'^badvar\tstreamable_http\tfailed\t' + re.escape(BAD_VAR) + '$', listed, re.M), listed
+    assert URL_SECRET not in listed and URL_SECRET not in json.dumps(servers()), listed
+    api('/mcp/badvar/disconnect', {})
+    # A url with nothing where its host goes.
+    try:
+        api('/mcp/nohost', {'transport': 'streamable_http', 'enabled': True, 'url': 'https:///mcp?api_key=' + URL_SECRET})
+        raise AssertionError('a server whose url has no host was configured')
+    except urllib.error.HTTPError:
+        pass
+    assert servers()['nohost']['detail'] == NO_HOST, servers()['nohost']
+    api('/mcp/nohost/disconnect', {})
+    # One in the query is named too, before anything is sent.
+    try:
+        api('/mcp/badquery', {'transport': 'streamable_http', 'enabled': True,
+                              'url': 'http://127.0.0.1:9/mcp?api_key=${HAARNESS_E2E_UNSET_KEY}'})
+        raise AssertionError('a server whose url names an unset variable in its query was configured')
+    except urllib.error.HTTPError:
+        pass
+    assert servers()['badquery']['detail'] == 'Its URL names an environment variable that is not set: HAARNESS_E2E_UNSET_KEY.', servers()['badquery']
+    api('/mcp/badquery/disconnect', {})
+    # A variable that is set is read when the server starts: this one leads to a port nothing answers on.
+    try:
+        api('/mcp/setvar', {'transport': 'streamable_http', 'enabled': True, 'timeout_ms': 3000,
+                            'url': 'http://${HAARNESS_E2E_MCP_HOST}/mcp'})
+    except urllib.error.HTTPError:
+        pass
+    detail = servers()['setvar']['detail']
+    assert 'cannot reach http://127.0.0.1:9/mcp' in detail and 'not set' not in detail, detail
+    api('/mcp/setvar/disconnect', {})
+    check('a remote server whose url has no host fails with one sentence (the unset variable named when the setting keeps the reference), in the API and `haarness mcp ls`, never the url; a variable that is set is read when the server starts')
+    shelf = servers()['shelf']
+    assert shelf['status'] == 'connected', shelf
+    assert shelf['detail'] == '2 tools discovered; left out as not valid MCP tools: "broken"', shelf
+    assert json.loads(call(thread, 'mcp__shelf__second', {})['output'])['tool'] == 'second'
+    offered = cli('mcp', 'tools', 'shelf')
+    assert [line.split('\t')[0] for line in offered.splitlines()] == ['mcp__shelf__first', 'mcp__shelf__second'], offered
+    check('a tool listed without an inputSchema is left out by name and the server\'s other tools are offered and answer')
 
     # --- a tool reaches the server that lists it
     catalog = {tool['id']: tool['source'] for tool in api(f'/tools?threadId={thread}')['tools']}
@@ -353,6 +421,10 @@ try:
     assert listing['resources'][1]['server'] == 'docs' and listing['templates'][0]['uriTemplate'] == 'docs://page/{id}', listing
     read = call(thread, 'mcp_resource_read', {'server': 'docs', 'uri': 'docs://setup'})
     assert read['output'] == '# Setup\nRun the fixture.', read
+    notes = call(thread, 'mcp_resource_read', {'server': 'docs', 'uri': 'docs://notes'})
+    assert notes['output'] == 'Ship the fixture on Friday.\n', notes
+    shout = call(thread, 'mcp_resource_read', {'server': 'docs', 'uri': 'docs://shout'})
+    assert shout['output'] == '[image/png attachment: docs://shout]' and shout['metadata']['attachments'][0].startswith('data:image/png;base64,'), shout
     logo = call(thread, 'mcp_resource_read', {'server': 'docs', 'uri': 'docs://logo'})
     assert logo['output'] == '[image/png attachment: docs://logo]' and logo['metadata']['attachments'][0].startswith('data:image/png;base64,'), logo
     denied = call(thread, 'mcp_resource_read', {'server': 'docs', 'uri': 'docs://private/notes'})
@@ -363,7 +435,7 @@ try:
     hidden = call(thread, 'mcp_resource_read', {'server': 'hidden', 'uri': 'docs://setup'})
     assert hidden['is_error'] and 'MCP server "hidden" is turned off for this chat' in hidden['output'], hidden
     assert not any(entry['server'] == 'hidden' for entry in listing['resources']), listing
-    check('the resource tools list and read (text, an image as an attachment), a rule about server:uri refuses a read, and a server whose tools are all denied is out of reach')
+    check('the resource tools list and read (text, base64 text as its text, an image as an attachment whatever the case of its type), a rule about server:uri refuses a read, and a server whose tools are all denied is out of reach')
     for name in ('docs', 'app', 'hidden'):
         api(f'/mcp/{name}/disconnect', {})
     until(lambda: not {'mcp_resource_list', 'mcp_resource_read'} & tool_names(), 'the resource tools stayed without a resource server')
@@ -401,7 +473,13 @@ try:
 
     # --- the 64 MB message limit
     big = call(thread, 'mcp__flood__big', {})
-    assert not big['is_error'] and len(big['output']) == 20 << 20, len(big['output'])
+    assert not big['is_error'] and len(big['output']) < 52 * 1024, len(big['output'])
+    # Its one long line fills the 50 KiB the model is shown.
+    assert big['output'].startswith('z' * (50 * 1024)), big['output'][:200]
+    assert 'The tool call succeeded but its output was truncated. Full output saved to: ' in big['output'], big['output'][-400:]
+    assert big['metadata']['truncated'] is True and pathlib.Path(big['metadata']['outputPath']).stat().st_size == 20 << 20, big['metadata']
+    pathlib.Path(big['metadata']['outputPath']).unlink()
+    check('a 20 MB MCP result reaches the model as 50 KiB, with the whole saved for it to read')
     before = rss_kb(daemon)
     started = time.monotonic()
     flood = call(thread, 'mcp__flood__flood', {})
@@ -443,6 +521,33 @@ try:
     if os.environ.get('HAARNESS_SCREENSHOTS'):
         (pathlib.Path(os.environ['HAARNESS_SCREENSHOTS'])/'tui-mcp-resource-rows.txt').write_text(pane())
     check('the TUI names the resource read and the server listed beside the tool')
+    for keys in (['-l', '/mcp'], ['Enter']):
+        subprocess.run(['tmux', 'send-keys', '-t', session, *keys], check=True)
+        time.sleep(.5)
+    until(lambda: 'Add remote server' in pane(), 'the TUI did not open its MCP servers')
+    time.sleep(.3)
+    for keys in (['-l', 'badurl'], ['Enter']):
+        subprocess.run(['tmux', 'send-keys', '-t', session, *keys], check=True)
+        time.sleep(.3)
+    def bad_url_page():
+        # Only the dialog's columns: the transcript and the sidebar share its rows.
+        screen = pane()
+        (root/'tui-mcp-bad-url.txt').write_text(screen)
+        rows = screen.splitlines()
+        top = next((index for index, row in enumerate(rows) if 'MCP · badurl' in row), None)
+        if top is None:
+            return False
+        left = rows[top].index('MCP · badurl')
+        page = ' '.join(row[left:left + 80] for row in rows[top:])
+        return 'Status: failed · ' + BAD_URL in ' '.join(page.split())
+    until(bad_url_page, 'the TUI\'s server page did not say why it failed')
+    assert URL_SECRET not in pane()
+    if os.environ.get('HAARNESS_SCREENSHOTS'):
+        (pathlib.Path(os.environ['HAARNESS_SCREENSHOTS'])/'tui-mcp-bad-url.txt').write_text(pane())
+    for key in ('Escape', 'Escape'):
+        subprocess.run(['tmux', 'send-keys', '-t', session, key], check=True)
+        time.sleep(.2)
+    check('the TUI\'s page for that server gives the same sentence')
 
     # Nothing wrote the secret anywhere it does not belong. The chat's database holds what the fixture's tool
     # answered (the secret, by design), so only logs and settings are read.
@@ -451,7 +556,9 @@ try:
     assert any(path.suffix in ('.log', '.jsonl') or 'log' in path.name for path in files), 'no log was written to read'
     for path in files:
         assert SECRET.encode() not in path.read_bytes(), f'the secret is in {path}'
-    check('no log or setting holds the secret')
+        # The settings hold the url as written; nothing else repeats it.
+        assert path == settings or URL_SECRET.encode() not in path.read_bytes(), f'the url\'s key is in {path}'
+    check('no log or setting holds the secret, and no log the key in a url')
 
     # --- a server started from another folder
     other = root/'other'; (other/'.haarness').mkdir(parents=True); (other/'sub').mkdir()

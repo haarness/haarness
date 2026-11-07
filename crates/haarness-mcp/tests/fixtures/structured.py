@@ -1,4 +1,7 @@
-"""MCP stdio fixture whose tools answer with structured content and little or no text."""
+"""MCP stdio fixture whose tools answer with structured content and little or no text, or embed resources as
+base64 blobs (an image under a type in capitals, text, an archive), or answer with 200 KB of text, or with the
+same text each call and the call's number as structured content."""
+import base64
 import json
 import sys
 
@@ -14,8 +17,50 @@ TOOLS = {
     'broken': {'content': [], 'isError': True},
     # A failure that says why in structured content only.
     'refused': {'content': [], 'structuredContent': {'code': 'E42-refused-proof'}, 'isError': True},
+    # Resources embedded as blobs: an image, text and an archive.
+    'embedded': {'content': [
+        {'type': 'text', 'text': 'Three files.'},
+        {'type': 'resource', 'resource': {'uri': 'ui://chart.png', 'mimeType': 'IMAGE/PNG; charset=binary', 'blob': PIXEL}},
+        {'type': 'resource', 'resource': {'uri': 'data://row.json', 'mimeType': 'application/json',
+                                          'blob': base64.b64encode(b'{"proof": "embedded-text-proof"}').decode()}},
+        {'type': 'resource', 'resource': {'uri': 'files://pack.zip', 'mimeType': 'application/zip',
+                                          'blob': base64.b64encode(bytes(300)).decode()}},
+    ]},
+    # Audio of a type Haarness does not carry, beside an image it does.
+    'odd_media': {'content': [{'type': 'audio', 'data': 'GkXfo0AAAA==', 'mimeType': 'audio/webm'},
+                              {'type': 'image', 'data': PIXEL, 'mimeType': 'image/png'}]},
+    # 120 KB of JSON on one line, as JSON.stringify gives it.
+    'rows': {'content': [{'type': 'text', 'text': json.dumps([{'id': n, 'title': 'row %d' % n, 'body': 'b' * 40}
+                                                             for n in range(1500)], separators=(',', ':'))}]},
+    # 66 KB of one-line JSON holding what a parser would change: an integer past 64 bits, a
+    # decimal past 17 digits, a key given twice.
+    'ledger': {'content': [{'type': 'text', 'text': '[%s]' % ','.join(
+        ['{"wei":1234567890123456789012345,"rate":0.12345678901234567890123,"key":1,"key":2}'] * 800)}]},
+    # The same JSON after a heading line.
+    'found': {'content': [{'type': 'text', 'text': 'Found 800 entries:\n[%s]' % ','.join(
+        ['{"wei":1234567890123456789012345,"key":1,"key":2}'] * 1600)}]},
+    # 52 KB of JSON indented four spaces, as Python's json.dumps(rows, indent=4) writes it: 48 KB at two.
+    'spaced': {'content': [{'type': 'text', 'text': json.dumps(
+        [{'id': n, 'title': 't' * 50, 'body': 'b' * 50, 'owner': 'o' * 50, 'state': 'open'} for n in range(200)],
+        indent=4)}]},
+    # The same text as `spaced` each call, with how many calls it has had as its structured content.
+    'stamp': {'content': [], 'structuredContent': {'call': 0}},
+    # 80 KB of one-digit values three levels down, four and a half times as long laid out in full.
+    'series': {'content': [{'type': 'text', 'text': json.dumps(
+        {'result': {'series': [n % 10 for n in range(40000)]}}, separators=(',', ':'))}]},
+    # 60 KB of arrays nested 30,000 deep.
+    'nested': {'content': [{'type': 'text', 'text': '[' * 30000 + ']' * 30000}]},
+    # Structured content that names `truncated` itself, beside 80 KB of text.
+    'tree': {'content': [{'type': 'text', 'text': 't' * 80 * 1024}],
+             'structuredContent': {'tree': [{'path': 'a'}], 'truncated': False}},
+    # A failure that says why at length.
+    'loud_failure': {'content': [{'type': 'text', 'text': 'f' * 200 * 1024}], 'isError': True},
+    # 200 KB of text, as a tool that returns a whole table does.
+    'wide': {'content': [{'type': 'text', 'text': ''.join('row %05d %s\n' % (n, 'w' * 90) for n in range(2000))}],
+             'structuredContent': {'rows': 2000}},
 }
 
+calls = 0
 for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request:
@@ -29,6 +74,9 @@ for line in sys.stdin:
                             for name, answer in TOOLS.items()]}
     elif method == 'tools/call':
         result = TOOLS[request['params']['name']]
+        if request['params']['name'] == 'stamp':
+            calls += 1
+            result = {'content': TOOLS['spaced']['content'], 'structuredContent': {'call': calls}}
     else:
         result = {}
     print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)

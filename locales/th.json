@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "ลาก {target} จาก {app} ไปยัง {endApp}",
   "Always allow this app": "อนุญาตแอปนี้เสมอ",
   "Could not allow this app: {error}": "ไม่สามารถอนุญาตแอปนี้ได้: {error}",
-  "No agent is paused": "ไม่มีเอเจนต์ที่หยุดชั่วคราวอยู่"
+  "No agent is paused": "ไม่มีเอเจนต์ที่หยุดชั่วคราวอยู่",
+  "Its URL is not a web address (http or https) with a host.": "URL ไม่ใช่ที่อยู่เว็บ (http หรือ https) ที่มีโฮสต์",
+  "Its URL names an environment variable that is not set: {variable}.": "URL อ้างถึงตัวแปรสภาพแวดล้อมที่ไม่ได้ตั้งค่า: {variable}",
+  "Its URL names environment variables that are not set: {variables}.": "URL อ้างถึงตัวแปรสภาพแวดล้อมที่ไม่ได้ตั้งค่า: {variables}",
+  "Left out as not valid MCP tools: {tools}": "ละไว้เพราะไม่ใช่เครื่องมือ MCP ที่ถูกต้อง: {tools}"
 }

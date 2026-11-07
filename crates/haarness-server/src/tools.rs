@@ -589,15 +589,41 @@ impl Tool for ExecuteTool {
             calls: std::sync::atomic::AtomicUsize::new(0),
             max_calls: context.execution.code_max_calls,
         });
-        let output = executor
+        let value = executor
             .execute(invocation, host, context.cancel)
             .await
-            .map_err(|error| CoreError::Tool(format!("code mode failed: {error}")))?;
-        let value = output.value.unwrap_or(Value::Null);
-        Ok(ToolOutput {
-            text: serde_json::to_string_pretty(&value).map_err(tool_error)?,
-            metadata: json!({"result":value}),
-        })
+            .map_err(|error| CoreError::Tool(format!("code mode failed: {error}")))?
+            .value
+            .unwrap_or(Value::Null);
+        // A script hands back whole texts, so what it returns is cut for
+        // the model as an MCP tool's text is: a string as itself, so a long
+        // one reads back by line, and anything else as JSON laid out (as
+        // indenting bounds a server's), or on one line when only that fits.
+        let mut cut = match &value {
+            Value::String(text) => {
+                cut_mcp_text(text.clone(), &tool_output_dir(), false)
+                    .await?
+                    .0
+            }
+            value => {
+                let compact = serde_json::to_string(value).map_err(tool_error)?;
+                let laid_out = indent_json(&compact);
+                if within_tool_output_limits(&laid_out) {
+                    output(laid_out)
+                } else if within_tool_output_limits(&compact) {
+                    output(compact)
+                } else {
+                    cut_laid_out(&laid_out, &tool_output_dir(), false).await?.0
+                }
+            }
+        };
+        let mut metadata = match cut.metadata {
+            Value::Object(object) => object,
+            _ => serde_json::Map::new(),
+        };
+        metadata.insert("result".into(), value);
+        cut.metadata = Value::Object(metadata);
+        Ok(cut)
     }
 }
 
@@ -645,11 +671,19 @@ impl WorkflowHost for McpCodeHost {
             .filter(|value| value.is_object())
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let output = self
-            .invoker
-            .invoke(name, arguments)
+        let script = ScriptCall::new();
+        let output = script
+            .run(self.invoker.invoke(name, arguments))
             .await
             .map_err(|error| HostError::new(error.to_string()))?;
+        // A call of a script is never shown to the model, so the file the
+        // cut text names is read by nothing else once the script has it.
+        if let Some((text, metadata, file)) = take_whole_mcp_output(&script, &output).await {
+            if let Some(file) = file {
+                let _ = tokio::fs::remove_file(file).await;
+            }
+            return Ok(Some(json!({"text":text,"metadata":metadata})));
+        }
         Ok(Some(json!({"text":output.text,"metadata":output.metadata})))
     }
 }
@@ -2630,12 +2664,204 @@ impl Tool for McpProjectedTool {
     async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput> {
         // MCP calls have no time limit of their own, so Stop must be able to
         // abandon one that hangs.
-        tokio::select! {
+        let result = tokio::select! {
             biased;
             () = context.cancel.cancelled() => Err(CoreError::Cancelled),
             result = self.registry.call(&self.server, &self.definition.name, arguments) => result,
+        };
+        match result {
+            Ok(output) => capped_mcp_output(output, &tool_output_dir()).await,
+            // A failure's text is cut too: the model reads it all the same.
+            Err(CoreError::Tool(text)) => Err(CoreError::Tool(
+                match cut_mcp_text(text.clone(), &tool_output_dir(), true).await {
+                    Ok((cut, _)) => cut.text,
+                    Err(_) => text,
+                },
+            )),
+            Err(error) => Err(error),
         }
     }
+}
+
+/// One call of a tool a script makes (Code Mode, a workflow): an MCP result
+/// it gets back is kept whole for it alone (see [`take_whole_mcp_output`]),
+/// and what is kept for it goes when it does.
+pub(crate) struct ScriptCall(u64);
+
+tokio::task_local! {
+    /// The script's call a tool runs for. The model's own calls run for
+    /// none, so nothing is kept for them.
+    static SCRIPT_CALL: u64;
+}
+
+impl ScriptCall {
+    pub(crate) fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Run `call`, the tool this call runs, as this call.
+    pub(crate) async fn run<F: Future>(&self, call: F) -> F::Output {
+        SCRIPT_CALL.scope(self.0, call).await
+    }
+}
+
+impl Drop for ScriptCall {
+    fn drop(&mut self) {
+        WHOLE_OUTPUTS.lock().retain(|kept| kept.call != self.0);
+    }
+}
+
+/// An MCP result [`capped_mcp_output`] cut for the model, or laid out,
+/// kept for the script's call that made it, which is not the model and
+/// gets the whole text and the server's own metadata.
+struct WholeOutput {
+    /// The [`ScriptCall`] it is kept for.
+    call: u64,
+    /// The file the cut text names, or `None` for JSON that fit once laid
+    /// out, which is not cut.
+    file: Option<PathBuf>,
+    /// The cut text the call gave, by its length and hash: what a script is
+    /// handed must start with it (hooks may add to its end), so a server
+    /// that names this file in its own short result gets nothing. A text
+    /// that is not cut names no file, so it must be all that is handed.
+    cut: (usize, [u8; 32]),
+    /// The server's text when the file holds another form of it (JSON
+    /// laid out a value a line), else `None`: the file is the text.
+    text: Option<String>,
+    metadata: Value,
+}
+
+/// The MCP results kept for scripts' calls still running, newest last: at
+/// most [`WHOLE_OUTPUTS_KEPT`], and texts of [`WHOLE_TEXT_BYTES_KEPT`]
+/// together. Each is taken once, by its own call; one let go meanwhile
+/// leaves a script the text the model would read.
+static WHOLE_OUTPUTS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::VecDeque<WholeOutput>>,
+> = std::sync::LazyLock::new(Default::default);
+const WHOLE_OUTPUTS_KEPT: usize = 256;
+const WHOLE_TEXT_BYTES_KEPT: usize = 32 * 1024 * 1024;
+
+/// An MCP tool's output as the model takes it: its text cut as described
+/// at [`cut_mcp_text`], with the whole saved in `directory` for the model to
+/// read, and its metadata as the server gave it (MCP App pages read it),
+/// with `truncated` and `outputPath` beside it when the text was cut.
+/// Structured content that uses one of those names moves under
+/// `structuredContent`, as for the names Haarness fills itself.
+async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<ToolOutput> {
+    let ToolOutput { text, metadata } = output;
+    let script = SCRIPT_CALL.try_with(|call| *call).ok();
+    let whole = script.map(|_| text.clone());
+    let (capped, saved) = cut_mcp_text(text, directory, false).await?;
+    let Some((file, reformatted)) = saved else {
+        if let (Some(call), Some(whole)) = (script, whole)
+            && capped.text != whole
+        {
+            keep_whole_output(WholeOutput {
+                call,
+                file: None,
+                cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
+                text: Some(whole),
+                metadata: metadata.clone(),
+            });
+        }
+        return Ok(ToolOutput {
+            text: capped.text,
+            metadata,
+        });
+    };
+    let Value::Object(cut) = capped.metadata else {
+        unreachable!("a cut output says where it was saved");
+    };
+    let mut merged = match metadata.clone() {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(object) if !cut.keys().any(|key| object.contains_key(key)) => object,
+        Value::Object(mut object) => {
+            let mut own = serde_json::Map::new();
+            for key in ["attachments", "diffs", "mcp_app"] {
+                if let Some(value) = object.remove(key) {
+                    own.insert(key.into(), value);
+                }
+            }
+            own.insert("structuredContent".into(), Value::Object(object));
+            own
+        }
+        other => serde_json::Map::from_iter([("structuredContent".to_owned(), other)]),
+    };
+    merged.extend(cut);
+    if let (Some(call), Some(whole)) = (script, whole) {
+        keep_whole_output(WholeOutput {
+            call,
+            file: Some(file),
+            cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
+            text: reformatted.then_some(whole),
+            metadata,
+        });
+    }
+    Ok(ToolOutput {
+        text: capped.text,
+        metadata: Value::Object(merged),
+    })
+}
+
+fn keep_whole_output(kept: WholeOutput) {
+    let mut outputs = WHOLE_OUTPUTS.lock();
+    outputs.push_back(kept);
+    while outputs.len() > WHOLE_OUTPUTS_KEPT
+        || outputs
+            .iter()
+            .filter_map(|kept| kept.text.as_ref().map(String::len))
+            .sum::<usize>()
+            > WHOLE_TEXT_BYTES_KEPT
+    {
+        outputs.pop_front();
+    }
+}
+
+fn cut_fingerprint(text: &[u8]) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(text).into()
+}
+
+/// What script's call `call` gets for `output`, an MCP result
+/// [`capped_mcp_output`] cut, or laid out, for that very call: the whole
+/// text as the server wrote it and the server's own metadata, taken once,
+/// with the file that holds the whole when there is one. `None` for any
+/// other output, so neither another call's result with the same text nor
+/// a file a server names in its structured content reaches the script.
+pub(crate) async fn take_whole_mcp_output(
+    call: &ScriptCall,
+    output: &ToolOutput,
+) -> Option<(String, Value, Option<PathBuf>)> {
+    // All that was kept for the call goes now, whatever is handed back.
+    let own: std::collections::VecDeque<WholeOutput> = {
+        let mut outputs = WHOLE_OUTPUTS.lock();
+        let (own, others) = std::mem::take(&mut *outputs)
+            .into_iter()
+            .partition(|kept| kept.call == call.0);
+        *outputs = others;
+        own
+    };
+    let named = if output.metadata.get("truncated") == Some(&Value::Bool(true)) {
+        Some(Path::new(output.metadata.get("outputPath")?.as_str()?))
+    } else {
+        None
+    };
+    let kept = own.into_iter().rev().find(|kept| {
+        let (length, hash) = kept.cut;
+        let text = output.text.as_bytes();
+        let start = match kept.file {
+            Some(_) => text.get(..length),
+            None => (text.len() == length).then_some(text),
+        };
+        kept.file.as_deref() == named && start.is_some_and(|start| cut_fingerprint(start) == hash)
+    })?;
+    let text = match (kept.text, &kept.file) {
+        (Some(text), _) => text,
+        (None, Some(file)) => tokio::fs::read_to_string(file).await.ok()?,
+        (None, None) => return None,
+    };
+    Some((text, kept.metadata, kept.file))
 }
 
 #[derive(Clone, Copy)]
@@ -5155,16 +5381,371 @@ pub(crate) async fn truncate_output_at(text: String, directory: &Path) -> CoreRe
     file.write_all(text.as_bytes()).await.map_err(tool_error)?;
     file.flush().await.map_err(tool_error)?;
     let removed = text.len().saturating_sub(preview.len());
-    let notice = format!(
-        "The tool call succeeded but its output was truncated. Full output saved to: {}\n\
-         Use grep on that path or read it with offset/limit.\n\n\
-         ...{removed} bytes truncated...",
-        path.display()
-    );
+    let notice = cut_notice(&path, removed, false);
     Ok(ToolOutput {
         text: format!("{preview}\n\n{notice}"),
         metadata: json!({"truncated": true, "outputPath": path}),
     })
+}
+
+/// What follows the start of a cut output: where the whole of it is, how to
+/// read it, and how much is left out.
+fn cut_notice(path: &Path, removed: usize, failed: bool) -> String {
+    let lead = if failed {
+        "The tool call failed and its output was truncated."
+    } else {
+        "The tool call succeeded but its output was truncated."
+    };
+    format!(
+        "{lead} Full output saved to: {}\n\
+         Use grep on that path or read it with offset/limit.\n\n\
+         ...{removed} bytes truncated...",
+        path.display()
+    )
+}
+
+/// An MCP server's text as it is cut for the model (a tool's result or
+/// error, a resource read, Code Mode's answer): as a native tool's output
+/// is, with two differences for text that often comes as a single line.
+/// JSON on one line (the whole text, or a long line of it, such as an
+/// embedded resource's) is saved, and shown, indented one value a line, so
+/// the file can be read by line, and a line longer than what is left of the
+/// 50 KiB is cut inside it rather than left out. JSON that fits once
+/// indented (written with wider indents than two spaces, say) is not cut.
+/// Gives the output (the text, or its JSON indented) and, when it was cut,
+/// the file holding the whole and whether it holds it indented rather than
+/// as it came.
+pub(crate) async fn cut_mcp_text(
+    text: String,
+    directory: &Path,
+    failed: bool,
+) -> CoreResult<(ToolOutput, Option<(PathBuf, bool)>)> {
+    if within_tool_output_limits(&text) {
+        return Ok((output(text), None));
+    }
+    let indented = indented_json(&text);
+    let reformatted = indented.is_some();
+    let readable = indented.unwrap_or(text);
+    if reformatted && within_tool_output_limits(&readable) {
+        return Ok((output(readable), None));
+    }
+    let (cut, path) = cut_laid_out(&readable, directory, failed).await?;
+    Ok((cut, Some((path, reformatted))))
+}
+
+/// `readable`, text past the limits as [`cut_mcp_text`] lays it out, cut:
+/// its start, then where the whole was saved in `directory`.
+async fn cut_laid_out(
+    readable: &str,
+    directory: &Path,
+    failed: bool,
+) -> CoreResult<(ToolOutput, PathBuf)> {
+    let preview = filled_preview(readable);
+    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
+        .await
+        .map_err(tool_error)?;
+    file.write_all(readable.as_bytes())
+        .await
+        .map_err(tool_error)?;
+    file.flush().await.map_err(tool_error)?;
+    let removed = readable.len().saturating_sub(preview.len());
+    let notice = cut_notice(&path, removed, failed);
+    Ok((
+        ToolOutput {
+            text: format!("{preview}\n\n{notice}"),
+            metadata: json!({"truncated": true, "outputPath": path}),
+        },
+        path,
+    ))
+}
+
+/// A line longer than this is taken for data written on one line (JSON,
+/// minified code) rather than prose: it is indented when it is JSON, and a
+/// mentioned resource's cut goes inside it rather than before it.
+pub(crate) const LONG_LINE_BYTES: usize = 2_000;
+
+fn within_tool_output_limits(text: &str) -> bool {
+    text.len() <= TOOL_OUTPUT_MAX_BYTES && text.lines().count() <= TOOL_OUTPUT_MAX_LINES
+}
+
+/// `text` with its JSON indented, or `None` when it holds none to indent:
+/// the whole of it when it is one JSON object or array, else each line of
+/// it longer than [`LONG_LINE_BYTES`] that is one. Only whitespace outside strings is
+/// added, so every value stays as the server wrote it, its digits and
+/// repeated keys included, where parsing and writing it again would round
+/// a long number and keep one of two same keys; [`indent_json`] says how
+/// far it is indented. The lines of a text share one budget, that of the
+/// whole text, and are indented alike, so a text of many such lines grows
+/// no more than one of its length would.
+pub(crate) fn indented_json(text: &str) -> Option<String> {
+    if let Some(whole) = json_container(text) {
+        return Some(indent_json(whole));
+    }
+    // The JSON of each long line, in order, for the two passes below: one
+    // entry per 2,000 bytes at most, where one a line could take more room
+    // than the text.
+    let found: Vec<Option<&str>> = text
+        .split_inclusive('\n')
+        .filter(|line| line.len() > LONG_LINE_BYTES)
+        .map(json_container)
+        .collect();
+    if found.iter().all(Option::is_none) {
+        return None;
+    }
+    // Each line, with its JSON when it is a long line of JSON.
+    let lines = || {
+        let mut jsons = found.iter().copied();
+        text.split_inclusive('\n').map(move |line| {
+            let json = (line.len() > LONG_LINE_BYTES).then(|| jsons.next().flatten());
+            (line, json.flatten())
+        })
+    };
+    let mut layout = JsonLayout::new();
+    for (line, json) in lines() {
+        match json {
+            Some(json) => {
+                layout.count(json);
+                layout.length += usize::from(line.ends_with('\n'));
+            }
+            None => layout.length += line.len(),
+        }
+    }
+    let (indent, length) = layout.deepest_indent(json_budget(text.len()));
+    let mut readable = String::with_capacity(length);
+    for (line, json) in lines() {
+        match json {
+            Some(json) => {
+                write_json(json, indent, &mut readable);
+                if line.ends_with('\n') {
+                    readable.push('\n');
+                }
+            }
+            None => readable.push_str(line),
+        }
+    }
+    debug_assert_eq!(readable.len(), length);
+    Some(readable)
+}
+
+/// `text` trimmed, when it is one JSON object or array.
+fn json_container(text: &str) -> Option<&str> {
+    let json = text.trim();
+    (json.starts_with(['{', '[']) && serde_json::from_str::<serde::de::IgnoredAny>(json).is_ok())
+        .then_some(json)
+}
+
+/// How deep JSON is laid out: what a container nested deeper holds stays
+/// on its line, so a line starts with at most 64 spaces.
+const JSON_INDENT_DEPTH: usize = 32;
+/// How many times longer than written laying JSON out may make it (or
+/// [`TOOL_OUTPUT_MAX_BYTES`], for short JSON), a text of many JSON lines
+/// counted as a whole. Short values nested deep gain the most, and a
+/// hostile text (`[[[…1…]]]`) gains space with the square of its length,
+/// so past this lines are indented less.
+const JSON_INDENT_GROWTH: usize = 4;
+
+/// How long JSON laid out from `written` bytes may come to: see
+/// [`JSON_INDENT_GROWTH`].
+fn json_budget(written: usize) -> usize {
+    written
+        .saturating_mul(JSON_INDENT_GROWTH)
+        .max(TOOL_OUTPUT_MAX_BYTES)
+}
+
+/// What [`walk_json`] hands on: JSON's tokens as written, and where laying
+/// it out adds whitespace.
+enum JsonPiece<'a> {
+    /// A string, number or literal, a bracket, a comma or a colon.
+    Token(&'a str),
+    /// A line break before the next token, in a container `level` deep
+    /// (1 for the outermost one's values), the next line indented `indent`
+    /// levels.
+    Line { level: usize, indent: usize },
+    /// The space after a colon, `level` deep.
+    Space { level: usize },
+}
+
+/// Hand `piece` each token of valid JSON `json` in order, without the
+/// whitespace between them, and each place laying it out one value a line
+/// breaks a line or adds a space. An empty container is one token pair
+/// with nothing between.
+fn walk_json<'a>(json: &'a str, mut piece: impl FnMut(JsonPiece<'a>)) {
+    let bytes = json.as_bytes();
+    let blank = |byte: u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
+    // How many containers the next token is in.
+    let mut depth = 0usize;
+    let mut at = 0;
+    // Every index stops after an ASCII byte or at the end, so each slice is
+    // on character boundaries.
+    while let Some(&byte) = bytes.get(at) {
+        let start = at;
+        at += 1;
+        match byte {
+            b'"' => {
+                while let Some(&byte) = bytes.get(at) {
+                    at += 1;
+                    match byte {
+                        b'\\' => at += json[at..].chars().next().map_or(0, char::len_utf8),
+                        b'"' => break,
+                        _ => {}
+                    }
+                }
+                piece(JsonPiece::Token(&json[start..at]));
+            }
+            b'{' | b'[' => {
+                piece(JsonPiece::Token(&json[start..at]));
+                let mut next = at;
+                while bytes.get(next).copied().is_some_and(blank) {
+                    next += 1;
+                }
+                if matches!(bytes.get(next), Some(b'}' | b']')) {
+                    at = next + 1;
+                    piece(JsonPiece::Token(&json[next..at]));
+                } else {
+                    depth += 1;
+                    piece(JsonPiece::Line {
+                        level: depth,
+                        indent: depth,
+                    });
+                }
+            }
+            b'}' | b']' => {
+                piece(JsonPiece::Line {
+                    level: depth,
+                    indent: depth.saturating_sub(1),
+                });
+                depth = depth.saturating_sub(1);
+                piece(JsonPiece::Token(&json[start..at]));
+            }
+            b',' => {
+                piece(JsonPiece::Token(","));
+                piece(JsonPiece::Line {
+                    level: depth,
+                    indent: depth,
+                });
+            }
+            b':' => {
+                piece(JsonPiece::Token(":"));
+                piece(JsonPiece::Space { level: depth });
+            }
+            byte if blank(byte) => {}
+            _ => {
+                while bytes.get(at).is_some_and(|&byte| {
+                    !blank(byte) && !matches!(byte, b',' | b':' | b'[' | b']' | b'{' | b'}' | b'"')
+                }) {
+                    at += 1;
+                }
+                piece(JsonPiece::Token(&json[start..at]));
+            }
+        }
+    }
+}
+
+/// Valid JSON `json` laid out one value a line, two spaces an indent, as
+/// `serde_json::to_string_pretty` lays it out, with every token as written,
+/// down to [`JSON_INDENT_DEPTH`] levels. When that would make it more than
+/// [`JSON_INDENT_GROWTH`] times as long (and longer than
+/// [`TOOL_OUTPUT_MAX_BYTES`]), lines deeper than the most levels that keep
+/// it within that are indented only as far as those levels, so each value
+/// is still on its own line.
+fn indent_json(json: &str) -> String {
+    let mut layout = JsonLayout::new();
+    layout.count(json);
+    let (indent, length) = layout.deepest_indent(json_budget(json.len()));
+    let mut out = String::with_capacity(length);
+    write_json(json, indent, &mut out);
+    debug_assert_eq!(out.len(), length);
+    out
+}
+
+/// How long laying out JSON comes to, counted without writing it, so that
+/// how deep to indent it can be chosen first.
+struct JsonLayout {
+    /// Its length with no line indented: the tokens, a byte for each break
+    /// and space, and whatever else the text it is in keeps as it is.
+    length: usize,
+    /// How many lines would be indented each number of levels.
+    lines: [usize; JSON_INDENT_DEPTH + 1],
+}
+
+impl JsonLayout {
+    fn new() -> Self {
+        Self {
+            length: 0,
+            lines: [0; JSON_INDENT_DEPTH + 1],
+        }
+    }
+
+    /// Counts valid JSON `json` in.
+    fn count(&mut self, json: &str) {
+        walk_json(json, |piece| match piece {
+            JsonPiece::Token(token) => self.length += token.len(),
+            JsonPiece::Line { level, indent } if level <= JSON_INDENT_DEPTH => {
+                self.length += 1;
+                self.lines[indent] += 1;
+            }
+            JsonPiece::Space { level } if level <= JSON_INDENT_DEPTH => self.length += 1,
+            JsonPiece::Line { .. } | JsonPiece::Space { .. } => {}
+        });
+    }
+
+    /// The most levels lines may be indented (two bytes a level) for all
+    /// that was counted to come to at most `most` bytes (0 when not even
+    /// one level fits), and how long it then comes to.
+    fn deepest_indent(&self, most: usize) -> (usize, usize) {
+        let mut length = self.length;
+        let mut indented = self.lines.iter().sum::<usize>();
+        let mut indent = 0;
+        for level in 1..=JSON_INDENT_DEPTH {
+            // Lines indented this many levels or more.
+            indented -= self.lines[level - 1];
+            if length + 2 * indented > most {
+                break;
+            }
+            length += 2 * indented;
+            indent = level;
+        }
+        (indent, length)
+    }
+}
+
+/// Valid JSON `json` laid out one value a line onto `out`, each line
+/// indented as far as it would be, but at most `indent` levels.
+fn write_json(json: &str, indent: usize, out: &mut String) {
+    walk_json(json, |piece| match piece {
+        JsonPiece::Token(token) => out.push_str(token),
+        JsonPiece::Line {
+            level,
+            indent: wanted,
+        } if level <= JSON_INDENT_DEPTH => {
+            out.push('\n');
+            for _ in 0..wanted.min(indent) {
+                out.push_str("  ");
+            }
+        }
+        JsonPiece::Space { level } if level <= JSON_INDENT_DEPTH => out.push(' '),
+        JsonPiece::Line { .. } | JsonPiece::Space { .. } => {}
+    });
+}
+
+/// The first 50 KiB (and at most 2,000 lines) of `text`, the line that
+/// passes the limit cut where it does, at a character boundary.
+fn filled_preview(text: &str) -> &str {
+    let mut end = 0;
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        if index == TOOL_OUTPUT_MAX_LINES {
+            break;
+        }
+        if end + line.len() > TOOL_OUTPUT_MAX_BYTES {
+            end = TOOL_OUTPUT_MAX_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            break;
+        }
+        end += line.len();
+    }
+    text[..end].trim_end_matches(['\n', '\r'])
 }
 
 fn output_preview(text: &str) -> String {
@@ -9818,6 +10399,106 @@ mod webfetch_tests {
         assert_eq!(output.metadata["results"][2]["metadata"]["n"], 3);
     }
 
+    /// What a script returned reached the model whole. A string came as
+    /// one JSON literal, its lines run together as `\n`, so its saved file
+    /// was one line `read` and `grep` could not get through; it comes as
+    /// itself now, and anything else as JSON laid out.
+    #[tokio::test]
+    async fn code_modes_answer_is_cut_for_the_model() {
+        if !WorkflowExecutor::default().capability().executable {
+            eprintln!("Bun unavailable; skipping portable code-mode execution test");
+            return;
+        }
+        let mut context = composite_context(Path::new("."));
+        context.invoker = Some(Arc::new(EchoInvoker));
+        let run = |code: &str| {
+            let (code, context) = (code.to_owned(), context.clone());
+            async move { ExecuteTool.execute(json!({ "code": code }), context).await }
+        };
+        let output = run("return 'c'.repeat(120000)").await.unwrap();
+        assert!(output.text.len() < 52 * 1024, "{}", output.text.len());
+        assert!(output.text.starts_with(&"c".repeat(50 * 1024)));
+        assert_eq!(output.metadata["result"].as_str().unwrap().len(), 120_000);
+        let file = output.metadata["outputPath"].as_str().unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "c".repeat(120_000));
+        std::fs::remove_file(file).unwrap();
+
+        let lines = (0..3_000)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = run("return Array.from({ length: 3000 }, (_, n) => `line ${n}`).join('\\n')")
+            .await
+            .unwrap();
+        assert!(
+            output.text.starts_with("line 0\nline 1\nline 2\n"),
+            "{:.40}",
+            output.text
+        );
+        assert_eq!(
+            output
+                .text
+                .lines()
+                .take_while(|line| line.starts_with("line "))
+                .count(),
+            2_000
+        );
+        let file = output.metadata["outputPath"].as_str().unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), lines);
+        std::fs::remove_file(file).unwrap();
+
+        let short = run("return 'done'").await.unwrap();
+        assert_eq!(
+            (short.text.as_str(), &short.metadata),
+            ("done", &json!({"result": "done"}))
+        );
+        let object = run("return { rows: [1, 2], note: 'ok' }").await.unwrap();
+        assert_eq!(
+            object.text,
+            serde_json::to_string_pretty(&json!({"rows": [1, 2], "note": "ok"})).unwrap()
+        );
+        // Short values nested deep, which laying out makes many times as
+        // long, are laid out all the same.
+        for (code, value) in [
+            (
+                "return { m: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] }",
+                json!({"m": [[0, 0, 0], [0, 0, 0], [0, 0, 0]]}),
+            ),
+            (
+                "return { a: [{ b: [{ c: [1, 2] }] }] }",
+                json!({"a": [{"b": [{"c": [1, 2]}]}]}),
+            ),
+        ] {
+            let nested = run(code).await.unwrap();
+            assert_eq!(nested.text, serde_json::to_string_pretty(&value).unwrap());
+        }
+        // A list past 2,000 lines laid out comes whole on one line when
+        // that fits, and is cut laid out when it does not.
+        let ids = run("return Array.from({ length: 2500 }, (_, n) => n)")
+            .await
+            .unwrap();
+        assert_eq!(
+            ids.text,
+            serde_json::to_string(&(0..2_500).collect::<Vec<_>>()).unwrap()
+        );
+        assert_eq!(ids.metadata.get("outputPath"), None);
+        let many = run("return Array.from({ length: 20000 }, (_, n) => n)")
+            .await
+            .unwrap();
+        assert!(
+            many.text.starts_with("[\n  0,\n  1,\n"),
+            "{:.40}",
+            many.text
+        );
+        let file = many.metadata["outputPath"].as_str().unwrap();
+        let saved = std::fs::read_to_string(file).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::to_string_pretty(&(0..20_000).collect::<Vec<_>>()).unwrap()
+        );
+        std::fs::remove_file(file).unwrap();
+    }
+
     #[tokio::test]
     async fn code_mode_calls_only_mcp_tools_in_confined_runtime() {
         if !WorkflowExecutor::default().capability().executable {
@@ -9956,6 +10637,601 @@ mod webfetch_tests {
         ) -> CoreResult<Value> {
             unreachable!()
         }
+    }
+
+    /// 200 KB of text a line at a time.
+    fn wide_text() -> String {
+        format!("{}\n", "r".repeat(99)).repeat(2_000)
+    }
+    /// 120 KB of JSON on one line, as `JSON.stringify` gives it.
+    fn compact_rows() -> String {
+        let rows: Vec<Value> = (0..1_500)
+            .map(|id| json!({"id": id, "title": format!("row {id}"), "body": "b".repeat(40)}))
+            .collect();
+        serde_json::to_string(&rows).unwrap()
+    }
+
+    /// 52 KiB of JSON indented four spaces a level, as Python's
+    /// `json.dumps(rows, indent=4)` writes it: 48 KiB at two spaces.
+    fn rows_indented_four() -> String {
+        let row = |id: usize| {
+            format!(
+                "    {{\n        \"id\": {id},\n        \"title\": \"{}\",\n        \"body\": \"{}\",\n        \"owner\": \"{}\",\n        \"state\": \"open\"\n    }}",
+                "t".repeat(50),
+                "b".repeat(50),
+                "o".repeat(50)
+            )
+        };
+        format!(
+            "[\n{}\n]",
+            (0..200).map(row).collect::<Vec<_>>().join(",\n")
+        )
+    }
+
+    /// One line of JSON over 50 KiB holding what parsing would change: an
+    /// integer past 64 bits, a decimal past 17 digits, a key given twice.
+    fn exact_numbers() -> String {
+        let row = r#"{"wei":1234567890123456789012345,"rate":0.12345678901234567890123,"key":1,"key":2,"note":"a, [b]: {c} \" d"}"#;
+        format!("[{}]", vec![row; 600].join(","))
+    }
+
+    /// Answers `wide` with 200 KB of lines beside its structured content
+    /// and page, `rows` with 120 KB of one-line JSON, `spaced` with JSON
+    /// that fits once laid out, `line` with 120 KB on one line, `tree` with
+    /// structured content that uses `truncated` itself, `listing` with
+    /// array content, `failing` with a long failure, and anything else
+    /// briefly.
+    struct WideMcp;
+
+    #[async_trait]
+    impl McpRegistry for WideMcp {
+        fn tool_snapshot(&self) -> Vec<ToolDefinition> {
+            Vec::new()
+        }
+        async fn list(&self) -> CoreResult<Vec<haarness_protocol::McpServerInfo>> {
+            Ok(Vec::new())
+        }
+        async fn configure(
+            &self,
+            _name: &str,
+            _config: haarness_protocol::McpConfigureRequest,
+        ) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn reconnect(&self, _name: &str) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn disconnect(&self, _name: &str) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn tools(&self, _name: &str) -> CoreResult<Vec<ToolDefinition>> {
+            Ok(Vec::new())
+        }
+        async fn call(&self, _name: &str, tool: &str, arguments: Value) -> CoreResult<ToolOutput> {
+            let output = |text: String, metadata: Value| Ok(ToolOutput { text, metadata });
+            match tool {
+                // The same text each call, with what the call was given as
+                // its structured content.
+                "stamp" => output(rows_indented_four(), arguments),
+                "stamp_wide" => output(wide_text(), arguments),
+                "wide" => output(
+                    wide_text(),
+                    json!({"rows": 2000, "mcp_app": {"uri": "ui://rows"}}),
+                ),
+                "rows" => output(compact_rows(), Value::Null),
+                "spaced" => output(rows_indented_four(), json!({"rows": 200})),
+                "line" => output("l".repeat(120 * 1024), Value::Null),
+                "tree" => output(
+                    "t".repeat(80 * 1024),
+                    json!({"tree": [{"path": "a"}], "truncated": false}),
+                ),
+                "listing" => output(wide_text(), json!([1, 2])),
+                "numbers" => output(exact_numbers(), Value::Null),
+                "found" => output(
+                    format!("Found 1500 issues:\n{}", compact_rows()),
+                    Value::Null,
+                ),
+                "failing" => Err(CoreError::Tool(wide_text())),
+                _ => output("short".into(), json!({"rows": 1})),
+            }
+        }
+        async fn resources(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn resource_templates(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn read_resource(&self, _name: &str, _uri: &str) -> CoreResult<Value> {
+            unreachable!()
+        }
+        async fn prompts(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn get_prompt(
+            &self,
+            _name: &str,
+            _prompt: &str,
+            _arguments: Value,
+        ) -> CoreResult<Value> {
+            unreachable!()
+        }
+    }
+
+    async fn call_wide(tool: &str, thread: ThreadId) -> CoreResult<ToolOutput> {
+        let projected = McpProjectedTool {
+            definition: ToolDefinition {
+                name: tool.into(),
+                description: "fixture".into(),
+                input_schema: json!({"type":"object"}),
+            },
+            server: "rows".into(),
+            registry: Arc::new(WideMcp),
+        };
+        let mut context = composite_context(&std::env::temp_dir());
+        context.thread_id = thread;
+        projected.execute(json!({}), context).await
+    }
+
+    /// `call_wide` of a `stamp` tool, whose structured content is `stamp`.
+    async fn call_stamp(tool: &str, stamp: &Value) -> ToolOutput {
+        let projected = McpProjectedTool {
+            definition: ToolDefinition {
+                name: tool.into(),
+                description: "fixture".into(),
+                input_schema: json!({"type":"object"}),
+            },
+            server: "rows".into(),
+            registry: Arc::new(WideMcp),
+        };
+        let context = composite_context(&std::env::temp_dir());
+        projected.execute(stamp.clone(), context).await.unwrap()
+    }
+
+    /// Whether anything is kept for a script with structured content `stamp`.
+    fn kept_for(stamp: &Value) -> bool {
+        WHOLE_OUTPUTS
+            .lock()
+            .iter()
+            .any(|kept| &kept.metadata == stamp)
+    }
+
+    fn saved(output: &ToolOutput) -> PathBuf {
+        PathBuf::from(output.metadata["outputPath"].as_str().unwrap())
+    }
+
+    /// An MCP tool's text reached the model whole, however long. It is cut
+    /// as a native tool's is, the whole saved for the model to read, and
+    /// the script's call that made it gets the whole text and the server's
+    /// own metadata, once; the metadata the chat keeps is the server's too.
+    #[tokio::test]
+    async fn a_long_mcp_result_is_cut_for_the_model_with_the_whole_saved() {
+        let thread = ThreadId::new();
+        let script = ScriptCall::new();
+        let output = script.run(call_wide("wide", thread)).await.unwrap();
+        assert!(output.text.len() < 52 * 1024, "{}", output.text.len());
+        assert!(
+            output.text.contains(
+                "The tool call succeeded but its output was truncated. Full output saved to: "
+            ),
+            "{}",
+            &output.text[output.text.len() - 300..]
+        );
+        assert_eq!(
+            std::fs::read_to_string(saved(&output)).unwrap(),
+            wide_text()
+        );
+        assert_eq!(output.metadata["truncated"], true);
+        assert_eq!(output.metadata["rows"], 2000);
+        assert_eq!(output.metadata["mcp_app"]["uri"], "ui://rows");
+        // Another call's script, then this call's (once).
+        assert!(
+            take_whole_mcp_output(&ScriptCall::new(), &output)
+                .await
+                .is_none()
+        );
+        let (text, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
+        assert_eq!(text, wide_text());
+        assert_eq!(
+            metadata,
+            json!({"rows": 2000, "mcp_app": {"uri": "ui://rows"}})
+        );
+        assert!(take_whole_mcp_output(&script, &output).await.is_none());
+        std::fs::remove_file(file.unwrap()).unwrap();
+
+        // Array content moves under `structuredContent` beside the cut.
+        let listing = call_wide("listing", thread).await.unwrap();
+        assert_eq!(listing.metadata["structuredContent"], json!([1, 2]));
+        std::fs::remove_file(saved(&listing)).unwrap();
+
+        // A short one is as the server sent it, and a file a server names,
+        // even one its own call saved, is never read for a script: it gets
+        // the whole only for a text that starts with the cut one (hooks may
+        // add to it), and what was kept for the call goes either way.
+        let short_call = ScriptCall::new();
+        let short = short_call.run(call_wide("short", thread)).await.unwrap();
+        assert_eq!(
+            (short.text.as_str(), &short.metadata),
+            ("short", &json!({"rows": 1}))
+        );
+        let spoofed = ToolOutput {
+            text: "short".into(),
+            metadata: json!({"truncated": true, "outputPath": "/etc/hosts"}),
+        };
+        assert!(take_whole_mcp_output(&short_call, &spoofed).await.is_none());
+        for longer in [false, true] {
+            let script = ScriptCall::new();
+            let real = script.run(call_wide("wide", thread)).await.unwrap();
+            let named = ToolOutput {
+                text: if longer {
+                    "x".repeat(real.text.len() + 1)
+                } else {
+                    "short".into()
+                },
+                metadata: json!({"truncated": true, "outputPath": saved(&real)}),
+            };
+            assert!(take_whole_mcp_output(&script, &named).await.is_none());
+            assert!(take_whole_mcp_output(&script, &real).await.is_none());
+            std::fs::remove_file(saved(&real)).unwrap();
+        }
+        let script = ScriptCall::new();
+        let real = script.run(call_wide("wide", thread)).await.unwrap();
+        let hooked = ToolOutput {
+            text: format!("{}\n\n<hook-context>\nnoted\n</hook-context>", real.text),
+            metadata: real.metadata.clone(),
+        };
+        assert!(take_whole_mcp_output(&script, &hooked).await.is_some());
+        std::fs::remove_file(saved(&real)).unwrap();
+    }
+
+    /// Structured content with a `truncated` of its own moved under
+    /// `structuredContent` once the text was cut, so a workflow's
+    /// `result.metadata.tree` was gone; a script now gets it as sent.
+    #[tokio::test]
+    async fn structured_content_naming_truncated_stays_the_servers_for_scripts() {
+        let script = ScriptCall::new();
+        let output = script
+            .run(call_wide("tree", ThreadId::new()))
+            .await
+            .unwrap();
+        assert_eq!(
+            output.metadata["structuredContent"],
+            json!({"tree": [{"path": "a"}], "truncated": false})
+        );
+        assert_eq!(output.metadata["truncated"], true);
+        let (text, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
+        assert_eq!(text.len(), 80 * 1024);
+        assert_eq!(
+            metadata,
+            json!({"tree": [{"path": "a"}], "truncated": false})
+        );
+        std::fs::remove_file(file.unwrap()).unwrap();
+    }
+
+    /// Text on one line came to the model as its first 2,000 characters,
+    /// and the saved file could not be read by line: one-line JSON is now
+    /// laid out a value a line (and shown up to 2,000 of its lines), and any other
+    /// long line fills the 50 KiB.
+    #[tokio::test]
+    async fn a_long_single_line_reaches_the_model_as_fifty_kib_and_reads_back_by_line() {
+        let thread = ThreadId::new();
+        let script = ScriptCall::new();
+        let rows = script.run(call_wide("rows", thread)).await.unwrap();
+        let preview = rows
+            .text
+            .split("\n\nThe tool call succeeded")
+            .next()
+            .unwrap();
+        // Two thousand whole lines of it, as a native tool's output keeps.
+        assert_eq!(preview.lines().count(), 2_000);
+        assert!(preview.len() > 30 * 1024, "{}", preview.len());
+        assert!(
+            preview.starts_with("[\n  {\n    \"id\": 0,"),
+            "{}",
+            &preview[..60]
+        );
+        let file = std::fs::read_to_string(saved(&rows)).unwrap();
+        assert!(file.lines().all(|line| line.len() < 200));
+        assert_eq!(
+            serde_json::from_str::<Value>(&file).unwrap(),
+            serde_json::from_str::<Value>(&compact_rows()).unwrap()
+        );
+        // A script still gets the text as the server wrote it.
+        let (text, _, file) = take_whole_mcp_output(&script, &rows).await.unwrap();
+        assert_eq!(text, compact_rows());
+        std::fs::remove_file(file.unwrap()).unwrap();
+
+        let line = call_wide("line", thread).await.unwrap();
+        assert!(
+            line.text.starts_with(&"l".repeat(50 * 1024)),
+            "{}",
+            &line.text[..80]
+        );
+        std::fs::remove_file(saved(&line)).unwrap();
+    }
+
+    /// Indenting JSON by parsing and writing it again turned an integer past
+    /// 64 bits into `1.2345678901234568e24`, rounded a long decimal and kept
+    /// one of two same keys; only whitespace is added now.
+    #[tokio::test]
+    async fn indented_json_keeps_every_value_as_the_server_wrote_it() {
+        let thread = ThreadId::new();
+        let numbers = call_wide("numbers", thread).await.unwrap();
+        let file = std::fs::read_to_string(saved(&numbers)).unwrap();
+        let unspaced = |text: &str| {
+            // Whitespace outside strings only: the note holds none of it.
+            text.replace(['\n', ' '], "")
+                .replace("a,[b]:{c}\\\"d", "a, [b]: {c} \\\" d")
+        };
+        assert_eq!(unspaced(&file), unspaced(&exact_numbers()));
+        assert!(numbers.text.contains("\"wei\": 1234567890123456789012345,"));
+        assert!(
+            numbers
+                .text
+                .contains("\"rate\": 0.12345678901234567890123,")
+        );
+        assert!(numbers.text.contains("\"key\": 1,\n    \"key\": 2,"));
+        assert!(numbers.text.contains(r#""note": "a, [b]: {c} \" d""#));
+        assert!(file.lines().all(|line| line.len() < 80));
+        std::fs::remove_file(saved(&numbers)).unwrap();
+        // JSON after a heading, as a long line of the text, reads by line too.
+        let found = call_wide("found", thread).await.unwrap();
+        assert!(
+            found
+                .text
+                .starts_with("Found 1500 issues:\n[\n  {\n    \"id\": 0,")
+        );
+        let file = std::fs::read_to_string(saved(&found)).unwrap();
+        assert!(file.lines().all(|line| line.len() < 200));
+        std::fs::remove_file(saved(&found)).unwrap();
+        assert_eq!(
+            indent_json("{\"a\":[],\"b\":{ },\"c\":[1,{\"d\":null}]}"),
+            "{\n  \"a\": [],\n  \"b\": {},\n  \"c\": [\n    1,\n    {\n      \"d\": null\n    }\n  ]\n}"
+        );
+    }
+
+    /// JSON over 50 KiB only for its wide indents was laid out to 48 KiB
+    /// and then said to be truncated by 0 bytes, with a file to read for
+    /// nothing; it now comes whole, and a script still gets the server's
+    /// text.
+    #[tokio::test]
+    async fn json_that_fits_once_laid_out_is_not_cut() {
+        let thread = ThreadId::new();
+        let script = ScriptCall::new();
+        let output = script.run(call_wide("spaced", thread)).await.unwrap();
+        assert!(
+            !output.text.contains("truncated"),
+            "{}",
+            &output.text[output.text.len() - 300..]
+        );
+        assert_eq!(output.metadata, json!({"rows": 200}));
+        assert!(
+            output.text.starts_with("[\n  {\n    \"id\": 0,\n"),
+            "{:.60}",
+            output.text
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.text).unwrap(),
+            serde_json::from_str::<Value>(&rows_indented_four()).unwrap()
+        );
+        // Matched whole: another call's script, or a text with more after
+        // it, gets the text as it is.
+        assert!(
+            take_whole_mcp_output(&ScriptCall::new(), &output)
+                .await
+                .is_none()
+        );
+        let (text, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
+        assert_eq!(
+            (text, metadata, file),
+            (rows_indented_four(), json!({"rows": 200}), None)
+        );
+        assert!(take_whole_mcp_output(&script, &output).await.is_none());
+        let script = ScriptCall::new();
+        let output = script.run(call_wide("spaced", thread)).await.unwrap();
+        let longer = ToolOutput {
+            text: format!("{}\n\nmore", output.text),
+            metadata: output.metadata.clone(),
+        };
+        assert!(take_whole_mcp_output(&script, &longer).await.is_none());
+
+        // A resource read's text, and a failure's, are not cut either.
+        let directory =
+            std::env::temp_dir().join(format!("haarness-laid-out-{}", uuid::Uuid::now_v7()));
+        for failed in [false, true] {
+            let (cut, saved) = cut_mcp_text(rows_indented_four(), &directory, failed)
+                .await
+                .unwrap();
+            assert_eq!((cut.text, saved), (output.text.clone(), None));
+        }
+        assert!(!directory.exists());
+    }
+
+    /// A result that fit once laid out was kept for a script by its text
+    /// alone, the oldest first, and the model's own calls kept theirs too,
+    /// so a script calling a tool after the model had (that tool, or
+    /// another with the same text) got the model's call's structured
+    /// content. Each script's call now gets its own, and nothing is kept
+    /// for the model's calls or once a script's call is over.
+    #[tokio::test]
+    async fn a_script_gets_its_own_calls_result_not_another_with_the_same_text() {
+        let run = uuid::Uuid::now_v7().to_string();
+        let stamp = |call: u32| json!({"test": run, "call": call});
+        for tool in ["stamp", "stamp_wide"] {
+            let script = ScriptCall::new();
+            let first = script.run(call_stamp(tool, &stamp(1))).await;
+            let (_, metadata, _) = take_whole_mcp_output(&script, &first).await.unwrap();
+            assert_eq!(metadata, stamp(1));
+            // The model's calls, of this tool and of one with the same text.
+            let model = call_stamp(tool, &stamp(2)).await;
+            let other = call_stamp(tool, &json!({"test": run, "other": true})).await;
+            // A cut text differs only in the file it names.
+            assert_eq!(model.text == other.text, tool == "stamp");
+            assert!(!kept_for(&stamp(2)));
+            assert!(!kept_for(&json!({"test": run, "other": true})));
+            // Two scripts' calls kept side by side, as `parallel` makes them.
+            let (third, fourth) = (ScriptCall::new(), ScriptCall::new());
+            let three = third.run(call_stamp(tool, &stamp(3))).await;
+            let four = fourth.run(call_stamp(tool, &stamp(4))).await;
+            assert_eq!(three.text == four.text, tool == "stamp");
+            let (text, metadata, _) = take_whole_mcp_output(&fourth, &four).await.unwrap();
+            assert_eq!(metadata, stamp(4));
+            let (text_three, metadata, _) = take_whole_mcp_output(&third, &three).await.unwrap();
+            assert_eq!(metadata, stamp(3));
+            assert_eq!(text, text_three);
+            // A call the script never takes leaves nothing once it is over.
+            let lost = ScriptCall::new();
+            let five = lost.run(call_stamp(tool, &stamp(5))).await;
+            assert!(kept_for(&stamp(5)));
+            drop(lost);
+            assert!(!kept_for(&stamp(5)));
+            for output in [&first, &model, &other, &three, &four, &five] {
+                if output.metadata["truncated"] == true {
+                    std::fs::remove_file(saved(output)).unwrap();
+                }
+            }
+        }
+    }
+
+    /// The bounded layout gave up on JSON it would make more than four
+    /// times as long: a short value nested deep (`{"m":[[0,0,0],…]}`) came
+    /// on one line where pretty-printing laid it out, and 80 KB of digits
+    /// three levels down was saved as one line. Short JSON is laid out as
+    /// pretty-printing does, and longer JSON that would grow too much keeps
+    /// a value a line, indented less deep.
+    #[test]
+    fn json_is_laid_out_as_pretty_printing_does_or_indented_less_deep() {
+        // Values 32 levels deep, the deepest laid out.
+        let deepest = (0..31).fold(json!([1, {}]), |inner, _| json!([inner]));
+        for value in [
+            json!({"m": [[0, 0, 0], [0, 0, 0], [0, 0, 0]]}),
+            json!({"a": [{"b": [{"c": [1, 2]}]}]}),
+            json!([[], {}, [[]], {"e": {}}]),
+            json!({"s": "a, [b]: {c} \" d\\", "n": null, "t": true, "u": "é\u{0}"}),
+            json!(1.5),
+            deepest,
+        ] {
+            let compact = serde_json::to_string(&value).unwrap();
+            assert_eq!(
+                indent_json(&compact),
+                serde_json::to_string_pretty(&value).unwrap()
+            );
+        }
+        let deeper = format!("{}1,2{}", "[".repeat(33), "]".repeat(33));
+        assert!(indent_json(&deeper).contains(&format!("\n{}[1,2]\n", "  ".repeat(32))));
+
+        let series = json!({"result": {"series": (0..40_000).map(|n| n % 10).collect::<Vec<_>>()}});
+        let compact = serde_json::to_string(&series).unwrap();
+        let laid_out = indent_json(&compact);
+        assert!(laid_out.len() <= 4 * compact.len(), "{}", laid_out.len());
+        assert_eq!(laid_out.lines().count(), 40_006);
+        assert!(
+            laid_out.starts_with("{\n  \"result\": {\n    \"series\": [\n    0,\n    1,\n"),
+            "{laid_out:.80}"
+        );
+        assert!(laid_out.ends_with("\n    9\n    ]\n  }\n}"));
+        assert_eq!(laid_out.replace(['\n', ' '], ""), compact);
+    }
+
+    /// Each long line of JSON had a budget of its own of at least 50 KiB,
+    /// so a text of many lines of short values nested deep came out about
+    /// 25 times as long (a 64 MiB one, 1.6 GB). A text's lines now share
+    /// its budget, and a lone long line still gets what the rest leaves.
+    #[test]
+    fn a_texts_json_lines_share_one_budget() {
+        let line = format!("{}{}1{}", "[".repeat(32), "1,".repeat(984), "]".repeat(32));
+        let text = vec![line.as_str(); 2_000].join("\n");
+        let laid_out = indented_json(&text).unwrap();
+        assert!(
+            laid_out.len() <= 4 * text.len() + TOOL_OUTPUT_MAX_BYTES,
+            "{} from {}",
+            laid_out.len(),
+            text.len()
+        );
+        // Each value is on a line of its own, and each line laid out alike.
+        let block = laid_out.lines().take(1_049).collect::<Vec<_>>().join("\n");
+        assert_eq!(laid_out, vec![block.as_str(); 2_000].join("\n"));
+        assert!(block.contains("\n    [\n    [\n"), "{block:.200}");
+        assert_eq!(laid_out.replace(['\n', ' '], ""), text.replace('\n', ""));
+
+        // Under 70 KB of prose, one such line is laid out 32 levels deep,
+        // as pretty-printing does, which alone it could not be.
+        let prose = "Some words on a line of their own.\n".repeat(2_000);
+        let laid_out = indented_json(&format!("{prose}{line}\n")).unwrap();
+        let pretty = serde_json::to_string_pretty(&serde_json::from_str::<Value>(&line).unwrap());
+        assert_eq!(laid_out, format!("{prose}{}\n", pretty.unwrap()));
+        assert!(!indent_json(&line).contains(&" ".repeat(64)));
+    }
+
+    /// Indenting gave each line two spaces a level, so JSON nested deep grew
+    /// with the square of its length: `[[[…]]]` of 200 KB came to 20 GB,
+    /// built in memory and saved. What a container 32 levels deep holds now
+    /// stays on its line, and JSON that indenting would make more than four
+    /// times as long is indented less deep.
+    #[tokio::test]
+    async fn deeply_nested_json_is_laid_out_within_a_few_times_its_length() {
+        let started = std::time::Instant::now();
+        let directory =
+            std::env::temp_dir().join(format!("haarness-deep-json-{}", uuid::Uuid::now_v7()));
+        let arrays = format!("{}{}", "[".repeat(30_000), "]".repeat(30_000));
+        let objects = format!("{}1{}", "{\"a\":".repeat(30_000), "}".repeat(30_000));
+        for json in [arrays, objects.clone(), format!("Deep:\n{objects}")] {
+            let (cut, saved) = cut_mcp_text(json.clone(), &directory, false).await.unwrap();
+            assert!(cut.text.len() < 52 * 1024, "{}", cut.text.len());
+            let (file, laid_out) = saved.unwrap();
+            assert!(laid_out);
+            let file = std::fs::read_to_string(file).unwrap();
+            assert!(
+                file.len() < 2 * json.len(),
+                "{} from {}",
+                file.len(),
+                json.len()
+            );
+            // Lines 32 levels down and 32 up, only spaces and breaks added.
+            assert!(file.lines().count() <= 66, "{}", file.lines().count());
+            assert!(file.lines().all(|line| !line.starts_with(&" ".repeat(65))));
+            assert_eq!(file.replace(['\n', ' '], ""), json.replace(['\n', ' '], ""));
+        }
+        // Short values 32 levels deep would be 33 times as long laid out:
+        // each is still on a line of its own, indented two levels, not 32.
+        let wide = format!(
+            "{}{}1{}",
+            "[".repeat(32),
+            "1,".repeat(30_000),
+            "]".repeat(32)
+        );
+        let (cut, saved) = cut_mcp_text(wide.clone(), &directory, false).await.unwrap();
+        let (file, laid_out) = saved.unwrap();
+        assert!(laid_out);
+        let file = std::fs::read_to_string(file).unwrap();
+        assert!(file.len() <= 4 * wide.len(), "{}", file.len());
+        assert_eq!(file.lines().count(), 30_065);
+        assert!(file.contains("\n    [\n    [\n"));
+        assert!(file.lines().all(|line| !line.starts_with("     ")));
+        assert_eq!(file.replace(['\n', ' '], ""), wide);
+        assert!(cut.text.starts_with(&file[..1_000]));
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A failure's text reached the model whole too.
+    #[tokio::test]
+    async fn a_long_mcp_failure_is_cut_and_says_it_failed() {
+        let error = call_wide("failing", ThreadId::new()).await.unwrap_err();
+        let CoreError::Tool(text) = error else {
+            panic!("{error:?}");
+        };
+        assert!(text.len() < 52 * 1024, "{}", text.len());
+        let path = text
+            .split("The tool call failed and its output was truncated. Full output saved to: ")
+            .nth(1)
+            .and_then(|rest| rest.lines().next())
+            .unwrap_or_else(|| panic!("{}", &text[text.len() - 300..]));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), wide_text());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]

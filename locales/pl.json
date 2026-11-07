@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "Przeciągnij {target} z {app} do {endApp}",
   "Always allow this app": "Zawsze zezwalaj na tę aplikację",
   "Could not allow this app: {error}": "Nie udało się zezwolić na tę aplikację: {error}",
-  "No agent is paused": "Żaden agent nie jest wstrzymany"
+  "No agent is paused": "Żaden agent nie jest wstrzymany",
+  "Its URL is not a web address (http or https) with a host.": "Jego adres URL nie jest adresem internetowym (http lub https) z hostem.",
+  "Its URL names an environment variable that is not set: {variable}.": "Jego adres URL zawiera nieustawioną zmienną środowiskową: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "Jego adres URL zawiera nieustawione zmienne środowiskowe: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Pominięto, bo nie są prawidłowymi narzędziami MCP: {tools}"
 }

@@ -3132,5 +3132,9 @@
   "Drag {target} from {app} to {endApp}": "将{target}从{app}拖到{endApp}",
   "Always allow this app": "始终允许此应用",
   "Could not allow this app: {error}": "无法允许此应用：{error}",
-  "No agent is paused": "没有已暂停的智能体"
+  "No agent is paused": "没有已暂停的智能体",
+  "Its URL is not a web address (http or https) with a host.": "其 URL 不是带主机的网址（http 或 https）。",
+  "Its URL names an environment variable that is not set: {variable}.": "其 URL 引用了未设置的环境变量：{variable}。",
+  "Its URL names environment variables that are not set: {variables}.": "其 URL 引用了未设置的环境变量：{variables}。",
+  "Left out as not valid MCP tools: {tools}": "因不是有效的 MCP 工具而略去：{tools}"
 }
