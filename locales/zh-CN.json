@@ -3105,5 +3105,9 @@
   "App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off.": "应用中的内容不可信：网页、文件或消息可能夹带针对智能体的指令。请留意它的行为，一旦觉得不对就按“停止”。",
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "智能体在你未允许的应用中操作前会先询问。一旦你允许某个应用，它就会在其中直接操作，而它所做的一切仍由你负责。",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS 会把辅助功能和屏幕录制权限授予 Haarness 运行所在的应用，即 Haarness 本身或你的终端，从该应用启动的每个程序都会继承这些权限。",
-  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "你可以随时在“设置 → 电脑操控”中关闭电脑操控，或运行 haarness mac off。"
+  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "你可以随时在“设置 → 电脑操控”中关闭电脑操控，或运行 haarness mac off。",
+  "Its URL is not an http or https address with a host.": "其 URL 不是带主机的 http 或 https 地址。",
+  "Its URL names an environment variable that is not set: {variable}.": "其 URL 引用了未设置的环境变量：{variable}。",
+  "Its URL names environment variables that are not set: {variables}.": "其 URL 引用了未设置的环境变量：{variables}。",
+  "Left out as not valid MCP tools: {tools}": "因不是有效的 MCP 工具而略去：{tools}"
 }

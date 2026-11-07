@@ -3105,5 +3105,9 @@
   "App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off.": "Содержимому приложений нельзя доверять: веб-страница, файл или сообщение могут содержать указания для агента. Присматривайте за ним и нажмите «Остановить», если что-то кажется не так.",
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "Агент спрашивает, прежде чем действовать в приложении, которое вы не разрешили. Как только вы разрешите приложение, он действует там без вопросов, а ответственность за его действия остаётся на вас.",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS выдаёт разрешения «Универсальный доступ» и «Запись экрана» приложению, в котором работает Haarness, — самому Haarness или вашему терминалу, — и их наследует каждая программа, запущенная из этого приложения.",
-  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Выключайте управление компьютером когда угодно в разделе «Настройки → Управление компьютером» или командой haarness mac off."
+  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Выключайте управление компьютером когда угодно в разделе «Настройки → Управление компьютером» или командой haarness mac off.",
+  "Its URL is not an http or https address with a host.": "Его URL — не адрес http или https с хостом.",
+  "Its URL names an environment variable that is not set: {variable}.": "Его URL ссылается на незаданную переменную окружения: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "Его URL ссылается на незаданные переменные окружения: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Пропущены, так как это не корректные инструменты MCP: {tools}"
 }

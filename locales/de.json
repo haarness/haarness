@@ -3105,5 +3105,9 @@
   "App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off.": "App-Inhalten ist nicht zu trauen: Eine Webseite, Datei oder Nachricht kann Anweisungen an den Agenten enthalten. Behalte ihn im Blick und drücke Stopp, wenn dir etwas seltsam vorkommt.",
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "Ein Agent fragt, bevor er in einer App handelt, die du nicht erlaubt hast. Hast du eine App erlaubt, handelt er dort ohne Nachfrage, und für sein Tun bleibst du verantwortlich.",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS erteilt Bedienungshilfen und Bildschirmaufnahme der App, in der Haarness läuft, also Haarness selbst oder deinem Terminal, und jedes von dort gestartete Programm erbt sie.",
-  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Schalte die Computersteuerung jederzeit unter Einstellungen → Computersteuerung aus, oder führe haarness mac off aus."
+  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Schalte die Computersteuerung jederzeit unter Einstellungen → Computersteuerung aus, oder führe haarness mac off aus.",
+  "Its URL is not an http or https address with a host.": "Die URL ist keine http- oder https-Adresse mit Host.",
+  "Its URL names an environment variable that is not set: {variable}.": "Die URL nennt eine Umgebungsvariable, die nicht gesetzt ist: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "Die URL nennt Umgebungsvariablen, die nicht gesetzt sind: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Ausgelassen, da keine gültigen MCP-Tools: {tools}"
 }

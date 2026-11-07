@@ -3105,5 +3105,9 @@
   "App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off.": "Sadržaju aplikacija se ne može vjerovati: web stranica, datoteka ili poruka mogu nositi upute namijenjene agentu. Pratite ga i pritisnite Zaustavi ako vam nešto izgleda čudno.",
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "Agent pita prije nego što djeluje u aplikaciji koju niste dozvolili. Kad dozvolite aplikaciju, u njoj djeluje bez pitanja, a za ono što radi i dalje ste odgovorni vi.",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS daje dozvole Pristupačnost i Snimanje ekrana aplikaciji u kojoj radi Haarness, bilo samom Haarnessu ili vašem terminalu, a svaki program pokrenut iz te aplikacije ih nasljeđuje.",
-  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Isključite korištenje računara kad god želite u Postavke → Korištenje računara ili pokrenite haarness mac off."
+  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Isključite korištenje računara kad god želite u Postavke → Korištenje računara ili pokrenite haarness mac off.",
+  "Its URL is not an http or https address with a host.": "Njegov URL nije http ili https adresa s hostom.",
+  "Its URL names an environment variable that is not set: {variable}.": "Njegov URL navodi varijablu okruženja koja nije postavljena: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "Njegov URL navodi varijable okruženja koje nisu postavljene: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Izostavljeno jer nisu ispravni MCP alati: {tools}"
 }

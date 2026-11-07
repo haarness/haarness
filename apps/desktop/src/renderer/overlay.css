@@ -1110,6 +1110,10 @@ dialog .notifications {
   font-size: var(--ui-sm);
   overflow-wrap: anywhere;
 }
+/* Tools a working server left out: worth knowing, not a failure. */
+.setting-block > .mcp-server-detail.quiet {
+  color: var(--muted);
+}
 .setting-block pre {
   font-size: var(--ui-sm);
   max-height: 320px;

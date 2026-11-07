@@ -3105,5 +3105,9 @@
   "App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off.": "On ne peut pas se fier au contenu des apps : une page web, un fichier ou un message peut contenir des instructions destinées à l'agent. Gardez un œil dessus et appuyez sur Arrêter si quelque chose vous semble anormal.",
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "Un agent demande avant d'agir dans une app que vous n'avez pas autorisée. Une fois l'app autorisée, il y agit sans demander, et ce qu'il fait reste sous votre responsabilité.",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS accorde l'accessibilité et l'enregistrement de l'écran à l'app dans laquelle tourne Haarness, Haarness lui-même ou votre terminal, et tout programme lancé depuis cette app en hérite.",
-  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Désactivez l'utilisation de l'ordinateur quand vous le souhaitez dans Paramètres → Utilisation de l'ordinateur, ou lancez haarness mac off."
+  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Désactivez l'utilisation de l'ordinateur quand vous le souhaitez dans Paramètres → Utilisation de l'ordinateur, ou lancez haarness mac off.",
+  "Its URL is not an http or https address with a host.": "Son URL n’est pas une adresse http ou https avec un hôte.",
+  "Its URL names an environment variable that is not set: {variable}.": "Son URL cite une variable d’environnement non définie : {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "Son URL cite des variables d’environnement non définies : {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Écartés, car ce ne sont pas des outils MCP valides : {tools}"
 }

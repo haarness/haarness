@@ -7,7 +7,8 @@ import { execFileSync } from "node:child_process";
 import { stopChatHome } from "./fixtures/chat-home";
 
 // MCP servers in Desktop: a server that failed says why under its name (a remote one whose url names an unset
-// variable in one sentence that leaves the url out), the model's resource tools read in
+// variable in one sentence that leaves the url out), one that left out a tool that is not valid MCP says so
+// quietly, the model's resource tools read in
 // plain words, a server's interactive apps turn off from its page's options or its row in Settings (and back
 // on with Undo) unless the server comes from a plugin, a server slow to start reads connecting and then
 // connected in open Settings, and a secret-looking value is kept in the keychain with
@@ -54,6 +55,10 @@ test.beforeAll(async () => {
           flood: server("flood.py", { env: { FLOOD_INIT: "1" } }),
           // Its host is a variable that is not set, which a JSON setting fills with nothing.
           badurl: { type: "http", url: "https://${HAARNESS_E2E_UNSET_HOST}/mcp?api_key=e2e-url-secret" },
+          // Lists a tool without an inputSchema beside a good one.
+          shelf: server("names.py", {
+            env: { LABEL: "shelf", TOOLS: JSON.stringify(["first"]), LISTED: JSON.stringify([{ name: "broken" }]) },
+          }),
         },
       },
       null,
@@ -100,7 +105,14 @@ test.beforeAll(async () => {
   client = new Haarness({ baseUrl: connection.url, token: connection.token });
   await expect
     .poll(async () => Object.fromEntries((await client.mcpServers()).map((server) => [server.name, server.status])), { timeout: 30000 })
-    .toEqual({ app: "connected", badurl: "failed", docs: "connected", flood: "failed", weather: "connected" });
+    .toEqual({
+      app: "connected",
+      badurl: "failed",
+      docs: "connected",
+      flood: "failed",
+      shelf: "connected",
+      weather: "connected",
+    });
   thread = (await client.createThread({ title: "MCP servers", provider: "echo", model: "echo-1" })).id;
   await page.locator(".sessions").getByRole("button", { name: "MCP servers", exact: true }).click();
 });
@@ -176,10 +188,29 @@ test("a remote server whose url cannot be asked says so in one sentence, without
   await openMcpSettings();
   const bad = block("badurl");
   await expect(bad.locator(".mcp-server-detail")).toHaveText(
-    'MCP server "badurl" has no usable URL: it is not an http or https address with a host.',
+    "Its URL is not an http or https address with a host.",
   );
   await expect(bad).not.toContainText("e2e-url-secret");
   await pictures(bad, "mcp-bad-url-detail");
+  await closeSettings();
+});
+
+test("a working server that left a tool out says so quietly under its name", async () => {
+  await openMcpSettings();
+  const shelf = block("shelf");
+  const note = shelf.locator(".mcp-server-detail.quiet");
+  await expect(note).toHaveText('Left out as not valid MCP tools: "broken"');
+  // In the theme's quiet text colour, unlike a failure's reason.
+  const muted = await page.evaluate(() => {
+    const probe = document.createElement("span");
+    probe.style.color = "var(--muted)";
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  await expect(note).toHaveCSS("color", muted);
+  await pictures(shelf, "mcp-left-out-tools");
   await closeSettings();
 });
 

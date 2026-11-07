@@ -3105,5 +3105,9 @@
   "App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off.": "Zawartości aplikacji nie można ufać: strona, plik lub wiadomość mogą zawierać polecenia wymierzone w agenta. Miej go na oku i naciśnij Zatrzymaj, gdy coś wyda się nie tak.",
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "Agent pyta, zanim zacznie działać w aplikacji, na którą nie zezwolono. Gdy na nią zezwolisz, działa w niej bez pytania, a za jego działania nadal odpowiadasz Ty.",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS przyznaje uprawnienia Dostępność i Nagrywanie ekranu aplikacji, w której działa Haarness, czyli samemu Haarness albo Twojemu terminalowi, a każdy program uruchomiony z tej aplikacji je dziedziczy.",
-  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Wyłącz korzystanie z komputera, kiedy chcesz, w Ustawienia → Korzystanie z komputera albo uruchom haarness mac off."
+  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Wyłącz korzystanie z komputera, kiedy chcesz, w Ustawienia → Korzystanie z komputera albo uruchom haarness mac off.",
+  "Its URL is not an http or https address with a host.": "Jego adres URL nie jest adresem http ani https z hostem.",
+  "Its URL names an environment variable that is not set: {variable}.": "Jego adres URL zawiera nieustawioną zmienną środowiskową: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "Jego adres URL zawiera nieustawione zmienne środowiskowe: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Pominięto, bo nie są prawidłowymi narzędziami MCP: {tools}"
 }

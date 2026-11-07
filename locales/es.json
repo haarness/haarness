@@ -3105,5 +3105,9 @@
   "App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off.": "No se puede confiar en el contenido de las apps: una página web, un archivo o un mensaje pueden llevar instrucciones dirigidas al agente. Vigílalo y pulsa Detener si algo te parece raro.",
   "An agent asks before acting in an app you haven't allowed. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "Un agente pregunta antes de actuar en una app que no hayas permitido. Una vez permitida, actúa en ella sin preguntar, y lo que haga sigue siendo responsabilidad tuya.",
   "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.": "macOS concede Accesibilidad y Grabación de pantalla a la app en la que se ejecuta Haarness, ya sea el propio Haarness o tu terminal, y todo programa iniciado desde esa app los hereda.",
-  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Desactiva el uso del ordenador cuando quieras en Ajustes → Uso del ordenador, o ejecuta haarness mac off."
+  "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.": "Desactiva el uso del ordenador cuando quieras en Ajustes → Uso del ordenador, o ejecuta haarness mac off.",
+  "Its URL is not an http or https address with a host.": "Su URL no es una dirección http o https con un host.",
+  "Its URL names an environment variable that is not set: {variable}.": "Su URL nombra una variable de entorno que no está definida: {variable}.",
+  "Its URL names environment variables that are not set: {variables}.": "Su URL nombra variables de entorno que no están definidas: {variables}.",
+  "Left out as not valid MCP tools: {tools}": "Omitidas por no ser herramientas MCP válidas: {tools}"
 }
