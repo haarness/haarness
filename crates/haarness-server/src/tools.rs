@@ -5474,22 +5474,48 @@ fn within_tool_output_limits(text: &str) -> bool {
 /// added, so every value stays as the server wrote it, its digits and
 /// repeated keys included, where parsing and writing it again would round
 /// a long number and keep one of two same keys; [`indent_json`] says how
-/// far it is indented.
+/// far it is indented. The lines of a text share one budget, that of the
+/// whole text, and are indented alike, so a text of many such lines grows
+/// no more than one of its length would.
 pub(crate) fn indented_json(text: &str) -> Option<String> {
     if let Some(whole) = json_container(text) {
         return Some(indent_json(whole));
     }
-    let mut changed = false;
-    let mut readable = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        match (line.len() > LONG_LINE_BYTES)
-            .then(|| json_container(line))
-            .flatten()
-            .map(indent_json)
-        {
+    // The JSON of each long line, in order, for the two passes below: one
+    // entry per 2,000 bytes at most, where one a line could take more room
+    // than the text.
+    let found: Vec<Option<&str>> = text
+        .split_inclusive('\n')
+        .filter(|line| line.len() > LONG_LINE_BYTES)
+        .map(json_container)
+        .collect();
+    if found.iter().all(Option::is_none) {
+        return None;
+    }
+    // Each line, with its JSON when it is a long line of JSON.
+    let lines = || {
+        let mut jsons = found.iter().copied();
+        text.split_inclusive('\n').map(move |line| {
+            let json = (line.len() > LONG_LINE_BYTES).then(|| jsons.next().flatten());
+            (line, json.flatten())
+        })
+    };
+    let mut layout = JsonLayout::new();
+    for (line, json) in lines() {
+        match json {
             Some(json) => {
-                changed = true;
-                readable.push_str(&json);
+                layout.count(json);
+                layout.length += usize::from(line.ends_with('\n'));
+            }
+            None => layout.length += line.len(),
+        }
+    }
+    let (indent, length) = layout.deepest_indent(json_budget(text.len()));
+    let mut readable = String::with_capacity(length);
+    for (line, json) in lines() {
+        match json {
+            Some(json) => {
+                write_json(json, indent, &mut readable);
                 if line.ends_with('\n') {
                     readable.push('\n');
                 }
@@ -5497,7 +5523,8 @@ pub(crate) fn indented_json(text: &str) -> Option<String> {
             None => readable.push_str(line),
         }
     }
-    changed.then_some(readable)
+    debug_assert_eq!(readable.len(), length);
+    Some(readable)
 }
 
 /// `text` trimmed, when it is one JSON object or array.
@@ -5511,10 +5538,19 @@ fn json_container(text: &str) -> Option<&str> {
 /// on its line, so a line starts with at most 64 spaces.
 const JSON_INDENT_DEPTH: usize = 32;
 /// How many times longer than written laying JSON out may make it (or
-/// [`TOOL_OUTPUT_MAX_BYTES`], for short JSON). Short values nested deep
-/// gain the most, and a hostile text (`[[[…1…]]]`) gains space with the
-/// square of its length, so past this lines are indented less.
+/// [`TOOL_OUTPUT_MAX_BYTES`], for short JSON), a text of many JSON lines
+/// counted as a whole. Short values nested deep gain the most, and a
+/// hostile text (`[[[…1…]]]`) gains space with the square of its length,
+/// so past this lines are indented less.
 const JSON_INDENT_GROWTH: usize = 4;
+
+/// How long JSON laid out from `written` bytes may come to: see
+/// [`JSON_INDENT_GROWTH`].
+fn json_budget(written: usize) -> usize {
+    written
+        .saturating_mul(JSON_INDENT_GROWTH)
+        .max(TOOL_OUTPUT_MAX_BYTES)
+}
 
 /// What [`walk_json`] hands on: JSON's tokens as written, and where laying
 /// it out adds whitespace.
@@ -5613,37 +5649,69 @@ fn walk_json<'a>(json: &'a str, mut piece: impl FnMut(JsonPiece<'a>)) {
 /// it within that are indented only as far as those levels, so each value
 /// is still on its own line.
 fn indent_json(json: &str) -> String {
-    let most = json
-        .len()
-        .saturating_mul(JSON_INDENT_GROWTH)
-        .max(TOOL_OUTPUT_MAX_BYTES);
-    // How long it comes out, counted first without writing it: its tokens,
-    // a byte for each break and space, and two for each level a line is
-    // indented, as far as the most levels that fit.
-    let mut length = 0usize;
-    // How many lines would be indented each number of levels.
-    let mut lines = [0usize; JSON_INDENT_DEPTH + 1];
-    walk_json(json, |piece| match piece {
-        JsonPiece::Token(token) => length += token.len(),
-        JsonPiece::Line { level, indent } if level <= JSON_INDENT_DEPTH => {
-            length += 1;
-            lines[indent] += 1;
-        }
-        JsonPiece::Space { level } if level <= JSON_INDENT_DEPTH => length += 1,
-        JsonPiece::Line { .. } | JsonPiece::Space { .. } => {}
-    });
-    let mut indented = lines.iter().sum::<usize>();
-    let mut indent = 0;
-    for level in 1..=JSON_INDENT_DEPTH {
-        // Lines indented this many levels or more.
-        indented -= lines[level - 1];
-        if length + 2 * indented > most {
-            break;
-        }
-        length += 2 * indented;
-        indent = level;
-    }
+    let mut layout = JsonLayout::new();
+    layout.count(json);
+    let (indent, length) = layout.deepest_indent(json_budget(json.len()));
     let mut out = String::with_capacity(length);
+    write_json(json, indent, &mut out);
+    debug_assert_eq!(out.len(), length);
+    out
+}
+
+/// How long laying out JSON comes to, counted without writing it, so that
+/// how deep to indent it can be chosen first.
+struct JsonLayout {
+    /// Its length with no line indented: the tokens, a byte for each break
+    /// and space, and whatever else the text it is in keeps as it is.
+    length: usize,
+    /// How many lines would be indented each number of levels.
+    lines: [usize; JSON_INDENT_DEPTH + 1],
+}
+
+impl JsonLayout {
+    fn new() -> Self {
+        Self {
+            length: 0,
+            lines: [0; JSON_INDENT_DEPTH + 1],
+        }
+    }
+
+    /// Counts valid JSON `json` in.
+    fn count(&mut self, json: &str) {
+        walk_json(json, |piece| match piece {
+            JsonPiece::Token(token) => self.length += token.len(),
+            JsonPiece::Line { level, indent } if level <= JSON_INDENT_DEPTH => {
+                self.length += 1;
+                self.lines[indent] += 1;
+            }
+            JsonPiece::Space { level } if level <= JSON_INDENT_DEPTH => self.length += 1,
+            JsonPiece::Line { .. } | JsonPiece::Space { .. } => {}
+        });
+    }
+
+    /// The most levels lines may be indented (two bytes a level) for all
+    /// that was counted to come to at most `most` bytes (0 when not even
+    /// one level fits), and how long it then comes to.
+    fn deepest_indent(&self, most: usize) -> (usize, usize) {
+        let mut length = self.length;
+        let mut indented = self.lines.iter().sum::<usize>();
+        let mut indent = 0;
+        for level in 1..=JSON_INDENT_DEPTH {
+            // Lines indented this many levels or more.
+            indented -= self.lines[level - 1];
+            if length + 2 * indented > most {
+                break;
+            }
+            length += 2 * indented;
+            indent = level;
+        }
+        (indent, length)
+    }
+}
+
+/// Valid JSON `json` laid out one value a line onto `out`, each line
+/// indented as far as it would be, but at most `indent` levels.
+fn write_json(json: &str, indent: usize, out: &mut String) {
     walk_json(json, |piece| match piece {
         JsonPiece::Token(token) => out.push_str(token),
         JsonPiece::Line {
@@ -5658,8 +5726,6 @@ fn indent_json(json: &str) -> String {
         JsonPiece::Space { level } if level <= JSON_INDENT_DEPTH => out.push(' '),
         JsonPiece::Line { .. } | JsonPiece::Space { .. } => {}
     });
-    debug_assert_eq!(out.len(), length);
-    out
 }
 
 /// The first 50 KiB (and at most 2,000 lines) of `text`, the line that
@@ -11064,6 +11130,36 @@ mod webfetch_tests {
         );
         assert!(laid_out.ends_with("\n    9\n    ]\n  }\n}"));
         assert_eq!(laid_out.replace(['\n', ' '], ""), compact);
+    }
+
+    /// Each long line of JSON had a budget of its own of at least 50 KiB,
+    /// so a text of many lines of short values nested deep came out about
+    /// 25 times as long (a 64 MiB one, 1.6 GB). A text's lines now share
+    /// its budget, and a lone long line still gets what the rest leaves.
+    #[test]
+    fn a_texts_json_lines_share_one_budget() {
+        let line = format!("{}{}1{}", "[".repeat(32), "1,".repeat(984), "]".repeat(32));
+        let text = vec![line.as_str(); 2_000].join("\n");
+        let laid_out = indented_json(&text).unwrap();
+        assert!(
+            laid_out.len() <= 4 * text.len() + TOOL_OUTPUT_MAX_BYTES,
+            "{} from {}",
+            laid_out.len(),
+            text.len()
+        );
+        // Each value is on a line of its own, and each line laid out alike.
+        let block = laid_out.lines().take(1_049).collect::<Vec<_>>().join("\n");
+        assert_eq!(laid_out, vec![block.as_str(); 2_000].join("\n"));
+        assert!(block.contains("\n    [\n    [\n"), "{block:.200}");
+        assert_eq!(laid_out.replace(['\n', ' '], ""), text.replace('\n', ""));
+
+        // Under 70 KB of prose, one such line is laid out 32 levels deep,
+        // as pretty-printing does, which alone it could not be.
+        let prose = "Some words on a line of their own.\n".repeat(2_000);
+        let laid_out = indented_json(&format!("{prose}{line}\n")).unwrap();
+        let pretty = serde_json::to_string_pretty(&serde_json::from_str::<Value>(&line).unwrap());
+        assert_eq!(laid_out, format!("{prose}{}\n", pretty.unwrap()));
+        assert!(!indent_json(&line).contains(&" ".repeat(64)));
     }
 
     /// Indenting gave each line two spaces a level, so JSON nested deep grew
