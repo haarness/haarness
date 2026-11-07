@@ -554,7 +554,8 @@ meets one that is not is refused (`… holds binary data, not text`). A folder, 
 each no-break space (U+00A0, U+202F) counts as a space, reads that file: macOS names screenshots
 and recordings with U+202F before AM or PM, so `Screenshot 2026-11-05 at 10.00.00 PM.png` typed
 with a plain space opens the screenshot. The call is then judged as a read of that file, by its
-real name, for rules, secret files and folders outside the project; two such files, or a folder,
+real name, for rules, secret files, folders outside the project and `PreToolUse` hooks (which see
+that name in `tool_input.path`, also after one rewrites the input); two such files, or a folder,
 leave the name not found, and `write` and the other tools keep the name they are given. Since
 `read` shows lines without their `\r`, in a file whose lines mostly end in CRLF
 `edit` and `multiedit` give an `old` of several lines those ends when it does
