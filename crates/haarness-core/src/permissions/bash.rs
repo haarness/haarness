@@ -172,6 +172,50 @@ const PATH_COMMANDS: &[&str] = &[
     "cd", "pushd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "chgrp", "cat",
 ];
 
+/// cmd.exe's commands whose arguments are paths, read like [`PATH_COMMANDS`]
+/// where agent commands run in cmd.exe (Windows without Git).
+const CMD_PATH_COMMANDS: &[&str] = &[
+    "type", "more", "copy", "xcopy", "robocopy", "move", "ren", "rename", "del", "erase", "rd",
+    "rmdir", "md", "mkdir", "cd", "chdir", "pushd", "dir", "attrib",
+];
+
+/// How a line's paths are read: as on macOS and Linux; on Windows by Git
+/// Bash, which reads the line as POSIX shell and a drive as `C:/…`, `/c/…`
+/// or `//server/share`; or by cmd.exe, which takes a word as written
+/// (`C:\Users\x`, no backslash escapes) and a `/x` word as a switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reading {
+    Posix,
+    GitBash,
+    Cmd,
+}
+
+impl Reading {
+    /// How this computer's agent shell reads a line.
+    pub(crate) fn here() -> Self {
+        match crate::agent_shell::current() {
+            crate::agent_shell::AgentShell::Posix => Self::Posix,
+            crate::agent_shell::AgentShell::GitBash(_) => Self::GitBash,
+            crate::agent_shell::AgentShell::Cmd => Self::Cmd,
+        }
+    }
+}
+
+/// A word as cmd.exe reads it: its double quotes gone, a `^` keeping the
+/// character after it, nothing else changed.
+fn cmd_word(raw: &str) -> String {
+    let mut word = String::with_capacity(raw.len());
+    let mut characters = raw.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' => {}
+            '^' => word.extend(characters.next()),
+            character => word.push(character),
+        }
+    }
+    word
+}
+
 /// Wrappers that run the command they are given in the folder they run in
 /// themselves, unless an option of theirs names another (`env -C`, `sudo
 /// -D`): after a plain `cd` that opens the line's `&&` chain, what they run
@@ -301,6 +345,16 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
 /// project is still `workspace`.
 #[must_use]
 pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalysis {
+    analyze_reading(command, workspace, workdir, Reading::here())
+}
+
+/// [`analyze_in`] as `reading` reads the line.
+pub(crate) fn analyze_reading(
+    command: &str,
+    workspace: &Path,
+    workdir: &Path,
+    reading: Reading,
+) -> BashAnalysis {
     if command.len() > MAX_COMMAND_BYTES {
         let mut analysis = fallback(&clipped(command));
         analysis.unreadable = true;
@@ -309,6 +363,7 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
     let mut reader = Reader {
         workspace,
         start: workdir,
+        reading,
         analysis: BashAnalysis::default(),
         patterns: HashSet::new(),
         written: HashMap::new(),
@@ -994,6 +1049,8 @@ struct Reader<'w> {
     workspace: &'w Path,
     /// The folder the shell starts in: the project, or a call's `workdir`.
     start: &'w Path,
+    /// Which shell reads the line ([`Reading`]).
+    reading: Reading,
     analysis: BashAnalysis,
     /// The patterns in the analysis, to keep them unique.
     patterns: HashSet<String>,
@@ -1590,6 +1647,13 @@ impl Reader<'_> {
                 });
             }
             self.folder = folders.get(&redirect.id()).cloned();
+            // cmd.exe writes to the file named as written.
+            let (value, complete) = if self.reading == Reading::Cmd {
+                let raw = node_text(dest, command);
+                (cmd_word(&raw), complete && !raw.contains('%'))
+            } else {
+                (value, complete)
+            };
             let outside = external_dir(
                 self.workspace,
                 self.from(),
@@ -2243,13 +2307,20 @@ impl Reader<'_> {
     /// substitution in a deeply nested line holds most of the line, so only
     /// the words of the commands in [`PATH_COMMANDS`] are read, and no
     /// substitution.
+    /// Whether `name`'s arguments are read as paths ([`PATH_COMMANDS`], and
+    /// [`CMD_PATH_COMMANDS`] where cmd.exe reads the line).
+    fn path_command(&self, name: &str) -> bool {
+        PATH_COMMANDS.contains(&name)
+            || (self.reading == Reading::Cmd && CMD_PATH_COMMANDS.contains(&name))
+    }
+
     fn check_paths_cheaply(&mut self, node: tree_sitter::Node<'_>, source: &str) {
         let Some(program) = node.child_by_field_name("name") else {
             return;
         };
         let (name, complete) = path_literal(program, source);
         let name = program_name(&name);
-        if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
+        if !complete || !self.path_command(&name) {
             return;
         }
         // A `cd` given no folder goes to the home folder.
@@ -2305,15 +2376,33 @@ impl Reader<'_> {
     /// parent, though followed it is the project itself. `pushd` enters its
     /// folder the same way.
     fn check_folder(&mut self, name: &str, raw: &str, value: &str, complete: bool) {
+        // cmd.exe takes the word as written: a `/x` word is a switch, `~` a
+        // name, `%NAME%` a variable.
+        let as_written;
+        let (value, complete) = if self.reading == Reading::Cmd {
+            as_written = cmd_word(raw);
+            if as_written.starts_with('/') || as_written == "~" {
+                return;
+            }
+            (as_written.as_str(), complete && !raw.contains('%'))
+        } else {
+            (value, complete)
+        };
         let outside = external_dir(self.workspace, self.from(), raw, value, complete);
-        // Of these, only `cat`, `cp` and `mv` read or carry off what a file
-        // holds.
-        let reads = matches!(name, "cat" | "cp" | "mv");
+        // Of these, only `cat`, `cp` and `mv` (in cmd.exe `type`, `more`,
+        // `copy`, `xcopy`, `robocopy` and `move`) read or carry off what a
+        // file holds.
+        let reads = matches!(name, "cat" | "cp" | "mv")
+            || (self.reading == Reading::Cmd
+                && matches!(
+                    name,
+                    "type" | "more" | "copy" | "xcopy" | "robocopy" | "move"
+                ));
         self.name_path(raw, value, complete, outside.as_deref(), reads);
         if let Some(dir) = outside {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
-        if matches!(name, "cd" | "pushd")
+        if (matches!(name, "cd" | "pushd") || (self.reading == Reading::Cmd && name == "chdir"))
             && let Some(dir) = cd_dir(self.workspace, self.from(), raw, value, complete)
         {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
@@ -2909,10 +2998,7 @@ impl Reader<'_> {
         // Any other program given where Haarness keeps sign-ins, by a
         // literal path (`jq . <data>/auth.json`), unless it only looks at
         // the file (`ls -l`, `stat`, `test -f`).
-        if complete
-            && !PATH_COMMANDS.contains(&name.as_str())
-            && !LOOKS_ONLY.contains(&name.as_str())
-        {
+        if complete && !self.path_command(&name) && !LOOKS_ONLY.contains(&name.as_str()) {
             for word in arguments {
                 let (value, complete) = path_literal(word.node, source);
                 // An option's value as well (`--files0-from=<file>`).
@@ -2923,7 +3009,7 @@ impl Reader<'_> {
                 self.name_path(&word.raw, &value, complete, None, true);
             }
         }
-        if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
+        if !complete || !self.path_command(&name) {
             return;
         }
         // A `cd` given no folder (`cd`, `cd --`, `cd -P`) goes to the home
@@ -5440,10 +5526,11 @@ fn external_dir(
     value: &str,
     complete: bool,
 ) -> Option<PathBuf> {
+    let value = drive_path(value);
     let target = if complete {
-        value
+        value.as_ref()
     } else {
-        value.rfind('/').map_or("", |end| &value[..=end])
+        value.rfind(SEPARATORS).map_or("", |end| &value[..=end])
     };
     if target.is_empty() {
         return None;
@@ -5460,6 +5547,20 @@ fn external_dir(
         Some(resolved)
     } else {
         Some(resolved.parent().unwrap_or(&resolved).to_path_buf())
+    }
+}
+
+/// What separates a path's folders: `/`, and on Windows `\` too.
+const SEPARATORS: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+
+/// `value` with a Git Bash, Cygwin or WSL drive (`/c/Users/…`) as the
+/// Windows drive path it is there (`C:/Users/…`); as it is elsewhere. On
+/// Windows a drive path (`C:\…`, `C:/…`) and a network one
+/// (`\\server\share`, `//server/share`) are absolute already.
+fn drive_path(value: &str) -> std::borrow::Cow<'_, str> {
+    match crate::paths::windows_spelling(value) {
+        Some(spelled) if !value.starts_with('"') => std::borrow::Cow::Owned(spelled),
+        _ => std::borrow::Cow::Borrowed(value),
     }
 }
 
@@ -5500,10 +5601,11 @@ fn cd_dir(
     value: &str,
     complete: bool,
 ) -> Option<PathBuf> {
+    let value = drive_path(value);
     let target = if complete {
-        value
+        value.as_ref()
     } else {
-        value.rfind('/').map_or("", |end| &value[..=end])
+        value.rfind(SEPARATORS).map_or("", |end| &value[..=end])
     };
     if target.is_empty() {
         return None;
@@ -10860,5 +10962,136 @@ mod scripts_on_windows {
                 "{command}"
             );
         }
+    }
+}
+
+/// Windows paths in agent commands, as Git Bash and cmd.exe read them.
+#[cfg(all(test, windows))]
+mod windows_paths {
+    use super::*;
+
+    /// A project and, beside it, a folder outside it holding `notes.txt`.
+    fn fixture() -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("haarness-winpaths-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(base.join("proj").join("src")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        std::fs::write(base.join("outside").join("notes.txt"), "secret").unwrap();
+        std::fs::write(base.join("proj").join("src").join("a.py"), "x").unwrap();
+        let base = crate::paths::canonicalize(&base).unwrap();
+        (base.join("proj"), base.join("outside"))
+    }
+
+    fn asks(reading: Reading, command: &str, workspace: &Path, outside: &Path) -> bool {
+        let analysis = analyze_reading(command, workspace, workspace, reading);
+        let folder = outside.display().to_string().to_lowercase();
+        analysis
+            .external_dirs
+            .iter()
+            .any(|dir| dir.replace('/', "\\").to_lowercase().starts_with(&folder))
+    }
+
+    #[test]
+    fn git_bash_asks_about_drive_network_and_slash_drive_paths_outside_the_project() {
+        let (workspace, outside) = fixture();
+        let notes = outside.join("notes.txt");
+        let backslashed = notes.display().to_string();
+        let forward = backslashed.replace('\\', "/");
+        let (drive, rest) = forward.split_once(':').unwrap();
+        let slash_drive = format!("/{}{rest}", drive.to_lowercase());
+        // Before, `/c/…` was read under the project's drive root and
+        // `C:/…` only by luck of `Path`; now each is the file it names.
+        for command in [
+            format!("cat {slash_drive}"),
+            format!("cat \"{backslashed}\""),
+            format!("cat {forward}"),
+            format!("cp src/a.py {slash_drive}"),
+            format!("cat '{backslashed}' > /dev/null"),
+        ] {
+            assert!(
+                asks(Reading::GitBash, &command, &workspace, &outside),
+                "{command}"
+            );
+        }
+        // Inside the project, by any spelling, nothing asks.
+        let inside = workspace.join("src").join("a.py").display().to_string();
+        for command in [
+            "cat src/a.py".to_owned(),
+            format!("cat \"{inside}\""),
+            format!("cat {}", inside.replace('\\', "/")),
+        ] {
+            let analysis = analyze_reading(&command, &workspace, &workspace, Reading::GitBash);
+            assert!(
+                analysis.external_dirs.is_empty(),
+                "{command}: {:?}",
+                analysis.external_dirs
+            );
+        }
+        let network = analyze_reading(
+            "cat //127.0.0.1/share/notes.txt",
+            &workspace,
+            &workspace,
+            Reading::GitBash,
+        );
+        assert!(
+            network
+                .external_dirs
+                .iter()
+                .any(|dir| dir.contains("127.0.0.1")),
+            "{:?}",
+            network.external_dirs
+        );
+    }
+
+    #[test]
+    fn cmd_reads_a_path_as_written_and_a_slash_word_as_a_switch() {
+        let (workspace, outside) = fixture();
+        let notes = outside.join("notes.txt").display().to_string();
+        let folder = outside.display().to_string();
+        // Before, `type` was no path command and `C:\Users\…` read as the
+        // POSIX `C:Users…`, inside the project: nothing asked.
+        for command in [
+            format!("type {notes}"),
+            format!("type \"{notes}\""),
+            format!("TYPE {notes}"),
+            format!("copy src\\a.py {folder}\\copied.py"),
+            format!("more < {notes}"),
+            format!("type src\\a.py > {folder}\\out.txt"),
+            format!("cd /d {folder}"),
+            format!("del /q {folder}\\notes.txt"),
+        ] {
+            assert!(
+                asks(Reading::Cmd, &command, &workspace, &outside),
+                "{command}"
+            );
+        }
+        for command in [
+            "dir /s /b *.py",
+            "type src\\a.py",
+            "del /q src\\a.py",
+            "rmdir /s /q src",
+            "copy src\\a.py src\\b.py",
+            "cd",
+        ] {
+            let analysis = analyze_reading(command, &workspace, &workspace, Reading::Cmd);
+            assert!(
+                analysis.external_dirs.is_empty(),
+                "{command}: {:?}",
+                analysis.external_dirs
+            );
+        }
+        let network = analyze_reading(
+            "type \\\\127.0.0.1\\share\\notes.txt",
+            &workspace,
+            &workspace,
+            Reading::Cmd,
+        );
+        assert!(
+            network
+                .external_dirs
+                .iter()
+                .any(|dir| dir.contains("127.0.0.1")),
+            "{:?}",
+            network.external_dirs
+        );
     }
 }
