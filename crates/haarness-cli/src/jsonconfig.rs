@@ -1443,16 +1443,13 @@ fn loaded_mcp_entry(entry: &Value, plugin_root: Option<&Path>) -> Option<McpConf
 }
 
 /// Resolves `${VAR}` references in the strings the MCP client uses as given
-/// (command, arguments, folder, URL, OAuth client and scopes). Environment
-/// values and headers keep theirs: the client resolves them once when it
-/// connects, so a variable whose value holds `${OTHER}` is not read again,
-/// and the server receives that text as it is. So does the headers helper,
-/// a shell command: its shell reads each reference from its environment, so
-/// a value is never read as shell syntax.
-///
-/// A URL keeps a reference to a variable that is not set (and has no
-/// `:-fallback`) as written, so the check of the URL when the server connects
-/// can name that variable instead of finding an address with a gap in it.
+/// (command, arguments, folder, OAuth client and scopes). Environment
+/// values, headers and the URL keep theirs: the client resolves them once
+/// when it connects, so a variable whose value holds `${OTHER}` is not read
+/// again, and the server receives that text as it is (a URL resolved twice
+/// could send a secret a value names to the host it names). So does the
+/// headers helper, a shell command: its shell reads each reference from its
+/// environment, so a value is never read as shell syntax.
 pub(super) fn resolve_mcp_entry(mut entry: McpConfigureRequest) -> McpConfigureRequest {
     for value in entry
         .command
@@ -1463,9 +1460,6 @@ pub(super) fn resolve_mcp_entry(mut entry: McpConfigureRequest) -> McpConfigureR
         .chain(&mut entry.oauth_scopes)
     {
         *value = expand_env(value);
-    }
-    if let Some(url) = &mut entry.url {
-        *url = expand_env_with(url, true);
     }
     entry
 }
@@ -1656,12 +1650,6 @@ fn plugin_placeholders(value: &str, plugin_root: Option<&Path>) -> String {
 
 /// `${VAR}` / `${VAR:-default}` expansion (the Claude `.mcp.json` idiom).
 fn expand_env(value: &str) -> String {
-    expand_env_with(value, false)
-}
-
-/// [`expand_env`], keeping a reference to a variable that is not set and
-/// has no fallback as written when `keep_unset`.
-fn expand_env_with(value: &str, keep_unset: bool) -> String {
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
     while let Some(start) = rest.find("${") {
@@ -1675,11 +1663,9 @@ fn expand_env_with(value: &str, keep_unset: bool) -> String {
         let (name, fallback) = token
             .split_once(":-")
             .map_or((token, None), |(name, fallback)| (name, Some(fallback)));
-        match (std::env::var(name), fallback) {
-            (Ok(resolved), _) => out.push_str(&resolved),
-            (Err(_), Some(fallback)) => out.push_str(fallback),
-            (Err(_), None) if keep_unset => out.push_str(&rest[start..start + end + 3]),
-            (Err(_), None) => {}
+        match std::env::var(name) {
+            Ok(resolved) => out.push_str(&resolved),
+            Err(_) => out.push_str(fallback.unwrap_or_default()),
         }
         rest = &after[end + 1..];
     }
@@ -5510,23 +5496,29 @@ webfetch = "deny"
         assert_eq!(expand_env("${MISSING_VAR_HAARNESS:-fallback}"), "fallback");
         assert_eq!(expand_env("${MISSING_VAR_HAARNESS}"), "");
         assert_eq!(expand_env("plain"), "plain");
-        // A server's URL keeps an unset reference as written; its other
-        // fields still resolve it to nothing, and a fallback still applies.
-        let entry = resolve_mcp_entry(McpConfigureRequest {
-            transport: "streamable_http".into(),
-            url: Some("https://${MISSING_VAR_HAARNESS}/mcp?home=${HOME}&tier=${MISSING_VAR_HAARNESS:-free}".into()),
-            oauth_client_id: Some("${MISSING_VAR_HAARNESS}".into()),
-            ..serde_json::from_value(serde_json::json!({"transport":"streamable_http","enabled":true})).unwrap()
-        });
-        assert_eq!(
-            entry.url.as_deref(),
-            Some(format!("https://${{MISSING_VAR_HAARNESS}}/mcp?home={home}&tier=free").as_str())
-        );
-        assert_eq!(entry.oauth_client_id.as_deref(), Some(""));
+        // A server's URL stays as written, its references set or not: the
+        // client resolves it once, when it connects. Its other fields still
+        // resolve an unset reference to nothing.
+        for url in [
+            "https://${MISSING_VAR_HAARNESS}/mcp",
+            "https://example.test/mcp?home=${HOME}&tier=${MISSING_VAR_HAARNESS:-free}",
+        ] {
+            let entry = resolve_mcp_entry(McpConfigureRequest {
+                transport: "streamable_http".into(),
+                url: Some(url.into()),
+                oauth_client_id: Some("${MISSING_VAR_HAARNESS}".into()),
+                ..serde_json::from_value(
+                    serde_json::json!({"transport":"streamable_http","enabled":true}),
+                )
+                .unwrap()
+            });
+            assert_eq!(entry.url.as_deref(), Some(url));
+            assert_eq!(entry.oauth_client_id.as_deref(), Some(""));
+        }
     }
 
     /// A load resolves what the MCP client uses as given and leaves
-    /// environment and header references to the client, which resolves them
+    /// environment, header and URL references to the client, which resolves them
     /// once when it connects: resolved here too, a variable whose value holds
     /// `${OTHER}` would have that read as well and sent.
     #[test]
@@ -5550,7 +5542,11 @@ webfetch = "deny"
             None,
         )
         .unwrap();
-        assert_eq!(remote.url.as_deref(), Some("https://example.test/eu/mcp"));
+        // The URL too: the client resolves it once, when it connects.
+        assert_eq!(
+            remote.url.as_deref(),
+            Some("https://example.test/${HAARNESS_FIXTURE_UNSET_REGION:-eu}/mcp")
+        );
         assert_eq!(
             remote.headers["Authorization"],
             "Bearer ${HAARNESS_FIXTURE_UNSET_TOKEN}"
