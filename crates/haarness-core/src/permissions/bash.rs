@@ -417,6 +417,10 @@ const MAX_DELIMITER_BYTES: usize = 64 * 1024;
 /// How many times [`separated_delimiters`] may parse any line, the last
 /// parse only checking the moves before it.
 const MIN_DELIMITER_PASSES: usize = 4;
+/// How many delimiters [`separated_delimiters`] sets apart in one text, over
+/// all its parses: a text that needs more is not read whole after the parse
+/// that shows it. Lines people and agents write need a few.
+const MAX_DELIMITERS_APART: usize = 64;
 
 /// How a delimiter written against an operator is set apart from it: see
 /// [`separated_delimiters`].
@@ -453,7 +457,9 @@ enum Apart {
 /// (`python3 - <<EOF ;ls`): the word after it keeps its place, and the
 /// ranges of the operator and of an error that starts with it are one byte
 /// late. A `;` that ends its line becomes a blank. Any other delimiter
-/// cannot move (`cat<<EOF>out.txt`).
+/// cannot move (`cat<<EOF>out.txt`). A text that needs more than
+/// [`MAX_DELIMITERS_APART`] set apart is returned, not whole, as it stood
+/// at the parse that showed it, with that parse's tree.
 fn separated_delimiters(
     text: &str,
 ) -> (std::borrow::Cow<'_, str>, bool, Option<tree_sitter::Tree>) {
@@ -469,6 +475,7 @@ fn separated_delimiters(
     }
     let mut bytes = text.as_bytes().to_vec();
     let mut changed = false;
+    let mut apart = 0;
     let passes = (MAX_DELIMITER_BYTES / text.len().max(1)).max(MIN_DELIMITER_PASSES);
     for pass in 1..=passes {
         // Only whole characters move, and a blank takes an ASCII byte's
@@ -480,13 +487,15 @@ fn separated_delimiters(
             break;
         };
         let moves = misread_delimiters(&tree, current);
-        if moves.as_ref().is_none_or(Vec::is_empty) {
+        apart += moves.as_ref().map_or(0, Vec::len);
+        if moves.as_ref().is_none_or(Vec::is_empty) || apart > MAX_DELIMITERS_APART {
             let text = if changed {
                 std::borrow::Cow::Owned(current.to_owned())
             } else {
                 std::borrow::Cow::Borrowed(text)
             };
-            return (text, moves.is_some(), Some(tree));
+            let whole = moves.is_some_and(|moves| moves.is_empty());
+            return (text, whole, Some(tree));
         }
         // No parse is left to check these moves.
         if pass == passes {
@@ -1157,8 +1166,14 @@ impl Reader<'_> {
             return false;
         }
         // The tree comes from the shell's reading of the line; every text is
-        // read from the line itself, which has the same length.
-        let (reading, whole, tree) = parser_input(command);
+        // read from the line itself, which has the same length. Text read
+        // again once the line is not read whole is not worth the parses
+        // that set its delimiters apart.
+        let (reading, whole, tree) = if depth.text > 0 && self.unseparated {
+            (shell_reading(command), true, None)
+        } else {
+            parser_input(command)
+        };
         self.unseparated |= !whole;
         let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
             return false;
@@ -7828,6 +7843,11 @@ mod readings {
         let analysis = analyze(&chain, &workspace);
         assert!(!analysis.unreadable);
         assert!(analysis.patterns.contains(&"rm -rf ~/x".to_owned()));
+        // Up to a bound on how many one text may need.
+        let chain =
+            |count: usize| format!("{}rm -rf ~/x\nbody\nEOF", "cat - <<EOF; ".repeat(count));
+        assert!(!analyze(&chain(MAX_DELIMITERS_APART), &workspace).unreadable);
+        assert!(analyze(&chain(MAX_DELIMITERS_APART + 1), &workspace).unreadable);
         // A redirect written against the delimiter writes where it says.
         let written = analyze("cat <<EOF>../outside/f\nbody\nEOF", &workspace);
         assert!(!written.external_dirs.is_empty(), "{written:?}");
