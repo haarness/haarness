@@ -2284,20 +2284,22 @@ pub fn migrate_toml(config_toml: &Path, notices: &mut Vec<String>) -> Result<()>
 /// Update one named setting while retaining sibling comments and formatting.
 pub(super) fn write_entry(
     path: &Path,
+    scope: &SaveScope,
     section: &str,
     name: &str,
     value: Option<Value>,
 ) -> Result<()> {
-    write_entries(path, section, vec![(name.to_owned(), value)])
+    write_entries(path, scope, section, vec![(name.to_owned(), value)])
 }
 
 pub(super) fn write_entries(
     path: &Path,
+    scope: &SaveScope,
     section: &str,
     updates: Vec<(String, Option<Value>)>,
 ) -> Result<()> {
     use anyhow::Context as _;
-    edit_json_file(path, |object| {
+    edit_json_file(path, scope, |object| {
         let entries = object
             .object_value_or_create(section)
             .context("configuration section must be an object")?;
@@ -2323,6 +2325,7 @@ pub(super) fn write_entries(
 /// edit would land on the first copy while the last one is in force.
 pub(super) fn write_entry_fields(
     path: &Path,
+    scope: &SaveScope,
     section: &str,
     name: &str,
     fields: Vec<(String, Option<Value>)>,
@@ -2342,7 +2345,7 @@ pub(super) fn write_entry_fields(
             .count()
             > 1
     };
-    edit_json_file(path, |object| {
+    edit_json_file(path, scope, |object| {
         anyhow::ensure!(
             !repeated(object, section),
             "\"{section}\" is written more than once in {}; remove the extra copy first",
@@ -2399,11 +2402,12 @@ fn cst_input(value: Value) -> jsonc_parser::cst::CstInputValue {
 /// [`replace_config_file`]).
 fn edit_json_file(
     path: &Path,
+    scope: &SaveScope,
     edit: impl FnOnce(&jsonc_parser::cst::CstObject) -> Result<()>,
 ) -> Result<()> {
     use anyhow::Context as _;
     use jsonc_parser::cst::CstRootNode;
-    replace_config_file(path, ConfigMode::OwnerOnly, |text| {
+    replace_config_file(path, ConfigMode::OwnerOnly, scope, |text| {
         let root = CstRootNode::parse(
             text.unwrap_or("{\n}\n"),
             &jsonc_parser::ParseOptions::default(),
@@ -2414,6 +2418,40 @@ fn edit_json_file(
         edit(&object)?;
         Ok(root.to_string())
     })
+}
+
+/// Whose configuration a save changes, which decides where its path may lead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SaveScope {
+    /// The person's own configuration: a link on the way may lead anywhere,
+    /// such as into a dotfiles folder.
+    Global,
+    /// A project's, whose root is this folder: the file saved, every link
+    /// and linked folder on the way followed, must be inside it.
+    Project(PathBuf),
+}
+
+impl SaveScope {
+    /// A save into the project `workspace` belongs to, whose root is where
+    /// its configuration layers start: the Git work tree's top when there is
+    /// one, else the workspace itself.
+    pub(super) fn project(workspace: &Path) -> Self {
+        Self::Project(
+            crate::layout::project_directories(workspace)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| workspace.to_path_buf()),
+        )
+    }
+
+    /// The project's scope when `project`, else the global one.
+    pub(super) fn of(project: bool, workspace: &Path) -> Self {
+        if project {
+            Self::project(workspace)
+        } else {
+            Self::Global
+        }
+    }
 }
 
 /// The permissions a saved configuration file gets.
@@ -2431,22 +2469,22 @@ pub(super) enum ConfigMode {
 /// the read to the write, so two saves at once (Desktop's server and a
 /// `haarness mcp add`) each keep the other's change. The new text goes to a
 /// file beside it that is renamed over it, so a reload never reads half a
-/// save. A link stays a link and the file it leads to is saved; inside a
-/// repository that file must be in the same repository, so a cloned project
-/// cannot point a save at a file elsewhere. A file with other hard links,
-/// or in a folder that takes no new file, is written in place instead, so
-/// it stays the file the other names lead to.
+/// save. A link stays a link and the file it leads to is saved. A project's
+/// save must land inside the project, every link and linked folder on the
+/// way followed, so a project cannot point a save at a file elsewhere (see
+/// [`SaveScope`]). A file with other hard links, another owner, or a folder
+/// that takes no new file is written in place instead, so it stays the file
+/// the other names lead to.
 pub(super) fn replace_config_file(
     path: &Path,
     mode: ConfigMode,
+    scope: &SaveScope,
     edit: impl FnOnce(Option<&str>) -> Result<String>,
 ) -> Result<()> {
     use anyhow::Context as _;
-    let target = save_target(path)?;
+    let target = save_target(path, scope)?;
     let parent = target.parent().context("configuration parent")?;
-    if target == path {
-        fs::create_dir_all(parent)?;
-    }
+    fs::create_dir_all(parent)?;
     // Writers lock the folder itself: a lock file beside a project's
     // haarness.json would be left behind in the person's repository.
     #[cfg(unix)]
@@ -2497,8 +2535,9 @@ pub(super) fn replace_config_file(
 }
 
 /// The file a save of `path` writes: `path`, or the file a link there
-/// leads to, through every link on the way.
-fn save_target(path: &Path) -> Result<PathBuf> {
+/// leads to, through every link on the way; for a project's save, the real
+/// path of that file, which must be inside the project.
+fn save_target(path: &Path, scope: &SaveScope) -> Result<PathBuf> {
     use anyhow::Context as _;
     // The folder a path is in, `.` for a bare file name.
     let folder_of = |path: &Path| {
@@ -2515,38 +2554,52 @@ fn save_target(path: &Path) -> Result<PathBuf> {
         }
         current = folder_of(&current).join(fs::read_link(&current)?);
     }
-    if current == path {
-        return Ok(current);
-    }
     let unsaved = |why: String| anyhow::anyhow!("Haarness did not save {}: {why}", path.display());
     if is_link(&current) {
         return Err(unsaved("its links lead round in a circle".into()));
     }
-    let folder = dunce::canonicalize(folder_of(&current))
-        .map_err(|_| unsaved("it is a link to a folder that does not exist".into()))?;
-    let target = folder.join(current.file_name().context("configuration file name")?);
+    let name = current.file_name().context("configuration file name")?;
+    let target = match scope {
+        SaveScope::Global if current == path => return Ok(current),
+        SaveScope::Global => dunce::canonicalize(folder_of(&current))
+            .map_err(|_| unsaved("it is a link to a folder that does not exist".into()))?
+            .join(name),
+        SaveScope::Project(root) => {
+            let target = real_path(&folder_of(&current)).join(name);
+            let root = dunce::canonicalize(root).unwrap_or_else(|_| root.clone());
+            if !target.starts_with(&root) {
+                return Err(unsaved(format!(
+                    "it leads to {}, outside the project. Save the setting in your global configuration instead, or replace the link with a copy of the file",
+                    target.display()
+                )));
+            }
+            target
+        }
+    };
     if fs::metadata(&target).is_ok_and(|metadata| !metadata.is_file()) {
         return Err(unsaved(format!(
             "it is a link to {}, which is not a file",
             target.display()
         )));
     }
-    if let Some(repository) = dunce::canonicalize(folder_of(path))
-        .ok()
-        .and_then(|folder| {
-            folder
-                .ancestors()
-                .find(|folder| folder.join(".git").exists())
-                .map(Path::to_path_buf)
-        })
-        && !target.starts_with(&repository)
-    {
-        return Err(unsaved(format!(
-            "it is a link to {}, outside the repository it is in",
-            target.display()
-        )));
-    }
     Ok(target)
+}
+
+/// Where `folder` really is: its nearest folder that exists with every link
+/// followed, and the parts not made yet after it.
+fn real_path(folder: &Path) -> PathBuf {
+    let mut existing = folder;
+    let mut missing = Vec::new();
+    while fs::symlink_metadata(existing).is_err() {
+        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+            break;
+        };
+        missing.push(name.to_os_string());
+        existing = parent;
+    }
+    let mut real = dunce::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    real.extend(missing.into_iter().rev());
+    real
 }
 
 /// Replaces `path` with `bytes` through a file beside it, or writes it in
@@ -2573,7 +2626,7 @@ fn write_whole(path: &Path, bytes: &[u8], mode: ConfigMode) -> Result<()> {
         return Ok(());
     }
     let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::now_v7()));
-    let result = (|| -> std::io::Result<()> {
+    let result = (|| -> std::io::Result<bool> {
         let mut options = fs::OpenOptions::new();
         options.create_new(true).write(true);
         #[cfg(unix)]
@@ -2582,6 +2635,15 @@ fn write_whole(path: &Path, bytes: &[u8], mode: ConfigMode) -> Result<()> {
             options.mode(0o600);
         }
         let mut file = options.open(&temporary)?;
+        // A file someone else owns would become this user's: it is written
+        // in place instead (the new file is this user's own).
+        #[cfg(unix)]
+        if let Some(metadata) = &existing {
+            use std::os::unix::fs::MetadataExt as _;
+            if file.metadata()?.uid() != metadata.uid() {
+                return Ok(false);
+            }
+        }
         // The file's own permissions, which the creation mask may have cut.
         if mode == ConfigMode::Kept
             && let Some(metadata) = &existing
@@ -2590,19 +2652,33 @@ fn write_whole(path: &Path, bytes: &[u8], mode: ConfigMode) -> Result<()> {
         }
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&temporary, path)
+        fs::rename(&temporary, path)?;
+        Ok(true)
     })();
     let _ = fs::remove_file(&temporary);
     match result {
-        Ok(()) => Ok(()),
-        // A folder that takes no new file (or, on Windows, a file another
-        // program holds open): the file itself may still be writable.
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            fs::write(path, bytes)?;
-            Ok(())
-        }
+        Ok(true) => Ok(()),
+        Ok(false) => Ok(fs::write(path, bytes)?),
+        // A folder that takes no new file, a file another program holds
+        // open (Windows), or a file mounted on its own (a container's bind
+        // mount of one file, which a rename cannot replace): the file itself
+        // may still be writable.
+        Err(error) if renames_refused(&error) => Ok(fs::write(path, bytes)?),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Whether a rename over a file failed in a way that writing the file in
+/// place may not.
+fn renames_refused(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::PermissionDenied
+            | ErrorKind::ResourceBusy
+            | ErrorKind::CrossesDevices
+            | ErrorKind::ReadOnlyFilesystem
+    )
 }
 
 #[cfg(test)]
@@ -4750,7 +4826,7 @@ mod tests {
             "{\n  // personal setting\n  \"model\": \"echo/echo-1\",\n}\n",
         )
         .unwrap();
-        write_entry(&path, "mcp", "fixture", Some(serde_json::json!({"command":"true", "args":["a b"],"timeoutMs":12000,"enabled":false}))).unwrap();
+        write_entry(&path, &SaveScope::Global, "mcp", "fixture", Some(serde_json::json!({"command":"true", "args":["a b"],"timeoutMs":12000,"enabled":false}))).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("// personal setting"));
         let value = read_json(&path).unwrap().unwrap();
@@ -4758,7 +4834,7 @@ mod tests {
         assert_eq!(entry.timeout_ms, Some(12000));
         assert_eq!(entry.args, ["a b"]);
         assert!(!entry.enabled);
-        write_entry(&path, "mcp", "fixture", None).unwrap();
+        write_entry(&path, &SaveScope::Global, "mcp", "fixture", None).unwrap();
         assert!(
             fs::read_to_string(&path)
                 .unwrap()
@@ -4785,6 +4861,7 @@ mod tests {
                 std::thread::spawn(move || {
                     write_entry(
                         &path,
+                        &SaveScope::Global,
                         "mcp",
                         &format!("server{index}"),
                         Some(serde_json::json!({"command":"true"})),
@@ -4818,6 +4895,7 @@ mod tests {
         std::os::unix::fs::symlink("../../dotfiles/haarness.json", &path).unwrap();
         write_entry(
             &path,
+            &SaveScope::Global,
             "mcp",
             "docs",
             Some(serde_json::json!({"command":"true"})),
@@ -4833,6 +4911,7 @@ mod tests {
         fs::remove_file(dotfiles.join("haarness.json")).unwrap();
         write_entry(
             &path,
+            &SaveScope::Global,
             "mcp",
             "docs",
             Some(serde_json::json!({"command":"true"})),
@@ -4851,54 +4930,137 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// A link in a repository may lead only to a file in that repository:
-    /// a cloned project cannot point a save at a file elsewhere.
+    /// A project's save must land inside the project, whatever leads it
+    /// out: a link to the global file in a project with no Git (a download),
+    /// or a linked `.haarness` folder. A link to a file inside the project
+    /// is followed. The person's own configuration follows its links
+    /// anywhere, also from a folder inside a Git work tree.
     #[cfg(unix)]
     #[test]
-    fn a_link_in_a_repository_saves_only_inside_it() {
+    fn a_project_save_stays_in_the_project_and_a_global_one_follows_its_links() {
         let root =
-            std::env::temp_dir().join(format!("haarness-json-repo-link-{}", uuid::Uuid::now_v7()));
+            std::env::temp_dir().join(format!("haarness-json-scope-{}", uuid::Uuid::now_v7()));
+        let global = root.join("home/.config/haarness");
+        fs::create_dir_all(&global).unwrap();
+        let global_file = global.join("haarness.json");
+        fs::write(&global_file, "{}\n").unwrap();
+        let entry = || Some(serde_json::json!({"command":"true","env":{"TOKEN":"project-only"}}));
+        let refused = |path: &Path, scope: &SaveScope| {
+            let error = write_entry(path, scope, "mcp", "docs", entry())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with(&format!("Haarness did not save {}: it leads to ", path.display()))
+                    && error.ends_with(", outside the project. Save the setting in your global configuration instead, or replace the link with a copy of the file"),
+                "{error}"
+            );
+        };
+
+        // (a) No Git: the project's file links to the global one.
+        let download = root.join("download");
+        fs::create_dir_all(download.join(".haarness")).unwrap();
+        let linked = download.join(".haarness/haarness.json");
+        std::os::unix::fs::symlink(&global_file, &linked).unwrap();
+        refused(&linked, &SaveScope::project(&download));
+        assert_eq!(fs::read_to_string(&global_file).unwrap(), "{}\n");
+
+        // (b) A Git project whose `.haarness` folder links to the global one.
         let project = root.join("project");
         fs::create_dir_all(project.join(".git")).unwrap();
-        fs::create_dir_all(project.join("shared")).unwrap();
-        fs::create_dir_all(project.join(".haarness")).unwrap();
-        let elsewhere = root.join("elsewhere.json");
-        fs::write(&elsewhere, "{}\n").unwrap();
-        let linked_out = project.join("haarness.json");
-        std::os::unix::fs::symlink(&elsewhere, &linked_out).unwrap();
-        let error = write_entry(
-            &linked_out,
-            "mcp",
-            "docs",
-            Some(serde_json::json!({"command":"true"})),
-        )
-        .unwrap_err()
-        .to_string();
-        assert_eq!(
-            error,
-            format!(
-                "Haarness did not save {}: it is a link to {}, outside the repository it is in",
-                linked_out.display(),
-                dunce::canonicalize(&elsewhere).unwrap().display()
-            )
+        std::os::unix::fs::symlink(&global, project.join(".haarness")).unwrap();
+        refused(
+            &project.join(".haarness/haarness.json"),
+            &SaveScope::project(&project),
         );
-        assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "{}\n");
-        assert!(fs::symlink_metadata(&linked_out).unwrap().is_symlink());
-
-        let inside = project.join("shared/haarness.json");
-        fs::write(&inside, "{}\n").unwrap();
-        let linked_in = project.join(".haarness/haarness.json");
-        std::os::unix::fs::symlink("../shared/haarness.json", &linked_in).unwrap();
+        assert_eq!(fs::read_to_string(&global_file).unwrap(), "{}\n");
+        // From a folder deep in it, the project is the whole work tree.
+        fs::create_dir_all(project.join("app/src")).unwrap();
+        fs::create_dir_all(project.join("shared")).unwrap();
+        fs::write(project.join("shared/haarness.json"), "{}\n").unwrap();
+        std::os::unix::fs::symlink("../shared/haarness.json", project.join("app/haarness.json"))
+            .unwrap();
         write_entry(
-            &linked_in,
+            &project.join("app/haarness.json"),
+            &SaveScope::project(&project.join("app/src")),
             "mcp",
             "docs",
-            Some(serde_json::json!({"command":"true"})),
+            entry(),
         )
         .unwrap();
-        assert!(fs::read_to_string(&inside).unwrap().contains("\"docs\""));
-        assert!(fs::symlink_metadata(&linked_in).unwrap().is_symlink());
+        assert!(
+            fs::read_to_string(project.join("shared/haarness.json"))
+                .unwrap()
+                .contains("project-only")
+        );
+        assert!(
+            fs::symlink_metadata(project.join("app/haarness.json"))
+                .unwrap()
+                .is_symlink()
+        );
+        // A new project file in a folder not made yet is made inside.
+        write_entry(
+            &download.join(".haarness/cloud/haarness.json"),
+            &SaveScope::project(&download),
+            "mcp",
+            "docs",
+            entry(),
+        )
+        .unwrap();
+        assert!(download.join(".haarness/cloud/haarness.json").is_file());
+
+        // (c) The global folder inside a Git work tree, its file a link to
+        // dotfiles outside it.
+        fs::create_dir_all(root.join("home/.git")).unwrap();
+        let dotfiles = root.join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::write(dotfiles.join("haarness.json"), "{}\n").unwrap();
+        fs::remove_file(&global_file).unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("haarness.json"), &global_file).unwrap();
+        write_entry(&global_file, &SaveScope::Global, "mcp", "docs", entry()).unwrap();
+        assert!(
+            fs::read_to_string(dotfiles.join("haarness.json"))
+                .unwrap()
+                .contains("\"docs\"")
+        );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A rename a mount or a busy file refuses (a container's bind mount of
+    /// one file, a file another program holds open) falls back to writing
+    /// the file in place, as a folder that takes no new file does.
+    #[test]
+    fn a_save_the_system_will_not_rename_into_place_writes_in_place() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::ResourceBusy,
+            ErrorKind::CrossesDevices,
+            ErrorKind::ReadOnlyFilesystem,
+        ] {
+            assert!(renames_refused(&Error::from(kind)), "{kind:?}");
+        }
+        assert!(!renames_refused(&Error::from(ErrorKind::NotFound)));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let root =
+                std::env::temp_dir().join(format!("haarness-json-locked-{}", uuid::Uuid::now_v7()));
+            fs::create_dir_all(&root).unwrap();
+            let path = root.join("haarness.json");
+            fs::write(&path, "{}\n").unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+            let saved = write_entry(
+                &path,
+                &SaveScope::Global,
+                "mcp",
+                "docs",
+                Some(serde_json::json!({"command":"true"})),
+            );
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+            saved.unwrap();
+            assert!(fs::read_to_string(&path).unwrap().contains("\"docs\""));
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     /// A file with another hard link is written in place, so both names keep
@@ -4914,6 +5076,7 @@ mod tests {
         fs::hard_link(&path, root.join("copy.json")).unwrap();
         write_entry(
             &path,
+            &SaveScope::Global,
             "mcp",
             "docs",
             Some(serde_json::json!({"command":"true"})),

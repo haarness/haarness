@@ -2399,7 +2399,8 @@ async fn provider_command(
                 ..ProviderSection::default()
             };
             let target = provider_config_target(paths, workspace, project);
-            write_provider_entry(&target, &id, Some(&section))?;
+            let scope = jsonconfig::SaveScope::of(project, workspace);
+            write_provider_entry(&target, &scope, &id, Some(&section))?;
             println!("Added custom provider '{id}' to {}.", target.display());
             if section.requires_auth && section.api_key_env.is_none() && section.headers.is_empty()
             {
@@ -2414,7 +2415,8 @@ async fn provider_command(
         ProviderCommand::Remove { id, project } => {
             validate_provider_id(&id)?;
             let target = provider_config_target(paths, workspace, project);
-            write_provider_entry(&target, &id, None)?;
+            let scope = jsonconfig::SaveScope::of(project, workspace);
+            write_provider_entry(&target, &scope, &id, None)?;
             println!("Removed custom provider '{id}' from {}.", target.display());
             println!(
                 "Stored credentials were retained; use `haarness auth logout {id}` to remove them."
@@ -9180,7 +9182,8 @@ async fn mcp_command(
                 _ => anyhow::bail!("provide exactly one of --command or --url"),
             };
             let target = mcp_entry_target(paths, workspace, project, &name);
-            write_mcp_entry(&target, &name, Some(&entry))?;
+            let scope = jsonconfig::SaveScope::of(project, workspace);
+            write_mcp_entry(&target, &scope, &name, Some(&entry))?;
             // The entry stays saved when the server cannot start: fixing the
             // program or the URL and reconnecting is the usual next step.
             match client
@@ -9223,7 +9226,12 @@ async fn mcp_command(
             let mut entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
             entry.enabled = false;
             client.configure_mcp(&name, &entry).await?;
-            write_mcp_entry(&target, &name, None)?;
+            write_mcp_entry(
+                &target,
+                &jsonconfig::SaveScope::of(project, workspace),
+                &name,
+                None,
+            )?;
             println!("Removed MCP server '{name}' from {}.", target.display());
         }
     }
@@ -9553,7 +9561,13 @@ fn set_mcp_enabled(
     let before = read_mcp_entry(&target, name)?;
     let mut entry = before.clone();
     entry.enabled = enabled;
-    write_mcp_changes(&target, name, &before, &entry)?;
+    write_mcp_changes(
+        &target,
+        &jsonconfig::SaveScope::of(project, workspace),
+        name,
+        &before,
+        &entry,
+    )?;
     if enabled && let Some(source) = release_base_mcp_copy(paths, workspace, name, project)? {
         println!(
             "Enabled MCP server '{name}' from the system folder ({}).",
@@ -9791,15 +9805,17 @@ fn adopt_system_mcp_entry(
         return Ok(());
     };
     let target = scoped_config_target(paths, workspace, project);
+    let scope = jsonconfig::SaveScope::of(project, workspace);
     if target.extension().is_some_and(|value| value != "toml") {
         jsonconfig::write_entry(
             &target,
+            &scope,
             "mcp",
             name,
             Some(raw_config_entry(&source, "mcp", name)?),
         )
     } else {
-        write_mcp_entry(&target, name, Some(&entry))
+        write_mcp_entry(&target, &scope, name, Some(&entry))
     }
 }
 
@@ -9828,7 +9844,12 @@ fn release_base_mcp_copy(
     if !mine.enabled || !base.enabled || comparable(&mine) != comparable(&base) {
         return Ok(None);
     }
-    write_mcp_entry(&target, name, None)?;
+    write_mcp_entry(
+        &target,
+        &jsonconfig::SaveScope::of(project, workspace),
+        name,
+        None,
+    )?;
     Ok(Some(source))
 }
 
@@ -9853,6 +9874,7 @@ fn raw_config_entry(path: &Path, section: &str, name: &str) -> Result<serde_json
 /// formatting; TOML round-trips its values and loses its comments.
 fn write_entry_fields(
     path: &Path,
+    scope: &jsonconfig::SaveScope,
     section: &str,
     name: &str,
     fields: Vec<(String, Option<serde_json::Value>)>,
@@ -9861,10 +9883,10 @@ fn write_entry_fields(
         return Ok(());
     }
     if path.extension().is_some_and(|value| value != "toml") {
-        return jsonconfig::write_entry_fields(path, section, name, fields);
+        return jsonconfig::write_entry_fields(path, scope, section, name, fields);
     }
     let missing = || format!("no {section} entry named '{name}' in {}", path.display());
-    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, |text| {
+    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, scope, |text| {
         let mut root: toml::Value = toml::from_str(text.with_context(missing)?)?;
         let entry = root
             .get_mut(section)
@@ -9892,12 +9914,13 @@ fn write_entry_fields(
 /// keys Haarness does not know stay.
 fn write_mcp_changes(
     path: &Path,
+    scope: &jsonconfig::SaveScope,
     name: &str,
     before: &McpConfigureRequest,
     after: &McpConfigureRequest,
 ) -> Result<()> {
     let raw = raw_config_entry(path, "mcp", name)?;
-    write_entry_fields(path, "mcp", name, mcp_changes(&raw, before, after))
+    write_entry_fields(path, scope, "mcp", name, mcp_changes(&raw, before, after))
 }
 
 /// The keys to write into the entry `raw` (as written) for the edit from
@@ -10043,16 +10066,22 @@ fn mcp_changes(
 /// Upsert or delete `[mcp.<name>]` in a TOML config file. TOML round-trips
 /// through `toml::Value`, so comments in the file are not preserved — noted
 /// in the CLI docs; JSON configs remain untouched.
-fn write_mcp_entry(path: &Path, name: &str, entry: Option<&McpConfigureRequest>) -> Result<()> {
+fn write_mcp_entry(
+    path: &Path,
+    scope: &jsonconfig::SaveScope,
+    name: &str,
+    entry: Option<&McpConfigureRequest>,
+) -> Result<()> {
     if path.extension().is_some_and(|value| value != "toml") {
         return jsonconfig::write_entry(
             path,
+            scope,
             "mcp",
             name,
             entry.map(serde_json::to_value).transpose()?,
         );
     }
-    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, |text| {
+    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, scope, |text| {
         let mut root: toml::Value = match text {
             Some(text) => toml::from_str(text)?,
             None => toml::Value::Table(toml::map::Map::new()),
@@ -10174,16 +10203,22 @@ fn provider_config_target(paths: &Paths, workspace: &Path, project: bool) -> Pat
 
 /// Upsert or delete `[providers.<id>]`. Like MCP management, this intentionally
 /// round-trips TOML values and therefore does not preserve comments.
-fn write_provider_entry(path: &Path, id: &str, entry: Option<&ProviderSection>) -> Result<()> {
+fn write_provider_entry(
+    path: &Path,
+    scope: &jsonconfig::SaveScope,
+    id: &str,
+    entry: Option<&ProviderSection>,
+) -> Result<()> {
     if path.extension().is_some_and(|value| value != "toml") {
         return jsonconfig::write_entry(
             path,
+            scope,
             "providers",
             id,
             entry.map(serde_json::to_value).transpose()?,
         );
     }
-    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, |text| {
+    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, scope, |text| {
         let mut root: toml::Value = match text {
             Some(text) => toml::from_str(text)?,
             None => toml::Value::Table(toml::map::Map::new()),
@@ -14908,7 +14943,13 @@ mod tests {
         let mut entry = read_mcp_entry(&path, "fixture").unwrap();
         assert_eq!(entry.env["TOKEN"], "${HAARNESS_FIXTURE_UNSET_TOKEN}");
         entry.enabled = true;
-        write_mcp_entry(&path, "fixture", Some(&entry)).unwrap();
+        write_mcp_entry(
+            &path,
+            &crate::jsonconfig::SaveScope::Global,
+            "fixture",
+            Some(&entry),
+        )
+        .unwrap();
         let written: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["mcp"]["fixture"]["command"], "${HOME}/server");
@@ -14951,7 +14992,13 @@ mod tests {
             enabled: false,
             apps: None,
         };
-        write_mcp_entry(&path, "fixture", Some(&entry)).unwrap();
+        write_mcp_entry(
+            &path,
+            &crate::jsonconfig::SaveScope::Global,
+            "fixture",
+            Some(&entry),
+        )
+        .unwrap();
         let restored = read_mcp_entry(&path, "fixture").unwrap();
         assert_eq!(restored.headers, entry.headers);
         assert_eq!(restored.oauth, Some(true));
@@ -15013,8 +15060,13 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for index in (0..6).map(|step| writer * 6 + step) {
-                        write_mcp_entry(&path, &format!("server{index}"), Some(&server(index)))
-                            .unwrap();
+                        write_mcp_entry(
+                            &path,
+                            &crate::jsonconfig::SaveScope::Global,
+                            &format!("server{index}"),
+                            Some(&server(index)),
+                        )
+                        .unwrap();
                     }
                 })
             })
@@ -15037,6 +15089,7 @@ mod tests {
         // The edit of one entry's fields goes the same way.
         write_entry_fields(
             &path,
+            &crate::jsonconfig::SaveScope::Global,
             "mcp",
             "server3",
             vec![("enabled".into(), Some(serde_json::json!(false)))],
@@ -15211,7 +15264,13 @@ mod tests {
             models: vec!["company-flash".into()],
             ..ProviderSection::default()
         };
-        write_provider_entry(&path, "company-gateway", Some(&section)).unwrap();
+        write_provider_entry(
+            &path,
+            &crate::jsonconfig::SaveScope::Global,
+            "company-gateway",
+            Some(&section),
+        )
+        .unwrap();
 
         let config: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let saved = config.providers.get("company-gateway").unwrap();
@@ -15225,7 +15284,13 @@ mod tests {
                 .contains("api_key =")
         );
 
-        write_provider_entry(&path, "company-gateway", None).unwrap();
+        write_provider_entry(
+            &path,
+            &crate::jsonconfig::SaveScope::Global,
+            "company-gateway",
+            None,
+        )
+        .unwrap();
         let config: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(config.providers.is_empty());
         let _ = std::fs::remove_dir_all(root);

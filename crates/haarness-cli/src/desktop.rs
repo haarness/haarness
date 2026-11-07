@@ -216,11 +216,26 @@ async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request)
             let path = configuration_path(paths, workspace, &id)?;
             validate(&path, &text)?;
             let _lock = haarness_profiles::configuration_lock(&paths.data)?;
-            ensure!(
-                revision(&read(&path)?) == expected,
-                "Configuration changed outside this editor. Reload before saving."
-            );
-            write(&path, text.as_bytes())?;
+            let scope = if id.starts_with("project-") {
+                crate::jsonconfig::SaveScope::project(workspace)
+            } else {
+                crate::jsonconfig::SaveScope::Global
+            };
+            // Saved as every other configuration save is: checked and
+            // replaced under the folder's lock, so a setting saved at the same
+            // moment is never lost.
+            crate::jsonconfig::replace_config_file(
+                &path,
+                crate::jsonconfig::ConfigMode::OwnerOnly,
+                &scope,
+                |current| {
+                    ensure!(
+                        revision(current.unwrap_or_default()) == expected,
+                        "Configuration changed outside this editor. Reload before saving."
+                    );
+                    Ok(text.clone())
+                },
+            )?;
             Ok(json!({"id":id,"path":path,"text":text,"revision":revision(&text)}))
         }
         Request::Credentials => {
@@ -569,29 +584,6 @@ fn validate(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn write(path: &Path, bytes: &[u8]) -> Result<()> {
-    fs::create_dir_all(path.parent().context("Missing parent directory")?)?;
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::now_v7()));
-    let mut options = fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let result = (|| -> Result<()> {
-        let mut file = options.open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
-}
-
 /// Serialize editor read/compare/write operations across native CLI processes.
 pub(super) fn editor_lock(data: &Path, resource: &str) -> anyhow::Result<std::fs::File> {
     let path = dunce::canonicalize(data)?.join(format!(".desktop-{resource}.lock"));
@@ -645,6 +637,49 @@ mod tests {
         assert_eq!(
             read(&paths.config.with_file_name("haarness.json")).unwrap(),
             saved["text"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The editor saves under the folder's lock that every other settings
+    /// save takes, so a save made at the same moment is never lost.
+    #[cfg(unix)]
+    #[test]
+    fn an_editor_save_waits_for_the_folders_other_saves() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-desktop-config-lock-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let file = paths.config.with_file_name("haarness.json");
+        let held = fs::File::open(paths.config_dir()).unwrap();
+        fs2::FileExt::lock_exclusive(&held).unwrap();
+        let editor = {
+            let paths = paths.clone();
+            let root = root.clone();
+            std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().unwrap().block_on(execute(
+                    &paths,
+                    &root,
+                    false,
+                    Request::WriteConfiguration {
+                        id: "global-json".into(),
+                        text: "{\"model\":\"echo/echo-1\"}".into(),
+                        revision: revision(""),
+                    },
+                ))
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(
+            !file.exists(),
+            "the editor saved while another save held the folder"
+        );
+        fs2::FileExt::unlock(&held).unwrap();
+        editor.join().unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "{\"model\":\"echo/echo-1\"}"
         );
         fs::remove_dir_all(root).unwrap();
     }

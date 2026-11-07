@@ -182,7 +182,12 @@ pub fn execute(paths: &Paths, workspace: &Path, trust: bool, input: &Value) -> R
             .cloned()
             .unwrap_or_default();
         groups.push(json!({"matcher":matcher,"hooks":[handler]}));
-        jsonconfig::write_entry(&path, "hooks", &event, Some(json!(groups)))?;
+        let scope = if input["scope"] == "local" {
+            jsonconfig::SaveScope::project(workspace)
+        } else {
+            jsonconfig::SaveScope::Global
+        };
+        jsonconfig::write_entry(&path, &scope, "hooks", &event, Some(json!(groups)))?;
         return Ok(json!({"saved":true}));
     }
     ensure!(
@@ -273,7 +278,13 @@ pub fn execute(paths: &Paths, workspace: &Path, trust: bool, input: &Value) -> R
             if new_event != old_event {
                 updates.push((new_event.clone(), Some(events[&new_event].clone())));
             }
-            jsonconfig::write_entries(&source.path, "hooks", updates)?;
+            // A hook in the global folder is the person's; any other is the project's.
+            let scope = if source.path.parent() == Some(paths.config_dir()) {
+                jsonconfig::SaveScope::Global
+            } else {
+                jsonconfig::SaveScope::project(workspace)
+            };
+            jsonconfig::write_entries(&source.path, &scope, "hooks", updates)?;
             return Ok(json!({"saved":true}));
         }
     }
