@@ -9863,24 +9863,26 @@ fn write_entry_fields(
     if path.extension().is_some_and(|value| value != "toml") {
         return jsonconfig::write_entry_fields(path, section, name, fields);
     }
-    let mut root: toml::Value = toml::from_str(&fs::read_to_string(path)?)?;
-    let entry = root
-        .get_mut(section)
-        .and_then(|entries| entries.get_mut(name))
-        .and_then(toml::Value::as_table_mut)
-        .with_context(|| format!("no {section} entry named '{name}' in {}", path.display()))?;
-    for (key, value) in fields {
-        match value {
-            Some(value) => {
-                entry.insert(key, toml::Value::try_from(value)?);
-            }
-            None => {
-                entry.remove(&key);
+    let missing = || format!("no {section} entry named '{name}' in {}", path.display());
+    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, |text| {
+        let mut root: toml::Value = toml::from_str(text.with_context(missing)?)?;
+        let entry = root
+            .get_mut(section)
+            .and_then(|entries| entries.get_mut(name))
+            .and_then(toml::Value::as_table_mut)
+            .with_context(missing)?;
+        for (key, value) in fields {
+            match value {
+                Some(value) => {
+                    entry.insert(key, toml::Value::try_from(value)?);
+                }
+                None => {
+                    entry.remove(&key);
+                }
             }
         }
-    }
-    fs::write(path, toml::to_string_pretty(&root)?)?;
-    Ok(())
+        Ok(toml::to_string_pretty(&root)?)
+    })
 }
 
 /// Saves `after`, an edit of the MCP entry `before` read from `path`: only
@@ -10050,119 +10052,120 @@ fn write_mcp_entry(path: &Path, name: &str, entry: Option<&McpConfigureRequest>)
             entry.map(serde_json::to_value).transpose()?,
         );
     }
-    let mut root: toml::Value = if path.exists() {
-        toml::from_str(&fs::read_to_string(path)?)?
-    } else {
-        toml::Value::Table(toml::map::Map::new())
-    };
-    let table = root.as_table_mut().context("config root must be a table")?;
-    let mcp = table
-        .entry("mcp")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-        .as_table_mut()
-        .context("[mcp] must be a table")?;
-    match entry {
-        Some(entry) => {
-            let mut server = toml::map::Map::new();
-            server.insert(
-                "transport".into(),
-                toml::Value::String(entry.transport.clone()),
-            );
-            if let Some(command) = &entry.command {
-                server.insert("command".into(), toml::Value::String(command.clone()));
-            }
-            if !entry.args.is_empty() {
+    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, |text| {
+        let mut root: toml::Value = match text {
+            Some(text) => toml::from_str(text)?,
+            None => toml::Value::Table(toml::map::Map::new()),
+        };
+        let table = root.as_table_mut().context("config root must be a table")?;
+        let mcp = table
+            .entry("mcp")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+            .as_table_mut()
+            .context("[mcp] must be a table")?;
+        match entry {
+            Some(entry) => {
+                let mut server = toml::map::Map::new();
                 server.insert(
-                    "args".into(),
-                    toml::Value::Array(
-                        entry
-                            .args
-                            .iter()
-                            .map(|arg| toml::Value::String(arg.clone()))
-                            .collect(),
-                    ),
+                    "transport".into(),
+                    toml::Value::String(entry.transport.clone()),
                 );
+                if let Some(command) = &entry.command {
+                    server.insert("command".into(), toml::Value::String(command.clone()));
+                }
+                if !entry.args.is_empty() {
+                    server.insert(
+                        "args".into(),
+                        toml::Value::Array(
+                            entry
+                                .args
+                                .iter()
+                                .map(|arg| toml::Value::String(arg.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
+                if !entry.env.is_empty() {
+                    server.insert(
+                        "env".into(),
+                        toml::Value::Table(
+                            entry
+                                .env
+                                .iter()
+                                .map(|(key, value)| {
+                                    (key.clone(), toml::Value::String(value.clone()))
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                if let Some(cwd) = &entry.cwd {
+                    server.insert("cwd".into(), toml::Value::String(cwd.clone()));
+                }
+                if let Some(url) = &entry.url {
+                    server.insert("url".into(), toml::Value::String(url.clone()));
+                }
+                if !entry.headers.is_empty() {
+                    server.insert(
+                        "headers".into(),
+                        toml::Value::Table(
+                            entry
+                                .headers
+                                .iter()
+                                .map(|(key, value)| {
+                                    (key.clone(), toml::Value::String(value.clone()))
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                if let Some(helper) = &entry.headers_helper {
+                    server.insert("headersHelper".into(), toml::Value::String(helper.clone()));
+                }
+                if let Some(timeout) = entry.timeout_ms {
+                    server.insert(
+                        "timeoutMs".into(),
+                        toml::Value::Integer(i64::try_from(timeout).unwrap_or(i64::MAX)),
+                    );
+                }
+                if let Some(oauth) = entry.oauth {
+                    server.insert("oauth".into(), toml::Value::Boolean(oauth));
+                }
+                if let Some(client_id) = &entry.oauth_client_id {
+                    server.insert(
+                        "oauthClientId".into(),
+                        toml::Value::String(client_id.clone()),
+                    );
+                }
+                if !entry.oauth_scopes.is_empty() {
+                    server.insert(
+                        "oauthScopes".into(),
+                        toml::Value::Array(
+                            entry
+                                .oauth_scopes
+                                .iter()
+                                .map(|scope| toml::Value::String(scope.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
+                if let Some(apps) = entry.apps {
+                    server.insert("apps".into(), toml::Value::Boolean(apps));
+                }
+                server.insert("enabled".into(), toml::Value::Boolean(entry.enabled));
+                mcp.insert(name.to_owned(), toml::Value::Table(server));
             }
-            if !entry.env.is_empty() {
-                server.insert(
-                    "env".into(),
-                    toml::Value::Table(
-                        entry
-                            .env
-                            .iter()
-                            .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
-                            .collect(),
-                    ),
-                );
+            None => {
+                if mcp.remove(name).is_none() {
+                    anyhow::bail!("no MCP server named '{name}' in {}", path.display());
+                }
             }
-            if let Some(cwd) = &entry.cwd {
-                server.insert("cwd".into(), toml::Value::String(cwd.clone()));
-            }
-            if let Some(url) = &entry.url {
-                server.insert("url".into(), toml::Value::String(url.clone()));
-            }
-            if !entry.headers.is_empty() {
-                server.insert(
-                    "headers".into(),
-                    toml::Value::Table(
-                        entry
-                            .headers
-                            .iter()
-                            .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
-                            .collect(),
-                    ),
-                );
-            }
-            if let Some(helper) = &entry.headers_helper {
-                server.insert("headersHelper".into(), toml::Value::String(helper.clone()));
-            }
-            if let Some(timeout) = entry.timeout_ms {
-                server.insert(
-                    "timeoutMs".into(),
-                    toml::Value::Integer(i64::try_from(timeout).unwrap_or(i64::MAX)),
-                );
-            }
-            if let Some(oauth) = entry.oauth {
-                server.insert("oauth".into(), toml::Value::Boolean(oauth));
-            }
-            if let Some(client_id) = &entry.oauth_client_id {
-                server.insert(
-                    "oauthClientId".into(),
-                    toml::Value::String(client_id.clone()),
-                );
-            }
-            if !entry.oauth_scopes.is_empty() {
-                server.insert(
-                    "oauthScopes".into(),
-                    toml::Value::Array(
-                        entry
-                            .oauth_scopes
-                            .iter()
-                            .map(|scope| toml::Value::String(scope.clone()))
-                            .collect(),
-                    ),
-                );
-            }
-            if let Some(apps) = entry.apps {
-                server.insert("apps".into(), toml::Value::Boolean(apps));
-            }
-            server.insert("enabled".into(), toml::Value::Boolean(entry.enabled));
-            mcp.insert(name.to_owned(), toml::Value::Table(server));
         }
-        None => {
-            if mcp.remove(name).is_none() {
-                anyhow::bail!("no MCP server named '{name}' in {}", path.display());
-            }
+        if mcp.is_empty() {
+            table.remove("mcp");
         }
-    }
-    if mcp.is_empty() {
-        table.remove("mcp");
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, toml::to_string_pretty(&root)?)?;
-    Ok(())
+        Ok(toml::to_string_pretty(&root)?)
+    })
 }
 
 fn provider_config_target(paths: &Paths, workspace: &Path, project: bool) -> PathBuf {
@@ -10180,91 +10183,90 @@ fn write_provider_entry(path: &Path, id: &str, entry: Option<&ProviderSection>) 
             entry.map(serde_json::to_value).transpose()?,
         );
     }
-    let mut root: toml::Value = if path.exists() {
-        toml::from_str(&fs::read_to_string(path)?)?
-    } else {
-        toml::Value::Table(toml::map::Map::new())
-    };
-    let table = root.as_table_mut().context("config root must be a table")?;
-    let providers = table
-        .entry("providers")
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
-        .as_table_mut()
-        .context("[providers] must be a table")?;
-    match entry {
-        Some(entry) => {
-            let mut provider = toml::map::Map::new();
-            provider.insert(
-                "protocol".into(),
-                toml::Value::String(entry.protocol.clone()),
-            );
-            if let Some(name) = &entry.name {
-                provider.insert("name".into(), toml::Value::String(name.clone()));
-            }
-            if let Some(url) = &entry.base_url {
-                provider.insert("base_url".into(), toml::Value::String(url.clone()));
-            }
-            if let Some(variable) = &entry.api_key_env {
-                provider.insert("api_key_env".into(), toml::Value::String(variable.clone()));
-            }
-            if !entry.headers.is_empty() {
+    jsonconfig::replace_config_file(path, jsonconfig::ConfigMode::Kept, |text| {
+        let mut root: toml::Value = match text {
+            Some(text) => toml::from_str(text)?,
+            None => toml::Value::Table(toml::map::Map::new()),
+        };
+        let table = root.as_table_mut().context("config root must be a table")?;
+        let providers = table
+            .entry("providers")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+            .as_table_mut()
+            .context("[providers] must be a table")?;
+        match entry {
+            Some(entry) => {
+                let mut provider = toml::map::Map::new();
                 provider.insert(
-                    "headers".into(),
-                    toml::Value::Table(
-                        entry
-                            .headers
-                            .iter()
-                            .map(|(name, value)| (name.clone(), toml::Value::String(value.clone())))
-                            .collect(),
-                    ),
+                    "protocol".into(),
+                    toml::Value::String(entry.protocol.clone()),
                 );
-            }
-            if !entry.models.is_empty() {
-                provider.insert(
-                    "models".into(),
-                    toml::Value::Array(
-                        entry
-                            .models
-                            .iter()
-                            .map(|model| toml::Value::String(model.clone()))
-                            .collect(),
-                    ),
-                );
-            }
-            provider.insert(
-                "requires_auth".into(),
-                toml::Value::Boolean(entry.requires_auth),
-            );
-            for (key, seconds) in [
-                ("stream_idle_timeout", entry.stream_idle_timeout),
-                ("request_timeout", entry.request_timeout),
-            ] {
-                if let Some(seconds) = seconds {
+                if let Some(name) = &entry.name {
+                    provider.insert("name".into(), toml::Value::String(name.clone()));
+                }
+                if let Some(url) = &entry.base_url {
+                    provider.insert("base_url".into(), toml::Value::String(url.clone()));
+                }
+                if let Some(variable) = &entry.api_key_env {
+                    provider.insert("api_key_env".into(), toml::Value::String(variable.clone()));
+                }
+                if !entry.headers.is_empty() {
                     provider.insert(
-                        key.into(),
-                        toml::Value::Integer(i64::try_from(seconds).unwrap_or(i64::MAX)),
+                        "headers".into(),
+                        toml::Value::Table(
+                            entry
+                                .headers
+                                .iter()
+                                .map(|(name, value)| {
+                                    (name.clone(), toml::Value::String(value.clone()))
+                                })
+                                .collect(),
+                        ),
                     );
                 }
+                if !entry.models.is_empty() {
+                    provider.insert(
+                        "models".into(),
+                        toml::Value::Array(
+                            entry
+                                .models
+                                .iter()
+                                .map(|model| toml::Value::String(model.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
+                provider.insert(
+                    "requires_auth".into(),
+                    toml::Value::Boolean(entry.requires_auth),
+                );
+                for (key, seconds) in [
+                    ("stream_idle_timeout", entry.stream_idle_timeout),
+                    ("request_timeout", entry.request_timeout),
+                ] {
+                    if let Some(seconds) = seconds {
+                        provider.insert(
+                            key.into(),
+                            toml::Value::Integer(i64::try_from(seconds).unwrap_or(i64::MAX)),
+                        );
+                    }
+                }
+                if let Some(integration) = &entry.integration {
+                    provider.insert("integration".into(), toml::Value::try_from(integration)?);
+                }
+                providers.insert(id.to_owned(), toml::Value::Table(provider));
             }
-            if let Some(integration) = &entry.integration {
-                provider.insert("integration".into(), toml::Value::try_from(integration)?);
+            None => {
+                if providers.remove(id).is_none() {
+                    anyhow::bail!("no custom provider named '{id}' in {}", path.display());
+                }
             }
-            providers.insert(id.to_owned(), toml::Value::Table(provider));
         }
-        None => {
-            if providers.remove(id).is_none() {
-                anyhow::bail!("no custom provider named '{id}' in {}", path.display());
-            }
+        if providers.is_empty() {
+            table.remove("providers");
         }
-    }
-    if providers.is_empty() {
-        table.remove("providers");
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, toml::to_string_pretty(&root)?)?;
-    Ok(())
+        Ok(toml::to_string_pretty(&root)?)
+    })
 }
 
 /// Linux keeps its trusted roots in a package (ca-certificates) that minimal
@@ -13998,7 +14000,8 @@ mod tests {
         prepare_start_log, read_mcp_entry, receive_oauth_callback,
         replace_incompatible_workspace_server, resolved_credentials, select_run_thread_client,
         server_compatibility_error, set_goal_for_run_client, start_failure, valid_provider_url,
-        wait_for_goal_client, write_mcp_entry, write_provider_entry, write_runtime,
+        wait_for_goal_client, write_entry_fields, write_mcp_entry, write_provider_entry,
+        write_runtime,
     };
     use super::{
         Approver, NO_MODEL_CONNECTED, Refusals, RunWatch, TurnStatus, allow_rule_example,
@@ -14962,6 +14965,87 @@ mod tests {
         assert_eq!(explicit["headers"]["Authorization"], "Bearer ${TOKEN}");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Two `haarness mcp add` at once against a TOML file both land: each
+    /// save reads the file under the folder's lock and replaces it whole.
+    /// The file keeps its permissions and a link to it stays a link.
+    #[test]
+    fn concurrent_toml_writes_keep_every_entry_the_file_mode_and_a_link() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-toml-race-{}", uuid::Uuid::now_v7()));
+        let dotfiles = root.join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        let target = dotfiles.join("config.toml");
+        fs::write(&target, "[defaults]\nmodel = \"echo/echo-1\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        #[cfg(unix)]
+        let path = {
+            let path = root.join("config/config.toml");
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            path
+        };
+        #[cfg(not(unix))]
+        let path = target.clone();
+        let server = |index: usize| McpConfigureRequest {
+            transport: "stdio".into(),
+            command: Some(format!("server-{index}")),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            url: None,
+            headers: BTreeMap::new(),
+            headers_helper: None,
+            timeout_ms: None,
+            oauth: None,
+            oauth_client_id: None,
+            oauth_scopes: Vec::new(),
+            enabled: true,
+            apps: None,
+        };
+        let writers: Vec<_> = (0..8)
+            .map(|writer| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for index in (0..6).map(|step| writer * 6 + step) {
+                        write_mcp_entry(&path, &format!("server{index}"), Some(&server(index)))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let written: toml::Value = toml::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(written["mcp"].as_table().unwrap().len(), 48);
+        assert_eq!(written["defaults"]["model"].as_str(), Some("echo/echo-1"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
+            assert_eq!(
+                fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+        // The edit of one entry's fields goes the same way.
+        write_entry_fields(
+            &path,
+            "mcp",
+            "server3",
+            vec![("enabled".into(), Some(serde_json::json!(false)))],
+        )
+        .unwrap();
+        let written: toml::Value = toml::from_str(&fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(written["mcp"]["server3"]["enabled"].as_bool(), Some(false));
+        assert_eq!(fs::read_dir(&dotfiles).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
