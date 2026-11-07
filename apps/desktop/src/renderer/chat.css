@@ -495,8 +495,12 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
 }
 
 /* Fenced code gets a quiet frame, its language, and a Copy control that only
-   appears once the pointer or keyboard is inside the block. */
+   appears once the pointer or keyboard is inside the block. It reads left to
+   right whatever the interface or a reply's markup around it says, so it is
+   shown in the order Copy copies it. */
 .markdown pre {
+  direction: ltr;
+  unicode-bidi: isolate;
   position: relative;
   background: var(--surface);
   border: 1px solid var(--hairline);

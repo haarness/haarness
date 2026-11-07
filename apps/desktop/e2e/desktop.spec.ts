@@ -13981,6 +13981,35 @@ test("raw HTML in a reply stays inside it and passes for none of the app's parts
   }
 });
 
+test("a reply's code block reads left to right inside markup that turns it", async () => {
+  await newCanvasSession();
+  // A direction turned around a code block.
+  await send('<div dir="rtl"><pre><code>./deploy.sh --prod;</code></pre></div>\n\nAfter the block');
+  const reply = page.locator(".transcript article.assistant").last().locator(".markdown");
+  await expect(reply).toContainText("After the block");
+  /** Where the code's first and last characters are drawn, left to right. */
+  const order = () =>
+    reply.locator("pre code").evaluate((code) => {
+      const text = code.firstChild as Text;
+      const at = (index: number) => {
+        const range = document.createRange();
+        range.setStart(text, index);
+        range.setEnd(text, index + 1);
+        return range.getBoundingClientRect().left;
+      };
+      return { first: at(0), last: at(text.length - 1), direction: getComputedStyle(code.parentElement!).direction };
+    });
+  for (const language of ["en", "ar"]) {
+    await page.evaluate((language) => window.haarness.preferences({ language } as never), language);
+    await expect(page.locator("html")).toHaveAttribute("lang", language);
+    const drawn = await order();
+    expect(drawn.direction, language).toBe("ltr");
+    expect(drawn.first, language).toBeLessThan(drawn.last);
+  }
+  await page.evaluate(() => window.haarness.preferences({ language: "en" } as never));
+  expect(errors).toEqual([]);
+});
+
 async function newCanvasSession() {
   // Other scenarios can leave a different provider/project selected.
   await app.evaluate(({ dialog }, directory) => {
