@@ -1107,7 +1107,11 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         return false;
     };
     let message = message.to_ascii_lowercase();
-    if RATE_LIMITED.iter().any(|marker| message.contains(marker)) {
+    // A 429 is a limit on how much may be sent in a while, however its
+    // words read: waiting fixes it, compacting does not.
+    if http_status(&message) == Some(429)
+        || RATE_LIMITED.iter().any(|marker| message.contains(marker))
+    {
         return false;
     }
     // Phrasings collected across providers and local servers (after
@@ -1138,11 +1142,28 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         "too many tokens",
         "prompt is too long",
         "input is too long",
-        // Ollama: "prompt too long; exceeded max context length by 1520 tokens".
-        "prompt too long; exceeded",
+        // Ollama: "prompt too long; exceeded max context length by 1520
+        // tokens"; Z.ai says it with no more words, or as code 1261,
+        // "Prompt exceeds max length".
+        "prompt too long",
+        "prompt exceeds max length",
+        // Amazon Nova on Bedrock: "Input Tokens Exceeded: Number of input
+        // tokens exceeds maximum length."
+        "number of input tokens exceeds maximum length",
+        // Text Generation Inference (Together, Hugging Face): "`inputs`
+        // tokens + `max_new_tokens` must be <= 131073". It says the same when
+        // the output limit alone is too large, which compacting cannot fix;
+        // `MAX_COMPACTIONS_PER_TURN` bounds the attempts then.
+        "tokens + `max_new_tokens` must be <=",
     ]
     .iter()
     .any(|marker| message.contains(marker))
+        // DeepInfra: "Requested input length 600010 exceeds maximum input
+        // length 131071", read whole: a field of a request can be longer
+        // than its own limit too.
+        || message
+            .split_once("requested input length ")
+            .is_some_and(|(_, rest)| rest.contains(" exceeds maximum input length "))
 }
 
 /// A provider that refused an image in the request (its type, bytes, size,
@@ -18860,6 +18881,15 @@ mod tests {
             "prompt too long; exceeded context length by 12 tokens",
             "Prompt contains 140000 tokens and 0 draft tokens, too large for model with 131072 maximum context length",
             r#"HTTP 400: {"error":{"message":"model_context_window_exceeded","type":"invalid_request_error"}}"#,
+            // Z.ai's code 1261, and the same words without the code.
+            "HTTP 400 Bad Request: [1261] Prompt exceeds max length",
+            "Prompt too long",
+            // Amazon Nova on Bedrock.
+            "HTTP 400 Bad Request: [ValidationException] The model returned the following errors: Input Tokens Exceeded: Number of input tokens exceeds maximum length. Please update the input to try again.",
+            // DeepInfra.
+            "HTTP 400 Bad Request: Requested input length 600010 exceeds maximum input length 131071",
+            // Text Generation Inference (Together, Hugging Face).
+            "HTTP 422 Unprocessable Entity: Input validation error: `inputs` tokens + `max_new_tokens` must be <= 131073. Given: 600035 `inputs` tokens and 16 `max_new_tokens`",
         ] {
             assert!(overflow(message), "{message}");
         }
@@ -18871,6 +18901,16 @@ mod tests {
             // A plan's tokens a minute: a shorter chat would not get through.
             "HTTP 413 Payload Too Large: [upstream_413] This request needs 12110 tokens, more than the 8000 tokens a minute the provider's plan allows",
             "Too many requests",
+            // Rate limits worded like the wordings above: waiting fixes them.
+            "HTTP 429 Too Many Requests: Prompt exceeds max length",
+            "HTTP 429 Too Many Requests: Number of input tokens exceeds maximum length for this minute",
+            "HTTP 429 Too Many Requests: Requested input length 9000 exceeds maximum input length 8000",
+            "HTTP 429 Too Many Requests: `inputs` tokens + `max_new_tokens` must be <= 4096",
+            "status 429: prompt too long",
+            // Near misses.
+            "The prompt is fine",
+            "Requested input length is unknown",
+            "HTTP 400 Bad Request: field `query` exceeds maximum input length of 512",
         ] {
             assert!(!overflow(message), "{message}");
         }

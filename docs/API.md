@@ -179,7 +179,12 @@ the summary, exact todo JSON as data, then the retained turns. Media from the
 pre-compaction tail is represented by a textual attachment note rather than
 re-uploaded. Automatic compaction uses the selected model's context and output
 limits and retries pre-output context-overflow/HTTP-413 failures after safe
-compaction, under a bounded per-turn recovery ceiling. A refusal of the request
+compaction, under a bounded per-turn recovery ceiling. A context too long is
+read in each provider's own words, among them Z.ai's code 1261 ("Prompt exceeds
+max length"), Amazon Nova's "Input Tokens Exceeded", DeepInfra's "Requested
+input length … exceeds maximum input length" and Text Generation Inference's
+(Together, Hugging Face) "`inputs` tokens + `max_new_tokens` must be <= …"; an
+HTTP 429 is a rate limit whatever its words, and never compacts. A refusal of the request
 for its size in bytes (an HTTP 413, Bedrock's "413 Payload Too Large" or
 Gemini's "Request payload size exceeds the limit", rather than a context too
 long in tokens or a rate limit) compacts once until the provider takes a
