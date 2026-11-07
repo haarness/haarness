@@ -589,6 +589,17 @@ pub fn text(text: &str) -> String {
     const KEYS: &str = r"token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth|cookie|credential|session";
     // A quoted value, or one written as Rust's `{:?}` writes `Some("…")`.
     const VALUE: &str = r#"Some\("(?:[^"\\\r\n]|\\.)*"?\)?|"[^"\r\n]*"?|'[^'\r\n]*'?"#;
+    // Where a program stands in a command line: at its start, after `;`,
+    // `&`, `|`, `(`, `{`, `!`, a backquote, `$(`, a quote, `:` (as in a
+    // logged `bash:…`), two blanks (a logged request names its commands
+    // apart with them) or a lone `--`, past the assignments and wrappers
+    // before it (`sudo -u x`, `env`, `timeout 5`, `nice -n 5`, `docker exec
+    // -it <container>` …) and the program's folder. Never a word's value,
+    // such as `--name mysql`.
+    const AT: &str = r#"((?:^|[;&|(){}`!\n]|\$\(|["':]|[ \t]{2}|[ \t]--[ \t])[ \t]*(?:(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|(?:sudo|doas|env|nohup|nice|time|exec|command|builtin|xargs|stdbuf|caffeinate|setsid|ionice|chrt|taskset)(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*|g?timeout(?:[ \t]+-[^\s;&|]+)*[ \t]+[^\s;&|]+|(?:docker|podman|nerdctl)[ \t]+exec(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*[ \t]+[^\s;&|-][^\s;&|]*)[ \t]+)*(?:[^\s;&|'"]*/)?)"#;
+    // One word of a command, its quotes whole: a `;`, `|` or `&` in quotes
+    // does not end the command.
+    const WORD: &str = r#"(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|"'])+"#;
     static RULES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
         [
             // A cookie header can hold several credentials; drop the rest of its line.
@@ -610,31 +621,38 @@ pub fn text(text: &str) -> String {
                 r#"(?i:\b(sshpass))((?:[ \t]+(?:-[fdP][ \t]*[^\s-]\S*|-[a-oq-zA-Z]\S*))*[ \t]+-p[ \t]*)("[^"\r\n]*"?|'[^'\r\n]*'?|[^\s"',;&]+)"#.to_owned(),
                 "${1}${2}[redacted]",
             ),
-            // The password options of database clients and registry sign-ins,
-            // each among the words of that one command. MySQL's and
-            // MariaDB's `-pPASSWORD` is written in one word: a bare `-p`
+            // The password options of database clients, registry sign-ins and
+            // archivers, each read only where the program stands in a command
+            // (see `AT`), among that command's words. MySQL's, MariaDB's and
+            // 7-Zip's `-pPASSWORD` is written in one word: a bare `-p`
             // prompts for it, and `-P` is a port.
             (
-                format!(r#"(?i:\b(mysql[a-z]*|mariadb(?:-[a-z]+)?))((?:[ \t]+[^\s;&|]+)*?[ \t]+-p)({VALUE}|[^\s"',;&|]+)"#),
-                "${1}${2}[redacted]",
+                format!(r#"{AT}(?i:(mysql[a-z]*|mariadb(?:-[a-z]+)?|7z[a-z]?))((?:[ \t]+{WORD})*?[ \t]+-p)({VALUE}|[^\s"',;&|]+)"#),
+                "${1}${2}${3}[redacted]",
             ),
-            // `docker login -p PASSWORD`, but not `docker run -p 8080:80`.
+            // `docker login -p PASSWORD` and `az login -p`, but not `docker
+            // run -p 8080:80`: `login` is the command's subcommand.
             (
-                format!(r#"(?i:\b(docker|podman|nerdctl|buildah|skopeo|helm|oc|cf)\b)((?:[ \t]+[^\s;&|]+)*?[ \t]+login\b(?:[ \t]+[^\s;&|]+)*?[ \t]+-p(?:[ \t]+|=)?)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
-                "${1}${2}[redacted]",
+                format!(r#"{AT}(?i:(docker|podman|nerdctl|buildah|skopeo|helm|oc|cf|az)\b)((?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*[ \t]+(?:registry[ \t]+)?login\b(?:[ \t]+{WORD})*?[ \t]+-p(?:[ \t]+|=)?)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
+                "${1}${2}${3}[redacted]",
             ),
-            // `redis-cli -a PASSWORD`, `sqlcmd -P PASSWORD`, `mongosh -p PASSWORD`.
+            // `redis-cli -a PASSWORD`, `sqlcmd -P PASSWORD`, `zip -P
+            // PASSWORD`, `ldapsearch -w PASSWORD`, `mongosh -p PASSWORD`.
             (
-                format!(r#"(?i:\b(redis-cli|valkey-cli|keydb-cli))((?:[ \t]+[^\s;&|]+)*?[ \t]+-a[ \t]+)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
-                "${1}${2}[redacted]",
-            ),
-            (
-                format!(r#"(?i:\b(sqlcmd|bcp))((?:[ \t]+[^\s;&|]+)*?[ \t]+-P[ \t]*)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
-                "${1}${2}[redacted]",
+                format!(r#"{AT}(?i:(redis-cli|valkey-cli|keydb-cli)\b)((?:[ \t]+{WORD})*?[ \t]+-a[ \t]+)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
+                "${1}${2}${3}[redacted]",
             ),
             (
-                format!(r#"(?i:\b(mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport|mongostat|mongotop|mongofiles)\b)((?:[ \t]+[^\s;&|]+)*?[ \t]+-p(?:[ \t]+|=)?)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
-                "${1}${2}[redacted]",
+                format!(r#"{AT}(?i:(sqlcmd|bcp|zip|unzip|zipcloak)\b)((?:[ \t]+{WORD})*?[ \t]+-P[ \t]*)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
+                "${1}${2}${3}[redacted]",
+            ),
+            (
+                format!(r#"{AT}(?i:(ldap(?:search|modify|add|delete|whoami|passwd|compare|modrdn|exop))\b)((?:[ \t]+{WORD})*?[ \t]+-w[ \t]*)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
+                "${1}${2}${3}[redacted]",
+            ),
+            (
+                format!(r#"{AT}(?i:(mongosh|mongo|mongodump|mongorestore|mongoexport|mongoimport|mongostat|mongotop|mongofiles)\b)((?:[ \t]+{WORD})*?[ \t]+-p(?:[ \t]+|=)?)({VALUE}|[^\s"',;&|-][^\s"',;&|]*)"#),
+                "${1}${2}${3}[redacted]",
             ),
             // `-u user:password`, but not `sort -u file`.
             (
@@ -2060,6 +2078,61 @@ mod tests {
                 "mongodump --port 27017 -u sam -p 'PRIVATE PART' --out dump",
                 "mongodump --port 27017 -u sam -p [redacted] --out dump",
             ),
+            // A quoted `;` does not end the command.
+            (
+                "mysql -uroot -e \"select 1; select 2\" -pPRIVATE db",
+                "mysql -uroot -e \"select 1; select 2\" -p[redacted] db",
+            ),
+            // Behind a wrapper, in a container, after a separator, as logged.
+            (
+                "sudo -u mysql mysql -pPRIVATE",
+                "sudo -u mysql mysql -p[redacted]",
+            ),
+            (
+                "kubectl exec -it db -- mysql -pPRIVATE",
+                "kubectl exec -it db -- mysql -p[redacted]",
+            ),
+            (
+                "docker exec -it mongo mongosh -u root -p PRIVATE",
+                "docker exec -it mongo mongosh -u root -p [redacted]",
+            ),
+            (
+                "timeout 5 redis-cli -a PRIVATE ping",
+                "timeout 5 redis-cli -a [redacted] ping",
+            ),
+            (
+                "MYSQL_HOST=db /usr/local/bin/mysql -pPRIVATE",
+                "MYSQL_HOST=db /usr/local/bin/mysql -p[redacted]",
+            ),
+            (
+                "make && mysql -pPRIVATE; echo \"$(mysql -pPRIVATE -e 'select 1')\"",
+                "make && mysql -p[redacted]; echo \"$(mysql -p[redacted] -e 'select 1')\"",
+            ),
+            (
+                "bash:mysql -u root -pPRIVATE app",
+                "bash:mysql -u root -p[redacted] app",
+            ),
+            // A logged request of several commands names them two blanks
+            // apart.
+            (
+                "bash: mysql -u root -pPRIVATE app  docker login -u sam -p PRIVATE r.test",
+                "bash: mysql -u root -p[redacted] app  docker login -u sam -p [redacted] r.test",
+            ),
+            ("az login -u id -p PRIVATE", "az login -u id -p [redacted]"),
+            (
+                "az login --service-principal -u id -p PRIVATE --tenant t",
+                "az login --service-principal -u id -p [redacted] --tenant t",
+            ),
+            ("7z a -pPRIVATE x.7z dir", "7z a -p[redacted] x.7z dir"),
+            (
+                "zip -r -P PRIVATE x.zip dir",
+                "zip -r -P [redacted] x.zip dir",
+            ),
+            ("unzip -P PRIVATE x.zip", "unzip -P [redacted] x.zip"),
+            (
+                "ldapsearch -x -D cn=admin -w PRIVATE -b dc=x",
+                "ldapsearch -x -D cn=admin -w [redacted] -b dc=x",
+            ),
         ] {
             assert_eq!(text(input), output, "{input}");
             assert_eq!(text(output), output, "{output}");
@@ -2078,6 +2151,25 @@ mod tests {
             "mongosh --port 27017 db",
             "sort -u notes.txt",
             "mongosh -p",
+            // The tool's name as a word's value, or as an argument, is not
+            // the tool.
+            "docker run -d --name mongo -p 27017:27017 mongo:7",
+            "docker run --name mysql -p3306:3306",
+            "docker run --name mysql -p3306:3306 -e MYSQL_ROOT_PASSWORD -d mysql:8",
+            "podman run --name mongo -p 27017:27017 docker.io/mongo",
+            "docker run -d --name login -p 8080:80 login-svc",
+            "docker compose -p login up -d",
+            "find /var/lib/mysql -perm 600 -print",
+            "find . -path ./mysql -prune -o -print",
+            "ssh mongo -p 2222",
+            "ssh -p 2222 host mongo",
+            "kubectl logs mysql-0 -p",
+            "cd mongo && npm start -- -p 3000",
+            "mongo-express -p 8081",
+            "sqlcmd -S db -E -p",
+            "7z a -p x.7z dir",
+            "ldapsearch -x -W -D cn=admin",
+            "gzip -P x",
         ] {
             assert_eq!(text(kept), kept);
         }
