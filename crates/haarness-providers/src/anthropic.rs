@@ -406,7 +406,7 @@ impl ModelProvider for AnthropicProvider {
                 } => {
                     let mut blocks = provider_metadata.get("anthropic_thinking")
                         .and_then(Value::as_array).cloned().unwrap_or_default();
-                    blocks.push(json!({"type":"tool_use","id":call_id,"name":name,"input":arguments}));
+                    blocks.push(json!({"type":"tool_use","id":crate::tool_ids::portable(&call_id),"name":name,"input":arguments}));
                     Some(Ok(json!({"role":"assistant","content":blocks})))
                 },
                 ProviderMessage::ToolResult {
@@ -430,7 +430,7 @@ impl ModelProvider for AnthropicProvider {
                         }
                         Value::Array(blocks)
                     };
-                    Ok(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":call_id,"content":content,"is_error":is_error}]}))
+                    Ok(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":crate::tool_ids::portable(&call_id),"content":content,"is_error":is_error}]}))
                 })),
             })
             .collect::<CoreResult<_>>()?;
@@ -650,7 +650,7 @@ impl ModelProvider for AnthropicProvider {
                         if let Some(block) = thinking_block.take() { thinking_blocks.push(block); }
                         if let Some((call_id,name,arguments,initial_input)) = tool.take() {
                         let arguments = if arguments.is_empty() { initial_input } else {
-                            serde_json::from_str(&arguments).map_err(|error| CoreError::Provider(format!("Anthropic returned invalid tool arguments: {error}")))?
+                            haarness_core::tool_call_arguments(&arguments)
                         };
                         if structured_output.is_some() && name == STRUCTURED_OUTPUT_TOOL_NAME {
                             yield ProviderEvent::StructuredOutput(arguments);
@@ -1597,13 +1597,14 @@ mod tests {
             system: "test".into(),
             messages: vec![
                 ProviderMessage::ToolCall {
-                    call_id: "previous".into(),
+                    // Written by another model the chat used first (Kimi).
+                    call_id: "functions.read:0".into(),
                     name: "read".into(),
                     arguments: json!({"path": "Cargo.toml"}),
                     provider_metadata: Value::Null,
                 },
                 ProviderMessage::ToolResult {
-                    call_id: "previous".into(),
+                    call_id: "functions.read:0".into(),
                     name: "read".into(),
                     output: "workspace".into(),
                     is_error: false,
@@ -1682,10 +1683,14 @@ mod tests {
             ]
         ));
         let requests = state.0.lock();
-        assert_eq!(requests[0]["messages"][0]["content"][0]["id"], "previous");
+        // Claude takes only ^[a-zA-Z0-9_-]+$ ids; call and result still match.
+        assert_eq!(
+            requests[0]["messages"][0]["content"][0]["id"],
+            "functions_read_0"
+        );
         assert_eq!(
             requests[0]["messages"][1]["content"][0]["tool_use_id"],
-            "previous"
+            "functions_read_0"
         );
         assert_eq!(
             requests[0]["messages"][1]["content"][0]["content"][1]["type"],

@@ -76,6 +76,7 @@ pub use stream_limits::{
     stream_stall_silence,
 };
 pub use tool_catalog::{LOAD_TOOL_NAME, LazyToolSettings, load_tool_definition, select_tools};
+pub use tool_validation::tool_call_arguments;
 pub use turn_context::{
     AGENT_MESSAGE_PREFIX, SESSION_MESSAGE_PREFIX, is_session_message, is_turn_reminder,
 };

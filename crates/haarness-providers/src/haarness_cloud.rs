@@ -377,6 +377,18 @@ fn readable_with(error: CoreError, place: &str) -> CoreError {
          run out of credit, so the model can't answer right now. Choose a model from another \
          provider."
             .to_owned()
+    } else if message.contains("[no_route_available]") {
+        // The router holds requests to a provider that failed several in a
+        // row and names when it takes them again ("Try again in 28
+        // seconds"): the wait is kept in the words the runtime waits on, so
+        // the retry lands after the hold instead of into it.
+        match advised_seconds(&message) {
+            Some(seconds) => format!(
+                "This model's provider is temporarily unavailable: it failed several requests in a row, so Haarness Cloud is holding requests to it for a moment. Please retry in {seconds}s, or choose another model."
+            ),
+            None => "This model's provider is temporarily unavailable through Haarness Cloud. Try again in a moment, or choose another model."
+                .to_owned(),
+        }
     } else if message.contains("[upstream_404]") {
         // The provider stopped serving a model it still lists (a deprecation); Cloud withdraws such models at its
         // next catalogue refresh.
@@ -1043,6 +1055,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The router holds requests to a provider that failed several in a row
+    /// and says for how long. The person reads what happened and what to do,
+    /// without the status line or code, and the wait stays where the runtime
+    /// reads it.
+    #[test]
+    fn a_held_provider_reads_plainly_and_keeps_its_wait() {
+        for (wait, seconds) in [
+            ("28 seconds", "28s"),
+            ("1 seconds", "1s"),
+            ("1 second", "1s"),
+        ] {
+            let raw = format!(
+                "HTTP 503 Service Unavailable: [no_route_available] This model's provider failed \
+                 several requests in a row, so the router is holding requests to it for a moment. \
+                 Try again in {wait}, or choose another model."
+            );
+            let CoreError::Provider(message) = readable(CoreError::Provider(raw.clone())) else {
+                panic!("still a provider error");
+            };
+            assert!(
+                message.starts_with("This model's provider is temporarily unavailable"),
+                "{message}"
+            );
+            assert!(
+                message.contains(&format!("Please retry in {seconds},")),
+                "{raw} → {message}"
+            );
+            assert!(
+                !message.contains("HTTP") && !message.contains('['),
+                "{message}"
+            );
+        }
+        let CoreError::Provider(message) = readable(CoreError::Provider(
+            "HTTP 503 Service Unavailable: [no_route_available] all configured routes are unavailable"
+                .into(),
+        )) else {
+            panic!("still a provider error");
+        };
+        assert_eq!(
+            message,
+            "This model's provider is temporarily unavailable through Haarness Cloud. Try again in a moment, or choose another model."
+        );
     }
 
     /// Cloud refuses a busy key or router with a 429 of its own. The runtime

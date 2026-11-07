@@ -71,7 +71,52 @@ pub(crate) fn unknown_tool(name: &str, names: impl IntoIterator<Item = String>) 
     ))
 }
 
+/// The key under which a tool call keeps arguments that were not a JSON
+/// object, and the one naming what was wrong with them.
+const UNPARSED: &str = "_unparsed_arguments";
+const UNPARSED_REASON: &str = "_unparsed_reason";
+
+/// A model's tool-call arguments as the provider streamed them. Text that is
+/// not a JSON object (a stray escape, a cut-off string) is kept, with why it
+/// was refused, in an object the runtime answers with an error instead of
+/// running the tool: the model can correct the call, the turn goes on, and
+/// the call still goes back to any provider as a JSON object. No arguments
+/// at all are an empty object.
+#[must_use]
+pub fn tool_call_arguments(raw: &str) -> Value {
+    if raw.trim().is_empty() {
+        return Value::Object(serde_json::Map::new());
+    }
+    let reason = match serde_json::from_str::<Value>(raw) {
+        Ok(value) if value.is_object() => return value,
+        // Some servers encode the arguments twice, as a JSON string that
+        // holds the object.
+        Ok(Value::String(inner)) if serde_json::from_str::<Value>(&inner).is_ok_and(|value| value.is_object()) => {
+            return serde_json::from_str(&inner).unwrap_or_default();
+        }
+        Ok(_) => "they are not a JSON object".to_owned(),
+        Err(error) => format!("they are not valid JSON: {error}"),
+    };
+    serde_json::json!({ UNPARSED: raw, UNPARSED_REASON: reason })
+}
+
+/// The error a call with arguments [`tool_call_arguments`] could not read
+/// gets in place of running.
+pub(crate) fn unparsed_arguments(name: &str, arguments: &Value) -> Option<CoreError> {
+    let object = arguments.as_object()?;
+    if object.len() != 2 || !object.get(UNPARSED)?.is_string() {
+        return None;
+    }
+    let reason = object.get(UNPARSED_REASON)?.as_str()?;
+    Some(CoreError::Invalid(format!(
+        "The {name} tool did not run because its arguments could not be read: {reason}. Call the same tool again with its arguments as one valid JSON object."
+    )))
+}
+
 pub(crate) fn validate_arguments(tool: &ToolDefinition, arguments: &Value) -> CoreResult<()> {
+    if let Some(error) = unparsed_arguments(&tool.name, arguments) {
+        return Err(error);
+    }
     // No HTTP/file resolver features are enabled. A broken tool schema is a
     // configuration error, not permission to execute an unvalidated payload.
     let validator = jsonschema::validator_for(&tool.input_schema).map_err(|error| {
@@ -184,6 +229,39 @@ fn append_property(path: &mut String, property: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn arguments_that_do_not_parse_are_kept_and_refused_without_running() {
+        assert_eq!(
+            tool_call_arguments(r#"{"path":"a.txt"}"#),
+            json!({"path":"a.txt"})
+        );
+        assert_eq!(tool_call_arguments("  "), json!({}));
+        // Encoded twice, as a JSON string that holds the object.
+        assert_eq!(
+            tool_call_arguments(r#""{\"path\":\"d.txt\"}""#),
+            json!({"path":"d.txt"})
+        );
+        let broken = r#"{"command":"grep -r \. src"}"#;
+        let kept = tool_call_arguments(broken);
+        // Replayed to any provider, the call is still a JSON object, and it
+        // still says what the model wrote.
+        assert_eq!(kept[UNPARSED], broken);
+        let tool = definition(json!({"type":"object","properties":{"command":{"type":"string"}}}));
+        let error = validate_arguments(&tool, &kept).unwrap_err().to_string();
+        assert!(error.contains("fixture tool did not run"), "{error}");
+        assert!(error.contains("invalid escape at line 1 column"), "{error}");
+        assert!(
+            !error.contains("grep"),
+            "the rejected text is not echoed: {error}"
+        );
+        let error = validate_arguments(&tool, &tool_call_arguments("[1,2]"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a JSON object"), "{error}");
+        // A real argument of that name is an ordinary argument.
+        assert!(unparsed_arguments("fixture", &json!({UNPARSED: "x"})).is_none());
+    }
 
     fn definition(schema: Value) -> ToolDefinition {
         ToolDefinition {

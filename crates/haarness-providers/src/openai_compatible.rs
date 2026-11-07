@@ -2688,18 +2688,11 @@ impl ModelProvider for OpenAiCompatibleProvider {
             if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
                 yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }; if let Some(usd) = charged.take() { yield ProviderEvent::Cost { usd }; }
             }
-            // A call whose arguments are not JSON is dropped, and the
-            // response ends as a malformed call, which the runtime answers by
-            // running the calls that parsed and asking the model again,
-            // rather than failing the whole turn on one bad call.
-            let mut dropped_call = false;
             for (call_id, name, arguments) in calls.drain(..) {
                 if !name.is_empty() {
-                    let Some(arguments) = tool_arguments(&arguments) else {
-                        tracing::warn!(provider = %provider_id, tool = %name, bytes = arguments.len(), "dropping a tool call whose arguments are not JSON");
-                        dropped_call = true;
-                        continue;
-                    };
+                    // Arguments that do not parse are answered with an error the
+                    // model can correct, as a call that fails validation is.
+                    let arguments = haarness_core::tool_call_arguments(&arguments);
                     if structured_output.is_some() && name == STRUCTURED_OUTPUT_TOOL_NAME {
                         yield ProviderEvent::StructuredOutput(arguments);
                     } else {
@@ -2711,7 +2704,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 let value = serde_json::from_str(&json_output).map_err(|error| CoreError::Provider(format!("OpenAI-compatible provider returned invalid structured output: {error}")))?;
                 yield ProviderEvent::StructuredOutput(value);
             }
-            let reason = if dropped_call { "malformed_function_call".into() } else { finish_reason.unwrap_or_else(||"incomplete".into()) };
+            let reason = finish_reason.unwrap_or_else(||"incomplete".into());
             crate::log_blocked_finish(&provider_id, &reason, request_id.as_deref(), response_id.as_deref());
             yield ProviderEvent::Finished{reason};
             if let Some(error) = broken_after_finish {
@@ -2773,24 +2766,6 @@ fn openai_compatible_media_message(
     }
     Ok(json!({"role":role,"content":blocks}))
 }
-/// A tool call's arguments as streamed: empty ones (some servers send
-/// nothing for a call without parameters) are `{}`, and arguments encoded
-/// twice, as a JSON string holding the object, are that object. `None` for
-/// anything that is not JSON.
-fn tool_arguments(raw: &str) -> Option<Value> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Some(json!({}));
-    }
-    match serde_json::from_str::<Value>(raw).ok()? {
-        Value::String(inner) => serde_json::from_str::<Value>(&inner)
-            .ok()
-            .filter(Value::is_object)
-            .or(Some(Value::String(inner))),
-        value => Some(value),
-    }
-}
-
 /// A whole reply's message as one chunk's delta: each tool call gets the
 /// index a stream would have given it.
 fn whole_reply_delta(message: &Value) -> Value {
@@ -4687,6 +4662,67 @@ mod tests {
         assert_eq!(state.0.lock().len(), 1);
     }
 
+    /// A call whose arguments are not valid JSON (ByteDance Seed wrote a
+    /// regex's `\.` unescaped) reaches the runtime as a call it refuses to
+    /// run, not as a provider error that ends the turn.
+    #[tokio::test]
+    async fn arguments_that_are_not_json_still_make_a_call() {
+        let request = ProviderRequest {
+            model: "compat-test".into(),
+            system: "sys".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "find it".into(),
+            }],
+            tools: vec![],
+            reasoning_effort: None,
+            output_schema: None,
+            parameters: haarness_core::RequestParameters::default(),
+        };
+        let base_url = cut_after(vec![
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"command\":\"grep -r \\. src\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ])
+        .await;
+        let events = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "compat".into(),
+            name: "Compatible".into(),
+            base_url,
+            api_key: None,
+            models: vec!["compat-test".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: true,
+            headers: crate::ProviderHeaders::default(),
+        })
+        .stream(request, CancellationToken::new())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+        let call = events.iter().find_map(|event| match event {
+            Ok(ProviderEvent::ToolCall {
+                name, arguments, ..
+            }) => Some((name.clone(), arguments.clone())),
+            _ => None,
+        });
+        let (name, arguments) = call.unwrap_or_else(|| panic!("no tool call: {events:?}"));
+        assert_eq!(name, "bash");
+        assert_eq!(
+            arguments,
+            haarness_core::tool_call_arguments(r#"{"command":"grep -r \. src"}"#)
+        );
+        assert!(arguments.is_object(), "replayable as an object");
+        // The response finishes; this stand-in then cuts the connection.
+        let finished = events
+            .iter()
+            .position(|event| matches!(event, Ok(ProviderEvent::Finished { reason }) if reason == "tool_calls"))
+            .unwrap_or_else(|| panic!("no finish: {events:?}"));
+        assert!(events[..finished].iter().all(Result::is_ok), "{events:?}");
+    }
+
     /// A server that streams `events` in a chunked body and then closes the
     /// connection without ending the body, as a connection cut short does.
     async fn cut_after(events: Vec<&'static str>) -> String {
@@ -5381,8 +5417,9 @@ mod tests {
             events.last(),
             Some(Err(haarness_core::CoreError::Provider(message))) if message == "Upstream overloaded"
         ));
-        // A call whose arguments do not parse is dropped after the usage is
-        // reported, and the response ends as a malformed call.
+        // Tool arguments that do not parse still make a call, which the
+        // runtime answers with an error instead of running it, and the usage
+        // comes first.
         let events = stream_events(concat!(
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"read\",\"arguments\":\"{broken\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":90,\"completion_tokens\":7}}\n\n",
@@ -5390,15 +5427,10 @@ mod tests {
         ))
         .await;
         assert_eq!(reported(&events), [(90, 7, 0, 0)]);
-        assert!(matches!(
-            events.last(),
-            Some(Ok(ProviderEvent::Finished { reason })) if reason == "malformed_function_call"
-        ));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Ok(ProviderEvent::ToolCall { .. })))
-        );
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        assert!(events.iter().any(|event| matches!(event,
+            Ok(ProviderEvent::ToolCall { arguments, .. })
+                if *arguments == haarness_core::tool_call_arguments("{broken"))));
     }
 
     #[tokio::test]
@@ -6639,7 +6671,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_call_with_broken_arguments_is_dropped_and_the_others_run() {
+    async fn a_call_with_broken_arguments_is_answered_with_an_error_and_the_others_run() {
         async fn calls() -> ([(axum::http::HeaderName, &'static str); 1], String) {
             use std::fmt::Write as _;
             let mut stream = String::new();
@@ -6670,10 +6702,13 @@ mod tests {
                 _ => None,
             })
             .collect();
+        // The cut-off call still reaches the runtime, which answers it with
+        // an error the model can correct instead of running it.
         assert_eq!(
             calls,
             [
                 ("call_a", json!({"path": "a.txt"})),
+                ("call_b", haarness_core::tool_call_arguments("{\"path\":\"b.t")),
                 ("call_c", json!({})),
                 ("call_d", json!({"path": "d.txt"}))
             ]
@@ -6682,8 +6717,7 @@ mod tests {
             ProviderEvent::Finished { reason } => Some(reason.as_str()),
             _ => None,
         });
-        assert_eq!(reason, Some("malformed_function_call"));
-        assert!(ProviderEvent::dropped_tool_call("malformed_function_call"));
+        assert_eq!(reason, Some("tool_calls"));
     }
 
     #[tokio::test]

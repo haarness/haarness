@@ -1139,7 +1139,19 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
         if attempt > 1 && refused_on_this_machine(error) {
             return None;
         }
-        return Some(std::time::Duration::from_secs(1 << attempt.min(4)));
+        let backoff = std::time::Duration::from_secs(1 << attempt.min(4));
+        // A Haarness router holding requests to a provider that failed
+        // several in a row names when it takes them again: a retry sooner is
+        // refused again, and one held for longer than a turn waits fails now.
+        let named = match error {
+            CoreError::Provider(message) => named_wait(&message.to_ascii_lowercase()),
+            _ => None,
+        };
+        return match named {
+            Some(wait) if wait > LONGEST_ADVISED_WAIT => None,
+            Some(wait) => Some(backoff.max(wait + std::time::Duration::from_secs(1))),
+            None => Some(backoff),
+        };
     }
     if !is_provider_usage_limit(error) {
         return None;
@@ -1148,7 +1160,7 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
         return None;
     };
     let lower = message.to_ascii_lowercase();
-    let Some((_, rest)) = lower.split_once("retry in ") else {
+    let Some(advised) = named_wait(&lower) else {
         // A shared pool upstream that is briefly full ("temporarily
         // rate-limited upstream. Please retry shortly", or a Haarness router's
         // "Try again in a moment"), Bedrock's throttling
@@ -1168,8 +1180,28 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
     };
     // The wait as named is held to the limit; the second added after
     // lands the retry once the provider's window has opened.
-    let advised = advised_wait(rest)?;
     (advised <= LONGEST_ADVISED_WAIT).then(|| advised + std::time::Duration::from_secs(1))
+}
+
+/// The wait a refusal names, read from its lowercased words: "Please retry
+/// in 17.2s" (Gemini, or a Retry-After a router passes on) or a Haarness
+/// router's "Try again in 28 seconds" (or "in 1 second").
+fn named_wait(lower: &str) -> Option<std::time::Duration> {
+    if let Some((_, rest)) = lower.split_once("retry in ") {
+        return advised_wait(rest);
+    }
+    let (_, rest) = lower.split_once("try again in ")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let value: u64 = digits.parse().ok()?;
+    let unit = rest[digits.len()..].trim_start();
+    let scale = if unit.starts_with("second") {
+        1
+    } else if unit.starts_with("minute") {
+        60
+    } else {
+        return None;
+    };
+    Some(std::time::Duration::from_secs(value.saturating_mul(scale)))
 }
 
 /// A wait written the way providers write it: "17.19s", "59s", "1m30s",
@@ -1872,6 +1904,22 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
         || lower.contains("too many unsettled requests for this account")
     {
         return "Haarness Cloud's pending-request allowance is full, or this request's output limit exceeds it. Wait for active requests to finish or reduce the output limit.".into();
+    }
+    // A Haarness router with no route to the model right now: it holds
+    // requests to a provider that failed several in a row, and its words for
+    // that say what to do. Shorter internal words get the same advice.
+    if lower.contains("holding requests to it") || lower.contains("[no_route_available]") {
+        let words = raw
+            .split_once("[no_route_available]")
+            .map_or(raw.as_str(), |(_, words)| words)
+            .trim();
+        if words.starts_with(|c: char| c.is_ascii_uppercase()) && words.ends_with('.') {
+            return clean_error_text(words, 600);
+        }
+        return format!(
+            "{} can't reach this model's provider right now. Try again in a moment, or choose another model.",
+            provider.unwrap_or("The router")
+        );
     }
     if lower.contains("error sending request")
         || lower.contains("connection reset")
@@ -11816,6 +11864,11 @@ impl RunnerTask {
     }
 
     fn validate_tool_arguments(&self, name: &str, arguments: &serde_json::Value) -> CoreResult<()> {
+        // Arguments the provider adapter could not read never run, whatever
+        // validation a tool does of its own.
+        if let Some(error) = crate::tool_validation::unparsed_arguments(name, arguments) {
+            return Err(error);
+        }
         if name == LOAD_TOOL_NAME {
             return validate_arguments(&crate::load_tool_definition(), arguments);
         }
@@ -23527,6 +23580,72 @@ mod tests {
         assert_eq!(
             super::retry_delay(&provider("HTTP 503 Service Unavailable"), 3),
             Some(std::time::Duration::from_secs(8))
+        );
+    }
+
+    /// A Haarness router holds requests to a provider that failed several in
+    /// a row, and names the hold: the retry waits it out instead of being
+    /// refused again at 2, 4, 8 and 16 seconds, and the person reads the
+    /// router's words without a status line or code.
+    #[test]
+    fn a_router_hold_is_waited_out_and_read_plainly() {
+        let provider = |message: &str| CoreError::Provider(message.into());
+        let own_router = |wait: &str| {
+            provider(&format!(
+                "HTTP 503 Service Unavailable: [no_route_available] This model's provider failed \
+                 several requests in a row, so the router is holding requests to it for a moment. \
+                 Try again in {wait}, or choose another model."
+            ))
+        };
+        // Haarness Cloud's words for the same hold.
+        let cloud = provider(
+            "This model's provider is temporarily unavailable: it failed several requests in a \
+             row, so Haarness Cloud is holding requests to it for a moment. Please retry in 28s, \
+             or choose another model.",
+        );
+        for error in [own_router("28 seconds"), cloud.clone()] {
+            assert!(super::is_provider_transient(&error), "{error}");
+            assert_eq!(
+                super::retry_delay(&error, 1),
+                Some(std::time::Duration::from_secs(29)),
+                "{error}"
+            );
+            let words = super::describe_error(&error, Some("Haarness Cloud"));
+            assert!(words.starts_with("This model's provider "), "{words}");
+            assert!(!words.contains("HTTP") && !words.contains('['), "{words}");
+        }
+        // A hold shorter than the backoff keeps the backoff; one longer than
+        // a turn waits fails now, with its words.
+        assert_eq!(
+            super::retry_delay(&own_router("1 seconds"), 3),
+            Some(std::time::Duration::from_secs(8))
+        );
+        assert_eq!(super::retry_delay(&own_router("120 seconds"), 1), None);
+        // Words that are not a sentence get advice of their own.
+        assert_eq!(
+            super::describe_error(
+                &provider(
+                    "HTTP 503 Service Unavailable: [no_route_available] all configured routes are unavailable"
+                ),
+                Some("My router")
+            ),
+            "My router can't reach this model's provider right now. Try again in a moment, or choose another model."
+        );
+        // A router's per-minute refusal that names its wait is sat out too.
+        assert_eq!(
+            super::retry_delay(
+                &provider(
+                    "HTTP 429 Too Many Requests: [upstream_429] The provider is rate limiting the \
+                     router's key. Try again in 12 seconds."
+                ),
+                1
+            ),
+            Some(std::time::Duration::from_secs(13))
+        );
+        assert_eq!(super::named_wait("try again in a moment"), None);
+        assert_eq!(
+            super::named_wait("try again in 2 minutes."),
+            Some(std::time::Duration::from_secs(120))
         );
     }
 
