@@ -287,7 +287,8 @@ fn resource_contents(result: &Value, attached: &mut usize) -> (String, Vec<Strin
 
 /// What the model gets for a `resources/read` result: its contents, the text
 /// cut with a note when long (the whole text saved in `directory`), as an
-/// MCP tool's is, so a resource of one long JSON line is pretty-printed.
+/// MCP tool's is, so a resource of one long JSON line is laid out a value a
+/// line.
 async fn resource_output(
     result: &Value,
     directory: &std::path::Path,
@@ -443,25 +444,34 @@ pub(crate) async fn read_mentions(
 }
 
 /// A mentioned resource's text within `room` bytes (and 2,000 lines): the
-/// first whole lines that fit, then a note that says how much is left out
-/// and where the whole text was saved for the model to read.
+/// first whole lines that fit, and the start of a long line that does not,
+/// then a note that says how much is left out and where the whole text was
+/// saved for the model to read. JSON on one line is laid out a value a line
+/// first (see [`crate::tools::indented_json`]).
 async fn cut(text: String, room: usize, directory: &Path) -> CoreResult<String> {
     if text.len() <= room && text.lines().count() <= MENTION_LINES {
         return Ok(text);
     }
+    // Saved, and shown, as an MCP tool's text is, so the file reads by line.
+    let text = crate::tools::indented_json(&text).unwrap_or(text);
     let mut kept = 0;
     for (index, line) in text.split_inclusive('\n').enumerate() {
-        if index == MENTION_LINES || kept + line.len() > room {
+        if index == MENTION_LINES {
+            break;
+        }
+        if kept + line.len() > room {
+            // A line too long to read whole (data on one line, or the first)
+            // is cut inside it, so a heading before it does not come alone;
+            // a shorter one is left out whole.
+            if kept == 0 || line.len() > crate::tools::LONG_LINE_BYTES {
+                kept = room.min(text.len());
+                while !text.is_char_boundary(kept) {
+                    kept -= 1;
+                }
+            }
             break;
         }
         kept += line.len();
-    }
-    // A first line longer than the room is cut inside it.
-    if kept == 0 {
-        kept = room.min(text.len());
-        while !text.is_char_boundary(kept) {
-            kept -= 1;
-        }
     }
     let error = |error: std::io::Error| CoreError::Tool(error.to_string());
     let (path, mut file) = crate::data_folder::new_private_file(directory, "resource")
@@ -619,6 +629,10 @@ mod tests {
                 "docs://big" => {
                     Ok(json!({"contents": [{"uri": uri, "text": "line\n".repeat(30_000)}]}))
                 }
+                "docs://found" => Ok(json!({"contents": [{"uri": uri, "mimeType": "text/plain",
+                    "text": format!("Found 3000 issues:\n[{}]", vec![r#"{"id":1234567890123456789012345}"#; 3000].join(","))}]})),
+                "docs://dump" => Ok(json!({"contents": [{"uri": uri,
+                    "text": format!("Found 3000 issues:\n{}", "issue; ".repeat(15_000))}]})),
                 "docs://wide" => Ok(
                     json!({"contents": [{"uri": uri, "text": format!("{}\n", "w".repeat(99)).repeat(1_500)}]}),
                 ),
@@ -1063,6 +1077,62 @@ mod tests {
             *registry.reads.lock().unwrap(),
             ["docs:slow://", "docs:docs://setup"]
         );
+    }
+
+    /// A heading before one long line came alone: the line did not fit,
+    /// and the cut kept only whole lines before it.
+    #[tokio::test]
+    async fn a_mention_with_a_heading_before_a_long_line_keeps_the_line_too() {
+        let registry = Resources::default();
+        let read = |uri: &'static str| {
+            let registry = &registry;
+            async move {
+                let (mut text, mut attachments) = (String::new(), Vec::new());
+                read_mentions(
+                    registry,
+                    &std::env::temp_dir(),
+                    vec![mention("docs", uri, None)],
+                    &|_: &str, _: &str| false,
+                    MENTION_BUDGET,
+                    &mut text,
+                    &mut attachments,
+                )
+                .await
+                .unwrap();
+                let kept: usize = text
+                    .split("[Only the first ")
+                    .nth(1)
+                    .and_then(|rest| rest.split(' ').next())
+                    .and_then(|bytes| bytes.parse().ok())
+                    .unwrap();
+                let saved = text
+                    .split("saved at ")
+                    .nth(1)
+                    .and_then(|rest| rest.split("; read it there").next())
+                    .unwrap();
+                let file = std::fs::read_to_string(saved).unwrap();
+                std::fs::remove_file(saved).unwrap();
+                (text, kept, file)
+            }
+        };
+        // JSON is laid out a value a line, every value as written, and as
+        // many of its lines as a mention keeps (2,000) come.
+        let (text, kept, file) = read("docs://found").await;
+        assert!(
+            text.contains(
+                "Found 3000 issues:\n[\n  {\n    \"id\": 1234567890123456789012345\n  },"
+            ),
+            "{text:.300}"
+        );
+        assert!(kept > 20 * 1024, "{kept}");
+        assert!(file.lines().all(|line| line.len() < 100));
+        // Other text on one line comes as its first 50 KiB.
+        let (text, kept, _) = read("docs://dump").await;
+        assert!(
+            text.contains("Found 3000 issues:\nissue; issue; "),
+            "{text:.300}"
+        );
+        assert_eq!(kept, MENTION_BYTES);
     }
 
     #[tokio::test]

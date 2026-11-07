@@ -2674,7 +2674,7 @@ struct WholeOutput {
     /// The file the cut text names.
     file: PathBuf,
     /// The server's text when the file holds another form of it (JSON
-    /// pretty-printed), else `None`: the file is the text.
+    /// laid out a value a line), else `None`: the file is the text.
     text: Option<String>,
     metadata: Value,
 }
@@ -5321,12 +5321,13 @@ fn cut_notice(path: &Path, removed: usize, failed: bool) -> String {
 
 /// An MCP server's text as it is cut for the model (a tool's result or
 /// error, a resource read, Code Mode's answer): as a native tool's output
-/// is, with two differences for text that often comes as a single line. A
-/// whole text that is JSON is saved, and shown, pretty-printed, so the file
-/// can be read by line, and a line longer than what is left of the 50 KiB
-/// is cut inside it rather than left out. Gives the output and, when it
-/// was cut, the file holding the whole and whether it holds it
-/// pretty-printed rather than as it came.
+/// is, with two differences for text that often comes as a single line.
+/// JSON on one line (the whole text, or a long line of it, such as an
+/// embedded resource's) is saved, and shown, indented one value a line, so
+/// the file can be read by line, and a line longer than what is left of the
+/// 50 KiB is cut inside it rather than left out. Gives the output and, when
+/// it was cut, the file holding the whole and whether it holds it indented
+/// rather than as it came.
 pub(crate) async fn cut_mcp_text(
     text: String,
     directory: &Path,
@@ -5335,12 +5336,9 @@ pub(crate) async fn cut_mcp_text(
     if text.lines().count() <= TOOL_OUTPUT_MAX_LINES && text.len() <= TOOL_OUTPUT_MAX_BYTES {
         return Ok((output(text), None));
     }
-    let pretty = serde_json::from_str::<Value>(&text)
-        .ok()
-        .filter(|value| value.is_object() || value.is_array())
-        .and_then(|value| serde_json::to_string_pretty(&value).ok());
-    let reformatted = pretty.is_some();
-    let readable = pretty.unwrap_or(text);
+    let indented = indented_json(&text);
+    let reformatted = indented.is_some();
+    let readable = indented.unwrap_or(text);
     let preview = filled_preview(&readable);
     let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
         .await
@@ -5358,6 +5356,105 @@ pub(crate) async fn cut_mcp_text(
         },
         Some((path, reformatted)),
     ))
+}
+
+/// A line longer than this is taken for data written on one line (JSON,
+/// minified code) rather than prose: it is indented when it is JSON, and a
+/// mentioned resource's cut goes inside it rather than before it.
+pub(crate) const LONG_LINE_BYTES: usize = 2_000;
+
+/// `text` with its JSON indented, or `None` when it holds none to indent:
+/// the whole of it when it is one JSON object or array, else each line of
+/// it longer than [`LONG_LINE_BYTES`] that is one. Only whitespace outside strings is
+/// added, so every value stays as the server wrote it, its digits and
+/// repeated keys included, where parsing and writing it again would round
+/// a long number and keep one of two same keys.
+pub(crate) fn indented_json(text: &str) -> Option<String> {
+    if let Some(whole) = json_container(text) {
+        return Some(indent_json(whole));
+    }
+    let mut changed = false;
+    let mut readable = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        match (line.len() > LONG_LINE_BYTES)
+            .then(|| json_container(line))
+            .flatten()
+        {
+            Some(json) => {
+                changed = true;
+                readable.push_str(&indent_json(json));
+                if line.ends_with('\n') {
+                    readable.push('\n');
+                }
+            }
+            None => readable.push_str(line),
+        }
+    }
+    changed.then_some(readable)
+}
+
+/// `text` trimmed, when it is one JSON object or array.
+fn json_container(text: &str) -> Option<&str> {
+    let json = text.trim();
+    (json.starts_with(['{', '[']) && serde_json::from_str::<serde::de::IgnoredAny>(json).is_ok())
+        .then_some(json)
+}
+
+/// Valid JSON `json` laid out one value a line, two spaces an indent, as
+/// `serde_json::to_string_pretty` lays it out, with every token as written.
+fn indent_json(json: &str) -> String {
+    let mut out = String::with_capacity(json.len() + json.len() / 2);
+    let mut depth = 0usize;
+    let mut chars = json.chars().peekable();
+    let line = |out: &mut String, depth: usize| {
+        out.push('\n');
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                out.push('"');
+                while let Some(c) = chars.next() {
+                    out.push(c);
+                    match c {
+                        '\\' => out.extend(chars.next()),
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '{' | '[' => {
+                out.push(c);
+                while chars
+                    .peek()
+                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
+                {
+                    chars.next();
+                }
+                if chars.peek().is_some_and(|c| matches!(c, '}' | ']')) {
+                    out.extend(chars.next());
+                } else {
+                    depth += 1;
+                    line(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                line(&mut out, depth);
+                out.push(c);
+            }
+            ',' => {
+                out.push(',');
+                line(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            ' ' | '\t' | '\n' | '\r' => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The first 50 KiB (and at most 2,000 lines) of `text`, the line that
@@ -10204,6 +10301,13 @@ mod webfetch_tests {
         serde_json::to_string(&rows).unwrap()
     }
 
+    /// One line of JSON over 50 KiB holding what parsing would change: an
+    /// integer past 64 bits, a decimal past 17 digits, a key given twice.
+    fn exact_numbers() -> String {
+        let row = r#"{"wei":1234567890123456789012345,"rate":0.12345678901234567890123,"key":1,"key":2,"note":"a, [b]: {c} \" d"}"#;
+        format!("[{}]", vec![row; 600].join(","))
+    }
+
     /// Answers `wide` with 200 KB of lines beside its structured content
     /// and page, `rows` with 120 KB of one-line JSON, `line` with 120 KB on
     /// one line, `tree` with structured content that uses `truncated` itself,
@@ -10249,6 +10353,11 @@ mod webfetch_tests {
                     json!({"tree": [{"path": "a"}], "truncated": false}),
                 ),
                 "listing" => output(wide_text(), json!([1, 2])),
+                "numbers" => output(exact_numbers(), Value::Null),
+                "found" => output(
+                    format!("Found 1500 issues:\n{}", compact_rows()),
+                    Value::Null,
+                ),
                 "failing" => Err(CoreError::Tool(wide_text())),
                 _ => output("short".into(), json!({"rows": 1})),
             }
@@ -10381,7 +10490,7 @@ mod webfetch_tests {
 
     /// Text on one line came to the model as its first 2,000 characters,
     /// and the saved file could not be read by line: one-line JSON is now
-    /// pretty-printed (and shown up to 2,000 of its lines), and any other
+    /// laid out a value a line (and shown up to 2,000 of its lines), and any other
     /// long line fills the 50 KiB.
     #[tokio::test]
     async fn a_long_single_line_reaches_the_model_as_fifty_kib_and_reads_back_by_line() {
@@ -10418,6 +10527,46 @@ mod webfetch_tests {
             &line.text[..80]
         );
         std::fs::remove_file(saved(&line)).unwrap();
+    }
+
+    /// Indenting JSON by parsing and writing it again turned an integer past
+    /// 64 bits into `1.2345678901234568e24`, rounded a long decimal and kept
+    /// one of two same keys; only whitespace is added now.
+    #[tokio::test]
+    async fn indented_json_keeps_every_value_as_the_server_wrote_it() {
+        let thread = ThreadId::new();
+        let numbers = call_wide("numbers", thread).await.unwrap();
+        let file = std::fs::read_to_string(saved(&numbers)).unwrap();
+        let unspaced = |text: &str| {
+            // Whitespace outside strings only: the note holds none of it.
+            text.replace(['\n', ' '], "")
+                .replace("a,[b]:{c}\\\"d", "a, [b]: {c} \\\" d")
+        };
+        assert_eq!(unspaced(&file), unspaced(&exact_numbers()));
+        assert!(numbers.text.contains("\"wei\": 1234567890123456789012345,"));
+        assert!(
+            numbers
+                .text
+                .contains("\"rate\": 0.12345678901234567890123,")
+        );
+        assert!(numbers.text.contains("\"key\": 1,\n    \"key\": 2,"));
+        assert!(numbers.text.contains(r#""note": "a, [b]: {c} \" d""#));
+        assert!(file.lines().all(|line| line.len() < 80));
+        std::fs::remove_file(saved(&numbers)).unwrap();
+        // JSON after a heading, as a long line of the text, reads by line too.
+        let found = call_wide("found", thread).await.unwrap();
+        assert!(
+            found
+                .text
+                .starts_with("Found 1500 issues:\n[\n  {\n    \"id\": 0,")
+        );
+        let file = std::fs::read_to_string(saved(&found)).unwrap();
+        assert!(file.lines().all(|line| line.len() < 200));
+        std::fs::remove_file(saved(&found)).unwrap();
+        assert_eq!(
+            indent_json("{\"a\":[],\"b\":{ },\"c\":[1,{\"d\":null}]}"),
+            "{\n  \"a\": [],\n  \"b\": {},\n  \"c\": [\n    1,\n    {\n      \"d\": null\n    }\n  ]\n}"
+        );
     }
 
     /// A failure's text reached the model whole too.
