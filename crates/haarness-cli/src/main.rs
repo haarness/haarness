@@ -9410,7 +9410,7 @@ async fn answer_mcp_oauth_callback(
     let _ = stream
         .write_all(
             format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             )
             .as_bytes(),
@@ -14694,6 +14694,10 @@ mod tests {
         );
         assert!(callback.unwrap().contains("error=access_denied"));
         assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(
+            response.contains("\r\nX-Content-Type-Options: nosniff\r\n"),
+            "{response}"
+        );
         assert!(
             response.ends_with("\r\n\r\nThe sign-in did not finish: Access was denied\nYou can close this page and try again from Haarness.\n"),
             "{response}"
