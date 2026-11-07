@@ -7432,6 +7432,98 @@ async fn undo_answers_conflict_and_changes_nothing_at_a_later_edit_whatever_the_
 }
 
 #[tokio::test]
+async fn a_file_a_turn_shrank_between_two_that_grew_it_is_undone_and_redone_without_a_conflict() {
+    let root = std::env::temp_dir().join(format!("haarness-grow-shrink-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    std::fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+    let runtime = large_file_fixture(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Grow, shrink, grow".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let make = |byte: char| {
+        serde_json::json!({"name": "bash", "arguments": {
+            "command": format!("head -c 2500000 /dev/zero | tr '\\0' {byte} > big.bin")}})
+    };
+    let shrink = serde_json::json!({"name": "write", "arguments": {
+        "path": "big.bin", "content": "small\n"}});
+    for (turn, change) in [make('a'), shrink, make('c')].into_iter().enumerate() {
+        let calls = serde_json::json!([
+            change,
+            {"name": "write", "arguments": {"path": "other.txt", "content": format!("o{}\n", turn + 1)}},
+        ]);
+        let begun = runtime
+            .start_turn(thread.id, turn_request(&format!("!multi {calls}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_done(&runtime, &begun).await.status,
+            TurnStatus::Completed
+        );
+    }
+    let read = |path: &str| std::fs::read(workspace.join(path)).ok();
+    let turn_three = read("big.bin");
+    let left = |thread: &Thread| {
+        thread
+            .revert
+            .as_ref()
+            .map(|revert| {
+                revert
+                    .unrestored
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    // Back over turn 3 the file is small again; back over turn 2 nothing
+    // holds what turn 1 left, so it stays small, named; back over turn 1,
+    // with nobody having touched it, it goes.
+    for (other, small, named) in [
+        ("o2\n", true, false),
+        ("o1\n", true, true),
+        ("o0\n", false, false),
+    ] {
+        let undone = runtime
+            .revert(thread.id, None)
+            .await
+            .unwrap_or_else(|error| panic!("back to {other:?}: {error}"));
+        assert_eq!(read("other.txt").as_deref(), Some(other.as_bytes()));
+        assert_eq!(
+            read("big.bin"),
+            small.then(|| b"small\n".to_vec()),
+            "back to {other:?}"
+        );
+        assert_eq!(
+            left(&undone),
+            if named {
+                vec!["big.bin".to_owned()]
+            } else {
+                Vec::new()
+            }
+        );
+    }
+    // Forward all the way, to the bytes turn 3 left.
+    for _ in 0..2 {
+        runtime.unrevert(thread.id).await.unwrap();
+    }
+    let redone = runtime.unrevert(thread.id).await.unwrap();
+    assert!(redone.revert.is_none());
+    assert_eq!(read("big.bin"), turn_three);
+    assert_eq!(read("other.txt").as_deref(), Some(&b"o3\n"[..]));
+    let copies = root.join("db.sqlite.undo-copies");
+    assert_eq!(std::fs::read_dir(&copies).map_or(0, Iterator::count), 0);
+    remove_test_folder(root).await;
+}
+
+#[tokio::test]
 async fn undo_names_only_what_a_resumed_child_agent_changed_in_the_undone_turn() {
     let root = std::env::temp_dir().join(format!("haarness-child-undo-{}", uuid::Uuid::now_v7()));
     let workspace = root.join("ws");

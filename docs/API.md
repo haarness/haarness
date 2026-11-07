@@ -535,10 +535,9 @@ as long as checkpoints do (`retention_days`). A file over 2 MiB that undo
 cannot handle so (past those bounds, or one whose earlier content no copy
 holds, as when a turn shrank it or two turns rewrote it) stays as it is while
 the rest is restored; the next step takes it as that step left it (the copy
-folder records which files those are), and a later edit to it still
-conflicts. An edit a person or another chat made to any file after the turn,
-whatever its size, stops the step with `409 conflict` before anything
-changes. Redo takes a file left so to where the last redo does, as it was
+folder records which files those are and what each held). An edit a person or
+another chat made to any file after the turn, whatever its size, stops the
+step with `409 conflict` before anything changes. Redo takes a file left so to where the last redo does, as it was
 before the undo, and names it until then. Redo refuses, before writing
 anything, only when a copy it needs is gone; its code is
 `refused` (409, not retryable), with `reason` `no_undo_copy` and the file's

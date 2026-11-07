@@ -1069,16 +1069,17 @@ pub struct DeltaRestore {
 /// Which way [`SnapshotStore::restore_step`] goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoStep {
-    /// Back one step. A large file an earlier step of the same undo left as
-    /// it was is handled as if it were as expected. Also how a redo step
-    /// that could not be recorded is put back.
+    /// Back one step. A file an earlier step of the same undo left is
+    /// handled as if it were as expected while it is still as that step left
+    /// it. Also how a redo step that could not be recorded is put back.
     Undo,
-    /// Forward one step. A large file an earlier undo step left as it was is
-    /// left so (the last redo brings it to where it already is), and so is
-    /// one whose content at this step's checkpoint no copy holds: it goes to
-    /// where the last redo takes it, as the backup has it. Both are named
-    /// until the last redo. A step refuses before anything is written only
-    /// when no redo could bring a large file back, its copy being gone.
+    /// Forward one step. A file an earlier undo step left is left so until a
+    /// step finds it as that step wants it, and so is a large one whose
+    /// content at this step's checkpoint no copy holds: it goes to where the
+    /// last redo takes it, as the backup has it. Both are named until then;
+    /// the last redo takes every such file to the backup's content. A step
+    /// refuses before anything is written only when no redo could bring a
+    /// large file back, its copy being gone.
     Redo,
     /// Putting an undo step that could not be recorded back as it was: like
     /// [`Self::Redo`], but it never refuses.
