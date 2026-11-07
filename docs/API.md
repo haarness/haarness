@@ -528,18 +528,23 @@ file back from the copy. Copies are kept up to 256 MiB per file and 1 GiB per
 database in all; room is made by dropping the copies of undos that are no
 longer pending, the oldest first. An undo's copies go when it is confirmed
 (the next message, a compaction or a direct tool), fully redone, or found
-abandoned by the retention pass. A file over 2 MiB that undo cannot handle so
-(past those bounds, or one whose earlier content no copy holds, as when a
-turn shrank it or two turns rewrote it) stays as it is while the rest is
-restored, and a later edit to it still conflicts; a redo that would leave one
-refuses before writing anything. The ignored and outside files that the
+abandoned by the retention pass. A file over 2 MiB that undo
+cannot handle so (past those bounds, or one whose earlier content no copy
+holds, as when a turn shrank it or two turns rewrote it) stays as it is while
+the rest is restored; the next step takes it as that step left it, and a
+later edit to it still conflicts. Redo takes such a file to where the last
+redo does, as it was before the undo, and names it until then. Redo refuses,
+before writing anything, only when a copy it needs is gone; its code is
+`refused` (409, not retryable), and a new message keeps the chat as it is
+now. The ignored and outside files that the
 undone turns' `write`, `edit`, `multiedit` and `apply_patch` calls (direct,
 in a `batch`, or a child agent's during those turns) changed stay as they
 are too. The thread's `revert` lists them in `unrestored` as `{path, reason}`,
 the reason `large`, `ignored` or `outside` (those left for their size first),
 the path relative to the folder or absolute when outside it, at most 50, with
-`unrestoredCount` when there are more; it follows the steps still undone and
-is absent when undo put everything back, as it is from older servers. A file
+`unrestoredCount` when there are more; it follows the steps still undone (a
+file a later step puts back drops out) and is absent when undo put everything
+back, as it is from older servers. A file
 made and removed within those turns is not listed. The last-turn diff comes from the newest pair before any
 pending undo boundary that changed files: an undone turn drops out of it, and a
 later turn that only ran commands does not hide the edits before it. The VCS

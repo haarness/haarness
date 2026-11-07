@@ -561,10 +561,11 @@ impl SqliteSnapshotStore {
 
         let mut prepared = Vec::with_capacity(changed.len());
         let mut skipped = Vec::new();
+        let mut settled = Vec::new();
         // This is deliberately a separate complete preflight pass. If any
         // path contains a later human edit, no earlier path is touched.
         for path in &changed {
-            let target = safe_target(&self.workspace, path)?;
+            let target_path = safe_target(&self.workspace, path)?;
             ensure_safe_ancestors(&self.workspace, path)?;
             let (from, to) = (expected.get(path), desired.get(path));
             // What was there when a snapshot could not read it is unknown:
@@ -578,31 +579,28 @@ impl SqliteSnapshotStore {
                     "workspace path could not be read when a snapshot was taken: {path}"
                 )));
             }
-            let actual = scan_live_entry(&target, path, &self.workspace)?;
+            let actual = scan_live_entry(&target_path, path, &self.workspace)?;
             let wanted = optional_entry_matches(to, actual.as_ref());
             let large = [from, to]
                 .into_iter()
                 .flatten()
                 .any(ManifestEntry::is_large);
             let mut expected_here = optional_entry_matches(from, actual.as_ref());
-            // A large file an earlier step of this undo left as it was is as
-            // the backup has it, not as this step's start does.
+            // A file an earlier step of this undo left as it was, for its
+            // size then or now, is as the backup has it, not as this step's
+            // start does.
             let mut left_earlier = false;
             if !expected_here
                 && !wanted
                 && let Some((backup_id, _)) = step
             {
-                if backup.is_none() {
-                    backup = Some(self.load_manifest(backup_id)?);
-                }
-                left_earlier = backup
-                    .as_ref()
-                    .and_then(|backup| backup.get(path))
+                left_earlier = self
+                    .backup_entry(&mut backup, backup_id, path)?
                     .is_some_and(|entry| {
-                        entry.is_large()
+                        (large || entry.is_large())
                             && actual
                                 .as_ref()
-                                .is_some_and(|actual| entries_match_live(entry, actual))
+                                .is_some_and(|actual| entries_match_live(&entry, actual))
                     });
                 expected_here = left_earlier;
             }
@@ -610,6 +608,7 @@ impl SqliteSnapshotStore {
                 // One already as desired needs nothing, as a redo finds a
                 // large file its undo left.
                 if large && wanted {
+                    settled.push(path.clone());
                     continue;
                 }
                 return Err(CoreError::Conflict(format!(
@@ -617,36 +616,54 @@ impl SqliteSnapshotStore {
                 )));
             }
             if wanted {
+                settled.push(path.clone());
                 continue;
             }
             // Forward, a file an undo step left goes where the last redo
-            // takes it: it is already there.
+            // takes it: it is already there, and named until then.
             if left_earlier && step.is_some_and(|(_, kind)| kind != UndoStep::Undo) {
+                skipped.push(path.clone());
                 continue;
             }
             let mut copy = None;
+            let mut target = to.cloned();
             if large || left_earlier {
                 // No checkpoint holds the content of a file over the size
                 // limit: the one wanted comes from a kept copy, and the live
                 // one is kept before it goes, so a later step can bring it
-                // back. Without either, the file stays as it is.
-                let leave = |reason: &str| -> CoreResult<()> {
-                    match step {
-                        Some((_, UndoStep::Redo)) => Err(CoreError::Conflict(format!(
-                            "redo cannot bring back {path}: {reason}; no files were changed"
-                        ))),
-                        _ => Ok(()),
-                    }
+                // back.
+                let Some((backup_id, kind)) = step else {
+                    skipped.push(path.clone());
+                    continue;
                 };
-                if let Some(entry) = to.filter(|entry| entry.is_large()) {
-                    match step.and_then(|(backup, _)| self.copies.find(backup, entry)) {
-                        Some(found) => copy = Some(found),
-                        None => {
-                            leave(
-                                "it is over the checkpoints' size limit and undo kept no copy of it",
-                            )?;
-                            skipped.push(path.clone());
+                let last_redo = kind == UndoStep::Redo && desired_id == backup_id;
+                match self.content_for(backup_id, to) {
+                    Ok(found) => copy = found,
+                    // Back, the file stays as it is.
+                    Err(NoCopy) if kind == UndoStep::Undo => {
+                        skipped.push(path.clone());
+                        continue;
+                    }
+                    Err(NoCopy) if last_redo => return Err(no_copy_for_redo(path)),
+                    // Forward (or putting a step back), the content this
+                    // step's checkpoint had existed only between two undone
+                    // turns: the file goes where the last redo takes it, as
+                    // the backup has it, and is named until then.
+                    Err(NoCopy) => {
+                        skipped.push(path.clone());
+                        let at_backup = self.backup_entry(&mut backup, backup_id, path)?;
+                        if optional_entry_matches(at_backup.as_ref(), actual.as_ref()) {
                             continue;
+                        }
+                        match self.content_for(backup_id, at_backup.as_ref()) {
+                            Ok(found) => (copy, target) = (found, at_backup),
+                            // Nor does anything hold what the last redo
+                            // needs (its copy is gone): no redo can get
+                            // there, so this one says so now.
+                            Err(NoCopy) if kind == UndoStep::Redo => {
+                                return Err(no_copy_for_redo(path));
+                            }
+                            Err(NoCopy) => continue,
                         }
                     }
                 }
@@ -654,28 +671,29 @@ impl SqliteSnapshotStore {
                     .as_ref()
                     .filter(|live| live.kind == EntryKind::Omitted)
                 {
-                    let kept = match step {
-                        Some((backup, _)) => {
-                            self.copies.keep(&self.connection, backup, &target, live)
-                        }
-                        None => Err(NotKept::Full),
-                    };
-                    match kept {
+                    match self
+                        .copies
+                        .keep(&self.connection, backup_id, &target_path, live)
+                    {
                         Ok(_) => {}
                         Err(NotKept::Changed) => {
                             return Err(CoreError::Conflict(format!(
                                 "workspace path changed since snapshot: {path}"
                             )));
                         }
+                        // What the last redo replaces is needed by no later
+                        // step: it goes without a copy.
+                        Err(NotKept::Full) if last_redo => {}
                         Err(NotKept::Full) => {
-                            leave("it is too large to keep a copy of what it holds now")?;
-                            skipped.push(path.clone());
+                            if skipped.last() != Some(path) {
+                                skipped.push(path.clone());
+                            }
                             continue;
                         }
                     }
                 }
             }
-            if let Some(entry) = to.filter(|_| copy.is_none()) {
+            if let Some(entry) = target.as_ref().filter(|_| copy.is_none()) {
                 // Validate now and reload immediately before writing. This
                 // keeps restore memory bounded to one blob while retaining a
                 // fail-before-mutation validation pass.
@@ -683,7 +701,7 @@ impl SqliteSnapshotStore {
             }
             prepared.push(PreparedChange {
                 path: path.clone(),
-                desired: to.cloned(),
+                desired: target,
                 copy,
             });
         }
@@ -717,7 +735,41 @@ impl SqliteSnapshotStore {
             touched.push(change.path.clone());
         }
         journal.finish(failure)?;
-        Ok(DeltaRestore { touched, skipped })
+        Ok(DeltaRestore {
+            touched,
+            skipped,
+            settled,
+        })
+    }
+
+    /// `path`'s entry in the backup checkpoint `backup_id`, its manifest
+    /// read once into `backup`.
+    fn backup_entry(
+        &self,
+        backup: &mut Option<BTreeMap<String, ManifestEntry>>,
+        backup_id: &str,
+        path: &str,
+    ) -> CoreResult<Option<ManifestEntry>> {
+        if backup.is_none() {
+            *backup = Some(self.load_manifest(backup_id)?);
+        }
+        Ok(backup.as_ref().and_then(|backup| backup.get(path)).cloned())
+    }
+
+    /// Where the content of `entry` comes from: `None` from its blob (or
+    /// nothing to write, for a removal), a kept copy of a large file, or
+    /// [`NoCopy`] when nothing holds it.
+    fn content_for(
+        &self,
+        backup_id: &str,
+        entry: Option<&ManifestEntry>,
+    ) -> Result<Option<PathBuf>, NoCopy> {
+        match entry {
+            Some(entry) if entry.is_large() => {
+                self.copies.find(backup_id, entry).map(Some).ok_or(NoCopy)
+            }
+            _ => Ok(None),
+        }
     }
 
     /// See [`SnapshotStore::left_out`]: each file asked of the manifests by
@@ -1413,6 +1465,9 @@ struct Copies {
     max_total: u64,
 }
 
+/// No checkpoint or kept copy holds the content of a large file.
+struct NoCopy;
+
 /// Why no copy of a file was kept.
 enum NotKept {
     /// It is not what it was a moment ago: someone is changing it.
@@ -1569,6 +1624,15 @@ impl Copies {
             tracing::warn!(path = %set.display(), %error, "cannot drop undo copies");
         }
     }
+}
+
+/// The refusal of a redo that no step can take to where the last one goes,
+/// a copy it needs being gone: no retry can, and a new message keeps the
+/// chat as it is.
+fn no_copy_for_redo(path: &str) -> CoreError {
+    CoreError::Refused(format!(
+        "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now."
+    ))
 }
 
 /// `path` as its folder lists it: the entry whose name matches the last
@@ -3234,15 +3298,21 @@ mod tests {
             assert_eq!(read("package.json").as_deref(), Some(json.as_bytes()));
             assert_eq!(read("package-lock.json"), Some(large(2)));
         }
-        // Forward, it is already where the last redo takes it.
-        for (expected, desired, json) in [
-            (first.id.clone(), second.id.clone(), "1\n"),
-            (second.id.clone(), backup.clone(), "2\n"),
+        // Forward, it is already where the last redo takes it, and named
+        // until then.
+        for (expected, desired, json, left) in [
+            (
+                first.id.clone(),
+                second.id.clone(),
+                "1\n",
+                vec!["package-lock.json"],
+            ),
+            (second.id.clone(), backup.clone(), "2\n", Vec::new()),
         ] {
             let redone = step(&store, &backup, &expected, &desired, UndoStep::Redo)
                 .await
                 .unwrap();
-            assert!(redone.skipped.is_empty(), "{redone:?}");
+            assert_eq!(redone.skipped, left);
             assert_eq!(read("package.json").as_deref(), Some(json.as_bytes()));
         }
         assert_eq!(read("package-lock.json"), Some(large(2)));
@@ -3313,7 +3383,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error, CoreError::Conflict(message) if message.contains("redo cannot bring back data.txt")),
+            matches!(&error, CoreError::Refused(message) if message.starts_with("data.txt is over 2 MiB")),
             "{error}"
         );
         assert_eq!(read("data.txt").as_deref(), Some(&b"v1\n"[..]));
@@ -3326,6 +3396,203 @@ mod tests {
             .unwrap();
         assert_eq!(put_back.skipped, vec!["data.txt"]);
         assert_eq!(read("other.txt").as_deref(), Some(&b"o2\n"[..]));
+    }
+
+    /// The ways two turns can take one file through the size limit, each
+    /// with the content `big.bin` starts with and turn 2's change to it.
+    #[derive(Debug, Clone, Copy)]
+    enum TwoTurns {
+        /// Turn 1 makes it, turn 2 rewrites it.
+        MadeRewritten,
+        /// Turn 1 grows it past the limit, turn 2 rewrites it.
+        GrownRewritten,
+        /// Turn 1 makes it, turn 2 deletes it.
+        MadeDeleted,
+        /// Turn 1 grows it past the limit, turn 2 shrinks it again.
+        GrownShrunk,
+    }
+
+    impl TwoTurns {
+        fn start(self) -> Option<Vec<u8>> {
+            matches!(self, Self::GrownRewritten | Self::GrownShrunk).then(|| b"v0\n".to_vec())
+        }
+
+        fn second(self) -> Option<Vec<u8>> {
+            match self {
+                Self::MadeRewritten | Self::GrownRewritten => Some(large(2)),
+                Self::MadeDeleted => None,
+                Self::GrownShrunk => Some(b"v2\n".to_vec()),
+            }
+        }
+    }
+
+    /// The checkpoints of `scenario`'s two turns, each also editing
+    /// `other.txt`, and the backup of an undo taken after them.
+    async fn two_turns(
+        store: &SqliteSnapshotStore,
+        workspace: &Path,
+        scenario: TwoTurns,
+    ) -> [String; 4] {
+        let put = |content: Option<Vec<u8>>| match content {
+            Some(content) => fs::write(workspace.join("big.bin"), content).unwrap(),
+            None => {
+                let _ = fs::remove_file(workspace.join("big.bin"));
+            }
+        };
+        put(scenario.start());
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap().id;
+        put(Some(large(1)));
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let middle = store.capture(ThreadId::new()).await.unwrap().id;
+        put(scenario.second());
+        fs::write(workspace.join("other.txt"), "o2\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap().id;
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+        [before, middle, after, backup]
+    }
+
+    #[tokio::test]
+    async fn two_turns_through_a_large_file_undo_and_redo_all_the_way() {
+        for scenario in [
+            TwoTurns::MadeRewritten,
+            TwoTurns::GrownRewritten,
+            TwoTurns::MadeDeleted,
+            TwoTurns::GrownShrunk,
+        ] {
+            let (guard, store) = fixture();
+            let workspace = guard.0.join("ws");
+            let read = |path: &str| fs::read(workspace.join(path)).ok();
+            let [before, middle, after, backup] = two_turns(&store, &workspace, scenario).await;
+            let big = vec!["big.bin"];
+
+            // Back: nothing holds what turn 1 left, so the first step leaves
+            // the file as turn 2 did; the second takes it as that, not as a
+            // later edit, and back to before turn 1.
+            let undone = step(&store, &backup, &after, &middle, UndoStep::Undo)
+                .await
+                .unwrap();
+            assert_eq!(undone.skipped, big, "{scenario:?}");
+            assert_eq!(read("big.bin"), scenario.second(), "{scenario:?}");
+            let undone = step(&store, &backup, &middle, &before, UndoStep::Undo)
+                .await
+                .unwrap_or_else(|error| panic!("{scenario:?}: {error}"));
+            assert!(undone.skipped.is_empty(), "{scenario:?}: {undone:?}");
+            assert_eq!(read("big.bin"), scenario.start(), "{scenario:?}");
+            assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+
+            // Forward: what turn 1 left exists nowhere, so the first redo
+            // takes the file to where the last one does, and names it.
+            let redone = step(&store, &backup, &before, &middle, UndoStep::Redo)
+                .await
+                .unwrap_or_else(|error| panic!("{scenario:?}: {error}"));
+            assert_eq!(redone.skipped, big, "{scenario:?}");
+            assert_eq!(read("big.bin"), scenario.second(), "{scenario:?}");
+            assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+            let redone = step(&store, &backup, &middle, &backup, UndoStep::Redo)
+                .await
+                .unwrap_or_else(|error| panic!("{scenario:?}: {error}"));
+            assert!(redone.skipped.is_empty(), "{scenario:?}: {redone:?}");
+            assert_eq!(read("big.bin"), scenario.second(), "{scenario:?}");
+            assert_eq!(read("other.txt").as_deref(), Some(&b"o2\n"[..]));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redo_whose_copies_are_gone_says_so_at_its_first_step() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        let [before, middle, after, backup] =
+            two_turns(&store, &workspace, TwoTurns::MadeRewritten).await;
+        for (expected, desired) in [(&after, &middle), (&middle, &before)] {
+            step(&store, &backup, expected, desired, UndoStep::Undo)
+                .await
+                .unwrap();
+        }
+        // The data folder was cleared: nothing holds either turn's file any
+        // more, so the first redo refuses rather than leave the last one a
+        // conflict.
+        store.release_copies(&backup).await.unwrap();
+        let error = step(&store, &backup, &before, &middle, UndoStep::Redo)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, CoreError::Refused(message) if message.starts_with("big.bin is over 2 MiB")),
+            "{error}"
+        );
+        assert_eq!(read("big.bin"), None);
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+    }
+
+    #[tokio::test]
+    async fn a_step_that_could_not_be_recorded_is_put_back_with_its_large_file() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        let [before, middle, after, backup] =
+            two_turns(&store, &workspace, TwoTurns::MadeRewritten).await;
+        step(&store, &backup, &after, &middle, UndoStep::Undo)
+            .await
+            .unwrap();
+        // The second step back removes the file, and its state is not
+        // saved: putting the step back brings the file back from its copy,
+        // though nothing holds what turn 1 left.
+        step(&store, &backup, &middle, &before, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert_eq!(read("big.bin"), None);
+        step(&store, &backup, &before, &middle, UndoStep::PutBack)
+            .await
+            .unwrap();
+        assert_eq!(read("big.bin"), Some(large(2)));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
+
+        // A redo step that is not saved goes back as an undo step does:
+        // the file it brought back from its copy goes again.
+        step(&store, &backup, &middle, &before, UndoStep::Undo)
+            .await
+            .unwrap();
+        step(&store, &backup, &before, &middle, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert_eq!(read("big.bin"), Some(large(2)));
+        step(&store, &backup, &middle, &before, UndoStep::Undo)
+            .await
+            .unwrap();
+        assert_eq!(read("big.bin"), None);
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o0\n"[..]));
+    }
+
+    #[tokio::test]
+    async fn the_last_redo_goes_on_without_a_copy_of_what_it_replaces() {
+        let (guard, mut store) = fixture();
+        let workspace = guard.0.join("ws");
+        let read = |path: &str| fs::read(workspace.join(path)).ok();
+        fs::write(workspace.join("big.bin"), large(1)).unwrap();
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap().id;
+        fs::write(workspace.join("big.bin"), large(2)).unwrap();
+        fs::write(workspace.join("other.txt"), "o1\n").unwrap();
+        let backup = store.capture(ThreadId::new()).await.unwrap().id;
+        // Undone, with a copy of the newer content only, and no room left
+        // for one of the older content the last redo replaces.
+        let set = store.copies.set(&backup).unwrap();
+        fs::create_dir_all(&set).unwrap();
+        fs::write(
+            set.join(&store.load_manifest(&backup).unwrap()["big.bin"].hash),
+            large(2),
+        )
+        .unwrap();
+        fs::write(workspace.join("big.bin"), large(1)).unwrap();
+        fs::write(workspace.join("other.txt"), "o0\n").unwrap();
+        store.copies.max_total = 4 * 1024 * 1024;
+        let redone = step(&store, &backup, &before, &backup, UndoStep::Redo)
+            .await
+            .unwrap();
+        assert!(redone.skipped.is_empty(), "{redone:?}");
+        assert_eq!(read("big.bin"), Some(large(2)));
+        assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
     }
 
     #[tokio::test]

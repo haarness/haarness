@@ -556,7 +556,8 @@ fn failure_message(error: &mut CoreError) -> Option<&mut String> {
         | CoreError::PermissionDenied(message)
         | CoreError::Invalid(message)
         | CoreError::Storage(message)
-        | CoreError::Tool(message) => Some(message),
+        | CoreError::Tool(message)
+        | CoreError::Refused(message) => Some(message),
         CoreError::PermissionRejected(_)
         | CoreError::ReviewBlocked(_)
         | CoreError::Provider(_)
@@ -5120,6 +5121,7 @@ impl AgentRuntime {
                     id,
                     (boundary, backup_id.clone(), Some(before.clone())),
                     unrestored,
+                    [restored.touched, restored.settled].concat(),
                 )
                 .await
             {
@@ -5253,23 +5255,39 @@ impl AgentRuntime {
             }
             _ => (state.snapshot_id.clone(), None),
         };
-        if let Some(base) = &state.base_snapshot_id {
+        let restored = if let Some(base) = &state.base_snapshot_id {
             snapshots
                 .restore_step(&state.snapshot_id, base, &desired, crate::UndoStep::Redo)
-                .await?;
+                .await?
         } else {
             snapshots.restore(&desired).await?;
-        }
+            crate::DeltaRestore::default()
+        };
         let todo_boundary = next_state.as_ref().map(|(boundary, _, _)| *boundary);
         let todos = latest_todos(&items, todo_boundary);
-        if let Err(error) = self
-            .repository
-            .set_revert_state(id, next_state.clone())
-            .await
-        {
+        // A step forward that could not bring a large file to its
+        // checkpoint names it, until the last redo brings it back.
+        let recorded = match next_state.clone() {
+            Some(next) => {
+                let left = crate::UndoStepFiles::new(restored.skipped.into_iter().map(|path| {
+                    haarness_protocol::UnrestoredFile {
+                        path,
+                        reason: haarness_protocol::UnrestoredReason::Large,
+                    }
+                }));
+                let settled = [restored.touched, restored.settled].concat();
+                self.repository
+                    .set_revert_state_unrestored(id, next, left, settled)
+                    .await
+            }
+            None => self.repository.set_revert_state(id, None).await,
+        };
+        if let Err(error) = recorded {
+            // Back over the step as an undo step goes, so a large file it
+            // took to the backup's content goes back too.
             let compensation = if let Some(base) = &state.base_snapshot_id {
                 snapshots
-                    .restore_step(&state.snapshot_id, &desired, base, crate::UndoStep::PutBack)
+                    .restore_step(&state.snapshot_id, &desired, base, crate::UndoStep::Undo)
                     .await
             } else {
                 Ok(crate::DeltaRestore::default())

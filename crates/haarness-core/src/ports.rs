@@ -54,6 +54,10 @@ pub enum CoreError {
     Storage(String),
     #[error("tool error: {0}")]
     Tool(String),
+    /// Refused for good: no retry can do it, and the message says what to
+    /// do instead.
+    #[error("{0}")]
+    Refused(String),
     #[error("operation cancelled")]
     Cancelled,
 }
@@ -88,6 +92,7 @@ impl CoreError {
             Self::Storage(_) => "storage_error",
             Self::Tool(_) => "tool_error",
             Self::ProviderUnavailable(_) => "provider_unavailable",
+            Self::Refused(_) => "refused",
             Self::Cancelled => "cancelled",
         }
     }
@@ -337,11 +342,13 @@ pub trait ThreadRepository: Send + Sync {
         id: ThreadId,
         state: Option<(u64, String, Option<String>)>,
     ) -> CoreResult<()>;
-    /// [`Self::set_revert_state`] for an undo step, also recording the files
-    /// that step left as they are. The steps of the same pending undo that
-    /// are still undone keep theirs, and [`RevertState::unrestored`] lists
-    /// them all; a redo drops those of the step it brings back. The default
-    /// records none, which keeps test adapters source-compatible.
+    /// [`Self::set_revert_state`] for an undo or redo step, also recording
+    /// the files that step left as they are. The steps of the same pending
+    /// undo that are still undone keep theirs, except for the `settled`
+    /// paths, which the step wrote, removed or found as its checkpoint has
+    /// them; [`RevertState::unrestored`] lists them all. A redo drops those
+    /// of the step it brings back. The default records none, which keeps
+    /// test adapters source-compatible.
     ///
     /// [`RevertState::unrestored`]: haarness_protocol::RevertState::unrestored
     async fn set_revert_state_unrestored(
@@ -349,6 +356,7 @@ pub trait ThreadRepository: Send + Sync {
         id: ThreadId,
         state: (u64, String, Option<String>),
         _unrestored: UndoStepFiles,
+        _settled: Vec<String>,
     ) -> CoreResult<()> {
         self.set_revert_state(id, Some(state)).await
     }
@@ -942,9 +950,9 @@ pub trait SnapshotStore: Send + Sync {
     /// it is kept in the store's own folder (within its bounds), and one the
     /// step wants back is taken from those copies, so undo and redo bring
     /// the folder to the checkpoint as they do any other file. What cannot be
-    /// handled so is left as it is and named in [`DeltaRestore::skipped`],
-    /// and a redo refuses before writing rather than leave one. The default
-    /// is [`Self::restore_delta`], which keeps no copies.
+    /// handled so is left as it is, or taken where the last redo takes it
+    /// (see [`UndoStep`]), and named in [`DeltaRestore::skipped`]. The
+    /// default is [`Self::restore_delta`], which keeps no copies.
     async fn restore_step(
         &self,
         _backup_snapshot_id: &str,
@@ -1044,19 +1052,26 @@ pub struct DeltaRestore {
     /// Paths left as they are because neither a checkpoint nor a kept copy
     /// holds the content needed: files over the size limit.
     pub skipped: Vec<String>,
+    /// Paths that differ between the two checkpoints but were already as
+    /// the desired one has them, so needed nothing.
+    pub settled: Vec<String>,
 }
 
 /// Which way [`SnapshotStore::restore_step`] goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoStep {
     /// Back one step. A large file an earlier step of the same undo left as
-    /// it was is handled as if it were as expected.
+    /// it was is handled as if it were as expected. Also how a redo step
+    /// that could not be recorded is put back.
     Undo,
     /// Forward one step. A large file an earlier undo step left as it was is
-    /// left so (the last redo brings it to where it already is); one it
-    /// cannot bring back refuses the whole step before anything is written.
+    /// left so (the last redo brings it to where it already is), and so is
+    /// one whose content at this step's checkpoint no copy holds: it goes to
+    /// where the last redo takes it, as the backup has it. Both are named
+    /// until the last redo. A step refuses before anything is written only
+    /// when no redo could bring a large file back, its copy being gone.
     Redo,
-    /// Putting a step that could not be recorded back as it was: like
+    /// Putting an undo step that could not be recorded back as it was: like
     /// [`Self::Redo`], but it never refuses.
     PutBack,
 }

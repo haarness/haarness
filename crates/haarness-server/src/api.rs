@@ -3480,6 +3480,7 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
         ),
         CoreError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error", true),
         CoreError::Tool(_) => (StatusCode::UNPROCESSABLE_ENTITY, "tool_error", false),
+        CoreError::Refused(_) => (StatusCode::CONFLICT, "refused", false),
         CoreError::Cancelled => (StatusCode::CONFLICT, "cancelled", false),
     }
 }
@@ -3569,6 +3570,20 @@ mod failure_tests {
         assert_eq!(invalid["message"], "invalid request: bad");
         let elsewhere = message(ApiFailure::from(CoreError::Tool("boom".into()))).await;
         assert_eq!(elsewhere["message"], "tool error: boom");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_reads_as_its_sentence_and_is_not_worth_retrying() {
+        let refused = message(ApiFailure::from(CoreError::Refused(
+            "big.bin is over 2 MiB and Undo has no copy of it.".into(),
+        )))
+        .await;
+        assert_eq!(
+            refused["message"],
+            "big.bin is over 2 MiB and Undo has no copy of it."
+        );
+        assert_eq!(refused["code"], "refused");
+        assert_eq!(refused["retryable"], false);
     }
 }
 
