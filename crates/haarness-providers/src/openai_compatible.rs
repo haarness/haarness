@@ -796,7 +796,7 @@ fn long_context_override(entry: &Value) -> Option<haarness_protocol::LongContext
         tier.1
             .get(key)
             .and_then(json_number)
-            .map(|value| value * 1_000_000.0)
+            .and_then(|value| price(value * 1_000_000.0))
     };
     Some(haarness_protocol::LongContextPricing {
         above_input_tokens: tier.0.saturating_sub(1),
@@ -1191,21 +1191,21 @@ fn discovered_model_info(
             entry.pointer("/pricing/completion").and_then(json_number),
         )
     {
-        info.pricing = (input >= 0.0 && output >= 0.0).then(|| ModelPricing {
-            input: input * 1_000_000.0,
-            output: output * 1_000_000.0,
-            cache_read: entry
-                .pointer("/pricing/input_cache_read")
+        let rate = |pointer: &str| {
+            entry
+                .pointer(pointer)
                 .and_then(json_number)
-                .unwrap_or(0.0)
-                * 1_000_000.0,
-            cache_write: entry
-                .pointer("/pricing/input_cache_write")
-                .and_then(json_number)
-                .unwrap_or(0.0)
-                * 1_000_000.0,
-            long_context: long_context_override(entry),
-        });
+                .and_then(|value| price(value * 1_000_000.0))
+        };
+        info.pricing = price(input * 1_000_000.0)
+            .zip(price(output * 1_000_000.0))
+            .map(|(input, output)| ModelPricing {
+                input,
+                output,
+                cache_read: rate("/pricing/input_cache_read").unwrap_or(0.0),
+                cache_write: rate("/pricing/input_cache_write").unwrap_or(0.0),
+                long_context: long_context_override(entry),
+            });
     }
     // xAI prices in hundredths of a cent per million tokens (12500 is $1.25),
     // with a long-context tier from `long_context_threshold` prompt tokens.
@@ -1221,29 +1221,32 @@ fn discovered_model_info(
             entry
                 .get(key)
                 .and_then(json_number)
-                .map(|value| value / 10_000.0)
+                .and_then(|value| price(value / 10_000.0))
         };
-        info.pricing = Some(ModelPricing {
-            input: input / 10_000.0,
-            output: output / 10_000.0,
-            cache_read: rate("cached_prompt_text_token_price").unwrap_or(0.0),
-            cache_write: 0.0,
-            long_context: entry
-                .get("long_context_threshold")
-                .and_then(Value::as_u64)
-                .zip(rate("prompt_text_token_price_long_context"))
-                .zip(rate("completion_text_token_price_long_context"))
-                .map(
-                    |((threshold, input), output)| haarness_protocol::LongContextPricing {
-                        above_input_tokens: threshold.saturating_sub(1),
-                        input,
-                        output,
-                        cache_read: rate("cached_prompt_text_token_price_long_context")
-                            .unwrap_or(0.0),
-                        cache_write: 0.0,
-                    },
-                ),
-        });
+        info.pricing =
+            price(input / 10_000.0)
+                .zip(price(output / 10_000.0))
+                .map(|(input, output)| ModelPricing {
+                    input,
+                    output,
+                    cache_read: rate("cached_prompt_text_token_price").unwrap_or(0.0),
+                    cache_write: 0.0,
+                    long_context: entry
+                        .get("long_context_threshold")
+                        .and_then(Value::as_u64)
+                        .zip(rate("prompt_text_token_price_long_context"))
+                        .zip(rate("completion_text_token_price_long_context"))
+                        .map(|((threshold, input), output)| {
+                            haarness_protocol::LongContextPricing {
+                                above_input_tokens: threshold.saturating_sub(1),
+                                input,
+                                output,
+                                cache_read: rate("cached_prompt_text_token_price_long_context")
+                                    .unwrap_or(0.0),
+                                cache_write: 0.0,
+                            }
+                        }),
+                })
     }
     if provider == "xai" {
         // A model that reasons at a fixed depth says so in its id only.
@@ -1277,16 +1280,19 @@ fn discovered_model_info(
                 .and_then(json_number),
         )
     {
-        info.pricing = Some(ModelPricing {
-            input,
-            output,
-            cache_read: entry
-                .pointer("/metadata/pricing/cache_read_tokens")
-                .and_then(json_number)
-                .unwrap_or(0.0),
-            cache_write: 0.0,
-            long_context: None,
-        });
+        info.pricing = price(input)
+            .zip(price(output))
+            .map(|(input, output)| ModelPricing {
+                input,
+                output,
+                cache_read: entry
+                    .pointer("/metadata/pricing/cache_read_tokens")
+                    .and_then(json_number)
+                    .and_then(price)
+                    .unwrap_or(0.0),
+                cache_write: 0.0,
+                long_context: None,
+            });
     }
     Some(apply_model_defaults(info, defaults))
 }
@@ -1849,6 +1855,13 @@ fn json_number(value: &Value) -> Option<f64> {
         .as_f64()
         .or_else(|| value.as_str()?.parse::<f64>().ok())
         .filter(|number| number.is_finite())
+}
+
+/// A rate in USD per million tokens, once a catalog's unit is brought to it:
+/// finite and not below zero. A per-token "1e303" is infinite a million, and
+/// a negative rate (a router's `-1` for a price it doesn't know) is none.
+fn price(rate: f64) -> Option<f64> {
+    (rate.is_finite() && rate >= 0.0).then_some(rate)
 }
 
 /// What a catalog entry says its model reads (OpenRouter's `architecture`,
@@ -3176,13 +3189,31 @@ mod tests {
             .unwrap()
             .pricing
         };
-        for broken in ["NaN", "inf", "-inf", "1e999"] {
+        // "1e303" a token is finite, but infinite a million.
+        for broken in ["NaN", "inf", "-inf", "1e999", "1e303", "-0.5"] {
             assert!(price(broken, "0").is_none(), "{broken}");
             // A broken cache rate is no rate, not a NaN in every cost.
             let pricing = price("0.000001", broken).unwrap();
             assert!(pricing.cache_read.abs() < 1e-12, "{broken}");
             assert!((pricing.input - 1.0).abs() < 1e-9);
         }
+        // xAI and DeepInfra list their own units; a negative rate is none.
+        let xai = discovered_model_info(
+            "xai",
+            &json!({"id": "grok-fixture", "prompt_text_token_price": -12500,
+                "completion_text_token_price": 25000}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert!(xai.pricing.is_none(), "{:?}", xai.pricing);
+        let deepinfra = discovered_model_info(
+            "deepinfra",
+            &json!({"id": "vendor/fixture", "metadata": {"tags": ["chat"], "pricing": {
+                "input_tokens": 0.2, "output_tokens": -1, "cache_read_tokens": 0.1}}}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert!(deepinfra.pricing.is_none(), "{:?}", deepinfra.pricing);
     }
 
     #[test]
