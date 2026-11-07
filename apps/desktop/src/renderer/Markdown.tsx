@@ -25,6 +25,7 @@ import {
   type ShownImage,
 } from "./project-images";
 import { watchOpenImages } from "./ImageViewer";
+import { spelledCharacter } from "./display-text";
 
 /**
  * What is read in the transcript's view: the first text that starts inside
@@ -117,6 +118,22 @@ function keepReading(element: HTMLElement, host: HTMLElement, change: () => void
   });
   measured.observe(host);
   requestAnimationFrame(() => requestAnimationFrame(done));
+}
+
+/**
+ * A code block's code as the reply wrote it, which its Copy copies: each
+ * code the block shows for a character it would not show (markdown-dom.ts)
+ * is that character again. Only the app's own chips count.
+ */
+function writtenCode(code: Element) {
+  let text = "";
+  const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const chip = node.parentElement;
+    const written = chip && madeHere(chip) && chip.matches(".spelled-code") ? spelledCharacter(node.nodeValue ?? "") : undefined;
+    text += written ?? node.nodeValue ?? "";
+  }
+  return text;
 }
 
 /** Text up to this long is drawn on this thread (about 3 ms here); longer
@@ -377,7 +394,7 @@ export function Markdown(props: {
         const button = target.closest<HTMLButtonElement>(".code-copy");
         if (button && host.contains(button)) {
           const code = button.parentElement?.querySelector("code");
-          void navigator.clipboard.writeText(code?.textContent ?? "").then(() => {
+          void navigator.clipboard.writeText(code ? writtenCode(code) : "").then(() => {
             if (disposed || !button.isConnected) return;
             button.textContent = t("Copied");
             button.classList.add("done");

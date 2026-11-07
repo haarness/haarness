@@ -2212,9 +2212,11 @@ html[dir="rtl"] .tool-target {
 .diff-line .spelled-code {
   color: inherit;
 }
-/* In a tool's input panel it takes the text color: the chip sets it apart,
-   and muted on the chip over the panel would read too faint. */
-.tool-input .spelled-code {
+/* In a tool's input panel and in a reply's code block it takes the text
+   color: the chip sets it apart, and muted on the chip over the panel would
+   read too faint. */
+.tool-input .spelled-code,
+.markdown pre .spelled-code {
   color: var(--text);
 }
 /* An explicit Chrome request names each site it asks for, one per line. */

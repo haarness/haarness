@@ -6,9 +6,11 @@
  * `[31m` or `]0;title` fragments, so output loses its sequences whole
  * (`withoutEscapes`). An approval card is read for what will run, so nothing
  * on it may be hidden or reordered: there the invisible characters show as
- * codes such as `\u{1B}` instead (`spelledOutParts`, `spelledOutText`). Neither
- * changes the text itself: what is stored, and what the model reads, stay as
- * written. The TUI reads such text the same way.
+ * codes such as `\u{1B}` instead (`spelledOutParts`, `spelledOutText`), and a
+ * reply's code block shows its control characters the same way
+ * (`codeBlockShows`). Neither changes the text itself: what is stored, what
+ * the model reads and what a code block's Copy copies stay as written. The
+ * TUI reads such text the same way.
  */
 
 const ESC = 0x1b;
@@ -203,6 +205,31 @@ const codeOf = (code: number) => `\\u{${code.toString(16).toUpperCase()}}`;
  */
 export const turnsDirection = (code: number) =>
   (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069);
+
+/**
+ * Whether a reply's code block shows the character at `code` as a code. That
+ * is any control character but tab and line feed, which a terminal acts on
+ * when the code is pasted into it (an escape that starts a sequence, a
+ * backspace, a bell), and every bidirectional control: the marks (U+061C,
+ * U+200E, U+200F), overrides and isolates, which draw code in another order
+ * than the one it is copied in. Everything else stays as written, joiners,
+ * variation selectors and emoji sequences included: a code block is the
+ * reply's text, and Copy copies it exactly.
+ */
+export const codeBlockShows = (code: number) =>
+  (control(code) && code !== 0x09 && code !== 0x0a) ||
+  code === 0x61c ||
+  code === 0x200e ||
+  code === 0x200f ||
+  turnsDirection(code);
+
+/** The character a code such as `\u{1B}` stands for, or undefined for
+ * anything else. */
+export function spelledCharacter(text: string): string | undefined {
+  const hex = /^\\u\{([0-9A-F]{1,6})\}$/.exec(text)?.[1];
+  const code = hex === undefined ? NaN : parseInt(hex, 16);
+  return code <= 0x10ffff ? String.fromCodePoint(code) : undefined;
+}
 
 /** `text` cut into what shows as written and the codes `shows` names
  * (`showsAsCode` unless said), for a card that draws the codes quieter than

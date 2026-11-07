@@ -13786,12 +13786,17 @@ tools=false
   }
 });
 
-test("raw HTML in a reply stays inside it, so Stop, the message box and the sidebar take clicks as it streams and after", async () => {
+test("raw HTML in a reply stays inside it, so Stop, the message box and the sidebar take clicks as it streams and after, and a code block shows its control characters yet copies them as written", async () => {
   test.setTimeout(240_000);
   let output: import("node:http").ServerResponse | undefined;
   // Markup wearing the app's own classes, among them the blurred overlay
   // behind its dialogs, and an open <dialog>, which the browser places itself.
   const hostile = '<div class="modal-backdrop"></div>\n\n<dialog open>An open dialog</dialog>\n\n';
+  // An escape, a direction override and its end, and an emoji sequence.
+  const code = "printf '\u001b[31mred\u001b[0m'\necho \u202eevil\u202c ok 👩\u200d👩\u200d👧\n";
+  // A chip the reply writes itself is its text, never one of the app's.
+  const forged = '<pre><code>x<span class="spelled-code">\\u{1B}</span>y</code></pre>\n\n';
+  const reply = hostile + "```sh\n" + code + "```\n\n" + forged;
   const finish = 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
   const chunk = (text: string) => "data: " + JSON.stringify({ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] }) + "\n\n";
   const delta = (text: string) => output!.write(chunk(text));
@@ -13806,7 +13811,7 @@ test("raw HTML in a reply stays inside it, so Stop, the message box and the side
     const messages = JSON.stringify(JSON.parse(Buffer.concat(chunks).toString()).messages);
     response.writeHead(200, { "Content-Type": "text/event-stream" });
     if (messages.includes("Name this conversation.")) return response.end(chunk("Markup fixture") + finish);
-    if (messages.includes("btw-side-question")) return response.end(chunk(hostile + "SIDE_DONE") + finish);
+    if (messages.includes("btw-side-question")) return response.end(chunk(reply + "SIDE_DONE") + finish);
     output = response;
   });
   await new Promise<void>(resolve => provider.listen(0, "127.0.0.1", resolve));
@@ -13827,6 +13832,9 @@ test("raw HTML in a reply stays inside it, so Stop, the message box and the side
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
   const stop = page.getByRole("button", { name: "Stop response", exact: true });
   const newChat = page.getByRole("button", { name: "New chat", exact: true });
+  const clipboard = () => app.evaluate(({ clipboard }) => clipboard.readText());
+  const codes = ["\\u{1B}", "\\u{1B}", "\\u{202E}", "\\u{202C}"];
+  const shots = process.env.HAARNESS_SCREENSHOTS ?? test.info().outputPath("");
   try {
     await app.evaluate(({ dialog }, directory) => {
       const original = dialog.showOpenDialog;
@@ -13838,7 +13846,7 @@ test("raw HTML in a reply stays inside it, so Stop, the message box and the side
     await newSession();
     await send("Show markup that borrows the app's classes.");
     await expect.poll(() => !!output).toBe(true);
-    delta(hostile + "STILL_STREAMING");
+    delta(reply + "STILL_STREAMING");
 
     // While it streams: the markup keeps no class, the open dialog stays in
     // the reply's box, and nothing lies over Stop, the message box or the sidebar.
@@ -13854,6 +13862,13 @@ test("raw HTML in a reply stays inside it, so Stop, the message box and the side
     })).toEqual(["relative", "isolate"]);
     // The dialog is placed in the reply's own box.
     expect(await live.locator(".markdown").evaluate((element) => element.querySelector("dialog")?.offsetParent === element)).toBe(true);
+    // Its code block shows the escape and the override as codes on chips, and
+    // the emoji as it is; the chip the reply wrote itself is plain text.
+    await expect(live.locator("pre .spelled-code")).toHaveText(codes);
+    await expect(live.locator("pre code").first()).toContainText("ok 👩\u200d👩\u200d👧");
+    await expect(live.locator("pre").last().locator("span")).not.toHaveAttribute("class");
+    await expect(live.locator("pre").last()).toHaveText("x\\u{1B}y");
+    await expect(live.getByRole("button", { name: "Copy code" })).toHaveCount(0);
 
     output!.end(finish);
     await expect(live).toHaveCount(0);
@@ -13862,6 +13877,21 @@ test("raw HTML in a reply stays inside it, so Stop, the message box and the side
     await expect(saved.locator(".markdown div")).not.toHaveAttribute("class");
     await expect(saved.locator("dialog[open]")).toHaveText("An open dialog");
     for (const target of [composer, newChat]) expect(await reachable(target)).toBe(true);
+    await expect(saved.locator("pre .spelled-code")).toHaveText(codes);
+    // Copy copies each block as the reply wrote it.
+    const copies = saved.getByRole("button", { name: "Copy code", exact: true });
+    await expect(copies).toHaveCount(2);
+    await copies.first().click();
+    await expect.poll(clipboard).toBe(code);
+    await copies.last().click();
+    await expect.poll(clipboard).toBe("x\\u{1B}y");
+    await saved.locator("pre").first().hover();
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await saved.screenshot({ path: join(shots, `reply-markup-codes-${theme}.png`) });
+    }
+    await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
 
     // Stop still takes the click of the next reply, under the markup on screen.
     output = undefined;
@@ -13892,6 +13922,7 @@ test("raw HTML in a reply stays inside it, so Stop, the message box and the side
     await expect(side).toContainText("SIDE_DONE");
     await expect(side.locator(".markdown div")).not.toHaveAttribute("class");
     await expect(side.locator("dialog[open]")).toHaveText("An open dialog");
+    await expect(side.locator("pre .spelled-code")).toHaveText(codes);
     for (const target of [composer, newChat, side.getByRole("textbox", { name: "Ask a side question", exact: true })])
       expect(await reachable(target)).toBe(true);
     expect(errors).toEqual([]);

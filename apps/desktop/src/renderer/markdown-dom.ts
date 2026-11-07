@@ -1,9 +1,10 @@
 import DOMPurify from "dompurify";
 import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "./link-target";
 import type { MarkdownPatch } from "./markdown-project";
-import { holdRemoteImages, madeHere, replyAttribute, type RemoteImageLabels } from "./remote-images";
+import { holdRemoteImages, madeHere, markMade, replyAttribute, type RemoteImageLabels } from "./remote-images";
 import { holdProjectImages, type ProjectImageLabels, type ShownImage } from "./project-images";
 import { openMark } from "./ImageViewer";
+import { codeBlockShows, spelledOutParts } from "./display-text";
 
 type Block = { html: string; start: Comment; end: Comment };
 
@@ -157,6 +158,35 @@ function taskBoxes(fragment: DocumentFragment) {
   }
 }
 
+/**
+ * A code block's characters that would not show, or would draw its code in
+ * another order than the one it is copied in (an escape, a direction
+ * override), each shown as its code (`\u{1B}`) on a quiet chip, as an
+ * approval card shows them (display-text.ts). The chips are the app's own,
+ * and Copy turns each back into its character (Markdown.tsx), so what it
+ * copies is the code as the reply wrote it.
+ */
+function spellCode(fragment: DocumentFragment) {
+  for (const block of Array.from(fragment.querySelectorAll("pre"))) {
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    const texts: Text[] = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) texts.push(node as Text);
+    for (const node of texts) {
+      const parts = spelledOutParts(node.data, codeBlockShows);
+      if (!parts.some((part) => part.code)) continue;
+      node.replaceWith(
+        ...parts.map((part) => {
+          if (!part.code) return part.text;
+          const chip = document.createElement("span");
+          chip.className = "spelled-code";
+          chip.textContent = part.text;
+          markMade(chip);
+          return chip;
+        }),
+      );
+    }
+  }
+}
 export function createMarkdownDOM(
   host: HTMLElement,
   images?: {
@@ -194,6 +224,7 @@ export function createMarkdownDOM(
         FORBID_ATTR: ["style"],
       });
       taskBoxes(fragment);
+      spellCode(fragment);
       const project = images?.project;
       if (project)
         holdProjectImages(
