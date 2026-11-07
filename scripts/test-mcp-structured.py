@@ -3,7 +3,7 @@
 resources embedded as base64 reach the model as what they hold (an image as an attachment, text as text, anything
 else named), never as base64; audio of a type Haarness does not carry is named rather than attached; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
 all of it. One-line JSON is laid out a value a line, whole when it then fits, and within a few times its length however deep
-it nests.
+it nests; what a Code Mode script returns is cut too, a string as its own lines.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -134,7 +134,11 @@ try:
     until(lambda: not api('/turns/active') and any(item['name'] == 'execute' for item in results(thread)[before:]), 'execute: no result', 60)
     coded = next(item for item in results(thread)[before:] if item['name'] == 'execute')
     assert not coded['is_error'] and len(coded['output']) < 52 * 1024 and 'Full output saved to: ' in coded['output'], len(coded['output'])
-    check('what a Code Mode script returns is cut for the model too')
+    # A string comes as its own lines, the model's and the saved file's, not as one escaped JSON line.
+    assert coded['output'].startswith('row 00000 ' + 'w' * 90 + '\nrow 00001 '), coded['output'][:200]
+    saved = pathlib.Path(coded['metadata']['outputPath']).read_text()
+    assert saved == WIDE and max(len(line) for line in saved.splitlines()) < 200, (len(saved), saved[:200])
+    check('what a Code Mode script returns is cut for the model too, a string as lines read and grep can take')
 
     ROWS = json.dumps([{'id': n, 'title': 'row %d' % n, 'body': 'b' * 40} for n in range(1500)], separators=(',', ':'))
     result = call(thread, 'rows')

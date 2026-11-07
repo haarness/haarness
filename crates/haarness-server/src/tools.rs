@@ -596,10 +596,16 @@ impl Tool for ExecuteTool {
             .map_err(|error| CoreError::Tool(format!("code mode failed: {error}")))?;
         let value = output.value.unwrap_or(Value::Null);
         // A script hands back whole texts, so what it returns is cut for
-        // the model as an MCP tool's text is, as JSON laid out, which
+        // the model as an MCP tool's text is: a string as itself, so a long
+        // one reads back by line, and anything else as JSON laid out, which
         // indenting bounds as it bounds a server's.
-        let compact = serde_json::to_string(&value).map_err(tool_error)?;
-        let text = indent_json(&compact).unwrap_or(compact);
+        let text = match &value {
+            Value::String(text) => text.clone(),
+            value => {
+                let compact = serde_json::to_string(value).map_err(tool_error)?;
+                indent_json(&compact).unwrap_or(compact)
+            }
+        };
         let (mut cut, _) = cut_mcp_text(text, &tool_output_dir(), false).await?;
         let mut metadata = match cut.metadata {
             Value::Object(object) => object,
@@ -10200,7 +10206,10 @@ mod webfetch_tests {
         assert_eq!(output.metadata["results"][2]["metadata"]["n"], 3);
     }
 
-    /// What a script returned reached the model whole.
+    /// What a script returned reached the model whole. A string came as
+    /// one JSON literal, its lines run together as `\n`, so its saved file
+    /// was one line `read` and `grep` could not get through; it comes as
+    /// itself now, and anything else as JSON laid out.
     #[tokio::test]
     async fn code_modes_answer_is_cut_for_the_model() {
         if !WorkflowExecutor::default().capability().executable {
@@ -10209,16 +10218,52 @@ mod webfetch_tests {
         }
         let mut context = composite_context(Path::new("."));
         context.invoker = Some(Arc::new(EchoInvoker));
-        let output = ExecuteTool
-            .execute(json!({"code":"return 'c'.repeat(120000)"}), context)
-            .await
-            .unwrap();
+        let run = |code: &str| {
+            let (code, context) = (code.to_owned(), context.clone());
+            async move { ExecuteTool.execute(json!({ "code": code }), context).await }
+        };
+        let output = run("return 'c'.repeat(120000)").await.unwrap();
         assert!(output.text.len() < 52 * 1024, "{}", output.text.len());
-        assert!(output.text.starts_with(&format!("\"{}", "c".repeat(1000))));
+        assert!(output.text.starts_with(&"c".repeat(50 * 1024)));
         assert_eq!(output.metadata["result"].as_str().unwrap().len(), 120_000);
         let file = output.metadata["outputPath"].as_str().unwrap();
-        assert_eq!(std::fs::read_to_string(file).unwrap().len(), 120_002);
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "c".repeat(120_000));
         std::fs::remove_file(file).unwrap();
+
+        let lines = (0..3_000)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = run("return Array.from({ length: 3000 }, (_, n) => `line ${n}`).join('\\n')")
+            .await
+            .unwrap();
+        assert!(
+            output.text.starts_with("line 0\nline 1\nline 2\n"),
+            "{:.40}",
+            output.text
+        );
+        assert_eq!(
+            output
+                .text
+                .lines()
+                .take_while(|line| line.starts_with("line "))
+                .count(),
+            2_000
+        );
+        let file = output.metadata["outputPath"].as_str().unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), lines);
+        std::fs::remove_file(file).unwrap();
+
+        let short = run("return 'done'").await.unwrap();
+        assert_eq!(
+            (short.text.as_str(), &short.metadata),
+            ("done", &json!({"result": "done"}))
+        );
+        let object = run("return { rows: [1, 2], note: 'ok' }").await.unwrap();
+        assert_eq!(
+            object.text,
+            serde_json::to_string_pretty(&json!({"rows": [1, 2], "note": "ok"})).unwrap()
+        );
     }
 
     #[tokio::test]
