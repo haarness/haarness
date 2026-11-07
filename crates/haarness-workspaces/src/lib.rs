@@ -1077,18 +1077,85 @@ fn worktree_link(path: &Path, project: &ProjectInfo) -> WorktreeLink {
 
 /// Whether `path` is on a disk that is not connected: the nearest part of it
 /// that is there is a folder disks are mounted in (`/Volumes`, `/mnt`,
-/// `/media`, a person's folder in `/media` or `/run/media`), or no part of it
-/// is (a Windows drive that is gone).
+/// `/media`, a person's folder in `/media` or `/run/media`), a folder a disk
+/// is mounted on that stays when the disk is gone and has nothing mounted on
+/// it now (one in `/mnt`, such as a WSL drive, or one `/etc/fstab` names), or
+/// no part of it is there (a Windows drive that is gone).
 fn on_a_missing_disk(path: &Path) -> bool {
+    on_a_missing_disk_beside(path, Path::new("/mnt"), Path::new("/etc/fstab"))
+}
+
+/// [`on_a_missing_disk`], with `mnt` as the folder disks are mounted in and
+/// `fstab` as the list of where they are mounted.
+fn on_a_missing_disk_beside(path: &Path, mnt: &Path, fstab: &Path) -> bool {
     let Some(present) = path.ancestors().find(|ancestor| ancestor.exists()) else {
         return true;
     };
-    ["/Volumes", "/mnt", "/media"]
-        .iter()
-        .any(|mounts| present == Path::new(mounts))
+    if [Path::new("/Volumes"), mnt, Path::new("/media")].contains(&present)
         || present.parent().is_some_and(|parent| {
             parent == Path::new("/media") || parent == Path::new("/run/media")
         })
+    {
+        return true;
+    }
+    (present.parent() == Some(mnt) || listed_mount_point(fstab, present)) && !mounted_on(present)
+}
+
+/// Whether the `fstab` file names `folder` as where a disk is mounted. Its
+/// second field is the folder, with a space, tab or backslash in it written
+/// as `\040`, `\011` or `\134`.
+fn listed_mount_point(fstab: &Path, folder: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(fstab) else {
+        return false;
+    };
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .any(|listed| Path::new(&unescape_mount_point(listed)) == folder)
+}
+
+/// A mount point as `fstab` writes it, its octal escapes read.
+fn unescape_mount_point(listed: &str) -> String {
+    let mut out = String::with_capacity(listed.len());
+    let mut rest = listed;
+    while let Some(at) = rest.find('\\') {
+        out.push_str(&rest[..at]);
+        let code = rest
+            .get(at + 1..at + 4)
+            .and_then(|digits| u8::from_str_radix(digits, 8).ok())
+            .filter(u8::is_ascii);
+        match code {
+            Some(code) => {
+                out.push(char::from(code));
+                rest = &rest[at + 4..];
+            }
+            None => {
+                out.push('\\');
+                rest = &rest[at + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether a disk is mounted on `folder` now: it is on another device than
+/// the folder it is in.
+#[cfg(unix)]
+fn mounted_on(folder: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(parent) = folder.parent() else {
+        return true;
+    };
+    match (fs::metadata(folder), fs::metadata(parent)) {
+        (Ok(folder), Ok(parent)) => folder.dev() != parent.dev(),
+        _ => true,
+    }
+}
+
+#[cfg(not(unix))]
+fn mounted_on(_folder: &Path) -> bool {
+    true
 }
 
 /// Why a worktree whose repository is out of reach is kept.
@@ -3008,6 +3075,47 @@ mod tests {
         fs::remove_file(folder.join(".git")).unwrap();
         fs::create_dir(folder.join(".git")).unwrap();
         assert_eq!(worktree_link(&folder, &project), WorktreeLink::Working);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A disk mounted on a folder that stays when the disk is gone (one
+    /// `/etc/fstab` names, a WSL drive in `/mnt`) leaves that folder empty, so
+    /// a repository that was on it is out of reach, not moved. A folder with
+    /// a disk on it now, and one nothing names, are judged as before.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_folder_a_disk_is_mounted_on_counts_as_a_missing_disk() {
+        let root = std::env::temp_dir().join(format!("haarness-mount-points-{}", Uuid::now_v7()));
+        let mnt = root.join("mnt");
+        let data = root.join("data disk");
+        for folder in [mnt.join("e"), data.clone(), root.join("plain")] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let fstab = root.join("fstab");
+        fs::write(
+            &fstab,
+            format!(
+                "# <file system> <mount point> <type> <options> <dump> <pass>\nUUID=0a1b {} ext4 defaults,nofail 0 2\n  # /dev/sdc1 {} ext4\ndevtmpfs /dev devtmpfs defaults 0 0\n",
+                data.display().to_string().replace(' ', "\\040"),
+                root.join("plain").display()
+            ),
+        )
+        .unwrap();
+        let missing = |path: &Path| on_a_missing_disk_beside(path, &mnt, &fstab);
+        // A WSL drive that is gone, and a disk the list names that is not
+        // mounted.
+        assert!(missing(&mnt.join("e/projects/app")));
+        assert!(missing(&data.join("repo")));
+        // The folder disks are mounted in, as before.
+        assert!(missing(&mnt.join("gone/app")));
+        // A folder only a comment names: a repository that moved.
+        assert!(!missing(&root.join("plain/repo")));
+        // A folder with a file system on it now.
+        assert!(!missing(Path::new("/dev/haarness-no-such-folder/repo")));
+        assert_eq!(
+            unescape_mount_point(r"/srv/a\040b\011c\134d\x\9"),
+            "/srv/a b\tc\\d\\x\\9"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

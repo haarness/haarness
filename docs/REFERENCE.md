@@ -325,7 +325,9 @@ and says so in one line (`worktree forgotten: …`). For a repository that moved
 run `git worktree repair` in it instead: the worktree then opens, resets and is
 removed again although the project's old folder is gone. A worktree whose
 repository is on a disk that is not connected (under `/Volumes`, `/mnt` or
-`/media`) is kept, so its chats stay with it, until the disk is back.
+`/media`, or in a folder a disk is mounted on that has nothing mounted on it
+now, such as one `/etc/fstab` names or a WSL drive in `/mnt`) is kept, so its
+chats stay with it, until the disk is back.
 
 ## Terminal UI
 
