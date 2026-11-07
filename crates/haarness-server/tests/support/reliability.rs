@@ -1489,3 +1489,55 @@ async fn reliability_tool_calls_alone_at_the_step_limit_are_asked_once_more_for_
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
+
+#[tokio::test]
+async fn reliability_an_explained_failure_still_leaves_the_step_limit_its_summary() {
+    // A failed read and an empty reply use the one request to explain; the
+    // step limit later still asks once more for the summary.
+    let (directory, runtime, provider, _) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(finish("stop"))],
+            vec![Ok(read_notes("explained")), Ok(finish("tool_use"))],
+            vec![
+                Ok(call(
+                    "only-calls",
+                    "write",
+                    serde_json::json!({"path":"must-not-exist","content":"bad"}),
+                )),
+                Ok(finish("tool_use")),
+            ],
+            vec![Ok(text("Here is the summary.")), Ok(finish("stop"))],
+            vec![Ok(text("never asked")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig {
+            max_rounds: Some(2),
+            ..RuntimeConfig::default()
+        },
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read, then sum up"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 5);
+    assert!(!directory.join("must-not-exist").exists());
+    assert!(
+        runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| matches!(&item.data,
+        ItemData::AssistantMessage {text} if text == "Here is the summary."))
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}

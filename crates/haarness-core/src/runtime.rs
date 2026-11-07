@@ -9632,11 +9632,13 @@ impl RunnerTask {
             // Whether the latest round's calls include a failure the model
             // has not explained yet, whether that round also wrote text, and
             // whether the next request asks it to explain. A turn asks the
-            // model again after an empty reply once at most.
+            // model to explain a failure once at most.
             let mut unexplained_failure = false;
             let mut failure_beside_text = false;
             let mut explain_failure = false;
-            let mut asked_again = false;
+            let mut asked_to_explain = false;
+            // Whether this turn asked again for the summary at its step limit.
+            let mut asked_for_summary = false;
             // UserPromptSubmit hooks may block the turn or inject context.
             let mut prompt_context: Option<String> = None;
             if self.depth == 0 {
@@ -10759,11 +10761,11 @@ impl RunnerTask {
                     if empty
                         && unexplained_failure
                         && (self.depth == 0 || !failure_beside_text)
-                        && !asked_again
+                        && !asked_to_explain
                         && !stopped_at_output_limit
                         && !self.has_unconsumed_queued().await
                     {
-                        asked_again = true;
+                        asked_to_explain = true;
                         explain_failure = true;
                         tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "empty reply after a failed call; asking the model to explain it");
                         continue 'provider_round;
@@ -10776,11 +10778,11 @@ impl RunnerTask {
                         && made_calls
                         && !wrote_text
                         && self.output_schema.is_none()
-                        && !asked_again
+                        && !asked_for_summary
                         && !stopped_at_output_limit
                         && !self.has_unconsumed_queued().await
                     {
-                        asked_again = true;
+                        asked_for_summary = true;
                         tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "only tool calls at the step limit; asking again for the summary");
                         continue 'provider_round;
                     }
