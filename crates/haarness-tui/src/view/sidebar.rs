@@ -157,9 +157,10 @@ pub fn sidebar_lines(app: &App, width: usize, height: usize) -> TaggedLines {
                     }
                     "done" => activity.push(app.language.text("completed").into()),
                     "failed" => activity.push(app.language.text("failed").into()),
-                    "cancelled" | "interrupted" => {
-                        activity.push(app.language.text("cancelled").into())
-                    }
+                    "cancelled" => activity.push(app.language.text("cancelled").into()),
+                    // Never a person's Stop: Haarness stopped it before it
+                    // finished, and it reads as its delegation's row does.
+                    "interrupted" => activity.push(app.language.text("didn't finish").into()),
                     _ => {
                         if let Some(seconds) = task.elapsed_seconds() {
                             activity.push(format!("{seconds}s"));

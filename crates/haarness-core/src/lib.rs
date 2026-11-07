@@ -33,6 +33,7 @@ mod stream_limits;
 mod tool_catalog;
 mod tool_validation;
 mod turn_context;
+mod unanswered;
 pub mod wire_names;
 mod workflows;
 
@@ -76,6 +77,10 @@ pub use stream_limits::{
 pub use tool_catalog::{LOAD_TOOL_NAME, LazyToolSettings, load_tool_definition, select_tools};
 pub use turn_context::{
     AGENT_MESSAGE_PREFIX, SESSION_MESSAGE_PREFIX, is_session_message, is_turn_reminder,
+};
+pub use unanswered::{
+    ToolCallPairs, UNFINISHED_CALL_RESULT, not_run, not_run_metadata, pair_tool_calls,
+    unfinished_call_result,
 };
 pub use workflows::{WorkflowLogDraft, WorkflowRepository};
 

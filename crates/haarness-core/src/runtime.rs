@@ -30,8 +30,8 @@ use tracing::{Instrument as _, error, info, instrument, warn};
 use crate::agents::custom_system_prompt_with_context;
 use crate::background::{BackgroundHandoff, BackgroundLedger, BackgroundProbe};
 use crate::tool_catalog::{
-    LOAD_TOOL_NAME, MAX_PROMOTED_TOOLS, is_essential_tool, load_tool_result, search_deferred_tools,
-    select_tools,
+    LOAD_TOOL_NAME, MAX_PROMOTED_TOOLS, already_available, is_essential_tool, load_tool_result,
+    search_deferred_tools, select_tools,
 };
 use crate::tool_validation::{unknown_tool, validate_arguments};
 use crate::{
@@ -225,6 +225,11 @@ struct ActiveTurn {
     /// (workflow agents, direct tools on its children) come from it, not
     /// from the agent's file as it is now.
     agent: AgentSnapshot,
+    /// The turn's calls that have begun since they were made, by call id.
+    /// Stop, and a shutdown the turn outlives, say the others never ran:
+    /// reads (and delegations) run together, so the first call without a
+    /// result is not the only one that began.
+    started_calls: Mutex<HashSet<String>>,
 }
 
 /// Model-facing prompt for the turn that answers steering the user sent
@@ -243,10 +248,69 @@ fn stopped_turn_message(reason: &str) -> String {
 type GoalMutationLocks = DashMap<ThreadId, Arc<AsyncMutex<()>>>;
 type TurnAdmissionLocks = DashMap<ThreadId, Arc<AsyncMutex<()>>>;
 type BackgroundTasks = DashMap<ThreadId, Arc<BackgroundTask>>;
-type ToolPromotions = DashMap<ThreadId, HashSet<String>>;
+type ToolPromotions = DashMap<ThreadId, ChatTools>;
 type ToolExecutionGates = DashMap<String, Arc<AsyncRwLock<()>>>;
 /// Subagent slot pools by (depth, concurrency limit), shared by a runtime and its turns.
 type SubagentSlots = Arc<Mutex<HashMap<(u8, usize), Arc<Semaphore>>>>;
+
+/// What a chat's tool list holds beyond its catalog. Kept while this process
+/// runs; for a chat it has none of (after a restart, or a fork) the loads
+/// are read back from the chat's history.
+#[derive(Debug, Clone, Default)]
+struct ChatTools {
+    /// Tools the model loaded or called, which stay in its list.
+    promoted: HashSet<String>,
+    /// The provider and model Auto chose to defer tools for: the chat goes
+    /// on deferring them (see [`select_tools`]).
+    deferring: Option<(String, String)>,
+}
+
+impl ChatTools {
+    /// `thread`'s tool state read back from its history. A `load_tool` call
+    /// that ran shows Auto was deferring tools then, for the model of its
+    /// turn (`provider`'s `model`, the chat's, when it has none, as in a
+    /// fork), so the chat goes on deferring them for that model.
+    async fn from_history(
+        repository: &dyn ThreadRepository,
+        thread: ThreadId,
+        tools: &[crate::ToolDefinition],
+        provider: &str,
+        model: &str,
+    ) -> CoreResult<Self> {
+        let items = repository.list_items(thread, None).await?;
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let last_load = items.iter().rev().find(|item| {
+            matches!(&item.data, ItemData::ToolResult { name, is_error: false, .. }
+                if name == LOAD_TOOL_NAME)
+        });
+        let deferring = match last_load {
+            None => None,
+            Some(item) => Some(match item.turn_id {
+                Some(turn) => match repository.get_turn(turn).await {
+                    Ok(turn) => (turn.provider, turn.model),
+                    Err(_) => (provider.to_owned(), model.to_owned()),
+                },
+                None => (provider.to_owned(), model.to_owned()),
+            }),
+        };
+        Ok(Self {
+            promoted: crate::tool_catalog::promoted_in(&items, &names),
+            deferring,
+        })
+    }
+
+    /// Whether Auto keeps deferring for `provider`'s `model`.
+    fn defers(&self, provider: &str, model: &str) -> bool {
+        self.deferring
+            .as_ref()
+            .is_some_and(|(kept_provider, kept_model)| {
+                kept_provider == provider && kept_model == model
+            })
+    }
+}
 
 fn tool_execution_gate(gates: &ToolExecutionGates, name: &str) -> Arc<AsyncRwLock<()>> {
     gates
@@ -2102,8 +2166,9 @@ pub struct AgentRuntime {
     /// the write lease. Different tools and concurrent child agents do not
     /// serialize behind one global execution lock.
     tool_execution_gates: Arc<ToolExecutionGates>,
-    /// Session-local schema promotions survive turns without leaking between
-    /// threads. They reset with the provider process by design.
+    /// Session-local schema promotions and Auto's lazy decision survive
+    /// turns without leaking between threads. A restart rebuilds the
+    /// promotions from each chat's history.
     tool_promotions: Arc<ToolPromotions>,
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
     /// Stores of the chats that work in a folder of their own: each such
@@ -2680,6 +2745,16 @@ impl AgentRuntime {
             return false;
         }
         before_swap();
+        let lazy = &self.components().config.lazy_tools;
+        if (lazy.mode, lazy.min_saved_tokens, &lazy.pin)
+            != (
+                config.lazy_tools.mode,
+                config.lazy_tools.min_saved_tokens,
+                &config.lazy_tools.pin,
+            )
+        {
+            self.forget_lazy_choices();
+        }
         let commands = config.commands.clone();
         let agents = config.custom_agents.clone();
         *self.approval_modes.fallback.lock() = config.approval_mode;
@@ -2702,6 +2777,14 @@ impl AgentRuntime {
         self.workspace.display().to_string()
     }
 
+    /// Every chat decides again whether Auto defers its tools: the person
+    /// changed the lazy mode, or the lazy settings changed.
+    fn forget_lazy_choices(&self) {
+        for mut tools in self.tool_promotions.iter_mut() {
+            tools.deferring = None;
+        }
+    }
+
     /// `tools`, a tool mask a workflow agent was given (its script may be
     /// one the model wrote), with each key that names a tool as providers
     /// were sent it under the tool's own name (see [`crate::wire_names`]).
@@ -2713,6 +2796,31 @@ impl AgentRuntime {
         names.own_keys(tools).into_iter().collect()
     }
 
+    /// `thread`'s tool state, read back from its history when this process
+    /// has none.
+    async fn chat_tools(
+        &self,
+        thread: &Thread,
+        components: &RuntimeComponents,
+    ) -> CoreResult<ChatTools> {
+        if let Some(tools) = self.tool_promotions.get(&thread.id) {
+            return Ok(tools.clone());
+        }
+        let rebuilt = ChatTools::from_history(
+            self.repository.as_ref(),
+            thread.id,
+            &components.tools.list(),
+            &thread.provider,
+            &thread.model,
+        )
+        .await?;
+        Ok(self
+            .tool_promotions
+            .entry(thread.id)
+            .or_insert(rebuilt)
+            .clone())
+    }
+
     /// Authoritative catalog for clients. With a thread id, session-local
     /// promotions and that thread's provider context are reflected.
     pub async fn tool_catalog(
@@ -2720,8 +2828,9 @@ impl AgentRuntime {
         thread_id: Option<ThreadId>,
     ) -> CoreResult<ToolCatalogResponse> {
         let components = self.components();
-        let (context_window, promoted) = if let Some(thread_id) = thread_id {
+        let (context_window, promoted, deferring) = if let Some(thread_id) = thread_id {
             let thread = self.repository.get_thread(thread_id).await?;
+            let tools = self.chat_tools(&thread, &components).await?;
             (
                 components
                     .providers
@@ -2729,9 +2838,8 @@ impl AgentRuntime {
                     .into_iter()
                     .find(|candidate| candidate.id == thread.model)
                     .and_then(|candidate| candidate.context_window),
-                self.tool_promotions
-                    .get(&thread_id)
-                    .map_or_else(HashSet::new, |entry| entry.value().clone()),
+                tools.promoted.clone(),
+                tools.defers(&thread.provider, &thread.model),
             )
         } else {
             let context = components
@@ -2747,7 +2855,7 @@ impl AgentRuntime {
                         .find(|candidate| candidate.id == model)
                         .and_then(|candidate| candidate.context_window)
                 });
-            (context, HashSet::new())
+            (context, HashSet::new(), false)
         };
         let live = self.tool_availability.read().clone();
         let mut lazy_tools = components.config.lazy_tools.clone();
@@ -2761,6 +2869,7 @@ impl AgentRuntime {
             &lazy_tools,
             &promoted,
             context_window,
+            deferring,
         )
         .response;
         // The server a tool comes from, as it is named: `a__b`'s tools read
@@ -2832,7 +2941,10 @@ impl AgentRuntime {
                 mode.map(|mode| json!(mode)),
             )
             .await?;
-        *self.lazy_tool_mode.write() = mode;
+        let changed = std::mem::replace(&mut *self.lazy_tool_mode.write(), mode) != mode;
+        if changed {
+            self.forget_lazy_choices();
+        }
         self.events
             .publish("tools.updated", None, None, None, json!({"lazyMode": mode}));
         self.tool_catalog(None).await
@@ -3951,10 +4063,7 @@ impl AgentRuntime {
                 .into_iter()
                 .find(|model| model.id == thread.model)
                 .and_then(|model| model.context_window);
-            let promoted = self
-                .tool_promotions
-                .get(&thread_id)
-                .map_or_else(HashSet::new, |entry| entry.value().clone());
+            let tools = self.chat_tools(&thread, &components).await?;
             let selection = select_tools(
                 catalog
                     .iter()
@@ -3964,8 +4073,9 @@ impl AgentRuntime {
                 &components.config.tool_availability,
                 &self.tool_availability.read(),
                 &lazy,
-                &promoted,
+                &tools.promoted,
                 context_window,
+                tools.defers(&thread.provider, &thread.model),
             );
             if selection.response.lazy_active {
                 system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
@@ -7081,6 +7191,7 @@ impl AgentRuntime {
             stop_reason: Mutex::new(None),
             answer_steer: AtomicBool::new(false),
             agent: agent.clone(),
+            started_calls: Mutex::new(HashSet::new()),
         });
         self.active.insert(thread_id, active.clone());
 
@@ -7594,6 +7705,41 @@ impl AgentRuntime {
                 turn = %active_turn.id,
                 "turn did not stop within the graceful shutdown window"
             );
+            // Its calls still running end here, as startup recovery ends
+            // those of a turn a crash stopped: the turn is marked
+            // interrupted below, which recovery leaves alone.
+            if let Ok(items) = self.repository.list_items(*thread_id, None).await {
+                let turn_items = items
+                    .into_iter()
+                    .filter(|item| item.turn_id == Some(active_turn.id))
+                    .collect::<Vec<_>>();
+                // The runner noted the calls that began; the others never ran.
+                let started = active_turn.started_calls.lock().clone();
+                let ended = crate::pair_tool_calls(turn_items.iter().map(|item| &item.data))
+                    .calls
+                    .into_iter()
+                    .filter_map(|call| match &turn_items[call].data {
+                        ItemData::ToolCall { call_id, name, .. } => Some(
+                            crate::unfinished_call_result(call_id, name, started.contains(call_id)),
+                        ),
+                        _ => None,
+                    });
+                for data in ended {
+                    if let Ok(item) = self
+                        .repository
+                        .append_item(*thread_id, Some(active_turn.id), data)
+                        .await
+                    {
+                        self.events.publish(
+                            "item.created",
+                            Some(*thread_id),
+                            Some(active_turn.id),
+                            Some(item.id),
+                            json!(item),
+                        );
+                    }
+                }
+            }
             let message = stopped_turn_message(reason);
             if let Ok(item) = self
                 .repository
@@ -9179,6 +9325,34 @@ impl RunnerTask {
             .await;
     }
 
+    /// Notes that call `call_id` of this turn has begun, or (`started` false)
+    /// that it was just made and has not; see `ActiveTurn::started_calls`.
+    fn note_call_start(&self, call_id: &str, started: bool) {
+        let Some(active) = self
+            .active
+            .get(&self.thread.id)
+            .filter(|entry| entry.id == self.turn.id)
+        else {
+            return;
+        };
+        let mut calls = active.started_calls.lock();
+        if started {
+            calls.insert(call_id.to_owned());
+        } else {
+            calls.remove(call_id);
+        }
+    }
+
+    /// Whether call `call_id` of this turn has begun since it was made. Once
+    /// the turn is no longer the thread's active one nothing says it has
+    /// not, so it counts as begun.
+    fn call_began(&self, call_id: &str) -> bool {
+        self.active
+            .get(&self.thread.id)
+            .filter(|entry| entry.id == self.turn.id)
+            .is_none_or(|active| active.started_calls.lock().contains(call_id))
+    }
+
     async fn stop_acceptance(&self) {
         let active = self
             .active
@@ -10057,22 +10231,19 @@ impl RunnerTask {
                 {
                     lazy_settings.mode = haarness_protocol::LazyToolMode::Off;
                 }
-                let promoted = self
-                    .tool_promotions
-                    .get(&self.thread.id)
-                    .map_or_else(HashSet::new, |entry| entry.value().clone());
                 let context_window = provider_models
                     .iter()
                     .find(|candidate| candidate.id == model)
                     .and_then(|candidate| candidate.context_window);
-                let selection = select_tools(
-                    eligible_tools,
-                    &self.config.tool_availability,
-                    &self.tool_availability.read(),
-                    &lazy_settings,
-                    &promoted,
-                    context_window,
-                );
+                let selection = self
+                    .round_tools(
+                        eligible_tools,
+                        &lazy_settings,
+                        provider_id,
+                        &model,
+                        context_window,
+                    )
+                    .await?;
                 if selection.response.lazy_active {
                     system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
                 }
@@ -10626,7 +10797,7 @@ impl RunnerTask {
                                 name,
                                 output: reason.clone(),
                                 is_error: true,
-                                metadata: serde_json::Value::Null,
+                                metadata: crate::not_run_metadata(),
                             })
                             .await?;
                         }
@@ -10880,7 +11051,10 @@ impl RunnerTask {
                     }
                 }
                 for (index, (call_id, name, arguments)) in calls.iter().cloned().enumerate() {
+                    // After Stop no group starts: its calls go one by one,
+                    // each found not to have begun.
                     if !task_handles.contains_key(&index)
+                        && !self.cancel.is_cancelled()
                         && self
                             .tools
                             .get(&name)
@@ -10906,6 +11080,9 @@ impl RunnerTask {
                         }
                     }
                     let fingerprint_arguments = arguments.clone();
+                    // Stop came before this call began: it will not run.
+                    let stopped_first =
+                        !task_handles.contains_key(&index) && self.cancel.is_cancelled();
                     let result = if let Some(handle) = task_handles.remove(&index) {
                         match handle.await {
                             Ok(result) => result,
@@ -10953,8 +11130,16 @@ impl RunnerTask {
                             // why its child failed.
                             // A block by Auto's reviewer says so, so clients
                             // tell it from a person's reject.
+                            // A call Stop reached before it began did not
+                            // run, by the rule a shutdown follows: one
+                            // started apart (a delegation) or in a group too.
                             let metadata = match &error {
                                 CoreError::ReviewBlocked(review) => json!({ "review": review }),
+                                CoreError::Cancelled
+                                    if stopped_first || !self.call_began(&call_id) =>
+                                {
+                                    crate::not_run_metadata()
+                                }
                                 _ => serde_json::Value::Null,
                             };
                             self.publish_item(ItemData::ToolResult {
@@ -11039,6 +11224,10 @@ impl RunnerTask {
     }
 
     async fn publish_item(&self, data: ItemData) -> CoreResult<Item> {
+        // A call made again under an id it used before has not begun yet.
+        if let ItemData::ToolCall { call_id, .. } = &data {
+            self.note_call_start(call_id, false);
+        }
         let item = self
             .repository
             .append_item(self.thread.id, Some(self.turn.id), data)
@@ -11526,17 +11715,65 @@ impl RunnerTask {
         ))
     }
 
+    /// This round's tools, from the chat's tool state (read back from its
+    /// history when this process has none), keeping Auto's choice to defer
+    /// tools for the chat's model while the person keeps that mode and model.
+    async fn round_tools(
+        &self,
+        eligible: Vec<crate::ToolDefinition>,
+        settings: &crate::LazyToolSettings,
+        provider: &str,
+        model: &str,
+        context_window: Option<u64>,
+    ) -> CoreResult<crate::tool_catalog::ToolSelection> {
+        if !self.tool_promotions.contains_key(&self.thread.id) {
+            let rebuilt = ChatTools::from_history(
+                self.repository.as_ref(),
+                self.thread.id,
+                &self.tools.list(),
+                provider,
+                model,
+            )
+            .await?;
+            self.tool_promotions
+                .entry(self.thread.id)
+                .or_insert(rebuilt);
+        }
+        let (promoted, deferring) = self
+            .tool_promotions
+            .get(&self.thread.id)
+            .map(|tools| (tools.promoted.clone(), tools.defers(provider, model)))
+            .unwrap_or_default();
+        let selection = select_tools(
+            eligible,
+            &self.config.tool_availability,
+            &self.tool_availability.read(),
+            settings,
+            &promoted,
+            context_window,
+            deferring,
+        );
+        self.tool_promotions
+            .entry(self.thread.id)
+            .or_default()
+            .deferring = (settings.mode == haarness_protocol::LazyToolMode::Auto
+            && selection.response.lazy_active)
+            .then(|| (provider.to_owned(), model.to_owned()));
+        Ok(selection)
+    }
+
     fn promote_tools(&self, names: impl IntoIterator<Item = String>) -> Vec<String> {
-        let mut promoted = self.tool_promotions.entry(self.thread.id).or_default();
+        let mut tools = self.tool_promotions.entry(self.thread.id).or_default();
+        let promoted = &mut tools.promoted;
         let mut accepted = Vec::new();
         for name in names {
             if promoted.contains(&name) {
                 accepted.push(name);
                 continue;
             }
-            let capacity_reached = promoted.len() >= MAX_PROMOTED_TOOLS;
-            if capacity_reached {
-                break;
+            // A tool already loaded is still accepted once the chat is full.
+            if promoted.len() >= MAX_PROMOTED_TOOLS {
+                continue;
             }
             promoted.insert(name.clone());
             accepted.push(name);
@@ -11587,8 +11824,13 @@ impl RunnerTask {
             ));
         }
         let matched = search_deferred_tools(&definitions, &catalog, &queries);
-        let loaded = self.promote_tools(matched);
-        let value = load_tool_result(&loaded, &catalog);
+        let loaded = self.promote_tools(matched.clone());
+        let full = matched
+            .into_iter()
+            .filter(|id| !loaded.contains(id))
+            .collect::<Vec<_>>();
+        let already = already_available(&definitions, &catalog, &queries);
+        let value = load_tool_result(&loaded, &already, &full, &catalog);
         Ok(ToolOutput {
             text: serde_json::to_string_pretty(&value)
                 .map_err(|error| CoreError::Tool(error.to_string()))?,
@@ -11654,6 +11896,9 @@ impl RunnerTask {
                 "tool {name} is disabled for this workflow agent turn"
             )));
         }
+        // The call begins here: its tool joins the chat's list, and a
+        // shutdown it outlives says it ran.
+        self.note_call_start(call_id, true);
         if !is_essential_tool(name) {
             let _ = self.promote_tools([name.to_owned()]);
         }
@@ -13154,6 +13399,7 @@ impl RunnerTask {
             stop_reason: Mutex::new(None),
             answer_steer: AtomicBool::new(false),
             agent: definition.clone(),
+            started_calls: Mutex::new(HashSet::new()),
         });
         self.active.insert(child.id, active.clone());
         let mut accepting = active.accepting.lock().await;
@@ -14472,7 +14718,16 @@ fn provider_messages_with_origins(
     // wrote there (not a steer they queued) opens a group of its own, as its
     // turn did in the parent.
     let mut group = None;
-    for item in provider_visible_items(&items) {
+    let visible = provider_visible_items(&items);
+    let pairs = crate::pair_tool_calls(visible.iter().map(|item| &item.data));
+    let abandoned = abandoned_calls(&visible, &pairs.calls);
+    // A second result for one call (a stopped turn's own, written after the
+    // one its shutdown gave it) would be a duplicate providers refuse.
+    let stray = pairs.stray.into_iter().collect::<HashSet<_>>();
+    // Results owed to abandoned calls of the batch being read, sent once its
+    // calls and results end.
+    let mut owed = Vec::<(ProviderMessage, crate::image_budget::Origin)>::new();
+    for (index, item) in visible.into_iter().enumerate() {
         let item_id = item.id;
         if item.turn_id.is_none()
             && matches!(
@@ -14596,6 +14851,18 @@ fn provider_messages_with_origins(
                 provider_metadata,
             } if !call_id.trim().is_empty() && !name.trim().is_empty() => {
                 valid_calls.insert(call_id.clone(), name.clone());
+                if abandoned.contains(&index) {
+                    owed.push((
+                        ProviderMessage::ToolResult {
+                            call_id: call_id.clone(),
+                            name: name.clone(),
+                            output: crate::UNFINISHED_CALL_RESULT.into(),
+                            is_error: true,
+                            attachments: Vec::new(),
+                        },
+                        origin,
+                    ));
+                }
                 Some(ProviderMessage::ToolCall {
                     call_id,
                     name,
@@ -14609,7 +14876,7 @@ fn provider_messages_with_origins(
                 is_error,
                 metadata,
                 ..
-            } => valid_calls.get(&call_id).cloned().map(|name| {
+            } if !stray.contains(&index) => valid_calls.get(&call_id).cloned().map(|name| {
                 // A tool's image is a file it saw; one deleted since is named
                 // instead of failing every later request.
                 let (output, attachments) = crate::attachments::for_model(
@@ -14635,9 +14902,22 @@ fn provider_messages_with_origins(
             _ => None,
         };
         if let Some(message) = message {
+            if !matches!(
+                message,
+                ProviderMessage::ToolCall { .. } | ProviderMessage::ToolResult { .. }
+            ) {
+                for (owed, origin) in owed.drain(..) {
+                    messages.push(owed);
+                    origins.push(origin);
+                }
+            }
             messages.push(message);
             origins.push(origin);
         }
+    }
+    for (owed, origin) in owed {
+        messages.push(owed);
+        origins.push(origin);
     }
     for item_id in deferred_order {
         if let Some((message, origin)) = deferred_queued.remove(&item_id) {
@@ -14646,6 +14926,33 @@ fn provider_messages_with_origins(
         }
     }
     (messages, origins)
+}
+
+/// Positions of the calls in `items` that will never get a result: none
+/// answers them, and a later turn has begun since, or the person wrote in the
+/// fork they were copied into. Haarness stopped while they ran (a crash, or
+/// a turn that outlived its shutdown), or an older fork copied them while
+/// they waited. A running turn's calls are left as they are, a steer queued
+/// while they run included.
+fn abandoned_calls(items: &[&Item], unanswered: &[usize]) -> HashSet<usize> {
+    unanswered
+        .iter()
+        .copied()
+        .filter(|&call| {
+            items[call + 1..].iter().any(|later| match later.data {
+                // A turn opens with a message that is not a steer.
+                ItemData::UserMessage {
+                    queued: false,
+                    synthetic,
+                    ..
+                } => match later.turn_id {
+                    Some(turn) => Some(turn) != items[call].turn_id,
+                    None => !synthetic,
+                },
+                _ => false,
+            })
+        })
+        .collect()
 }
 
 /// Every attachment a provider refused earlier in the thread.
@@ -18593,6 +18900,202 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(texts, ["read the file", "Done.", "thanks"]);
         assert_eq!(messages.len(), 5, "the tool call and its result stay");
+    }
+
+    fn in_turn(sequence: u64, turn: Option<TurnId>, data: ItemData) -> Item {
+        Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        }
+    }
+
+    fn person(text: &str, queued: bool) -> ItemData {
+        ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued,
+            synthetic: false,
+            command_line: None,
+        }
+    }
+
+    fn sleep_call(call_id: &str) -> ItemData {
+        ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            arguments: json!({"command": "sleep 120"}),
+            provider_metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn slept(call_id: &str) -> ItemData {
+        ItemData::ToolResult {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            output: "slept".into(),
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    /// Each message as one line: `user: …`, `call id`, `result id: …`.
+    fn outline(messages: &[ProviderMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|message| match message {
+                ProviderMessage::Text { role, content } => format!("{role}: {content}"),
+                ProviderMessage::ToolCall { call_id, .. } => format!("call {call_id}"),
+                ProviderMessage::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                    ..
+                } => format!(
+                    "result {call_id}{}: {output}",
+                    if *is_error { " (error)" } else { "" }
+                ),
+                media @ ProviderMessage::Media { .. } => format!("{media:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_call_a_stopped_turn_left_without_a_result_ends_before_the_next_turn() {
+        let (stopped, next) = (Some(TurnId::new()), Some(TurnId::new()));
+        let unfinished = format!("result b (error): {}", crate::UNFINISHED_CALL_RESULT);
+        let messages = provider_messages(vec![
+            in_turn(1, stopped, person("run both", false)),
+            in_turn(2, stopped, sleep_call("a")),
+            in_turn(3, stopped, sleep_call("b")),
+            in_turn(4, stopped, slept("a")),
+            // What recovery records: no result, only the turn's notice.
+            in_turn(
+                5,
+                stopped,
+                ItemData::Error {
+                    message: "restarted".into(),
+                    retryable: true,
+                },
+            ),
+            in_turn(6, next, person("and now?", false)),
+        ]);
+        assert_eq!(
+            outline(&messages),
+            [
+                "user: run both",
+                "call a",
+                "call b",
+                "result a: slept",
+                unfinished.as_str(),
+                "user: and now?",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_copied_into_a_fork_without_its_result_ends_before_the_next_message() {
+        // A fork made before forks left such calls out: its items carry no
+        // turn, and the person's messages there are its turns.
+        let unfinished = format!("result call-1 (error): {}", crate::UNFINISHED_CALL_RESULT);
+        let messages = provider_messages(vec![
+            item(1, person("sleep a while", false)),
+            item(2, sleep_call("call-1")),
+            item(3, person("hi", false)),
+        ]);
+        assert_eq!(
+            outline(&messages),
+            [
+                "user: sleep a while",
+                "call call-1",
+                unfinished.as_str(),
+                "user: hi"
+            ]
+        );
+        // The fork's own next turn ends it the same way.
+        let messages = provider_messages(vec![
+            item(1, person("sleep a while", false)),
+            item(2, sleep_call("call-1")),
+            in_turn(3, Some(TurnId::new()), person("hi", false)),
+        ]);
+        assert_eq!(outline(&messages)[2], unfinished);
+    }
+
+    #[test]
+    fn a_second_result_for_one_call_is_not_sent() {
+        let (stopped, next) = (Some(TurnId::new()), Some(TurnId::new()));
+        let messages = provider_messages(vec![
+            in_turn(1, stopped, person("run it", false)),
+            in_turn(2, stopped, sleep_call("a")),
+            // The shutdown's result, then the stopped turn's own.
+            in_turn(
+                3,
+                stopped,
+                ItemData::ToolResult {
+                    call_id: "a".into(),
+                    name: "bash".into(),
+                    output: crate::UNFINISHED_CALL_RESULT.into(),
+                    is_error: true,
+                    metadata: json!({"unfinished": true}),
+                },
+            ),
+            in_turn(4, stopped, slept("a")),
+            in_turn(5, next, person("and now?", false)),
+        ]);
+        let unfinished = format!("result a (error): {}", crate::UNFINISHED_CALL_RESULT);
+        assert_eq!(
+            outline(&messages),
+            [
+                "user: run it",
+                "call a",
+                unfinished.as_str(),
+                "user: and now?"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_running_turn_keeps_its_calls_as_they_are() {
+        let (earlier, live) = (Some(TurnId::new()), Some(TurnId::new()));
+        let items = vec![
+            in_turn(1, earlier, person("first", false)),
+            in_turn(2, earlier, sleep_call("call-1")),
+            in_turn(3, earlier, slept("call-1")),
+            in_turn(4, live, person("second", false)),
+            // Same id as the earlier turn's call, still running, with a
+            // steer queued while it runs.
+            in_turn(5, live, sleep_call("call-1")),
+            in_turn(6, live, person("also check the logs", true)),
+            // Recovery of an earlier turn's background task can write in
+            // the chat while this one runs.
+            in_turn(
+                7,
+                earlier,
+                ItemData::UserMessage {
+                    text: "background result".into(),
+                    attachments: Vec::new(),
+                    queued: true,
+                    synthetic: true,
+                    command_line: None,
+                },
+            ),
+        ];
+        let messages = provider_messages(items);
+        assert_eq!(
+            outline(&messages)[..5],
+            [
+                "user: first",
+                "call call-1",
+                "result call-1: slept",
+                "user: second",
+                "call call-1",
+            ]
+        );
+        assert!(
+            !outline(&messages)
+                .iter()
+                .any(|line| line.contains(crate::UNFINISHED_CALL_RESULT)),
+            "{messages:?}"
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ import {
   toolWords,
   resultText,
   exitStatus,
+  unfinishedCall,
 } from "../src/renderer/transcript";
 import { lines } from "../src/renderer/diff";
 import { applyLanguage } from "../src/renderer/i18n";
@@ -337,6 +338,14 @@ test("a result reads without the engine's category, the system's error number or
   assert.equal(exitStatus("bash", { output: "", is_error: false, metadata: { exit: 0 } }), undefined);
   assert.equal(exitStatus("read", { output: "", is_error: false, metadata: { exit: 3 } }), undefined);
   assert.equal(exitStatus("bash", undefined), undefined);
+});
+
+test("a call a restart cut off is told from a failure by its result's marker", () => {
+  const output = "This call did not finish, so there is no result. It may have done part of its work before it stopped.";
+  assert.equal(unfinishedCall({ output, is_error: true, metadata: { unfinished: true } }), true);
+  assert.equal(unfinishedCall({ output, is_error: true }), false);
+  assert.equal(unfinishedCall({ output: "boom", is_error: true, metadata: { unfinished: "yes" } }), false);
+  assert.equal(unfinishedCall(undefined), false);
 });
 
 test("the target is the one argument a reader scans for", () => {

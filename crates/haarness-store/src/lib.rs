@@ -8,7 +8,11 @@ mod snapshots;
 mod workflows;
 pub use snapshots::{PruneReport, SqliteSnapshotFolders, SqliteSnapshotStore};
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -96,6 +100,39 @@ impl SqliteStore {
             )
             .map_err(storage)?;
         Ok(upgraded == 1)
+    }
+
+    /// The calls of one turn that no result answers, as `(call id, name)`.
+    fn unanswered_turn_calls(
+        tx: &rusqlite::Transaction<'_>,
+        thread: &str,
+        turn: &str,
+    ) -> CoreResult<Vec<(String, String)>> {
+        let mut statement = tx
+            .prepare(
+                "SELECT data_json FROM items
+                 WHERE thread_id=?1 AND turn_id=?2 AND deleted=0 ORDER BY sequence",
+            )
+            .map_err(storage)?;
+        let mut items = Vec::new();
+        for row in statement
+            .query_map(params![thread, turn], |row| row.get::<_, String>(0))
+            .map_err(storage)?
+        {
+            // An item this version cannot read is no call or result of its
+            // own, and must not keep the server from starting.
+            if let Ok(data) = serde_json::from_str::<ItemData>(&row.map_err(storage)?) {
+                items.push(data);
+            }
+        }
+        Ok(haarness_core::pair_tool_calls(&items)
+            .calls
+            .into_iter()
+            .filter_map(|index| match &items[index] {
+                ItemData::ToolCall { call_id, name, .. } => Some((call_id.clone(), name.clone())),
+                _ => None,
+            })
+            .collect())
     }
 
     /// Reconcile parent-side task checkpoints with terminal child turns.
@@ -1329,8 +1366,20 @@ impl ThreadRepository for SqliteStore {
             let mut copied = Vec::new();
             for row in rows {
                 let (old_id, sequence, data_json, created_at) = row.map_err(storage)?;
-                copied.push((item_id(&old_id)?, sequence, data_json, created_at));
+                let data: ItemData = serde_json::from_str(&data_json).map_err(storage)?;
+                copied.push((item_id(&old_id)?, sequence, data, created_at));
             }
+            // A call whose result is not in the copied range (it was waiting
+            // or running, or a steer it ran through is the boundary) would
+            // never get one in the fork, and providers refuse a call without
+            // its result: it is left out with what was recorded for it.
+            let unanswered =
+                haarness_core::pair_tool_calls(copied.iter().map(|(_, _, data, _)| data));
+            let left_out = unanswered
+                .calls
+                .into_iter()
+                .chain(unanswered.records)
+                .collect::<HashSet<_>>();
             let id_map = copied
                 .iter()
                 .map(|(old_id, ..)| (*old_id, ItemId::new()))
@@ -1340,8 +1389,11 @@ impl ThreadRepository for SqliteStore {
                 sequence: 0,
                 item_id: None,
             };
-            for (old_id, sequence, data_json, created_at) in copied {
-                let mut data: ItemData = serde_json::from_str(&data_json).map_err(storage)?;
+            for (index, (old_id, sequence, mut data, created_at)) in copied.into_iter().enumerate()
+            {
+                if left_out.contains(&index) {
+                    continue;
+                }
                 // The fork runs none of its source's commands: a checkpoint
                 // of one still running is left out (the copied call's result
                 // still names the command), an ended one is kept.
@@ -1696,24 +1748,41 @@ impl ThreadRepository for SqliteStore {
                     "orphaned turn {turn_id} changed during recovery"
                 )));
             }
-            let data = ItemData::Error {
+            // The calls the restart cut off end here, so the chat's history
+            // holds a result for each of them and its next turn is taken.
+            // Only the first one open counts as begun. That holds for calls
+            // that run in order, but reads (and delegations) run together,
+            // and a crash leaves no record of which of those began: one
+            // after the first is marked as not run even if it began, so a
+            // rebuild of the chat's loads may leave its tool out, and the
+            // next request's tool list changes once.
+            let mut ended = Self::unanswered_turn_calls(&tx, raw_thread_id, raw_turn_id)?
+                .into_iter()
+                .enumerate()
+                .map(|(position, (call_id, name))| {
+                    haarness_core::unfinished_call_result(&call_id, &name, position == 0)
+                })
+                .collect::<Vec<_>>();
+            ended.push(ItemData::Error {
                 message: RECOVERED_TURN_MESSAGE.into(),
                 retryable: true,
-            };
-            let sequence = Self::next_sequence(&tx, thread_id)?;
-            tx.execute(
-                "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at)
-                 VALUES(?1,?2,?3,?4,?5,?6)",
-                params![
-                    ItemId::new().to_string(),
-                    raw_thread_id,
-                    raw_turn_id,
-                    i64::try_from(sequence).map_err(storage)?,
-                    serde_json::to_string(&data).map_err(storage)?,
-                    updated_at,
-                ],
-            )
-            .map_err(storage)?;
+            });
+            for data in ended {
+                let sequence = Self::next_sequence(&tx, thread_id)?;
+                tx.execute(
+                    "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at)
+                     VALUES(?1,?2,?3,?4,?5,?6)",
+                    params![
+                        ItemId::new().to_string(),
+                        raw_thread_id,
+                        raw_turn_id,
+                        i64::try_from(sequence).map_err(storage)?,
+                        serde_json::to_string(&data).map_err(storage)?,
+                        updated_at,
+                    ],
+                )
+                .map_err(storage)?;
+            }
             tx.execute(
                 "UPDATE threads SET updated_at=?2 WHERE id=?1",
                 params![raw_thread_id, updated_at],
@@ -3316,6 +3385,148 @@ mod tests {
         assert_eq!(store.list_items(partial.id, None).await.unwrap().len(), 1);
     }
 
+    fn bash_call(call_id: &str) -> ItemData {
+        ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "sleep 120"}),
+            provider_metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn bash_result(call_id: &str) -> ItemData {
+        ItemData::ToolResult {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            output: "slept".into(),
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn calls_and_results(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::ToolCall { call_id, .. } => Some(format!("call {call_id}")),
+                ItemData::ToolResult { call_id, .. } => Some(format!("result {call_id}")),
+                ItemData::TaskLink { call_id, .. } => Some(format!("link {call_id}")),
+                ItemData::TaskState { call_id, .. } => Some(format!("task {call_id}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_fork_leaves_out_a_call_still_waiting_or_running() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let turn = command_turn(&store, thread.id).await;
+        let child = ThreadId::new();
+        for data in [
+            bash_call("done"),
+            bash_result("done"),
+            ItemData::AssistantMessage {
+                text: "Now the slow part.".into(),
+            },
+            // Waits for its approval, and a subagent runs alongside it.
+            bash_call("waiting"),
+            ItemData::ToolCall {
+                call_id: "agent".into(),
+                name: "task".into(),
+                arguments: serde_json::json!({"prompt": "look around"}),
+                provider_metadata: serde_json::Value::Null,
+            },
+            ItemData::TaskLink {
+                call_id: "agent".into(),
+                child_thread_id: child,
+            },
+            ItemData::TaskState {
+                call_id: "agent".into(),
+                child_thread_id: child,
+                child_turn_id: TurnId::new(),
+                state: "running".into(),
+            },
+        ] {
+            store
+                .append_item(thread.id, Some(turn), data)
+                .await
+                .unwrap();
+        }
+
+        let fork = store.fork_thread(thread.id, None, None).await.unwrap();
+        let copied = store.list_items(fork.id, None).await.unwrap();
+        assert_eq!(calls_and_results(&copied), ["call done", "result done"]);
+        assert!(copied.iter().any(|item| matches!(
+            &item.data,
+            ItemData::AssistantMessage { text } if text == "Now the slow part."
+        )));
+        let source = store.list_items(thread.id, None).await.unwrap();
+        assert_eq!(
+            calls_and_results(&source).len(),
+            6,
+            "the source keeps its calls"
+        );
+        assert_eq!(
+            fork.fork_origin.as_ref().map(|origin| origin.sequence),
+            copied.last().map(|item| item.sequence),
+            "the fork starts after the last item it copied"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fork_before_a_steer_leaves_out_the_call_the_steer_came_during() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let turn = command_turn(&store, thread.id).await;
+        store
+            .append_item(thread.id, Some(turn), bash_call("slow"))
+            .await
+            .unwrap();
+        let steer = store
+            .append_item(
+                thread.id,
+                Some(turn),
+                ItemData::UserMessage {
+                    text: "also check the logs".into(),
+                    attachments: Vec::new(),
+                    queued: true,
+                    synthetic: false,
+                    command_line: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append_item(thread.id, Some(turn), bash_result("slow"))
+            .await
+            .unwrap();
+
+        let fork = store
+            .fork_thread(thread.id, None, Some(steer.sequence - 1))
+            .await
+            .unwrap();
+        let copied = store.list_items(fork.id, None).await.unwrap();
+        assert!(calls_and_results(&copied).is_empty(), "{copied:?}");
+        assert!(
+            copied
+                .iter()
+                .any(|item| matches!(item.data, ItemData::UserMessage { queued: false, .. })),
+            "the turn's prompt is copied"
+        );
+        let whole = store.fork_thread(thread.id, None, None).await.unwrap();
+        assert_eq!(
+            calls_and_results(&store.list_items(whole.id, None).await.unwrap()),
+            ["call slow", "result slow"]
+        );
+    }
+
     #[tokio::test]
     async fn fork_remaps_queue_consumed_item_references() {
         let store = SqliteStore::in_memory().unwrap();
@@ -3987,6 +4198,71 @@ mod tests {
                 .count(),
             1,
             "recovery is idempotent and never duplicates its transcript notice"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_ends_the_calls_a_restart_cut_off() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let earlier = command_turn(&store, thread.id).await;
+        store
+            .set_turn_status(earlier, TurnStatus::Completed, None)
+            .await
+            .unwrap();
+        // An earlier turn's call, answered there, with the same id.
+        for data in [bash_call("call-1"), bash_result("call-1")] {
+            store
+                .append_item(thread.id, Some(earlier), data)
+                .await
+                .unwrap();
+        }
+        let turn = command_turn(&store, thread.id).await;
+        for data in [
+            bash_call("call-0"),
+            bash_result("call-0"),
+            bash_call("call-1"),
+            bash_call("call-2"),
+        ] {
+            store
+                .append_item(thread.id, Some(turn), data)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(store.recover_interrupted().await.unwrap(), 1);
+        let items = store.list_items(thread.id, None).await.unwrap();
+        let ended = items
+            .iter()
+            .skip_while(|item| !matches!(&item.data, ItemData::ToolCall { call_id, .. } if call_id == "call-2"))
+            .skip(1)
+            .map(|item| (item.turn_id, item.data.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(ended.len(), 3, "{ended:?}");
+        // call-1 was running; call-2, after it, had not started.
+        for ((turn_id, data), (expected, ran)) in
+            ended.iter().zip([("call-1", true), ("call-2", false)])
+        {
+            assert_eq!(*turn_id, Some(turn));
+            assert!(
+                matches!(data, ItemData::ToolResult { call_id, name, output, is_error: true, metadata }
+                    if call_id == expected && name == "bash" && output == haarness_core::UNFINISHED_CALL_RESULT
+                        && metadata["unfinished"] == true
+                        && haarness_core::not_run(metadata) != ran),
+                "{data:?}"
+            );
+        }
+        assert!(matches!(
+            &ended[2].1,
+            ItemData::Error { message, .. } if message == RECOVERED_TURN_MESSAGE
+        ));
+        assert!(
+            haarness_core::pair_tool_calls(items.iter().map(|item| &item.data))
+                .calls
+                .is_empty()
         );
     }
 

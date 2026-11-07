@@ -13,7 +13,7 @@ use haarness_protocol::{FileDiff, FileDiffStatus, Item, ItemData, ItemId};
 
 use crate::diff::{render_added, render_diff};
 use crate::markdown::render_markdown;
-use crate::state::{App, ChildTask};
+use crate::state::{App, ChildTask, unfinished};
 use crate::theme::Theme;
 use crate::view::frame::{HitTarget, TaggedLines};
 use crate::view::span::{line, single_line, spinner, task_state_style, wrap_spans};
@@ -344,10 +344,12 @@ fn batch_failures(name: &str, result: Option<&Item>, steps: &[BatchStep]) -> usi
 }
 
 /// The line under a delegation row: `↳` what the child is doing while it
-/// runs, `└` what it did once it stopped. The status line already says how
-/// to open child views, so the row does not repeat it.
+/// runs, `└` what it did once it stopped (`cut_off`: Haarness stopped its
+/// call before it finished). The status line already says how to open child
+/// views, so the row does not repeat it.
 fn delegation_detail_line(
     task: &ChildTask,
+    cut_off: bool,
     theme: &Theme,
     language: crate::locale::Language,
 ) -> Line {
@@ -385,6 +387,7 @@ fn delegation_detail_line(
         let (ended, tone) = match task.state.as_str() {
             "done" => (None, theme.muted),
             "failed" => (Some(language.text("failed")), theme.danger),
+            _ if cut_off => (Some(language.text("didn't finish")), theme.muted),
             _ => (Some(language.text("cancelled")), theme.muted),
         };
         let parts = ended
@@ -1184,6 +1187,7 @@ fn render_tool_result(
             || (*is_error
                 && (rejected_by_user(output)
                     || output.trim() == "operation cancelled"
+                    || unfinished(metadata)
                     || review_block(metadata).is_some())))
         && paired_call(app, item, call_id).is_some()
     {
@@ -2038,6 +2042,13 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     {
                         Some("stopped")
                     }
+                    // Haarness stopped before the call finished: quiet, as
+                    // the turn's own notice below says why.
+                    ItemData::ToolResult {
+                        is_error: true,
+                        metadata,
+                        ..
+                    } if unfinished(metadata) => Some("unfinished"),
                     ItemData::ToolResult {
                         output, is_error, ..
                     } => Some(if *is_error && output.trim() == "operation cancelled" {
@@ -2072,7 +2083,13 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     match state {
                         "done" => Some("done"),
                         "failed" => Some("failed"),
-                        "cancelled" | "interrupted" => Some("cancelled"),
+                        // Haarness stopped the call before it finished: the
+                        // row says so as any call's does. Only Haarness
+                        // leaves a child interrupted (a restart, say), one in
+                        // the background too.
+                        "cancelled" if result_status == Some("unfinished") => Some("unfinished"),
+                        "interrupted" => Some("unfinished"),
+                        "cancelled" => Some("cancelled"),
                         _ => None,
                     }
                 } else {
@@ -2131,7 +2148,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         None if queued => "  ○ ".into(),
                         None => format!("  {} ", spinner(app.tick)),
                         Some("failed") => "  ✗ ".into(),
-                        Some("cancelled" | "rejected" | "blocked" | "stopped") => "  ⊘ ".into(),
+                        Some("cancelled" | "rejected" | "blocked" | "stopped" | "unfinished") => {
+                            "  ⊘ ".into()
+                        }
                         Some(_) => "  ● ".into(),
                     },
                     |state| format!("  {} ", task_state_style(state, app.tick, theme).0),
@@ -2151,6 +2170,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     Some(state @ ("cancelled" | "rejected" | "stopped")) => {
                         format!("  {}", app.language.text(state))
                     }
+                    Some("unfinished") => format!("  {}", app.language.text("didn't finish")),
                     Some("blocked") => {
                         let lead = app.language.text("Stopped by Auto's reviewer");
                         let reason = blocked
@@ -2357,7 +2377,12 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 {
                     block.push_tagged(row, HitTarget::TaskOpen(call_id.clone()));
                     block.push_tagged(
-                        delegation_detail_line(task, theme, app.language),
+                        delegation_detail_line(
+                            task,
+                            status == Some("unfinished"),
+                            theme,
+                            app.language,
+                        ),
                         HitTarget::TaskOpen(call_id.clone()),
                     );
                 } else if name == "workflow"
@@ -2579,7 +2604,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     ]);
                     block.push_tagged(child_row, HitTarget::TaskOpen(child_call_id.clone()));
                     block.push_tagged(
-                        delegation_detail_line(task, theme, app.language),
+                        delegation_detail_line(task, false, theme, app.language),
                         HitTarget::TaskOpen(child_call_id.clone()),
                     );
                 }

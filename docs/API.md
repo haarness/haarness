@@ -150,7 +150,11 @@ The API retains `{title?, beforeItemId?}` for older integrations that use an
 exclusive user-message boundary; clients may send both boundary fields only
 when the sequence is immediately before the named message. Forking is one
 SQLite transaction: copied items receive new IDs and internal
-`QueueConsumed.itemId` references are remapped to those IDs.
+`QueueConsumed.itemId` references are remapped to those IDs. A tool call whose
+result is not among the copied items (it was waiting for approval or still
+running, or a steer sent while it ran is the boundary) is left out, with its
+`task_link`, `task_state` and `command_state` items: nothing would ever give the
+fork's copy a result, and providers refuse a call without one.
 New forks also persist optional `forkOrigin: {title, sequence, itemId}` on the
 thread in that transaction. `parentId` identifies the immediate source;
 `title` is its title at fork time, `sequence` is the last item actually copied,
@@ -500,9 +504,27 @@ The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.
 Startup recovery marks orphaned queued/running turns interrupted and appends a
 retryable transcript notice while preserving prior items; provider streams and
-side-effecting tools are never replayed speculatively. Active goals recover as
-paused with `awaitingUserInput=true`, so elapsed indicators cannot claim a
-stale execution is still pursuing after process death.
+side-effecting tools are never replayed speculatively. Each call such a turn
+left without a result gets an error `tool_result` first, saying it did not
+finish, with `metadata: {"unfinished": true}`; a turn that outlives a graceful
+shutdown's wait gets the same results before the shutdown marks it interrupted.
+Desktop and the TUI show such a call as one that did not finish, in a few words
+of their own, rather than its result's text, which is written for the model;
+the phone apps and Cloud web still show that text as a failed call. A request
+leaves out a second result for one call. A chat stored before then, or a fork
+made before forks left such calls out, can still hold one: once a later turn
+has begun after it (or, in a fork, a message the person wrote there), requests
+give it the same kind of result after the calls and results it was made with,
+so the provider takes the history. A running turn's calls, a steer queued
+meanwhile included, are left as they are. `"notRun": true` in a result's
+metadata says its call never began: a call of a round that broke off before its
+calls ran, one Stop reached first, or one still waiting its turn when a
+shutdown or crash cut the turn off. After a crash only the turn's first open
+call counts as begun, since recovery cannot tell which of several reads running
+together had. Rebuilding a chat's loaded tools after a restart or in a fork
+skips these calls. Active goals recover as paused with
+`awaitingUserInput=true`, so elapsed indicators cannot claim a stale execution
+is still pursuing after process death.
 
 Todo state is available through `GET /v1/threads/{id}/todos` and
 `todo.updated` (`{threadId,todos}`). The canonical tools are `todowrite`
