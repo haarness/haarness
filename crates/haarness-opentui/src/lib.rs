@@ -239,6 +239,8 @@ mod handles;
 pub use handles::keep_standard_handles_from_children;
 #[cfg(windows)]
 pub use handles::stdin_ready_now;
+mod machine;
+pub use machine::hardware_id;
 
 pub mod attr {
     pub const NONE: u32 = 0;
