@@ -413,6 +413,20 @@ fn parser_input(command: &str) -> (std::borrow::Cow<'_, str>, bool, Option<tree_
 /// read whole.
 const MAX_DELIMITER_PASSES: usize = 4;
 
+/// How a delimiter written against an operator is set apart from it: see
+/// [`separated_delimiters`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Apart {
+    /// The bytes from the first to the delimiter's end (the second) move one
+    /// byte left.
+    Left(usize, usize),
+    /// The operator at the first, as long as the second, moves one byte
+    /// right, into the blank after it.
+    Right(usize, usize),
+    /// The `;` here ends its line, and becomes a blank.
+    Blank(usize),
+}
+
 /// `text` with each here-document delimiter that is written against an
 /// operator (`cat <<EOF; rm -rf x`, `cat <<EOF>out.txt`, `cat <<EOF|sh`) set
 /// apart from it, whether every one could be, and the tree of the text
@@ -425,11 +439,16 @@ const MAX_DELIMITER_PASSES: usize = 4;
 /// before them (`cat<<EOF ; rm -rf x`), and that blank goes after it. The
 /// text keeps its length and every node's range is a range of the line as
 /// written, but for those of `<<` and the delimiter, one byte early; the
-/// delimiter's text is only read for its quotes, which stay in that range. A
-/// delimiter that has no blank to take, or whose `<<` would join the word
-/// before it (`2 <<EOF;` would read as a redirect of descriptor 2, `a=
-/// <<EOF;` as a value) or take it in (the parser reads `-s<<` and `-<<` as
-/// the operator), cannot move.
+/// delimiter's text is only read for its quotes, which stay in that range.
+/// When neither of those blanks can be taken, because there is none or `<<`
+/// would join the word before it (`2 <<EOF;` would read as a redirect of
+/// descriptor 2, `a= <<EOF;` as a value) or take it in (the parser reads
+/// `-s<<` and `-<<` as the operator), an operator `;`, `&`, `&&`, `|` or `||`
+/// with a blank after it moves one byte right instead, into that blank
+/// (`python3 - <<EOF ;ls`): the word after it keeps its place, and the
+/// ranges of the operator and of an error that starts with it are one byte
+/// late. A `;` that ends its line becomes a blank. Any other delimiter
+/// cannot move (`cat<<EOF>out.txt`).
 fn separated_delimiters(
     text: &str,
 ) -> (std::borrow::Cow<'_, str>, bool, Option<tree_sitter::Tree>) {
@@ -463,9 +482,18 @@ fn separated_delimiters(
             };
             return (text, moves.is_some(), Some(tree));
         }
-        for (from, end) in moves.unwrap_or_default() {
-            bytes.copy_within(from..end, from - 1);
-            bytes[end - 1] = b' ';
+        for apart in moves.unwrap_or_default() {
+            match apart {
+                Apart::Left(from, end) => {
+                    bytes.copy_within(from..end, from - 1);
+                    bytes[end - 1] = b' ';
+                }
+                Apart::Right(at, length) => {
+                    bytes.copy_within(at..at + length, at + 1);
+                    bytes[at] = b' ';
+                }
+                Apart::Blank(at) => bytes[at] = b' ',
+            }
         }
         changed = true;
     }
@@ -477,12 +505,11 @@ fn separated_delimiters(
     )
 }
 
-/// The delimiters a parse of `text` misreads, each as where the bytes that
-/// move start and where the shell ends the delimiter, or `None` when one of
-/// them cannot move (see [`separated_delimiters`]). After a misread one the
-/// parser takes each later `<<EOF;` on the line for that document's end
-/// (`cat <<EOF; cat <<EOF;`): those are delimiters too.
-fn misread_delimiters(tree: &tree_sitter::Tree, text: &str) -> Option<Vec<(usize, usize)>> {
+/// The delimiters a parse of `text` misreads, each as how it is set apart,
+/// or `None` when one of them cannot be (see [`separated_delimiters`]).
+/// After a misread one the parser takes each later `<<EOF;` on the line for
+/// that document's end (`cat <<EOF; cat <<EOF;`): those are delimiters too.
+fn misread_delimiters(tree: &tree_sitter::Tree, text: &str) -> Option<Vec<Apart>> {
     let mut moves = Vec::new();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
@@ -509,14 +536,16 @@ fn misread_delimiters(tree: &tree_sitter::Tree, text: &str) -> Option<Vec<(usize
                 return None;
             }
             let operator = operator?;
-            let from = delimiter_room(
+            let apart = delimiter_room(
                 text.as_bytes(),
                 operator.start_byte(),
                 operator.end_byte(),
                 start,
                 end,
-            )?;
-            moves.push((from, end));
+            )
+            .map(|from| Apart::Left(from, end))
+            .or_else(|| operator_room(text.as_bytes(), end))?;
+            moves.push(apart);
         }
         stack.extend(parts);
     }
@@ -639,6 +668,26 @@ fn delimiter_room(
         byte => byte.is_ascii_alphabetic() || byte >= 0x80 || b"_./-+,:@%'\"])".contains(&byte),
     };
     joins.then_some(operator)
+}
+
+/// How the operator right after a delimiter that ends at `end` makes room
+/// for a blank before it, when the delimiter cannot move: a `;`, `&`, `&&`,
+/// `|` or `||` with a blank after it moves into that blank, and a `;` that
+/// ends its line becomes a blank. `None` for any other operator, or none.
+fn operator_room(bytes: &[u8], end: usize) -> Option<Apart> {
+    let rest = bytes.get(end..)?;
+    let length = if rest.starts_with(b"&&") || rest.starts_with(b"||") {
+        2
+    } else if matches!(rest.first(), Some(b';' | b'&' | b'|')) {
+        1
+    } else {
+        return None;
+    };
+    match rest.get(length) {
+        Some(b' ' | b'\t') => Some(Apart::Right(end, length)),
+        Some(b'\n') if rest[0] == b';' => Some(Apart::Blank(end)),
+        _ => None,
+    }
 }
 
 /// A shell line with the backslash shapes tree-sitter-bash reads otherwise
@@ -1204,7 +1253,7 @@ impl Reader<'_> {
         let mut hidden_at = Vec::new();
         let mut consumed = HashSet::new();
         for error in &errors {
-            if !starts_with_operator(*error, command) {
+            if !starts_with_operator(*error) {
                 continue;
             }
             let rest = command.get(error.end_byte()..).unwrap_or_default();
@@ -4272,7 +4321,7 @@ fn command_words<'t>(
         // [`Reader::read`]).
         let unplaced = children(redirect)
             .into_iter()
-            .find(|part| part.kind() == "ERROR" && starts_with_operator(*part, source))
+            .find(|part| part.kind() == "ERROR" && starts_with_operator(*part))
             .map_or(0..0, |error| {
                 error.start_byte()..error.end_byte() + line_end(&source[error.end_byte()..])
             });
@@ -5267,11 +5316,20 @@ fn node_text(node: tree_sitter::Node, source: &str) -> String {
 
 /// Whether the parser's error `node` starts with an operator it could not
 /// place (`;`, `&`, `|`, `&&`, `||`): what follows it is another command.
-fn starts_with_operator(node: tree_sitter::Node<'_>, source: &str) -> bool {
-    let text = node_text(node, source);
-    ["|", "&&", "||", ";", "&"]
-        .iter()
-        .any(|operator| text.trim_start().starts_with(operator))
+/// Its first part tells, not the line's text there: an operator written
+/// against a delimiter is parsed one byte later than it is written (see
+/// [`separated_delimiters`]).
+fn starts_with_operator(node: tree_sitter::Node<'_>) -> bool {
+    let mut first = node.child(0);
+    while let Some(part) = first.filter(|part| part.kind() == "ERROR") {
+        first = part.child(0);
+    }
+    first.is_some_and(|first| {
+        !first.is_named()
+            && ["|", "&&", "||", ";", "&"]
+                .iter()
+                .any(|operator| first.kind().starts_with(operator))
+    })
 }
 
 /// How long the line `text` starts with is, as the shell reads it: to the
@@ -7700,6 +7758,9 @@ mod readings {
             "cat <<EOF;\\\nrm -rf ~/x\nb\nEOF",
             "cat <<EOF ;\\\n rm -rf ~/x\nb\nEOF",
             "cat <<EOF \\\n; rm -rf ~/x\nb\nEOF",
+            // The operator moves right, into the blank after it.
+            "cat<<EOF; rm -rf ~/x\nbody\nEOF",
+            "python3 - <<EOF; rm -rf ~/x\nprint(1)\nEOF",
         ] {
             let analysis = analyze(command, &workspace);
             assert!(
@@ -7741,18 +7802,72 @@ mod readings {
         // A redirect written against the delimiter writes where it says.
         let written = analyze("cat <<EOF>../outside/f\nbody\nEOF", &workspace);
         assert!(!written.external_dirs.is_empty(), "{written:?}");
-        // A delimiter with no blank to take, or whose `<<` would join the
-        // word before it or take it in, one the shell joins to the next line
-        // before it reads it, and what follows an operator that no command of
-        // the line opens are not read whole.
+        // A delimiter that cannot move left, against an operator with a
+        // blank after it, is read as the line with the blank before the
+        // operator: the operator moves right.
+        for (command, twin) in [
+            (
+                "cat<<EOF; rm -rf ~/x\nbody\nEOF",
+                "cat<<EOF ; rm -rf ~/x\nbody\nEOF",
+            ),
+            (
+                "cat 2 <<EOF; rm -rf ~/x\nbody\nEOF",
+                "cat 2 <<EOF ; rm -rf ~/x\nbody\nEOF",
+            ),
+            (
+                "cat {fd} <<EOF; rm -rf ~/x\nbody\nEOF",
+                "cat {fd} <<EOF ; rm -rf ~/x\nbody\nEOF",
+            ),
+            (
+                "git commit -F - <<EOF; git push --force\nmsg\nEOF",
+                "git commit -F - <<EOF ; git push --force\nmsg\nEOF",
+            ),
+            (
+                "python3 - <<EOF; ls\nprint(1)\nEOF",
+                "python3 - <<EOF ; ls\nprint(1)\nEOF",
+            ),
+            (
+                "kubectl apply -f - <<EOF; kubectl get pods\nkind: x\nEOF",
+                "kubectl apply -f - <<EOF ; kubectl get pods\nkind: x\nEOF",
+            ),
+            (
+                "psql -v ON_ERROR_STOP=1 <<SQL; echo ok\nselect 1;\nSQL",
+                "psql -v ON_ERROR_STOP=1 <<SQL ; echo ok\nselect 1;\nSQL",
+            ),
+            (
+                "mysql -uroot <<EOF& ls\nselect 1;\nEOF",
+                "mysql -uroot <<EOF & ls\nselect 1;\nEOF",
+            ),
+            (
+                "git clean -fdx <<EOF&& ls\nbody\nEOF",
+                "git clean -fdx <<EOF && ls\nbody\nEOF",
+            ),
+            ("cat<<EOF|| ls\nbody\nEOF", "cat<<EOF || ls\nbody\nEOF"),
+            (
+                "cat<<EOF| sh\nrm -rf ~/x\nEOF",
+                "cat<<EOF | sh\nrm -rf ~/x\nEOF",
+            ),
+            ("cat<<EOF;\nbody\nEOF", "cat<<EOF\nbody\nEOF"),
+        ] {
+            let (analysis, other) = (analyze(command, &workspace), analyze(twin, &workspace));
+            assert!(!analysis.unreadable, "{command}");
+            let spelled = |analysis: &BashAnalysis| -> Vec<String> {
+                analysis
+                    .patterns
+                    .iter()
+                    .map(|pattern| pattern.replace([' ', ';'], ""))
+                    .collect()
+            };
+            assert_eq!(spelled(&analysis), spelled(&other), "{command}");
+            assert_eq!(analysis.external_dirs, other.external_dirs, "{command}");
+            assert_eq!(analysis.always, other.always, "{command}");
+        }
+        // One with no blank to take on either side, one the shell joins to
+        // the next line before it reads it, and what follows an operator
+        // that no command of the line opens is not read whole.
         for command in [
-            "cat<<EOF; rm -rf ~/x\nbody\nEOF",
-            "cat 2 <<EOF; rm -rf ~/x\nbody\nEOF",
-            "cat {fd} <<EOF; rm -rf ~/x\nbody\nEOF",
-            "git commit -F - <<EOF; git push --force\nmsg\nEOF",
-            "python3 - <<EOF; rm -rf ~/x\nprint(1)\nEOF",
-            "mysql -uroot <<EOF; rm -rf ~/x\nselect 1;\nEOF",
-            "git clean -fdx <<EOF; true\nbody\nEOF",
+            "cat<<EOF;rm -rf ~/x\nbody\nEOF",
+            "cat<<EOF>out.txt\nbody\nEOF",
             "cat <<EOF\\\n; rm -rf ~/x\nb\nEOF",
             "cat <<EO\\\nF; rm -rf ~/x\nb\nEOF",
             "X=1 <<EOF; rm -rf ~/x\nbody\nEOF",

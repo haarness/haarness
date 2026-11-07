@@ -49,7 +49,8 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
 17. heredoc_line: what follows a here-document's delimiter on its line, written against it or not, or on
    the next line after a backslash, meets the rules (`cat <<EOF; rm -rf victim` against an `rm *` deny) as a
    command of the line, so an allowed `cat *` under `"*": "ask"` does not open `cat <<EOF ; touch x`; plain
-   lines of that shape run, and one whose delimiter cannot be set apart (`cat<<EOF; touch x`) asks.
+   lines of that shape run, `cat<<EOF; echo x` too, and one with no blank on either side of its operator
+   (`cat<<EOF;touch x`) asks.
 18. quoted_lines: a double-quoted script that `bash -c`, `sh -c` or `eval` runs keeps its line breaks, so an
    `rm *` deny refuses the `rm` on its own line of it.
 
@@ -651,13 +652,15 @@ def case_heredoc_line():
         assert 'body line' in output and 'after-the-operator' in output and 'Stopped' not in output, output
         bash(env, folder, 'cat <<EOF>out.txt\nwritten\nEOF', code=0)
         assert (folder / 'out.txt').read_text() == 'written\n'
-        output = bash(env, folder, 'cat<<EOF; touch made.txt\nbody\nEOF', code=1)
+        output = bash(env, folder, 'cat<<EOF; echo glued-after\nbody line\nEOF', code=0)
+        assert 'body line' in output and 'glued-after' in output and 'Stopped' not in output, output
+        output = bash(env, folder, 'cat<<EOF;touch made.txt\nbody\nEOF', code=1)
         assert 'Stopped:' in output, output
         assert not (folder / 'made.txt').exists(), 'a line whose delimiter could not be set apart ran unasked'
     finally:
         stop(env, folder)
-    passed('a here-document line with a command after its delimiter runs, a redirect against the delimiter '
-           'writes, and a delimiter with no blank on either side of its operator asks')
+    passed('a here-document line with a command after its delimiter runs, also with no blank before `<<`, a '
+           'redirect against the delimiter writes, and a delimiter with no blank on either side of its operator asks')
 
 
 

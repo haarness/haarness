@@ -199,6 +199,9 @@ CORPUS = [
     'bash -c \'cat <<EOF ; git push --force\nb\nEOF\'',
     # A backslash at the end of the operator's line, or of its delimiter
     'cat <<EOF;\\\nrm -rf victim\nbody\nEOF', 'cat <<EOF\\\n; rm -rf victim\nbody\nEOF',
+    # A delimiter that cannot move left, against an operator with a blank after it or not
+    'kubectl apply -f - <<EOF; kubectl get pods\nkind: x\nEOF', 'psql -v ON_ERROR_STOP=1 <<SQL; echo ok\nselect 1;\nSQL',
+    'cat<<EOF;ls\nbody\nEOF', 'cat<<EOF>out.txt\nbody\nEOF',
     # A double-quoted script over several lines
     'bash -c "true\nrm -rf victim"', 'bash -c "set -e\ncd src\nls"', 'git commit -m "fix: the thing\n\nBody line."',
     'eval "true\nrm -rf ~/x"', 'echo "a\nb" > notes.txt',
