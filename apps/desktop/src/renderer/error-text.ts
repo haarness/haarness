@@ -215,8 +215,10 @@ export function errorText(error: unknown, options: { relay?: boolean } = {}): Er
   const chosen = lines.get(text);
   if (chosen) return known(chosen);
   const { name, status: raw, code, body } = failure(error);
-  // A refusal the server named, said with its file in the reader's words.
-  const named = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  // A refusal the server named under `details`, as Cloud's errors carry
+  // their reasons too, said with its file in the reader's words.
+  const details = body && typeof body === "object" ? (body as { details?: unknown }).details : undefined;
+  const named = details && typeof details === "object" ? (details as Record<string, unknown>) : {};
   const reason = code === "refused" && typeof named.reason === "string" ? named.reason : "";
   if (Object.hasOwn(refusals, reason) && typeof named.path === "string")
     return { message: refusals[reason], values: { path: named.path }, known: true };

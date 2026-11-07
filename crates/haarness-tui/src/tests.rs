@@ -23758,8 +23758,7 @@ async fn a_redo_undo_has_no_copy_for_says_why_whole_in_the_persons_language() {
             "code": "refused",
             "message": english,
             "retryable": false,
-            "reason": "no_undo_copy",
-            "path": "assets/big.bin",
+            "details": {"reason": "no_undo_copy", "path": "assets/big.bin"},
         });
         let (client, server) =
             workspace_http_status_client(vec![(409, refusal.to_string())], false).await;
@@ -23794,6 +23793,24 @@ async fn a_redo_undo_has_no_copy_for_says_why_whole_in_the_persons_language() {
             assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
         }
     }
+
+    // Relayed inside `error`, as a gateway writes it, it reads the same.
+    let (mut app, _) = undo_fixture();
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+        ..Default::default()
+    });
+    let relayed = serde_json::json!({"error": {
+        "code": "refused",
+        "message": english,
+        "details": {"reason": "no_undo_copy", "path": "assets/big.bin"},
+    }});
+    let (client, _server) =
+        workspace_http_status_client(vec![(409, relayed.to_string())], false).await;
+    app.execute_command("/redo", &client).await.unwrap();
+    assert_eq!(app.notice, english);
 
     // A server that names no reason is said as before.
     let (mut app, _) = undo_fixture();

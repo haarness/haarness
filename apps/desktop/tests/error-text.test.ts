@@ -205,7 +205,8 @@ test("a refusal that conflicts with how things stand reads as one, and keeps its
 test("a redo Undo has no copy for says why in the reader's words, with its file, across the window", () => {
   const english = "assets/big.bin is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.";
   const key = "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.";
-  const body = { code: "refused", message: english, retryable: false, reason: "no_undo_copy", path: "assets/big.bin" };
+  const details = { reason: "no_undo_copy", path: "assets/big.bin" };
+  const body = { code: "refused", message: english, retryable: false, details };
   const refused = new ApiError(409, "refused", english, false, body);
   assert.deepEqual(errorText(refused), { message: key, values: { path: "assets/big.bin" }, known: true });
   // Main hands the window the sentence, which it reads back the same way.
@@ -220,7 +221,15 @@ test("a redo Undo has no copy for says why in the reader's words, with its file,
   assert.equal(failureMessage(reworded), english);
   // A refusal it has no words for, or a server that names no reason, says
   // the server's own sentence.
-  const unknown = new ApiError(409, "refused", "Something else entirely.", false, { ...body, reason: "other", message: "Something else entirely." });
+  const unknown = new ApiError(409, "refused", "Something else entirely.", false, {
+    ...body,
+    details: { ...details, reason: "other" },
+    message: "Something else entirely.",
+  });
   assert.deepEqual(errorText(unknown), { message: "Something else entirely.", known: false });
   assert.equal(failureMessage(unknown), "Something else entirely.");
+  // The reason is read under `details` only, where the server puts it.
+  const loose = { code: "refused", message: "Something else entirely.", retryable: false, ...details };
+  const top = new ApiError(409, "refused", "Something else entirely.", false, loose);
+  assert.equal(failureMessage(top), "Something else entirely.");
 });

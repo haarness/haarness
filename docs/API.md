@@ -541,10 +541,11 @@ step with `409 conflict` before anything changes; so does any change to a file
 a step left, deleting it or putting it back by hand included. Redo takes a file left so to where the last redo does, as it was
 before the undo, and names it until then. Redo refuses, before writing
 anything, only when a copy it needs is gone; its code is
-`refused` (409, not retryable), with `reason` `no_undo_copy` and the file's
-`path` beside the English `message`, so a client can say it in the person's
-language (Desktop and the terminal UI do), and a new message keeps the chat
-as it is now. The ignored and outside files that the
+`refused` (409, not retryable), with `details.reason` `no_undo_copy` and the
+file in `details.path` beside the English `message` (the `details` object
+Cloud's errors carry their reasons in), so a client can say it in the
+person's language (Desktop and the terminal UI do), and a new message keeps
+the chat as it is now. The ignored and outside files that the
 undone turns' `write`, `edit`, `multiedit` and `apply_patch` calls (direct,
 in a `batch`, or a child agent's during those turns) changed stay as they
 are too. The thread's `revert` lists them in `unrestored` as `{path, reason}`,

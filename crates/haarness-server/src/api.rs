@@ -3487,9 +3487,12 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
 impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
         let (status, code, retryable) = failure_parts(&self.0);
-        let (reason, path) = match &self.0 {
-            CoreError::Refused(refusal) => (Some(refusal.reason), refusal.path.clone()),
-            _ => (None, None),
+        let details = match &self.0 {
+            CoreError::Refused(refusal) => Some(haarness_protocol::ApiErrorDetails {
+                reason: Some(refusal.reason),
+                path: refusal.path.clone(),
+            }),
+            _ => None,
         };
         (
             status,
@@ -3497,8 +3500,7 @@ impl IntoResponse for ApiFailure {
                 code: code.into(),
                 message: self.1.unwrap_or_else(|| self.0.to_string()),
                 retryable,
-                reason,
-                path,
+                details,
             }),
         )
             .into_response()
@@ -3594,11 +3596,13 @@ mod failure_tests {
         );
         assert_eq!(refused["code"], "refused");
         assert_eq!(refused["retryable"], false);
-        assert_eq!(refused["reason"], "no_undo_copy");
-        assert_eq!(refused["path"], "assets/big.bin");
+        // Under `details`, where Cloud's errors carry their reasons too.
+        assert_eq!(refused["details"]["reason"], "no_undo_copy");
+        assert_eq!(refused["details"]["path"], "assets/big.bin");
+        assert!(refused.get("reason").is_none() && refused.get("path").is_none());
         // Other failures say neither.
         let conflict = message(ApiFailure::from(CoreError::Conflict("big.bin".into()))).await;
-        assert!(conflict.get("reason").is_none() && conflict.get("path").is_none());
+        assert!(conflict.get("details").is_none());
     }
 }
 

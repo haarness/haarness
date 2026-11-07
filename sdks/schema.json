@@ -64,9 +64,34 @@
           "code": {
             "type": "string"
           },
+          "details": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ApiErrorDetails",
+                "description": "What a client needs to say the failure in the person's own\nlanguage, where `message` says it in English: set on some refusals\n(`code` `refused`), absent from other failures and from older\nservers. Cloud's errors carry their reasons in the same object."
+              }
+            ]
+          },
           "message": {
             "type": "string"
           },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "ApiErrorDetails": {
+        "description": "The parts of a failure a client says in its own words (see\n[`ApiError::details`]).",
+        "properties": {
           "path": {
             "description": "The file `reason` is about, relative to the folder.",
             "type": [
@@ -81,19 +106,11 @@
               },
               {
                 "$ref": "#/components/schemas/RefusalReason",
-                "description": "Why, for a client to say in the person's own language, where\n`message` says it in English: set on some refusals (`code`\n`refused`), absent from other failures and from older servers."
+                "description": "Why the request was refused."
               }
             ]
-          },
-          "retryable": {
-            "type": "boolean"
           }
         },
-        "required": [
-          "code",
-          "message",
-          "retryable"
-        ],
         "type": "object"
       },
       "ApprovalMode": {
@@ -4675,7 +4692,7 @@
         "type": "object"
       },
       "RefusalReason": {
-        "description": "Why a request was refused for good (see [`ApiError::reason`]).",
+        "description": "Why a request was refused for good (see [`ApiErrorDetails::reason`]).",
         "enum": [
           "no_undo_copy",
           "other"

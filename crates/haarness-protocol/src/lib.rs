@@ -1524,9 +1524,20 @@ pub struct ApiError {
     pub code: String,
     pub message: String,
     pub retryable: bool,
-    /// Why, for a client to say in the person's own language, where
-    /// `message` says it in English: set on some refusals (`code`
-    /// `refused`), absent from other failures and from older servers.
+    /// What a client needs to say the failure in the person's own
+    /// language, where `message` says it in English: set on some refusals
+    /// (`code` `refused`), absent from other failures and from older
+    /// servers. Cloud's errors carry their reasons in the same object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<ApiErrorDetails>,
+}
+
+/// The parts of a failure a client says in its own words (see
+/// [`ApiError::details`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiErrorDetails {
+    /// Why the request was refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<RefusalReason>,
     /// The file `reason` is about, relative to the folder.
@@ -1534,7 +1545,7 @@ pub struct ApiError {
     pub path: Option<String>,
 }
 
-/// Why a request was refused for good (see [`ApiError::reason`]).
+/// Why a request was refused for good (see [`ApiErrorDetails::reason`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RefusalReason {
@@ -1559,6 +1570,7 @@ pub enum RefusalReason {
         RevertState,
         UnrestoredFile,
         UnrestoredReason,
+        ApiErrorDetails,
         RefusalReason,
         FileDiff,
         FileDiffStatus,

@@ -2384,12 +2384,21 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
         }
         None => said.unwrap_or_default().to_owned(),
     };
+    // Why, and the file it is about, under `details` as Cloud's errors
+    // carry their reasons too.
+    let detail = |name: &str| {
+        record
+            .and_then(|record| record.get("details"))
+            .and_then(|details| details.get(name))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
     Err(ApiRefusal {
         status,
         code,
         message,
-        reason: field("reason").map(str::to_owned),
-        path: field("path").map(str::to_owned),
+        reason: detail("reason"),
+        path: detail("path"),
     }
     .into())
 }
