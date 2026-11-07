@@ -1,8 +1,12 @@
 //! What an undo step could not put back: the files the agent's file tools
 //! changed that no checkpoint holds (ignored, or outside the folder), and
-//! the files over the checkpoints' size limit, which the restore names.
-//! Clients show them under the undone turn, so a turn never reads as undone
-//! while some of its changes stay.
+//! the files over the checkpoints' size limit that the restore left. Clients
+//! show them under the undone turn, so a turn never reads as undone while
+//! some of its changes stay.
+//!
+//! The file tools' calls are read before the workspace's undo lock is
+//! taken ([`AgentRuntime::plan_undo_files`]): a long child chat never holds
+//! up undo and redo in the other chats. Only their paths are kept.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -10,7 +14,8 @@ use std::{
     sync::Arc,
 };
 
-use haarness_protocol::{Item, ItemData, ThreadId, TurnId};
+use chrono::{DateTime, Utc};
+use haarness_protocol::{Item, ItemData, ThreadId, TurnId, UnrestoredFile, UnrestoredReason};
 use serde_json::Value;
 use tracing::warn;
 
@@ -20,12 +25,13 @@ use crate::{ChangedFile, SnapshotStore, UndoStepFiles};
 /// The most child agents' chats one undo step reads for their file tools.
 const MAX_CHILD_THREADS: usize = 64;
 
-/// One file-tool call that succeeded, as the transcript keeps it.
-#[derive(Debug, Clone)]
-pub(super) struct FileCall {
-    name: String,
-    arguments: Value,
-    metadata: Value,
+/// The files the turns an undo step takes back changed, worked out before
+/// the step: for the step back to `boundary` from `until`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UndoPlan {
+    pub(super) boundary: u64,
+    pub(super) until: Option<u64>,
+    pub(super) changed: Vec<ChangedFile>,
 }
 
 /// A path a call changed: written (made or replaced) or removed.
@@ -35,68 +41,174 @@ enum Change {
     Removed { path: String },
 }
 
+/// A child agent's chat that a call started, and when: its calls from then
+/// to the end of the step are the step's.
+struct ChildRun {
+    thread: ThreadId,
+    since: DateTime<Utc>,
+}
+
 impl AgentRuntime {
-    /// The files the undo step back to `boundary` left as they are: those
-    /// `skipped` names, and those the file tools of the turns it undid (the
-    /// items after `boundary`, up to `until`) and of their child agents
-    /// changed that neither `expected` nor `desired` holds. Never fails the
-    /// undo, which is done by now: what cannot be worked out is left out.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn undo_step_files(
+    /// [`Self::plan_undo_files`] for the step an undo of chat `id` (back to
+    /// `sequence` when given) takes now. `None` when there is none, or the
+    /// chat cannot be read: the undo then works it out itself.
+    pub(super) async fn plan_revert_files(
+        &self,
+        id: ThreadId,
+        sequence: Option<u64>,
+    ) -> Option<UndoPlan> {
+        let thread = self.repository.get_thread(id).await.ok()?;
+        let items = self.repository.list_items(id, None).await.ok()?;
+        let until = thread.revert.as_ref().map(|state| state.sequence);
+        let boundary = undo_boundary(&items, sequence.unwrap_or(u64::MAX), until)?;
+        Some(
+            self.plan_undo_files(&thread, &items, (boundary, until))
+                .await,
+        )
+    }
+
+    /// Drop the copies of large files kept for `thread`'s pending undo, now
+    /// that it is confirmed (see [`SnapshotStore::release_copies`]).
+    pub(super) async fn release_undo_copies(&self, thread: &haarness_protocol::Thread) {
+        let Some(revert) = &thread.revert else {
+            return;
+        };
+        // Without snapshots no copy was kept.
+        let Ok(snapshots) = self.undo_snapshots(thread.id, FolderAccess::Read).await else {
+            return;
+        };
+        if let Err(error) = snapshots.release_copies(&revert.snapshot_id).await {
+            warn!(%error, "cannot drop the copies kept for an undo");
+        }
+    }
+
+    /// The files the undo step from `until` back to `boundary` would take
+    /// back: those the file tools of the turns after `boundary` (up to
+    /// `until`) and of the child agents they ran changed, resolved as the
+    /// tools resolve them. Best effort: a chat that cannot be read is left
+    /// out.
+    pub(super) async fn plan_undo_files(
         &self,
         thread: &haarness_protocol::Thread,
-        snapshots: &Arc<dyn SnapshotStore>,
         items: &[Item],
         (boundary, until): (u64, Option<u64>),
+    ) -> UndoPlan {
+        let undone = items
+            .iter()
+            .filter(|item| item.sequence > boundary && until.is_none_or(|end| item.sequence <= end))
+            .collect::<Vec<_>>();
+        let mut plan = UndoPlan {
+            boundary,
+            until,
+            changed: Vec::new(),
+        };
+        // The step ends where its last item was written; a child's later
+        // calls (a background child still running) are not the step's.
+        let Some(end) = undone.iter().map(|item| item.created_at).max() else {
+            return plan;
+        };
+        let (mut changes, children) = file_changes(undone.iter().copied());
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::from(children);
+        while let Some(child) = queue.pop_front() {
+            if seen.len() >= MAX_CHILD_THREADS {
+                break;
+            }
+            if !seen.insert((child.thread, child.since)) {
+                continue;
+            }
+            match self.repository.list_items(child.thread, None).await {
+                Ok(items) => {
+                    // A resumed child's earlier turns are another step's.
+                    let (more, grandchildren) =
+                        file_changes(items.iter().filter(|item| {
+                            item.created_at >= child.since && item.created_at <= end
+                        }));
+                    changes.extend(more);
+                    queue.extend(grandchildren);
+                }
+                Err(error) => {
+                    warn!(child = %child.thread, %error, "cannot read a child agent's files for undo");
+                }
+            }
+        }
+        if changes.is_empty() {
+            return plan;
+        }
+        match self.thread_workspace(thread, FolderAccess::Read).await {
+            Ok(workspace) => match blocking(move || Ok(changed_files(changes, &workspace))).await {
+                Ok(files) => plan.changed = files,
+                Err(error) => warn!(%error, "cannot tell which files undo leaves"),
+            },
+            Err(error) => warn!(%error, "cannot tell which files undo leaves"),
+        }
+        plan
+    }
+
+    /// The files the undo step that `plan` describes left as they are:
+    /// `skipped`, left for their size, and those of the plan that neither
+    /// `expected` nor `desired` holds. Never fails the undo, which is done by
+    /// now: what cannot be worked out is left out.
+    pub(super) async fn undo_step_files(
+        snapshots: &Arc<dyn SnapshotStore>,
+        plan: UndoPlan,
         expected: &str,
         desired: &str,
         skipped: Vec<String>,
     ) -> UndoStepFiles {
-        let undone = items.iter().filter(|item| {
-            item.sequence > boundary && until.is_none_or(|end| item.sequence <= end)
-        });
-        let (mut calls, children) = file_calls(undone);
-        let mut seen = HashSet::new();
-        let mut queue = VecDeque::from(children);
-        while let Some(child) = queue.pop_front() {
-            if seen.len() >= MAX_CHILD_THREADS || !seen.insert(child) {
-                continue;
-            }
-            match self.repository.list_items(child, None).await {
-                Ok(items) => {
-                    let (more, grandchildren) = file_calls(items.iter());
-                    calls.extend(more);
-                    queue.extend(grandchildren);
-                }
-                Err(error) => warn!(%child, %error, "cannot read a child agent's files for undo"),
-            }
-        }
         let mut left = Vec::new();
-        if !calls.is_empty() {
-            match self.thread_workspace(thread, FolderAccess::Read).await {
-                Ok(workspace) => {
-                    let changed = blocking(move || Ok(changed_files(&calls, &workspace))).await;
-                    let left_out = match changed {
-                        Ok(changed) => snapshots.left_out(expected, desired, changed).await,
-                        Err(error) => Err(error),
-                    };
-                    match left_out {
-                        Ok(files) => left = files,
-                        Err(error) => warn!(%error, "cannot tell which files undo left"),
-                    }
-                }
+        if !plan.changed.is_empty() {
+            match snapshots.left_out(expected, desired, plan.changed).await {
+                Ok(files) => left = files,
                 Err(error) => warn!(%error, "cannot tell which files undo left"),
             }
         }
-        UndoStepFiles::new(skipped.into_iter().chain(left))
+        UndoStepFiles::new(
+            skipped
+                .into_iter()
+                .map(|path| UnrestoredFile {
+                    path,
+                    reason: UnrestoredReason::Large,
+                })
+                .chain(left),
+        )
     }
 }
 
-/// The file-tool calls among `items` that succeeded, in the order they ran,
-/// and the child agents' chats they started.
-fn file_calls<'a>(items: impl Iterator<Item = &'a Item>) -> (Vec<FileCall>, Vec<ThreadId>) {
-    let mut started: HashMap<(Option<TurnId>, &str), (&str, &Value)> = HashMap::new();
-    let mut calls = Vec::new();
+/// The step an undo now would take: back to the newest checkpoint before
+/// `current` (the pending undo's boundary), whether a turn's paired
+/// checkpoints or a prompt's own boundary, among items up to `limit`.
+pub(super) fn undo_boundary(items: &[Item], limit: u64, current: Option<u64>) -> Option<u64> {
+    let eligible = |boundary: u64| current.is_none_or(|current| boundary < current);
+    items
+        .iter()
+        .filter(|item| item.sequence <= limit)
+        .filter_map(|item| match &item.data {
+            ItemData::Snapshot {
+                boundary_sequence: Some(boundary),
+                base_snapshot_id: Some(_),
+                ..
+            } => Some(*boundary),
+            ItemData::UserMessage {
+                synthetic: false, ..
+            } => Some(item.sequence.saturating_sub(1)),
+            _ => None,
+        })
+        .filter(|boundary| eligible(*boundary))
+        .max()
+}
+
+/// A call by its turn and id.
+type CallKey<'a> = (Option<TurnId>, &'a str);
+/// A call's tool, arguments and when it started.
+type StartedCall<'a> = (&'a str, &'a Value, DateTime<Utc>);
+
+/// What the file-tool calls among `items` that succeeded changed, in the
+/// order they ran, and the child agents' chats they started. Only names are
+/// read; no call's content is copied.
+fn file_changes<'a>(items: impl Iterator<Item = &'a Item>) -> (Vec<Change>, Vec<ChildRun>) {
+    let mut started: HashMap<CallKey<'_>, StartedCall<'_>> = HashMap::new();
+    let mut changes = Vec::new();
     let mut children = Vec::new();
     for item in items {
         match &item.data {
@@ -106,7 +218,10 @@ fn file_calls<'a>(items: impl Iterator<Item = &'a Item>) -> (Vec<FileCall>, Vec<
                 arguments,
                 ..
             } => {
-                started.insert((item.turn_id, call_id.as_str()), (name.as_str(), arguments));
+                started.insert(
+                    (item.turn_id, call_id.as_str()),
+                    (name.as_str(), arguments, item.created_at),
+                );
             }
             ItemData::ToolResult {
                 call_id,
@@ -114,35 +229,33 @@ fn file_calls<'a>(items: impl Iterator<Item = &'a Item>) -> (Vec<FileCall>, Vec<
                 metadata,
                 ..
             } => {
-                if let Some((name, arguments)) = started.get(&(item.turn_id, call_id.as_str())) {
-                    calls.push(FileCall {
-                        name: (*name).to_owned(),
-                        arguments: (*arguments).clone(),
-                        metadata: metadata.clone(),
-                    });
+                if let Some((name, arguments, _)) = started.get(&(item.turn_id, call_id.as_str())) {
+                    changes.extend(call_changes(name, arguments, metadata));
                 }
             }
             ItemData::TaskLink {
-                child_thread_id, ..
-            } => children.push(*child_thread_id),
+                call_id,
+                child_thread_id,
+            } => children.push(ChildRun {
+                thread: *child_thread_id,
+                // From the call that started it, which comes before the
+                // child's first item.
+                since: started
+                    .get(&(item.turn_id, call_id.as_str()))
+                    .map_or(item.created_at, |(_, _, at)| *at),
+            }),
             _ => {}
         }
     }
-    calls.retain(|call| {
-        matches!(
-            tool_name(&call.name),
-            "write" | "edit" | "multiedit" | "apply_patch" | "batch"
-        )
-    });
-    (calls, children)
+    (changes, children)
 }
 
 fn tool_name(name: &str) -> &str {
     name.strip_prefix("functions.").unwrap_or(name)
 }
 
-/// What each call changed, by the names it gave.
-fn changes(name: &str, arguments: &Value, metadata: &Value) -> Vec<Change> {
+/// What one call changed, by the names it gave.
+fn call_changes(name: &str, arguments: &Value, metadata: &Value) -> Vec<Change> {
     let path = || {
         arguments
             .get("path")
@@ -212,7 +325,7 @@ fn changes(name: &str, arguments: &Value, metadata: &Value) -> Vec<Change> {
                     if tool_name(name) == "batch" {
                         return Vec::new();
                     }
-                    changes(
+                    call_changes(
                         name,
                         step.get("parameters").unwrap_or(&Value::Null),
                         result.get("metadata").unwrap_or(&Value::Null),
@@ -224,26 +337,24 @@ fn changes(name: &str, arguments: &Value, metadata: &Value) -> Vec<Change> {
     }
 }
 
-/// The files `calls` changed, each once, as the tools resolve them in
+/// The files `changes` named, each once, as the tools resolve them in
 /// `workspace`, with whether its first change made it.
-fn changed_files(calls: &[FileCall], workspace: &Path) -> Vec<ChangedFile> {
+fn changed_files(changes: Vec<Change>, workspace: &Path) -> Vec<ChangedFile> {
     let mut files: Vec<ChangedFile> = Vec::new();
     let mut known: HashSet<PathBuf> = HashSet::new();
-    for call in calls {
-        for change in changes(&call.name, &call.arguments, &call.metadata) {
-            let (path, created) = match change {
-                Change::Written { path, created } => (
-                    crate::permissions::resolve_permission_path(workspace, &path),
-                    created,
-                ),
-                Change::Removed { path } => (
-                    crate::permissions::resolve_permission_entry(workspace, &path),
-                    false,
-                ),
-            };
-            if known.insert(path.clone()) {
-                files.push(ChangedFile { path, created });
-            }
+    for change in changes {
+        let (path, created) = match change {
+            Change::Written { path, created } => (
+                crate::permissions::resolve_permission_path(workspace, &path),
+                created,
+            ),
+            Change::Removed { path } => (
+                crate::permissions::resolve_permission_entry(workspace, &path),
+                false,
+            ),
+        };
+        if known.insert(path.clone()) {
+            files.push(ChangedFile { path, created });
         }
     }
     files
@@ -252,7 +363,6 @@ fn changed_files(calls: &[FileCall], workspace: &Path) -> Vec<ChangedFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use haarness_protocol::ItemId;
     use serde_json::json;
 
@@ -367,8 +477,9 @@ mod tests {
                 false,
                 json!({"diffs": [{"status": "modified"}]}),
             ),
+            call(15, turn, "h", "task", json!({"prompt": "help"})),
             item(
-                15,
+                16,
                 turn,
                 ItemData::TaskLink {
                     call_id: "h".into(),
@@ -376,9 +487,16 @@ mod tests {
                 },
             ),
         ];
-        let (calls, children) = file_calls(items.iter());
-        assert_eq!(children, vec![child]);
-        let files = changed_files(&calls, &workspace);
+        let (changes, children) = file_changes(items.iter());
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| (child.thread, child.since))
+                .collect::<Vec<_>>(),
+            vec![(child, items[14].created_at)],
+            "a child's calls count from the call that started it"
+        );
+        let files = changed_files(changes, &workspace);
         let named = files
             .iter()
             .map(|file| {
@@ -406,5 +524,42 @@ mod tests {
             ]
         );
         std::fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn the_step_an_undo_takes_is_the_newest_boundary_before_the_pending_one() {
+        let turn = TurnId::new();
+        let prompt = |sequence| {
+            item(
+                sequence,
+                turn,
+                ItemData::UserMessage {
+                    text: "go".into(),
+                    attachments: vec![],
+                    queued: false,
+                    synthetic: false,
+                    command_line: None,
+                },
+            )
+        };
+        let pair = |sequence, boundary| {
+            item(
+                sequence,
+                turn,
+                ItemData::Snapshot {
+                    snapshot_id: format!("after-{boundary}"),
+                    file_count: 1,
+                    boundary_sequence: Some(boundary),
+                    base_snapshot_id: Some(format!("before-{boundary}")),
+                },
+            )
+        };
+        let items = vec![prompt(1), pair(3, 0), prompt(4), pair(6, 3), prompt(7)];
+        // A text-only prompt last: its own boundary.
+        assert_eq!(undo_boundary(&items, u64::MAX, None), Some(6));
+        assert_eq!(undo_boundary(&items, u64::MAX, Some(6)), Some(3));
+        assert_eq!(undo_boundary(&items, u64::MAX, Some(3)), Some(0));
+        assert_eq!(undo_boundary(&items, u64::MAX, Some(0)), None);
+        assert_eq!(undo_boundary(&items, 5, None), Some(3));
     }
 }

@@ -4814,9 +4814,9 @@
             "type": "string"
           },
           "unrestored": {
-            "description": "Files the undone turns changed that undo left as they are: files the\ncheckpoints never hold (ignored, or outside the folder) that the\nagent's file tools wrote, and files over the checkpoints' size limit.\nRelative to the folder, or absolute when outside it; at most\n[`MAX_UNRESTORED`]. Absent from older servers, and empty when undo put\neverything back.",
+            "description": "Files the undone turns changed that undo left as they are, each with\nwhy: files the checkpoints never hold (ignored, or outside the\nfolder) that the agent's file tools wrote, and files over the\ncheckpoints' size limit whose content undo had no copy of. The ones\nleft for their size come first; at most [`MAX_UNRESTORED`]. Absent\nfrom older servers, and empty when undo put everything back.",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/UnrestoredFile"
             },
             "type": "array"
           },
@@ -6082,6 +6082,33 @@
           "completed",
           "failed",
           "interrupted"
+        ],
+        "type": "string"
+      },
+      "UnrestoredFile": {
+        "description": "A file an undo left as it is (see [`RevertState::unrestored`]).",
+        "properties": {
+          "path": {
+            "description": "Relative to the folder, as checkpoints name it, or absolute when\noutside it.",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/UnrestoredReason"
+          }
+        },
+        "required": [
+          "path",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "UnrestoredReason": {
+        "description": "Why undo left a file as it is, the one a person most needs to know\nabout first.",
+        "enum": [
+          "large",
+          "ignored",
+          "outside",
+          "other"
         ],
         "type": "string"
       },

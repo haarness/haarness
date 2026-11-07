@@ -10,7 +10,8 @@ use futures::Stream;
 use haarness_protocol::{
     CompactRequest, CreateThreadRequest, GoalState, Item, ItemData, ItemId, McpConfigureRequest,
     McpServerInfo, ModelInfo, ProviderInfo, SessionArchive, SessionArchiveImportResult, SkillInfo,
-    StartTurnRequest, Thread, ThreadId, Turn, TurnId, TurnStatus, UpdateThreadRequest,
+    StartTurnRequest, Thread, ThreadId, Turn, TurnId, TurnStatus, UnrestoredFile, UnrestoredReason,
+    UpdateThreadRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -935,6 +936,30 @@ pub trait SnapshotStore: Send + Sync {
         expected_snapshot_id: &str,
         desired_snapshot_id: &str,
     ) -> CoreResult<DeltaRestore>;
+    /// One step of the pending undo whose backup checkpoint is `backup`:
+    /// [`Self::restore_delta`], except that a file over the size limit is
+    /// handled too where it can be. Before such a file is changed, a copy of
+    /// it is kept in the store's own folder (within its bounds), and one the
+    /// step wants back is taken from those copies, so undo and redo bring
+    /// the folder to the checkpoint as they do any other file. What cannot be
+    /// handled so is left as it is and named in [`DeltaRestore::skipped`],
+    /// and a redo refuses before writing rather than leave one. The default
+    /// is [`Self::restore_delta`], which keeps no copies.
+    async fn restore_step(
+        &self,
+        _backup_snapshot_id: &str,
+        expected_snapshot_id: &str,
+        desired_snapshot_id: &str,
+        _kind: UndoStep,
+    ) -> CoreResult<DeltaRestore> {
+        self.restore_delta(expected_snapshot_id, desired_snapshot_id)
+            .await
+    }
+    /// Drop the copies [`Self::restore_step`] kept for the undo backed up by
+    /// `backup_snapshot_id`, once it is confirmed, abandoned or fully redone.
+    async fn release_copies(&self, _backup_snapshot_id: &str) -> CoreResult<()> {
+        Ok(())
+    }
     /// Of `changed`, the files a restore from `expected_snapshot_id` to
     /// `desired_snapshot_id` leaves as they are because neither checkpoint
     /// holds them: outside the folder, or left out of every checkpoint (an
@@ -947,7 +972,7 @@ pub trait SnapshotStore: Send + Sync {
         _expected_snapshot_id: &str,
         _desired_snapshot_id: &str,
         _changed: Vec<ChangedFile>,
-    ) -> CoreResult<Vec<String>> {
+    ) -> CoreResult<Vec<UnrestoredFile>> {
         Ok(Vec::new())
     }
     /// Compare one checkpoint with the live workspace for Last turn `/diff`.
@@ -1016,9 +1041,24 @@ pub struct SnapshotInfo {
 pub struct DeltaRestore {
     /// Paths written or removed.
     pub touched: Vec<String>,
-    /// Paths left as they are because a checkpoint holds no content for
-    /// them: files over the size limit, which no restore could put back.
+    /// Paths left as they are because neither a checkpoint nor a kept copy
+    /// holds the content needed: files over the size limit.
     pub skipped: Vec<String>,
+}
+
+/// Which way [`SnapshotStore::restore_step`] goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UndoStep {
+    /// Back one step. A large file an earlier step of the same undo left as
+    /// it was is handled as if it were as expected.
+    Undo,
+    /// Forward one step. A large file an earlier undo step left as it was is
+    /// left so (the last redo brings it to where it already is); one it
+    /// cannot bring back refuses the whole step before anything is written.
+    Redo,
+    /// Putting a step that could not be recorded back as it was: like
+    /// [`Self::Redo`], but it never refuses.
+    PutBack,
 }
 
 /// A file the agent's file tools changed, for [`SnapshotStore::left_out`].
@@ -1035,25 +1075,32 @@ pub struct ChangedFile {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UndoStepFiles {
     /// At most [`haarness_protocol::MAX_UNRESTORED`], sorted.
-    pub paths: Vec<String>,
+    pub files: Vec<UnrestoredFile>,
     /// How many there are in all.
     pub count: u64,
 }
 
 impl UndoStepFiles {
-    /// `paths`, deduplicated, the files in the folder first, kept to
+    /// `files`, each path once with its most pressing reason, the ones left
+    /// for their size first and each reason's paths in order, kept to
     /// [`haarness_protocol::MAX_UNRESTORED`].
     #[must_use]
-    pub fn new(paths: impl IntoIterator<Item = String>) -> Self {
-        let mut paths = paths
+    pub fn new(files: impl IntoIterator<Item = UnrestoredFile>) -> Self {
+        let mut reasons = BTreeMap::new();
+        for file in files {
+            reasons
+                .entry(file.path)
+                .and_modify(|reason: &mut UnrestoredReason| *reason = (*reason).min(file.reason))
+                .or_insert(file.reason);
+        }
+        let mut files = reasons
             .into_iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
+            .map(|(path, reason)| UnrestoredFile { path, reason })
             .collect::<Vec<_>>();
-        paths.sort_by_key(|path| Path::new(path).is_absolute());
-        let count = u64::try_from(paths.len()).unwrap_or(u64::MAX);
-        paths.truncate(haarness_protocol::MAX_UNRESTORED);
-        Self { paths, count }
+        files.sort_by_key(|file| file.reason);
+        let count = u64::try_from(files.len()).unwrap_or(u64::MAX);
+        files.truncate(haarness_protocol::MAX_UNRESTORED);
+        Self { files, count }
     }
 
     #[must_use]

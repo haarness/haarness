@@ -1,8 +1,8 @@
 import { createSignal } from "solid-js";
-import { t } from "./i18n";
+import { formatNumber, t } from "./i18n";
 import type { Item, Thread } from "@haarness/sdk";
 import { useApp } from "./state";
-import { lastUserMessage } from "./conversation-history";
+import { lastUserMessage, unrestoredFiles } from "./conversation-history";
 import { shortcutLabel, type SearchEntry } from "./search";
 
 export const historyCommands = [
@@ -73,11 +73,21 @@ export function createConversationControls(props: {
         );
         props.restored(undone);
       } else if (action === "redo") props.redone();
+      // A file left for its size is not as the checkpoint has it: said with
+      // the undo, not only under its notice.
+      const left =
+        action === "undo" ? unrestoredFiles(value as Thread).large.length : 0;
       app.notify(
         action === "compact"
           ? t("Chat compacted")
           : action === "undo"
-            ? t("Last turn undone")
+            ? t("Last turn undone") +
+              (left === 0
+                ? ""
+                : " · " +
+                  (left === 1
+                    ? t("1 file left as it was")
+                    : t("{count} files left as they were", { count: formatNumber(left) })))
             : t("Turn restored"),
       );
     } finally {

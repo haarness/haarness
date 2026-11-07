@@ -2,8 +2,9 @@
 """The TUI's undo of a turn that changed files no checkpoint can put back, in a real tmux pane on the
 echo provider. One turn writes an ignored file, shrinks a tracked file over the checkpoints' 2 MiB
 limit and edits a tracked file. `/undo` puts the tracked file back, leaves the other two as the turn
-left them, and says so on one line under the undone marker; `/redo` brings the turn back and the
-line goes. The same line in another interface language follows `/language`.
+left them, and says so under the undone marker: the file left for its size on a line of its own in
+the text colour, with why, then the ignored one, quietly. `/redo` brings the turn back and the lines
+go. The same lines in another interface language follow `/language`.
 
 `UNDO_TMUX_THEME` (`light` or `dark`) draws the pane in that variant of the editorial theme, and
 `UNDO_TMUX_LANGUAGE` (`ar`, `ja`, ...) also checks the line in that language. Pane captures, with
@@ -28,10 +29,13 @@ EVIDENCE = Path(os.environ.get("UNDO_TMUX_EVIDENCE", tempfile.gettempdir() + "/h
 EVIDENCE.mkdir(parents=True, exist_ok=True)
 THEME = os.environ.get("UNDO_TMUX_THEME", "")
 LANGUAGE = os.environ.get("UNDO_TMUX_LANGUAGE", "")
-LINE = "2 files weren't restored · assets/model.bin, local.env"
+LARGE = "1 file left as it was · too large for Undo · assets/model.bin"
+LINE = "1 file wasn't restored · local.env"
 TRANSLATED = {
-    "ar": "لم تتم استعادة 2 ملفات · assets/model.bin, local.env",
-    "ja": "2 個のファイルは復元されませんでした · assets/model.bin, local.env",
+    "ar": ("تُرك ملف واحد كما كان · أكبر من أن يستعيده التراجع · assets/model.bin",
+           "لم تتم استعادة ملف واحد · local.env"),
+    "ja": ("1 件のファイルはそのままです · 大きすぎて元に戻せません · assets/model.bin",
+           "1 件のファイルは復元されていません · local.env"),
 }
 
 
@@ -137,29 +141,30 @@ with tempfile.TemporaryDirectory(prefix="haarness-undo-tmux-") as directory:
         until(lambda: LINE in pane(), "the undo did not say which files it left")
         rows = pane().splitlines()
         marker = next(index for index, row in enumerate(rows) if "1 step undone" in row)
-        assert LINE in rows[marker + 1], rows[marker:marker + 2]
-        assert rows[marker + 1].startswith("    " + LINE[:1]), rows[marker + 1]
+        assert rows[marker + 1].startswith("    " + LARGE), rows[marker:marker + 3]
+        assert rows[marker + 2].startswith("    " + LINE), rows[marker:marker + 3]
         assert (project / "tracked.txt").read_text() == "before\n"
         assert (project / "local.env").read_text() == "TOKEN=changed\n"
         assert (project / "assets/model.bin").read_bytes() == b"small now\n"
         revert = api(f"/threads/{thread}")["revert"]
-        assert revert["unrestored"] == ["assets/model.bin", "local.env"], revert
+        assert revert["unrestored"] == [{"path": "assets/model.bin", "reason": "large"},
+                                        {"path": "local.env", "reason": "ignored"}], revert
         screen("undo-unrestored")
-        checks.append("/undo restores tracked.txt and says: " + LINE)
+        checks.append("/undo restores tracked.txt and says: " + LARGE + " / " + LINE)
 
         if LANGUAGE:
             command(f"/language {LANGUAGE}")
             expected = TRANSLATED[LANGUAGE]
-            until(lambda: expected in pane(), f"the line did not follow /language {LANGUAGE}")
+            until(lambda: all(line in pane() for line in expected), f"the lines did not follow /language {LANGUAGE}")
             screen("undo-unrestored-language")
-            checks.append(f"/language {LANGUAGE}: " + expected)
+            checks.append(f"/language {LANGUAGE}: " + " / ".join(expected))
             command("/language en")
             until(lambda: LINE in pane(), "the line did not come back in English")
 
         command("/redo")
         until(lambda: (project / "tracked.txt").read_text() == "after\n", "redo did not bring the turn back")
-        until(lambda: "wasn't restored" not in pane() and "weren't restored" not in pane(),
-              "the line stayed after redo")
+        until(lambda: "restored ·" not in pane() and "left as it was" not in pane(),
+              "the lines stayed after redo")
         assert api(f"/threads/{thread}").get("revert") is None
         screen("redo")
         checks.append("/redo brings tracked.txt back and the line goes")

@@ -18922,12 +18922,20 @@ fn an_undo_that_left_files_says_so_under_its_marker() {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let undone = |unrestored: &[&str], count| haarness_protocol::RevertState {
-        sequence: 1,
-        snapshot_id: "backup".into(),
-        base_snapshot_id: Some("base".into()),
-        unrestored: unrestored.iter().map(|path| (*path).to_owned()).collect(),
-        unrestored_count: count,
+    let undone = |unrestored: &[(&str, haarness_protocol::UnrestoredReason)], count| {
+        haarness_protocol::RevertState {
+            sequence: 1,
+            snapshot_id: "backup".into(),
+            base_snapshot_id: Some("base".into()),
+            unrestored: unrestored
+                .iter()
+                .map(|(path, reason)| haarness_protocol::UnrestoredFile {
+                    path: (*path).to_owned(),
+                    reason: *reason,
+                })
+                .collect(),
+            unrestored_count: count,
+        }
     };
     // An undo that put everything back: the marker alone.
     app.thread.revert = Some(undone(&[], None));
@@ -18936,7 +18944,10 @@ fn an_undo_that_left_files_says_so_under_its_marker() {
     assert!(!quiet.contains("restored ·"), "{quiet}");
     assert!(!quiet.contains("wasn't restored"), "{quiet}");
 
-    app.thread.revert = Some(undone(&[".env"], None));
+    app.thread.revert = Some(undone(
+        &[(".env", haarness_protocol::UnrestoredReason::Ignored)],
+        None,
+    ));
     let one = text(&app);
     let marker = one
         .lines()
@@ -18948,23 +18959,52 @@ fn an_undo_that_left_files_says_so_under_its_marker() {
         "{one}"
     );
 
-    // Named up to what the server sent, the rest counted.
-    app.thread.revert = Some(undone(&["big.bin", "src/\u{1b}[31mlog"], Some(5)));
-    let many = text(&app);
-    assert!(
-        many.contains("    5 files weren't restored · big.bin, src/[31mlog, +3 more"),
-        "{many}"
+    // A file left for its size comes first, in the text colour, with why;
+    // the ignored ones stay quiet, named up to what the server sent and the
+    // rest counted.
+    app.thread.revert = Some(undone(
+        &[
+            ("big.bin", haarness_protocol::UnrestoredReason::Large),
+            (
+                "src/\u{1b}[31mlog",
+                haarness_protocol::UnrestoredReason::Ignored,
+            ),
+        ],
+        Some(5),
+    ));
+    let lines = app.lines((100, 40));
+    let row = |needle: &str| {
+        lines
+            .iter()
+            .find(|line| line.text().contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle}"))
+    };
+    let large = row("left as it was");
+    assert_eq!(
+        large.text().trim_end(),
+        "    1 file left as it was · too large for Undo · big.bin"
     );
+    assert!(large.spans.iter().any(|span| span.fg == app.theme.text));
+    let quiet = row("weren't restored");
+    assert_eq!(
+        quiet.text().trim_end(),
+        "    4 files weren't restored · src/[31mlog, +3 more"
+    );
+    assert!(quiet.spans.iter().all(|span| span.fg == app.theme.muted));
     assert!(
-        !many.contains('\u{1b}'),
+        !lines.iter().any(|line| line.text().contains('\u{1b}')),
         "a name is never a terminal control"
     );
 
-    // Read in the interface language.
+    // Read in the interface language, one counter word to a line.
     app.language = crate::locale::Language::Japanese;
     let japanese = text(&app);
     assert!(
-        japanese.contains("5 個のファイルは復元されませんでした · big.bin"),
+        japanese.contains("1 件のファイルはそのままです · 大きすぎて元に戻せません · big.bin"),
+        "{japanese}"
+    );
+    assert!(
+        japanese.contains("4 件のファイルは復元されていません · src/[31mlog, あと 3 件"),
         "{japanese}"
     );
 }

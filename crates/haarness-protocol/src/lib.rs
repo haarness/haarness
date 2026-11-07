@@ -243,14 +243,14 @@ pub struct RevertState {
     /// a conflict-checked delta before restoring `snapshot_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_snapshot_id: Option<String>,
-    /// Files the undone turns changed that undo left as they are: files the
-    /// checkpoints never hold (ignored, or outside the folder) that the
-    /// agent's file tools wrote, and files over the checkpoints' size limit.
-    /// Relative to the folder, or absolute when outside it; at most
-    /// [`MAX_UNRESTORED`]. Absent from older servers, and empty when undo put
-    /// everything back.
+    /// Files the undone turns changed that undo left as they are, each with
+    /// why: files the checkpoints never hold (ignored, or outside the
+    /// folder) that the agent's file tools wrote, and files over the
+    /// checkpoints' size limit whose content undo had no copy of. The ones
+    /// left for their size come first; at most [`MAX_UNRESTORED`]. Absent
+    /// from older servers, and empty when undo put everything back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unrestored: Vec<String>,
+    pub unrestored: Vec<UnrestoredFile>,
     /// How many such files there are in all, when `unrestored` names only
     /// the first of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,6 +259,35 @@ pub struct RevertState {
 
 /// The most files [`RevertState::unrestored`] names.
 pub const MAX_UNRESTORED: usize = 50;
+
+/// A file an undo left as it is (see [`RevertState::unrestored`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UnrestoredFile {
+    /// Relative to the folder, as checkpoints name it, or absolute when
+    /// outside it.
+    pub path: String,
+    pub reason: UnrestoredReason,
+}
+
+/// Why undo left a file as it is, the one a person most needs to know
+/// about first.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UnrestoredReason {
+    /// Over the checkpoints' size limit, and undo had no copy of the
+    /// content it needed, so the file is not as the checkpoint has it.
+    Large,
+    /// Left out of every checkpoint by the folder's ignore files, or in
+    /// `.git`.
+    Ignored,
+    /// Outside the folder the checkpoints hold.
+    Outside,
+    /// A reason from a newer server.
+    #[serde(other)]
+    Other,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1508,6 +1537,8 @@ pub struct ApiError {
         ReviewFinding,
         TodoEntry,
         RevertState,
+        UnrestoredFile,
+        UnrestoredReason,
         FileDiff,
         FileDiffStatus,
         DiffTruncation,

@@ -85,7 +85,8 @@
   font-size: var(--ui-xs);
   border-radius: var(--r-sm);
 }
-.undo-unrestored > summary:hover {
+.undo-unrestored > summary:hover,
+.undo-unrestored.pressing > summary {
   color: var(--text);
 }
 .undo-unrestored > summary .icon {
@@ -97,8 +98,8 @@
 :root[dir="rtl"] .undo-unrestored:not([open]) > summary .icon {
   transform: scaleX(-1);
 }
-/* The names and the note line up with the summary's words, past its xs
-   chevron (12px, as --s3) and the gap after it. */
+/* The names line up with the summary's words, past its xs chevron (12px,
+   as --s3) and the gap after it. */
 .undo-unrestored > ul {
   margin: var(--s1) 0 0;
   padding-inline-start: calc(var(--s3) + var(--s1));
@@ -107,14 +108,12 @@
   overflow-y: auto;
 }
 .undo-unrestored li {
-  font-family: var(--mono);
-  font-variant-ligatures: none;
   overflow-wrap: anywhere;
 }
-.undo-unrestored li.more {
-  font-family: inherit;
+.undo-unrestored li > bdi {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
 }
-.undo-unrestored > p {
-  margin: var(--s1) 0 0;
-  padding-inline-start: calc(var(--s3) + var(--s1));
+.undo-unrestored li > .reason {
+  color: var(--muted);
 }

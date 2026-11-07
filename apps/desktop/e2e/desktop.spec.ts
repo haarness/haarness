@@ -12001,7 +12001,7 @@ test("conversation controls undo and redo real files, preserve drafts, and compa
   expect(errors).toEqual([]);
 });
 
-test("an undo that left files says so on one quiet line under its notice", async () => {
+test("an undo says which files it left, those left for their size first, under its notice", async () => {
   await page.locator(".project-list .project-heading").filter({ hasText: /^workspace$/ }).click();
   const expand = page.getByRole("button", { name: "Expand project workspace", exact: true });
   if (await expand.count()) await expand.click();
@@ -12021,11 +12021,15 @@ test("an undo that left files says so on one quiet line under its notice", async
   const kept = join(workspace, "undo-left-settings.env");
   const made = join(workspace, "undo-left-tokens.env");
   const tracked = join(workspace, "undo-left-tracked.txt");
+  // Over the checkpoints' 2 MiB: no checkpoint holds what it held before.
+  const big = join(workspace, "undo-left-big.bin");
   await writeFile(kept, "TOKEN=old\n");
+  await writeFile(big, "x".repeat(3 * 1024 * 1024));
   const calls = [
     ["undo-left-settings.env", "TOKEN=new\n"],
     ["undo-left-tokens.env", "SECRET=made\n"],
     ["undo-left-tracked.txt", "turn output\n"],
+    ["undo-left-big.bin", "shrunk\n"],
   ].map(([path, content]) => ({ name: "write", arguments: { path, content } }));
   await send("!multi " + JSON.stringify(calls));
   await expect.poll(() => readFile(tracked, "utf8").catch(() => "")).toBe("turn output\n");
@@ -12035,19 +12039,31 @@ test("an undo that left files says so on one quiet line under its notice", async
   await menu("Undo last turn");
   await expect(notice).toContainText("Turn undone");
   await expect.poll(() => existsSync(tracked)).toBe(false);
-  // The ignored files stay as the turn left them, and the notice says so.
+  // The toast says a file stays as the turn left it.
+  await expect(page.locator(".toast")).toContainText("Last turn undone · 1 file left as it was");
   expect(await readFile(kept, "utf8")).toBe("TOKEN=new\n");
   expect(await readFile(made, "utf8")).toBe("SECRET=made\n");
-  const left = notice.locator(".undo-unrestored");
-  const summary = left.locator("summary");
-  await expect(summary).toHaveText("2 files weren't restored");
-  await expect(summary).toHaveAttribute("title", "undo-left-settings.env\nundo-left-tokens.env");
-  await expect(left.locator("li").first()).toBeHidden();
+  expect(await readFile(big, "utf8")).toBe("shrunk\n");
+  // First the one left for its size, in the text colour; then, quietly, the
+  // ignored ones.
+  const lines = notice.locator(".undo-unrestored");
+  await expect(lines).toHaveCount(2);
+  const pressing = lines.nth(0);
+  const quiet = lines.nth(1);
+  await expect(pressing).toHaveClass(/pressing/);
+  await expect(pressing.locator("summary")).toHaveText("1 file left as it was · too large for Undo");
+  await expect(pressing.locator("summary")).toHaveAttribute("title", "undo-left-big.bin");
+  const colour = (locator: Locator) => locator.evaluate((element) => getComputedStyle(element).color);
+  expect(await colour(pressing.locator("summary"))).toBe(await colour(notice.getByRole("button", { name: "Redo turn", exact: true })));
+  expect(await colour(pressing.locator("summary"))).not.toBe(await colour(quiet.locator("summary")));
+  await expect(quiet.locator("summary")).toHaveText("2 files weren't restored");
+  await expect(quiet.locator("summary")).toHaveAttribute("title", "undo-left-settings.env\nundo-left-tokens.env");
+  await expect(quiet.locator("li").first()).toBeHidden();
   // The notice's first line is where it always is: the sentence, then Redo.
   const sentence = await notice.locator("span").first().boundingBox();
   const redo = await notice.getByRole("button", { name: "Redo turn", exact: true }).boundingBox();
   expect(Math.abs(sentence!.y + sentence!.height / 2 - (redo!.y + redo!.height / 2))).toBeLessThan(2);
-  expect((await summary.boundingBox())!.y).toBeGreaterThan(redo!.y + redo!.height - 1);
+  expect((await pressing.locator("summary").boundingBox())!.y).toBeGreaterThan(redo!.y + redo!.height - 1);
   const shots = async (name: string) => {
     for (const theme of ["light", "dark"] as const) {
       await page.evaluate((value) => window.haarness.preferences({ theme: value }), theme);
@@ -12056,24 +12072,26 @@ test("an undo that left files says so on one quiet line under its notice", async
     }
   };
   await shots("undo-unrestored-closed");
-  await summary.click();
-  await expect(left.locator("li")).toHaveText(["undo-left-settings.env", "undo-left-tokens.env"]);
-  await expect(left.locator("p")).toHaveText("Undo leaves files that are ignored, outside the folder or over 2 MiB as they are.");
+  await pressing.locator("summary").click();
+  await quiet.locator("summary").click();
+  await expect(pressing.locator("li")).toHaveText(["undo-left-big.bin"]);
+  await expect(quiet.locator("li")).toHaveText(["undo-left-settings.env · ignored", "undo-left-tokens.env · ignored"]);
   await shots("undo-unrestored-open");
   await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-  await expect(summary).toHaveText(/^لم تتم استعادة (2|٢) ملفات$/);
-  await expect(left.locator("li bdi").first()).toHaveAttribute("dir", "ltr");
+  await expect(quiet.locator("summary")).toHaveText(/^لم تتم استعادة (2|٢) ملفات$/);
+  await expect(pressing.locator("summary")).toHaveText("تُرك ملف واحد كما كان · أكبر من أن يستعيده التراجع");
+  await expect(quiet.locator("li bdi").first()).toHaveAttribute("dir", "ltr");
   await shots("undo-unrestored-rtl");
   await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "dark" }));
   // Kept with the undo across a reload.
   await page.reload();
-  await expect(notice.locator(".undo-unrestored summary")).toHaveText("2 files weren't restored");
+  await expect(notice.locator(".undo-unrestored summary")).toHaveText(["1 file left as it was · too large for Undo", "2 files weren't restored"]);
   await menu("Redo turn");
   await expect.poll(() => readFile(tracked, "utf8").catch(() => "")).toBe("turn output\n");
   await expect(notice).toHaveCount(0);
   await writeFile(exclude, excluded);
-  for (const path of [kept, made, tracked]) await rm(path);
+  for (const path of [kept, made, tracked, big]) await rm(path);
   expect(errors).toEqual([]);
 });
 

@@ -1712,51 +1712,86 @@ fn plan_row(app: &App, width: usize) -> Line {
     ])
 }
 
-/// The files a pending undo left as they are, counted and then named:
-/// `2 files weren't restored · .env, ~/notes.txt`. `None` when it put
-/// everything back.
-fn unrestored_text(app: &App) -> Option<String> {
-    let revert = app.thread.revert.as_ref()?;
+/// The files a pending undo left as they are, one line for each kind: the
+/// ones left for their size, which the folder no longer matches a
+/// checkpoint at, in the text colour with why (`1 file left as it was ·
+/// too large for Undo · data/model.bin`), then the ignored and outside ones,
+/// quiet (`2 files weren't restored · .env, ~/notes.txt`). Each `true` when
+/// it is the first kind.
+fn unrestored_lines(app: &App) -> Vec<(String, bool)> {
+    let Some(revert) = app.thread.revert.as_ref() else {
+        return Vec::new();
+    };
     let shown = revert.unrestored.len();
     let count = revert
         .unrestored_count
         .map_or(shown, |count| usize::try_from(count).unwrap_or(usize::MAX))
         .max(shown);
-    if count == 0 {
-        return None;
-    }
-    let summary = if count == 1 {
-        app.language.text("1 file wasn't restored").to_owned()
-    } else {
-        app.language.format(
-            "{count} files weren't restored",
-            &[("count", &count.to_string())],
-        )
-    };
     // The home folder reads as `~`, and a path is text, never a control.
     let home = haarness_protocol::home_dir().map(|home| home.display().to_string());
-    let mut names = revert
+    let name = |path: &str| {
+        let path = match home.as_deref().and_then(|home| path.strip_prefix(home)) {
+            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+            _ => path.to_owned(),
+        };
+        path.chars().filter(|c| !c.is_control()).collect::<String>()
+    };
+    let (large, quiet): (Vec<_>, Vec<_>) = revert
         .unrestored
         .iter()
-        .map(|path| {
-            let path = match home.as_deref().and_then(|home| path.strip_prefix(home)) {
-                Some(rest) if rest.starts_with('/') => format!("~{rest}"),
-                _ => path.clone(),
-            };
-            path.chars().filter(|c| !c.is_control()).collect::<String>()
-        })
-        .collect::<Vec<_>>();
-    if count > shown {
-        names.push(
-            app.language
-                .format("+{count} more", &[("count", &(count - shown).to_string())]),
-        );
+        .partition(|file| file.reason == haarness_protocol::UnrestoredReason::Large);
+    let language = app.language;
+    let counted = |count: usize, one: &str, many: &str| {
+        if count == 1 {
+            language.text(one).to_owned()
+        } else {
+            language.format(many, &[("count", &count.to_string())])
+        }
+    };
+    let mut lines = Vec::new();
+    if !large.is_empty() {
+        let names = large
+            .iter()
+            .map(|file| name(&file.path))
+            .collect::<Vec<_>>();
+        lines.push((
+            format!(
+                "{} · {} · {}",
+                counted(
+                    large.len(),
+                    "1 file left as it was",
+                    "{count} files left as they were"
+                ),
+                language.text("too large for Undo"),
+                names.join(", ")
+            ),
+            true,
+        ));
     }
-    Some(if names.is_empty() {
-        summary
-    } else {
-        format!("{summary} · {}", names.join(", "))
-    })
+    // Those the list leaves out are counted with the quiet ones.
+    let unnamed = count - shown;
+    if !quiet.is_empty() || unnamed > 0 {
+        let mut names = quiet
+            .iter()
+            .map(|file| name(&file.path))
+            .collect::<Vec<_>>();
+        if unnamed > 0 {
+            names.push(language.format("+{count} more", &[("count", &unnamed.to_string())]));
+        }
+        lines.push((
+            format!(
+                "{} · {}",
+                counted(
+                    quiet.len() + unnamed,
+                    "1 file wasn't restored",
+                    "{count} files weren't restored"
+                ),
+                names.join(", ")
+            ),
+            false,
+        ));
+    }
+    lines
 }
 
 pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
@@ -2804,11 +2839,12 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
             Span::new("  ↶ ", theme.muted),
             Span::new(single_line(&text, width.saturating_sub(4)), theme.muted),
         ]));
-        // What the undo left as it is, under it on one line of its own.
-        if let Some(text) = unrestored_text(app) {
+        // What the undo left as it is, under it, a line for each kind.
+        for (text, pressing) in unrestored_lines(app) {
+            let tone = if pressing { theme.text } else { theme.muted };
             block.push(Line::new(vec![
                 Span::new("    ", theme.muted),
-                Span::new(single_line(&text, width.saturating_sub(4)), theme.muted),
+                Span::new(single_line(&text, width.saturating_sub(4)), tone),
             ]));
         }
         append_block(

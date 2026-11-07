@@ -1,30 +1,90 @@
 import { For, Show } from "solid-js";
+import type { UnrestoredFile } from "@haarness/sdk";
 import { Icon } from "./ui";
 import { formatNumber, t } from "./i18n";
+import { unrestoredFiles } from "./conversation-history";
 
-/**
- * The files a pending undo left as they are, as one quiet line under the
- * undo notice: their names on hover, and listed when it is opened.
- */
-export function UnrestoredFiles(props: { names: string[]; count: number; more: number }) {
-  const summary = () =>
-    props.count === 1
-      ? t("1 file wasn't restored")
-      : t("{count} files weren't restored", { count: formatNumber(props.count) });
+/** "1 file …" or "N files …" in the interface language. */
+function counted(count: number, one: string, many: string) {
+  return count === 1 ? t(one) : t(many, { count: formatNumber(count) });
+}
+
+/** How the folder stands where undo left `file` as it was. */
+function reason(file: UnrestoredFile) {
+  return file.reason === "large"
+    ? t("too large for Undo")
+    : file.reason === "outside"
+      ? t("outside the folder")
+      : t("ignored");
+}
+
+/** One kind of file an undo left: a line that opens to list them. */
+function Group(props: {
+  files: UnrestoredFile[];
+  summary: string;
+  pressing: boolean;
+  more: number;
+}) {
   return (
-    <details class="undo-unrestored">
-      <summary title={props.names.join("\n")}>
+    <details class="undo-unrestored" classList={{ pressing: props.pressing }}>
+      <summary title={props.files.map((file) => file.path).join("\n")}>
         <Icon name="chevron" size="xs" />
-        {summary()}
+        {props.summary}
       </summary>
       <ul>
         {/* A path reads left to right, where the list starts in either direction. */}
-        <For each={props.names}>{(name) => <li><bdi dir="ltr">{name}</bdi></li>}</For>
+        <For each={props.files}>
+          {(file) => (
+            <li>
+              <bdi dir="ltr">{file.path}</bdi>
+              <Show when={!props.pressing}>
+                <span class="reason"> · {reason(file)}</span>
+              </Show>
+            </li>
+          )}
+        </For>
         <Show when={props.more > 0}>
-          <li class="more">{t("+{count} more", { count: formatNumber(props.more) })}</li>
+          <li>{t("+{count} more", { count: formatNumber(props.more) })}</li>
         </Show>
       </ul>
-      <p>{t("Undo leaves files that are ignored, outside the folder or over 2 MiB as they are.")}</p>
     </details>
+  );
+}
+
+/**
+ * The files a pending undo left as they are, under the undo notice: those
+ * left for their size first, in the text colour with why, as the folder no
+ * longer matches a checkpoint there; then, quietly, the ignored ones and those
+ * outside the folder. Names show on hover and are listed when a line is
+ * opened.
+ */
+export function UnrestoredFiles(props: ReturnType<typeof unrestoredFiles>) {
+  return (
+    <>
+      <Show when={props.large.length > 0}>
+        <Group
+          files={props.large}
+          summary={
+            counted(props.large.length, "1 file left as it was", "{count} files left as they were") +
+            " · " +
+            t("too large for Undo")
+          }
+          pressing
+          more={0}
+        />
+      </Show>
+      <Show when={props.quiet.length + props.more > 0}>
+        <Group
+          files={props.quiet}
+          summary={counted(
+            props.quiet.length + props.more,
+            "1 file wasn't restored",
+            "{count} files weren't restored",
+          )}
+          pressing={false}
+          more={props.more}
+        />
+      </Show>
+    </>
   );
 }

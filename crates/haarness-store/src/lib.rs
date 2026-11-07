@@ -2216,7 +2216,7 @@ fn decode_unrestored(
     recorded: Option<&str>,
     backup: &str,
     sequence: u64,
-) -> (Vec<String>, Option<u64>) {
+) -> (Vec<haarness_protocol::UnrestoredFile>, Option<u64>) {
     let steps = still_undone(recorded, backup, sequence);
     // A step names only its first files; the rest count, unnamed.
     let unnamed: u64 = steps
@@ -2224,14 +2224,14 @@ fn decode_unrestored(
         .map(|step| {
             step.files
                 .count
-                .saturating_sub(u64::try_from(step.files.paths.len()).unwrap_or(u64::MAX))
+                .saturating_sub(u64::try_from(step.files.files.len()).unwrap_or(u64::MAX))
         })
         .sum();
     let all =
-        haarness_core::UndoStepFiles::new(steps.into_iter().flat_map(|step| step.files.paths));
+        haarness_core::UndoStepFiles::new(steps.into_iter().flat_map(|step| step.files.files));
     let count = all.count.saturating_add(unnamed);
-    let named = u64::try_from(all.paths.len()).unwrap_or(u64::MAX);
-    (all.paths, (count > named).then_some(count))
+    let named = u64::try_from(all.files.len()).unwrap_or(u64::MAX);
+    (all.files, (count > named).then_some(count))
 }
 
 fn decode_turn(raw: RawTurn) -> CoreResult<Turn> {
@@ -2339,9 +2339,21 @@ mod tests {
             .create_thread(CreateThreadRequest::default())
             .await
             .unwrap();
-        let files = |paths: &[&str]| {
-            haarness_core::UndoStepFiles::new(paths.iter().map(|path| (*path).to_owned()))
+        let file = |path: &str| {
+            let reason = if path.starts_with('/') {
+                haarness_protocol::UnrestoredReason::Outside
+            } else if path.starts_with("big") {
+                haarness_protocol::UnrestoredReason::Large
+            } else {
+                haarness_protocol::UnrestoredReason::Ignored
+            };
+            haarness_protocol::UnrestoredFile {
+                path: path.to_owned(),
+                reason,
+            }
         };
+        let files =
+            |paths: &[&str]| haarness_core::UndoStepFiles::new(paths.iter().map(|path| file(path)));
         let left = |thread: Thread| {
             let revert = thread.revert.expect("a pending undo");
             (revert.sequence, revert.unrestored, revert.unrestored_count)
@@ -2360,15 +2372,12 @@ mod tests {
             )
             .await
             .unwrap();
+        // The one left for its size first, then the ignored, then outside.
         assert_eq!(
             left(store.get_thread(thread.id).await.unwrap()),
             (
                 5,
-                vec![
-                    ".env".to_owned(),
-                    "big.bin".to_owned(),
-                    "/outside/notes.txt".to_owned()
-                ],
+                vec![file("big.bin"), file(".env"), file("/outside/notes.txt")],
                 None
             )
         );
@@ -2379,7 +2388,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             left(store.get_thread(thread.id).await.unwrap()),
-            (9, vec![".env".to_owned()], None)
+            (9, vec![file(".env")], None)
         );
         // Another undo (another backup) starts over, and a step that left
         // everything in place names nothing.
@@ -2407,13 +2416,13 @@ mod tests {
             .set_revert_state_unrestored(
                 thread.id,
                 step(2, "b2"),
-                haarness_core::UndoStepFiles::new(many),
+                haarness_core::UndoStepFiles::new(many.iter().map(|path| file(path))),
             )
             .await
             .unwrap();
         let (_, named, count) = left(store.get_thread(thread.id).await.unwrap());
         assert_eq!(named.len(), haarness_protocol::MAX_UNRESTORED);
-        assert_eq!(named[0], "f000");
+        assert_eq!(named[0], file("f000"));
         assert_eq!(count, Some(120));
         // Confirming the undo clears them with it.
         assert!(store.confirm_revert(thread.id).await.unwrap());

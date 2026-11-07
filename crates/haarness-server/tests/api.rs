@@ -6835,7 +6835,18 @@ async fn undo_names_the_files_it_left_as_they_are() {
             .as_ref()
             .map(|revert| (revert.unrestored.clone(), revert.unrestored_count))
     };
-    let expected = Some((vec!["large.bin".to_owned(), "local.env".to_owned()], None));
+    // Nothing holds what the large file held before the turn shrank it.
+    let left = |path: &str, reason| haarness_protocol::UnrestoredFile {
+        path: path.to_owned(),
+        reason,
+    };
+    let expected = Some((
+        vec![
+            left("large.bin", haarness_protocol::UnrestoredReason::Large),
+            left("local.env", haarness_protocol::UnrestoredReason::Ignored),
+        ],
+        None,
+    ));
     assert_eq!(unrestored(&reverted), expected);
     assert_eq!(
         unrestored(&runtime.get_thread(thread.id).await.unwrap()),
@@ -6848,6 +6859,192 @@ async fn undo_names_the_files_it_left_as_they_are() {
     assert!(redone.revert.is_none());
     assert_eq!(read("tracked.txt").as_deref(), Some(&b"after\n"[..]));
     assert_eq!(read("added.txt").as_deref(), Some(&b"new\n"[..]));
+    remove_test_folder(root).await;
+}
+
+#[tokio::test]
+async fn undo_and_redo_step_through_a_file_a_turn_grew_past_the_size_limit() {
+    let root = std::env::temp_dir().join(format!("haarness-grown-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::write(workspace.join("data.txt"), "v0\n")
+        .await
+        .unwrap();
+    tokio::fs::write(workspace.join("other.txt"), "o0\n")
+        .await
+        .unwrap();
+    let database = root.join("db.sqlite");
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::open(&database).unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(64),
+        workspace.clone(),
+        String::new(),
+        {
+            let mut config = haarness_core::RuntimeConfig::default();
+            for pattern in ["write:*", "bash:*"] {
+                config.base_rules.push(haarness_core::PermissionRule {
+                    pattern: pattern.into(),
+                    decision: haarness_core::PermissionDecision::Allow,
+                });
+            }
+            config
+        },
+    )
+    .with_snapshots(Arc::new(
+        haarness_store::SqliteSnapshotStore::open(&database, workspace.clone()).unwrap(),
+    ));
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Grown file fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // Turn 1 edits it; turn 2's command grows it past 2 MiB.
+    let grow = "head -c 2500000 /dev/zero | tr '\\0' a > data.txt";
+    for (data, other) in [
+        (
+            serde_json::json!({"name": "write", "arguments": {"path": "data.txt", "content": "v1\n"}}),
+            "o1\n",
+        ),
+        (
+            serde_json::json!({"name": "bash", "arguments": {"command": grow}}),
+            "o2\n",
+        ),
+    ] {
+        let calls = serde_json::json!([
+            data,
+            {"name": "write", "arguments": {"path": "other.txt", "content": other}},
+        ]);
+        let turn = runtime
+            .start_turn(thread.id, turn_request(&format!("!multi {calls}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+    }
+    let read = |path: &str| std::fs::read_to_string(workspace.join(path)).unwrap();
+    let large = read("data.txt");
+    assert_eq!(large.len(), 2_500_000);
+    // Both steps back: the large content is kept first, so nothing is left
+    // and the second step meets no false conflict.
+    for (data, other) in [("v1\n", "o1\n"), ("v0\n", "o0\n")] {
+        let reverted = runtime.revert(thread.id, None).await.unwrap();
+        assert_eq!(read("data.txt"), data);
+        assert_eq!(read("other.txt"), other);
+        assert!(reverted.revert.unwrap().unrestored.is_empty());
+    }
+    let copies = root.join("db.sqlite.undo-copies");
+    assert_eq!(std::fs::read_dir(&copies).unwrap().count(), 1);
+    // And forward again, the large file from its copy.
+    runtime.unrevert(thread.id).await.unwrap();
+    assert_eq!(read("data.txt"), "v1\n");
+    let redone = runtime.unrevert(thread.id).await.unwrap();
+    assert!(redone.revert.is_none());
+    assert_eq!(read("data.txt"), large);
+    assert_eq!(read("other.txt"), "o2\n");
+    assert_eq!(
+        std::fs::read_dir(&copies).unwrap().count(),
+        0,
+        "the copies go with the undo"
+    );
+    remove_test_folder(root).await;
+}
+
+#[tokio::test]
+async fn undo_names_only_what_a_resumed_child_agent_changed_in_the_undone_turn() {
+    let root = std::env::temp_dir().join(format!("haarness-child-undo-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(workspace.join(".git"))
+        .await
+        .unwrap();
+    tokio::fs::write(workspace.join(".gitignore"), "*.env\n")
+        .await
+        .unwrap();
+    let runtime = undo_fixture(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Child undo fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let delegate = |path: &str, child: Option<haarness_protocol::ThreadId>| {
+        let write = serde_json::json!({"path": path, "content": "set\n"});
+        let mut task = serde_json::json!({
+            "description": "settings",
+            "prompt": format!("!tool write {write}"),
+            "agent": "general",
+        });
+        if let Some(child) = child {
+            task["task_id"] = serde_json::json!(child.to_string());
+        }
+        format!("!tool task {task}")
+    };
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&delegate("first.env", None)))
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    let child = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|item| match item.data {
+            haarness_protocol::ItemData::TaskLink {
+                child_thread_id, ..
+            } => Some(child_thread_id),
+            _ => None,
+        })
+        .expect("a child agent");
+    // The same child, resumed by the next turn.
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(&delegate("second.env", Some(child))),
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert!(workspace.join("first.env").exists() && workspace.join("second.env").exists());
+    let children = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            haarness_protocol::ItemData::TaskLink {
+                child_thread_id, ..
+            } => Some(child_thread_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(children, vec![child, child], "the child was resumed");
+
+    let reverted = runtime.revert(thread.id, None).await.unwrap();
+    let named = reverted
+        .revert
+        .unwrap()
+        .unrestored
+        .into_iter()
+        .map(|file| file.path)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        named,
+        vec!["second.env"],
+        "the earlier turn's file is not this step's"
+    );
     remove_test_folder(root).await;
 }
 

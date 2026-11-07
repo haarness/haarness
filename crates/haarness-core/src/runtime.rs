@@ -4725,9 +4725,11 @@ impl AgentRuntime {
     }
 
     async fn confirm_revert_before_compaction(&self, id: ThreadId) -> CoreResult<()> {
+        let pending = self.repository.get_thread(id).await?;
         if !self.repository.confirm_revert(id).await? {
             return Ok(());
         }
+        self.release_undo_copies(&pending).await;
         let thread = self.repository.get_thread(id).await?;
         let root = self.resolve_root(&thread).await;
         let todos = latest_todos(&self.repository.list_items(id, None).await?, None);
@@ -4945,6 +4947,13 @@ impl AgentRuntime {
     pub async fn revert(&self, id: ThreadId, sequence: Option<u64>) -> CoreResult<Thread> {
         let admission_lock = turn_admission_lock(&self.turn_admissions, id);
         let _admission_guard = admission_lock.lock().await;
+        // What the step's turns changed, read while only this chat waits:
+        // its transcript cannot change under the admission lock.
+        let planned = if self.active.contains_key(&id) {
+            None
+        } else {
+            self.plan_revert_files(id, sequence).await
+        };
         // Held from the backup capture through the saved undo state.
         let _restore_guard = self.restore_gate.lock().await;
         let snapshots = &self.undo_snapshots(id, FolderAccess::Write).await?;
@@ -5091,18 +5100,20 @@ impl AgentRuntime {
             } else {
                 (after, snapshots.capture(id).await?.id)
             };
-            let restored = snapshots.restore_delta(&expected, &before).await?;
-            let unrestored = self
-                .undo_step_files(
-                    &thread,
-                    snapshots,
-                    &items,
-                    (boundary, current_boundary),
-                    &expected,
-                    &before,
-                    restored.skipped,
-                )
-                .await;
+            let restored = snapshots
+                .restore_step(&backup_id, &expected, &before, crate::UndoStep::Undo)
+                .await?;
+            let plan = match planned
+                .filter(|plan| plan.boundary == boundary && plan.until == current_boundary)
+            {
+                Some(plan) => plan,
+                None => {
+                    self.plan_undo_files(&thread, &items, (boundary, current_boundary))
+                        .await
+                }
+            };
+            let unrestored =
+                Self::undo_step_files(snapshots, plan, &expected, &before, restored.skipped).await;
             if let Err(error) = self
                 .repository
                 .set_revert_state_unrestored(
@@ -5112,7 +5123,9 @@ impl AgentRuntime {
                 )
                 .await
             {
-                let compensation = snapshots.restore_delta(&before, &expected).await;
+                let compensation = snapshots
+                    .restore_step(&backup_id, &before, &expected, crate::UndoStep::PutBack)
+                    .await;
                 return Err(match compensation {
                     Ok(_) => error,
                     Err(compensation) => CoreError::Storage(format!(
@@ -5241,7 +5254,9 @@ impl AgentRuntime {
             _ => (state.snapshot_id.clone(), None),
         };
         if let Some(base) = &state.base_snapshot_id {
-            snapshots.restore_delta(base, &desired).await?;
+            snapshots
+                .restore_step(&state.snapshot_id, base, &desired, crate::UndoStep::Redo)
+                .await?;
         } else {
             snapshots.restore(&desired).await?;
         }
@@ -5253,7 +5268,9 @@ impl AgentRuntime {
             .await
         {
             let compensation = if let Some(base) = &state.base_snapshot_id {
-                snapshots.restore_delta(&desired, base).await
+                snapshots
+                    .restore_step(&state.snapshot_id, &desired, base, crate::UndoStep::PutBack)
+                    .await
             } else {
                 Ok(crate::DeltaRestore::default())
             };
@@ -5263,6 +5280,11 @@ impl AgentRuntime {
                     "failed to clear undo state ({error}); workspace compensation also failed ({compensation})"
                 )),
             });
+        }
+        if next_state.is_none()
+            && let Err(error) = snapshots.release_copies(&state.snapshot_id).await
+        {
+            warn!(%error, "cannot drop the copies kept for an undo");
         }
         self.events.publish_scoped(
             "todo.updated",
@@ -5577,6 +5599,9 @@ impl AgentRuntime {
             )?;
         }
         let confirmed_revert = self.repository.confirm_revert(thread_id).await?;
+        if confirmed_revert {
+            self.release_undo_copies(&thread).await;
+        }
         let thread = if confirmed_revert {
             self.repository.get_thread(thread_id).await?
         } else {
@@ -7084,6 +7109,7 @@ impl AgentRuntime {
                 }
             }
             if thread.revert.is_some() {
+                self.release_undo_copies(&thread).await;
                 // Store confirmation and turn creation are one transaction.
                 // Publish authoritative snapshots so connected clients leave
                 // pending-revert UI state without a manual refresh.
