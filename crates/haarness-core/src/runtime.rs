@@ -9993,7 +9993,9 @@ impl RunnerTask {
                         "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
                     recovering = false;
                 }
-                if std::mem::take(&mut explain_failure) {
+                // Asked until the provider takes the request: a retry, an
+                // image retry or a compaction before then asks again.
+                if explain_failure {
                     messages.push(ProviderMessage::Text {
                         role: "user".into(),
                         content: EXPLAIN_FAILURE.into(),
@@ -10436,10 +10438,12 @@ impl RunnerTask {
                     }
                     saw_provider_event = true;
                     // The provider took this request: a later one refused
-                    // for its size may compact again, and a later one it
-                    // turns away while busy backs off from the first wait.
+                    // for its size may compact again, a later one it turns
+                    // away while busy backs off from the first wait, and the
+                    // request to explain a failure has been made.
                     compacted_for_size = false;
                     retries.accepted();
+                    explain_failure = false;
                     match event {
                         ProviderEvent::TextDelta(delta) => {
                             if delta.is_empty() {

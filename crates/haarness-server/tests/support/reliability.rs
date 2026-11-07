@@ -1213,6 +1213,59 @@ async fn reliability_an_empty_reply_after_a_failed_tool_is_asked_to_explain_it_o
     }
 }
 
+#[tokio::test]
+async fn reliability_a_retry_still_asks_the_model_to_explain_the_failure() {
+    // The read fails, the reply is empty, and the request to explain meets
+    // an overloaded provider: the request sent again still asks.
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![Ok(read_notes("missing")), Ok(finish("tool_use"))],
+            vec![Ok(usage()), Ok(finish("stop"))],
+            vec![cut("HTTP 529: overloaded")],
+            vec![
+                Ok(text("The file is not there.")),
+                Ok(usage()),
+                Ok(finish("stop")),
+            ],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(!explain_note(&requests[1]));
+        assert!(explain_note(&requests[2]) && explain_note(&requests[3]));
+        assert_eq!(
+            serde_json::to_value(&requests[2].messages).unwrap(),
+            serde_json::to_value(&requests[3].messages).unwrap()
+        );
+    }
+    assert!(
+        runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|item| matches!(&item.data,
+                ItemData::AssistantMessage {text} if text == "The file is not there."))
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 fn explain_note(request: &ProviderRequest) -> bool {
     request.messages.iter().any(|message| matches!(message, ProviderMessage::Text {role,content} if role == "user" && content.starts_with("Your last reply was empty")))
 }
