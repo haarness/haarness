@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { keyboardClaim, typedElsewhere } from "../src/renderer/terminal-focus";
+import { keyboardClaim, typedElsewhere, watchKeyboard } from "../src/renderer/terminal-focus";
 
 // A terminal view takes the keyboard on its first connect only when the
 // person brought it up. Each step below is what the panel tells the claim.
@@ -69,4 +69,36 @@ test("typing or Tab outside the terminal keeps the keyboard there; a shortcut ma
   claim.claim();
   if (typedElsewhere(key("x"))) claim.release();
   assert.equal(claim.take(), false);
+});
+
+test("composing with an input method or entering text outside the terminal keeps the keyboard there; inside it, it does not", () => {
+  /** Where an event lands: inside the terminal panel or not. */
+  class Place extends EventTarget {
+    constructor(private inside: boolean) {
+      super();
+    }
+    closest(selector: string) {
+      return this.inside && selector === ".terminal-panel" ? this : null;
+    }
+  }
+  const keydown = (key: string) => Object.assign(new Event("keydown"), { key, ctrlKey: false, metaKey: false, altKey: false });
+  for (const [inside, event, ends] of [
+    [false, () => new Event("compositionstart"), true],
+    [false, () => new Event("beforeinput"), true],
+    // An input method's keys alone say nothing; its composing does.
+    [false, () => keydown("Process"), false],
+    [false, () => keydown("a"), true],
+    [false, () => new Event("pointerdown"), true],
+    [true, () => new Event("compositionstart"), false],
+    [true, () => new Event("beforeinput"), false],
+    [true, () => keydown("a"), false],
+    [true, () => new Event("pointerdown"), true],
+  ] as const) {
+    const claim = keyboardClaim();
+    const place = new Place(inside);
+    watchKeyboard(place, claim);
+    claim.claim();
+    place.dispatchEvent(event());
+    assert.equal(claim.take(), !ends, `${event().type} ${inside ? "inside" : "outside"}`);
+  }
 });

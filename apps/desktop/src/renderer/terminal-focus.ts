@@ -49,24 +49,39 @@ export function keyboardClaim() {
  * Whether a key pressed outside the terminal panel shows the person using
  * the keyboard where it is: typing (a character, Enter, Backspace, Delete)
  * or moving it on with Tab. A shortcut, with Command, Control or Option,
- * does not: it may be the one that brings the terminal up.
+ * does not: it may be the one that brings the terminal up. Text an input
+ * method composes comes as `Process` keys, and counts by the composing and
+ * the input it makes (`watchKeyboard`).
  */
 export function typedElsewhere(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }) {
   if (event.ctrlKey || event.metaKey || event.altKey) return false;
   return event.key.length === 1 || ["Tab", "Enter", "Backspace", "Delete"].includes(event.key);
 }
 
-/** The window's one claim. A press or key lands before what it does, so one
- * that brings a terminal up claims after it has ended the earlier claim. */
-export const terminalKeyboard = keyboardClaim();
-if (typeof window !== "undefined") {
-  window.addEventListener("pointerdown", terminalKeyboard.release, true);
-  window.addEventListener(
+/** Whether an event's target is inside the terminal panel. */
+const inTerminal = (target: EventTarget | null) =>
+  !!target && typeof (target as Element).closest === "function" && !!(target as Element).closest(".terminal-panel");
+
+/**
+ * Ends `claim` as the person puts the keyboard somewhere: a pointer press
+ * anywhere, and outside the terminal panel a key `typedElsewhere` counts,
+ * an input method starting to compose, or any text going into a field.
+ * Listens on `root` (the window) before anything else hears the event.
+ */
+export function watchKeyboard(root: EventTarget, claim: { release(): void }) {
+  root.addEventListener("pointerdown", () => claim.release(), true);
+  root.addEventListener(
     "keydown",
     (event) => {
-      const inTerminal = event.target instanceof Element && !!event.target.closest(".terminal-panel");
-      if (!inTerminal && typedElsewhere(event)) terminalKeyboard.release();
+      if (!inTerminal(event.target) && typedElsewhere(event as KeyboardEvent)) claim.release();
     },
     true,
   );
+  for (const type of ["compositionstart", "beforeinput"])
+    root.addEventListener(type, (event) => inTerminal(event.target) || claim.release(), true);
 }
+
+/** The window's one claim. A press or key lands before what it does, so one
+ * that brings a terminal up claims after it has ended the earlier claim. */
+export const terminalKeyboard = keyboardClaim();
+if (typeof window !== "undefined") watchKeyboard(window, terminalKeyboard);
