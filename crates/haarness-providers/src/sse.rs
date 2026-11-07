@@ -75,6 +75,33 @@ pub fn json_stream(
     cancel: CancellationToken,
     limits: StreamLimits,
 ) -> JsonStream {
+    framed_stream(response, cancel, limits, Framing::Events)
+}
+
+/// The response's lines as JSON values, one value a line (Ollama's own API
+/// streams this way), with the same limits and errors as [`json_stream`].
+pub(crate) fn json_lines_stream(
+    response: reqwest::Response,
+    cancel: CancellationToken,
+    limits: StreamLimits,
+) -> JsonStream {
+    framed_stream(response, cancel, limits, Framing::Lines)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Framing {
+    /// Server-sent events: `data:` lines, a blank line between events.
+    Events,
+    /// One JSON value a line.
+    Lines,
+}
+
+fn framed_stream(
+    response: reqwest::Response,
+    cancel: CancellationToken,
+    limits: StreamLimits,
+    framing: Framing,
+) -> JsonStream {
     let limit = limits.idle(is_loopback(response.url()));
     Box::pin(try_stream! {
         let response = if response.status().is_success() {
@@ -120,8 +147,25 @@ pub fn json_stream(
                     unreachable!();
                 }
             };
-            let Some(chunk) = chunk else { break; };
+            let Some(chunk) = chunk else {
+                // A last line the server didn't end.
+                if framing == Framing::Lines {
+                    if let Some(value) = json_line(&buffer)? {
+                        yield value;
+                    }
+                }
+                break;
+            };
             buffer.extend_from_slice(&chunk);
+            if framing == Framing::Lines {
+                while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = buffer.drain(..=end).collect();
+                    if let Some(value) = json_line(&line)? {
+                        yield value;
+                    }
+                }
+                continue;
+            }
             while let Some(boundary) = find_boundary(&buffer) {
                 let frame: Vec<u8> = buffer.drain(..boundary.0).collect();
                 buffer.drain(..boundary.1);
@@ -253,6 +297,18 @@ pub(crate) fn upstream_error(error: &Value) -> Option<String> {
             None => detail,
         },
     )
+}
+
+/// One line of a JSON-lines stream; `None` for a blank one.
+fn json_line(line: &[u8]) -> CoreResult<Option<Value>> {
+    let line = String::from_utf8_lossy(line);
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(line)
+        .map(Some)
+        .map_err(|error| CoreError::Provider(format!("invalid JSON line: {error}")))
 }
 
 fn find_boundary(buffer: &[u8]) -> Option<(usize, usize)> {

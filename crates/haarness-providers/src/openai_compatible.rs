@@ -1,7 +1,8 @@
 use crate::{
     auth::{Credential, CredentialStore, XaiOAuthClient, unix_millis, xai_access_token_expiring},
     media::Unreadable,
-    sse::json_stream,
+    ollama,
+    sse::{json_lines_stream, json_stream},
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -373,12 +374,18 @@ impl OpenAiCompatibleProvider {
                 .listed_audio
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = audio;
-            let models = match self.id.as_str() {
+            let (models, weak) = match self.id.as_str() {
                 "ollama" => self.ollama_details(base, models).await,
                 "lmstudio" => self.lmstudio_details(base, models).await,
-                _ => models,
+                _ => (models, HashSet::new()),
             };
-            return Some(crate::merge_discovered_models(self.models.clone(), models));
+            let mut models = crate::merge_discovered_models(self.models.clone(), models);
+            if matches!(self.id.as_str(), "ollama" | "lmstudio") {
+                // Every client gives a new chat a provider's first model:
+                // on this computer, one that can do the work.
+                models.sort_by_key(|model| local_rank(model, &weak));
+            }
+            return Some(models);
         }
         None
     }
@@ -386,8 +393,13 @@ impl OpenAiCompatibleProvider {
     /// What Ollama knows of each installed model (`/api/show`): whether it
     /// reads images, calls tools and thinks, and its context window. Its
     /// OpenAI-style list names the models and nothing more. A model runs on
-    /// this computer, so its price is nothing.
-    async fn ollama_details(&self, base: &str, models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    /// this computer, so its price is nothing. Also the models too small to
+    /// follow an agent's instructions (see [`local_rank`]).
+    async fn ollama_details(
+        &self,
+        base: &str,
+        models: Vec<ModelInfo>,
+    ) -> (Vec<ModelInfo>, HashSet<String>) {
         let root = base.strip_suffix("/v1").unwrap_or(base).to_owned();
         let details = futures::future::join_all(models.iter().map(|model| {
             let request = self
@@ -408,13 +420,25 @@ impl OpenAiCompatibleProvider {
             }
         }))
         .await;
-        models
+        let mut weak = HashSet::new();
+        let models = models
             .into_iter()
             .zip(details)
             .map(|(mut model, details)| {
                 if let Some(details) = details {
                     apply_ollama_details(&mut model, &details);
+                    if details["details"]["parameter_size"]
+                        .as_str()
+                        .and_then(billions_of_parameters)
+                        .is_some_and(|billions| billions < SMALL_MODEL_BILLIONS)
+                    {
+                        weak.insert(model.id.clone());
+                    }
                 }
+                // The window it runs with, though `/api/show` didn't answer.
+                model.context_window.get_or_insert_with(|| {
+                    ollama::context_window(None, &[ollama::chosen_context()])
+                });
                 model.pricing.get_or_insert(ModelPricing {
                     input: 0.0,
                     output: 0.0,
@@ -424,7 +448,8 @@ impl OpenAiCompatibleProvider {
                 });
                 model
             })
-            .collect()
+            .collect();
+        (models, weak)
     }
 
     /// LM Studio's own list (`/api/v1/models`, from 0.4): each model's
@@ -449,11 +474,17 @@ impl OpenAiCompatibleProvider {
     /// What LM Studio knows of each downloaded model, which its OpenAI-style
     /// list leaves out. Every model calls tools there (LM Studio prompts
     /// those not trained for them itself), and it runs on this computer, so
-    /// its price is nothing.
-    async fn lmstudio_details(&self, base: &str, models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    /// its price is nothing. Also the models too small for an agent, or not
+    /// trained to call tools (see [`local_rank`]).
+    async fn lmstudio_details(
+        &self,
+        base: &str,
+        models: Vec<ModelInfo>,
+    ) -> (Vec<ModelInfo>, HashSet<String>) {
         let root = base.strip_suffix("/v1").unwrap_or(base);
         let details = self.lmstudio_models(root).await.unwrap_or_default();
-        models
+        let mut weak = HashSet::new();
+        let models = models
             .into_iter()
             .map(|mut model| {
                 if let Some(entry) = details
@@ -461,6 +492,13 @@ impl OpenAiCompatibleProvider {
                     .find(|entry| entry["key"] == model.id.as_str())
                 {
                     apply_lmstudio_details(&mut model, entry);
+                    let small = entry["params_string"]
+                        .as_str()
+                        .and_then(billions_of_parameters)
+                        .is_some_and(|billions| billions < SMALL_MODEL_BILLIONS);
+                    if small || entry["capabilities"]["trained_for_tool_use"] == false {
+                        weak.insert(model.id.clone());
+                    }
                 }
                 model.pricing.get_or_insert(ModelPricing {
                     input: 0.0,
@@ -471,7 +509,8 @@ impl OpenAiCompatibleProvider {
                 });
                 model
             })
-            .collect()
+            .collect();
+        (models, weak)
     }
 
     /// LM Studio loads a model on its first request with the context its
@@ -525,17 +564,37 @@ impl OpenAiCompatibleProvider {
                     .await;
             }
         }
-        tracing::info!(model, context, "loading an LM Studio model");
-        let loaded = self
-            .client
-            .post(format!("{root}/api/v1/models/load"))
-            .json(&json!({"model": model, "context_length": context}))
-            .timeout(std::time::Duration::from_secs(300))
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status);
-        if let Err(error) = loaded {
-            tracing::warn!(model, %error, "LM Studio did not load the model");
+        // A computer short of memory for that much (LM Studio refuses a load
+        // its guardrails say won't fit) may still fit the least that works.
+        let smallest = LMSTUDIO_MIN_CONTEXT.min(context);
+        for context in [context, smallest] {
+            tracing::info!(model, context, "loading an LM Studio model");
+            let loaded = self
+                .client
+                .post(format!("{root}/api/v1/models/load"))
+                .json(&json!({"model": model, "context_length": context}))
+                .timeout(std::time::Duration::from_secs(300))
+                .send()
+                .await;
+            match loaded {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response)
+                    if context > smallest
+                        && response.status() != reqwest::StatusCode::NOT_FOUND =>
+                {
+                    let status = response.status();
+                    let detail = response.text().await.unwrap_or_default();
+                    tracing::warn!(model, context, %status, detail, "LM Studio did not load the model; trying with less room");
+                }
+                Ok(response) => {
+                    tracing::warn!(model, status = %response.status(), "LM Studio did not load the model");
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(model, %error, "LM Studio did not load the model");
+                    break;
+                }
+            }
         }
         Ok(())
     }
@@ -1394,6 +1453,51 @@ fn deepseek_charge(model: &str, at: chrono::DateTime<chrono::Utc>, usage: &Value
         .then(|| ((prompt - hit) * input + hit * cache_read + completion * output) / 1_000_000.0)
 }
 
+/// Under this many billion parameters a model on this computer seldom
+/// follows an agent's instructions and tools: SmolLM2 1.7B answers with
+/// nothing, Llama 3.2 3B breaks the code it edits.
+const SMALL_MODEL_BILLIONS: f64 = 4.0;
+
+/// The least window a model a new chat gets on this computer should have.
+const LOCAL_ROOM: u64 = 16_384;
+
+/// How well a model on this computer suits a new chat, best first: one that
+/// calls tools, runs here rather than on a cloud the runtime signs in to,
+/// isn't small (`weak`, from the runtime's details), and has room for the
+/// instructions and tools. Equal ranks keep the catalog's order.
+fn local_rank(model: &ModelInfo, weak: &HashSet<String>) -> (bool, bool, bool, bool) {
+    (
+        !model.tools,
+        model.id.ends_with("-cloud") || model.id.ends_with(":cloud"),
+        weak.contains(&model.id),
+        model
+            .context_window
+            .is_some_and(|window| window < LOCAL_ROOM),
+    )
+}
+
+/// A parameter count as runtimes write it, in billions: `7.6B`, `135M`, `30B-A3B`
+/// (its total), or a bare count (`116829156672`).
+fn billions_of_parameters(text: &str) -> Option<f64> {
+    let text = text.trim();
+    let digits = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let number: f64 = text[..digits].parse().ok()?;
+    match text[digits..]
+        .chars()
+        .next()
+        .map(|unit| unit.to_ascii_uppercase())
+    {
+        Some('B') => Some(number),
+        Some('M') => Some(number / 1_000.0),
+        Some('K') => Some(number / 1_000_000.0),
+        Some('T') => Some(number * 1_000.0),
+        None => Some(number / 1e9),
+        Some(_) => None,
+    }
+}
+
 /// The context Haarness loads an LM Studio model with: room for the
 /// instructions, tools and a long chat, without the memory of a model's
 /// full window (often 256K).
@@ -1465,6 +1569,12 @@ fn local_model_missing(error: CoreError, model: &str) -> CoreError {
 
 /// One model's `/api/show` answer from Ollama, into what Haarness offers.
 fn apply_ollama_details(model: &mut ModelInfo, details: &Value) {
+    apply_ollama_details_chosen(model, details, ollama::chosen_context());
+}
+
+/// [`apply_ollama_details`], with the context the person chose for Ollama
+/// (`OLLAMA_CONTEXT_LENGTH`).
+fn apply_ollama_details_chosen(model: &mut ModelInfo, details: &Value, chosen: Option<u64>) {
     let capabilities: Vec<&str> = details["capabilities"]
         .as_array()
         .into_iter()
@@ -1475,9 +1585,21 @@ fn apply_ollama_details(model: &mut ModelInfo, details: &Value) {
         model.images = capabilities.contains(&"vision");
         model.tools = capabilities.contains(&"tools");
         model.reasoning = capabilities.contains(&"thinking");
-        // Ollama turns thinking off with `none`; gpt-oss always thinks.
+        // The levels Ollama lists (`thinking.values`, gpt-oss's `low` to
+        // `high`); a model it lists as on or off turns thinking off with
+        // `none`. gpt-oss always thinks.
+        let levels: Vec<String> = details["thinking"]["values"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|level| ["minimal", "low", "medium", "high", "xhigh"].contains(level))
+            .map(str::to_owned)
+            .collect();
         model.reasoning_efforts = if !model.reasoning {
             Vec::new()
+        } else if !levels.is_empty() {
+            levels
         } else if model.id.starts_with("gpt-oss") {
             ["low", "medium", "high"].map(str::to_owned).to_vec()
         } else {
@@ -1486,14 +1608,10 @@ fn apply_ollama_details(model: &mut ModelInfo, details: &Value) {
                 .to_vec()
         };
     }
-    // `<architecture>.context_length`, e.g. `qwen3_5.context_length`.
-    if let Some(window) = details["model_info"].as_object().and_then(|info| {
-        info.iter()
-            .find(|(key, _)| key.ends_with(".context_length"))
-            .and_then(|(_, value)| value.as_u64())
-    }) {
-        model.context_window = Some(window);
-    }
+    model.context_window = Some(ollama::context_window(
+        ollama::longest_context(details),
+        &[chosen, ollama::modelfile_context(details)],
+    ));
 }
 
 fn is_chat_completion_model(provider: &str, entry: &Value, id: &str) -> bool {
@@ -2071,11 +2189,25 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .and_then(|model| model.max_output_tokens)
             .or(self.model_defaults.max_output_tokens)
             .filter(|limit| *limit > 0);
+        // Ollama runs the model with the window Haarness compacts against.
+        let ollama_context = selected
+            .and_then(|model| model.context_window)
+            .filter(|window| *window > 0)
+            .unwrap_or(ollama::CONTEXT);
         let supports_reasoning_effort = supports_reasoning
             && (selected.is_some_and(|model| !model.reasoning_efforts.is_empty())
                 || self.reasoning_effort_models.contains(&request.model)
                 || known_reasoning_effort_model(&self.id, &request.model));
         let structured_output = request.output_schema;
+        // A model Ollama runs without tools would answer as if it had read,
+        // changed and run things it never saw. Refused in the words Ollama
+        // itself once used; the runtime says what to choose instead.
+        if self.id == "ollama" && !supports_tools && !request.tools.is_empty() {
+            return Err(CoreError::Provider(format!(
+                "{} does not support tools",
+                request.model
+            )));
+        }
         if structured_output.is_some() && !supports_tools {
             return Err(CoreError::Provider(format!(
                 "model {} does not advertise tool support required for structured output",
@@ -2330,11 +2462,27 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 loaded = self.lmstudio_load(&model) => loaded?,
             }
         }
-        let builder = self
-            .client
-            .post(&self.endpoint)
-            .headers(headers.clone())
-            .json(&body);
+        // Ollama takes its own API, which says how much of the model's
+        // context to run it with (see [`ollama`]).
+        let ollama_native = (self.id == "ollama").then(|| ollama::chat_body(&body, ollama_context));
+        let builder = match &ollama_native {
+            Some(native) => {
+                let root = self
+                    .endpoint
+                    .strip_suffix("/chat/completions")
+                    .unwrap_or(&self.endpoint);
+                let root = root.strip_suffix("/v1").unwrap_or(root);
+                self.client
+                    .post(format!("{root}/api/chat"))
+                    .headers(headers.clone())
+                    .json(native)
+            }
+            None => self
+                .client
+                .post(&self.endpoint)
+                .headers(headers.clone())
+                .json(&body),
+        };
         let mut response = crate::sse::send(builder, limits).await?;
         // A sign-in token the server refuses before its stated expiry
         // (revoked early, a clock off) is renewed once and the request sent
@@ -2389,6 +2537,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         // forcing the call: the runtime asks for structured output again when
         // the answer comes back without it.
         if body.get("tool_choice").is_some()
+            && ollama_native.is_none()
             && response.status() == reqwest::StatusCode::BAD_REQUEST
         {
             tracing::info!(provider = %self.id, model = %body["model"], "asking again without forcing the tool call");
@@ -2415,7 +2564,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
         } else {
             None
         };
-        let mut events = json_stream(response, cancel, limits);
+        let mut events = if let Some(native) = &ollama_native {
+            let tools = native["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+                .collect();
+            ollama::chat_chunks(json_lines_stream(response, cancel, limits), tools)
+        } else {
+            json_stream(response, cancel, limits)
+        };
         // A Cloud workspace's own router (the Haarness Cloud provider translates its errors itself).
         if self.server_output_limit && self.id != "haarness" {
             events = Box::pin(futures::StreamExt::map(events, |event| {
@@ -2712,8 +2871,8 @@ mod tests {
     use super::{
         CompatibleInstance, CompatibleModelDefaults, ListedAudio, OpenAiCompatibleProvider,
         Unreadable, append_reasoning_details, apply_lmstudio_details, apply_ollama_details,
-        deepseek_charge, deepseek_peak, discovered_model_info, local_model_missing, model_info,
-        openai_compatible_media_message,
+        apply_ollama_details_chosen, deepseek_charge, deepseek_peak, discovered_model_info,
+        local_model_missing, model_info, openai_compatible_media_message,
     };
 
     #[derive(Clone, Default)]
@@ -3995,6 +4154,275 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ollama_runs_a_model_with_the_window_its_chat_compacts_against() {
+        // Ollama's OpenAI-style endpoint runs a model with the server's
+        // default context, 4K on a small GPU, and cuts the front of a longer
+        // prompt: Haarness's instructions and tools. Its own API is asked
+        // for the window instead, and to refuse a prompt that won't fit.
+        #[derive(Clone, Default)]
+        struct Calls(Arc<Mutex<Vec<Value>>>);
+        let calls = Calls::default();
+        let router = Router::new()
+            .route(
+                "/api/chat",
+                post(|State(calls): State<Calls>, Json(body): Json<Value>| async move {
+                    let long = body["messages"][1]["content"] == "a long chat";
+                    calls.0.lock().push(body);
+                    if long {
+                        return (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            [(CONTENT_TYPE, "application/json")],
+                            "{\"error\":\"request (40112 tokens) exceeds the available context size (32768 tokens), try increasing it\"}".to_owned(),
+                        );
+                    }
+                    // Qwen2.5 Coder writes its call as text.
+                    (
+                        axum::http::StatusCode::OK,
+                        [(CONTENT_TYPE, "application/x-ndjson")],
+                        [
+                            json!({"model": "qwen2.5-coder:7b", "message": {"role": "assistant", "content": "{\"name\": \"read\", "}, "done": false}),
+                            json!({"model": "qwen2.5-coder:7b", "message": {"role": "assistant", "content": "\"arguments\": {\"path\": \"calc.py\"}}"}, "done": false}),
+                            json!({"model": "qwen2.5-coder:7b", "message": {"role": "assistant", "content": ""}, "done": true, "done_reason": "stop", "prompt_eval_count": 12_597, "eval_count": 21}),
+                        ]
+                        .iter()
+                        .fold(String::new(), |mut body, line| {
+                            body.push_str(&line.to_string());
+                            body.push('\n');
+                            body
+                        }),
+                    )
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(|State(calls): State<Calls>| async move {
+                    calls.0.lock().push(json!("openai-style"));
+                    (
+                        [(CONTENT_TYPE, "text/event-stream")],
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"I'm ready to help!\"},\"finish_reason\":\"stop\"}]}\n\n",
+                    )
+                }),
+            )
+            .with_state(calls.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut coder = model_info(
+            "ollama",
+            "qwen2.5-coder:7b",
+            CompatibleModelDefaults::default(),
+        );
+        coder.context_window = Some(32_768);
+        let mut provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/v1/chat/completions"))
+                .with_model_info(vec![coder]);
+        provider.id = "ollama".into();
+        let mut request = ProviderRequest {
+            model: "qwen2.5-coder:7b".into(),
+            system: "You are Haarness.".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "Read calc.py".into(),
+            }],
+            tools: vec![ToolDefinition {
+                name: "read".into(),
+                description: "Read a file".into(),
+                input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            }],
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let events: Vec<_> = provider
+            .stream(request.clone(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
+        {
+            let calls = calls.0.lock();
+            assert_eq!(calls.len(), 1, "{calls:?}");
+            assert_eq!(calls[0]["options"]["num_ctx"], 32_768);
+            assert_eq!(calls[0]["truncate"], false);
+            assert_eq!(calls[0]["tools"][0]["function"]["name"], "read");
+        }
+        assert!(
+            events.iter().any(|event| matches!(event, ProviderEvent::ToolCall { name, arguments, .. } if name == "read" && arguments["path"] == "calc.py")),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::TextDelta(_))),
+            "{events:?}"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::Usage {
+                input_tokens: 12_597,
+                output_tokens: 21,
+                ..
+            }
+        )));
+        assert!(events.iter().any(
+            |event| matches!(event, ProviderEvent::Finished { reason } if reason == "tool_calls")
+        ));
+        // A model Haarness knows nothing of still gets room.
+        request.model = "unlisted:latest".into();
+        let _: Vec<_> = provider
+            .stream(request.clone(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert_eq!(
+            calls.0.lock()[1]["options"]["num_ctx"],
+            super::ollama::CONTEXT
+        );
+        // A prompt over the window is refused in words compaction answers.
+        request.model = "qwen2.5-coder:7b".into();
+        request.messages = vec![ProviderMessage::Text {
+            role: "user".into(),
+            content: "a long chat".into(),
+        }];
+        let error = match provider.stream(request, CancellationToken::new()).await {
+            Err(error) => error,
+            Ok(stream) => stream
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .find_map(Result::err)
+                .expect("an error"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the available context size (32768 tokens)"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lmstudio_short_of_memory_loads_the_least_that_works() {
+        #[derive(Clone, Default)]
+        struct Calls(Arc<Mutex<Vec<String>>>);
+        let calls = Calls::default();
+        let router = Router::new()
+            .route(
+                "/api/v1/models",
+                get(|| async {
+                    Json(json!({"models": [{
+                        "type": "llm",
+                        "key": "qwen/qwen3-8b",
+                        "max_context_length": 40_960,
+                        "loaded_instances": [],
+                    }]}))
+                }),
+            )
+            .route(
+                "/api/v1/models/load",
+                post(|State(calls): State<Calls>, Json(body): Json<Value>| async move {
+                    let context = body["context_length"].as_u64().unwrap_or(0);
+                    calls.0.lock().push(format!("load {context}"));
+                    if context > 32_768 {
+                        return (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            Json(json!({"error": {"message": "Model loading was stopped due to insufficient system resources."}})),
+                        );
+                    }
+                    (axum::http::StatusCode::OK, Json(json!({"status": "loaded"})))
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(|State(calls): State<Calls>| async move {
+                    calls.0.lock().push("chat".into());
+                    (
+                        [(CONTENT_TYPE, "text/event-stream")],
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ready\"},\"finish_reason\":\"stop\"}]}\n\n",
+                    )
+                }),
+            )
+            .with_state(calls.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/v1/chat/completions"));
+        provider.id = "lmstudio".into();
+        let request = ProviderRequest {
+            model: "qwen/qwen3-8b".into(),
+            system: "sys".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "go".into(),
+            }],
+            tools: vec![],
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let events: Vec<_> = provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        // Its 40K is refused; 32K, the least Haarness's instructions and
+        // tools leave room with, loads.
+        assert_eq!(*calls.0.lock(), ["load 40960", "load 32768", "chat"]);
+    }
+
+    #[test]
+    fn a_new_chat_on_this_computer_gets_a_model_that_can_do_the_work() {
+        use super::{billions_of_parameters, local_rank};
+        assert_eq!(billions_of_parameters("1.7B"), Some(1.7));
+        assert_eq!(billions_of_parameters("135M"), Some(0.135));
+        assert_eq!(billions_of_parameters("30B-A3B"), Some(30.0));
+        assert_eq!(
+            billions_of_parameters("116829156672").map(f64::round),
+            Some(117.0)
+        );
+        assert_eq!(billions_of_parameters("unknown"), None);
+        let model = |id: &str, tools: bool, window: u64| {
+            let mut model = model_info("ollama", id, CompatibleModelDefaults::default());
+            model.tools = tools;
+            model.context_window = Some(window);
+            model
+        };
+        // In the catalog's order, as this Mac's Ollama listed them.
+        let mut models = [
+            model("gemma3:latest", false, 32_768),
+            model("gpt-oss:120b-cloud", true, 32_768),
+            model("llama3.2:latest", true, 32_768),
+            model("qwen3:8b", true, 32_768),
+            model("smollm2:1.7b", true, 8_192),
+            model("tinyllama:1.1b", true, 32_768),
+        ];
+        let weak: std::collections::HashSet<String> = [
+            "llama3.2:latest".to_owned(),
+            "smollm2:1.7b".to_owned(),
+            "tinyllama:1.1b".to_owned(),
+        ]
+        .into();
+        models.sort_by_key(|model| local_rank(model, &weak));
+        let order: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "qwen3:8b",
+                "llama3.2:latest",
+                "tinyllama:1.1b",
+                "smollm2:1.7b",
+                "gpt-oss:120b-cloud",
+                "gemma3:latest"
+            ]
+        );
+    }
+
     #[test]
     fn a_model_ollama_lacks_says_how_to_get_it() {
         let missing = local_model_missing(
@@ -4025,7 +4453,16 @@ mod tests {
         );
         assert!(qwen.images && qwen.tools && qwen.reasoning);
         assert_eq!(qwen.reasoning_efforts, ["none", "low", "medium", "high"]);
-        assert_eq!(qwen.context_window, Some(262_144));
+        // The window Haarness runs it with, not the 256K it could take:
+        // what it asks Ollama for, and what the chat compacts against.
+        assert_eq!(qwen.context_window, Some(32_768));
+        // More when the person chose more for Ollama, up to the model's own.
+        apply_ollama_details_chosen(
+            &mut qwen,
+            &json!({"capabilities": ["completion", "tools"], "model_info": {"general.architecture": "qwen3_5", "qwen3_5.context_length": 262_144}}),
+            Some(131_072),
+        );
+        assert_eq!(qwen.context_window, Some(131_072));
         let mut oss = model_info("ollama", "gpt-oss:20b", CompatibleModelDefaults::default());
         apply_ollama_details(
             &mut oss,
@@ -4033,6 +4470,27 @@ mod tests {
         );
         assert_eq!(oss.reasoning_efforts, ["low", "medium", "high"]);
         assert!(!oss.images);
+        // The levels Ollama lists for a model, when it lists them.
+        let mut listed = model_info("ollama", "some-thinker", CompatibleModelDefaults::default());
+        apply_ollama_details(
+            &mut listed,
+            &json!({"capabilities": ["completion", "tools", "thinking"], "thinking": {"values": ["low", "medium", "high"], "default": "medium"}}),
+        );
+        assert_eq!(listed.reasoning_efforts, ["low", "medium", "high"]);
+        let mut switch = model_info("ollama", "qwen3:8b", CompatibleModelDefaults::default());
+        apply_ollama_details(
+            &mut switch,
+            &json!({"capabilities": ["completion", "tools", "thinking"], "thinking": {"values": [false, true], "default": true}, "model_info": {"general.architecture": "qwen3", "qwen3.context_length": 40_960}}),
+        );
+        assert_eq!(switch.reasoning_efforts, ["none", "low", "medium", "high"]);
+        assert_eq!(switch.context_window, Some(32_768));
+        // A model shorter than that runs with all it has.
+        let mut short = model_info("ollama", "llama3:8b", CompatibleModelDefaults::default());
+        apply_ollama_details(
+            &mut short,
+            &json!({"capabilities": ["completion"], "model_info": {"general.architecture": "llama", "llama.context_length": 8_192}}),
+        );
+        assert_eq!(short.context_window, Some(8_192));
         let mut plain = model_info("ollama", "llama-small", CompatibleModelDefaults::default());
         apply_ollama_details(&mut plain, &json!({"capabilities": ["completion"]}));
         assert!(!plain.tools && !plain.reasoning && plain.reasoning_efforts.is_empty());
