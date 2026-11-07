@@ -214,6 +214,15 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
                  plan under Billing{terminal}."
             )
         }
+    } else if message.contains("[provider_out_of_credit]") && !message.starts_with("HTTP 402") {
+        // Cloud's own account with the provider ran out of credit: nothing the
+        // person can top up. (With their own key, a 402, the router's words
+        // already say to add credit there.) The code stays, so the turn
+        // neither waits for it nor words it again.
+        "HTTP 503: [provider_out_of_credit] Haarness Cloud's account with this model's provider has \
+         run out of credit, so the model can't answer right now. Choose a model from another \
+         provider."
+            .to_owned()
     } else if message.contains("[upstream_404]") {
         // The provider stopped serving a model it still lists (a deprecation); Cloud withdraws such models at its
         // next catalogue refresh.
@@ -713,6 +722,29 @@ mod tests {
             message.ends_with("raise the budget under Billing in Haarness Cloud."),
             "{message}"
         );
+
+        // Cloud's own account with a provider out of credit is not the
+        // person's to top up; their own key's is, in the router's words.
+        let own = "HTTP 503 Service Unavailable: [provider_out_of_credit] This router's account \
+                   with the provider has run out of credit, so this model can't answer until the \
+                   account is topped up. Choose a model from another provider meanwhile.";
+        for readable in [readable, readable_router] {
+            let CoreError::Provider(message) = readable(CoreError::Provider(own.into())) else {
+                panic!("still a provider error");
+            };
+            assert_eq!(
+                message,
+                "HTTP 503: [provider_out_of_credit] Haarness Cloud's account with this model's \
+                 provider has run out of credit, so the model can't answer right now. Choose a \
+                 model from another provider."
+            );
+            let byok = "HTTP 402 Payment Required: [provider_out_of_credit] The provider account \
+                        behind this key has run out of credit, so the provider refused the request.";
+            let CoreError::Provider(message) = readable(CoreError::Provider(byok.into())) else {
+                panic!("still a provider error");
+            };
+            assert_eq!(message, byok);
+        }
 
         for (raw, start) in [
             (

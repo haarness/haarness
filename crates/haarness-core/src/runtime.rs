@@ -926,6 +926,12 @@ fn is_provider_transient(error: &CoreError) -> bool {
     if is_provider_usage_limit(error) {
         return false;
     }
+    // A provider account with no credit left stays that way until someone
+    // tops it up: a Haarness router says so with a 503 or 402 that waiting
+    // does not clear.
+    if message.contains(OUT_OF_CREDIT) {
+        return false;
+    }
     // A provider that sent nothing for the configured limit, or a connection
     // that broke before anything reached the person: another request may
     // well be answered.
@@ -1031,9 +1037,9 @@ const EXPLAIN_FAILURE: &str = "Your last reply was empty, but a tool call before
 /// has already seen made.
 fn failure_to_explain(error: &CoreError) -> bool {
     match error {
-        CoreError::PermissionRejected(_) | CoreError::ReviewBlocked(_) | CoreError::Cancelled => {
-            false
-        }
+        CoreError::PermissionRejected(_)
+        | CoreError::ReviewBlocked(_)
+        | CoreError::Cancelled => false,
         // Worded where a `PreToolUse` hook's block is turned into an error.
         CoreError::PermissionDenied(message) => {
             !message.starts_with("blocked by a PreToolUse hook")
@@ -1041,6 +1047,10 @@ fn failure_to_explain(error: &CoreError) -> bool {
         _ => true,
     }
 }
+
+/// The code a Haarness router gives a refusal because the provider account
+/// behind the key has no credit left. Its words say whose account it is.
+const OUT_OF_CREDIT: &str = "[provider_out_of_credit]";
 
 /// Retries for a transient provider failure before any output, waiting 2,
 /// 4, 8 then 16 seconds, in each provider round.
@@ -1957,6 +1967,11 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
                 "The provider rejected the API key or sign-in{reason}. Connect it again to replace it."
             ),
         };
+    }
+    // A Haarness router's words already say whose account ran out of credit:
+    // the key's owner, or the router's own (which its users can't top up).
+    if let Some((_, words)) = raw.split_once(OUT_OF_CREDIT) {
+        return clean_error_text(words.trim(), 600);
     }
     // A provider's own account out of money (DeepSeek's "Insufficient
     // Balance", OpenRouter's credits): only a top-up there helps. Haarness
@@ -23316,6 +23331,32 @@ mod tests {
             ),
             "Your DeepSeek account is out of credit (Insufficient Balance). Add credit with DeepSeek, then try again."
         );
+        // A Haarness router says whose account ran out of credit, and a turn
+        // does not wait for an account that only a top-up brings back.
+        for (raw, words) in [
+            (
+                "HTTP 503 Service Unavailable: [provider_out_of_credit] This router's account with \
+                 the provider has run out of credit, so this model can't answer until the account is \
+                 topped up. Choose a model from another provider meanwhile.",
+                "This router's account with the provider has run out of credit, so this model can't \
+                 answer until the account is topped up. Choose a model from another provider meanwhile.",
+            ),
+            (
+                "HTTP 402 Payment Required: [provider_out_of_credit] The provider account behind this \
+                 key has run out of credit, so the provider refused the request. Add credit with the \
+                 provider, or use another key or provider.",
+                "The provider account behind this key has run out of credit, so the provider refused \
+                 the request. Add credit with the provider, or use another key or provider.",
+            ),
+        ] {
+            let refused = CoreError::Provider(raw.into());
+            assert_eq!(
+                super::describe_error(&refused, Some("Haarness Router")),
+                words
+            );
+            assert!(!super::is_provider_transient(&refused), "{raw}");
+            assert_eq!(super::retry_delay(&refused, 1), None, "{raw}");
+        }
         assert_eq!(
             super::describe_error(
                 &CoreError::Provider(
