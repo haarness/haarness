@@ -382,6 +382,8 @@ async fn pump(mut pump: Pump) {
     pump.control.live.store(false, Ordering::SeqCst);
     drop(pump.group);
     // Its job, on Windows, with whatever is still in it.
+    #[cfg(windows)]
+    let _ = pump.child.start_kill();
     drop(pump.child);
     drop(pump.recorded);
     pump.end.send_replace(Some(ProcessEnd {
@@ -1607,18 +1609,36 @@ mod git_bash_tests {
             if timeout == 0 {
                 cancel.cancel();
             }
+            let stopped = std::time::Instant::now();
             let error = task.await.unwrap().unwrap_err();
+            let returned = stopped.elapsed();
             if timeout == 0 {
                 assert!(matches!(error, CoreError::Cancelled), "{error}");
             } else {
                 assert!(error.to_string().contains("timed out"), "{error}");
             }
+            let left = left_running();
             tokio::time::sleep(Duration::from_millis(7000)).await;
             assert!(
                 !root.join("escaped").exists(),
-                "a process outlived its command"
+                "a process outlived its command (timeout {timeout}): the call returned after {returned:?}, and then these still ran:\n{left}"
             );
         }
+    }
+
+    /// The sh, sleep and bash processes running, with their parents.
+    fn left_running() -> String {
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'sh.exe','sleep.exe','bash.exe' } | ForEach-Object { \"$($_.ProcessId) parent $($_.ParentProcessId) $($_.CommandLine)\" }",
+            ])
+            .output();
+        output.map_or_else(
+            |error| error.to_string(),
+            |output| String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
     }
 
     #[tokio::test]

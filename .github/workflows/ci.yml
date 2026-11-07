@@ -1,14 +1,11 @@
 name: ci
 on:
   push:
-  pull_request:
+    branches: [win/fail1107-wip]
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15, windows-latest]
-    runs-on: ${{ matrix.os }}
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -19,145 +16,24 @@ jobs:
           toolchain: 1.94.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # One Python on every runner (Windows images have no python3 command).
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      # Blocked words must not reach a release. The self-test proves the
-      # gate still detects them.
-      - run: sh ./scripts/check-commercial-boundary.sh --self-test
-        if: runner.os != 'Windows'
-      - run: sh ./scripts/check-commercial-boundary.sh
-        if: runner.os != 'Windows'
+      - name: Git for Windows on this runner
+        shell: pwsh
+        run: |
+          Get-Command git | Format-List Source
+          & "C:\Program Files\Git\bin\bash.exe" -lc 'echo "bash $BASH_VERSION in $(pwd -W)"; command -v ls grep sed cygpath'
+          "login bash: " + (Measure-Command { & "C:\Program Files\Git\bin\bash.exe" -lc 'true' }).TotalMilliseconds + " ms"
+          "cmd: " + (Measure-Command { cmd /d /s /c "exit 0" }).TotalMilliseconds + " ms"
+      - name: Git Bash background work and job objects
+        shell: pwsh
+        continue-on-error: true
+        run: .github/job-probe.ps1
       - run: cargo fmt --all -- --check
-      - run: cargo run -p xtask -- architecture
+      # Main's own Windows job stops here today (process_tree.rs parse_table, unused on Windows).
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # Every test binary runs, so one run shows every failure.
-      - run: cargo test --workspace --no-fail-fast
-      - run: cargo build --release -p haarness-cli
-      - name: Computer use helper (Swift) unit tests
-        if: runner.os == 'macOS'
-        run: swift test --package-path crates/haarness-computer/macos
-      - name: Bundled ripgrep integrity and offline CLI/server searches
-        env:
-          HAARNESS_BIN: ./target/release/haarness${{ runner.os == 'Windows' && '.exe' || '' }}
-        run: |
-          python vendor/ripgrep/verify.py
-          python scripts/test-ripgrep.py
-      - name: Install terminal test dependency
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y tmux
-      - name: Extension CLI, provider, and terminal integration
-        if: runner.os == 'Linux'
-        env:
-          HAARNESS_BIN: ./target/release/haarness
-        run: python3 scripts/test-extensions.py
-      - uses: actions/setup-node@v4
-        if: runner.os == 'Linux'
-        with:
-          node-version: '22'
-      - uses: astral-sh/setup-uv@v6
-        if: runner.os == 'Linux'
-      - name: SDK generation, typing, artifacts, and complete server coverage
-        if: runner.os == 'Linux'
-        env:
-          HAARNESS_BIN: ./target/release/haarness
-        run: ./scripts/test-sdks.sh
-      - name: Native cursor visibility across TUI screens
-        if: runner.os == 'Linux'
-        env:
-          HAARNESS_BIN: ./target/release/haarness
-        run: python3 scripts/test-tui-cursor.py
-      - name: PowerShell installer
-        env:
-          HAARNESS_BIN: ./target/release/haarness${{ runner.os == 'Windows' && '.exe' || '' }}
-        run: python scripts/test-release-install-ps1.py
-      - run: ./target/release/haarness doctor
-        if: runner.os != 'Windows'
-      - run: .\target\release\haarness.exe doctor
-        if: runner.os == 'Windows'
-  desktop:
-    strategy:
-      fail-fast: false
-      matrix:
-        # Dictation builds against the macOS 26 SDK.
-        os: [ubuntu-latest, macos-26, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.94.0
-      - uses: Swatinem/rust-cache@v2
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.3
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: |
-            apps/desktop/package-lock.json
-            packages/browser-driver/package-lock.json
-            apps/browser-extension/package-lock.json
-      - run: cargo build --release -p haarness-cli
-      # Installs the browser driver before Desktop, which links it.
-      - run: npm run desktop:install
-      - name: Browser driver typecheck, tests and tool catalog
-        run: npm run driver:test
-      - run: npm --prefix apps/desktop run build
-      - run: npm --prefix apps/desktop test
-      - name: Chrome extension install, build and unit tests
-        run: |
-          npm run extension:install
-          npm run extension:build
-          npm --prefix apps/browser-extension test
-      - name: Chrome extension end-to-end tests
-        # Chrome reads native messaging hosts from the registry on Windows, so these run on macOS and Linux.
-        # The full-stack project drives the release binary's daemon and bridge.
-        if: runner.os != 'Windows'
-        env:
-          HAARNESS_BIN: ${{ github.workspace }}/target/release/haarness
-        run: |
-          cd apps/browser-extension
-          npx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium
-          npm run test:e2e
-      # The terminal tests drive the TUI in tmux, which macOS runners lack.
-      - run: brew install tmux
-        if: runner.os == 'macOS'
-      - name: Electron end-to-end tests
-        if: runner.os == 'macOS'
-        env:
-          HAARNESS_BIN: ${{ github.workspace }}/target/release/haarness
-        run: npm --prefix apps/desktop run test:e2e
-      - name: Electron end-to-end tests in a Linux desktop session
-        if: runner.os == 'Linux'
-        env:
-          HAARNESS_BIN: ${{ github.workspace }}/target/release/haarness
-        run: |
-          sudo apt-get install -y gnome-keyring
-          scripts/linux-desktop-session.sh npm --prefix apps/desktop run test:e2e
-      - name: Package desktop
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npm --prefix apps/desktop run package:dir
-      - name: Verify packaged macOS application
-        if: runner.os == 'macOS'
-        env:
-          HAARNESS_BIN: ${{ github.workspace }}/apps/desktop/release/mac-arm64/Haarness.app/Contents/Resources/bin/haarness
-          HAARNESS_DESKTOP_EXECUTABLE: ${{ github.workspace }}/apps/desktop/release/mac-arm64/Haarness.app/Contents/MacOS/Haarness
-        run: npm --prefix apps/desktop run test:e2e
-      - name: Verify packaged Linux application
-        if: runner.os == 'Linux'
-        env:
-          HAARNESS_BIN: ${{ github.workspace }}/apps/desktop/release/linux-unpacked/resources/bin/haarness
-          HAARNESS_DESKTOP_EXECUTABLE: ${{ github.workspace }}/apps/desktop/release/linux-unpacked/haarness-desktop
-        run: scripts/linux-desktop-session.sh npm --prefix apps/desktop run test:e2e -- e2e/project-required.spec.ts e2e/desktop.spec.ts --grep "project home|real workspace"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: desktop-verification-${{ matrix.os }}
-          path: |
-            apps/desktop/test-results
-            apps/desktop/playwright-report
-            apps/browser-extension/test-results
-            apps/browser-extension/playwright-report
+        continue-on-error: true
+      - name: The new Windows tests, with their output
+        run: cargo test -p haarness-ripgrep -p haarness-core -p haarness-server --lib --no-fail-fast -- --nocapture git_bash agent_shell windows_paths the_shell_tool_names a_file_deeper_than_260 git_bash_drive_paths
+      - name: Every test
+        run: cargo test --workspace --no-fail-fast
