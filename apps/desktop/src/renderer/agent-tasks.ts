@@ -71,8 +71,22 @@ export function agentTasks(items: Item[]) {
 /** A failed task's error as its row shows it, without the escape sequences a
  * tool may have left in it; empty when the task did not fail. */
 export function agentTaskError(task: AgentTask) {
-  return task.result?.is_error ? withoutEscapes(task.result.output) : "";
+  return task.result?.is_error && !unfinished(task.result)
+    ? withoutEscapes(task.result.output)
+    : "";
 }
+
+/** Haarness stopped before the delegation's call finished: a stop, not a
+ * failure, whose words were written for the parent model. */
+const unfinished = (result: Data<"tool_result">) => {
+  const metadata = result.metadata;
+  return (
+    typeof metadata === "object" &&
+    metadata !== null &&
+    !Array.isArray(metadata) &&
+    metadata.unfinished === true
+  );
+};
 
 export function agentTaskStatus(task: AgentTask, progress?: TaskProgress) {
   const checkpoint = task.checkpoint?.state;
@@ -87,7 +101,7 @@ export function agentTaskStatus(task: AgentTask, progress?: TaskProgress) {
   if (finished) return finished;
   const live = terminal(progress?.state);
   if (live) return live;
-  if (result?.is_error) return "failed";
+  if (result?.is_error) return unfinished(result) ? "stopped" : "failed";
   const envelope = result?.output.match(/^<task\b[^>]*\bstate="([^"]+)"/)?.[1];
   if (terminal(envelope)) return terminal(envelope)!;
   if (progress?.state === "waiting_permission") return "approval";

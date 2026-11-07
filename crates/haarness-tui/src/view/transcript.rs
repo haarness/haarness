@@ -575,6 +575,16 @@ fn is_user_shell(call_id: &str) -> bool {
     call_id.starts_with("shell-")
 }
 
+/// A call Haarness stopped before it finished, a restart or a shutdown
+/// cutting it off: its result is written for the model, and its row says so
+/// in a few words.
+fn unfinished(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("unfinished")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
 /// The exit code of a command that ran and failed. The bash tool reports a
 /// non-zero exit as a successful call, since the command did run, but the
 /// row has to read as failed all the same.
@@ -1184,6 +1194,7 @@ fn render_tool_result(
             || (*is_error
                 && (rejected_by_user(output)
                     || output.trim() == "operation cancelled"
+                    || unfinished(metadata)
                     || review_block(metadata).is_some())))
         && paired_call(app, item, call_id).is_some()
     {
@@ -2038,6 +2049,13 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     {
                         Some("stopped")
                     }
+                    // Haarness stopped before the call finished: quiet, as
+                    // the turn's own notice below says why.
+                    ItemData::ToolResult {
+                        is_error: true,
+                        metadata,
+                        ..
+                    } if unfinished(metadata) => Some("unfinished"),
                     ItemData::ToolResult {
                         output, is_error, ..
                     } => Some(if *is_error && output.trim() == "operation cancelled" {
@@ -2131,7 +2149,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         None if queued => "  ○ ".into(),
                         None => format!("  {} ", spinner(app.tick)),
                         Some("failed") => "  ✗ ".into(),
-                        Some("cancelled" | "rejected" | "blocked" | "stopped") => "  ⊘ ".into(),
+                        Some("cancelled" | "rejected" | "blocked" | "stopped" | "unfinished") => {
+                            "  ⊘ ".into()
+                        }
                         Some(_) => "  ● ".into(),
                     },
                     |state| format!("  {} ", task_state_style(state, app.tick, theme).0),
@@ -2151,6 +2171,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     Some(state @ ("cancelled" | "rejected" | "stopped")) => {
                         format!("  {}", app.language.text(state))
                     }
+                    Some("unfinished") => format!("  {}", app.language.text("didn't finish")),
                     Some("blocked") => {
                         let lead = app.language.text("Stopped by Auto's reviewer");
                         let reason = blocked

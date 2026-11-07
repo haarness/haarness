@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { Item, ItemData, Turn } from "@haarness/sdk";
 import {
   agentTasks,
+  agentTaskError,
   agentTaskStatus,
   agentTaskActiveTurn,
 } from "../src/renderer/agent-tasks";
@@ -178,4 +179,22 @@ test("stop controls belong to the exact live child run, never a newer run in its
     agentTaskActiveTurn(task, { ...progress, state: "cancelled" }, [turn]),
     undefined,
   );
+});
+
+test("a delegation a restart cut off reads stopped, not failed", () => {
+  const result = {
+    type: "tool_result",
+    call_id: "task",
+    name: "task",
+    output: "This call did not finish, so there is no result. It may have done part of its work before it stopped.",
+    is_error: true,
+    metadata: { unfinished: true },
+  } as const;
+  const [task] = [...agentTasks([item(1, call), item(2, link), item(3, result)]).values()];
+  assert.equal(agentTaskStatus(task), "stopped");
+  assert.equal(agentTaskError(task), "");
+  const failed = { ...result, metadata: null };
+  const [other] = [...agentTasks([item(1, call), item(2, link), item(3, failed)]).values()];
+  assert.equal(agentTaskStatus(other), "failed");
+  assert.notEqual(agentTaskError(other), "");
 });

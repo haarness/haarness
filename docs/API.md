@@ -507,9 +507,11 @@ side-effecting tools are never replayed speculatively. Each call such a turn
 left without a result gets an error `tool_result` first, saying it did not
 finish, with `metadata: {"unfinished": true}`; a turn that outlives a graceful
 shutdown's wait gets the same results before the shutdown marks it interrupted.
-A request leaves out a second result for one call. A chat stored before then,
-or a fork made before forks left such calls out, can still hold one: once a
-later turn has begun after it (or, in a fork, a message the person wrote
+Clients show such a call as one that did not finish (Desktop and the TUI in a
+few words of their own) rather than its result's text, which is written for the
+model. A request leaves out a second result for one call. A chat stored before
+then, or a fork made before forks left such calls out, can still hold one: once
+a later turn has begun after it (or, in a fork, a message the person wrote
 there), requests give it the same kind of result after the calls and results it
 was made with, so the provider takes the history. A running turn's calls, a
 steer queued meanwhile included, are left as they are. Active goals recover as

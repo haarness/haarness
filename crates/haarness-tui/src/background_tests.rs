@@ -1891,6 +1891,52 @@ fn a_person_stopping_a_foreground_command_reads_stopped_and_leftovers_running_sa
 }
 
 #[test]
+fn a_call_a_restart_cut_off_reads_quietly_that_it_did_not_finish() {
+    let thread = fixture_thread();
+    let turn = TurnId::new();
+    let items = vec![
+        message_item_for_turn(
+            1,
+            &thread,
+            turn,
+            ItemData::ToolCall {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({ "command": "sleep 30" }),
+                provider_metadata: serde_json::Value::Null,
+            },
+        ),
+        message_item_for_turn(
+            2,
+            &thread,
+            turn,
+            ItemData::ToolResult {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                output: "This call did not finish, so there is no result. It may have done part of its work before it stopped.".into(),
+                is_error: true,
+                metadata: serde_json::json!({ "unfinished": true }),
+            },
+        ),
+    ];
+    let mut app = app_on(&thread, items);
+    let rows = frame_text(&app, (100, 30));
+    let row = row_with(&rows, "bash sleep 30");
+    assert!(row.contains('⊘') && row.contains("didn't finish"), "{row}");
+    assert!(!row.contains("failed"), "{row}");
+    assert!(
+        !rows.iter().any(|row| row.contains("so there is no result")),
+        "the words for the model stay folded: {rows:#?}"
+    );
+    app.language = crate::locale::Language::Japanese;
+    let rows = frame_text(&app, (100, 30));
+    assert!(
+        row_with(&rows, "bash sleep 30").contains("完了しませんでした"),
+        "{rows:#?}"
+    );
+}
+
+#[test]
 fn a_progress_line_read_part_way_shows_as_a_terminal_leaves_it() {
     let thread = fixture_thread();
     let mut app = app_on(&thread, vec![]);
