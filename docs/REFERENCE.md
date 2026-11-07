@@ -823,7 +823,8 @@ Environment values and headers (and the headers helper's environment) are resolv
 when Haarness connects; the headers helper is shell text and keeps its references for its
 shell, which reads them from that environment (see
 [Hooks](CONFIGURATION-SCOPES.md)); in a JSON file the other fields are resolved when the
-configuration loads. A variable's value is used as it is, so a `${OTHER}` inside it
+configuration loads, and a `url` keeps a reference to a variable that is not set (one with no
+`:-fallback`) as written rather than leaving a gap in the address. A variable's value is used as it is, so a `${OTHER}` inside it
 reaches the MCP server as that text, and what a headers helper prints is never resolved.
 The references stay in the file: `haarness mcp enable`/`disable`, `mcp_manage` and Desktop
 edits write only the keys they change, in the entry's own shape, and `haarness mcp get
