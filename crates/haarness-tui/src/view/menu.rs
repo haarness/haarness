@@ -1298,7 +1298,8 @@ fn billing_preface(
         lines.push("Free trial  not started · that card was already used for a trial".into());
     }
     if summary.trial_available {
-        lines.push("Free trial  available · start it with /billing open".into());
+        // The first row below starts it.
+        lines.push("Free trial  available".into());
     }
     lines
 }

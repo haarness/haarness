@@ -4872,6 +4872,24 @@ impl App {
                 },
             );
         }
+        // A new account's way in comes first: credits bought without a plan
+        // pay only once overage is on, and the trial needs neither. Billing
+        // starts it with a saved card.
+        if self
+            .billing
+            .summary
+            .as_ref()
+            .is_some_and(|summary| summary.trial_available)
+        {
+            entries.insert(
+                0,
+                OptionEntry {
+                    label: "Start free trial".into(),
+                    description: "Try Cloud models in your browser · nothing is charged".into(),
+                    value: "open".into(),
+                },
+            );
+        }
         self.open_overlay(Overlay::Options {
             title: "Cloud billing".into(),
             kind: OptionsKind::Billing,
@@ -5026,6 +5044,9 @@ impl App {
     }
 
     pub async fn set_model(&mut self, model: &str, client: &ApiClient) -> Result<()> {
+        // A model given on purpose is kept: the automatic choice no longer
+        // follows the lists or the Cloud account's billing for this chat.
+        self.auto_model = None;
         let Some((provider, model)) = model.split_once('/') else {
             self.notice = "Use /models or /models provider/model".into();
             return Ok(());

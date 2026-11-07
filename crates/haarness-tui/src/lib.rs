@@ -61,7 +61,7 @@ use crate::api::{ApiClient, EndpointResolver, ServerRestarter};
 use crate::input::{AppAction, handle_key_at};
 /// The model a new chat starts on when none is configured; `haarness run`
 /// picks the same way.
-pub use crate::state::{default_connected_model, listed_default_model};
+pub use crate::state::{default_connected_model, default_model_for, listed_default_model};
 
 /// The models this terminal UI picked most recently (`provider/model`),
 /// newest first, as it keeps them between runs.
@@ -488,9 +488,10 @@ async fn run_with_client(
         |view| view.viewport_offset,
     );
     // The chat this TUI opened on the model it chose takes the one it would
-    // have chosen with the lists still loading, once they come.
-    let auto_model = (models_loading && chose_model)
-        .then(|| (thread.id, thread.provider.clone(), thread.model.clone()));
+    // choose once the lists come, or once the Cloud account's billing says
+    // whether it can pay (`App::follow_automatic_model`).
+    let auto_model =
+        chose_model.then(|| (thread.id, thread.provider.clone(), thread.model.clone()));
     let mut app = App::new(thread, threads, items, providers, agents);
     app.models_loading = models_loading;
     app.auto_model = auto_model;
@@ -1187,7 +1188,11 @@ async fn run_with_client(
                 }
             } => {
                 if let Some(watch) = &mut billing {
+                    let could_pay = app.billing.cloud_can_pay();
                     app.billing = watch.updates.borrow_and_update().clone();
+                    if app.billing.cloud_can_pay() != could_pay {
+                        app.follow_automatic_model(&client).await;
+                    }
                     // The summary reads live state; the actions depend on it
                     // too (sign in, turn on overage), so rebuild them in place.
                     if matches!(

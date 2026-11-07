@@ -37,10 +37,19 @@ export function selectModel(input: {
   defaultModel?: string | null;
   recent: ModelKey[];
   threads: Thread[];
+  /** Providers whose account cannot pay (a Haarness Cloud account with no
+   * credit that can): every request to them is refused, so an automatic
+   * choice skips them while another connected provider can answer. A model
+   * chosen, configured or picked before is kept. */
+  unpaid?: string[];
 }): ModelKey | undefined {
   const connected = input.providers.filter(
     (p) => p.authenticated && p.models.length,
   );
+  const unpaid = new Set(input.unpaid ?? []);
+  const answering = connected.filter((p) => !unpaid.has(p.id));
+  // Skipped only while something else can answer; alone, they stay the choice.
+  const skipped = (id: string) => unpaid.has(id) && answering.length > 0;
   const valid = (key?: ModelKey) =>
     key &&
     connected.some(
@@ -68,8 +77,9 @@ export function selectModel(input: {
   if (valid(configured)) return configured;
   const history = [
     ...input.recent,
+    // A chat's model may have been chosen for it, not by anyone.
     ...input.threads
-      .filter((t) => !t.isSubagent)
+      .filter((t) => !t.isSubagent && !skipped(t.provider))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
   ];
   // A provider-only preference should keep its own recent/preferred model.
@@ -89,7 +99,7 @@ export function selectModel(input: {
   if (recent) return { provider: recent.provider, model: recent.model };
   // Preserve the server's preferred order within each catalog. Keep the
   // built-in provider preference deterministic, not dependent on discovery timing.
-  const providers = [...connected].sort(
+  const providers = connected.filter((p) => !skipped(p.id)).sort(
     (a, b) =>
       Number(b.id === "openai") - Number(a.id === "openai") ||
       a.id.localeCompare(b.id),

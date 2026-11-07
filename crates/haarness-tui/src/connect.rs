@@ -824,34 +824,7 @@ impl App {
         self.providers = providers;
         self.models_loading = false;
         self.normalize_reasoning();
-        if let Some((id, provider, model)) = self.auto_model.take()
-            && id == self.thread.id
-            && self.thread.provider == provider
-            && self.thread.model == model
-            && self.items.is_empty()
-            && self.active_turn.is_none()
-            && let Some((chosen_provider, chosen_model)) =
-                crate::state::default_connected_model(&self.providers)
-            && (chosen_provider != provider || chosen_model != model)
-            && let Ok(thread) = client
-                .update_thread(
-                    id,
-                    haarness_protocol::UpdateThreadRequest {
-                        title: None,
-                        archived: None,
-                        agent: None,
-                        provider: Some(chosen_provider),
-                        model: Some(chosen_model),
-                        ultracode: None,
-                    },
-                )
-                .await
-        {
-            if let Some(listed) = self.threads.iter_mut().find(|listed| listed.id == id) {
-                *listed = thread.clone();
-            }
-            self.thread = thread;
-        }
+        self.follow_automatic_model(client).await;
         if said {
             self.notice = if self
                 .providers
@@ -862,6 +835,55 @@ impl App {
             } else {
                 crate::state::unconnected_notice(&self.providers, &self.thread.provider)
             };
+        }
+    }
+
+    /// The chat this TUI opened on a model it chose itself takes the model
+    /// it would choose now, while nobody has used it or given it another:
+    /// once the lists come in, and when the Haarness Cloud account starts or
+    /// stops being able to pay (a trial started in the browser puts Cloud
+    /// back without a restart).
+    pub(crate) async fn follow_automatic_model(&mut self, client: &ApiClient) {
+        let Some((id, provider, model)) = self.auto_model.clone() else {
+            return;
+        };
+        if id != self.thread.id
+            || self.thread.provider != provider
+            || self.thread.model != model
+            || !self.items.is_empty()
+            || self.active_turn.is_some()
+        {
+            self.auto_model = None;
+            return;
+        }
+        let Some((chosen_provider, chosen_model)) =
+            crate::state::default_model_for(&self.providers, self.billing.cloud_can_pay())
+        else {
+            return;
+        };
+        if chosen_provider == provider && chosen_model == model {
+            return;
+        }
+        if let Ok(thread) = client
+            .update_thread(
+                id,
+                haarness_protocol::UpdateThreadRequest {
+                    title: None,
+                    archived: None,
+                    agent: None,
+                    provider: Some(chosen_provider),
+                    model: Some(chosen_model),
+                    ultracode: None,
+                },
+            )
+            .await
+        {
+            if let Some(listed) = self.threads.iter_mut().find(|listed| listed.id == id) {
+                *listed = thread.clone();
+            }
+            self.auto_model = Some((id, thread.provider.clone(), thread.model.clone()));
+            self.thread = thread;
+            self.normalize_reasoning();
         }
     }
 
@@ -884,6 +906,20 @@ impl App {
                 && local_runtime_name(&provider.id).is_none()
         });
         (!elsewhere).then_some(runtime)
+    }
+
+    /// The signed-in account's billing when this chat's model is a Haarness
+    /// Cloud one and the account holds no credits at all (a new account):
+    /// every Cloud model refuses the chat's first prompt until the trial, a
+    /// plan or credits come in.
+    pub(crate) fn cloud_without_credits(&self) -> Option<&haarness_account::billing::Summary> {
+        if self.thread.provider != "haarness" || !self.billing.logged_in {
+            return None;
+        }
+        self.billing
+            .summary
+            .as_ref()
+            .filter(|summary| summary.holds_no_credits())
     }
 
     /// Hint rows above the API-key prompt: where the key comes from and the

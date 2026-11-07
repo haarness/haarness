@@ -76,6 +76,41 @@ pub struct Summary {
 /// The plan code the trial's allowance carries.
 pub const TRIAL_PLAN: &str = "trial";
 
+/// [`Summary::plan`] for an account with no plan, trial or granted allowance.
+pub const NO_PLAN: &str = "No plan";
+
+impl Summary {
+    /// The account holds no AI credits at all: no plan or trial, nothing included and nothing purchased. A new
+    /// account starts here, and Cloud models refuse every request until the trial, a plan or credits come in;
+    /// an account with a plan or purchased credits that cannot pay is [`Summary::out_of_credits`] instead.
+    #[must_use]
+    pub fn holds_no_credits(&self) -> bool {
+        let none = |credits: &str| credits.bytes().all(|byte| matches!(byte, b'0' | b'.'));
+        self.plan == NO_PLAN && none(&self.included_credits) && none(&self.purchased_credits)
+    }
+
+    /// Some AI credit of the account can pay for a request now: included credits, or purchased ones while
+    /// overage is on and they are not on hold, on an active account. Without it every Cloud model refuses,
+    /// so a new chat's automatic model comes from another connected provider instead.
+    #[must_use]
+    pub fn can_pay(&self) -> bool {
+        let some = |credits: &str| credits.bytes().any(|byte| matches!(byte, b'1'..=b'9'));
+        self.account_status == "active"
+            && (some(&self.included_credits)
+                || (self.overage_opt_in && !self.purchased_frozen && some(&self.purchased_credits)))
+    }
+}
+
+impl State {
+    /// Whether Haarness Cloud models can be paid for, as far as this snapshot says: `false` only for a
+    /// signed-in account whose summary says no credit can pay ([`Summary::can_pay`]). Signed out, or with
+    /// billing still loading or unreadable, nothing is known and Cloud keeps its usual place.
+    #[must_use]
+    pub fn cloud_can_pay(&self) -> bool {
+        !self.logged_in || self.summary.as_ref().is_none_or(Summary::can_pay)
+    }
+}
+
 /// Exact nanos from a wallet amount (`{"nanos":"…"}`); 0 when absent.
 fn nanos(value: &Value, key: &str) -> u128 {
     value[key]["nanos"]
@@ -395,7 +430,7 @@ impl Client {
                 trial: plan_code.as_deref() == Some(TRIAL_PLAN) && subscription.is_null(),
                 out_of_credits: (plan_code.is_some() || balance.purchased > 0)
                     && balance.included + if purchased_pays { balance.purchased } else { 0 } == 0,
-                plan: plan_code.unwrap_or_else(|| "No plan".into()),
+                plan: plan_code.unwrap_or_else(|| NO_PLAN.into()),
                 subscription_status: text(&subscription, "status"),
                 account_status: text(&wallet, "status")
                     .ok_or_else(|| Error::Other("Missing billing status".into()))?,
@@ -662,6 +697,80 @@ mod tests {
             "purchased": {"credits": "0", "nanos": "0"},
         });
         assert_eq!(balances(&wallet).included, 500_000_000);
+    }
+
+    /// A new account holds nothing; the trial, a plan, or a credit of any
+    /// size (even one held by a reply in flight) is something.
+    #[test]
+    fn a_new_account_holds_no_credits() {
+        let summary = |fields: serde_json::Value| -> super::Summary {
+            let mut base = json!({
+                "accountId": "a", "accountName": "Sam", "plan": "No plan", "subscriptionStatus": null,
+                "accountStatus": "active", "includedCredits": "0.000000", "purchasedCredits": "0.000000",
+                "heldCredits": "0", "cloudUnits": "0.00", "cloudUnitsHeld": "0.00", "cancelAtPeriodEnd": false,
+                "overageOptIn": false, "billingUrl": "https://haarness.ai/app/billing",
+                "usageUrl": "https://haarness.ai/app/billing/usage", "trialAvailable": true,
+            });
+            for (key, value) in fields.as_object().unwrap() {
+                base[key] = value.clone();
+            }
+            serde_json::from_value(base).unwrap()
+        };
+        assert!(summary(json!({})).holds_no_credits());
+        assert!(
+            !summary(json!({"plan": "trial", "trial": true, "includedCredits": "2000.000000"}))
+                .holds_no_credits()
+        );
+        assert!(!summary(json!({"plan": "pro", "includedCredits": "0.000000"})).holds_no_credits());
+        assert!(!summary(json!({"purchasedCredits": "0.000001"})).holds_no_credits());
+        assert!(!summary(json!({"includedCredits": "0.500000"})).holds_no_credits());
+    }
+
+    /// Paying takes a credit that can pay now: included ones, or purchased
+    /// ones with overage on and not on hold.
+    #[test]
+    fn an_account_pays_with_a_credit_that_can_pay_now() {
+        let summary = |fields: serde_json::Value| -> super::Summary {
+            let mut base = json!({
+                "accountId": "a", "accountName": "Sam", "plan": "No plan", "subscriptionStatus": null,
+                "accountStatus": "active", "includedCredits": "0.000000", "purchasedCredits": "0.000000",
+                "heldCredits": "0", "cloudUnits": "0.00", "cloudUnitsHeld": "0.00", "cancelAtPeriodEnd": false,
+                "overageOptIn": false, "billingUrl": "https://haarness.ai/app/billing",
+                "usageUrl": "https://haarness.ai/app/billing/usage",
+            });
+            for (key, value) in fields.as_object().unwrap() {
+                base[key] = value.clone();
+            }
+            serde_json::from_value(base).unwrap()
+        };
+        assert!(!summary(json!({})).can_pay());
+        assert!(
+            summary(json!({"plan": "trial", "trial": true, "includedCredits": "2000.000000"}))
+                .can_pay()
+        );
+        assert!(!summary(json!({"plan": "pro", "includedCredits": "0.000000"})).can_pay());
+        assert!(
+            !summary(json!({"purchasedCredits": "20.000000"})).can_pay(),
+            "overage off"
+        );
+        assert!(summary(json!({"purchasedCredits": "20.000000", "overageOptIn": true})).can_pay());
+        assert!(
+            !summary(json!({"purchasedCredits": "20.000000", "overageOptIn": true, "purchasedFrozen": true}))
+                .can_pay()
+        );
+        assert!(
+            !summary(json!({"includedCredits": "5.000000", "accountStatus": "suspended"}))
+                .can_pay()
+        );
+
+        let state = |summary: Option<super::Summary>| super::State {
+            logged_in: true,
+            summary,
+            error: None,
+        };
+        assert!(!state(Some(summary(json!({})))).cloud_can_pay());
+        assert!(state(None).cloud_can_pay(), "billing still loading");
+        assert!(super::State::default().cloud_can_pay(), "signed out");
     }
 
     #[test]

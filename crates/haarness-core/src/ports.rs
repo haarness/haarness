@@ -723,6 +723,14 @@ pub trait ModelProvider: Send + Sync {
     }
     /// Revalidate model availability and metadata without interrupting active requests.
     async fn refresh_models(&self, _force: bool) {}
+    /// Whether the account behind this provider can pay for a request now, as
+    /// far as the provider knows. Only a provider that sells metered credits
+    /// (Haarness Cloud) says no, for an account with no credit that can pay:
+    /// a new chat's automatic model then comes from another connected
+    /// provider. A model someone chose or configured is kept regardless.
+    fn can_pay(&self) -> bool {
+        true
+    }
     /// Ask the provider whether it accepts `key`, without storing or using it
     /// for anything else: one cheap authenticated request, where there is one.
     async fn check_api_key(&self, _key: &str) -> KeyCheck {

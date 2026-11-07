@@ -69,6 +69,7 @@ import {
 } from "../chrome";
 import { chatTitle } from "./chat-title";
 import { parseModel, selectModel } from "./model-selection";
+import { unpaidProviders } from "./cloud-billing";
 import { carriedReasoning } from "./reasoning";
 import { AgentTask } from "./AgentTask";
 import { Shimmer } from "./Shimmer";
@@ -448,6 +449,7 @@ export function Session() {
       defaultModel: state.connection?.info.defaultModel,
       recent: state.modelRecents,
       threads: state.threads,
+      unpaid: unpaidProviders(state.connection?.remote),
     }),
   );
   let providerSetup = "";
