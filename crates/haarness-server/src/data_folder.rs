@@ -153,8 +153,18 @@ pub(crate) async fn new_private_file(
     folder: &Path,
     prefix: &str,
 ) -> std::io::Result<(PathBuf, tokio::fs::File)> {
+    new_private_file_with(folder, prefix, "txt").await
+}
+
+/// [`new_private_file`] with another extension, for a file whose kind is
+/// read from its name (a PDF or an image attached for the model).
+pub(crate) async fn new_private_file_with(
+    folder: &Path,
+    prefix: &str,
+    extension: &str,
+) -> std::io::Result<(PathBuf, tokio::fs::File)> {
     private_folder(folder).await?;
-    let path = folder.join(format!("{prefix}_{}.txt", uuid::Uuid::now_v7()));
+    let path = folder.join(format!("{prefix}_{}.{extension}", uuid::Uuid::now_v7()));
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
