@@ -370,6 +370,10 @@ impl McpOAuthSession {
 enum ActivationError {
     Core(CoreError),
     AuthorizationRequired(Option<String>),
+    /// A setting keeps the server from starting at all (see
+    /// [`url_problem`]): its status says so as it is, with no
+    /// "connection failed" before it, since nothing was connected to.
+    NotStarted(String),
 }
 
 impl From<CoreError> for ActivationError {
@@ -1038,6 +1042,9 @@ impl NativeMcpRegistry {
             .url
             .as_deref()
             .ok_or_else(|| CoreError::Invalid("Streamable HTTP MCP requires url".into()))?;
+        if let Some(problem) = url_problem(name, url) {
+            return Err(CoreError::Invalid(problem));
+        }
         let (manager, _) =
             authorization_manager(url, manager_store(name, self.auth_dir.as_deref())).await?;
         let mut request = AuthorizationRequest::new(redirect_uri).with_client_name("Haarness");
@@ -1360,6 +1367,12 @@ impl McpStart {
         let launch = launch_config(&config, folder.as_deref());
         let activation = async {
             let config = &launch;
+            // Checked before any header, helper or OAuth step reads it.
+            if config.transport != "stdio"
+                && let Some(problem) = config.url.as_deref().and_then(|url| url_problem(name, url))
+            {
+                return Err(ActivationError::NotStarted(problem));
+            }
             match config.transport.as_str() {
                 "stdio" => {
                     let result = async {
@@ -1462,6 +1475,11 @@ impl McpStart {
                 {
                     stop_oversized(name, entry, oversized);
                     return (Err(oversized_error(name)), None);
+                }
+                Err(ActivationError::NotStarted(problem)) => {
+                    entry.info.status = "failed".into();
+                    entry.info.detail = Some(problem.clone());
+                    return (Err(CoreError::Invalid(problem)), None);
                 }
                 Err(ActivationError::Core(error)) => {
                     entry.info.status = "failed".into();
@@ -1920,6 +1938,70 @@ fn describe_timeout(timeout: Duration) -> String {
     } else {
         format!("{millis} ms")
     }
+}
+
+/// Why remote MCP server `name` cannot be reached at `url`, or `None` when
+/// it can be asked: an http or https URL with a host, in a form an HTTP
+/// request carries. Unchecked, such a URL (an unset `${DOCS_HOST}` left in
+/// it, or none at all) failed deep in the transport with an error that
+/// named the transport's own types. The sentence names the server and never
+/// the URL, which may carry a token; an unset environment variable the URL
+/// names is named, since setting it is the fix.
+fn url_problem(name: &str, url: &str) -> Option<String> {
+    if haarness_core::links::http_url(url).is_some_and(|parsed| parsed.parse::<http::Uri>().is_ok())
+        && !without_host(url)
+    {
+        return None;
+    }
+    let unset = unset_references(url);
+    Some(match unset.as_slice() {
+        [] => format!(
+            "MCP server \"{name}\" has no usable URL: it is not an http or https address with a host."
+        ),
+        [one] => format!(
+            "MCP server \"{name}\" has no usable URL: the environment variable {one} it names is not set."
+        ),
+        [many @ .., last] => format!(
+            "MCP server \"{name}\" has no usable URL: the environment variables {} and {last} it names are not set.",
+            many.join(", ")
+        ),
+    })
+}
+
+/// Whether `url` is written with nothing where its host goes. A JSON
+/// setting fills an unset variable with nothing, so `https://${DOCS_HOST}/mcp`
+/// arrives as `https:///mcp`, which the URL parser reads as host `mcp`.
+fn without_host(url: &str) -> bool {
+    url.trim()
+        .split_once(':')
+        .and_then(|(_, rest)| rest.strip_prefix("//"))
+        .is_some_and(|authority| {
+            authority.is_empty() || authority.starts_with(['/', '\\', '?', '#'])
+        })
+}
+
+/// The `${NAME}` references left in `value`, each once in the order they
+/// come: configuration loading replaces those that are set, so one still
+/// written out names a variable that was not. Only names a variable may
+/// have are read.
+fn unset_references(value: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let name = &after[..end];
+        let variable = name.len() <= 64
+            && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if variable && !names.iter().any(|seen| seen == name) {
+            names.push(name.to_owned());
+        }
+        rest = &after[end + 1..];
+    }
+    names
 }
 
 async fn activate_remote(
@@ -3380,6 +3462,119 @@ mod tests {
             server.abort();
             let _ = std::fs::remove_dir_all(auth_dir);
         }
+    }
+
+    #[test]
+    fn a_remote_url_is_usable_only_as_an_http_or_https_address_with_a_host() {
+        for usable in [
+            "http://127.0.0.1:8123/mcp",
+            "https://docs.fixture.test/mcp?api_key=k",
+            "https://sam:secret@docs.fixture.test/mcp",
+            " HTTPS://Docs.Fixture.Test/mcp ",
+            "http://[::1]:9000/mcp",
+            // A reference left in the path still makes a request the server
+            // can answer, as before.
+            "https://docs.fixture.test/${SPACE}/mcp",
+        ] {
+            assert_eq!(url_problem("docs", usable), None, "{usable}");
+        }
+        for (unusable, said) in [
+            (
+                "not a url",
+                "it is not an http or https address with a host",
+            ),
+            ("", "it is not an http or https address with a host"),
+            (
+                "ftp://docs.fixture.test/mcp",
+                "it is not an http or https address with a host",
+            ),
+            ("http:", "it is not an http or https address with a host"),
+            // `https://${DOCS_HOST}/mcp` from a JSON setting, its unset
+            // variable filled with nothing.
+            (
+                "https:///mcp?api_key=tok-secret",
+                "it is not an http or https address with a host",
+            ),
+            (
+                "file:///tmp/mcp.sock",
+                "it is not an http or https address with a host",
+            ),
+            (
+                "https://${DOCS_HOST}/mcp?token=tok-secret",
+                "the environment variable DOCS_HOST it names is not set",
+            ),
+            (
+                "${DOCS_SCHEME}://${DOCS_HOST}:${DOCS_PORT}/${DOCS_HOST}",
+                "the environment variables DOCS_SCHEME, DOCS_HOST and DOCS_PORT it names are not set",
+            ),
+        ] {
+            let problem = url_problem("docs", unusable).unwrap_or_else(|| panic!("{unusable}"));
+            assert_eq!(
+                problem,
+                format!("MCP server \"docs\" has no usable URL: {said}."),
+                "{unusable}"
+            );
+            assert!(
+                !problem.contains("tok-secret") && !problem.contains("fixture.test"),
+                "{problem}"
+            );
+        }
+    }
+
+    /// Neither transport reaches OAuth or the network with a URL that cannot
+    /// be asked, and a sign-in for it is refused the same way.
+    #[tokio::test]
+    async fn a_remote_server_whose_url_cannot_be_asked_fails_saying_so_plainly() {
+        let auth_dir =
+            std::env::temp_dir().join(format!("haarness-mcp-bad-url-{}", uuid::Uuid::now_v7()));
+        let registry = NativeMcpRegistry::with_auth_dir(&auth_dir);
+        for transport in ["streamable_http", "sse"] {
+            let config: McpConfigureRequest = serde_json::from_value(json!({
+                "transport": transport,
+                "url": "https://${HAARNESS_TEST_UNSET_HOST}/mcp?api_key=tok-secret",
+                "enabled": true,
+                "timeoutMs": 2000
+            }))
+            .unwrap();
+            let error = registry.configure(transport, config).await.unwrap_err();
+            let said = format!(
+                "MCP server \"{transport}\" has no usable URL: the environment variable HAARNESS_TEST_UNSET_HOST it names is not set."
+            );
+            assert_eq!(error.to_string(), format!("invalid request: {said}"));
+            let info = registry
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|info| info.name == transport)
+                .unwrap();
+            assert_eq!(info.status, "failed");
+            assert_eq!(info.detail.as_deref(), Some(said.as_str()));
+        }
+        let error = registry
+            .begin_oauth(
+                "streamable_http",
+                "http://127.0.0.1:19876/mcp/oauth/callback",
+            )
+            .await
+            .err()
+            .expect("the sign-in is refused");
+        assert!(
+            error.to_string().ends_with(
+                "MCP server \"streamable_http\" has no usable URL: the environment variable HAARNESS_TEST_UNSET_HOST it names is not set."
+            ),
+            "{error}"
+        );
+        // A server that is off stays off, whatever its URL.
+        let off: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http", "url": "not a url", "enabled": false
+        }))
+        .unwrap();
+        assert_eq!(
+            registry.configure("off", off).await.unwrap().status,
+            "disabled"
+        );
+        let _ = std::fs::remove_dir_all(auth_dir);
     }
 
     #[tokio::test]

@@ -6,7 +6,8 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { stopChatHome } from "./fixtures/chat-home";
 
-// MCP servers in Desktop: a server that failed says why under its name, the model's resource tools read in
+// MCP servers in Desktop: a server that failed says why under its name (a remote one whose url names an unset
+// variable in one sentence that leaves the url out), the model's resource tools read in
 // plain words, a server's interactive apps turn off from its page's options or its row in Settings (and back
 // on with Undo) unless the server comes from a plugin, a server slow to start reads connecting and then
 // connected in open Settings, and a secret-looking value is kept in the keychain with
@@ -51,6 +52,8 @@ test.beforeAll(async () => {
           docs: server("resources.py"),
           // Floods its handshake: stopped at once, and says why.
           flood: server("flood.py", { env: { FLOOD_INIT: "1" } }),
+          // Its host is a variable that is not set, which a JSON setting fills with nothing.
+          badurl: { type: "http", url: "https://${HAARNESS_E2E_UNSET_HOST}/mcp?api_key=e2e-url-secret" },
         },
       },
       null,
@@ -97,7 +100,7 @@ test.beforeAll(async () => {
   client = new Haarness({ baseUrl: connection.url, token: connection.token });
   await expect
     .poll(async () => Object.fromEntries((await client.mcpServers()).map((server) => [server.name, server.status])), { timeout: 30000 })
-    .toEqual({ app: "connected", docs: "connected", flood: "failed", weather: "connected" });
+    .toEqual({ app: "connected", badurl: "failed", docs: "connected", flood: "failed", weather: "connected" });
   thread = (await client.createThread({ title: "MCP servers", provider: "echo", model: "echo-1" })).id;
   await page.locator(".sessions").getByRole("button", { name: "MCP servers", exact: true }).click();
 });
@@ -166,6 +169,17 @@ test("a server stopped for an oversized reply says why under its name", async ()
   // A server that connected shows no line of its own.
   await expect(block("docs").locator(".mcp-server-detail")).toHaveCount(0);
   await pictures(flood, "mcp-failed-detail");
+  await closeSettings();
+});
+
+test("a remote server whose url cannot be asked says so in one sentence, without the url", async () => {
+  await openMcpSettings();
+  const bad = block("badurl");
+  await expect(bad.locator(".mcp-server-detail")).toHaveText(
+    'MCP server "badurl" has no usable URL: it is not an http or https address with a host.',
+  );
+  await expect(bad).not.toContainText("e2e-url-secret");
+  await pictures(bad, "mcp-bad-url-detail");
   await closeSettings();
 });
 
