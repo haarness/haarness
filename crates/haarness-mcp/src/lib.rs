@@ -2869,29 +2869,39 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
                 text_parts.push(text.text.clone());
             }
             rmcp::model::ContentBlock::Image(image) => {
-                let mime = mcp_content::media_type(&image.mime_type);
-                if let Some(note) = unattachable(&mime, "image", &image.data) {
-                    text_parts.push(note);
-                    continue;
-                }
-                count_mcp_attachment(&image.data, &mut attachment_bytes)?;
-                attachments.push(format!("data:{mime};base64,{}", image.data));
-                text_parts.push(format!("[{mime} image attachment]"));
+                let (attachment, line) = media_block(
+                    &image.mime_type,
+                    &image.data,
+                    "image",
+                    &mut attachment_bytes,
+                )?;
+                attachments.extend(attachment);
+                text_parts.push(line);
             }
             rmcp::model::ContentBlock::Audio(audio) => {
-                let mime = mcp_content::media_type(&audio.mime_type);
-                if let Some(note) = unattachable(&mime, "audio", &audio.data) {
-                    text_parts.push(note);
-                    continue;
-                }
-                count_mcp_attachment(&audio.data, &mut attachment_bytes)?;
-                attachments.push(format!("data:{mime};base64,{}", audio.data));
-                text_parts.push(format!("[{mime} audio attachment]"));
+                let (attachment, line) = media_block(
+                    &audio.mime_type,
+                    &audio.data,
+                    "audio",
+                    &mut attachment_bytes,
+                )?;
+                attachments.extend(attachment);
+                text_parts.push(line);
             }
-            // A blob reaches the model as what it holds: its text in place
-            // of the base64 (the resource reads as a text resource would),
-            // an image or PDF as an attachment, anything else named.
+            // A resource's text reaches the model as text on lines of its
+            // own under a line naming it, so a long one can be cut and read
+            // back by line; a blob as what it holds (text, an image or PDF
+            // attached, anything else named).
             rmcp::model::ContentBlock::Resource(embedded) => match &embedded.resource {
+                rmcp::model::ResourceContents::TextResourceContents {
+                    uri,
+                    mime_type,
+                    text,
+                    ..
+                } => {
+                    has_text |= !text.is_empty();
+                    text_parts.push(resource_text(uri, mime_type.as_deref(), text));
+                }
                 rmcp::model::ResourceContents::BlobResourceContents {
                     uri,
                     mime_type,
@@ -2902,14 +2912,7 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
                     {
                         Blob::Text(text) => {
                             has_text |= !text.is_empty();
-                            let mut block = serde_json::to_value(content).unwrap_or_default();
-                            if let Some(resource) =
-                                block.get_mut("resource").and_then(Value::as_object_mut)
-                            {
-                                resource.remove("blob");
-                                resource.insert("text".into(), text.into());
-                            }
-                            text_parts.push(block.to_string());
+                            text_parts.push(resource_text(uri, mime_type.as_deref(), &text));
                         }
                         Blob::Attached { data_url, note } => {
                             attachments.push(data_url);
@@ -2918,13 +2921,7 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
                         Blob::Note(note) => text_parts.push(note),
                     }
                 }
-                resource => {
-                    has_text |= matches!(
-                        resource,
-                        rmcp::model::ResourceContents::TextResourceContents { text, .. } if !text.is_empty()
-                    );
-                    text_parts.push(serde_json::to_string(content).unwrap_or_default());
-                }
+                _ => text_parts.push(serde_json::to_string(content).unwrap_or_default()),
             },
             other => text_parts.push(serde_json::to_string(other).unwrap_or_default()),
         }
@@ -2969,17 +2966,56 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
     }
 }
 
-/// The line that stands for an image or audio block of a type Haarness
-/// does not carry to providers (`audio/webm`, `image/svg+xml`), or `None`
-/// for one it does. Attached, such a block was refused each time a later
-/// request was built, so every turn of the chat failed after it.
-fn unattachable(mime: &str, kind: &str, data: &str) -> Option<String> {
-    (!haarness_core::attachments::is_supported_media_mime(mime)).then(|| {
-        let bytes = data.trim_end_matches('=').len() / 4 * 3;
-        format!(
-            "[{mime} {kind}, about {bytes} bytes, left out: Haarness does not attach this type]"
-        )
-    })
+/// A resource's text as a tool result holds it: a line naming the
+/// resource (`[notes://today: text/markdown]`), then the text.
+fn resource_text(uri: &str, mime: Option<&str>, text: &str) -> String {
+    match mime.filter(|mime| !mime.trim().is_empty()) {
+        Some(mime) => format!(
+            "[{uri}: {}]\n{text}",
+            haarness_core::mcp_content::media_type(mime)
+        ),
+        None => format!("[{uri}]\n{text}"),
+    }
+}
+
+/// An image or audio block as the model takes it: the attachment and the
+/// line that stands for it, or, for a type Haarness does not carry to
+/// providers (`audio/webm`), only a line that names it. An image whose
+/// type is mislabelled (`image/jpg`) is attached as what its bytes are, and
+/// one of a text type (an SVG) is attached as before, which the model reads
+/// as its text. Base64 broken over lines is read without the breaks.
+fn media_block(
+    declared: &str,
+    data: &str,
+    kind: &str,
+    total: &mut usize,
+) -> CoreResult<(Option<String>, String)> {
+    use haarness_core::{attachments::is_supported_media_mime, mcp_content};
+    let data = mcp_content::base64_text(data);
+    let mut mime = mcp_content::media_type(declared);
+    if !is_supported_media_mime(&mime) && !mcp_content::textual(&mime) {
+        let sniffed = mime
+            .starts_with("image/")
+            .then(|| STANDARD.decode(data.as_bytes()).ok())
+            .flatten()
+            .and_then(|bytes| haarness_core::images::sniff(&bytes))
+            .filter(|sniffed| is_supported_media_mime(sniffed));
+        let Some(sniffed) = sniffed else {
+            let bytes = data.trim_end_matches('=').len() / 4 * 3;
+            return Ok((
+                None,
+                format!(
+                    "[{mime} {kind}, about {bytes} bytes, left out: Haarness does not attach this type]"
+                ),
+            ));
+        };
+        sniffed.clone_into(&mut mime);
+    }
+    count_mcp_attachment(&data, total)?;
+    Ok((
+        Some(format!("data:{mime};base64,{data}")),
+        format!("[{mime} {kind} attachment]"),
+    ))
 }
 
 fn count_mcp_attachment(encoded: &str, total: &mut usize) -> CoreResult<()> {
@@ -4775,19 +4811,14 @@ mod tests {
             json!([format!("data:image/png;base64,{png}")])
         );
         assert!(!output.text.contains(&png), "{}", output.text);
-        let lines: Vec<&str> = output.text.lines().collect();
-        assert_eq!(lines[0], "Here is the chart.");
-        assert_eq!(lines[1], "[image/png attachment: ui://chart.png]");
-        let row: Value = serde_json::from_str(lines[2]).unwrap();
+        // Text, decoded or sent as text, on lines of its own under its name.
         assert_eq!(
-            row,
-            json!({"type": "resource", "resource": {"uri": "data://row.json", "mimeType": "application/json", "text": r#"{"id":7}"#}})
-        );
-        assert_eq!(lines[3], "[files://a.zip: application/zip, 300 bytes]");
-        // A text resource reads as it always has.
-        assert_eq!(
-            serde_json::from_str::<Value>(lines[4]).unwrap()["resource"]["text"],
-            "Ship on Friday."
+            output.text,
+            "Here is the chart.\n\
+             [image/png attachment: ui://chart.png]\n\
+             [data://row.json: application/json]\n{\"id\":7}\n\
+             [files://a.zip: application/zip, 300 bytes]\n\
+             [notes://today: text/plain]\nShip on Friday."
         );
         // Images past the 10 MiB a result attaches are named, not attached,
         // and an image block's type is compared the same way.
@@ -4824,21 +4855,33 @@ mod tests {
     /// later request of the chat failed to load it.
     #[test]
     fn mcp_media_of_a_type_haarness_does_not_carry_is_named_not_attached() {
+        let jpeg = STANDARD.encode(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00fixture");
         let result = rmcp::model::CallToolResult::success(vec![
             rmcp::model::ContentBlock::audio("GkXfo0AAAA==", "audio/webm"),
-            rmcp::model::ContentBlock::image("PHN2Zy8+", "image/svg+xml"),
             rmcp::model::ContentBlock::audio("SUQz", "Audio/MPEG"),
+            // An SVG goes as before, for the model to read as its text.
+            rmcp::model::ContentBlock::image("PHN2Zy8+", "image/svg+xml"),
+            // A JPEG labelled `image/jpg`, its base64 broken over lines.
+            rmcp::model::ContentBlock::image(
+                format!("{}\n{}", &jpeg[..8], &jpeg[8..]),
+                "image/jpg",
+            ),
         ]);
         let output = to_output(result, "media").unwrap();
         assert_eq!(
             output.metadata["attachments"],
-            json!(["data:audio/mpeg;base64,SUQz"])
+            json!([
+                "data:audio/mpeg;base64,SUQz",
+                "data:image/svg+xml;base64,PHN2Zy8+",
+                format!("data:image/jpeg;base64,{jpeg}")
+            ])
         );
         assert_eq!(
             output.text,
             "[audio/webm audio, about 6 bytes, left out: Haarness does not attach this type]\n\
-             [image/svg+xml image, about 6 bytes, left out: Haarness does not attach this type]\n\
-             [audio/mpeg audio attachment]"
+             [audio/mpeg audio attachment]\n\
+             [image/svg+xml image attachment]\n\
+             [image/jpeg image attachment]"
         );
     }
 

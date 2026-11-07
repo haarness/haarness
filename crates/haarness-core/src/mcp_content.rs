@@ -85,16 +85,32 @@ pub fn textual(media_type: &str) -> bool {
         || (kind == "application" && TEXT_APPLICATIONS.contains(&subtype))
 }
 
+/// `data` without the ASCII whitespace base64 may be broken over lines
+/// with (76 characters a line is common), which decoding refuses.
+#[must_use]
+pub fn base64_text(data: &str) -> std::borrow::Cow<'_, str> {
+    if data.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        data.chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect::<String>()
+            .into()
+    } else {
+        data.into()
+    }
+}
+
 /// What a model is given for `blob`, the base64 data of resource `uri`
 /// declared as `mime`. Images and PDFs are attached while `attached` (the
-/// decoded bytes this result attached so far) stays within
-/// [`MAX_ATTACHMENT_BYTES`], and counted into it when they are; one past it
-/// is named instead, so smaller ones after it still fit.
+/// decoded bytes attached so far) stays within [`MAX_ATTACHMENT_BYTES`],
+/// and counted into it when they are; one past it is named instead, so
+/// smaller ones after it still fit. An image whose type is mislabelled
+/// (`image/jpg`) is attached as what its bytes are.
 #[must_use]
 pub fn blob(uri: &str, mime: Option<&str>, blob: &str, attached: &mut usize) -> Blob {
-    let mime = media_type(mime.unwrap_or_default());
+    let blob = base64_text(blob);
+    let mut mime = media_type(mime.unwrap_or_default());
     let text = textual(&mime);
-    let attachable = ATTACHABLE.contains(&mime.as_str());
+    let image = !text && mime.starts_with("image/");
     // Measured before it is decoded: four base64 characters hold three bytes.
     let estimate = blob.trim_end_matches('=').len() / 4 * 3;
     if text && estimate > MAX_TEXT_BYTES {
@@ -102,10 +118,12 @@ pub fn blob(uri: &str, mime: Option<&str>, blob: &str, attached: &mut usize) -> 
             "[{uri}: {mime}, about {estimate} bytes, left out: Haarness reads at most 10 MiB of one resource as text]"
         ));
     }
-    if attachable && attached.saturating_add(estimate) > MAX_ATTACHMENT_BYTES {
+    if (image || ATTACHABLE.contains(&mime.as_str()))
+        && attached.saturating_add(estimate) > MAX_ATTACHMENT_BYTES
+    {
         return over_attachments(uri, &mime, estimate);
     }
-    let Ok(bytes) = STANDARD.decode(blob) else {
+    let Ok(bytes) = STANDARD.decode(blob.as_bytes()) else {
         return Blob::Note(format!("[{uri}: {mime} content that is not valid base64]"));
     };
     if text {
@@ -120,7 +138,14 @@ pub fn blob(uri: &str, mime: Option<&str>, blob: &str, attached: &mut usize) -> 
         }
         return Blob::Text(String::from_utf8_lossy(body).into_owned());
     }
-    if attachable && !bytes.is_empty() {
+    if image
+        && !ATTACHABLE.contains(&mime.as_str())
+        && let Some(sniffed) =
+            crate::images::sniff(&bytes).filter(|sniffed| ATTACHABLE.contains(sniffed))
+    {
+        sniffed.clone_into(&mut mime);
+    }
+    if ATTACHABLE.contains(&mime.as_str()) && !bytes.is_empty() {
         if attached.saturating_add(bytes.len()) > MAX_ATTACHMENT_BYTES {
             return over_attachments(uri, &mime, bytes.len());
         }
@@ -133,9 +158,12 @@ pub fn blob(uri: &str, mime: Option<&str>, blob: &str, attached: &mut usize) -> 
     Blob::Note(format!("[{uri}: {mime}, {} bytes]", bytes.len()))
 }
 
+/// A resource's image or PDF left out because the images and PDFs
+/// attached with it (a tool's result, a read, or a message's mentions)
+/// already come to [`MAX_ATTACHMENT_BYTES`].
 fn over_attachments(uri: &str, mime: &str, bytes: usize) -> Blob {
     Blob::Note(format!(
-        "[{uri}: {mime}, {bytes} bytes, left out: one result attaches at most 10 MiB of images and PDFs]"
+        "[{uri}: {mime}, {bytes} bytes, left out: the images and PDFs attached with it already come to 10 MiB]"
     ))
 }
 
@@ -145,6 +173,41 @@ mod tests {
 
     fn encoded(bytes: &[u8]) -> String {
         STANDARD.encode(bytes)
+    }
+
+    /// Base64 broken over lines read as not valid base64, and an image
+    /// labelled `image/jpg` was named rather than attached.
+    #[test]
+    fn wrapped_base64_and_a_mislabelled_image_are_read_as_what_they_are() {
+        let jpeg = encoded(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00fixture-jpeg-bytes-to-wrap");
+        let wrapped = format!("{}\r\n{}\n", &jpeg[..20], &jpeg[20..]);
+        let mut attached = 0;
+        assert_eq!(
+            blob("ui://photo", Some("image/jpg"), &wrapped, &mut attached),
+            Blob::Attached {
+                data_url: format!("data:image/jpeg;base64,{jpeg}"),
+                note: "[image/jpeg attachment: ui://photo]".into()
+            }
+        );
+        assert_eq!(
+            blob(
+                "notes://a",
+                Some("text/plain"),
+                &format!("{}\n", encoded(b"hello")),
+                &mut attached
+            ),
+            Blob::Text("hello".into())
+        );
+        // An image type whose bytes are no image Haarness attaches is named.
+        assert_eq!(
+            blob(
+                "ui://raw",
+                Some("image/x-raw"),
+                &encoded(&[7; 9]),
+                &mut attached
+            ),
+            Blob::Note("[ui://raw: image/x-raw, 9 bytes]".into())
+        );
     }
 
     #[test]
@@ -271,7 +334,9 @@ mod tests {
             panic!("an attachment past the limit was attached");
         };
         assert!(
-            note.ends_with("left out: one result attaches at most 10 MiB of images and PDFs]"),
+            note.ends_with(
+                "left out: the images and PDFs attached with it already come to 10 MiB]"
+            ),
             "{note}"
         );
         assert!(matches!(
