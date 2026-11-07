@@ -14401,7 +14401,12 @@ fn provider_messages_with_origins(
     // wrote there (not a steer they queued) opens a group of its own, as its
     // turn did in the parent.
     let mut group = None;
-    for item in provider_visible_items(&items) {
+    let visible = provider_visible_items(&items);
+    let abandoned = abandoned_calls(&visible);
+    // Results owed to abandoned calls of the batch being read, sent once its
+    // calls and results end.
+    let mut owed = Vec::<(ProviderMessage, crate::image_budget::Origin)>::new();
+    for (index, item) in visible.into_iter().enumerate() {
         let item_id = item.id;
         if item.turn_id.is_none()
             && matches!(
@@ -14525,6 +14530,18 @@ fn provider_messages_with_origins(
                 provider_metadata,
             } if !call_id.trim().is_empty() && !name.trim().is_empty() => {
                 valid_calls.insert(call_id.clone(), name.clone());
+                if abandoned.contains(&index) {
+                    owed.push((
+                        ProviderMessage::ToolResult {
+                            call_id: call_id.clone(),
+                            name: name.clone(),
+                            output: crate::UNFINISHED_CALL_RESULT.into(),
+                            is_error: true,
+                            attachments: Vec::new(),
+                        },
+                        origin,
+                    ));
+                }
                 Some(ProviderMessage::ToolCall {
                     call_id,
                     name,
@@ -14564,9 +14581,22 @@ fn provider_messages_with_origins(
             _ => None,
         };
         if let Some(message) = message {
+            if !matches!(
+                message,
+                ProviderMessage::ToolCall { .. } | ProviderMessage::ToolResult { .. }
+            ) {
+                for (owed, origin) in owed.drain(..) {
+                    messages.push(owed);
+                    origins.push(origin);
+                }
+            }
             messages.push(message);
             origins.push(origin);
         }
+    }
+    for (owed, origin) in owed {
+        messages.push(owed);
+        origins.push(origin);
     }
     for item_id in deferred_order {
         if let Some((message, origin)) = deferred_queued.remove(&item_id) {
@@ -14575,6 +14605,33 @@ fn provider_messages_with_origins(
         }
     }
     (messages, origins)
+}
+
+/// Positions of the calls in `items` that will never get a result: none
+/// answers them, and a later turn has begun since, or the person wrote in the
+/// fork they were copied into. Haarness stopped while they ran (a crash, or
+/// a turn that outlived its shutdown), or an older fork copied them while
+/// they waited. A running turn's calls are left as they are, a steer queued
+/// while they run included.
+fn abandoned_calls(items: &[&Item]) -> HashSet<usize> {
+    crate::unanswered_calls(items.iter().map(|item| &item.data))
+        .calls
+        .into_iter()
+        .filter(|&call| {
+            items[call + 1..].iter().any(|later| match later.data {
+                // A turn opens with a message that is not a steer.
+                ItemData::UserMessage {
+                    queued: false,
+                    synthetic,
+                    ..
+                } => match later.turn_id {
+                    Some(turn) => Some(turn) != items[call].turn_id,
+                    None => !synthetic,
+                },
+                _ => false,
+            })
+        })
+        .collect()
 }
 
 /// Every attachment a provider refused earlier in the thread.
@@ -18465,6 +18522,169 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(texts, ["read the file", "Done.", "thanks"]);
         assert_eq!(messages.len(), 5, "the tool call and its result stay");
+    }
+
+    fn in_turn(sequence: u64, turn: Option<TurnId>, data: ItemData) -> Item {
+        Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        }
+    }
+
+    fn person(text: &str, queued: bool) -> ItemData {
+        ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued,
+            synthetic: false,
+            command_line: None,
+        }
+    }
+
+    fn sleep_call(call_id: &str) -> ItemData {
+        ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            arguments: json!({"command": "sleep 120"}),
+            provider_metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn slept(call_id: &str) -> ItemData {
+        ItemData::ToolResult {
+            call_id: call_id.into(),
+            name: "bash".into(),
+            output: "slept".into(),
+            is_error: false,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    /// Each message as one line: `user: …`, `call id`, `result id: …`.
+    fn outline(messages: &[ProviderMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|message| match message {
+                ProviderMessage::Text { role, content } => format!("{role}: {content}"),
+                ProviderMessage::ToolCall { call_id, .. } => format!("call {call_id}"),
+                ProviderMessage::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                    ..
+                } => format!(
+                    "result {call_id}{}: {output}",
+                    if *is_error { " (error)" } else { "" }
+                ),
+                media @ ProviderMessage::Media { .. } => format!("{media:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_call_a_stopped_turn_left_without_a_result_ends_before_the_next_turn() {
+        let (stopped, next) = (Some(TurnId::new()), Some(TurnId::new()));
+        let unfinished = format!("result b (error): {}", crate::UNFINISHED_CALL_RESULT);
+        let messages = provider_messages(vec![
+            in_turn(1, stopped, person("run both", false)),
+            in_turn(2, stopped, sleep_call("a")),
+            in_turn(3, stopped, sleep_call("b")),
+            in_turn(4, stopped, slept("a")),
+            // What recovery records: no result, only the turn's notice.
+            in_turn(
+                5,
+                stopped,
+                ItemData::Error {
+                    message: "restarted".into(),
+                    retryable: true,
+                },
+            ),
+            in_turn(6, next, person("and now?", false)),
+        ]);
+        assert_eq!(
+            outline(&messages),
+            [
+                "user: run both",
+                "call a",
+                "call b",
+                "result a: slept",
+                unfinished.as_str(),
+                "user: and now?",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_copied_into_a_fork_without_its_result_ends_before_the_next_message() {
+        // A fork made before forks left such calls out: its items carry no
+        // turn, and the person's messages there are its turns.
+        let unfinished = format!("result call-1 (error): {}", crate::UNFINISHED_CALL_RESULT);
+        let messages = provider_messages(vec![
+            item(1, person("sleep a while", false)),
+            item(2, sleep_call("call-1")),
+            item(3, person("hi", false)),
+        ]);
+        assert_eq!(
+            outline(&messages),
+            [
+                "user: sleep a while",
+                "call call-1",
+                unfinished.as_str(),
+                "user: hi"
+            ]
+        );
+        // The fork's own next turn ends it the same way.
+        let messages = provider_messages(vec![
+            item(1, person("sleep a while", false)),
+            item(2, sleep_call("call-1")),
+            in_turn(3, Some(TurnId::new()), person("hi", false)),
+        ]);
+        assert_eq!(outline(&messages)[2], unfinished);
+    }
+
+    #[test]
+    fn a_running_turn_keeps_its_calls_as_they_are() {
+        let (earlier, live) = (Some(TurnId::new()), Some(TurnId::new()));
+        let items = vec![
+            in_turn(1, earlier, person("first", false)),
+            in_turn(2, earlier, sleep_call("call-1")),
+            in_turn(3, earlier, slept("call-1")),
+            in_turn(4, live, person("second", false)),
+            // Same id as the earlier turn's call, still running, with a
+            // steer queued while it runs.
+            in_turn(5, live, sleep_call("call-1")),
+            in_turn(6, live, person("also check the logs", true)),
+            // Recovery of an earlier turn's background task can write in
+            // the chat while this one runs.
+            in_turn(
+                7,
+                earlier,
+                ItemData::UserMessage {
+                    text: "background result".into(),
+                    attachments: Vec::new(),
+                    queued: true,
+                    synthetic: true,
+                    command_line: None,
+                },
+            ),
+        ];
+        let messages = provider_messages(items);
+        assert_eq!(
+            outline(&messages)[..5],
+            [
+                "user: first",
+                "call call-1",
+                "result call-1: slept",
+                "user: second",
+                "call call-1",
+            ]
+        );
+        assert!(
+            !outline(&messages)
+                .iter()
+                .any(|line| line.contains(crate::UNFINISHED_CALL_RESULT)),
+            "{messages:?}"
+        );
     }
 
     #[test]
