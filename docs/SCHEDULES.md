@@ -110,13 +110,14 @@ Every native entry runs the hidden command
    When the 30 minutes or the 12 hours run out, whatever of the run's own work is still going is
    stopped and the run is recorded as **failed**, naming it. Nothing the run stops tells the chat or
    a chat under it, so no turn of the run starts in either after the run. A person's turn still may:
-   the result of their own work, or the answer to a message they wrote into a turn the run stopped
-   before its agent had read it (the agent is told the run ended, and replies to the message). The
-   times are wall-clock time, so the time a computer spends asleep counts. Questions asked in the
-   run's own turns and subagents are declined, since nobody is there to answer; a person's question
-   in the chat, or in a chat under it, is left for them. A server older than the `haarness` running
-   the schedule cannot stop a run's work: the run is recorded as **failed** when it has work to
-   stop, and that work goes on.
+   the result of their own work, the answer to a message they wrote into a turn the run stopped
+   before its agent had read it (the agent is told the run ended, and replies to the message), or a
+   message they queued behind such a turn, which is sent once it stops, just as after a turn that
+   ended. The times are wall-clock time, so the time a computer spends asleep counts. Questions
+   asked in the run's own turns and subagents are declined, since nobody is there to answer; a
+   person's question in the chat, or in a chat under it, is left for them. A server older than the
+   `haarness` running the schedule cannot stop a run's work: the run is recorded as **failed** when
+   it has work to stop, and that work goes on.
 6. It records **success** or **failed** with the chat and turn ids and the agent's answer: what it
    said in the run's own turns. The run fails, with the reason as its error, when its first or last
    turn failed or was stopped, or when a subagent it ran in the background failed, as

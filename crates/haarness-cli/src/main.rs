@@ -21752,6 +21752,75 @@ request_timeout = 0
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A message a person queued to follow a turn the run stops is sent
+    /// once that turn has stopped, as after a turn that ended: the run's
+    /// stop is not a person's, which would leave the queue waiting for them.
+    #[tokio::test]
+    async fn a_message_queued_behind_a_turn_the_run_stops_is_sent() {
+        let (client, server, runtime, root) = scheduled_client(120_000).await;
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "person: linger 30000").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let queued = client
+            .queue_input(
+                thread,
+                haarness_protocol::QueueInputRequest {
+                    request_id: RequestId::new(),
+                    text: "person: linger 10".into(),
+                    delivery: haarness_protocol::InputDelivery::Queue,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(queued.queued, "{queued:?}");
+        assert_eq!(client.input_queue(thread).await.unwrap().items.len(), 1);
+        client
+            .stop_turn_work(
+                thread,
+                &haarness_protocol::StopTurnWorkRequest {
+                    turns: vec![first],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(settles(&client, first).await, TurnStatus::Interrupted);
+        let next = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let last = client.thread_activity(thread).await.unwrap().last_turn;
+                if let Some(last) = last.filter(|last| last.id != first) {
+                    break last.id;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the queued message was never sent");
+        assert_eq!(settles(&client, next).await, TurnStatus::Completed);
+        assert!(client.input_queue(thread).await.unwrap().items.is_empty());
+        let items = client.items(thread).await.unwrap();
+        let of_next = items
+            .iter()
+            .filter(|item| item.turn_id == Some(next))
+            .map(|item| &item.data)
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(of_next[0], ItemData::UserMessage { text, synthetic: false, .. }
+                if text == "person: linger 10"),
+            "{of_next:?}"
+        );
+        assert!(
+            of_next.iter().any(
+                |data| matches!(data, ItemData::AssistantMessage { text } if text == "Person done.")
+            ),
+            "{of_next:?}"
+        );
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The server stops only what the named turns of the chat left, and the
     /// chat's own named commands: a turn named from another chat, that
     /// chat's commands, and a person's subagent in the same chat go on.

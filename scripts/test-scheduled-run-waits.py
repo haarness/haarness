@@ -19,7 +19,8 @@ provider may do that):
 - person: a person's turn and dev server in the run's chat are neither waited for nor stopped.
 - deleted: a workflow of the run deleted while it waits has ended; the rest is still waited for.
 - steer: a person's message written into the run's turn is answered outside the run's record, and
-  one the run's ceiling stops unread is answered in a turn of its own.
+  one the run's ceiling stops unread is answered in a turn of its own; one queued behind that turn
+  is sent once it stops.
 - nested: a workflow started from the chat of one of the run's subagents holds the run and is
   cancelled at its limit, so nothing starts in that chat after the run either; one started by a
   subagent that ended before the run first looked (in the foreground, or quickly in the background)
@@ -329,7 +330,25 @@ try:
     told = [item["data"] for item in api(f"/threads/{thread}/items") if item.get("turnId") == answer]
     assert told[0]["type"] == "user_message" and "scheduled run" in told[0]["text"], told
     assert any(data["type"] == "assistant_message" for data in told), told
-    ok("a person's message in the run's turn is answered outside its record, even when the run stops it unread")
+    schedule("queued-late", "!linger 8000 never-finished")
+    process = runner("queued-late", 60000, ceiling_ms=2500)
+    thread = chat_of("queued-late")
+    until(lambda: api(f"/threads/{thread}/activity")["activeTurn"], "the run's turn never ran")
+    queued = api(f"/threads/{thread}/input", {"requestId": str(uuid.uuid4()), "text": "Queued for later",
+                                              "delivery": "queue"})
+    assert queued.get("queued"), queued
+    record = record_of(process)
+    assert record["status"] == "failed", record
+    sent = until(lambda: next((item["turnId"] for item in api(f"/threads/{thread}/items")
+                               if item.get("turnId") and item["turnId"] != record["turnId"]), None),
+                 "the message queued behind the turn the run stopped was never sent")
+    until(lambda: api(f"/turns/{sent}")["status"] == "completed", "the queued message's turn never finished")
+    assert not api(f"/threads/{thread}/input/queue")["items"], api(f"/threads/{thread}/input/queue")
+    told = [item["data"] for item in api(f"/threads/{thread}/items") if item.get("turnId") == sent]
+    assert told[0]["type"] == "user_message" and told[0]["text"] == "Queued for later", told
+    assert any(data["type"] == "assistant_message" and "Queued for later" in data["text"] for data in told), told
+    ok("a person's message in the run's turn is answered outside its record, even when the run stops it unread; "
+       "one queued behind that turn is sent")
 
     # nested
     schedule("nested-flow", tool("task", {"description": "Nested flow check", "prompt": "!linger 1500 sub done",

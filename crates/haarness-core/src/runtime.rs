@@ -7392,6 +7392,8 @@ impl AgentRuntime {
     /// steering gets a continuation that answers it. Otherwise the next queued
     /// prompt starts as its own turn, unless the user stopped the work or the
     /// failed turn was itself a queued prompt; those leave the queue paused.
+    /// A turn the end of its scheduled run stopped is followed as one that
+    /// ended: nobody stopped the queue behind it.
     // Boxed with an explicit `Send` bound: this starts turns, whose runners
     // call back here, and that recursion is otherwise opaque to `Send` checks.
     fn follow_turn(
@@ -7439,6 +7441,9 @@ impl AgentRuntime {
             return;
         }
         match result {
+            // The end of a scheduled run stopped this turn, not a person: what
+            // they queued behind it starts, as after a turn that ended.
+            Err(CoreError::Cancelled) if run_ended => {}
             Err(CoreError::Cancelled) => return,
             Err(_) if from_queue => {
                 self.queue_pauses.insert(thread_id, ());
