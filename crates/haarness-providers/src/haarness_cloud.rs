@@ -24,6 +24,8 @@ pub struct HaarnessCloudProvider {
     /// Which listed models take audio, kept across the transports made for
     /// each request.
     listed_audio: ListedAudio,
+    /// How long a busy refusal is held back ([`random_busy_jitter`]).
+    busy_jitter: fn() -> Duration,
 }
 impl HaarnessCloudProvider {
     pub fn from_environment() -> Option<Self> {
@@ -32,6 +34,7 @@ impl HaarnessCloudProvider {
             grant: Arc::default(),
             models: RwLock::new(None),
             listed_audio: ListedAudio::default(),
+            busy_jitter: random_busy_jitter,
         })
     }
     fn identity(&self) -> Option<[u8; 32]> {
@@ -157,6 +160,11 @@ fn busy(error: &CoreError) -> bool {
 /// The most a busy refusal is held back, in milliseconds, so that agents
 /// refused together spread out their next tries.
 const BUSY_JITTER_MS: u64 = 1_000;
+
+/// A random part of [`BUSY_JITTER_MS`].
+fn random_busy_jitter() -> Duration {
+    Duration::from_millis(rand::random_range(0..BUSY_JITTER_MS))
+}
 
 fn error(e: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(e.to_string())
@@ -439,6 +447,7 @@ impl ModelProvider for HaarnessCloudProvider {
         let client = self.client.clone();
         let grant = Arc::clone(&self.grant);
         let listed_audio = Arc::clone(&self.listed_audio);
+        let busy_jitter = self.busy_jitter;
         let used = grant
             .lock()
             .await
@@ -476,10 +485,9 @@ impl ModelProvider for HaarnessCloudProvider {
                         // Agents refused together would all try again at the
                         // same moment, and be refused together again: each
                         // waits a random part of a second more first.
-                        let jitter = Duration::from_millis(rand::random_range(0..BUSY_JITTER_MS));
                         tokio::select! {
                             () = cancel.cancelled() => {}
-                            () = tokio::time::sleep(jitter) => {}
+                            () = tokio::time::sleep(busy_jitter()) => {}
                         }
                         Err::<(), _>(readable(failure))?;
                     }
@@ -559,6 +567,7 @@ mod tests {
             grant: Arc::default(),
             models: RwLock::new(None),
             listed_audio: ListedAudio::default(),
+            busy_jitter: random_busy_jitter,
         });
         let refresh = || async {
             tokio::time::sleep(std::time::Duration::from_millis(1010)).await;
@@ -955,6 +964,7 @@ mod tests {
             grant: Arc::default(),
             models: RwLock::new(None),
             listed_audio: ListedAudio::default(),
+            busy_jitter: random_busy_jitter,
         };
         (provider, stand, server, root)
     }
@@ -1014,16 +1024,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Busy refusals reach the turn spread over a second, so agents refused
-    /// together do not try again together.
+    /// Busy refusals are held back a random part of a second, so agents
+    /// refused together do not try again together.
+    #[test]
+    fn busy_jitter_is_a_random_part_of_a_second() {
+        let draws: std::collections::HashSet<_> = (0..200).map(|_| random_busy_jitter()).collect();
+        assert!(draws.len() > 10, "{draws:?}");
+        assert!(
+            draws
+                .iter()
+                .all(|draw| *draw < Duration::from_millis(BUSY_JITTER_MS)),
+            "{draws:?}"
+        );
+    }
+
+    static JITTERED: AtomicUsize = AtomicUsize::new(0);
+
+    fn counted_jitter() -> Duration {
+        JITTERED.fetch_add(1, Ordering::SeqCst);
+        Duration::ZERO
+    }
+
+    static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn held_jitter() -> Duration {
+        HELD.store(true, Ordering::SeqCst);
+        Duration::from_secs(3_600)
+    }
+
+    /// Each busy refusal waits its jitter before the turn sees it, and a stop
+    /// ends the wait.
     #[tokio::test]
-    async fn busy_refusals_reach_the_turn_spread_over_a_second() {
+    async fn a_busy_refusal_waits_its_jitter_first() {
         use futures::StreamExt as _;
-        let (provider, stand, server, root) = stand_in().await;
+        let (mut provider, stand, server, root) = stand_in().await;
         stand.refusing.store(true, Ordering::SeqCst);
-        let mut waits = Vec::new();
-        for _ in 0..6 {
-            let started = std::time::Instant::now();
+        provider.busy_jitter = counted_jitter;
+        for count in 1..=3 {
             let events = provider
                 .stream(
                     recording("anthropic/claude-sonnet-5-5"),
@@ -1033,21 +1070,33 @@ mod tests {
                 .unwrap()
                 .collect::<Vec<_>>()
                 .await;
-            waits.push(started.elapsed());
             let error = events.into_iter().find_map(Result::err).unwrap();
             assert!(
                 error.to_string().contains("as its rate limit allows"),
                 "{error}"
             );
+            assert_eq!(JITTERED.load(Ordering::SeqCst), count);
         }
-        let (shortest, longest) = (waits.iter().min().unwrap(), waits.iter().max().unwrap());
+        // Held back for an hour, the refusal comes as soon as the turn stops.
+        provider.busy_jitter = held_jitter;
+        let cancel = CancellationToken::new();
+        let mut events = provider
+            .stream(recording("anthropic/claude-sonnet-5-5"), cancel.clone())
+            .await
+            .unwrap();
+        let next = tokio::spawn(async move { events.next().await });
+        while !HELD.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        cancel.cancel();
+        let event = tokio::time::timeout(Duration::from_secs(30), next)
+            .await
+            .expect("a stop ends the wait")
+            .unwrap();
+        let error = event.unwrap().unwrap_err();
         assert!(
-            longest.saturating_sub(*shortest) > std::time::Duration::from_millis(50),
-            "{waits:?}"
-        );
-        assert!(
-            *longest < std::time::Duration::from_millis(BUSY_JITTER_MS + 500),
-            "{waits:?}"
+            error.to_string().contains("as its rate limit allows"),
+            "{error}"
         );
         server.abort();
         let _ = std::fs::remove_dir_all(root);
@@ -1136,6 +1185,7 @@ mod tests {
             grant: Arc::default(),
             models: RwLock::new(None),
             listed_audio: ListedAudio::default(),
+            busy_jitter: random_busy_jitter,
         };
         let request = || ProviderRequest {
             model: "fixture-chat".into(),
