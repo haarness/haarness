@@ -1462,3 +1462,152 @@ async fn a_loaded_tool_stays_offered_after_a_restart_and_in_a_fork() {
     drop(restarted);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// A large optional schema and a small one: Auto defers both, and once the
+/// model loads the large one what is left no longer pays for the loader.
+fn docs_registry() -> FixtureRegistry {
+    let mut registry = FixtureRegistry::new();
+    registry.tools.remove("session_manage");
+    let long: &'static str = Box::leak(
+        "Search the project documentation. "
+            .repeat(400)
+            .into_boxed_str(),
+    );
+    for (name, description) in [
+        ("mcp__docs__search", long),
+        ("mcp__docs__list", "List documentation pages"),
+    ] {
+        registry.tools.insert(
+            name.into(),
+            Arc::new(FixtureTool { name, description }) as Arc<dyn Tool>,
+        );
+    }
+    registry
+}
+
+fn auto_config(lazy: LazyToolSettings) -> RuntimeConfig {
+    RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        lazy_tools: lazy,
+        ..RuntimeConfig::default()
+    }
+}
+
+fn auto_runtime(
+    store: Arc<SqliteStore>,
+    provider: &Scripted,
+    root: &std::path::Path,
+) -> AgentRuntime {
+    AgentRuntime::with_config(
+        store,
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(docs_registry()),
+        EventBus::new(128),
+        root.to_path_buf(),
+        String::new(),
+        auto_config(LazyToolSettings::default()),
+    )
+}
+
+async fn one_turn(runtime: &AgentRuntime, thread: haarness_protocol::ThreadId, text: &str) {
+    let turn = runtime
+        .start_turn(thread, turn_request(text))
+        .await
+        .unwrap();
+    wait_done(runtime, turn.id).await;
+}
+
+/// Auto chose to defer a chat's tools, and then the model loaded most of
+/// what was deferred. A restart, a fork, the same server deciding afresh:
+/// each must keep the loader and the tool list the chat had, until the
+/// person changes the lazy mode or the lazy settings change.
+#[tokio::test]
+async fn auto_keeps_deferring_a_chats_tools_across_a_restart_and_in_a_fork() {
+    let root = std::env::temp_dir().join(format!("haarness-lazy-kept-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(SqliteStore::open(root.join("state.db")).unwrap());
+    let names = |tools: &str| {
+        serde_json::from_str::<Vec<Value>>(tools)
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let before = Scripted::default();
+    before.then(call(
+        "load-1",
+        "load_tool",
+        json!({"queries": ["mcp__docs__search"]}),
+    ));
+    let runtime = auto_runtime(store.clone(), &before, &root);
+    runtime.recover().await.unwrap();
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("scripted".into()),
+            model: Some("scripted-1".into()),
+            ..CreateThreadRequest::default()
+        })
+        .await
+        .unwrap();
+    one_turn(&runtime, thread.id, "search the docs").await;
+    let kept = before.offered().last().cloned().unwrap();
+    assert_eq!(names(&kept), ["mcp__docs__search", "read", "load_tool"]);
+    drop(runtime);
+
+    let after = Scripted::default();
+    let restarted = auto_runtime(store.clone(), &after, &root);
+    restarted.recover().await.unwrap();
+    one_turn(&restarted, thread.id, "and again").await;
+    assert_eq!(after.offered()[0], kept, "the same tools after the restart");
+    let fork = restarted.fork_thread(thread.id, None, None).await.unwrap();
+    one_turn(&restarted, fork.id, "and in the fork").await;
+    assert_eq!(after.offered()[1], kept, "the same tools in the fork");
+
+    // The person changes the lazy mode and back between turns: the chat
+    // decides again, here to send every schema.
+    restarted
+        .set_lazy_tool_mode(Some(LazyToolMode::Off))
+        .await
+        .unwrap();
+    restarted
+        .set_lazy_tool_mode(Some(LazyToolMode::Auto))
+        .await
+        .unwrap();
+    one_turn(&restarted, thread.id, "after the switch").await;
+    assert_eq!(
+        names(&after.offered()[2]),
+        ["mcp__docs__list", "mcp__docs__search", "read"]
+    );
+    drop(restarted);
+
+    // A reload that changes the lazy settings decides again too.
+    let reloaded = Scripted::default();
+    let runtime = auto_runtime(store.clone(), &reloaded, &root);
+    runtime.recover().await.unwrap();
+    one_turn(&runtime, fork.id, "fork again").await;
+    assert_eq!(reloaded.offered()[0], kept, "the fork still defers");
+    assert!(runtime.replace_components_when_idle(
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(reloaded.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(docs_registry()),
+        String::new(),
+        auto_config(LazyToolSettings {
+            min_saved_tokens: 4_096,
+            ..LazyToolSettings::default()
+        }),
+        None,
+        || {},
+    ));
+    one_turn(&runtime, fork.id, "after the reload").await;
+    assert_eq!(
+        names(&reloaded.offered()[1]),
+        ["mcp__docs__list", "mcp__docs__search", "read"]
+    );
+
+    drop(runtime);
+    std::fs::remove_dir_all(root).unwrap();
+}

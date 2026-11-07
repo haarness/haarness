@@ -495,26 +495,20 @@ pub fn load_tool_result(
 
 /// The tools a chat's history shows promoted, as the chat held them while
 /// it ran: those `load_tool` loaded and the optional tools the model called,
-/// oldest first and at most [`MAX_PROMOTED_TOOLS`]. For a process that has
-/// no record of the chat's loads (after a restart, or in a fork, whose
-/// history holds its source's). `tools` are the registered names, which a
-/// called name is read as.
+/// a `batch` call's steps included, in the order the calls were made and at
+/// most [`MAX_PROMOTED_TOOLS`]. A call counts whatever its outcome, as its
+/// tool was promoted when it started, unless it was refused before it could
+/// start (see [`refused_before_running`]); a call with no result does not.
+/// For a process that has no record of the chat's loads (after a restart, or
+/// in a fork, whose history holds its source's). `tools` are the registered
+/// names, which a called name is read as. Code Mode's calls are not in the
+/// history, so the tools only they reached are not read back.
 #[must_use]
 pub fn promoted_in(items: &[Item], tools: &[String]) -> HashSet<String> {
     let registered = tools.iter().map(String::as_str).collect::<HashSet<_>>();
-    let mut promoted = HashSet::new();
-    for item in items {
-        let ItemData::ToolResult {
-            name,
-            is_error: false,
-            metadata,
-            ..
-        } = &item.data
-        else {
-            continue;
-        };
-        let name = if name == LOAD_TOOL_NAME || registered.contains(name.as_str()) {
-            name.clone()
+    let resolve = |name: &str| {
+        if name == LOAD_TOOL_NAME || registered.contains(name) {
+            name.to_owned()
         } else {
             crate::tool_validation::resolve_name(
                 name,
@@ -523,29 +517,89 @@ pub fn promoted_in(items: &[Item], tools: &[String]) -> HashSet<String> {
                     .cloned()
                     .chain(std::iter::once(LOAD_TOOL_NAME.to_owned())),
             )
+        }
+    };
+    let mut promoted = HashSet::new();
+    let mut promote = |name: String| {
+        if promoted.len() < MAX_PROMOTED_TOOLS {
+            promoted.insert(name);
+        }
+    };
+    for (call, result) in crate::pair_tool_calls(items.iter().map(|item| &item.data)).answered {
+        let (
+            ItemData::ToolCall { name, .. },
+            ItemData::ToolResult {
+                output,
+                is_error,
+                metadata,
+                ..
+            },
+        ) = (&items[call].data, &items[result].data)
+        else {
+            continue;
         };
-        let names = if name == LOAD_TOOL_NAME {
-            metadata
-                .get("loaded")
+        if *is_error && refused_before_running(output) {
+            continue;
+        }
+        let name = resolve(name);
+        if name == LOAD_TOOL_NAME {
+            if !is_error {
+                metadata
+                    .get("loaded")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|tool| tool.get("id").and_then(Value::as_str))
+                    .for_each(|id| promote(id.to_owned()));
+            }
+        } else if name == "batch" {
+            let steps = metadata
+                .get("results")
                 .and_then(Value::as_array)
                 .into_iter()
-                .flatten()
-                .filter_map(|tool| tool.get("id").and_then(Value::as_str))
-                .map(ToOwned::to_owned)
-                .collect()
-        } else if is_essential_tool(&name) {
-            continue;
-        } else {
-            vec![name]
-        };
-        for name in names {
-            if !promoted.contains(&name) && promoted.len() == MAX_PROMOTED_TOOLS {
-                return promoted;
+                .flatten();
+            for step in steps {
+                let refused = step
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .is_some_and(refused_before_running);
+                if let Some(step) = step.get("tool").and_then(Value::as_str)
+                    && !refused
+                {
+                    let step = resolve(step);
+                    if !is_essential_tool(&step) {
+                        promote(step);
+                    }
+                }
             }
-            promoted.insert(name);
+        } else if !is_essential_tool(&name) {
+            promote(name);
         }
     }
     promoted
+}
+
+/// Whether a call's error is a refusal made before the call started, which
+/// promoted nothing: an unknown tool, one deferred, not offered or turned off
+/// for the round, one an inherited rule denies, or arguments its schema
+/// refuses. Reads the runtime's wording of those refusals.
+fn refused_before_running(error: &str) -> bool {
+    let line = error.lines().next().unwrap_or_default();
+    let line = ["tool error: ", "permission denied: ", "invalid request: "]
+        .iter()
+        .find_map(|category| line.strip_prefix(category))
+        .unwrap_or(line);
+    line.starts_with("unknown tool: ")
+        || (line.starts_with("tool ")
+            && [
+                " is deferred and was not advertised",
+                " was not advertised for this provider round",
+                " is disabled for this workflow agent turn",
+                " is denied by the rule '",
+            ]
+            .iter()
+            .any(|refusal| line.contains(refusal)))
+        || (line.starts_with("The ") && line.contains(" tool was called with invalid arguments"))
 }
 
 #[cfg(test)]
@@ -748,21 +802,39 @@ mod tests {
         assert!(!without_loader.response.lazy_active);
     }
 
-    fn result(name: &str, is_error: bool, metadata: Value) -> Item {
+    fn item(data: ItemData) -> Item {
         Item {
             id: haarness_protocol::ItemId::new(),
             thread_id: haarness_protocol::ThreadId::new(),
             turn_id: None,
             sequence: 0,
-            data: ItemData::ToolResult {
-                call_id: "call".into(),
-                name: name.into(),
-                output: String::new(),
-                is_error,
-                metadata,
-            },
+            data,
             created_at: chrono::Utc::now(),
         }
+    }
+
+    fn call(id: &str, name: &str) -> Item {
+        item(ItemData::ToolCall {
+            call_id: id.into(),
+            name: name.into(),
+            arguments: json!({}),
+            provider_metadata: Value::Null,
+        })
+    }
+
+    fn answer(id: &str, name: &str, output: &str, is_error: bool, metadata: Value) -> Item {
+        item(ItemData::ToolResult {
+            call_id: id.into(),
+            name: name.into(),
+            output: output.into(),
+            is_error,
+            metadata,
+        })
+    }
+
+    /// A call and its result.
+    fn ran(id: &str, name: &str, is_error: bool, metadata: Value) -> [Item; 2] {
+        [call(id, name), answer(id, name, "", is_error, metadata)]
     }
 
     fn loads(ids: &[&str]) -> Value {
@@ -774,31 +846,75 @@ mod tests {
 
     #[test]
     fn a_chats_loads_and_calls_are_read_back_from_its_history() {
-        let tools =
-            ["read", "memory_read", "mcp__docs__search", "session_manage"].map(String::from);
+        let tools = [
+            "read",
+            "memory_read",
+            "memory_save",
+            "mcp__docs__search",
+            "session_manage",
+            "skill",
+            "cloud_chat",
+        ]
+        .map(String::from);
+        let refused = |id: &str, name: &str, error: &str| {
+            [call(id, name), answer(id, name, error, true, Value::Null)]
+        };
         let items = [
-            result(LOAD_TOOL_NAME, false, loads(&["mcp__docs__search"])),
+            ran("1", LOAD_TOOL_NAME, false, loads(&["mcp__docs__search"])),
             // Called while every tool was offered.
-            result("Memory_Read", false, Value::Null),
+            ran("2", "Memory_Read", false, Value::Null),
+            // It ran and failed, or a person rejected it: it was promoted
+            // when it started all the same.
+            ran("3", "memory_save", true, Value::Null),
             // Core tools are always offered; nothing to keep.
-            result("read", false, Value::Null),
-            // Refused: it was deferred and not loaded.
-            result("session_manage", true, Value::Null),
-            result(LOAD_TOOL_NAME, true, Value::Null),
-        ];
+            ran("4", "read", false, Value::Null),
+            // Refused before it could start: deferred and not loaded.
+            refused(
+                "5",
+                "session_manage",
+                "tool error: tool session_manage is deferred and was not advertised for this provider round. Call load_tool …",
+            ),
+            refused("6", "skill", "invalid request: The skill tool was called with invalid arguments. Fix the input and retry the same tool."),
+            refused("7", "nope", "tool error: unknown tool: nope. Use an exact available tool name."),
+            ran("8", LOAD_TOOL_NAME, true, Value::Null),
+            // A batch's steps, the refused one left out.
+            ran(
+                "9",
+                "batch",
+                false,
+                json!({"results": [
+                    {"tool": "cloud_chat", "output": "ok"},
+                    {"tool": "read", "output": "ok"},
+                    {"tool": "session_manage", "error": "permission denied: tool session_manage is disabled for this workflow agent turn or by permission policy."},
+                ], "failures": 1}),
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .chain([call("10", "memory_read")]) // cut off: no result
+        .collect::<Vec<_>>();
         assert_eq!(
             promoted_in(&items, &tools),
-            HashSet::from(["mcp__docs__search".to_owned(), "memory_read".to_owned()])
+            HashSet::from([
+                "mcp__docs__search".to_owned(),
+                "memory_read".to_owned(),
+                "memory_save".to_owned(),
+                "cloud_chat".to_owned(),
+            ])
         );
+    }
 
+    #[test]
+    fn the_rebuild_keeps_the_oldest_calls_by_when_they_were_made() {
         let many = (0..MAX_PROMOTED_TOOLS + 6)
             .map(|index| format!("mcp__many__tool_{index:03}"))
             .collect::<Vec<_>>();
-        let items = many
+        let mut items = many
             .chunks(10)
-            .map(|chunk| {
+            .enumerate()
+            .flat_map(|(index, chunk)| {
                 let ids = chunk.iter().map(String::as_str).collect::<Vec<_>>();
-                result(LOAD_TOOL_NAME, false, loads(&ids))
+                ran(&format!("load-{index}"), LOAD_TOOL_NAME, false, loads(&ids))
             })
             .collect::<Vec<_>>();
         let promoted = promoted_in(&items, &many);
@@ -808,6 +924,29 @@ mod tests {
             !promoted.contains(&many[MAX_PROMOTED_TOOLS]),
             "the oldest loads are kept"
         );
+
+        // Two calls made together whose results came back the other way
+        // round: the earlier call takes the last place.
+        let tools = ["mcp__a__first", "mcp__a__second"].map(String::from);
+        let full = (0..MAX_PROMOTED_TOOLS - 1)
+            .map(|index| format!("mcp__full__tool_{index:03}"))
+            .collect::<Vec<_>>();
+        items = ran(
+            "load",
+            LOAD_TOOL_NAME,
+            false,
+            loads(&full.iter().map(String::as_str).collect::<Vec<_>>()),
+        )
+        .into_iter()
+        .chain([
+            call("first", "mcp__a__first"),
+            call("second", "mcp__a__second"),
+            answer("second", "mcp__a__second", "", false, Value::Null),
+            answer("first", "mcp__a__first", "", false, Value::Null),
+        ])
+        .collect();
+        let promoted = promoted_in(&items, &tools);
+        assert!(promoted.contains("mcp__a__first") && !promoted.contains("mcp__a__second"));
     }
 
     #[test]

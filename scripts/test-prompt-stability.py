@@ -21,7 +21,10 @@ daemon in a private data folder shows that:
    take them out of the list;
 6. a tool the model loaded with `load_tool` stays in the chat's tool list after the daemon
    restarts and in a fork of the chat: the next request's tools are byte-identical to the last
-   request's before, so the cached prefix holds.
+   request's before, so the cached prefix holds;
+7. a chat whose model loaded every deferred tool (what is left would no longer pay for the
+   loader, so Auto decided afresh would send every schema) keeps its tool list, the loader
+   included, after a restart.
 
 With --system-folder the daemon also starts with a system configuration folder
 (HAARNESS_SYSTEM_CONFIG_DIR) whose prompt files add to the main instructions and the
@@ -85,6 +88,31 @@ def clean(value):
     return value
 
 
+def last_typed(body):
+    """The newest text a person typed into the request, reminders left out."""
+    for message in reversed(body['messages']):
+        if message['role'] != 'user' or not isinstance(message['content'], list):
+            continue
+        typed = [block.get('text', '') for block in message['content']
+                 if block.get('type') == 'text' and not block.get('text', '').startswith('<system-reminder>')]
+        if typed:
+            return typed[-1]
+    return ''
+
+
+def loaded_last(body):
+    """The ids the newest `load_tool` result loaded."""
+    for block in reversed(body['messages'][-1]['content']):
+        if block.get('type') == 'tool_result':
+            content = block.get('content')
+            text = content if isinstance(content, str) else ''.join(part.get('text', '') for part in content or [])
+            try:
+                return json.loads(text).get('loaded', [])
+            except ValueError:
+                return []
+    return []
+
+
 def texts(body):
     return [block.get('text', '') for message in body['messages'] for block in message['content']
             if isinstance(message['content'], list)]
@@ -111,6 +139,9 @@ class Anthropic(http.server.BaseHTTPRequestHandler):
             return self.task(body, 'CHILD_FROM_' + dispatch.split('_')[1] + ' list the project files')
         if 'LOAD_A_TOOL' in prompt and not answered:
             return self.call('load_tool', {'queries': [LOADED]})
+        # Load every deferred tool, twenty a call, until a load finds none.
+        if 'LOAD_EVERY_TOOL' in last_typed(body) and (not answered or loaded_last(body)):
+            return self.call('load_tool', {'queries': ['*']})
         refuse = 'REFUSE' in prompt
         partial = 'REFUSE_PARTIAL' in prompt
         self.send_response(200)
@@ -430,6 +461,34 @@ try:
     checks.append({'loaded tool': [f'{LOADED} loaded', f'{len(names(loaded))} tools byte-identical after a restart',
                                    'system and messages unchanged', 'the fork sends the same tools']})
     print(f'PASS a loaded tool stays in the list after a restart and in a fork ({len(names(loaded))} tools)', flush=True)
+
+    # 7. Auto keeps deferring once the loads left too little to defer, across a restart.
+    try:
+        connection = json.loads(run(tools_args + ['desktop'], input='{"action":"connect"}', env=env, timeout=120))
+        everything = chat('Every tool fixture')
+        offset = len(REQUESTS)
+        assert turn(everything, 'LOAD_EVERY_TOOL please')['status'] == 'completed'
+        sent = tool_requests(offset)
+        assert len(sent) >= 3, [names(body) for body in sent]
+        first, last = sent[0], sent[-1]
+        assert 'load_tool' in names(first) and len(names(last)) > len(names(first)), names(last)
+        assert 'load_tool' in names(last), 'the chat stopped deferring in the same process'
+        catalog = api(f'/tools?threadId={everything}')
+        assert catalog['lazyActive'], catalog['lazyActive']
+        subprocess.run(tools_args + ['serve', '--stop'], env=env, capture_output=True, timeout=60)
+        connection = json.loads(run(tools_args + ['desktop'], input='{"action":"connect"}', env=env, timeout=120))
+        offset = len(REQUESTS)
+        assert turn(everything, 'AFTER_EVERY_LOAD go on')['status'] == 'completed'
+        again = tool_requests(offset)[0]
+        assert json.dumps(again['tools']) == json.dumps(last['tools']), \
+            f'the tools changed across the restart: {sorted(set(names(last)) ^ set(names(again)))}'
+        (EVIDENCE / 'every-tool-requests.json').write_text(json.dumps([first, last, again], indent=2))
+    finally:
+        subprocess.run(tools_args + ['serve', '--stop'], env=env, capture_output=True, timeout=60)
+        connection = first_connection
+    checks.append({'kept deferring': [f'{len(sent) - 1} loads, {len(names(last))} tools with the loader',
+                                      'byte-identical after a restart']})
+    print(f'PASS Auto keeps deferring after the loads and a restart ({len(names(last))} tools)', flush=True)
     (EVIDENCE / 'results.json').write_text(json.dumps(checks, indent=2))
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)

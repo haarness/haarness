@@ -261,15 +261,40 @@ struct ChatTools {
 }
 
 impl ChatTools {
-    fn from_history(items: &[Item], tools: &[crate::ToolDefinition]) -> Self {
+    /// `thread`'s tool state read back from its history. A `load_tool` call
+    /// that ran shows Auto was deferring tools then, for the model of its
+    /// turn (`provider`'s `model`, the chat's, when it has none, as in a
+    /// fork), so the chat goes on deferring them for that model.
+    async fn from_history(
+        repository: &dyn ThreadRepository,
+        thread: ThreadId,
+        tools: &[crate::ToolDefinition],
+        provider: &str,
+        model: &str,
+    ) -> CoreResult<Self> {
+        let items = repository.list_items(thread, None).await?;
         let names = tools
             .iter()
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
-        Self {
-            promoted: crate::tool_catalog::promoted_in(items, &names),
-            deferring: None,
-        }
+        let last_load = items.iter().rev().find(|item| {
+            matches!(&item.data, ItemData::ToolResult { name, is_error: false, .. }
+                if name == LOAD_TOOL_NAME)
+        });
+        let deferring = match last_load {
+            None => None,
+            Some(item) => Some(match item.turn_id {
+                Some(turn) => match repository.get_turn(turn).await {
+                    Ok(turn) => (turn.provider, turn.model),
+                    Err(_) => (provider.to_owned(), model.to_owned()),
+                },
+                None => (provider.to_owned(), model.to_owned()),
+            }),
+        };
+        Ok(Self {
+            promoted: crate::tool_catalog::promoted_in(&items, &names),
+            deferring,
+        })
     }
 
     /// Whether Auto keeps deferring for `provider`'s `model`.
@@ -2710,6 +2735,16 @@ impl AgentRuntime {
             return false;
         }
         before_swap();
+        let lazy = &self.components().config.lazy_tools;
+        if (lazy.mode, lazy.min_saved_tokens, &lazy.pin)
+            != (
+                config.lazy_tools.mode,
+                config.lazy_tools.min_saved_tokens,
+                &config.lazy_tools.pin,
+            )
+        {
+            self.forget_lazy_choices();
+        }
         let commands = config.commands.clone();
         let agents = config.custom_agents.clone();
         *self.approval_modes.fallback.lock() = config.approval_mode;
@@ -2732,6 +2767,14 @@ impl AgentRuntime {
         self.workspace.display().to_string()
     }
 
+    /// Every chat decides again whether Auto defers its tools: the person
+    /// changed the lazy mode, or the lazy settings changed.
+    fn forget_lazy_choices(&self) {
+        for mut tools in self.tool_promotions.iter_mut() {
+            tools.deferring = None;
+        }
+    }
+
     /// `tools`, a tool mask a workflow agent was given (its script may be
     /// one the model wrote), with each key that names a tool as providers
     /// were sent it under the tool's own name (see [`crate::wire_names`]).
@@ -2747,17 +2790,23 @@ impl AgentRuntime {
     /// has none.
     async fn chat_tools(
         &self,
-        thread: ThreadId,
+        thread: &Thread,
         components: &RuntimeComponents,
     ) -> CoreResult<ChatTools> {
-        if let Some(tools) = self.tool_promotions.get(&thread) {
+        if let Some(tools) = self.tool_promotions.get(&thread.id) {
             return Ok(tools.clone());
         }
-        let items = self.repository.list_items(thread, None).await?;
-        let rebuilt = ChatTools::from_history(&items, &components.tools.list());
+        let rebuilt = ChatTools::from_history(
+            self.repository.as_ref(),
+            thread.id,
+            &components.tools.list(),
+            &thread.provider,
+            &thread.model,
+        )
+        .await?;
         Ok(self
             .tool_promotions
-            .entry(thread)
+            .entry(thread.id)
             .or_insert(rebuilt)
             .clone())
     }
@@ -2771,7 +2820,7 @@ impl AgentRuntime {
         let components = self.components();
         let (context_window, promoted, deferring) = if let Some(thread_id) = thread_id {
             let thread = self.repository.get_thread(thread_id).await?;
-            let tools = self.chat_tools(thread_id, &components).await?;
+            let tools = self.chat_tools(&thread, &components).await?;
             (
                 components
                     .providers
@@ -2882,7 +2931,10 @@ impl AgentRuntime {
                 mode.map(|mode| json!(mode)),
             )
             .await?;
-        *self.lazy_tool_mode.write() = mode;
+        let changed = std::mem::replace(&mut *self.lazy_tool_mode.write(), mode) != mode;
+        if changed {
+            self.forget_lazy_choices();
+        }
         self.events
             .publish("tools.updated", None, None, None, json!({"lazyMode": mode}));
         self.tool_catalog(None).await
@@ -3994,7 +4046,7 @@ impl AgentRuntime {
                 .into_iter()
                 .find(|model| model.id == thread.model)
                 .and_then(|model| model.context_window);
-            let tools = self.chat_tools(thread_id, &components).await?;
+            let tools = self.chat_tools(&thread, &components).await?;
             let selection = select_tools(
                 catalog
                     .iter()
@@ -11578,8 +11630,14 @@ impl RunnerTask {
         context_window: Option<u64>,
     ) -> CoreResult<crate::tool_catalog::ToolSelection> {
         if !self.tool_promotions.contains_key(&self.thread.id) {
-            let items = self.repository.list_items(self.thread.id, None).await?;
-            let rebuilt = ChatTools::from_history(&items, &self.tools.list());
+            let rebuilt = ChatTools::from_history(
+                self.repository.as_ref(),
+                self.thread.id,
+                &self.tools.list(),
+                provider,
+                model,
+            )
+            .await?;
             self.tool_promotions
                 .entry(self.thread.id)
                 .or_insert(rebuilt);
