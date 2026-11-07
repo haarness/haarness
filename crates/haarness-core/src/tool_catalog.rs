@@ -336,47 +336,14 @@ pub fn search_deferred_tools(
         .iter()
         .map(|tool| (tool.name.as_str(), tool))
         .collect::<HashMap<_, _>>();
-    let deferred = catalog
-        .tools
-        .iter()
-        .filter(|entry| entry.enabled && !entry.advertised && by_id.contains_key(entry.id.as_str()))
-        .collect::<Vec<_>>();
+    let deferred = deferred_entries(catalog, &by_id);
     let mut matched = Vec::new();
     for raw in queries.iter().take(10) {
         let query = raw.trim().to_ascii_lowercase();
         if query.is_empty() {
             continue;
         }
-        let mut candidates = deferred
-            .iter()
-            .filter(|entry| {
-                if entry.id.eq_ignore_ascii_case(&query) {
-                    return true;
-                }
-                if query.contains('*') && wildcard_matches(&query, &entry.id.to_ascii_lowercase()) {
-                    return true;
-                }
-                let haystack = by_id.get(entry.id.as_str()).map_or_else(
-                    || format!("tool tools {} {} {}", entry.id, entry.group, entry.source),
-                    |tool| {
-                        format!(
-                            "tool tools {} {} {} {} {}",
-                            entry.id,
-                            entry.group,
-                            entry.group_title,
-                            entry.source,
-                            tool.description
-                        )
-                    },
-                );
-                query
-                    .split_whitespace()
-                    .all(|word| haystack.to_ascii_lowercase().contains(word))
-            })
-            .map(|entry| entry.id.clone())
-            .collect::<Vec<_>>();
-        candidates.sort_by_key(|id| (!id.eq_ignore_ascii_case(&query), id.clone()));
-        for id in candidates {
+        for id in query_matches(&deferred, &by_id, &query) {
             if !matched.contains(&id) {
                 matched.push(id);
                 if matched.len() == MAX_LOAD_MATCHES {
@@ -388,9 +355,98 @@ pub fn search_deferred_tools(
     matched
 }
 
+/// The tools a query names exactly, or by a wildcard, among those the model
+/// has this round, for each query that names no deferred tool: loading them
+/// does nothing, and a small model told that nothing matched tries the same
+/// id again. Bounded as a search is.
 #[must_use]
-pub fn load_tool_result(ids: &[String], catalog: &ToolCatalogResponse) -> Value {
-    let tools = ids
+pub fn already_available(
+    definitions: &[ToolDefinition],
+    catalog: &ToolCatalogResponse,
+    queries: &[String],
+) -> Vec<String> {
+    let by_id = definitions
+        .iter()
+        .map(|tool| (tool.name.as_str(), tool))
+        .collect::<HashMap<_, _>>();
+    let deferred = deferred_entries(catalog, &by_id);
+    let mut found = Vec::new();
+    for raw in queries.iter().take(10) {
+        let query = raw.trim().to_ascii_lowercase();
+        if query.is_empty() || !query_matches(&deferred, &by_id, &query).is_empty() {
+            continue;
+        }
+        for entry in catalog.tools.iter().filter(|entry| entry.advertised) {
+            let named = entry.id.eq_ignore_ascii_case(&query)
+                || (query.contains('*')
+                    && wildcard_matches(&query, &entry.id.to_ascii_lowercase()));
+            if named && !found.contains(&entry.id) {
+                found.push(entry.id.clone());
+                if found.len() == MAX_LOAD_MATCHES {
+                    return found;
+                }
+            }
+        }
+    }
+    found
+}
+
+fn deferred_entries<'a>(
+    catalog: &'a ToolCatalogResponse,
+    by_id: &HashMap<&str, &ToolDefinition>,
+) -> Vec<&'a ToolCatalogEntry> {
+    catalog
+        .tools
+        .iter()
+        .filter(|entry| entry.enabled && !entry.advertised && by_id.contains_key(entry.id.as_str()))
+        .collect()
+}
+
+/// The deferred tools one (lowercased) query matches, exact ids first.
+fn query_matches(
+    deferred: &[&ToolCatalogEntry],
+    by_id: &HashMap<&str, &ToolDefinition>,
+    query: &str,
+) -> Vec<String> {
+    let mut candidates = deferred
+        .iter()
+        .filter(|entry| {
+            if entry.id.eq_ignore_ascii_case(query) {
+                return true;
+            }
+            if query.contains('*') && wildcard_matches(query, &entry.id.to_ascii_lowercase()) {
+                return true;
+            }
+            let haystack = by_id.get(entry.id.as_str()).map_or_else(
+                || format!("tool tools {} {} {}", entry.id, entry.group, entry.source),
+                |tool| {
+                    format!(
+                        "tool tools {} {} {} {} {}",
+                        entry.id, entry.group, entry.group_title, entry.source, tool.description
+                    )
+                },
+            );
+            query
+                .split_whitespace()
+                .all(|word| haystack.to_ascii_lowercase().contains(word))
+        })
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|id| (!id.eq_ignore_ascii_case(query), id.clone()));
+    candidates
+}
+
+/// What `load_tool` answers: the tools it `loaded`, those the model
+/// `already` has, and matches it left out because the chat holds
+/// [`MAX_PROMOTED_TOOLS`] loaded tools (`full`).
+#[must_use]
+pub fn load_tool_result(
+    loaded: &[String],
+    already: &[String],
+    full: &[String],
+    catalog: &ToolCatalogResponse,
+) -> Value {
+    let tools = loaded
         .iter()
         .filter_map(|id| catalog.tools.iter().find(|tool| tool.id == *id))
         .map(|tool| {
@@ -402,14 +458,39 @@ pub fn load_tool_result(ids: &[String], catalog: &ToolCatalogResponse) -> Value 
             })
         })
         .collect::<Vec<_>>();
-    json!({
+    let mut message = Vec::new();
+    if !loaded.is_empty() {
+        message.push(
+            "The matching tool schemas will be available on the next model round.".to_owned(),
+        );
+    }
+    if !already.is_empty() {
+        message.push(format!(
+            "Already in your tool list, so there is nothing to load: {}. Call {} directly.",
+            already.join(", "),
+            if already.len() == 1 { "it" } else { "them" }
+        ));
+    }
+    if !full.is_empty() {
+        message.push(format!(
+            "Not loaded, because this session already holds the most loaded tools it can ({MAX_PROMOTED_TOOLS}): {}. Use the tools you have.",
+            full.join(", ")
+        ));
+    }
+    if message.is_empty() {
+        message.push("No deferred tools matched. Try a functional term such as sessions, memory, extensions, automation, or an exact/wildcard tool id.".to_owned());
+    }
+    let mut value = json!({
         "loaded": tools,
-        "message": if ids.is_empty() {
-            "No deferred tools matched. Try a functional term such as sessions, memory, extensions, automation, or an exact/wildcard tool id."
-        } else {
-            "The matching tool schemas will be available on the next model round."
-        }
-    })
+        "message": message.join(" "),
+    });
+    if !already.is_empty() {
+        value["available"] = json!(already);
+    }
+    if !full.is_empty() {
+        value["notLoaded"] = json!(full);
+    }
+    value
 }
 
 /// The tools a chat's history shows promoted, as the chat held them while
@@ -726,6 +807,98 @@ mod tests {
         assert!(
             !promoted.contains(&many[MAX_PROMOTED_TOOLS]),
             "the oldest loads are kept"
+        );
+    }
+
+    #[test]
+    fn loading_a_tool_already_offered_says_it_is_there() {
+        let definitions = vec![
+            definition("bash", "run a command"),
+            definition("memory_read", "read durable notes"),
+            definition("mcp__github__issues", "list issues"),
+        ];
+        let selection = select_tools(
+            definitions.clone(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::from(["mcp__github__issues".to_owned()]),
+            None,
+            false,
+        );
+        let catalog = &selection.response;
+        let queries =
+            ["BASH", "memory_read", "mcp__github__*", "nothing like it"].map(String::from);
+        assert_eq!(
+            search_deferred_tools(&definitions, catalog, &queries),
+            ["memory_read"]
+        );
+        assert_eq!(
+            already_available(&definitions, catalog, &queries),
+            ["bash", "mcp__github__issues"]
+        );
+        // A text search is no claim about one tool.
+        assert!(already_available(&definitions, catalog, &["run a command".into()]).is_empty());
+
+        let only = load_tool_result(&[], &["bash".to_owned()], &[], catalog);
+        assert_eq!(only["loaded"], json!([]));
+        assert_eq!(only["available"], json!(["bash"]));
+        let message = only["message"].as_str().unwrap();
+        assert!(
+            message.contains("Already in your tool list") && message.contains("bash"),
+            "{message}"
+        );
+        assert!(!message.contains("No deferred tools matched"), "{message}");
+
+        let both = load_tool_result(
+            &["memory_read".to_owned()],
+            &["bash".to_owned(), "mcp__github__issues".to_owned()],
+            &[],
+            catalog,
+        );
+        assert_eq!(both["loaded"][0]["id"], "memory_read");
+        assert!(
+            both["message"]
+                .as_str()
+                .unwrap()
+                .contains("Call them directly")
+        );
+    }
+
+    #[test]
+    fn a_load_past_the_limit_says_so() {
+        let definitions = vec![definition("memory_read", "read durable notes")];
+        let selection = select_tools(
+            definitions,
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::new(),
+            None,
+            false,
+        );
+        let value = load_tool_result(&[], &[], &["memory_read".to_owned()], &selection.response);
+        assert_eq!(value["notLoaded"], json!(["memory_read"]));
+        let message = value["message"].as_str().unwrap();
+        assert!(
+            message.contains(&MAX_PROMOTED_TOOLS.to_string()),
+            "{message}"
+        );
+        assert!(!message.contains("No deferred tools matched"), "{message}");
+
+        // What a miss always said, unchanged.
+        assert_eq!(
+            load_tool_result(&[], &[], &[], &selection.response),
+            json!({
+                "loaded": [],
+                "message": "No deferred tools matched. Try a functional term such as sessions, memory, extensions, automation, or an exact/wildcard tool id.",
+            })
         );
     }
 

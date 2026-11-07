@@ -30,8 +30,8 @@ use tracing::{Instrument as _, error, info, instrument, warn};
 use crate::agents::custom_system_prompt_with_context;
 use crate::background::{BackgroundHandoff, BackgroundLedger, BackgroundProbe};
 use crate::tool_catalog::{
-    LOAD_TOOL_NAME, MAX_PROMOTED_TOOLS, is_essential_tool, load_tool_result, search_deferred_tools,
-    select_tools,
+    LOAD_TOOL_NAME, MAX_PROMOTED_TOOLS, already_available, is_essential_tool, load_tool_result,
+    search_deferred_tools, select_tools,
 };
 use crate::tool_validation::{unknown_tool, validate_arguments};
 use crate::{
@@ -11583,9 +11583,9 @@ impl RunnerTask {
                 accepted.push(name);
                 continue;
             }
-            let capacity_reached = promoted.len() >= MAX_PROMOTED_TOOLS;
-            if capacity_reached {
-                break;
+            // A tool already loaded is still accepted once the chat is full.
+            if promoted.len() >= MAX_PROMOTED_TOOLS {
+                continue;
             }
             promoted.insert(name.clone());
             accepted.push(name);
@@ -11636,8 +11636,13 @@ impl RunnerTask {
             ));
         }
         let matched = search_deferred_tools(&definitions, &catalog, &queries);
-        let loaded = self.promote_tools(matched);
-        let value = load_tool_result(&loaded, &catalog);
+        let loaded = self.promote_tools(matched.clone());
+        let full = matched
+            .into_iter()
+            .filter(|id| !loaded.contains(id))
+            .collect::<Vec<_>>();
+        let already = already_available(&definitions, &catalog, &queries);
+        let value = load_tool_result(&loaded, &already, &full, &catalog);
         Ok(ToolOutput {
             text: serde_json::to_string_pretty(&value)
                 .map_err(|error| CoreError::Tool(error.to_string()))?,
