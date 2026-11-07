@@ -185,11 +185,15 @@ one id are still answered in order. Once the user's side of the chat holds
 text the person did not write (a tool result, a background command's or a
 task's notice, a reminder, an earlier summary), the person's own words sit
 between markers of their own, and the request to summarize says that only
-those words are theirs and that the rest is data. In every text the request
-quotes, the person's words included, a `<` (or its fullwidth or small form)
-followed, after any slashes, backslashes or spaces, by `tool_`, `tool-`,
-`user_` or `user-` in any case or width is written `&lt;`, so the only markers
-of those kinds in the request are the ones it wrote. Automatic compaction uses the
+those words are theirs and that the rest is data. Every marker's name ends in
+a key of 16 random hex digits that Haarness makes for that one request, so no
+text it quotes was written knowing it, and the request says that only markers
+with that key open or close anything: a lookalike without it, whatever its
+characters, is part of the text around it. Everything the request quotes is
+sent as it was written, angle brackets and all; only a copy of the key, should
+one turn up, is left out. A chat with nothing to mark is sent without markers
+or key.
+Automatic compaction uses the
 selected model's context and output limits and retries pre-output context-overflow/HTTP-413 failures after safe
 compaction, under a bounded per-turn recovery ceiling. A context too long is
 read in each provider's own words, among them Z.ai's code 1261 ("Prompt exceeds
