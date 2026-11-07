@@ -427,8 +427,9 @@ async fn an_approval_covers_the_same_calls_later_requests() {
     let thread = echo_thread(&runtime).await;
     set_mode(&runtime, thread.id, ApprovalModeSetting::Auto).await;
     // One call, two requests: the folder outside the project, then the
-    // command. The first review covers the second.
-    let command = format!("cat {}/note.txt", outside.0.display());
+    // command. The first review covers the second. Quoted, a Windows path
+    // keeps its backslashes in Git Bash.
+    let command = format!("cat '{}'", outside.0.join("note.txt").display());
     let turn = runtime
         .start_turn(thread.id, turn_request(&bash(&command, "allow")))
         .await

@@ -2429,6 +2429,7 @@ impl AgentRuntime {
     ) -> Self {
         let commands = config.commands.clone();
         let agents = config.custom_agents.clone();
+        crate::agent_shell::configure(config.execution.windows_shell.as_deref());
         let approval_modes = Arc::new(crate::approval_mode::ApprovalModes::new(
             repository.clone(),
             workspace.display().to_string(),
@@ -2904,6 +2905,7 @@ impl AgentRuntime {
         }
         let commands = config.commands.clone();
         let agents = config.custom_agents.clone();
+        crate::agent_shell::configure(config.execution.windows_shell.as_deref());
         *self.approval_modes.fallback.lock() = config.approval_mode;
         *self.components.write() = Arc::new(RuntimeComponents {
             providers,

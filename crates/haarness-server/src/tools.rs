@@ -81,20 +81,27 @@ const APPLY_PATCH_DESCRIPTION: &str = "Apply a V4A patch envelope across one or 
 /// The `bash` tool's description on every system.
 macro_rules! bash_description {
     () => {
-        "Run a terminal command through the workspace shell. Use bash for builds, tests, git, package managers, process inspection, and other terminal operations. Do not use it for ordinary file reading, listing, searching, writing, or editing when read, list, glob, grep, write, edit, or apply_patch can express the operation more clearly. Ripgrep (rg) is bundled and available on PATH for searches requiring flags or pipelines beyond the grep/glob tools; no installation is needed. Use workdir instead of 'cd <dir> && ...'. Quote paths containing spaces. timeout is milliseconds, defaults to the configured deadline (normally 120000), and has no fixed upper limit; set 0 for no deadline. Output includes the exit code and combined stdout/stderr. Do not create commits or push unless the user explicitly asks, and do not use destructive git or filesystem operations without clear authorization. Set run_in_background for a command that keeps running or takes minutes, such as a dev server, a file watcher, or a full build or test suite: the call returns at once with the command's id, you keep working, and when it ends a message gives its exit status and the last lines it printed. Meanwhile read its output with bash_output, which can also wait for it, and end it with bash_stop. Keep quick commands, and any command whose result your next step needs, in the foreground, and wait for a background one with bash_output when the answer depends on it. Never start a lasting process with a trailing & or nohup; use run_in_background so Haarness can follow and stop it. A timeout you give limits the whole run, in the background too. In some chats a foreground command that runs long moves to the background by itself; its result then says so and gives its id."
+        "Run a terminal command through the workspace shell. Use bash for builds, tests, git, package managers, process inspection, and other terminal operations. Do not use it for ordinary file reading, listing, searching, writing, or editing when read, list, glob, grep, write or edit can express the operation more clearly. Ripgrep (rg) is bundled and available on PATH for searches requiring flags or pipelines beyond the grep/glob tools; no installation is needed. Use workdir instead of 'cd <dir> && ...'. Quote paths containing spaces. timeout is milliseconds, defaults to the configured deadline (normally 120000), and has no fixed upper limit; set 0 for no deadline. Output includes the exit code and combined stdout/stderr. Do not create commits or push unless the user explicitly asks, and do not use destructive git or filesystem operations without clear authorization. Set run_in_background for a command that keeps running or takes minutes, such as a dev server, a file watcher, or a full build or test suite: the call returns at once with the command's id, you keep working, and when it ends a message gives its exit status and the last lines it printed. Meanwhile read its output with bash_output, which can also wait for it, and end it with bash_stop. Keep quick commands, and any command whose result your next step needs, in the foreground, and wait for a background one with bash_output when the answer depends on it. Never start a lasting process with a trailing & or nohup; use run_in_background so Haarness can follow and stop it. A timeout you give limits the whole run, in the background too. In some chats a foreground command that runs long moves to the background by itself; its result then says so and gives its id."
     };
 }
-/// What the model reads of `bash`. On Windows it also says commands run in
-/// cmd.exe: models otherwise write POSIX shell there (`ls`, `cat`,
-/// `mkdir -p`, `2>/dev/null`, heredocs), which cmd.exe refuses or misreads.
-const BASH_DESCRIPTION: &str = if cfg!(windows) {
-    concat!(
-        bash_description!(),
-        " On this Windows computer commands run in cmd.exe (Command Prompt), not a POSIX shell: write cmd syntax (dir, type, findstr, copy, move, del, rmdir /s /q, mkdir without -p, set NAME=value and %NAME%, && and ||, double quotes) or run PowerShell with powershell -NoProfile -Command \"...\". POSIX tools such as ls, cat, grep, sed, head, rm, touch and which, heredocs, $(...) and 2>/dev/null do not work there unless the person installed them; paths take backslashes. rg is bundled."
-    )
-} else {
-    bash_description!()
-};
+/// What the model reads of `bash`, naming the shell it runs in: on Windows
+/// Git for Windows' bash, or cmd.exe where Git is not installed. Models
+/// otherwise write POSIX shell for cmd.exe (`ls`, `cat`, `mkdir -p`,
+/// `2>/dev/null`, heredocs), which it refuses or misreads, and Windows
+/// `/switches` for bash, which turns them into paths.
+fn bash_description(shell: &haarness_core::agent_shell::AgentShell) -> String {
+    use haarness_core::agent_shell::AgentShell;
+    let note = match shell {
+        AgentShell::Posix => "",
+        AgentShell::GitBash(_) => {
+            " On this Windows computer commands run in Git Bash (bash from Git for Windows): write POSIX shell; ls, cat, grep, sed, find and the other usual tools are there, and so are Windows programs. Paths may be written C:/Users/name or /c/Users/name. Before it starts a Windows program, this shell turns arguments that look like paths into Windows paths, so write a Windows /switch with two slashes (cmd //c dir, taskkill //F //PID 4321), or put MSYS_NO_PATHCONV=1 before the command."
+        }
+        AgentShell::Cmd => {
+            " On this Windows computer commands run in cmd.exe (Command Prompt), not a POSIX shell, since Git for Windows is not installed: write cmd syntax (dir, type, findstr, copy, move, del, rmdir /s /q, mkdir without -p, set NAME=value and %NAME%, && and ||, double quotes) or run PowerShell with powershell -NoProfile -Command \"...\". POSIX tools such as ls, cat, grep, sed, head, rm, touch and which, heredocs, $(...) and 2>/dev/null do not work there unless the person installed them; paths take backslashes."
+        }
+    };
+    format!("{}{note}", bash_description!())
+}
 
 const BASH_OUTPUT_DESCRIPTION: &str = "Follow the shell commands bash started in this chat. With an id it returns what that command printed since your last read of it (at most 30 KB; tail_lines keeps only the last lines), whether it still runs or how it ended, and a cursor to read from later. Without an id it lists the chat's commands with their ids and states. wait_seconds waits up to that long before answering: until the command ends (until=exit, the default), until it prints nothing for quiet_seconds (until=quiet), or until a line matches pattern (until=match); a match is looked for from your last read of that command on, earlier output in that span included. A foreground command's result already holds its output; use this for commands in the background.";
 
@@ -2988,6 +2995,11 @@ impl Tool for BuiltinTool {
                 input_schema: json!({"type":"object","properties":{"name":{"type":"string","description":"Exact skill name from the available skills catalog."},"arguments":{"type":"string"}},"required":["name"],"additionalProperties":false}),
             };
         }
+        let bash_text = if matches!(self.kind, Kind::Bash) {
+            bash_description(&haarness_core::agent_shell::current())
+        } else {
+            String::new()
+        };
         let (name, description, properties, required) = match self.kind {
             Kind::Read => (
                 "read",
@@ -3084,7 +3096,7 @@ impl Tool for BuiltinTool {
             ),
             Kind::Bash => (
                 "bash",
-                BASH_DESCRIPTION,
+                bash_text.as_str(),
                 json!({
                     "command":{"type":"string","description":"Shell command to execute."},
                     "timeout":{"type":"integer","minimum":0,"description":"Optional timeout in milliseconds; defaults to the configured deadline (normally 120000). Zero disables the deadline."},
@@ -7094,9 +7106,9 @@ export default workflow({
             .get("bash")
             .unwrap()
             .execute(
-                // Windows runs a command in cmd.exe, where `cd` prints the folder.
+                // cmd.exe, Windows' shell without Git, prints the folder with `cd`.
                 json!({
-                    "command": if cfg!(windows) { "cd & exit 7" } else { "pwd; exit 7" },
+                    "command": if haarness_core::agent_shell::current().posix() { "pwd; exit 7" } else { "cd & exit 7" },
                     "timeout": 10_000,
                     "workdir": "nested"
                 }),
@@ -9771,14 +9783,28 @@ export default workflow({
         }
     }
 
-    #[cfg(windows)]
     #[test]
-    fn the_shell_tool_says_its_commands_run_in_cmd_on_windows() {
-        let registry = NativeToolRegistry::new(std::env::temp_dir());
-        let description = registry.get("bash").unwrap().definition().description;
+    fn the_shell_tool_names_the_shell_its_commands_run_in() {
+        use haarness_core::agent_shell::AgentShell;
+        let posix = bash_description(&AgentShell::Posix);
+        assert!(!posix.contains("Windows"), "{posix}");
+        let bash = bash_description(&AgentShell::GitBash(PathBuf::from("bash.exe")));
         assert!(
-            description.contains("commands run in cmd.exe (Command Prompt), not a POSIX shell"),
-            "{description}"
+            bash.contains("commands run in Git Bash (bash from Git for Windows)"),
+            "{bash}"
+        );
+        assert!(bash.contains("cmd //c dir"), "{bash}");
+        let cmd = bash_description(&AgentShell::Cmd);
+        assert!(
+            cmd.contains("commands run in cmd.exe (Command Prompt), not a POSIX shell"),
+            "{cmd}"
+        );
+        // The tool says which one runs here.
+        let registry = NativeToolRegistry::new(std::env::temp_dir());
+        let described = registry.get("bash").unwrap().definition().description;
+        assert_eq!(
+            described,
+            bash_description(&haarness_core::agent_shell::current())
         );
     }
 

@@ -30,6 +30,12 @@ pub struct ExecutionSettings {
     pub code_max_source_bytes: usize,
     /// Operator-selected extension tools permitted by the plan ceiling.
     pub plan_read_tools: Vec<String>,
+    /// What runs agent commands on Windows: `auto` (Git for Windows' bash
+    /// when Git is installed, else cmd.exe), `cmd`, or the path of a
+    /// `bash.exe` ([`crate::agent_shell`]). Read from the global
+    /// configuration only. Ignored elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub windows_shell: Option<String>,
     /// Extra environment for one shell tool invocation, supplied per call by
     /// `shell.env` hooks. Never read from or written to configuration.
     #[serde(skip)]
@@ -75,6 +81,7 @@ impl Default for ExecutionSettings {
             code_max_calls: 100,
             code_max_source_bytes: 256 * 1024,
             plan_read_tools: Vec::new(),
+            windows_shell: None,
             shell_env: std::collections::BTreeMap::new(),
             person_shell: false,
             chat_home: None,
