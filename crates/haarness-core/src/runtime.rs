@@ -985,10 +985,12 @@ const TURN_RETRY_ROUNDS: u8 = 4;
 /// recovering responses cut short. Each round has its own budget, back once
 /// the provider takes a request (retries) or a response finishes
 /// (recoveries), so failures spread over a long turn of tool rounds do not
-/// add up to fail it; the turn's totals bound the failures. A provider that
-/// is busy or at its rate limit is waited out in each round but not counted
-/// for the turn: it refused the request, so nothing ran or was charged, and
-/// a fan-out of agents can wait on a free slot for a long time.
+/// add up to fail it; the turn's totals bound the failures. A provider at
+/// its rate limit (a 429, or a key or router already running as many
+/// requests at once as it allows) is waited out in each round but not
+/// counted for the turn: it refused the request, so nothing ran or was
+/// charged, and a fan-out of agents can wait on a free slot for a long time.
+/// An overloaded provider counts, as any server error does.
 #[derive(Debug, Default)]
 struct RetryBudget {
     retries: u8,
@@ -1004,7 +1006,7 @@ impl RetryBudget {
         if self.retries >= TRANSIENT_RETRIES {
             return None;
         }
-        // An unreachable or failing server, not a busy or rate-limited one.
+        // An unreachable, failing or overloaded server, not a rate limit.
         let failure = is_provider_transient(error);
         if failure && self.turn_retries >= TRANSIENT_RETRIES * TURN_RETRY_ROUNDS {
             return None;

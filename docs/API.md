@@ -504,6 +504,12 @@ workflow's). Both are written in one database step while no turn can start;
 if a turn started meanwhile, the result steers into it instead. A chat that
 no longer exists, or is archived, is not told.
 
+A call the model makes in the request that sums up at an agent's `steps` or
+`tools.max_rounds` limit is not run: its error `tool_result` says so and
+carries `metadata: {"notRun": true}`, which the rebuild of a chat's loaded
+tools after a restart reads to leave it out. Clients show it as a failed call
+with that text.
+
 The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.
 Startup recovery marks orphaned queued/running turns interrupted and appends a
