@@ -2737,12 +2737,10 @@ fn real_path(folder: &Path) -> std::result::Result<PathBuf, &'static str> {
             Component::Normal(name) if !made => real.push(name),
             Component::Normal(name) => {
                 let next = real.join(name);
-                match dunce::canonicalize(&next) {
-                    Ok(resolved) => real = resolved,
-                    Err(_) if fs::symlink_metadata(&next).is_ok() => {
-                        return Err("it leads through a link to a folder that does not exist");
-                    }
-                    Err(_) => {
+                let looked = dunce::canonicalize(&next);
+                match part_found(&next, looked)? {
+                    Some(found) => real = found,
+                    None => {
                         made = false;
                         real = next;
                     }
@@ -2751,6 +2749,29 @@ fn real_path(folder: &Path) -> std::result::Result<PathBuf, &'static str> {
         }
     }
     Ok(real)
+}
+
+/// Where `next`, a part of a path after the folders already found, really
+/// is, from what resolving it gave (`looked`): `None` when it is not there.
+/// A part that is there though resolving it failed was made since (another
+/// save making the same folder at once) or cannot be opened; not a link, it
+/// is where its name says. A link that leads nowhere is refused.
+fn part_found(
+    next: &Path,
+    looked: std::io::Result<PathBuf>,
+) -> std::result::Result<Option<PathBuf>, &'static str> {
+    if let Ok(resolved) = looked {
+        return Ok(Some(resolved));
+    }
+    match fs::symlink_metadata(next) {
+        Ok(entry) if entry.is_symlink() => {
+            Err("it leads through a link to a folder that does not exist")
+        }
+        Ok(_) => Ok(Some(
+            dunce::canonicalize(next).unwrap_or_else(|_| next.to_path_buf()),
+        )),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Replaces `path` with `bytes` through a file beside it, or writes it in
@@ -5040,6 +5061,35 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["haarness.jsonc"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Two saves making the same new folder at once: the one that looked
+    /// before the other made it finds it there on its second look, a
+    /// folder, not a link to one that does not exist.
+    #[test]
+    fn a_folder_another_save_makes_meanwhile_is_where_its_name_says() {
+        let root = std::env::temp_dir().join(format!("haarness-made-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let made = root.join("made");
+        let before = dunce::canonicalize(&made);
+        assert!(before.is_err());
+        fs::create_dir(&made).unwrap();
+        assert_eq!(
+            part_found(&made, before),
+            Ok(Some(dunce::canonicalize(&made).unwrap()))
+        );
+        let later = root.join("later");
+        assert_eq!(part_found(&later, dunce::canonicalize(&later)), Ok(None));
+        #[cfg(unix)]
+        {
+            let link = root.join("link");
+            std::os::unix::fs::symlink(root.join("gone"), &link).unwrap();
+            assert_eq!(
+                part_found(&link, dunce::canonicalize(&link)),
+                Err("it leads through a link to a folder that does not exist")
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

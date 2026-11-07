@@ -190,7 +190,9 @@ mod tests {
         assert!(!lease.release("b"));
         assert!(lease.release("a"));
         lease.take("b").unwrap();
-        // A holder in a process that is gone frees the screen at once.
+        // A holder in a process that is gone frees the screen at once. Only
+        // Unix can tell such a process is gone: computer use runs on macOS
+        // only, and elsewhere every holder counts as running until it idles.
         lease
             .write(&Holder {
                 pid: 999_999,
@@ -198,7 +200,11 @@ mod tests {
                 at: now(),
             })
             .unwrap();
-        lease.take("c").unwrap();
+        if cfg!(unix) {
+            lease.take("c").unwrap();
+        } else {
+            assert!(lease.take("c").is_err());
+        }
         // A stale holder frees it too.
         lease
             .write(&Holder {

@@ -13,18 +13,20 @@
 //! take, not a determined program.
 //!
 //! This reads the process table, so it costs a `ps` (and an `lsof` to place a local connection): callers ask only for
-//! the rare request that would widen something.
+//! the rare request that would widen something. Unix only: elsewhere there is no `ps` table to read, and computer use,
+//! the one thing this guards, runs on macOS only, so no process reads as inside.
 
+#[cfg(unix)]
 use parking_lot::Mutex;
-use std::{collections::BTreeSet, net::SocketAddr, path::Path};
+#[cfg(unix)]
+use std::collections::BTreeSet;
+use std::{net::SocketAddr, path::Path};
 
 /// The name of Haarness's command-line program, which runs every server.
-const PROGRAM: &str = if cfg!(windows) {
-    "haarness.exe"
-} else {
-    "haarness"
-};
+#[cfg(unix)]
+const PROGRAM: &str = "haarness";
 
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Process {
     pid: u32,
@@ -35,17 +37,26 @@ struct Process {
 
 /// Whether `pid` runs inside Haarness: a `haarness` program is among its ancestors (`pid` itself does not count), or
 /// it or one of its ancestors runs in a process group Haarness started for a command. An unreadable process table
-/// reads as no.
+/// reads as no, and so does every process off Unix.
 #[must_use]
 pub fn inside_haarness(pid: u32) -> bool {
-    table().is_some_and(|rows| {
-        let started = STARTED.lock().clone();
-        below_program(&rows, pid) || in_haarness_group(&rows, pid, &started)
-    })
+    #[cfg(unix)]
+    {
+        table().is_some_and(|rows| {
+            let started = STARTED.lock().clone();
+            below_program(&rows, pid) || in_haarness_group(&rows, pid, &started)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// The process groups this process started for commands. A server stops a command's group when the command ends, a
 /// moment after its leader: until then a program in it is known here, with no leader to tell.
+#[cfg(unix)]
 static STARTED: std::sync::LazyLock<Mutex<BTreeSet<i32>>> =
     std::sync::LazyLock::new(Default::default);
 
@@ -55,6 +66,7 @@ static STARTED: std::sync::LazyLock<Mutex<BTreeSet<i32>>> =
 /// Every host that records a group lands here (shell commands, workflows, extension and MCP hosts), but none of them
 /// reads the note: only [`inside_haarness`] does, for the computer use settings, and a note counts only in the process
 /// that started the group. That is the server; `haarness mac` starts no groups, so its own set stays empty.
+#[cfg(unix)]
 pub(crate) fn mark_started(leader: u32) {
     let Ok(group) = i32::try_from(leader) else {
         return;
@@ -66,6 +78,10 @@ pub(crate) fn mark_started(leader: u32) {
     }
 }
 
+/// Off Unix nothing reads the note (see [`inside_haarness`]).
+#[cfg(not(unix))]
+pub(crate) fn mark_started(_leader: u32) {}
+
 /// Whether some process still runs in `group`.
 #[cfg(unix)]
 fn group_runs(group: i32) -> bool {
@@ -75,14 +91,10 @@ fn group_runs(group: i32) -> bool {
     )
 }
 
-#[cfg(not(unix))]
-fn group_runs(_group: i32) -> bool {
-    false
-}
-
 /// Whether `pid`, or a process above it, runs in a process group Haarness started for a command: one whose leader
 /// runs below a `haarness` program, or one of `started` (this process's own) whose leader has ended. A leader that runs
 /// elsewhere leads a later group that happens to have the same id: an id is free again only once its group is gone.
+#[cfg(unix)]
 fn in_haarness_group(rows: &[Process], pid: u32, started: &BTreeSet<i32>) -> bool {
     let row = |pid: u32| rows.iter().find(|row| row.pid == pid);
     let mut current = row(pid);
@@ -150,6 +162,7 @@ fn client_in_listing(listing: &str, peer: SocketAddr) -> Option<u32> {
     None
 }
 
+#[cfg(unix)]
 fn below_program(rows: &[Process], pid: u32) -> bool {
     let row = |pid: u32| rows.iter().find(|row| row.pid == pid);
     let mut current = row(pid).map(|row| row.parent);
@@ -179,12 +192,8 @@ fn table() -> Option<Vec<Process>> {
         .then(|| parse_table(&String::from_utf8_lossy(&output.stdout)))
 }
 
-#[cfg(not(unix))]
-fn table() -> Option<Vec<Process>> {
-    None
-}
-
 /// `ps -o pid=,ppid=,pgid=,comm=` lines. macOS prints the program's path, which may hold spaces; Linux its name.
+#[cfg(unix)]
 fn parse_table(text: &str) -> Vec<Process> {
     text.lines()
         .filter_map(|line| {
@@ -210,7 +219,9 @@ mod tests {
     use super::*;
 
     // Desktop's server (602) runs an agent's command (603) in a group of its own; 610 is a program that command put in
-    // the background, which the system handed to launchd, and 611 one that program started in a group of its own.
+    // the background, which the system handed to launchd, and 611 one that program started in a group of its own. The
+    // table, and every test reading one, is Unix's: Windows has no `ps` table, and nothing there reads as inside.
+    #[cfg(unix)]
     const TABLE: &str = "    1     0     1 /sbin/launchd
   500     1   500 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
   501   500   501 /bin/zsh
@@ -227,6 +238,7 @@ mod tests {
   620     1   620 /usr/bin/curl
 ";
 
+    #[cfg(unix)]
     #[test]
     fn a_process_started_by_haarness_is_inside_it_and_others_are_not() {
         let rows = parse_table(TABLE);
@@ -247,6 +259,7 @@ mod tests {
         assert!(!below_program(&rows, 610));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_program_that_left_the_tree_is_known_by_its_group() {
         let rows = parse_table(TABLE);
@@ -264,6 +277,7 @@ mod tests {
         assert!(!in_haarness_group(&rows, 620, &BTreeSet::from([620])));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_group_whose_leader_just_ended_is_known_to_the_process_that_started_it() {
         // The command's shell (603) has ended and the server has not stopped the rest of its group yet.
@@ -278,6 +292,7 @@ mod tests {
         assert!(!in_haarness_group(&rows, 620, &started));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_loop_in_the_table_ends() {
         let rows = parse_table("  10    11    10 /bin/a\n  11    10    11 /bin/b\n");

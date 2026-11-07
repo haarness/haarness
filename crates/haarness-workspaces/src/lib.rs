@@ -2960,6 +2960,9 @@ mod tests {
                 bare.to_str().unwrap(),
             ],
         );
+        // A clone has none of its source's settings: files as committed here
+        // too, whatever this system's Git converts on checkout.
+        command(&bare, ["config", "core.autocrlf", "false"]);
         let main = fixture.root.join("main");
         command(&bare, ["worktree", "add", main.to_str().unwrap(), "main"]);
         let project = fixture.manager.register_local(&main).unwrap();
