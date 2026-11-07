@@ -357,6 +357,85 @@ async fn session_cancellation_stops_only_matching_workflows_without_reinjection(
         .expect("fixture cleanup");
 }
 
+/// The work that started a run ends it, paused or running, and nothing is
+/// delivered; a run launched from another chat, or one that has ended, is
+/// left as it is.
+#[tokio::test]
+async fn an_untold_cancel_ends_a_paused_run_and_leaves_anothers() {
+    let Some(bun) = bun_path() else {
+        eprintln!("skipping coordinator fixture: Bun is unavailable");
+        return;
+    };
+    let workspace = tempfile::tempdir().expect("workspace fixture");
+    let store = Arc::new(SqliteStore::in_memory().expect("workflow store"));
+    let first = store
+        .create_thread(CreateThreadRequest::default())
+        .await
+        .expect("first launch thread");
+    let second = store
+        .create_thread(CreateThreadRequest::default())
+        .await
+        .expect("second launch thread");
+    let host = Arc::new(CoordinatorHost::new(Arc::clone(&store), 2));
+    let coordinator =
+        portable_coordinator(bun, store, host.clone(), workspace.path().to_path_buf());
+    let mut request = portable_start(BLOCKING_PORTABLE_WORKFLOW);
+    request.thread_id = Some(first.id);
+    let paused = coordinator.start(request).await.expect("first run starts");
+    let mut request = portable_start(BLOCKING_PORTABLE_WORKFLOW);
+    request.thread_id = Some(second.id);
+    let elsewhere = coordinator.start(request).await.expect("second run starts");
+    host.wait_for_request().await;
+    host.wait_for_request().await;
+    coordinator
+        .pause(paused.id)
+        .await
+        .expect("first run pauses");
+
+    let launch = HashSet::from([first.id]);
+    assert!(
+        coordinator
+            .cancel_untold(paused.id, &launch)
+            .await
+            .expect("the paused run cancels")
+    );
+    assert_eq!(
+        coordinator.get(paused.id, None).await.unwrap().status,
+        WorkflowRunStatus::Cancelled
+    );
+    assert!(
+        !coordinator
+            .cancel_untold(paused.id, &launch)
+            .await
+            .expect("an ended run is left")
+    );
+    assert!(
+        !coordinator
+            .cancel_untold(elsewhere.id, &launch)
+            .await
+            .expect("another chat's run is left")
+    );
+    assert_eq!(
+        coordinator.get(elsewhere.id, None).await.unwrap().status,
+        WorkflowRunStatus::Running
+    );
+    assert!(
+        !coordinator
+            .cancel_untold(WorkflowId::new(), &launch)
+            .await
+            .expect("an unknown run is left")
+    );
+    assert!(
+        host.notifications().is_empty(),
+        "{:?}",
+        host.notifications()
+    );
+    coordinator
+        .cancel(elsewhere.id)
+        .await
+        .expect("fixture cleanup");
+}
+
 #[tokio::test]
 async fn workflow_wide_agent_defaults_fallback_and_warning_are_durable() {
     let Some(bun) = bun_path() else {

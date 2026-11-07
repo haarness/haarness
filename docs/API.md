@@ -431,10 +431,10 @@ command that completed. Enums may gain values; an unknown one reads as
   stops what those turns of the chat left running, and tells the chat
   nothing: any of them still running, the subagents they started (with
   everything under them), the commands they ran (`endedBy: turn_ended`), and
-  the named workflows launched from the chat, cancelled with no result
-  delivered. Every other turn's work goes on. It answers what began to stop
-  (`StopTurnWorkResult`). A scheduled run ends its own work this way, leaving
-  a person's turns in its chat alone.
+  the named workflows launched from the chat, running or paused, cancelled
+  with no result delivered. Every other turn's work goes on. It answers what
+  began to stop (`StopTurnWorkResult`). A scheduled run ends its own work this
+  way, leaving a person's turns in its chat alone.
 - `POST /v1/threads/{id}/commands/background` sends every running foreground
   command of the chat tree to the background, the one named with
   `?commandId=` alone; it answers the commands moved. A named command that
