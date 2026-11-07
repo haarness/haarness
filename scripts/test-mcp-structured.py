@@ -74,7 +74,8 @@ try:
     result = call(thread, 'embedded')
     output = result['output']
     assert not result['is_error'] and output.startswith('Three files.\n[image/png attachment: ui://chart.png]\n'), output
-    assert 'embedded-text-proof' in output and '[files://pack.zip: application/zip, 300 bytes]' in output, output
+    assert '\n[data://row.json: application/json]\n{"proof": "embedded-text-proof"}\n' in output, output
+    assert '[files://pack.zip: application/zip, 300 bytes]' in output, output
     assert PIXEL not in output and 'blob' not in output, output
     assert result['metadata']['attachments'] == ['data:image/png;base64,' + PIXEL], result['metadata']
     check('embedded resources reach the model as what they hold: an image under IMAGE/PNG as an attachment, base64 JSON as its text, an archive named by type and size, and no base64 text')
@@ -124,6 +125,45 @@ try:
     coded = next(item for item in results(thread)[before:] if item['name'] == 'execute')
     assert not coded['is_error'] and json.loads(coded['output']) == len(WIDE), coded['output'][:400]
     check('Code Mode gets all of the 200 KB tool\'s text too')
+
+    # What Code Mode hands back is cut for the model in turn.
+    before = len(results(thread))
+    code = "return (await tool('mcp__structured__wide', {})).text;"
+    api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': '!tool execute ' + json.dumps({'code': code})})
+    until(lambda: not api('/turns/active') and any(item['name'] == 'execute' for item in results(thread)[before:]), 'execute: no result', 60)
+    coded = next(item for item in results(thread)[before:] if item['name'] == 'execute')
+    assert not coded['is_error'] and len(coded['output']) < 52 * 1024 and 'Full output saved to: ' in coded['output'], len(coded['output'])
+    check('what a Code Mode script returns is cut for the model too')
+
+    ROWS = json.dumps([{'id': n, 'title': 'row %d' % n, 'body': 'b' * 40} for n in range(1500)], separators=(',', ':'))
+    result = call(thread, 'rows')
+    assert not result['is_error'] and result['output'].startswith('[\n  {\n    "id": 0,'), result['output'][:200]
+    assert result['output'].count('\n') > 1900, result['output'].count('\n')
+    saved = pathlib.Path(result['metadata']['outputPath']).read_text()
+    assert json.loads(saved) == json.loads(ROWS) and max(len(line) for line in saved.splitlines()) < 200
+    source = ("export const meta = { name: 'compact-rows', phases: ['call'] };\nphase('call');\n"
+              "return (await tool('mcp__structured__rows', {})).output;\n")
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed' and run_state.get('result') == ROWS, str(run_state.get('result'))[:200]
+    check('120 KB of one-line JSON reaches the model as its first 2,000 lines pretty-printed, saved readable by line, and a workflow gets it as the server wrote it')
+
+    source = ("export const meta = { name: 'tree-metadata', phases: ['call'] };\nphase('call');\n"
+              "const result = await tool('mcp__structured__tree', {});\n"
+              "return { tree: result.metadata.tree.length, truncated: result.metadata.truncated, text: result.output.length };\n")
+    run_state = api('/workflows/run', {'source': source, 'model': 'echo/echo-1'})
+    deadline = time.monotonic() + 60
+    while run_state['status'] == 'running' and time.monotonic() < deadline:
+        time.sleep(.3); run_state = api('/workflows/runs/' + run_state['id'])
+    assert run_state['status'] == 'completed' and run_state.get('result') == {'tree': 1, 'truncated': False, 'text': 80 * 1024}, run_state.get('result')
+    check('a workflow gets the server\'s own metadata for a cut result, its own `truncated` included')
+
+    result = call(thread, 'loud_failure')
+    assert result['is_error'] and len(result['output']) < 52 * 1024, len(result['output'])
+    assert 'The tool call failed and its output was truncated. Full output saved to: ' in result['output'], result['output'][-300:]
+    check('a long failure is cut for the model as well, and says the call failed')
 
     (root/'result.json').write_text(json.dumps({'passed': True, 'checks': checks}, indent=2))
     print(f'PASS {len(checks)} MCP structured-content scenarios.', flush=True)

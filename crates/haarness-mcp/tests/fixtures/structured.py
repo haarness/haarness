@@ -28,6 +28,14 @@ TOOLS = {
     # Audio of a type Haarness does not carry, beside an image it does.
     'odd_media': {'content': [{'type': 'audio', 'data': 'GkXfo0AAAA==', 'mimeType': 'audio/webm'},
                               {'type': 'image', 'data': PIXEL, 'mimeType': 'image/png'}]},
+    # 120 KB of JSON on one line, as JSON.stringify gives it.
+    'rows': {'content': [{'type': 'text', 'text': json.dumps([{'id': n, 'title': 'row %d' % n, 'body': 'b' * 40}
+                                                             for n in range(1500)], separators=(',', ':'))}]},
+    # Structured content that names `truncated` itself, beside 80 KB of text.
+    'tree': {'content': [{'type': 'text', 'text': 't' * 80 * 1024}],
+             'structuredContent': {'tree': [{'path': 'a'}], 'truncated': False}},
+    # A failure that says why at length.
+    'loud_failure': {'content': [{'type': 'text', 'text': 'f' * 200 * 1024}], 'isError': True},
     # 200 KB of text, as a tool that returns a whole table does.
     'wide': {'content': [{'type': 'text', 'text': ''.join('row %05d %s\n' % (n, 'w' * 90) for n in range(2000))}],
              'structuredContent': {'rows': 2000}},

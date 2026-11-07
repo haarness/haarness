@@ -51,8 +51,8 @@ keychain = root/'keychain.json'
 SECRET = 'ghp_e2e-' + uuid.uuid4().hex
 URL_SECRET = 'url-e2e-' + uuid.uuid4().hex
 # A JSON setting fills an unset variable with nothing; a server configured through the API keeps the reference.
-BAD_URL = 'MCP server "badurl" has no usable URL: it is not an http or https address with a host.'
-BAD_VAR = 'MCP server "badvar" has no usable URL: the environment variable HAARNESS_E2E_UNSET_HOST it names is not set.'
+BAD_URL = 'Its URL is not an http or https address with a host.'
+BAD_VAR = 'Its URL names an environment variable that is not set: HAARNESS_E2E_UNSET_HOST.'
 # Quotes, backslashes and length the old `security -i` path split or mangled.
 AWKWARD = 'a"b\\c\\"d \'e\' $(f) %g% ' + 'x' * 4096
 python = sys.executable
@@ -181,7 +181,8 @@ settings.write_text(json.dumps({
 (workspace/'.haarness/config.toml').write_text('[tool_availability]\n"mcp__Docs_Server__plain" = false\n')
 env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(root/'data'), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
-           HAARNESS_TEST_KEYCHAIN_FILE=str(keychain), LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
+           HAARNESS_TEST_KEYCHAIN_FILE=str(keychain), LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8',
+           HAARNESS_E2E_MCP_HOST='127.0.0.1:9')
 session = f'haarness-mcp-servers-{os.getpid()}'
 connection = None; foreground = None; stand_in = None; first_run = None; checks = []
 
@@ -287,16 +288,34 @@ try:
                             'url': 'https://${HAARNESS_E2E_UNSET_HOST}/mcp?api_key=' + URL_SECRET})
         raise AssertionError('a server whose url cannot be asked was configured')
     except urllib.error.HTTPError as error:
-        assert json.loads(error.read())['message'].endswith(BAD_VAR), error.code
+        assert json.loads(error.read())['message'].endswith('MCP server "badvar" cannot be reached. ' + BAD_VAR), error.code
     assert servers()['badvar']['status'] == 'failed' and servers()['badvar']['detail'] == BAD_VAR, servers()['badvar']
     listed = cli('mcp', 'ls')
     assert re.search(r'^badvar\tstreamable_http\tfailed\t' + re.escape(BAD_VAR) + '$', listed, re.M), listed
     assert URL_SECRET not in listed and URL_SECRET not in json.dumps(servers()), listed
     api('/mcp/badvar/disconnect', {})
-    check('a remote server whose url has no host fails with one sentence naming the server, and the unset variable when the setting keeps it, in the API and `haarness mcp ls`, never the url')
+    # One in the query is named too, before anything is sent.
+    try:
+        api('/mcp/badquery', {'transport': 'streamable_http', 'enabled': True,
+                              'url': 'http://127.0.0.1:9/mcp?api_key=${HAARNESS_E2E_UNSET_KEY}'})
+        raise AssertionError('a server whose url names an unset variable in its query was configured')
+    except urllib.error.HTTPError:
+        pass
+    assert servers()['badquery']['detail'] == 'Its URL names an environment variable that is not set: HAARNESS_E2E_UNSET_KEY.', servers()['badquery']
+    api('/mcp/badquery/disconnect', {})
+    # A variable that is set is read when the server starts: this one leads to a port nothing answers on.
+    try:
+        api('/mcp/setvar', {'transport': 'streamable_http', 'enabled': True, 'timeout_ms': 3000,
+                            'url': 'http://${HAARNESS_E2E_MCP_HOST}/mcp'})
+    except urllib.error.HTTPError:
+        pass
+    detail = servers()['setvar']['detail']
+    assert 'cannot reach http://127.0.0.1:9/mcp' in detail and 'not set' not in detail, detail
+    api('/mcp/setvar/disconnect', {})
+    check('a remote server whose url has no host fails with one sentence (the unset variable named when the setting keeps the reference), in the API and `haarness mcp ls`, never the url; a variable that is set is read when the server starts')
     shelf = servers()['shelf']
     assert shelf['status'] == 'connected', shelf
-    assert shelf['detail'] == '2 tools discovered; left out "broken", which is not a valid MCP tool', shelf
+    assert shelf['detail'] == '2 tools discovered; left out as not valid MCP tools: "broken"', shelf
     assert json.loads(call(thread, 'mcp__shelf__second', {})['output'])['tool'] == 'second'
     offered = cli('mcp', 'tools', 'shelf')
     assert [line.split('\t')[0] for line in offered.splitlines()] == ['mcp__shelf__first', 'mcp__shelf__second'], offered
@@ -446,6 +465,8 @@ try:
     # --- the 64 MB message limit
     big = call(thread, 'mcp__flood__big', {})
     assert not big['is_error'] and len(big['output']) < 52 * 1024, len(big['output'])
+    # Its one long line fills the 50 KiB the model is shown.
+    assert big['output'].startswith('z' * (50 * 1024)), big['output'][:200]
     assert 'The tool call succeeded but its output was truncated. Full output saved to: ' in big['output'], big['output'][-400:]
     assert big['metadata']['truncated'] is True and pathlib.Path(big['metadata']['outputPath']).stat().st_size == 20 << 20, big['metadata']
     pathlib.Path(big['metadata']['outputPath']).unlink()
