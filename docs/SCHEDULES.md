@@ -86,7 +86,8 @@ Every native entry runs the hidden command
    Requests only a person can answer, such as a site in the user's Chrome, fail at once instead of
    waiting ([Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals)).
 5. The run then waits for its own work: the subagents, workflows and shell commands its turn started
-   in the background, the turns their results start, and what those turns start in turn. Work a
+   in the background, the turns their results start, and what those turns start in turn, down to
+   the workflows its subagents start and the turns their results start in a subagent's chat. Work a
    person starts in the chat meanwhile is theirs: the run neither waits for it nor stops it. A
    message a person sends while one of the run's turns works joins that turn, and once the agent has
    read it the rest of the turn answers them: what the agent says from then on is not in the run's
@@ -106,15 +107,15 @@ Every native entry runs the hidden command
      time limit included, so a run that keeps starting commands cannot keep its lock forever.
 
    When the 30 minutes or the 12 hours run out, whatever of the run's own work is still going is
-   stopped and the run is recorded as **failed**, naming it. Nothing the run stops tells the chat,
-   so no turn of the run starts there after the run. A turn of a person's may: the result of their
-   own work, or the answer to a message they wrote into a turn the run stopped before its agent had
-   read it (the agent is told the run ended, and replies to the message). The times are wall-clock
-   time, so the time a computer
-   spends asleep counts. Questions asked in the run's own turns and subagents are declined, since
-   nobody is there to answer; a person's question in the chat, or in a chat under it, is left for
-   them. A server older than the `haarness` running the schedule cannot stop a run's work: the run
-   is recorded as **failed** when it has work to stop, and that work goes on.
+   stopped and the run is recorded as **failed**, naming it. Nothing the run stops tells the chat or
+   a chat under it, so no turn of the run starts in either after the run. A person's turn still may:
+   the result of their own work, or the answer to a message they wrote into a turn the run stopped
+   before its agent had read it (the agent is told the run ended, and replies to the message). The
+   times are wall-clock time, so the time a computer spends asleep counts. Questions asked in the
+   run's own turns and subagents are declined, since nobody is there to answer; a person's question
+   in the chat, or in a chat under it, is left for them. A server older than the `haarness` running
+   the schedule cannot stop a run's work: the run is recorded as **failed** when it has work to
+   stop, and that work goes on.
 6. It records **success** or **failed** with the chat and turn ids and the agent's answer: what it
    said in the run's own turns. The run fails, with the reason as its error, when its first or last
    turn failed or was stopped, or when a subagent it ran in the background failed, as

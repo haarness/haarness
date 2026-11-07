@@ -436,6 +436,78 @@ async fn an_untold_cancel_ends_a_paused_run_and_leaves_anothers() {
         .expect("fixture cleanup");
 }
 
+/// Every run launched from the chats named, running or paused, is listed
+/// and cancelled with nothing delivered; a run launched from another chat
+/// is left as it is.
+#[tokio::test]
+async fn untold_cancels_reach_every_run_launched_from_the_chats_named() {
+    let Some(bun) = bun_path() else {
+        eprintln!("skipping coordinator fixture: Bun is unavailable");
+        return;
+    };
+    let workspace = tempfile::tempdir().expect("workspace fixture");
+    let store = Arc::new(SqliteStore::in_memory().expect("workflow store"));
+    let first = store
+        .create_thread(CreateThreadRequest::default())
+        .await
+        .expect("first launch thread");
+    let second = store
+        .create_thread(CreateThreadRequest::default())
+        .await
+        .expect("second launch thread");
+    let host = Arc::new(CoordinatorHost::new(Arc::clone(&store), 3));
+    let coordinator =
+        portable_coordinator(bun, store, host.clone(), workspace.path().to_path_buf());
+    let mut started = Vec::new();
+    for thread in [first.id, first.id, second.id] {
+        let mut request = portable_start(BLOCKING_PORTABLE_WORKFLOW);
+        request.thread_id = Some(thread);
+        started.push(coordinator.start(request).await.expect("a run starts").id);
+    }
+    for _ in 0..3 {
+        host.wait_for_request().await;
+    }
+    coordinator.pause(started[1]).await.expect("one run pauses");
+
+    let launch = HashSet::from([first.id]);
+    let mut listed = coordinator
+        .list_launched_from(&launch, 10)
+        .await
+        .expect("runs list")
+        .into_iter()
+        .map(|run| run.id)
+        .collect::<Vec<_>>();
+    listed.sort_by_key(ToString::to_string);
+    let mut expected = started[..2].to_vec();
+    expected.sort_by_key(ToString::to_string);
+    assert_eq!(listed, expected);
+    let mut cancelled = coordinator
+        .cancel_untold_from(&launch)
+        .await
+        .expect("the runs cancel");
+    cancelled.sort_by_key(ToString::to_string);
+    assert_eq!(cancelled, expected);
+    for id in &started[..2] {
+        assert_eq!(
+            coordinator.get(*id, None).await.unwrap().status,
+            WorkflowRunStatus::Cancelled
+        );
+    }
+    assert_eq!(
+        coordinator.get(started[2], None).await.unwrap().status,
+        WorkflowRunStatus::Running
+    );
+    assert!(
+        host.notifications().is_empty(),
+        "{:?}",
+        host.notifications()
+    );
+    coordinator
+        .cancel(started[2])
+        .await
+        .expect("fixture cleanup");
+}
+
 #[tokio::test]
 async fn workflow_wide_agent_defaults_fallback_and_warning_are_durable() {
     let Some(bun) = bun_path() else {

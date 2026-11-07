@@ -883,6 +883,16 @@ impl ApiClient {
     pub async fn workflow_runs(&self, limit: usize) -> Result<Vec<haarness_protocol::WorkflowRun>> {
         self.get(&format!("/v1/workflows/runs?limit={limit}")).await
     }
+    /// Recent runs launched from chat `root` or a chat under it, newest
+    /// first (servers with `turn-work-stop.v1`; older ones list every run).
+    pub async fn workflow_runs_in_tree(
+        &self,
+        root: haarness_protocol::ThreadId,
+        limit: usize,
+    ) -> Result<Vec<haarness_protocol::WorkflowRun>> {
+        self.get(&format!("/v1/workflows/runs?tree={root}&limit={limit}"))
+            .await
+    }
     /// Read an authoritative run snapshot. `after_sequence` lets callers
     /// request only newer log rows without changing the rest of the shape.
     pub async fn workflow_run(

@@ -4216,8 +4216,10 @@ fn to_delta(duration: Duration) -> chrono::TimeDelta {
 /// A scheduled run's own work in its chat, read as the chat grows: the
 /// run's turns (its first, and each one the result of its own work starts),
 /// the subagents, workflows and commands they started, and which of their
-/// results reached the chat. A turn a person starts in the chat, and what
-/// it starts, are not the run's.
+/// results reached the chat; and the workflows its subagents started from
+/// their own chats, whose results come there. A turn a person starts in
+/// the chat, and what it starts, are not the run's, nor what a turn of the
+/// run starts once its agent has read a person's message written into it.
 #[derive(Debug)]
 struct RunWork {
     thread: ThreadId,
@@ -4238,6 +4240,21 @@ struct RunWork {
     workflows: HashMap<WorkflowId, String>,
     /// Those of them the server no longer has: deleted, so ended.
     deleted: std::collections::HashSet<WorkflowId>,
+    /// Workflow runs started from the chats under the run's (those of its
+    /// subagents, and under them), by id: the chat each was started from,
+    /// where its result comes, and its name.
+    nested: HashMap<WorkflowId, (ThreadId, String)>,
+    /// Those of them that ended and whose chat was quiet since: neither
+    /// their result nor a turn it starts is still to come there.
+    settled: std::collections::HashSet<WorkflowId>,
+    /// The chats of nested runs that ended unsettled, as last asked: the
+    /// turn running there, and how many results they are owed.
+    nested_chats: HashMap<ThreadId, (Option<TurnId>, u32)>,
+    /// Whether a subagent of the run ran at the last listing of nested
+    /// runs: one more listing follows its end.
+    listed_running: bool,
+    /// The server runs no workflows (it refused to list them).
+    no_workflows: bool,
     /// The `workflow` calls that start a run, by call id, with the name
     /// they ask for (the run's own name replaces it once read).
     workflow_starts: HashMap<String, String>,
@@ -4302,6 +4319,11 @@ impl RunWork {
             in_background: std::collections::HashSet::new(),
             workflows: HashMap::new(),
             deleted: std::collections::HashSet::new(),
+            nested: HashMap::new(),
+            settled: std::collections::HashSet::new(),
+            nested_chats: HashMap::new(),
+            listed_running: false,
+            no_workflows: false,
             workflow_starts: HashMap::new(),
             commands: std::collections::HashSet::new(),
             stopping: std::collections::HashSet::new(),
@@ -4347,6 +4369,8 @@ impl RunWork {
         self.tasks = client.background_tasks(self.thread).await?;
         let known = self.untold_workflows();
         self.running = self.workflows_going(client, &known).await?;
+        let nested = self.nested_going(client).await?;
+        self.running.extend(nested);
         let items = client.items_after(self.thread, self.read).await?;
         for item in &items {
             self.read_item(item);
@@ -4366,6 +4390,7 @@ impl RunWork {
         let activity = client.thread_activity(self.thread).await?;
         self.active = activity.active_turn.map(|turn| turn.id);
         self.owed = activity.background;
+        self.look_at_nested_chats(client).await?;
         let timed = self
             .own_commands()
             .filter(|command| {
@@ -4375,6 +4400,182 @@ impl RunWork {
             .collect::<Vec<_>>();
         self.timed.extend(timed);
         Ok(())
+    }
+
+    /// The workflow runs started from the chats under the run's that are
+    /// still going (paused ones too), any new one among them found first.
+    /// The chat tree's runs are listed while a subagent of the run runs
+    /// (and once after), or while a nested run is not settled: nothing else
+    /// starts one. Only a server that can stop them lists a tree's runs.
+    async fn nested_going(
+        &mut self,
+        client: &haarness_tui::api::ApiClient,
+    ) -> Result<Vec<WorkflowId>> {
+        let running = self.own_tasks().next().is_some();
+        let unsettled = self
+            .nested
+            .keys()
+            .any(|id| !self.settled.contains(id) && !self.deleted.contains(id));
+        let ran = std::mem::replace(&mut self.listed_running, running);
+        let list = running || ran || unsettled;
+        if !list || self.no_workflows || !self.can_stop(client).await? {
+            return Ok(Vec::new());
+        }
+        let going = |status| {
+            matches!(
+                status,
+                haarness_protocol::WorkflowRunStatus::Running
+                    | haarness_protocol::WorkflowRunStatus::Paused
+            )
+        };
+        let mut running = Vec::new();
+        let mut listed = std::collections::HashSet::new();
+        let runs = match client.workflow_runs_in_tree(self.thread, 100).await {
+            Ok(runs) => runs,
+            // A server that runs no workflows has none to list.
+            Err(error)
+                if haarness_tui::api::refusal_status(&error)
+                    .is_some_and(|status| status.is_client_error()) =>
+            {
+                self.no_workflows = true;
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        };
+        for run in runs {
+            // The chat's own are told apart by its items.
+            let Some(chat) = run
+                .definition
+                .launch_thread_id
+                .filter(|chat| *chat != self.thread)
+            else {
+                continue;
+            };
+            if !self.nested.contains_key(&run.id) {
+                if !self.owns_chat(client, chat).await? {
+                    continue;
+                }
+                self.nested
+                    .insert(run.id, (chat, run.workflow_name.clone()));
+            }
+            listed.insert(run.id);
+            if going(run.status) {
+                running.push(run.id);
+            }
+        }
+        // One the list leaves out: deleted, or older than what it shows.
+        let missing = self
+            .nested
+            .keys()
+            .filter(|id| {
+                !listed.contains(id) && !self.settled.contains(id) && !self.deleted.contains(id)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for id in missing {
+            match client.workflow_run(id, None).await {
+                Ok(run) if going(run.status) => running.push(id),
+                Ok(_) => {}
+                Err(error)
+                    if haarness_tui::api::refusal_status(&error)
+                        == Some(reqwest::StatusCode::NOT_FOUND) =>
+                {
+                    self.deleted.insert(id);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(running)
+    }
+
+    /// Look at the chats nested runs that ended were started from: each
+    /// run's result comes there, and may start a turn there. A chat with
+    /// neither a turn running nor a result owed has settled them.
+    async fn look_at_nested_chats(&mut self, client: &haarness_tui::api::ApiClient) -> Result<()> {
+        let ended = self
+            .nested
+            .iter()
+            .filter(|(id, _)| !self.running.contains(id) && !self.settled.contains(id))
+            .map(|(id, (chat, _))| (*id, *chat))
+            .collect::<Vec<_>>();
+        self.nested_chats.clear();
+        let chats = ended
+            .iter()
+            .map(|(_, chat)| *chat)
+            .collect::<std::collections::HashSet<_>>();
+        for chat in chats {
+            let activity = client.thread_activity(chat).await?;
+            let turn = activity.active_turn.map(|turn| turn.id);
+            if turn.is_none() && activity.background == 0 {
+                self.settled.extend(
+                    ended
+                        .iter()
+                        .filter(|(_, from)| *from == chat)
+                        .map(|(id, _)| *id),
+                );
+            } else {
+                self.nested_chats.insert(chat, (turn, activity.background));
+            }
+        }
+        Ok(())
+    }
+
+    /// The nested runs that ended whose chat has not settled them, each
+    /// with that chat's running turn, if one runs.
+    /// A chat where a subagent of the run still runs is left out: that
+    /// subagent holds the run, and is stopped with it.
+    fn unsettled_results(&self) -> impl Iterator<Item = (&str, Option<TurnId>)> {
+        self.nested.iter().filter_map(|(id, (chat, name))| {
+            self.nested_chats
+                .get(chat)
+                .filter(|_| !self.running.contains(id) && !self.settled.contains(id))
+                .filter(|_| !self.own_tasks().any(|task| task.child_thread_id == *chat))
+                .map(|(turn, _)| (name.as_str(), *turn))
+        })
+    }
+
+    /// Whether a nested run's result is on its way into its chat, no turn
+    /// running there yet.
+    fn nested_result_coming(&self) -> bool {
+        self.nested_chats
+            .values()
+            .any(|(turn, owed)| turn.is_none() && *owed > 0)
+    }
+
+    /// A workflow of the run by name, its chat's or a nested one.
+    fn workflow_name(&self, id: &WorkflowId) -> &str {
+        self.workflows
+            .get(id)
+            .or_else(|| self.nested.get(id).map(|(_, name)| name))
+            .map_or("", String::as_str)
+    }
+
+    /// The turns the run stops as it ends: its own, and those the results
+    /// of nested runs started in their chats.
+    fn turns_to_stop(&self) -> Vec<TurnId> {
+        let mut turns = self.turns.clone();
+        turns.extend(
+            self.nested_chats
+                .values()
+                .filter_map(|(turn, _)| *turn)
+                .filter(|turn| !self.turns.contains(turn)),
+        );
+        turns
+    }
+
+    /// Whether the server can stop the run's work, asked once.
+    async fn can_stop(&mut self, client: &haarness_tui::api::ApiClient) -> Result<bool> {
+        if let Some(can_stop) = self.can_stop {
+            return Ok(can_stop);
+        }
+        let can_stop = client
+            .info()
+            .await?
+            .capabilities
+            .iter()
+            .any(|capability| capability == haarness_protocol::TURN_WORK_STOP_CAPABILITY);
+        self.can_stop = Some(can_stop);
+        Ok(can_stop)
     }
 
     /// The run's workflows whose result has not reached the chat, of those
@@ -4643,8 +4844,14 @@ impl RunWork {
         for id in &self.running {
             left.held.push(format!(
                 "workflow \u{201c}{}\u{201d}",
-                self.workflows.get(id).map_or("", String::as_str)
+                self.workflow_name(id)
             ));
+        }
+        // A workflow a subagent of the run started, ended, whose result is
+        // still to come into that subagent's chat, or runs there.
+        for (name, _) in self.unsettled_results() {
+            left.held
+                .push(format!("the result of workflow \u{201c}{name}\u{201d}"));
         }
         // A background workflow that ended and whose result has not
         // reached the chat yet, while the chat is owed something (one the
@@ -4693,12 +4900,16 @@ impl RunWork {
             self.own_tasks()
                 .map(|task| format!("subagent \u{201c}{}\u{201d}", task.description.trim())),
         );
-        going.extend(self.running.iter().map(|id| {
-            format!(
-                "workflow \u{201c}{}\u{201d}",
-                self.workflows.get(id).map_or("", String::as_str)
-            )
-        }));
+        going.extend(
+            self.running
+                .iter()
+                .map(|id| format!("workflow \u{201c}{}\u{201d}", self.workflow_name(id))),
+        );
+        going.extend(
+            self.unsettled_results()
+                .filter(|(_, turn)| turn.is_some())
+                .map(|(name, _)| format!("the result of workflow \u{201c}{name}\u{201d}")),
+        );
         going.extend(
             self.own_commands()
                 .filter(|command| command.state.is_live())
@@ -4733,7 +4944,10 @@ async fn end_run_work(
     let until = Instant::now() + Duration::from_secs(10);
     loop {
         let going = work.going();
-        let unread = work.active.is_some_and(|turn| !work.begun.contains(&turn));
+        // A turn not read yet may be the run's; a nested run's result on
+        // its way starts one.
+        let unread = work.active.is_some_and(|turn| !work.begun.contains(&turn))
+            || work.nested_result_coming();
         if going.is_empty() {
             if !unread || Instant::now() >= until {
                 return Ok(stopped);
@@ -4746,7 +4960,7 @@ async fn end_run_work(
         }
         ensure_run_work_stops(client, work, &going).await?;
         let request = haarness_protocol::StopTurnWorkRequest {
-            turns: work.turns.clone(),
+            turns: work.turns_to_stop(),
             workflows: work.running.clone(),
             commands: work
                 .own_commands()
@@ -4835,19 +5049,7 @@ async fn ensure_run_work_stops(
     work: &mut RunWork,
     going: &[String],
 ) -> Result<()> {
-    let can_stop =
-        match work.can_stop {
-            Some(can_stop) => can_stop,
-            None => {
-                let can_stop =
-                    client.info().await?.capabilities.iter().any(|capability| {
-                        capability == haarness_protocol::TURN_WORK_STOP_CAPABILITY
-                    });
-                work.can_stop = Some(can_stop);
-                can_stop
-            }
-        };
-    if !can_stop {
+    if !work.can_stop(client).await? {
         anyhow::bail!(
             "The server is older than this haarness and cannot stop a scheduled run's work, so it was left running: {}.",
             going.join(", ")
@@ -20246,7 +20448,8 @@ request_timeout = 0
     /// its result is answered `Done: <how it ended>`, or with `then fail` in
     /// the prompt by a failed turn. `command: <line>` (with ` within <ms>`)
     /// runs the line in the background, and its end is answered `Command
-    /// done.` (after `<ms>` when the notice ends `linger <ms>`). A person's
+    /// done.` (after `<ms>` when the notice ends `linger <ms>`; a workflow's
+    /// end is answered `Workflow done.` the same way). A person's
     /// `person: command <line>` does the same;
     /// `person: linger <ms>` answers after that long, and `person: ask
     /// <prompt>` asks it with the question tool. A child told `wait <ms>`
@@ -20333,18 +20536,24 @@ request_timeout = 0
                     "Done: failed"
                 });
             }
-            if last.starts_with("<command id=") {
-                // A notice ending `linger <ms>` keeps its turn that long.
-                if let Some(milliseconds) = last
-                    .rsplit_once("linger ")
-                    .and_then(|(_, milliseconds)| milliseconds.trim().parse().ok())
-                {
+            if last.starts_with("<command id=") || last.starts_with("<workflow id=") {
+                // A notice saying `linger <ms>` keeps its turn that long.
+                if let Some(milliseconds) = last.rsplit_once("linger ").and_then(|(_, rest)| {
+                    rest.split(|character: char| !character.is_ascii_digit())
+                        .next()?
+                        .parse()
+                        .ok()
+                }) {
                     tokio::select! {
                         () = cancel.cancelled() => return Err(haarness_core::CoreError::Cancelled),
                         () = tokio::time::sleep(Duration::from_millis(milliseconds)) => {}
                     }
                 }
-                return reply("Command done.");
+                return reply(if last.starts_with("<workflow") {
+                    "Workflow done."
+                } else {
+                    "Command done."
+                });
             }
             if let Some(child) = last
                 .strip_prefix("launch: ")
@@ -21106,6 +21315,148 @@ request_timeout = 0
         assert_eq!(
             super::end_run_work(&client, &mut work).await.unwrap(),
             ["subagent \u{201c}Background check\u{201d}"]
+        );
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The subagent of the run that `chat` is, once it runs.
+    async fn subagent_chat(client: &haarness_tui::api::ApiClient, chat: ThreadId) -> ThreadId {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(task) = client.background_tasks(chat).await.unwrap().first() {
+                    break task.child_thread_id;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the run's subagent never started")
+    }
+
+    /// A workflow one of the run's subagents starts is the run's: it holds
+    /// the run, and at the limit it is cancelled with the rest, telling
+    /// nobody, so nothing starts in the subagent's chat after the run.
+    #[tokio::test]
+    async fn a_scheduled_run_waits_for_and_stops_a_workflow_its_subagent_started() {
+        let Some((client, server, runtime, root)) = scheduled_client_with_workflows().await else {
+            return;
+        };
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "launch: wait 800").await;
+        let run = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                super::follow_scheduled_run(&client, thread, first, Duration::from_secs(4), CEILING)
+                    .await
+            })
+        };
+        let child = subagent_chat(&client, thread).await;
+        let nested = background_workflow(&client, child, "nested-slow", 60_000, "never").await;
+        let end = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the run waited past its limit")
+            .unwrap()
+            .unwrap();
+        let run = client.workflow_run(nested, None).await.unwrap();
+        assert_eq!(
+            end.error,
+            Some(format!(
+                "Background work was still going after 4 seconds and was stopped: workflow \u{201c}{}\u{201d}.",
+                run.workflow_name
+            ))
+        );
+        assert_eq!(end.response, "Started it.\nDone: completed");
+        assert_eq!(run.status, haarness_protocol::WorkflowRunStatus::Cancelled);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let activity = client.thread_activity(child).await.unwrap();
+        assert!(activity.active_turn.is_none() && activity.background == 0);
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The result of a workflow a subagent of the run started comes into
+    /// the subagent's chat, and the turn it starts there holds the run too.
+    /// A stop of a subagent cancels what was launched from its chat, named
+    /// or not.
+    #[tokio::test]
+    async fn the_result_of_a_workflow_a_subagent_started_holds_the_run_to_its_end() {
+        let Some((client, server, runtime, root)) = scheduled_client_with_workflows().await else {
+            return;
+        };
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "launch: wait 300").await;
+        let run = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                super::follow_scheduled_run(
+                    &client,
+                    thread,
+                    first,
+                    Duration::from_secs(60),
+                    CEILING,
+                )
+                .await
+            })
+        };
+        let child = subagent_chat(&client, thread).await;
+        background_workflow(&client, child, "nested-quick", 1_000, "linger 2000").await;
+        let began = std::time::Instant::now();
+        let end = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the run never ended")
+            .unwrap()
+            .unwrap();
+        assert!(
+            began.elapsed() >= Duration::from_secs(2),
+            "{:?}",
+            began.elapsed()
+        );
+        assert_eq!(end.error, None);
+        let activity = client.thread_activity(child).await.unwrap();
+        assert!(
+            activity.active_turn.is_none() && activity.background == 0,
+            "the run ended before its subagent's chat did: {activity:?}"
+        );
+        let said = client
+            .items(child)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|item| match item.data {
+                ItemData::AssistantMessage { text } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(said.last().map(String::as_str), Some("Workflow done."));
+
+        // Stopping a subagent cancels the workflow launched from its chat,
+        // although the stop does not name it.
+        let thread = scheduled_chat(&client).await;
+        let first = start(&client, thread, "launch: wait 60000").await;
+        let child = subagent_chat(&client, thread).await;
+        let nested = background_workflow(&client, child, "nested-slow", 60_000, "never").await;
+        let listed = client.workflow_runs_in_tree(thread, 10).await.unwrap();
+        assert_eq!(
+            listed.iter().map(|run| run.id).collect::<Vec<_>>(),
+            [nested]
+        );
+        let stopped = client
+            .stop_turn_work(
+                thread,
+                &haarness_protocol::StopTurnWorkRequest {
+                    turns: vec![first],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(stopped.workflows, [nested]);
+        assert_eq!(
+            client.workflow_run(nested, None).await.unwrap().status,
+            haarness_protocol::WorkflowRunStatus::Cancelled
         );
         server.shutdown().await.unwrap();
         drop(runtime);

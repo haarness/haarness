@@ -1279,6 +1279,9 @@ async fn start_workflow(
 #[serde(rename_all = "camelCase")]
 struct WorkflowRunsQuery {
     thread_id: Option<ThreadId>,
+    /// Runs launched from this chat or from any chat under it (its
+    /// subagents' and theirs), in place of `threadId`.
+    tree: Option<ThreadId>,
     limit: Option<usize>,
 }
 
@@ -1286,11 +1289,15 @@ async fn list_workflow_runs(
     State(state): State<ServerState>,
     Query(query): Query<WorkflowRunsQuery>,
 ) -> ApiResult<Json<Vec<WorkflowRun>>> {
-    Ok(Json(
-        workflow_coordinator(&state)?
-            .list(query.thread_id, query.limit.unwrap_or(50).clamp(1, 500))
-            .await?,
-    ))
+    let coordinator = workflow_coordinator(&state)?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 500);
+    Ok(Json(match query.tree {
+        Some(root) => {
+            let chats = state.runtime.thread_tree_ids(root).await?;
+            coordinator.list_launched_from(&chats, limit).await?
+        }
+        None => coordinator.list(query.thread_id, limit).await?,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -3023,8 +3030,10 @@ async fn interrupt_thread_tree(
 }
 /// Stop what some turns of a chat left running, telling the chat nothing:
 /// those turns if one still runs, their subagents and commands, and the
-/// named workflows launched from the chat and commands of it. Other turns'
-/// work goes on.
+/// named workflows launched from the chat or a chat under it and commands
+/// of it. As `/interrupt` does for a whole tree, what runs under a stopped
+/// subagent or workflow goes too, the workflows launched there included.
+/// Other turns' work goes on.
 async fn stop_turn_work(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
@@ -3046,6 +3055,25 @@ async fn stop_turn_work(
         .runtime
         .stop_turn_work(id, &turns, &commands, &kept)
         .await?;
+    if let Some(coordinator) = &state.workflows {
+        // The chats of the stopped subagents and workflows, and those
+        // under them: a workflow launched there (one a subagent started)
+        // would deliver its result into a chat whose work has ended.
+        let mut under = std::collections::HashSet::new();
+        for task in &stopped.subagents {
+            under.extend(state.runtime.thread_tree_ids(task.child_thread_id).await?);
+        }
+        for run in &workflows {
+            if let Some(chat) = coordinator.get(*run, None).await?.thread_id {
+                under.extend(state.runtime.thread_tree_ids(chat).await?);
+            }
+        }
+        for run in coordinator.cancel_untold_from(&under).await? {
+            if !workflows.contains(&run) {
+                workflows.push(run);
+            }
+        }
+    }
     stopped.workflows = workflows;
     Ok(Json(stopped))
 }

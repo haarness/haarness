@@ -7602,6 +7602,9 @@
           },
           "threadId": {
             "type": "string"
+          },
+          "tree": {
+            "type": "string"
           }
         },
         "required": [],
@@ -12756,6 +12759,14 @@
           {
             "in": "query",
             "name": "threadId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tree",
             "required": false,
             "schema": {
               "type": "string"

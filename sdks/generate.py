@@ -253,7 +253,7 @@ def specification():
         "ToolCatalogQuery": obj({"threadId": S}),
         "ChatListQuery": obj({"threadId": S}),
         "PtyConnectQuery": obj({"cursor": N}),
-        "WorkflowRunsQuery": obj({"threadId": S, "limit": N}),
+        "WorkflowRunsQuery": obj({"threadId": S, "tree": S, "limit": N}),
         "WorkflowRunQuery": obj({"afterSequence": N}),
         "WorkflowWaitQuery": obj({"timeoutMs": N}),
         "ThreadQuery": obj({"archived": B}),

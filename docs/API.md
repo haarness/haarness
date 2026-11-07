@@ -433,8 +433,11 @@ command that completed. Enums may gain values; an unknown one reads as
   subagents they started (with everything under them), the commands they ran
   (`endedBy: turn_ended`), the named workflows launched from the chat, running
   or paused, cancelled with no result delivered, and the named commands of the
-  chat itself, whichever turn ran them. What the calls named in `keepCalls`
-  (by `tool_call` id) started goes on, as does every other turn's work. A
+  chat itself, whichever turn ran them. As `/interrupt` does for a whole tree,
+  every workflow launched from the chat of a stopped subagent or workflow, or
+  a chat under it, is cancelled too, with no result delivered. What the calls
+  named in `keepCalls` (by `tool_call` id) started goes on, as does every other
+  turn's work. A
   person's message steered into a stopped turn that its agent had not
   answered is answered in a turn of its own, as after the person's own Stop.
   It answers what began to stop (`StopTurnWorkResult`). A scheduled run ends
@@ -824,7 +827,9 @@ ordered logs, warnings, child-agent records, result/error, and timestamps.
 `GET /v1/workflows/runs/{id}?afterSequence=N` returns only logs newer than the
 given sequence. `GET /v1/workflows/runs?threadId=...` scopes recent runs to the
 conversation that launched them (with execution-thread matching retained only
-for legacy rows that predate launch-session persistence); the wait endpoint
+for legacy rows that predate launch-session persistence), and `?tree=...` to
+those launched from a conversation or any under it (its subagents' and
+theirs; servers with `turn-work-stop.v1`); the wait endpoint
 accepts a bounded timeout. Pause/cancel stop
 the active execution, and resume restarts paused/interrupted source from the
 beginning. `workflow.updated`, `workflow.log`, and `workflow.deleted` are live
