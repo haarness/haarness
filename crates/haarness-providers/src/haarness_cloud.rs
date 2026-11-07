@@ -302,20 +302,14 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
         );
         format!("You've reached Haarness Cloud's rate limit{limit} requests a minute. {next}")
     } else if message.contains("[exposure_cap]") {
-        // Cloud names a wait when requests still settling are in the way.
-        // Without one, this request alone could cost more than the cap, and
-        // no wait makes room. "usage limit" lets the words read on their own,
-        // and nothing in them asks the turn to try again.
-        if advised_seconds(&message).is_some() {
-            "Too many requests are still settling on this Haarness Cloud account. Wait a moment, \
-             then try again."
-                .to_owned()
-        } else {
-            "This request could cost more than the usage limit Haarness Cloud sets on requests in \
-             flight, so waiting won't help. Lower the output limit, or compact or shorten the \
-             conversation."
-                .to_owned()
-        }
+        // The router's words name only the cap, not whether this request
+        // alone could cost more than it, and Cloud before Retry-After sent
+        // none on any of these: the advice covers both. "usage limit" lets the
+        // words read on their own, and nothing in them asks the turn to retry.
+        "Too many requests are still settling on this Haarness Cloud account, past its usage \
+         limit for requests in flight. Wait a moment, then try again; if nothing else is running, \
+         lower the output limit or shorten the conversation."
+            .to_owned()
     } else if message.contains("[account_suspended]") {
         format!(
             "This Haarness Cloud account is suspended. Open Billing in Haarness Cloud for \
@@ -777,42 +771,37 @@ mod tests {
         );
     }
 
-    /// Cloud's unsettled-request cap names a wait only when requests still
-    /// settling are in the way; a request that alone could cost more than the
-    /// cap is told plainly that waiting won't help. The words read as a usage
-    /// limit (`describe_error` shows them as they are) and ask for no retry.
+    /// Cloud's refusal for its cap on requests in flight says the same with
+    /// or without a Retry-After (today's Cloud sends none), since its words
+    /// don't say whether this request alone is over the cap. They read as a
+    /// usage limit (`describe_error` shows them as they are) and ask for no
+    /// retry.
     #[test]
-    fn an_exposure_cap_says_whether_waiting_helps() {
-        let raw = "HTTP 429 Too Many Requests: [exposure_cap] too many unsettled requests for this \
-                   account (cap 5000000000 nanos)";
-        for readable in [readable, readable_router] {
-            let CoreError::Provider(message) = readable(CoreError::Provider(raw.into())) else {
-                panic!("still a provider error");
-            };
-            assert_eq!(
-                message,
-                "This request could cost more than the usage limit Haarness Cloud sets on \
-                 requests in flight, so waiting won't help. Lower the output limit, or compact or \
-                 shorten the conversation."
-            );
-            let lower = message.to_ascii_lowercase();
-            assert!(lower.contains("usage limit"), "{message}");
-            assert!(
-                !["try again", "retry", "wait a moment"]
-                    .iter()
-                    .any(|words| lower.contains(words)),
-                "{message}"
-            );
-            let CoreError::Provider(timed) =
-                readable(CoreError::Provider(format!("{raw} Please retry in 5s.")))
-            else {
-                panic!("still a provider error");
-            };
-            assert_eq!(
-                timed,
-                "Too many requests are still settling on this Haarness Cloud account. Wait a \
-                 moment, then try again."
-            );
+    fn an_exposure_cap_reads_right_on_every_cloud() {
+        let today = "HTTP 429 Too Many Requests: [exposure_cap] too many unsettled requests for this \
+                     account (cap 5000000000 nanos)";
+        for raw in [today.to_owned(), format!("{today} Please retry in 5s.")] {
+            for readable in [readable, readable_router] {
+                let CoreError::Provider(message) = readable(CoreError::Provider(raw.clone()))
+                else {
+                    panic!("still a provider error");
+                };
+                assert_eq!(
+                    message,
+                    "Too many requests are still settling on this Haarness Cloud account, past its \
+                     usage limit for requests in flight. Wait a moment, then try again; if nothing \
+                     else is running, lower the output limit or shorten the conversation.",
+                    "{raw}"
+                );
+                let lower = message.to_ascii_lowercase();
+                assert!(lower.contains("usage limit"), "{message}");
+                assert!(
+                    !["try again in a moment", "retry in", "won't help"]
+                        .iter()
+                        .any(|words| lower.contains(words)),
+                    "{message}"
+                );
+            }
         }
     }
 

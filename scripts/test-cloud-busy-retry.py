@@ -184,14 +184,15 @@ try:
                           'Try again in a moment, or once another chat or agent finishes.'), errors
     print(f'PASS a key that stays busy ends the turn after {sum(gaps):.0f} s in plain words: {errors[-1]}', flush=True)
     passed += 1
-    # A request that alone could cost more than the account's cap gets no Retry-After: no wait makes room, and the
-    # turn ends at once in plain words, not "Provider error".
-    turn, thread, gaps = scenario('too_costly', [('exposure_cap', None)])
+    # The cap on an account's requests in flight, as today's Cloud sends it (no Retry-After): the turn ends at once
+    # in plain words, not "Provider error", that fit a request that waits for others and one too costly alone.
+    turn, thread, gaps = scenario('in_flight_cap', [('exposure_cap', None)])
     errors = [item['message'] for item in items(thread, 'error')]
     assert turn['status'] == 'failed' and gaps == [], (turn, gaps, errors)
-    assert errors[-1] == ("This request could cost more than the usage limit Haarness Cloud sets on requests in flight, "
-                          "so waiting won't help. Lower the output limit, or compact or shorten the conversation."), errors
-    print(f'PASS a request over the unsettled-request cap ends at once, saying waiting won\'t help', flush=True)
+    assert errors[-1] == ("Too many requests are still settling on this Haarness Cloud account, past its usage limit for "
+                          "requests in flight. Wait a moment, then try again; if nothing else is running, lower the output "
+                          "limit or shorten the conversation."), errors
+    print('PASS the cap on requests in flight ends the turn at once in plain words', flush=True)
     passed += 1
     print(f'PASS {passed} Haarness Cloud busy scenarios.', flush=True)
 finally:
