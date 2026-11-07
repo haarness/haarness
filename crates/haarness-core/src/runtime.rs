@@ -1081,8 +1081,10 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
             && !lower.contains("per day"))
         .then(|| std::time::Duration::from_secs(1 << attempt.min(4)));
     };
-    let advised = advised_wait(rest)? + std::time::Duration::from_secs(1);
-    (advised <= LONGEST_ADVISED_WAIT).then_some(advised)
+    // The wait as named is held to the limit; the second added after
+    // lands the retry once the provider's window has opened.
+    let advised = advised_wait(rest)?;
+    (advised <= LONGEST_ADVISED_WAIT).then(|| advised + std::time::Duration::from_secs(1))
 }
 
 /// A wait written the way providers write it: "17.19s", "59s", "1m30s",
@@ -21919,6 +21921,24 @@ mod tests {
             )
             .is_none()
         );
+        // A named wait up to 90 seconds is sat out, a second more; a longer
+        // one fails.
+        for (named, waited) in [
+            ("89.5s", Some(90_500)),
+            ("90s", Some(91_000)),
+            ("90.5s", None),
+        ] {
+            assert_eq!(
+                super::retry_delay(
+                    &provider(&format!(
+                        "HTTP 429: rate limit exceeded. Please retry in {named}."
+                    )),
+                    1
+                ),
+                waited.map(std::time::Duration::from_millis),
+                "{named}"
+            );
+        }
         // A daily quota names hours: never mistaken for seconds.
         assert!(
             super::retry_delay(
