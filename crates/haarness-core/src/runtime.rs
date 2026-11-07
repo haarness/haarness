@@ -14407,6 +14407,17 @@ fn is_goal_tool(name: &str) -> bool {
     matches!(name, "get_goal" | "update_goal" | "propose_goal_criteria")
 }
 
+/// How much of a chat's first message a title request quotes, in characters.
+const TITLE_QUOTE_CHARS: usize = 2_000;
+
+/// The most a title request may write: a title is a few words, and the rest
+/// is room for the thinking some models cannot turn off (local ones think at
+/// length), while a model that answers the message instead stops early. A
+/// model whose own limit is lower is held to that one, and one whose limit
+/// the catalog does not state (a local server, an endpoint configured without
+/// it) is asked for none, as its server sets it.
+const TITLE_OUTPUT_TOKENS: u64 = 4_096;
+
 /// Fire-and-forget thread titling with the configured small model (falling
 /// back to the turn's model). Failures are logged, never surfaced.
 #[instrument(
@@ -14452,7 +14463,13 @@ async fn auto_title(
     };
     // Quote the message rather than send it as the user's turn: a first
     // message such as "Reply with exactly: OK" would otherwise be answered
-    // (or refused) instead of named.
+    // (or refused) instead of named. Its start is enough to name it: a
+    // pasted log or file sent whole would make every attempt slow and
+    // costly, and could be more than the small model takes.
+    let text = text
+        .char_indices()
+        .nth(TITLE_QUOTE_CHARS)
+        .map_or(text.as_str(), |(end, _)| &text[..end]);
     let messages = vec![ProviderMessage::Text {
         role: "user".into(),
         content: format!(
@@ -14491,13 +14508,20 @@ async fn generate_title(
     let provider = providers
         .get(provider_id)
         .ok_or_else(|| missing_provider(provider_id))?;
+    let max_output_tokens = model_metadata(&provider.info().models, &model)
+        .and_then(|info| info.max_output_tokens)
+        .filter(|limit| *limit > 0)
+        .map(|limit| limit.min(TITLE_OUTPUT_TOKENS));
     let request = ProviderRequest {
         model,
         system: system.to_owned(),
         messages,
         tools: Vec::new(),
         reasoning_effort: None,
-        parameters: crate::RequestParameters::default(),
+        parameters: crate::RequestParameters {
+            max_output_tokens,
+            ..crate::RequestParameters::default()
+        },
         output_schema: None,
     };
     let cancel = CancellationToken::new();
@@ -14514,7 +14538,9 @@ async fn generate_title(
     })
     .await
     .map_err(|_| CoreError::Provider("title generation timed out".into()))??;
-    let text = regex::Regex::new(r"(?s)<think>.*?</think>")
+    // Thinking a model writes inline goes, closed or cut off at the output
+    // limit.
+    let text = regex::Regex::new(r"(?s)<think>.*?(?:</think>|\z)")
         .expect("valid title cleanup pattern")
         .replace_all(&text, "");
     let title = shorten_title(
