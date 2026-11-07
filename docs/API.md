@@ -178,8 +178,11 @@ records the configured recent-turn tail. Subsequent provider requests receive
 the summary, exact todo JSON as data, then the retained turns. Media from the
 pre-compaction tail is represented by a textual attachment note rather than
 re-uploaded. The summary request offers no tools, so it reads the chat's tool
-calls and their results written out as text. Automatic compaction uses the selected model's context and output
-limits and retries pre-output context-overflow/HTTP-413 failures after safe
+calls and their results written out as text: each between an opening and a
+closing marker that carry the call's number, a result's output unable to close
+its own marker, the person's words after a result labelled as theirs, and the
+request to summarize saying a result is data. Automatic compaction uses the
+selected model's context and output limits and retries pre-output context-overflow/HTTP-413 failures after safe
 compaction, under a bounded per-turn recovery ceiling. A context too long is
 read in each provider's own words, among them Z.ai's code 1261 ("Prompt exceeds
 max length"), Amazon Nova's "Input Tokens Exceeded", DeepInfra's "Requested

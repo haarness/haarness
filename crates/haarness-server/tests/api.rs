@@ -551,12 +551,14 @@ impl CompactionQueueRace {
     }
 }
 
+/// A summary request ends on its request to summarize, in the chat's last
+/// message when that is the person's too.
 fn is_compaction_request(request: &ProviderRequest) -> bool {
     matches!(
         request.messages.last(),
         Some(ProviderMessage::Text { role, content })
             if role == "user"
-                && content.starts_with("Summarize this conversation for continuation:")
+                && content.contains("Summarize this conversation for continuation:")
     )
 }
 
@@ -4825,7 +4827,7 @@ async fn a_compaction_summary_asks_providers_to_write_no_cache_entry() {
     let requests = requests.lock().unwrap();
     let (summaries, turns): (Vec<_>, Vec<_>) = requests.iter().partition(|request| {
         matches!(request.messages.last(), Some(ProviderMessage::Text { content, .. })
-            if content.starts_with("Summarize this conversation for continuation"))
+            if content.contains("Summarize this conversation for continuation"))
     });
     assert_eq!(summaries.len(), 1, "{requests:#?}");
     assert!(summaries[0].parameters.uncached);
