@@ -893,7 +893,7 @@ impl Kept {
         for folder in home.into_iter().chain([workspace]) {
             for path in [
                 folder.to_path_buf(),
-                dunce::canonicalize(folder).unwrap_or_default(),
+                crate::paths::canonicalize(folder).unwrap_or_default(),
             ] {
                 if path.as_os_str().is_empty() {
                     continue;
@@ -1948,8 +1948,8 @@ mod tests {
         let workspace = root.join("home/project");
         std::fs::create_dir_all(workspace.join("sub/build")).unwrap();
         std::fs::create_dir_all(root.join("home/other/build")).unwrap();
-        let home = dunce::canonicalize(root.join("home")).unwrap();
-        let workspace = dunce::canonicalize(&workspace).unwrap();
+        let home = crate::paths::canonicalize(root.join("home")).unwrap();
+        let workspace = crate::paths::canonicalize(&workspace).unwrap();
         let _home = crate::permissions::TestHome::set(&home);
         let request = |workdir: &str| ReviewRequest {
             permission: "bash".into(),

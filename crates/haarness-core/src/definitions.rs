@@ -395,7 +395,7 @@ pub fn component_paths(root: &Path, kind: &str) -> Vec<PathBuf> {
             .collect(),
         _ => vec![],
     };
-    let canonical = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let canonical = crate::paths::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     for entry in entries {
         let path = root.join(&entry);
         if Path::new(&entry).is_absolute()
@@ -405,11 +405,11 @@ pub fn component_paths(root: &Path, kind: &str) -> Vec<PathBuf> {
         {
             continue;
         }
-        if let Ok(path) = dunce::canonicalize(&path) {
+        if let Ok(path) = crate::paths::canonicalize(&path) {
             if path.starts_with(&canonical)
                 && !paths
                     .iter()
-                    .any(|p| dunce::canonicalize(p).ok().as_ref() == Some(&path))
+                    .any(|p| crate::paths::canonicalize(p).ok().as_ref() == Some(&path))
             {
                 paths.push(path);
             }
@@ -695,7 +695,7 @@ fn expand_references(
     }
     let workspace = workspace
         .map(PathBuf::from)
-        .and_then(|path| dunce::canonicalize(&path).ok());
+        .and_then(|path| crate::paths::canonicalize(&path).ok());
     let home = haarness_protocol::home_dir();
     let mut seen = std::collections::HashSet::new();
     let mut blocks = Vec::new();
@@ -720,7 +720,7 @@ fn expand_references(
             blocks.push(directory_listing(&name, &target));
             continue;
         }
-        if let Some(reason) = dunce::canonicalize(&target).ok().and_then(|real| {
+        if let Some(reason) = crate::paths::canonicalize(&target).ok().and_then(|real| {
             crate::instructions::left_out(&real, workspace.as_deref(), &|file| {
                 rules.as_ref().and_then(|rules| {
                     (rules.evaluate(&format!("read:{}", file.display()))
@@ -766,7 +766,7 @@ fn reference_target(name: &str, workspace: Option<&Path>, home: Option<&Path>) -
     } else {
         workspace.join(name)
     };
-    let canonical = dunce::canonicalize(&candidate).ok()?;
+    let canonical = crate::paths::canonicalize(&candidate).ok()?;
     canonical.starts_with(workspace).then_some(canonical)
 }
 

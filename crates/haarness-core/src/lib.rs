@@ -18,6 +18,7 @@ pub mod instructions;
 pub mod links;
 pub mod mcp_content;
 pub mod patch;
+pub mod paths;
 mod permissions;
 mod ports;
 mod prefix_warmup;

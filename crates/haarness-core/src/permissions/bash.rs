@@ -5557,7 +5557,7 @@ fn resolve(workspace: &Path, argument: impl AsRef<Path>) -> PathBuf {
 }
 
 fn resolve_path(path: &Path, depth: u8) -> PathBuf {
-    if let Ok(resolved) = dunce::canonicalize(path) {
+    if let Ok(resolved) = crate::paths::canonicalize(path) {
         return resolved;
     }
     let mut resolved = PathBuf::new();
@@ -5586,7 +5586,7 @@ fn resolve_path(path: &Path, depth: u8) -> PathBuf {
                         // (Windows' short 8.3 names are its long ones).
                         if let Some(real) = resolved
                             .parent()
-                            .and_then(|parent| dunce::canonicalize(parent).ok())
+                            .and_then(|parent| crate::paths::canonicalize(parent).ok())
                         {
                             resolved = real.join(name);
                         }
@@ -6726,7 +6726,7 @@ mod tests {
         let analysis = analyze("cd /tmp", &workspace());
         assert!(analysis.patterns.is_empty(), "{analysis:?}");
         // As the system resolves it: /private/tmp on macOS.
-        let tmp = dunce::canonicalize("/tmp").unwrap();
+        let tmp = crate::paths::canonicalize("/tmp").unwrap();
         assert_eq!(analysis.external_dirs, vec![format!("{}/*", tmp.display())]);
     }
 
@@ -6790,7 +6790,7 @@ mod regression {
         let outside = root.join("external space");
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        let expected = vec![glob(&dunce::canonicalize(&outside).unwrap())];
+        let expected = vec![glob(&crate::paths::canonicalize(&outside).unwrap())];
         std::fs::write(outside.join("input"), "probe").unwrap();
         assert_eq!(
             analyze(&format!("'cat' '{}/'input", outside.display()), &workspace).external_dirs,
@@ -6841,7 +6841,7 @@ mod regression {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(workspace.join("file"), "x").unwrap();
-        let outside_dir = dunce::canonicalize(&outside).unwrap();
+        let outside_dir = crate::paths::canonicalize(&outside).unwrap();
         let expected = vec![glob(&outside_dir)];
         let new = outside.join("new");
         for command in [
@@ -6894,7 +6894,7 @@ mod regression {
         let outside = root.join("outside");
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(outside.join("sub")).unwrap();
-        let outside_dir = dunce::canonicalize(&outside).unwrap();
+        let outside_dir = crate::paths::canonicalize(&outside).unwrap();
         // A dangling link: writing through it creates its target.
         std::os::unix::fs::symlink(outside.join("missing"), workspace.join("dangling")).unwrap();
         // `..` after a link goes up from where the link leads.
@@ -6970,7 +6970,7 @@ mod regression {
         std::os::unix::fs::symlink("../deep/er/x", workspace.join("a/l")).unwrap();
         std::os::unix::fs::symlink(root.join("elsewhere"), workspace.join("away")).unwrap();
         std::fs::create_dir_all(root.join("elsewhere/sub")).unwrap();
-        let parent = dunce::canonicalize(&root).unwrap();
+        let parent = crate::paths::canonicalize(&root).unwrap();
         // Followed, `a/l/../../..` is the project; the shell's `cd` takes it by
         // name, which is the project's parent.
         for command in [
@@ -7014,7 +7014,7 @@ mod regression {
         std::fs::create_dir_all(workspace.join("a")).unwrap();
         std::fs::create_dir_all(workspace.join("sub")).unwrap();
         std::os::unix::fs::symlink("../deep/er/x", workspace.join("a/l")).unwrap();
-        let parent = dunce::canonicalize(&root).unwrap();
+        let parent = crate::paths::canonicalize(&root).unwrap();
         let tmp = analyze("cd /tmp && cat notes.txt", &workspace).external_dirs;
         assert!(!tmp.is_empty());
         for command in [
@@ -7078,7 +7078,7 @@ mod regression {
         std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
         std::os::unix::fs::symlink("../deep/er/x", workspace.join("a/l")).unwrap();
         std::os::unix::fs::symlink("../deep", workspace.join("sub/l")).unwrap();
-        let parent = vec![glob(&dunce::canonicalize(&root).unwrap())];
+        let parent = vec![glob(&crate::paths::canonicalize(&root).unwrap())];
         // Inside the project, read from where the `cd`s went: the
         // command's paths and its redirects, also after commands that
         // cannot move the shell; a link is entered where it leads.
@@ -7304,7 +7304,7 @@ mod regression {
         let workspace = root.join("project");
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         std::fs::create_dir_all(workspace.join("build")).unwrap();
-        let parent = vec![glob(&dunce::canonicalize(&root).unwrap())];
+        let parent = vec![glob(&crate::paths::canonicalize(&root).unwrap())];
         // `/bin/sh` expands these to `..` among the rest.
         for command in [
             "chmod -R a-w .*",
@@ -7363,7 +7363,7 @@ mod regression {
             std::env::temp_dir().join(format!("haarness-dash-dash-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("project");
         std::fs::create_dir_all(workspace.join("src")).unwrap();
-        let parent = vec![glob(&dunce::canonicalize(&root).unwrap())];
+        let parent = vec![glob(&crate::paths::canonicalize(&root).unwrap())];
         for command in [
             "mkdir -- - && rm -rf -- -/../../x",
             "cat -- -/../../x",
@@ -7399,7 +7399,7 @@ mod regression {
         assert_eq!(
             outside_deletions("mkdir -- - && rm -rf -- -/../../x", &workspace, None),
             vec![OutsideDeletion {
-                path: dunce::canonicalize(&root)
+                path: crate::paths::canonicalize(&root)
                     .unwrap()
                     .join("x")
                     .display()
@@ -7465,7 +7465,10 @@ mod regression {
             return;
         };
         let home = resolve(&home, "");
-        if dunce::canonicalize(&workspace).unwrap().starts_with(&home) {
+        if crate::paths::canonicalize(&workspace)
+            .unwrap()
+            .starts_with(&home)
+        {
             std::fs::remove_dir_all(root).unwrap();
             return;
         }
@@ -7513,7 +7516,10 @@ mod regression {
             .filter(|home| home.is_absolute())
             .unwrap_or_else(|| PathBuf::from("/"));
         let home = resolve(&home, "");
-        if dunce::canonicalize(&workspace).unwrap().starts_with(&home) {
+        if crate::paths::canonicalize(&workspace)
+            .unwrap()
+            .starts_with(&home)
+        {
             // A temporary folder inside home cannot tell the two apart.
             std::fs::remove_dir_all(root).unwrap();
             return;
@@ -8456,7 +8462,7 @@ mod readings {
         let outside = root.join("outside");
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        let expected = vec![glob(&dunce::canonicalize(&outside).unwrap())];
+        let expected = vec![glob(&crate::paths::canonicalize(&outside).unwrap())];
         let nested = format!("echo {}x{}", "$(echo ".repeat(1500), ")".repeat(1500));
         let command = format!(
             "{nested}; touch {}/x; echo y > {}/z",
@@ -8516,7 +8522,7 @@ mod readings {
         let outside = root.join("outside");
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        let expected = vec![glob(&dunce::canonicalize(&outside).unwrap())];
+        let expected = vec![glob(&crate::paths::canonicalize(&outside).unwrap())];
         let outside = outside.display();
         for command in [
             format!("sudo rm -rf {outside}/x"),
@@ -8550,7 +8556,7 @@ mod readings {
         std::fs::create_dir_all(workspace.join("build")).unwrap();
         std::fs::create_dir_all(workspace.join("sub").join("node_modules")).unwrap();
         std::fs::create_dir_all(outside.join("cache")).unwrap();
-        let outside_real = dunce::canonicalize(&outside).unwrap();
+        let outside_real = crate::paths::canonicalize(&outside).unwrap();
         let cache = outside_real.join("cache").display().to_string();
         let placed = |path: &str| OutsideDeletion {
             path: path.to_owned(),
@@ -9337,7 +9343,7 @@ mod backslash_lines {
         // Nothing else reads those words as the command before's.
         assert!(!is_obviously_read_only("ls\n\\rm -rf victim"));
         let workspace = std::env::current_dir().unwrap();
-        let parent = dunce::canonicalize(workspace.parent().unwrap()).unwrap();
+        let parent = crate::paths::canonicalize(workspace.parent().unwrap()).unwrap();
         assert_eq!(
             analyze("true\n\\cat ../x", &workspace).external_dirs,
             vec![glob(&parent)]
@@ -9901,7 +9907,7 @@ mod wrappers {
         let workspace = root.join("project");
         std::fs::create_dir_all(workspace.join("sub/deeper")).unwrap();
         std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
-        let parent = vec![glob(&dunce::canonicalize(&root).unwrap())];
+        let parent = vec![glob(&crate::paths::canonicalize(&root).unwrap())];
         // Read as after a plain `cd` that opens an `&&` chain: the folder
         // checked like the `cd`'s, the command's relative paths from there
         // when it is plain and there, else from where the shell started.
@@ -10074,7 +10080,7 @@ mod wrappers {
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         std::fs::create_dir_all(root.join("outside")).unwrap();
         std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
-        let parent = vec![glob(&dunce::canonicalize(&root).unwrap())];
+        let parent = vec![glob(&crate::paths::canonicalize(&root).unwrap())];
         // After a step that ran (it may have made `src` a link out), in a
         // line of more than one statement, a pipeline, a step with an
         // assignment or a substitution, and in text run again, a `cd` is not
