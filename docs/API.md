@@ -423,8 +423,9 @@ command that completed. Enums may gain values; an unknown one reads as
   output past `cursor` is there already; `settled` says the command has ended
   and `size` is final. Terminal escapes are left in for the client to strip.
 - `POST …/commands/{command}/stop` stops it for a person, with every process
-  it started (interrupt, terminate, then kill, `execution.shell_stop_grace_ms`
-  apart). The answer reads `stopping` until the process has exited, then a
+  in its process group, its process tree on Windows (interrupt, terminate,
+  then kill, `execution.shell_stop_grace_ms` apart). The answer reads
+  `stopping` until the process has exited, then a
   `command.updated` event reports `stopped`. Stopping an ended command answers
   it unchanged.
 - `POST /v1/threads/{id}/commands/background` sends every running foreground

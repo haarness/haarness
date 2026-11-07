@@ -3,12 +3,14 @@
 //! agents more reach refuse changes from such a process, so an agent cannot widen what the person allowed by running
 //! a command, whatever variables that command clears.
 //!
-//! Two marks tell: the process's ancestry, and the process group Haarness starts each command in. A program that
-//! left the tree (put in the background with `nohup` or `( … & )`, so the system handed it to launchd) still runs in
-//! its command's group, and the group's leader, the command's own shell, is still below Haarness: a server stops the
-//! whole group when the command ends, so nothing in it outlives the command. What escapes both is a program that
-//! also leaves its group or session on purpose, or one launchd or another app starts for it (`launchctl`, `at`,
-//! `open`): this guards the routes an agent would take, not a determined program.
+//! Two marks tell: the process's ancestry, and the process group Haarness starts each command in. A command's shell
+//! starts without job control, so a program that left the tree (put in the background with `nohup` or `( … & )` and
+//! handed to launchd by the system) still runs in its command's group, whose leader, the command's own shell, is still
+//! below Haarness; a server stops that group when the command ends, and until then knows it as one it started. What
+//! escapes both is a program that moves to a group or session of its own (job control turned on with `set -m`,
+//! `setsid`, a daemon detaching itself) once the process that started it is gone, which also outlives its command,
+//! or one launchd or another app starts for it (`launchctl`, `at`, `open`): this guards the routes an agent would
+//! take, not a determined program.
 //!
 //! This reads the process table, so it costs a `ps` (and an `lsof` to place a local connection): callers ask only for
 //! the rare request that would widen something.
