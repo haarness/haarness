@@ -4235,6 +4235,27 @@ mod tests {
         assert_eq!(read("other.txt").as_deref(), Some(&b"o1\n"[..]));
     }
 
+    /// A folder opened to change its times: Windows opens one only with
+    /// the flag that lets a handle name a folder, and the right to write
+    /// its attributes.
+    fn folder_handle(folder: &Path) -> fs::File {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(folder)
+                .unwrap()
+        }
+        #[cfg(not(windows))]
+        {
+            fs::File::open(folder).unwrap()
+        }
+    }
+
     #[tokio::test]
     async fn copies_of_undos_no_longer_pending_are_dropped_oldest_first_for_room() {
         let (guard, mut store) = fixture();
@@ -4243,8 +4264,7 @@ mod tests {
             let set = store.copies.set(backup).unwrap();
             fs::create_dir_all(&set).unwrap();
             fs::write(set.join("copy"), large(byte)).unwrap();
-            fs::File::open(&set)
-                .unwrap()
+            folder_handle(&set)
                 .set_modified(std::time::SystemTime::now() - age)
                 .unwrap();
             set
@@ -4306,9 +4326,7 @@ mod tests {
         assert!(unnamed.exists(), "kept as long as checkpoints are");
         assert!(archived.exists());
         // A pass that keeps every checkpoint keeps every copy.
-        let _ = fs::File::open(&unnamed)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - day * 30);
+        let _ = folder_handle(&unnamed).set_modified(std::time::SystemTime::now() - day * 30);
         store.sweep().unwrap();
         assert!(unnamed.exists());
 

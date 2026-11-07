@@ -1459,7 +1459,9 @@ async fn a_loaded_tool_stays_offered_after_a_restart_and_in_a_fork() {
         2
     );
 
+    // The database closes before its folder goes: Windows removes no open file.
     drop(restarted);
+    drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1608,6 +1610,8 @@ async fn auto_keeps_deferring_a_chats_tools_across_a_restart_and_in_a_fork() {
         ["mcp__docs__list", "mcp__docs__search", "read"]
     );
 
+    // The database closes before its folder goes: Windows removes no open file.
     drop(runtime);
+    drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }

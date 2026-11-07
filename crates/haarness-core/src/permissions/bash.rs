@@ -7946,11 +7946,13 @@ mod readings {
                 analysis.external_dirs
             );
             assert!(!analysis.unreadable, "{command}");
+            // `~/x` in the home folder, written the system's way (`C:\Users\sam\x`).
+            let deletions = outside_deletions(command, &workspace, None);
             assert!(
-                outside_deletions(command, &workspace, None)
+                deletions
                     .iter()
-                    .any(|deletion| deletion.path.ends_with("/x")),
-                "{command}"
+                    .any(|deletion| Path::new(&deletion.path).ends_with("x")),
+                "{command}: {deletions:?}"
             );
         }
         // A delimiter that starts with `-` keeps its document's text a text.
