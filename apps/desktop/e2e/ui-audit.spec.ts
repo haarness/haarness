@@ -181,5 +181,39 @@ test("capture surfaces", async () => {
   await shot("16-palette-th");
   await page.keyboard.press("Escape");
   await page.waitForTimeout(300);
-  await prefs({ language: "en", palette: "haarness" });
+
+  // A canvas preview's banners in the chat: their frames, buttons and a
+  // comparison, and in the Files panel the version strip and the notice a
+  // blocked link brings.
+  await prefs({ theme: "light", language: "en" });
+  await writeFile(join(workspace, "canvas.html"), '<h1>Canvas first</h1><a href="https://example.test/leave">Leave</a>\n');
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  const idle = () => expect(page.getByRole("button", { name: "Stop response", exact: true })).toHaveCount(0);
+  await composer.fill('!tool preview {"filePath":"canvas.html","title":"Canvas demo"}');
+  await composer.press("Enter");
+  await expect(page.locator(".preview-banner")).toHaveCount(1);
+  await idle();
+  await writeFile(join(workspace, "canvas.html"), '<h1>Canvas second</h1><a href="https://example.test/leave">Leave</a>\n');
+  await composer.fill('!tool preview {"filePath":"canvas.html","title":"Canvas updated"}');
+  await composer.press("Enter");
+  await expect(page.locator(".preview-banner")).toHaveCount(2);
+  await idle();
+  const earlier = page.locator(".preview-banner").first();
+  await earlier.getByRole("button", { name: "Compare", exact: true }).click();
+  await expect(earlier.locator(".preview-added")).toBeVisible();
+  await earlier.getByRole("button", { name: "Open preview", exact: true }).click();
+  await expect(page.locator(".preview-version-strip")).toBeVisible();
+  const content = page.frameLocator(".file-preview .html-preview iframe").frameLocator("iframe").frameLocator("iframe");
+  await content.getByRole("link", { name: "Leave" }).click();
+  await expect(page.locator(".file-preview .preview-notice")).toBeVisible();
+  await earlier.scrollIntoViewIfNeeded();
+  await shot("17-preview-banner-light");
+  await prefs({ theme: "dark" });
+  await shot("18-preview-banner-dark");
+  await prefs({ language: "ar" });
+  await shot("19-preview-banner-ar");
+  await prefs({ theme: "light" });
+  await shot("20-preview-banner-ar-light");
+  await prefs({ theme: "dark", language: "en", palette: "haarness" });
 });

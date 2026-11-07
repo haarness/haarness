@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item, ItemData } from "@haarness/sdk";
 import {
+  codeBlockShows,
+  hasCodeCharacters,
   shortenSpelled,
+  spelledCharacter,
   spelledOutParts,
   spelledOutPlain,
   spelledOutText,
@@ -170,6 +173,41 @@ test("an edit on its card shows only what turns a line's direction as a code", (
   );
   for (const text of ["مرحبا\u200f بالعالم", "a\u200bb\tc", "שלום"])
     assert.deepEqual(spelledOutParts(text, turnsDirection), [{ text, code: false }]);
+});
+
+test("a reply's code block shows its control characters and direction controls as codes, and each code reads back as its character", () => {
+  const code = "printf '\u001b[31mred\u001b[0m\u0007'\u0008\u007f\u009b x\tz\nadmin\u202e \u2066// note\u2069 \u200f\u200e\u061c";
+  const parts = spelledOutParts(code, codeBlockShows);
+  assert.equal(
+    parts.map((part) => part.text).join(""),
+    "printf '\\u{1B}[31mred\\u{1B}[0m\\u{7}'\\u{8}\\u{7F}\\u{9B} x\tz\nadmin\\u{202E} \\u{2066}// note\\u{2069} \\u{200F}\\u{200E}\\u{61C}",
+  );
+  // Copy turns every code back into its character: the code as written.
+  assert.equal(
+    parts.map((part) => (part.code ? spelledCharacter(part.text) : part.text)).join(""),
+    code,
+  );
+  // What belongs to the text stays as written: joiners, selectors, emoji
+  // sequences and flags, and the invisible spaces an approval shows as codes.
+  for (const text of [
+    "👩\u200d👩\u200d👧 ❤\ufe0f 🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}",
+    "क्\u200dष می\u200cخواهم",
+    "a\u200bb\ufeffc\u00add",
+    "const x = '\\u{1B}';",
+  ])
+    assert.deepEqual(spelledOutParts(text, codeBlockShows), [{ text, code: false }]);
+  for (const text of ["\\u{1B}", "\\u{110000}", "\\u{1b}", "u{1B}", "\\u{}", "\\u{1B}x"])
+    assert.equal(spelledCharacter(text), text === "\\u{1B}" ? "\u001b" : undefined, text);
+});
+
+test("the quick test for a code block's characters finds exactly the ones it shows as codes", () => {
+  for (let code = 0; code <= 0x10ffff; code++) {
+    if (code >= 0xd800 && code <= 0xdfff) continue;
+    const character = String.fromCodePoint(code);
+    if (hasCodeCharacters(character) !== codeBlockShows(code)) assert.fail(`U+${code.toString(16).toUpperCase()}`);
+  }
+  assert.equal(hasCodeCharacters("const a = 1;\n\tb 👩\u200d👧"), false);
+  assert.equal(hasCodeCharacters("ok\u001b[0m"), true);
 });
 
 test("every kind of row target shows what would not show as a code", () => {

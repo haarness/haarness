@@ -198,15 +198,14 @@ test("a click loads only addresses that are on the host its button names", () =>
 });
 
 test("a reply keeps none of the attributes and classes placeholders use", () => {
-  assert.equal(replyAttribute("data-remote-src", "https://evil.example/"), undefined);
-  assert.equal(replyAttribute("data-remote-host", "github.com"), undefined);
-  assert.equal(replyAttribute("DATA-REMOTE-ALT", "x"), undefined);
-  assert.equal(replyAttribute("class", "remote-image"), undefined);
-  assert.equal(replyAttribute("class", "note  remote-image-load big REMOTE-IMAGE-alt"), "note big");
-  // Anything else stays as written.
-  assert.equal(replyAttribute("class", "remoteimage  wide"), "remoteimage  wide");
-  assert.equal(replyAttribute("data-note", "kept"), "kept");
-  assert.equal(replyAttribute("title", "remote-image"), "remote-image");
+  assert.equal(replyAttribute("data-remote-src", "https://evil.example/", "SPAN"), undefined);
+  assert.equal(replyAttribute("data-remote-host", "github.com", "SPAN"), undefined);
+  assert.equal(replyAttribute("DATA-REMOTE-ALT", "x", "SPAN"), undefined);
+  assert.equal(replyAttribute("class", "remote-image", "SPAN"), undefined);
+  assert.equal(replyAttribute("class", "note  remote-image-load big REMOTE-IMAGE-alt", "SPAN"), undefined);
+  // Anything else stays as written (a class never does: markdown-dom.test.ts).
+  assert.equal(replyAttribute("data-note", "kept", "SPAN"), "kept");
+  assert.equal(replyAttribute("title", "remote-image", "SPAN"), "remote-image");
 });
 
 test("only http and https addresses without credentials are fetched", () => {

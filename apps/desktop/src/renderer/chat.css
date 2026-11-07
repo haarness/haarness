@@ -304,7 +304,16 @@
 }
 
 /* ---------------------------------------------------------------- markdown */
+/* What a reply's raw HTML places by itself (an open <dialog> is placed
+   absolutely) is placed in this box and stacks inside it, so it never lies
+   over the message box or the rest of the window; the app's classes it
+   might borrow to do more are dropped before it is drawn (remote-images.ts).
+   This clips nothing and moves nothing: layout containment would keep the
+   margins of a first or last quote's text from meeting those around the
+   reply, and keep wide content in a previewed file from scrolling. */
 .markdown {
+  position: relative;
+  isolation: isolate;
   line-height: var(--lh-read);
   font-size: var(--font-size);
   overflow-wrap: anywhere;
@@ -486,8 +495,12 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
 }
 
 /* Fenced code gets a quiet frame, its language, and a Copy control that only
-   appears once the pointer or keyboard is inside the block. */
+   appears once the pointer or keyboard is inside the block. It reads left to
+   right whatever the interface or a reply's markup around it says, so it is
+   shown in the order Copy copies it. */
 .markdown pre {
+  direction: ltr;
+  unicode-bidi: isolate;
   position: relative;
   background: var(--surface);
   border: 1px solid var(--hairline);
@@ -2203,9 +2216,11 @@ html[dir="rtl"] .tool-target {
 .diff-line .spelled-code {
   color: inherit;
 }
-/* In a tool's input panel it takes the text color: the chip sets it apart,
-   and muted on the chip over the panel would read too faint. */
-.tool-input .spelled-code {
+/* In a tool's input panel and in a reply's code block it takes the text
+   color: the chip sets it apart, and muted on the chip over the panel would
+   read too faint. */
+.tool-input .spelled-code,
+.markdown pre .spelled-code {
   color: var(--text);
 }
 /* An explicit Chrome request names each site it asks for, one per line. */
