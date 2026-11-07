@@ -190,9 +190,11 @@ a key of 16 random hex digits that Haarness makes for that one request, so no
 text it quotes was written knowing it, and the request says that only markers
 with that key open or close anything: a lookalike without it, whatever its
 characters, is part of the text around it. Everything the request quotes is
-sent as it was written, angle brackets and all; only a copy of the key, should
-one turn up, is left out. A chat with nothing to mark is sent without markers
-or key.
+sent as it was written, angle brackets and all, but for two things: a copy of
+the key, should one turn up, is left out, and a tool name, which sits inside a
+marker, has its `&`, `"`, `<` and `>` written as character entities and its
+control characters and Unicode line and paragraph separators as numeric ones.
+A chat with nothing to mark is sent without markers or key.
 Automatic compaction uses the
 selected model's context and output limits and retries pre-output context-overflow/HTTP-413 failures after safe
 compaction, under a bounded per-turn recovery ceiling. A context too long is
