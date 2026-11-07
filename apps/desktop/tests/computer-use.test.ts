@@ -94,6 +94,24 @@ test("the card's main line is said in the person's language from the request's p
   assert.equal(computerApproval(request({ kind: "act", action: "click", app: "メモ", label: "保存" }), translate).summary, "メモ で 「保存」 をクリック");
 });
 
+test("an app's label cannot turn the card's line around", () => {
+  const line = (mac: Record<string, unknown>) => computerApproval(request({ kind: "act", app: "Notes", label: null, ...mac }), english).summary;
+  // Each direction mark and isolate: Arabic letter mark, LRM, RLM, LRE…RLO, LRI…PDI.
+  const marks = "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069";
+  assert.equal(line({ action: "click", label: "Save\u2069\u202e" }), "Click “Save” in Notes");
+  assert.equal(line({ action: "press", keys: `Meta+S${marks}`, app: `No${marks}tes` }), "Press Meta+S in Notes");
+  assert.equal(
+    line({ action: "drag", label: `a${marks}b`, endApp: `\u202eFinder` }),
+    "Drag “ab” from Notes to Finder",
+  );
+  assert.equal(line({ action: "squeeze", summary: "Squeeze \u202eit in Notes" }), "Squeeze it in Notes");
+  // The translation's own marks stay: only the parts lose theirs.
+  const isolating = (key: string, values?: Record<string, string>) =>
+    `\u2067${Object.entries(values ?? {}).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, value), key)}\u2069`;
+  const card = computerApproval(request({ kind: "act", action: "click", app: "Notes", label: "Save\u202e" }), isolating);
+  assert.equal(card.summary, "\u2067Click \u2067“Save”\u2069 in Notes\u2069");
+});
+
 test("a request that asks every time offers nothing lasting and says why", () => {
   const console = computerApproval(request({ kind: "act", app: "Terminal", console: true, everyTime: true }, false), english);
   assert.equal(console.inChat, null);

@@ -153,18 +153,30 @@ const scrollLines: Record<string, string> = {
 };
 
 /**
+ * A part of a card's line as an app gave it (an element's label, an app's name, keys), without the marks and isolates
+ * that set the direction of text (U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069): one could end the part's
+ * place in the line early and turn the rest of the line around.
+ */
+function plainPart<T extends string | null | undefined>(text: T): T {
+  return (text?.replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "") ?? text) as T;
+}
+
+/**
  * The card's main line in the person's language, built from the request's parts; null when the server sent an action
  * this build does not know, whose line the server's own words then give.
  */
 export function computerLine(mac: MacDetail, translate: (key: string, values?: Record<string, string>) => string) {
   if (!mac.parts) return null;
-  const app = mac.app ?? mac.bundle ?? translate("this app");
-  const target = mac.label ? translate("“{label}”", { label: mac.label }) : translate("the marked spot");
+  const app = plainPart(mac.app ?? mac.bundle) ?? translate("this app");
+  const label = plainPart(mac.label);
+  const target = label ? translate("“{label}”", { label }) : translate("the marked spot");
+  const endApp = plainPart(mac.endApp);
+  const keys = plainPart(mac.keys);
   if (mac.kind === "launch") return translate(mac.action === "quit" ? "Quit {app}" : "Open {app}", { app });
-  if (mac.action === "press" && mac.keys) return translate("Press {keys} in {app}", { keys: mac.keys, app });
+  if (mac.action === "press" && keys) return translate("Press {keys} in {app}", { keys, app });
   if (mac.action === "drag")
-    return mac.endApp && mac.endApp !== app
-      ? translate("Drag {target} from {app} to {endApp}", { target, app, endApp: mac.endApp })
+    return endApp && endApp !== app
+      ? translate("Drag {target} from {app} to {endApp}", { target, app, endApp })
       : translate("Drag {target} in {app}", { target, app });
   if (mac.action === "scroll") {
     const line = scrollLines[mac.direction ?? "down"];
@@ -202,7 +214,9 @@ export function computerApproval(
   else if (mac.everyTime) notes.push(translate("You set this app to ask every time."));
   return {
     summary:
-      mac.kind === "screen" ? translate("Look at every app's windows") : (computerLine(mac, translate) ?? mac.summary ?? app),
+      mac.kind === "screen"
+        ? translate("Look at every app's windows")
+        : (computerLine(mac, translate) ?? plainPart(mac.summary ?? app)),
     preview: mac.kind === "screen" ? null : mac.preview,
     text: mac.text ? shownText(mac.text) : null,
     keys: mac.text ? null : mac.keys,
