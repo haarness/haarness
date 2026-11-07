@@ -134,7 +134,13 @@ its defaults. Inline configuration overrides those defaults. Follow-ups use the 
 `wait=false` submits the message after startup and returns without waiting for the reply.
 Waits default to 120 seconds (maximum 600). A startup timeout reports `messageSubmitted:false`;
 retry `ask` with that workspace ID once it is running. A running turn at timeout continues remotely:
-use `wait` with its IDs instead of submitting another message. History supports `after`/`nextAfter`
+use `wait` with its IDs instead of submitting another message. The timeout bounds every read made
+while waiting, so a workspace or Cloud that stops answering cannot hold the call past it: the reads
+that close the answer once it has passed (the turn's last state, its history) get five seconds each,
+and a read left unanswered ends the call with the last state known and a `message` saying the
+workspace did not answer. An ask stopped that way before its message went in reports
+`messageSubmitted:false`. Submitting a message, creating a chat or workspace and starting one are
+never cut short, so the answer always says whether they happened. History supports `after`/`nextAfter`
 cursors and `limit` (1–100); without `after`, it returns the latest page.
 
 Waits use the account WebSocket for startup and the runtime SSE stream for turn/approval

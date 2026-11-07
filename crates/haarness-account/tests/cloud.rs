@@ -48,6 +48,11 @@ struct Data {
     control_rejections: usize,
     stale_generation: bool,
     stale_generation_on_write: bool,
+    /// Answer this many runtime requests, then accept every later one and
+    /// never answer it.
+    runtime_answers: Option<usize>,
+    /// The same for Cloud's reads of the workspace.
+    workspace_answers: Option<usize>,
 }
 type Shared = Arc<Mutex<Data>>;
 fn agent(d: &Data) -> Value {
@@ -65,6 +70,29 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
         .to_owned();
     let bytes = to_bytes(req.into_body(), 1024 * 1024).await.unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let silent = {
+        let mut d = state.lock().unwrap();
+        let seen = |prefix: &str| {
+            d.requests
+                .iter()
+                .filter(|r| r.1.starts_with(prefix) && (r.0 == "GET" || prefix == "/runtime/"))
+                .count()
+        };
+        let workspace = format!("/api/v1/workspaces/{WORKSPACE}?");
+        let silent = path.starts_with("/runtime/")
+            && d.runtime_answers.is_some_and(|n| seen("/runtime/") >= n)
+            || method == "GET"
+                && format!("{path}?") == workspace
+                && d.workspace_answers.is_some_and(|n| seen(&workspace) >= n);
+        if silent {
+            d.requests
+                .push((method.clone(), format!("{path}?{query}"), body.clone()));
+        }
+        silent
+    };
+    if silent {
+        return std::future::pending().await;
+    }
     let mut d = state.lock().unwrap();
     d.requests
         .push((method.clone(), format!("{path}?{query}"), body.clone()));
@@ -615,6 +643,10 @@ async fn timeout_and_history_cursors_continue_without_resubmitting() {
     let result=cloud.workspace(json!({"action":"ask","workspaceId":WORKSPACE,"threadId":THREAD,"message":"hello","timeoutSeconds":1})).await.unwrap();
     assert_eq!(result["status"], "running");
     assert_eq!(result["turnId"], TURN);
+    // A workspace that answers is read once more after the deadline, with
+    // the history.
+    assert_eq!(result["messages"]["items"][4]["sequence"], 5);
+    assert!(result.get("message").is_none(), "{result}");
     let first = cloud
         .workspace(
             json!({"action":"messages","workspaceId":WORKSPACE,"threadId":THREAD,"after":0,"limit":2}),
@@ -1426,4 +1458,141 @@ async fn cloud_schedule_adapter_is_explicit_scoped_versioned_and_never_installs_
     assert!(d.schedule.is_none());
     assert_eq!(d.attachments, 0);
     assert!(!d.started && !d.created);
+}
+
+/// How long `call` took, failing past `limit`: a wait must answer by its own
+/// deadline even when nothing answers it.
+async fn answered_within<T>(
+    limit: std::time::Duration,
+    call: impl std::future::Future<Output = T>,
+) -> (T, std::time::Duration) {
+    let started = std::time::Instant::now();
+    let value = tokio::time::timeout(limit, call)
+        .await
+        .expect("the call ran past its deadline");
+    (value, started.elapsed())
+}
+
+#[tokio::test]
+async fn a_wait_on_a_workspace_that_never_answers_ends_at_its_deadline() {
+    use std::time::Duration as Wall;
+    let f = Fixture::new(true).await;
+    f.data.lock().unwrap().runtime_answers = Some(0);
+    let cloud = f.cloud(CancellationToken::new()).await;
+
+    // The chat cannot even be read: the wait says the work goes on.
+    let (result, took) = answered_within(
+        Wall::from_secs(6),
+        cloud.chat(json!({"action":"wait","workspaceId":WORKSPACE,"chatId":THREAD,"turnId":TURN,"timeoutSeconds":2})),
+    )
+    .await;
+    let result = result.unwrap();
+    assert!(took >= Wall::from_millis(1900), "{took:?}");
+    assert!(took < Wall::from_secs(3), "{took:?}");
+    assert_eq!(result["status"], "running");
+    assert_eq!(result["chatId"], THREAD);
+    assert_eq!(result["threadId"], THREAD);
+    assert_eq!(result["turnId"], TURN);
+    assert_eq!(result["messageSubmitted"], false);
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("did not answer within timeoutSeconds"),
+        "{result}"
+    );
+
+    // An ask that cannot reach its chat submits nothing and says so.
+    let (result, took) = answered_within(
+        Wall::from_secs(6),
+        cloud.workspace(json!({"action":"ask","workspaceId":WORKSPACE,"threadId":THREAD,"message":"hello","timeoutSeconds":1})),
+    )
+    .await;
+    let result = result.unwrap();
+    assert!(took < Wall::from_secs(2), "{took:?}");
+    assert_eq!(result["messageSubmitted"], false);
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("no message was submitted"),
+        "{result}"
+    );
+    assert_eq!(
+        f.count("POST", &format!("/runtime/v1/threads/{THREAD}/turns")),
+        0
+    );
+
+    // Stopping a wait that nothing answers still stops it, as a cancellation.
+    let cancel = CancellationToken::new();
+    let cloud = f.cloud(cancel.clone()).await;
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Wall::from_millis(300)).await;
+        stop.cancel();
+    });
+    let (result, took) = answered_within(
+        Wall::from_secs(6),
+        cloud.workspace(json!({"action":"wait","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN,"timeoutSeconds":30})),
+    )
+    .await;
+    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    assert!(took < Wall::from_secs(2), "{took:?}");
+}
+
+#[tokio::test]
+async fn a_workspace_that_stops_answering_mid_wait_gets_its_last_known_turn_back() {
+    use std::time::Duration as Wall;
+    let f = Fixture::new(true).await;
+    {
+        let mut d = f.data.lock().unwrap();
+        d.running_turn = true;
+        // The chat, the turn, one poll of the turn and of approvals; then
+        // nothing.
+        d.runtime_answers = Some(4);
+    }
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let (result, took) = answered_within(
+        Wall::from_secs(8),
+        cloud.workspace(json!({"action":"wait","workspaceId":WORKSPACE,"threadId":THREAD,"turnId":TURN,"timeoutSeconds":3})),
+    )
+    .await;
+    let result = result.unwrap();
+    assert!(took >= Wall::from_millis(2900), "{took:?}");
+    assert!(took < Wall::from_secs(4), "{took:?}");
+    assert_eq!(result["status"], "running");
+    assert_eq!(result["turn"]["id"], TURN);
+    assert_eq!(result["turnId"], TURN);
+    // The workspace is not asked for the history it would not give either.
+    assert!(result.get("messages").is_none(), "{result}");
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("use wait with these IDs"),
+        "{result}"
+    );
+    assert_eq!(
+        f.count("GET", &format!("/runtime/v1/threads/{THREAD}/items")),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_startup_wait_cloud_does_not_answer_ends_at_its_deadline_with_nothing_submitted() {
+    use std::time::Duration as Wall;
+    let f = Fixture::new(true).await;
+    f.data.lock().unwrap().workspace_answers = Some(0);
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let (result, took) = answered_within(
+        Wall::from_secs(6),
+        cloud.workspace(json!({"action":"ask","message":"hello","timeoutSeconds":1})),
+    )
+    .await;
+    let result = result.unwrap();
+    assert!(took < Wall::from_secs(2), "{took:?}");
+    assert_eq!(result["workspaceId"], WORKSPACE);
+    assert_eq!(result["status"], "pending");
+    assert_eq!(result["messageSubmitted"], false);
+    assert_eq!(f.count("POST", "/api/v1/workspaces"), 1);
 }
