@@ -157,7 +157,7 @@ pub struct Derived {
 /// Commands whose non-flag arguments are filesystem paths worth resolving.
 /// `pushd` enters its folder like `cd`.
 const PATH_COMMANDS: &[&str] = &[
-    "cd", "pushd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
+    "cd", "pushd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "chgrp", "cat",
 ];
 
 /// Programs that only look at the files they are given (their names, sizes,
@@ -286,6 +286,8 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         folder: None,
         here: None,
         lost: false,
+        names_work_tree: false,
+        work_trees: Vec::new(),
     };
     if !reader.read(command, Depth::default()) {
         return fallback(command);
@@ -668,6 +670,12 @@ struct Reader<'w> {
     /// what runs behind a wrapper whose folder nobody can place (`env -C
     /// "$d"`, `sudo -i`, `find -execdir`).
     lost: bool,
+    /// The text being read, or one it is read from, names `GIT_WORK_TREE`:
+    /// a `git clean` may clean a work tree set where it is not read.
+    names_work_tree: bool,
+    /// The `GIT_WORK_TREE` settings of the command being read, by where
+    /// each starts: see [`work_tree_settings`].
+    work_trees: Vec<(usize, Path_)>,
 }
 
 /// The written command whose standard input a program reads.
@@ -914,6 +922,9 @@ impl Reader<'_> {
         let outer_folder = self.folder.take();
         let outer_here = self.here.take();
         let outer_lost = self.lost;
+        let outer_names_work_tree = self.names_work_tree;
+        self.names_work_tree |= command.contains("GIT_WORK_TREE");
+        let outer_work_trees = std::mem::take(&mut self.work_trees);
         let continued = command.contains("\\\n");
         // The written command each command node is read for, by where the
         // node starts.
@@ -961,6 +972,9 @@ impl Reader<'_> {
             // here-document operator are the command's too.
             let (words, carried) = command_words(node, parent, command);
             let here = folders.get(&node.id()).cloned();
+            if self.names_work_tree {
+                self.work_trees = work_tree_settings(node, command);
+            }
             self.folder.clone_from(&here);
             self.check_paths(&words, command);
             self.folder = None;
@@ -1012,6 +1026,7 @@ impl Reader<'_> {
             self.lost = !open.contains(&node.id());
             self.unwrap(&words, Some(stdin), command, depth);
             self.here = None;
+            self.work_trees.clear();
             if let Some(lines) = parent.and_then(|statement| hidden.get(&statement.id())) {
                 for line in lines {
                     self.nested(line, depth);
@@ -1127,6 +1142,8 @@ impl Reader<'_> {
         self.folder = outer_folder;
         self.here = outer_here;
         self.lost = outer_lost;
+        self.names_work_tree = outer_names_work_tree;
+        self.work_trees = outer_work_trees;
         true
     }
 
@@ -1411,8 +1428,8 @@ impl Reader<'_> {
     }
 
     /// Read what a command runs: the rest of a wrapper's words, or the text
-    /// a shell, `eval`, `env -S` or `source` runs again. `stdin` is the
-    /// written command whose standard input the program reads.
+    /// a shell, `eval`, `env -S`, `source` or `trap` runs again. `stdin` is
+    /// the written command whose standard input the program reads.
     fn unwrap(
         &mut self,
         words: &[Word<'_>],
@@ -1534,6 +1551,11 @@ impl Reader<'_> {
             }
             "su" => {
                 if let Some(text) = su_command(arguments) {
+                    self.nested(&text, depth);
+                }
+            }
+            "trap" => {
+                if let Some(text) = trap_action(arguments) {
                     self.nested(&text, depth);
                 }
             }
@@ -1677,6 +1699,7 @@ impl Reader<'_> {
         }
         // A `cd` given no folder goes to the home folder.
         let mut bare = name == "cd";
+        let mut ended = false;
         for word in node.named_children(&mut node.walk()) {
             if word.id() == program.id() || !WORD_KINDS.contains(&word.kind()) {
                 continue;
@@ -1687,7 +1710,11 @@ impl Reader<'_> {
             }
             let (argument, complete) = path_literal(word, source);
             bare &= complete && argument.starts_with('-') && argument != "-";
-            if names_no_path(&name, &argument) {
+            if !ended && complete && argument == "--" {
+                ended = true;
+                continue;
+            }
+            if !ended && names_no_path(&name, &argument) {
                 continue;
             }
             let raw = node_text(word, source);
@@ -1723,6 +1750,21 @@ impl Reader<'_> {
             && let Some(dir) = cd_dir(self.workspace, self.from(), raw, value, complete)
         {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
+        }
+        // `/bin/sh` on macOS (bash 3.2) and dash expand `.*` to `..` too, so
+        // `chmod -R a-w .*` changes the folder above. `rm`, `rmdir` and `mv`
+        // refuse `..`.
+        if complete
+            && matches!(name, "chmod" | "chown" | "chgrp" | "cp")
+            && let Some(up) = dot_patterns_up(raw, value)
+        {
+            // A quoted `~` stays a name.
+            let raw = if raw.starts_with('~') || !up.starts_with('~') {
+                up.clone()
+            } else {
+                format!("'{up}'")
+            };
+            self.check_folder(name, &raw, &up, true);
         }
     }
 
@@ -1779,6 +1821,8 @@ impl Reader<'_> {
         let top = self.text_depth == 0;
         let moved = self.moved > 0;
         let workspace = self.workspace;
+        let names_work_tree = self.names_work_tree;
+        let work_trees = &self.work_trees;
         let deletions = std::cell::RefCell::new(&mut self.analysis.deletions);
         // A path deleted (`existing`: emptied or replaced) as written.
         let record = |word: &Word<'_>, path: &Path_, existing: bool| {
@@ -1816,16 +1860,21 @@ impl Reader<'_> {
             }
         };
         // The words that are not options, the value of an option that takes
-        // one (`-s 0`) left out too.
+        // one (`-s 0`) left out too. After a literal `--` every word is one.
         let operands = |takes_value: &[&str]| {
             let mut skip = false;
+            let mut ended = false;
             arguments
                 .iter()
                 .filter(|word| {
                     if std::mem::take(&mut skip) {
                         return false;
                     }
-                    if word.value.starts_with('-') {
+                    if !ended && ends_options(word) {
+                        ended = true;
+                        return false;
+                    }
+                    if !ended && word.value.starts_with('-') {
                         skip = takes_value.contains(&word.value.as_str());
                         return false;
                     }
@@ -2119,6 +2168,9 @@ impl Reader<'_> {
                 // `git -c alias.c=clean c -fdx`: what an alias runs is not
                 // read, so where it deletes cannot be told.
                 let mut alias = None;
+                // `--work-tree` (or `GIT_WORK_TREE`) names the folder it
+                // cleans instead, from the folder it runs in.
+                let mut tree = None;
                 let clean = loop {
                     let Some(word) = rest.next() else {
                         break false;
@@ -2133,10 +2185,24 @@ impl Reader<'_> {
                                 alias = setting;
                             }
                         }
-                        "--git-dir" | "--work-tree" | "--namespace" => {
+                        "--work-tree" => {
+                            tree = rest
+                                .next()
+                                .and_then(|word| expanded(word, source).into_iter().next());
+                        }
+                        "--git-dir" | "--namespace" => {
                             rest.next();
                         }
                         "clean" => break true,
+                        other if other.starts_with("--work-tree=") => {
+                            let given = Given {
+                                name: "work-tree".into(),
+                                value: other["--work-tree=".len()..].to_owned(),
+                                word: Some(word),
+                                attached: true,
+                            };
+                            tree = given_paths(&given, source).into_iter().next();
+                        }
                         other if other.starts_with('-') => {}
                         _ => break false,
                     }
@@ -2152,16 +2218,46 @@ impl Reader<'_> {
                             && word.value.contains('f'))
                 });
                 if clean && forced {
+                    let mut ended = false;
                     let paths: Vec<&&Word<'_>> = rest
                         .iter()
-                        .filter(|word| !word.value.starts_with('-'))
+                        .filter(|word| {
+                            if !ended && ends_options(word) {
+                                ended = true;
+                                return false;
+                            }
+                            ended || !word.value.starts_with('-')
+                        })
                         .collect();
-                    if paths.is_empty() {
-                        match (folder, arguments.first()) {
+                    // One set before `git`, in the command or for a wrapper.
+                    let tree = tree.or_else(|| {
+                        let first = arguments.first()?.node.start_byte();
+                        work_trees
+                            .iter()
+                            .rev()
+                            .find(|(start, _)| *start < first)
+                            .map(|(_, tree)| tree.clone())
+                    });
+                    match (tree, arguments.first()) {
+                        // Its paths are in the work tree too: the whole of it
+                        // is what it may clean.
+                        (Some(tree), Some(anchor)) => {
+                            let tree = match folder {
+                                Some(word) => under_folder(word, tree, source),
+                                None => tree,
+                            };
+                            record(anchor, &tree, false);
+                        }
+                        // Set earlier in the line (`export GIT_WORK_TREE=…`).
+                        (None, Some(anchor)) if names_work_tree => {
+                            unplaced(anchor, "$GIT_WORK_TREE".to_owned(), false);
+                        }
+                        (None, anchor) if paths.is_empty() => match (folder, anchor) {
                             (Some(word), _) => push(word),
                             (None, Some(anchor)) => record(anchor, &Path_::here(), false),
                             (None, None) => {}
-                        }
+                        },
+                        _ => {}
                     }
                     for word in paths {
                         push(word);
@@ -2273,16 +2369,25 @@ impl Reader<'_> {
         {
             self.check_folder(&name, "~", "~", true);
         }
+        // After a literal `--`, a word that starts with `-` is a path too.
+        let mut ended = false;
         for word in arguments {
+            let ends = !ended && ends_options(word);
             // Each path of a brace list (`cat {,~/.ssh/id_rsa}`) on its own.
             for path in expanded(word, source) {
-                if names_no_path(&name, &path.value) {
+                if ends || (!ended && names_no_path(&name, &path.value)) {
                     continue;
                 }
                 self.check_folder(&name, &path.raw, &path.value, path.complete);
             }
+            ended |= ends;
         }
     }
+}
+
+/// Whether `word` is a literal `--`, which ends a program's options.
+fn ends_options(word: &Word<'_>) -> bool {
+    word.literal && word.value == "--"
 }
 
 /// Whether an argument of a command in [`PATH_COMMANDS`] names no path: an
@@ -2403,6 +2508,66 @@ fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
         value: given.value[..known].to_owned(),
         complete: word.literal,
     }]
+}
+
+/// The `GIT_WORK_TREE` values `command` (a command node) sets, by where each
+/// starts: an assignment before its program (`GIT_WORK_TREE=x git …`, also
+/// before a wrapper), and a word `env` or `sudo` sets (`env GIT_WORK_TREE=x
+/// git …`). An empty one sets none.
+fn work_tree_settings(command: tree_sitter::Node<'_>, source: &str) -> Vec<(usize, Path_)> {
+    const NAME: &str = "GIT_WORK_TREE";
+    let mut found = Vec::new();
+    for child in command.named_children(&mut command.walk()) {
+        let tree = if child.kind() == "variable_assignment" {
+            if child
+                .child_by_field_name("name")
+                .is_none_or(|name| node_text(name, source) != NAME)
+            {
+                continue;
+            }
+            child.child_by_field_name("value").map(|value| {
+                let (text, complete) = path_literal(value, source);
+                Path_ {
+                    raw: node_text(value, source),
+                    value: text,
+                    complete,
+                }
+            })
+        } else if WORD_KINDS.contains(&child.kind()) {
+            let (value, literal) = unquote(child, source);
+            // Read as an option's value: `~` there is a name.
+            value
+                .strip_prefix(NAME)
+                .and_then(|rest| rest.strip_prefix('='))
+                .map(|tree| Path_ {
+                    raw: node_text(child, source),
+                    value: tree.to_owned(),
+                    complete: literal,
+                })
+        } else {
+            continue;
+        };
+        if let Some(tree) = tree.filter(|tree| !tree.value.is_empty() || !tree.complete) {
+            found.push((child.start_byte(), tree));
+        }
+    }
+    found
+}
+
+/// `path` from the folder `-C` names (`folder`), when it is relative.
+fn under_folder(folder: &Word<'_>, path: Path_, source: &str) -> Path_ {
+    if path.value.starts_with('/') || home_expansion(&path.raw, &path.value).is_some() {
+        return path;
+    }
+    let Some(folder) = expanded(folder, source).into_iter().next() else {
+        return path;
+    };
+    let join = |base: &str| format!("{}/{}", base.trim_end_matches('/'), path.value);
+    Path_ {
+        raw: join(&folder.raw),
+        value: join(&folder.value),
+        complete: folder.complete && path.complete,
+    }
 }
 
 /// The value written after the option's own `skip` bytes of literal text in
@@ -3283,6 +3448,34 @@ fn su_command(arguments: &[Word<'_>]) -> Option<String> {
     None
 }
 
+/// The text `trap` sets the shell to run later, on a signal or as it exits:
+/// its first operand, when one or more conditions follow it. Nothing for
+/// `trap -p` and `trap -l` (they print), another option (refused), a single
+/// operand (that condition is reset), or a first operand of `-` (reset),
+/// empty text (ignore) or an unsigned number (every operand a condition).
+fn trap_action(arguments: &[Word<'_>]) -> Option<String> {
+    let mut operands = arguments;
+    if let [option, rest @ ..] = operands
+        && option.literal
+        && option.value.starts_with('-')
+        && option.value != "-"
+    {
+        if option.value != "--" {
+            return None;
+        }
+        operands = rest;
+    }
+    let [action, _, ..] = operands else {
+        return None;
+    };
+    if action.literal
+        && (action.value == "-" || action.value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(action.value.clone())
+}
+
 /// The script a command reads on standard input, when the command line
 /// spells it out: a here-string or here-document of its own, or what an
 /// `echo`, `printf` or `cat` of one writes into a pipe to it, through any
@@ -4124,6 +4317,109 @@ fn remote(value: &str) -> bool {
         || value
             .split_once(':')
             .is_some_and(|(host, _)| !host.is_empty() && !host.contains('/'))
+}
+
+/// `value` with each of its parts that is a pattern the shell matches
+/// against `..` written as `..`: a part that starts with a dot and holds a
+/// `*`, `?` or `[` that `raw` (the word as written) leaves unquoted, such as
+/// `.*`, `.?` or `'.'*`, but not `.??*`, `.[!.]*` or `".*"`. `None` when no
+/// part is one.
+fn dot_patterns_up(raw: &str, value: &str) -> Option<String> {
+    // The value's characters as written, each marked when the shell reads it
+    // as a pattern character.
+    let mut characters: Vec<(char, bool)> = Vec::with_capacity(value.len());
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    for c in raw.chars() {
+        if escaped {
+            escaped = false;
+            characters.push((c, false));
+            continue;
+        }
+        match c {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            _ => characters.push((c, !single && !double && matches!(c, '*' | '?' | '['))),
+        }
+    }
+    // A word written in a way this does not read (`$'…'`) is left alone.
+    if !characters.iter().map(|(c, _)| *c).eq(value.chars()) {
+        return None;
+    }
+    let mut up = String::with_capacity(value.len());
+    let mut changed = false;
+    for (index, part) in characters.split(|(c, _)| *c == '/').enumerate() {
+        if index > 0 {
+            up.push('/');
+        }
+        if part.first().is_some_and(|(c, _)| *c == '.')
+            && part.iter().any(|(_, pattern)| *pattern)
+            && matches_two_dots(part)
+        {
+            up.push_str("..");
+            changed = true;
+        } else {
+            up.extend(part.iter().map(|(c, _)| *c));
+        }
+    }
+    changed.then_some(up)
+}
+
+/// Whether a part of a shell pattern (each character marked when it is a
+/// pattern character) matches the name `..`.
+fn matches_two_dots(pattern: &[(char, bool)]) -> bool {
+    // Whether the pattern read so far matches none, one or both of the dots.
+    let mut reach = [true, false, false];
+    let mut index = 0;
+    while index < pattern.len() {
+        let (c, special) = pattern[index];
+        index += 1;
+        let dot = match (c, special) {
+            ('*', true) => {
+                for count in 1..reach.len() {
+                    reach[count] |= reach[count - 1];
+                }
+                continue;
+            }
+            ('?', true) => true,
+            ('[', true) => match bracket_matches_dot(&pattern[index..]) {
+                Some((dot, length)) => {
+                    index += length;
+                    dot
+                }
+                // With no `]` to close it, `[` is itself.
+                None => false,
+            },
+            (c, _) => c == '.',
+        };
+        reach = [false, dot && reach[0], dot && reach[1]];
+    }
+    reach[2]
+}
+
+/// For a bracket expression after its `[`: whether it matches `.`, and how
+/// many characters it takes, its `]` included. `None` when no `]` closes it.
+fn bracket_matches_dot(rest: &[(char, bool)]) -> Option<(bool, usize)> {
+    let negated = matches!(rest.first(), Some(('!' | '^', _)));
+    let start = usize::from(negated);
+    let mut index = start;
+    let mut dot = false;
+    while let Some(&(c, _)) = rest.get(index) {
+        // A `]` right after the `[` (or its `!`) is a member.
+        if c == ']' && index > start {
+            return Some((dot != negated, index + 1));
+        }
+        if let (Some(('-', _)), Some(&(high, _))) = (rest.get(index + 1), rest.get(index + 2))
+            && high != ']'
+        {
+            dot |= (c..=high).contains(&'.');
+            index += 3;
+            continue;
+        }
+        dot |= c == '.';
+        index += 1;
+    }
+    None
 }
 
 /// Whether `node` (a line's statement) is one `&&` chain of commands, each
@@ -5987,6 +6283,145 @@ mod regression {
     }
 
     #[test]
+    fn chgrp_s_paths_are_checked_like_chown_s() {
+        let workspace = std::env::current_dir().expect("cwd");
+        let shared = analyze("chown -R :staff ~/shared", &workspace).external_dirs;
+        assert!(!shared.is_empty());
+        assert_eq!(
+            analyze("chgrp -R staff ~/shared", &workspace).external_dirs,
+            shared
+        );
+        assert_eq!(
+            analyze("/usr/bin/chgrp staff ~/shared", &workspace).external_dirs,
+            shared
+        );
+        assert!(
+            analyze("chgrp staff notes.txt", &workspace)
+                .external_dirs
+                .is_empty()
+        );
+        // It changes no file's contents: naming a secret file is no read.
+        assert!(
+            analyze("chgrp staff .env", &workspace)
+                .paths
+                .iter()
+                .all(|path| !path.secret)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_led_pattern_that_matches_dot_dot_reaches_the_folder_above() {
+        let root = std::env::temp_dir().join(format!("haarness-dot-glob-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(workspace.join("build")).unwrap();
+        let parent = vec![glob(&dunce::canonicalize(&root).unwrap())];
+        // `/bin/sh` expands these to `..` among the rest.
+        for command in [
+            "chmod -R a-w .*",
+            "chown -R sam .*",
+            "chgrp -R staff .*",
+            "cp -R .* build/",
+            "chmod -R a-w ./.*",
+            "chmod a-w .?",
+            "chmod a-w '.'*",
+            "chmod a-w \\.*",
+            "chmod a-w .[.]*",
+            "chmod -R a-w .*/*",
+            "chmod -R a-w src/../.*",
+            "sudo chmod -R a-w .*",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        // Patterns that cannot match `..`, a part below a folder of the
+        // project, quoted characters, other programs, and those that refuse
+        // `..`.
+        for command in [
+            "chmod 600 .env*",
+            "chmod 600 .??*",
+            "chmod -R go-w .[!.]*",
+            "chmod -R go-w .[^.]*",
+            "chmod -R a-w src/.*",
+            "chmod a-w \".*\"",
+            "chmod a-w '.*'",
+            "chmod a-w .\\*",
+            "chmod a-w .*rc",
+            "cd src && chmod -R a-w .*",
+            "ls -la .*",
+            "du -sh .*",
+            "rm -rf .*",
+            "mv .* build/",
+            "cat .*",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_word_after_a_literal_double_dash_is_a_path_even_with_a_leading_dash() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-dash-dash-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let parent = vec![glob(&dunce::canonicalize(&root).unwrap())];
+        for command in [
+            "mkdir -- - && rm -rf -- -/../../x",
+            "cat -- -/../../x",
+            "chmod -R a-w -- -/../..",
+            "cp -- -/../../x .",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        // Before it, a dash word is an option, as before; inside the
+        // project nothing asks.
+        for command in [
+            "rm -rf -/../../x",
+            "touch -- -notes.txt",
+            "rm -f -- -notes.txt",
+            "cat -- --",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        // What it deletes is placed.
+        let deleted: Vec<String> = analyze("rm -rf -- -x --", &workspace)
+            .deletions
+            .into_iter()
+            .map(|deletion| deletion.value)
+            .collect();
+        assert_eq!(deleted, ["-x", "--"]);
+        assert_eq!(
+            outside_deletions("mkdir -- - && rm -rf -- -/../../x", &workspace, None),
+            vec![OutsideDeletion {
+                path: dunce::canonicalize(&root)
+                    .unwrap()
+                    .join("x")
+                    .display()
+                    .to_string(),
+                placed: true,
+                effect: Effect::Deletes,
+            }]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_cd_with_no_folder_goes_to_the_home_folder() {
         let root = std::env::temp_dir().join(format!("haarness-bare-cd-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("project");
@@ -6250,6 +6685,11 @@ mod readings {
             "busybox sh -c 'rm x'",
             "git status && sudo rm x",
             "for f in a; do timeout 1 rm \"$f\"; done",
+            "trap 'rm -rf x' EXIT",
+            "trap -- 'rm x' EXIT INT TERM",
+            "trap \"rm x\" 0",
+            "trap 'rm x' ERR; make",
+            "bash -c \"trap 'rm x' EXIT\"",
         ] {
             let readings = derived(command);
             assert!(
@@ -6274,6 +6714,11 @@ mod readings {
             "grep -r 'eval rm' .",
             "echo 'rm x' > script.sh",
             "find . -name rm",
+            "trap 'rm x'",
+            "trap -p 'rm x' EXIT",
+            "trap -l 'rm x' EXIT",
+            "trap - 'rm x' EXIT",
+            "trap 2 'rm x'",
         ] {
             let readings = derived(command);
             assert!(
@@ -6281,6 +6726,65 @@ mod readings {
                     .iter()
                     .any(|pattern| wildcard_match("rm *", pattern)),
                 "{command}: {readings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trap_s_text_is_read_as_a_command_of_its_own() {
+        let workspace = workspace();
+        // Its paths outside the project ask, and what it deletes is placed.
+        let home = analyze("rm -rf ~/x", &workspace).external_dirs;
+        assert!(!home.is_empty());
+        for command in [
+            "trap 'rm -rf ~/x' EXIT; true",
+            "trap -- 'rm -rf ~/x' EXIT",
+            "f() { trap 'rm -rf ~/x' RETURN; }",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                home,
+                "{command}"
+            );
+        }
+        let at_home = resolve(&haarness_protocol::home_dir().unwrap(), Path::new("x"))
+            .display()
+            .to_string();
+        assert_eq!(
+            outside_deletions("trap 'rm -rf ~/x' EXIT; true", &workspace, None),
+            vec![OutsideDeletion {
+                path: at_home,
+                placed: true,
+                effect: Effect::Deletes,
+            }]
+        );
+        // A variable in it cannot be placed, as when written directly.
+        assert_eq!(
+            outside_deletions("trap 'rm -rf \"$tmp\"' EXIT", &workspace, None),
+            outside_deletions("rm -rf \"$tmp\"", &workspace, None)
+        );
+        // Resetting, ignoring, listing and printing run nothing.
+        for command in [
+            "trap - EXIT",
+            "trap -- - EXIT INT",
+            "trap '' INT",
+            "trap 2 INT",
+            "trap -p",
+            "trap -p EXIT",
+            "trap -l",
+            "trap EXIT",
+            "trap",
+        ] {
+            // Only `trap` itself, spelled as it runs (`trap  INT`).
+            assert!(
+                derived(command)
+                    .iter()
+                    .all(|pattern| pattern.starts_with("trap")),
+                "{command}"
+            );
+            assert!(
+                analyze(command, &workspace).deletions.is_empty(),
+                "{command}"
             );
         }
     }
@@ -6764,6 +7268,38 @@ mod readings {
             found("git -c alias.c=clean c -fdx"),
             vec![unplaced("alias.c=clean")]
         );
+        // A work tree named by an option or by `GIT_WORK_TREE` is what git
+        // cleans, from the folder it runs in; set earlier in the line, it
+        // cannot be placed.
+        for command in [
+            "git --work-tree=../outside/cache clean -fdx",
+            "git --work-tree ../outside/cache clean -fd",
+            "git --git-dir=.git --work-tree=../outside/cache clean -fdx",
+            "git --work-tree=../outside/cache clean -fdx sub",
+            "git -C ../outside --work-tree=cache clean -fdx",
+            "GIT_WORK_TREE=../outside/cache git clean -fdx",
+            "env GIT_WORK_TREE=../outside/cache git clean -fdx",
+            "sudo GIT_WORK_TREE=../outside/cache git clean -fdx",
+            "cd sub && git --work-tree=../../outside/cache clean -fdx",
+            "bash -c 'GIT_WORK_TREE=../outside/cache git clean -fdx'",
+        ] {
+            assert_eq!(found(command), vec![placed(&cache)], "{command}");
+        }
+        assert_eq!(
+            found(&format!(
+                "git --work-tree={} clean -fdx",
+                outside.join("cache").display()
+            )),
+            vec![placed(&cache)]
+        );
+        assert_eq!(
+            found("export GIT_WORK_TREE=../outside/cache && git clean -fdx"),
+            vec![unplaced("$GIT_WORK_TREE")]
+        );
+        assert_eq!(
+            found("git --work-tree=\"$W\" clean -fdx"),
+            vec![unplaced("--work-tree=\"$W\"")]
+        );
         // A new file, an append, a find that deletes nothing and a clean
         // without -f delete nothing outside.
         for command in [
@@ -6776,6 +7312,12 @@ mod readings {
             "find . -name '*.o' -delete".to_owned(),
             "find -L . -delete".to_owned(),
             "git clean -fdx".to_owned(),
+            "git --work-tree=. clean -fdx".to_owned(),
+            "git --work-tree=build clean -fdx".to_owned(),
+            "git --git-dir=.git clean -fdx".to_owned(),
+            "GIT_WORK_TREE=build git clean -fdx".to_owned(),
+            "git --work-tree=../outside/cache clean -n".to_owned(),
+            "git --work-tree=../outside/cache status".to_owned(),
             "ls | xargs echo".to_owned(),
             "git -c color.ui=never status".to_owned(),
         ] {

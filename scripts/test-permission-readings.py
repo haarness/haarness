@@ -33,13 +33,21 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    after a line of two assignments (`! rm …`, `{ rm …; }`); the folder `env -C` or `--chdir` names outside the
    project asks before the line runs, and so does a path that leaves the project from it, while one that stays
    in the project from there runs.
+12. trap: an `rm *` deny refuses the text a `trap` sets, and a path outside the project in it asks before the
+   line runs, while `trap -`, `trap ''` and `trap -p` run.
+13. owners_and_dots: `chgrp` of a folder outside the project asks, a `chmod` or `chgrp` of `.*` (which
+   `/bin/sh` expands to `..` too) asks for the folder above, and so does a dash-led path after `--` that leaves
+   the project; `chmod 600 .env*`, `chmod -R u+w src/.*` and `chgrp <group> notes.txt` run.
+14. auto_deletions: in Auto, a `git clean -f` whose work tree (`--work-tree`, `GIT_WORK_TREE`) is outside the
+   project, and an `rm` a trap runs there, ask though the reviewer allows them; a clean of the project runs.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
 toml_order, cd_link, resource_alias, backslash, backquotes, dev, action_case, sign_ins, holding_always,
-workdir_home, wrappers). No model is
+workdir_home, wrappers, trap, owners_and_dots, auto_deletions). No model is
 called; nothing outside the fixture is touched.
 """
+import grp
 import json
 import os
 import sqlite3
@@ -471,10 +479,91 @@ def case_wrappers():
            'that leaves the project from it; one that stays inside from there runs')
 
 
+def case_trap():
+    """What a trap sets the shell to run later meets the rules, and its paths outside the project ask."""
+    _, env = environment('trap')
+    denied = project('trap', {'permission': {'bash': {'rm *': 'deny'}}})
+    for command in ["trap 'rm -rf victim' EXIT", "trap -- 'rm -rf victim' EXIT INT",
+                    "set -e\ntrap 'rm -rf victim' EXIT\ntrue"]:
+        (denied / 'victim').mkdir(exist_ok=True)
+        try:
+            output = bash(env, denied, command)
+        finally:
+            stop(env, denied)
+        assert "is denied by permission rule 'bash:rm *'" in output, (command, output)
+        assert (denied / 'victim').is_dir(), f'{command!r} deleted victim'
+    passed('an rm deny refuses the rm a trap runs at exit')
+    folder = project('trap-home', REVIEW)
+    home = Path(env['HOME'])
+    (home / 'x').mkdir(exist_ok=True)
+    try:
+        output = bash(env, folder, "trap 'rm -rf ~/x' EXIT; true", code=1)
+        assert 'Stopped:' in output and str(home) in output, output
+        assert (home / 'x').is_dir(), 'the trap deleted ~/x without asking'
+        for line, said in [('trap - EXIT; echo reset', 'reset'), ("trap '' INT; echo ignored", 'ignored'),
+                           ("trap 'echo bye' EXIT; trap -p EXIT", 'echo bye')]:
+            output = bash(env, folder, line, code=0)
+            assert said in output and 'Stopped' not in output, (line, output)
+    finally:
+        stop(env, folder)
+    passed('a path outside the project in a trap asks before the line runs; resetting, ignoring and printing '
+           'traps run')
+
+
+def case_owners_and_dots():
+    """chgrp is checked like chown, `.*` reaches the folder above, and a dash-led path after `--` is a path."""
+    _, env = environment('owners-dots')
+    folder = project('owners-dots', REVIEW)
+    group = grp.getgrgid(os.getgid()).gr_name
+    outside = folder.parent / 'outside'
+    outside.mkdir(exist_ok=True)
+    (outside / 'secret').write_text('outside secret\n')
+    (folder / '.env.local').write_text('A=1\n')
+    (folder / 'src').mkdir(exist_ok=True)
+    (folder / 'src' / '.keep').write_text('')
+    (folder / 'notes.txt').write_text('notes\n')
+    try:
+        # Each would change nothing if it ran: the modes and the group are already these.
+        for line, asked in [(f'chgrp -R {group} {outside}', outside), ('chmod -R u+w .*', folder.parent),
+                            (f'chgrp -R {group} .*', folder.parent),
+                            ('mkdir -p -- - && cat -- -/../../outside/secret', outside)]:
+            output = bash(env, folder, line, code=1)
+            assert 'Stopped:' in output and str(asked) in output, (line, output)
+            assert 'outside secret' not in output, (line, output)
+        for line in ['chmod 600 .env*', 'chmod -R u+w src/.*', f'chgrp {group} notes.txt', 'ls -a .* > /dev/null']:
+            output = bash(env, folder, line, code=0)
+            assert 'Stopped' not in output, (line, output)
+    finally:
+        stop(env, folder)
+    passed('chgrp of an outside folder, a chmod or chgrp of .* and a dash-led path after -- that leaves the '
+           'project ask; .env*, src/.* and a chgrp in the project run')
+
+
+def case_auto_deletions():
+    """In Auto, a deletion outside the project asks though the reviewer allows it."""
+    _, env = environment('auto-deletions')
+    folder = project('auto-deletions', {'permission': {'bash': {'*': 'ask'}}})
+    (folder / 'untracked.txt').write_text('x')
+    try:
+        # `-n` only lists: nothing is deleted even if it ran.
+        for line in ['git --work-tree=.. clean -fdxn', 'git --work-tree .. clean -fdxn',
+                     'GIT_WORK_TREE=.. git clean -fdxn', "trap 'rm -rf ..' EXIT; true"]:
+            output = call(env, folder, 'bash', {'command': line}, flags=('--auto',))
+            assert 'Refused: ' in output and 'This deletes ' in output, (line, output)
+            assert 'Would remove' not in output, (line, output)
+        output = call(env, folder, 'bash', {'command': 'git clean -fdxn'}, flags=('--auto',), code=0)
+        assert 'Would remove untracked.txt' in output and 'Refused' not in output, output
+    finally:
+        stop(env, folder)
+    passed('in Auto, a clean of a work tree outside the project (--work-tree, GIT_WORK_TREE) and an rm a trap runs '
+           'there ask; a clean of the project runs')
+
+
 CASES = {'toml_order': case_toml_order, 'cd_link': case_cd_link, 'resource_alias': case_resource_alias,
          'backslash': case_backslash, 'backquotes': case_backquotes, 'dev': case_dev,
          'action_case': case_action_case, 'sign_ins': case_sign_ins, 'holding_always': case_holding_always,
-         'workdir_home': case_workdir_home, 'wrappers': case_wrappers}
+         'workdir_home': case_workdir_home, 'wrappers': case_wrappers, 'trap': case_trap,
+         'owners_and_dots': case_owners_and_dots, 'auto_deletions': case_auto_deletions}
 
 if __name__ == '__main__':
     chosen = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]

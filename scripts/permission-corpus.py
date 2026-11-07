@@ -134,6 +134,30 @@ CORPUS = [
     'cp .env.example .env', 'mv build dist', 'chmod +x run.sh && ./run.sh', 'bash run.sh', 'sudo rm -rf /tmp/x',
     'xargs -n1 echo < files.txt', "find . -name '*.tmp' -delete", 'git clean -fdx', 'kill -9 1234',
     'open http://localhost:3000', 'ln -s ../deep link', 'touch ~/x', 'rm -rf victim',
+    # Text a trap runs later
+    "trap 'rm -rf build' EXIT", "trap 'rm -rf ~/x' EXIT; true", 'trap \'rm -rf "$tmp"\' EXIT',
+    'tmp=$(mktemp -d) && trap \'rm -rf "$tmp"\' EXIT && cp README.md "$tmp"/', 'trap - EXIT', 'trap -p',
+    'trap -l', "trap '' INT", 'trap 2 INT', "trap -- 'cat ../outside/secret' EXIT", "trap 'echo done' EXIT INT TERM",
+    'trap EXIT', "trap 'kill $(jobs -p)' EXIT", 'trap -p EXIT', "cd src && trap 'rm -rf build' EXIT && make",
+    "set -e\ntrap 'rm -f build/out.log' EXIT\nnpm test",
+    # Group owners
+    'chgrp -R staff ~/shared', 'chgrp staff notes.txt', 'chown -R :staff ~/shared', 'chgrp staff ../outside/a',
+    'chgrp staff .env', 'chown sam .env',
+    # Dot-led patterns
+    'chmod -R a-w .*', 'chmod 600 .env*', 'chmod 600 .??*', 'chmod -R go-w .[!.]*', 'chmod -R a-w src/.*',
+    'chmod -R a-w ./.*', 'chown -R sam .*', 'chgrp -R staff .*', 'cp -R .* build/', 'cp .env* build/', 'ls -la .*',
+    'du -sh .*', 'rm -rf .*', 'mv .* build/', "chmod 644 '.'*", 'chmod 644 ".*"', 'chmod -R a-w .?',
+    'cd src && chmod -R a-w .*', 'chmod -R a-w deep/.*', 'chmod +x .husky/*', 'cp -r .github build/',
+    # Words after `--`
+    'mkdir -- - && rm -rf -- -/../../outside/x', 'cat -- -/../../outside/secret', 'touch -- -notes.txt',
+    'rm -f -- -notes.txt', 'git checkout -- src/main.rs', 'rm -rf -- build', 'cd -- src && ls', 'cp -- a b',
+    'git diff -- src/main.rs | head',
+    # Git work trees
+    'git --work-tree=../outside clean -fdx', 'git --work-tree ../outside clean -fd',
+    'GIT_WORK_TREE=../outside git clean -fdx', 'env GIT_WORK_TREE=../outside git clean -fdx',
+    'git --work-tree=. clean -fdx', 'git --work-tree=build clean -fdx', 'git -C src --work-tree=.. clean -fdx',
+    'git --git-dir=.git clean -fdx', 'git --work-tree=../outside clean -fdx sub',
+    'export GIT_WORK_TREE=../outside && git clean -fdx', 'git clean -fdx -- build', 'git --work-tree=../outside status',
 ]
 
 
