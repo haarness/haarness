@@ -45,6 +45,9 @@ TOOLS = {
         indent=4)}]},
     # The same text as `spaced` each call, with how many calls it has had as its structured content.
     'stamp': {'content': [], 'structuredContent': {'call': 0}},
+    # 80 KB of one-digit values three levels down, four and a half times as long laid out in full.
+    'series': {'content': [{'type': 'text', 'text': json.dumps(
+        {'result': {'series': [n % 10 for n in range(40000)]}}, separators=(',', ':'))}]},
     # 60 KB of arrays nested 30,000 deep.
     'nested': {'content': [{'type': 'text', 'text': '[' * 30000 + ']' * 30000}]},
     # Structured content that names `truncated` itself, beside 80 KB of text.

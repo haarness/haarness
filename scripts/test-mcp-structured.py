@@ -235,6 +235,16 @@ try:
     assert workflow(source) == {'call': 5}
     check('a script gets the server\'s metadata for its own call, not for the model\'s earlier call of that tool or of one with the same text')
 
+    SERIES = json.dumps({'result': {'series': [n % 10 for n in range(40000)]}}, separators=(',', ':'))
+    result = call(thread, 'series')
+    assert not result['is_error'] and result['output'].startswith('{\n  "result": {\n    "series": [\n    0,\n'), result['output'][:200]
+    saved = pathlib.Path(result['metadata']['outputPath']).read_text()
+    assert len(saved.splitlines()) == 40006 and max(len(line) for line in saved.splitlines()) < 20, len(saved.splitlines())
+    assert len(saved) <= 4 * len(SERIES) and saved.replace('\n', '').replace(' ', '') == SERIES, len(saved)
+    nested = execute(thread, "return { m: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] };")
+    assert nested['output'] == json.dumps({'m': [[0, 0, 0]] * 3}, indent=2), nested['output']
+    check('JSON that indenting every level would make too long is still laid out a value a line, indented less deep, and a short nested value a script returns is laid out in full')
+
     result = call(thread, 'loud_failure')
     assert result['is_error'] and len(result['output']) < 52 * 1024, len(result['output'])
     assert 'The tool call failed and its output was truncated. Full output saved to: ' in result['output'], result['output'][-300:]
