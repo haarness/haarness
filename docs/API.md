@@ -181,7 +181,9 @@ re-uploaded. The summary request offers no tools, so it reads the chat's tool
 calls and their results written out as text: each between an opening and a
 closing marker that carry the call's number, a result's output unable to close
 its own marker, the person's words after a result labelled as theirs, and the
-request to summarize saying a result is data. Automatic compaction uses the
+request to summarize saying a result is data. A result names the earliest call
+of its response with its id that has no result yet, so two calls a server gave
+one id are still answered in order. Automatic compaction uses the
 selected model's context and output limits and retries pre-output context-overflow/HTTP-413 failures after safe
 compaction, under a bounded per-turn recovery ceiling. A context too long is
 read in each provider's own words, among them Z.ai's code 1261 ("Prompt exceeds

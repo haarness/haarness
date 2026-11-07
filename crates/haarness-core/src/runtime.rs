@@ -14909,6 +14909,61 @@ fn fenced(text: &str) -> String {
     out
 }
 
+/// Which call each tool result answers when a call id can repeat. A result
+/// answers the earliest call of the latest response that has its id and no
+/// result yet, so calls one response gave the same id are answered in the
+/// order they were made; a call an earlier response left without a result
+/// is answered only when no later call has its id.
+struct CallPairing<T> {
+    /// Calls of the latest response waiting for a result, by id, oldest
+    /// first.
+    latest: HashMap<String, std::collections::VecDeque<T>>,
+    /// Calls earlier responses left without a result, by id, newest last.
+    earlier: HashMap<String, Vec<T>>,
+    /// Whether a result or the user's side came after the latest call, so
+    /// that the next call starts a new response.
+    ended: bool,
+}
+
+impl<T> Default for CallPairing<T> {
+    fn default() -> Self {
+        Self {
+            latest: HashMap::new(),
+            earlier: HashMap::new(),
+            ended: false,
+        }
+    }
+}
+
+impl<T> CallPairing<T> {
+    /// The model made `call`, with the id `id`.
+    fn call(&mut self, id: &str, call: T) {
+        if std::mem::take(&mut self.ended) {
+            for (id, waiting) in self.latest.drain() {
+                self.earlier.entry(id).or_default().extend(waiting);
+            }
+        }
+        self.latest
+            .entry(id.to_owned())
+            .or_default()
+            .push_back(call);
+    }
+
+    /// The call a result with the id `id` answers, when one waits for it.
+    fn result(&mut self, id: &str) -> Option<T> {
+        self.ended = true;
+        self.latest
+            .get_mut(id)
+            .and_then(std::collections::VecDeque::pop_front)
+            .or_else(|| self.earlier.get_mut(id).and_then(Vec::pop))
+    }
+
+    /// The user's side wrote: the response before it has ended.
+    fn end_response(&mut self) {
+        self.ended = true;
+    }
+}
+
 /// The chat as the summary request reads it, the request to summarize last:
 /// text only, one message for each run of the same role, as providers that
 /// want roles to alternate take them. The summary request offers no tools,
@@ -14934,7 +14989,8 @@ fn summary_messages(
     };
     let quoted = |value: &str| value.replace('&', "&amp;").replace('"', "&quot;");
     // Each call gets a number of its own, even one whose id a provider used
-    // again in a later response; a result takes its call's latest number.
+    // again; a result with no call waiting takes its id's latest number.
+    let mut pairing = CallPairing::default();
     let mut numbers = HashMap::<String, usize>::new();
     let mut calls = 0_usize;
     // Each message's role and text, and whether it ends with a tool result.
@@ -14957,17 +15013,27 @@ fn summary_messages(
     for (index, message) in messages.into_iter().enumerate() {
         let person = origins.get(index).is_some_and(|origin| origin.person);
         match message {
-            ProviderMessage::Text { role, content } => push(role, content, false, person),
+            ProviderMessage::Text { role, content } => {
+                if role == "user" {
+                    pairing.end_response();
+                }
+                push(role, content, false, person);
+            }
             ProviderMessage::Media {
                 role,
                 content,
                 attachments,
-            } => push(
-                role,
-                format!("{content}{}", omitted(&attachments)),
-                false,
-                person,
-            ),
+            } => {
+                if role == "user" {
+                    pairing.end_response();
+                }
+                push(
+                    role,
+                    format!("{content}{}", omitted(&attachments)),
+                    false,
+                    person,
+                );
+            }
             ProviderMessage::ToolCall {
                 call_id,
                 name,
@@ -14976,6 +15042,7 @@ fn summary_messages(
             } => {
                 tools = true;
                 calls += 1;
+                pairing.call(&call_id, calls);
                 numbers.insert(call_id, calls);
                 let text = format!(
                     "<tool_call call=\"{calls}\" name=\"{}\">\n{}\n</tool_call>",
@@ -14992,10 +15059,13 @@ fn summary_messages(
                 attachments,
             } => {
                 tools = true;
-                let number = numbers.get(&call_id).copied().unwrap_or_else(|| {
-                    calls += 1;
-                    calls
-                });
+                let number = pairing
+                    .result(&call_id)
+                    .or_else(|| numbers.get(&call_id).copied())
+                    .unwrap_or_else(|| {
+                        calls += 1;
+                        calls
+                    });
                 let text = format!(
                     "<tool_result call=\"{number}\" name=\"{}\" status=\"{}\">\n{}{}\n</tool_result>",
                     quoted(&name),
@@ -19366,6 +19436,99 @@ mod tests {
         assert!(
             matches!(&messages[0], ProviderMessage::Text { role, content } if role == "user" && content.contains("Image loaded"))
         );
+    }
+
+    fn summary_user(text: &str, synthetic: bool) -> ItemData {
+        ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic,
+            command_line: None,
+        }
+    }
+
+    fn summary_reply(text: &str) -> ItemData {
+        ItemData::AssistantMessage { text: text.into() }
+    }
+
+    fn summary_call(id: &str, name: &str, arguments: serde_json::Value) -> ItemData {
+        ItemData::ToolCall {
+            call_id: id.into(),
+            name: name.into(),
+            arguments,
+            provider_metadata: json!({"bedrock_reasoning":[{"reasoningContent":{}}]}),
+        }
+    }
+
+    fn summary_result(id: &str, name: &str, output: &str, is_error: bool) -> ItemData {
+        ItemData::ToolResult {
+            call_id: id.into(),
+            name: name.into(),
+            output: output.into(),
+            is_error,
+            metadata: json!({}),
+        }
+    }
+
+    /// The summary request for `items`, each message's role and text.
+    fn summary_request(items: Vec<ItemData>) -> Vec<(String, String)> {
+        let items = (1..)
+            .zip(items)
+            .map(|(sequence, data)| item(sequence, data))
+            .collect::<Vec<_>>();
+        let (messages, origins) = super::provider_messages_with_origins(items);
+        super::summary_messages(messages, &origins)
+            .into_iter()
+            .map(|message| match message {
+                ProviderMessage::Text { role, content } => (role, content),
+                message => panic!("not text: {message:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn results_of_calls_sharing_an_id_pair_with_their_own_calls_in_the_summary_request() {
+        let read = |path: &str| json!({ "path": path });
+        let messages = summary_request(vec![
+            summary_user("Read both", false),
+            // A server that gives two calls of one response the same id:
+            // their results come in call order.
+            summary_call("dup", "read", read("a.txt")),
+            summary_call("dup", "read", read("b.txt")),
+            summary_result("dup", "read", "alpha", false),
+            summary_result("dup", "read", "beta", false),
+            summary_reply("Both read."),
+            summary_user("And c.txt", false),
+            // A call left without a result (Haarness stopped while it ran),
+            // then the same id in the next response: the result is the
+            // later call's.
+            summary_call("dup", "read", read("c.txt")),
+            summary_user("Read d.txt instead", false),
+            summary_call("dup", "read", read("d.txt")),
+            summary_result("dup", "read", "delta", false),
+        ]);
+        let results = messages
+            .iter()
+            .flat_map(|(_, content)| content.split("\n\n"))
+            .filter(|part| part.starts_with("<tool_result"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results,
+            [
+                "<tool_result call=\"1\" name=\"read\" status=\"ok\">\nalpha\n</tool_result>",
+                "<tool_result call=\"2\" name=\"read\" status=\"ok\">\nbeta\n</tool_result>",
+                "<tool_result call=\"4\" name=\"read\" status=\"ok\">\ndelta\n</tool_result>",
+            ]
+        );
+        assert!(
+            messages[1]
+                .1
+                .contains("<tool_call call=\"2\" name=\"read\">\n{\"path\":\"b.txt\"}")
+        );
+        assert!(messages.iter().any(|(_, content)| {
+            content.contains("<tool_call call=\"4\" name=\"read\">\n{\"path\":\"d.txt\"}")
+        }));
     }
 
     #[test]
