@@ -1028,6 +1028,35 @@ fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
 const STEP_LIMIT_CALL: &str =
     "This call was not run: the turn reached its step limit, so no more tools run in it.";
 
+/// What the request after a reply the provider refused for its tool call
+/// says, before the provider's reason.
+const REFUSED_CALL: &str = "The provider refused your last reply before it reached Haarness, because a tool call in it did not match the tool's definition. Call the tool again with arguments that match its schema, or answer without it. The provider said: ";
+
+/// How often a turn asks the model to correct a tool call the provider
+/// refused, before the turn fails.
+const REFUSED_CALL_RETRIES: u8 = 2;
+
+/// The provider's reason when it refused the model's own reply for a tool
+/// call that does not match its tool (Groq's `tool_use_failed`: "Tool call
+/// validation failed: parameters for tool apply_patch did not match
+/// schema…", or a call of a tool it was not sent). The request was fine; a
+/// model asked again usually gets the call right.
+fn refused_tool_call(error: &CoreError) -> Option<String> {
+    let CoreError::Provider(message) = error else {
+        return None;
+    };
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("tool_use_failed") && !lower.contains("tool call validation failed") {
+        return None;
+    }
+    let reason = lower
+        .rfind("tool call validation failed: ")
+        .map_or(message.as_str(), |at| {
+            &message[at + "tool call validation failed: ".len()..]
+        });
+    Some(clean_error_text(reason, 600))
+}
+
 /// What the request after an empty reply says, when a call before it failed.
 const EXPLAIN_FAILURE: &str = "Your last reply was empty, but a tool call before it failed. Explain what went wrong and what happens next, then carry on with the task if you can.";
 
@@ -2103,6 +2132,15 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
                 "The provider rejected the API key or sign-in{reason}. Connect it again to replace it."
             ),
         };
+    }
+    // The model's tool calls kept not matching their tools, and a provider
+    // that checks them (Groq) refused each reply, though it was asked to
+    // correct them.
+    if refused_tool_call(error).is_some() {
+        return format!(
+            "{} refused the model's tool calls, which did not match the tools' definitions, even after it was asked to correct them. Send the message again, or choose another model.",
+            provider.unwrap_or("The provider")
+        );
     }
     // A Haarness router's words already say whose account ran out of credit:
     // the key's owner, or the router's own (which its users can't top up).
@@ -10247,6 +10285,11 @@ impl RunnerTask {
             let mut failure_beside_text = false;
             let mut explain_failure = false;
             let mut asked_to_explain = false;
+            // Why the provider refused the model's last reply for a tool call
+            // that did not match its tool, for the next request to say, and
+            // how often this turn has asked the model to correct one.
+            let mut refused_call: Option<String> = None;
+            let mut refused_calls = 0_u8;
             // Whether this turn asked again for the summary at its step limit.
             let mut asked_for_summary = false;
             // UserPromptSubmit hooks may block the turn or inject context.
@@ -10604,6 +10647,12 @@ impl RunnerTask {
                         "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
                     recovering = false;
                 }
+                if let Some(reason) = refused_call.take() {
+                    messages.push(ProviderMessage::Text {
+                        role: "user".into(),
+                        content: format!("{REFUSED_CALL}{reason}"),
+                    });
+                }
                 // Asked in every request until a reply to it shows words, a
                 // tool call or structured output, or ends: a retry, an image
                 // retry, a compaction, or a recovery after a cut that brought
@@ -10917,6 +10966,14 @@ impl RunnerTask {
                             compacted_for_size |= oversized;
                             continue 'provider_round;
                         }
+                        if let Some(reason) = refused_tool_call(&error_value)
+                            && refused_calls < REFUSED_CALL_RETRIES
+                        {
+                            refused_calls += 1;
+                            tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "the provider refused a tool call that did not match its tool; asking the model to correct it");
+                            refused_call = Some(reason);
+                            continue 'provider_round;
+                        }
                         if let Some((attempt, delay)) = retries.retry(&error_value) {
                             self.wait_before_retry(attempt, delay, &error_value).await?;
                             continue 'provider_round;
@@ -11002,6 +11059,20 @@ impl RunnerTask {
                             {
                                 compactions_this_turn = compactions_this_turn.saturating_add(1);
                                 compacted_for_size |= oversized;
+                                continue 'provider_round;
+                            }
+                            // A provider that checks the model's tool calls
+                            // itself (Groq) refuses a reply whose call does
+                            // not match its tool, before anything streamed:
+                            // the model is told why and asked again.
+                            if !saw_provider_event
+                                && refused_calls < REFUSED_CALL_RETRIES
+                                && let Some(reason) = refused_tool_call(&error_value)
+                            {
+                                refused_calls += 1;
+                                drop(stream);
+                                tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "the provider refused a tool call that did not match its tool; asking the model to correct it");
+                                refused_call = Some(reason);
                                 continue 'provider_round;
                             }
                             // Providers report an HTTP failure as the stream's
@@ -11375,6 +11446,18 @@ impl RunnerTask {
                             () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
                             () = tokio::time::sleep(pause) => {}
                         }
+                        continue 'provider_round;
+                    }
+                    // Groq streams the model's reasoning, then refuses the
+                    // reply whose tool call does not match its tool: what
+                    // streamed stays, and the model is told why and asked
+                    // again.
+                    if refused_calls < REFUSED_CALL_RETRIES
+                        && let Some(reason) = refused_tool_call(&error)
+                    {
+                        refused_calls += 1;
+                        tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "the provider refused a tool call that did not match its tool; asking the model to correct it");
+                        refused_call = Some(reason);
                         continue 'provider_round;
                     }
                     return Err(error);
