@@ -44,7 +44,8 @@ pub struct BashAnalysis {
     /// here-document delimiter in it could not be set apart from the operator
     /// written against it (see [`separated_delimiters`]), or what follows a
     /// here-document's operator on its line comes after no command
-    /// (`X=1 <<EOF ; make`). Its written patterns may be clipped, and no rule
+    /// (`X=1 <<EOF ; make`, `cd sub <<EOF ; make`) or is cut short by a limit
+    /// on what is read. Its written patterns may be clipped, and no rule
     /// allows it.
     pub unreadable: bool,
     /// What the line deletes or overwrites, wherever it runs the program
@@ -312,7 +313,7 @@ pub fn analyze_in(command: &str, workspace: &Path, workdir: &Path) -> BashAnalys
         source: None,
         readings: HashSet::new(),
         counts: HashMap::new(),
-        texts: HashSet::new(),
+        texts: HashMap::new(),
         read_bytes: 0,
         nested_commands: 0,
         pattern_bytes: 0,
@@ -993,8 +994,9 @@ struct Reader<'w> {
     readings: HashSet<(String, usize)>,
     /// How many readings each written command has.
     counts: HashMap<usize, usize>,
-    /// The text each written command has read again.
-    texts: HashSet<(usize, String)>,
+    /// The text each written command has read again, and whether it was
+    /// read as the line's own (see [`Depth::own`]).
+    texts: HashMap<(usize, String), bool>,
     /// Bytes of text read again, in all.
     read_bytes: usize,
     /// Commands read in text run again, in all.
@@ -1055,7 +1057,7 @@ struct Reader<'w> {
     /// A here-document delimiter in the text read could not be set apart
     /// from the operator written against it (see [`separated_delimiters`]),
     /// or what follows such an operator in the line as written has no
-    /// command of the line to be read for.
+    /// command of the line to be read for, or a limit stopped reading it.
     unseparated: bool,
 }
 
@@ -1360,6 +1362,7 @@ impl Reader<'_> {
                 self.nested_commands += 1;
                 if self.nested_commands > MAX_NESTED_COMMANDS {
                     self.stopped();
+                    self.unseparated |= depth.own;
                     break;
                 }
             }
@@ -1442,11 +1445,16 @@ impl Reader<'_> {
             self.here = None;
             self.carried = None;
             self.work_trees.clear();
-            if let Some((statement, lines)) = parent.and_then(|statement| {
-                hidden
-                    .get(&statement.id())
-                    .map(|lines| (statement.id(), lines))
-            }) {
+            // A `cd` is no command of the line to read them for (`cd sub
+            // <<EOF ; rm -rf x`): they are read below, as those of a loop.
+            if let Some((statement, lines)) = parent
+                .and_then(|statement| {
+                    hidden
+                        .get(&statement.id())
+                        .map(|lines| (statement.id(), lines))
+                })
+                .filter(|_| self.source.is_some())
+            {
                 consumed.insert(statement);
                 for line in lines {
                     self.nested_as(line, depth, depth.text == 0 || depth.own);
@@ -1482,9 +1490,10 @@ impl Reader<'_> {
                 first[index] = sources[index].1.or(first[index + 1]);
             }
             // A statement no command of which is its own (a loop, a group,
-            // a pipeline: `for f in a; do cat; done <<EOF; rm -rf x`) has
-            // none that reads what follows its here-document's operator: it
-            // is read for the command written last before it.
+            // a pipeline: `for f in a; do cat; done <<EOF; rm -rf x`) or
+            // whose command is a `cd` has none that reads what follows its
+            // here-document's operator: it is read for the command written
+            // last before it.
             for (at, statement) in hidden_at {
                 if consumed.contains(&statement) {
                     continue;
@@ -1696,6 +1705,9 @@ impl Reader<'_> {
             || self.pattern_bytes + pattern.len() > MAX_PATTERN_BYTES
         {
             self.stopped();
+            // A command of the line's own left out, as a written one past
+            // the limit is.
+            self.unseparated |= own;
             return;
         }
         if self.text_depth == 0 {
@@ -1875,19 +1887,26 @@ impl Reader<'_> {
     }
 
     /// [`Self::nested`] for text that is the line's own when `own` (see
-    /// [`Depth::own`]).
+    /// [`Depth::own`]). The line's own text that is not read, for want of a
+    /// written command to read it for or because a limit stops it, leaves
+    /// the line not read whole: no rule about another command covers what
+    /// it runs.
     fn nested_as(&mut self, text: &str, depth: Depth, own: bool) {
         if text.trim().is_empty() {
             return;
         }
         let Some(source) = self.source else {
+            self.unseparated |= own;
             return;
         };
+        // Read again as the line's own when it was read before as text a
+        // command runs (`bash -c 'rm x' <<EOF ; rm x`).
         let key = (source, text.to_owned());
-        if self.texts.contains(&key) {
+        if self.texts.get(&key).is_some_and(|&read| read || !own) {
             return;
         }
         let Some(mut depth) = self.hop(depth) else {
+            self.unseparated |= own;
             return;
         };
         depth.text += 1;
@@ -1898,10 +1917,11 @@ impl Reader<'_> {
             || self.nested_commands >= MAX_NESTED_COMMANDS
         {
             self.stopped();
+            self.unseparated |= own;
             return;
         }
         self.read_bytes += text.len();
-        self.texts.insert(key);
+        self.texts.insert(key, own);
         self.read(text, depth);
     }
 
@@ -7881,10 +7901,61 @@ mod readings {
             "cat <<EO\\\nF; rm -rf ~/x\nb\nEOF",
             "X=1 <<EOF; rm -rf ~/x\nbody\nEOF",
             "X=1 <<EOF ; rm -rf ~/x\nbody\nEOF",
+            // A `cd` reads no document and is no command to read them for.
+            "cd sub <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "cd sub <<EOF; rm -rf ~/x\nbody\nEOF",
+            "cd sub <<EOF & rm -rf ~/x\nbody\nEOF",
+            "cd sub <<EOF 2>&1 | rm -rf ~/x\nbody\nEOF",
+            "cd -- sub <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "cd sub 2>/dev/null <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "cd sub; cd sub <<EOF ; rm -rf ~/x\nbody\nEOF",
         ] {
             assert!(analyze(command, &workspace).unreadable, "{command}");
             assert!(!is_obviously_read_only(command), "{command}");
         }
+        // Next to another command they are read for it.
+        for command in [
+            "ls && cd sub <<EOF ; rm -rf ~/x\nbody\nEOF",
+            "true; cd sub <<EOF; rm -rf ~/x\nbody\nEOF",
+        ] {
+            let analysis = analyze(command, &workspace);
+            assert!(!analysis.unreadable, "{command}");
+            assert!(
+                analysis.patterns.contains(&"rm -rf ~/x".to_owned()),
+                "{command}: {:?}",
+                analysis.patterns
+            );
+            assert!(
+                home.iter().all(|dir| analysis.external_dirs.contains(dir)),
+                "{command}"
+            );
+        }
+        // What follows the operator and is too long to read leaves the line
+        // not read whole, as a written command that long does.
+        let long = "a".repeat(MAX_NESTED_BYTES + 1);
+        for command in [
+            format!("cat <<EOF ; rm -rf ~/x {long}\nbody\nEOF"),
+            format!("cat <<EOF; git push --force {long}\nbody\nEOF"),
+            format!("cat <<EOF 2>&1 | rm -rf ~/x {long}\nbody\nEOF"),
+        ] {
+            assert!(
+                analyze(&command, &workspace).unreadable,
+                "{}",
+                &command[..30]
+            );
+        }
+        // So does one past the bytes a line may read again in all: each
+        // script here is read twice, as `bash -c`'s and as `eval`'s.
+        let script = |byte: &str| format!("echo {}", byte.repeat(MAX_READ_BYTES / 5));
+        let line = format!(
+            "bash -c 'eval \"{}\"'; bash -c 'eval \"{}\"'; cat <<EOF ; rm -rf ~/x {}\nbody\nEOF",
+            script("b"),
+            script("c"),
+            "d".repeat(MAX_READ_BYTES - 4 * script("b").len())
+        );
+        assert!(line.len() < MAX_COMMAND_BYTES);
+        assert!(analyze(&line, &workspace).unreadable);
+        assert!(!analyze(&line.replace(" <<EOF ;", ";"), &workspace).unreadable);
         // Each document on a line of its own needs a parse of its own, up to
         // the bytes the parses of one line may take in all.
         let documents = |count: usize, body: &str| -> String {

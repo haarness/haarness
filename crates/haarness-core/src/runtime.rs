@@ -17060,6 +17060,75 @@ mod shell_reading_tests {
             Vec::new()
         );
     }
+
+    #[test]
+    fn a_line_whose_own_commands_go_unread_asks_a_person_every_time() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let defaults = engine(&[]);
+        let allowlist = engine(&[
+            ("bash:*", Ask),
+            ("bash:cat *", Allow),
+            ("bash:cd *", Allow),
+            ("bash:ls *", Allow),
+            ("bash:bash *", Allow),
+        ]);
+        let denies = engine(&[("bash:rm *", Deny)]);
+        let decisions = |engine: &PermissionEngine, command: &str| -> Vec<PermissionDecision> {
+            verdicts(engine, command)
+                .into_iter()
+                .map(|(_, decision)| decision)
+                .collect()
+        };
+        // After a document a `cd` opens, with no other command to read them
+        // for, and past a limit on what is read.
+        let long = "a".repeat(300 * 1024);
+        for command in [
+            "cd sub <<EOF ; rm -rf ../victim\nbody\nEOF".to_owned(),
+            "cd -- sub <<EOF; rm -rf ../victim\nbody\nEOF".to_owned(),
+            "cd sub 2>/dev/null <<EOF 2>&1 | rm -rf ../victim\nbody\nEOF".to_owned(),
+            format!("cat <<EOF ; rm -rf victim {long}\nbody\nEOF"),
+            format!("cat <<EOF; git push --force {long}\nbody\nEOF"),
+        ] {
+            assert_eq!(
+                decisions(&defaults, &command),
+                vec![Ask],
+                "{}",
+                &command[..30]
+            );
+            assert_eq!(
+                decisions(&allowlist, &command),
+                vec![Ask],
+                "{}",
+                &command[..30]
+            );
+            assert_eq!(
+                decisions(&denies, &command),
+                vec![Deny],
+                "{}",
+                &command[..30]
+            );
+            let plan = plan(&command);
+            assert!(plan.evaluate(&defaults, &plan.patterns[0]).protected);
+        }
+        // Next to another command they are read for it, and judged as
+        // written.
+        assert_eq!(
+            verdicts(&allowlist, "ls && cd sub <<EOF ; rm -rf victim\nb\nEOF"),
+            vec![("rm -rf victim".to_owned(), Ask)]
+        );
+        assert_eq!(
+            verdicts(&denies, "ls && cd sub <<EOF ; rm -rf victim\nb\nEOF"),
+            vec![("rm -rf victim".to_owned(), Deny)]
+        );
+        // Also when a command of the line runs the same text.
+        assert_eq!(
+            verdicts(
+                &allowlist,
+                "bash -c 'rm -rf victim' <<EOF ; rm -rf victim\nb\nEOF"
+            ),
+            vec![("rm -rf victim".to_owned(), Ask)]
+        );
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
