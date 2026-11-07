@@ -1840,7 +1840,34 @@ async fn fetch_page(
             }
         }
     }
-    truncate_output(text).await
+    fetched_text(text).await
+}
+
+/// A fetched page longer than this is saved as well as shown, so that a
+/// compaction that later shows only its start and end can say where the
+/// rest is.
+const WEBFETCH_SAVED_BYTES: usize = 8 * 1024;
+
+/// A page's text as webfetch gives it: cut and saved past the output limits
+/// as any tool's output is, and otherwise saved whole once it is long enough
+/// for a compaction to cut. Saving is best effort: the page is shown anyway.
+async fn fetched_text(text: String) -> CoreResult<ToolOutput> {
+    let mut output = truncate_output(text).await?;
+    if output.metadata.is_null() && output.text.len() > WEBFETCH_SAVED_BYTES {
+        let saved = async {
+            let (path, mut file) =
+                crate::data_folder::new_private_file_with(&tool_output_dir(), "fetched", "txt")
+                    .await?;
+            file.write_all(output.text.as_bytes()).await?;
+            file.flush().await?;
+            std::io::Result::Ok(path)
+        };
+        match saved.await {
+            Ok(path) => output.metadata = json!({"outputPath": path}),
+            Err(error) => tracing::info!(%error, "webfetch could not save a long page"),
+        }
+    }
+    Ok(output)
 }
 
 /// How much of an error page webfetch reads to say why the fetch failed.
