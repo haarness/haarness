@@ -36,7 +36,7 @@ impl Drop for RawProbeGuard {
 }
 
 fn osc_text(value: &str, limit: usize) -> String {
-    value
+    crate::escapes::without_escapes(value)
         .chars()
         .filter(|character| !character.is_control())
         .take(limit)
@@ -748,9 +748,15 @@ mod tests {
 
     #[test]
     fn osc_payloads_drop_every_control_character() {
+        // A sequence goes whole; one that never ends hides the rest of its
+        // line, and the next line still shows.
         assert_eq!(
             osc_text("safe\x07\x1b]9;injected\nnext\u{009c}", 120),
-            "safe]9;injectednext"
+            "safenext"
+        );
+        assert_eq!(
+            osc_text("\x1b]0;owned\x07\x1b]52;c;aGk=\x07Escaped", 200),
+            "Escaped"
         );
     }
 

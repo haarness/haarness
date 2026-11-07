@@ -17084,6 +17084,34 @@ async fn resume_alias_targets_a_unique_short_session_id_without_an_extra_menu_st
     );
 }
 
+/// A title an older server kept as written, escape sequences included,
+/// shows as its words in the sidebar and the session list, with no `]0;`
+/// fragment.
+#[test]
+fn a_title_with_escape_sequences_draws_as_its_words() {
+    let thread = Thread {
+        title: "\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}Escaped title".into(),
+        ..fixture_thread()
+    };
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::AssistantMessage {
+            text: "conversation".into(),
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.sidebar_open = true;
+    let header = frame_text(&app, (140, 30));
+    assert!(header.contains("Escaped title"), "{header}");
+    app.open_overlay(crate::state::Overlay::Threads);
+    let list = frame_text(&app, (140, 30));
+    assert!(list.contains("Escaped title"), "{list}");
+    for shown in [&header, &list] {
+        assert!(!shown.contains("]0;") && !shown.contains("52;c"), "{shown}");
+    }
+}
+
 /// A server that answers each `PATCH /v1/threads/{id}` with that chat
 /// renamed as asked, and records which chat each rename went to.
 async fn renaming_server(
