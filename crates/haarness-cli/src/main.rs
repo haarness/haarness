@@ -3052,6 +3052,42 @@ fn one_line_metadata(value: &str) -> String {
         .replace(['\r', '\n'], " ")
 }
 
+/// A chat title or a terminal's name as the CLI prints it: on one line,
+/// without the escape sequences and other control characters a terminal
+/// would act on (set its title, write its clipboard). Titles stored before
+/// the server cleaned them, or imported, may still hold some.
+fn printed_title(title: &str) -> String {
+    one_line_metadata(&haarness_protocol::without_escapes(title))
+}
+
+/// `value` as pretty JSON for a terminal: serde_json escapes the C0
+/// controls, but writes DEL and the C1 controls (U+007F–U+009F) as they
+/// are, and some terminals read U+009B as `ESC [`. Those are written as
+/// `\u` escapes too; the JSON reads back the same.
+fn printed_json(value: &impl Serialize) -> Result<String> {
+    Ok(json_without_raw_controls(serde_json::to_string_pretty(
+        value,
+    )?))
+}
+
+fn json_without_raw_controls(json: String) -> String {
+    use std::fmt::Write as _;
+    let raw = |character: char| ('\u{7f}'..='\u{9f}').contains(&character);
+    if !json.contains(raw) {
+        return json;
+    }
+    let mut escaped = String::with_capacity(json.len() + 16);
+    for character in json.chars() {
+        if raw(character) {
+            // Only a string can hold one, and an escape there reads the same.
+            let _ = write!(escaped, "\\u{:04x}", u32::from(character));
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
 fn remove_managed_asset(path: &Path, directory: bool, what: &str) -> Result<()> {
     if !path.exists() {
         anyhow::bail!(
@@ -3111,7 +3147,7 @@ async fn session_command(
                 client.threads().await?
             };
             if json {
-                println!("{}", serde_json::to_string_pretty(&sessions)?);
+                println!("{}", printed_json(&sessions)?);
             } else if sessions.is_empty() {
                 println!("No chats in this folder yet.");
             } else {
@@ -3121,7 +3157,7 @@ async fn session_command(
                     println!(
                         "{}\t{}\t{}/{}\t{}{}",
                         session.id,
-                        one_line_metadata(&session.title),
+                        printed_title(&session.title),
                         session.provider,
                         session.model,
                         session
@@ -3140,23 +3176,31 @@ async fn session_command(
                 let items = client.items(id).await?;
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&json!({"session": session, "items": items}))?
+                    printed_json(&json!({"session": session, "items": items}))?
                 );
             } else {
-                println!("{}", serde_json::to_string_pretty(&session)?);
+                println!("{}", printed_json(&session)?);
             }
         }
         SessionCommand::Archive { id } => {
             let session = client
                 .update_thread(ThreadId(id), session_archive_request(true))
                 .await?;
-            println!("Archived {} ({})", session.title, session.id);
+            println!(
+                "Archived {} ({})",
+                printed_title(&session.title),
+                session.id
+            );
         }
         SessionCommand::Unarchive { id } => {
             let session = client
                 .update_thread(ThreadId(id), session_archive_request(false))
                 .await?;
-            println!("Unarchived {} ({})", session.title, session.id);
+            println!(
+                "Unarchived {} ({})",
+                printed_title(&session.title),
+                session.id
+            );
         }
         SessionCommand::Fork {
             id,
@@ -3175,9 +3219,13 @@ async fn session_command(
                 )
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&session)?);
+                println!("{}", printed_json(&session)?);
             } else {
-                println!("Forked into {} ({})", session.title, session.id);
+                println!(
+                    "Forked into {} ({})",
+                    printed_title(&session.title),
+                    session.id
+                );
             }
         }
         SessionCommand::Export {
@@ -3216,7 +3264,11 @@ async fn session_command(
                     }
                 );
             } else {
-                io::stdout().write_all(&payload)?;
+                // Standard output may be a terminal: DEL and C1 controls go
+                // as escapes there, which read back the same. `--output`
+                // writes the archive as serialized.
+                let payload = json_without_raw_controls(String::from_utf8(payload)?);
+                io::stdout().write_all(payload.as_bytes())?;
             }
         }
         SessionCommand::Import { file, json } => {
@@ -3237,7 +3289,7 @@ async fn session_command(
             let sanitized = archive.sanitized;
             let result = client.import_session_archive(archive).await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+                println!("{}", printed_json(&result)?);
             } else {
                 println!(
                     "Imported chat {}: {} created, {} already here",
@@ -12548,7 +12600,7 @@ impl std::fmt::Display for ServerActivity {
                 .terminals
                 .iter()
                 .take(3)
-                .map(|title| title.chars().take(40).collect::<String>())
+                .map(|title| printed_title(title).chars().take(40).collect::<String>())
                 .collect::<Vec<_>>()
                 .join(", ");
             let more = self.terminals.len().saturating_sub(3);
@@ -15892,6 +15944,46 @@ request_timeout = 0
             "1 active turn, 4 open terminals (zsh, npm run dev, a and 1 more), 2 pending approvals, 1 unanswered question"
         );
         assert!(super::ServerActivity::default().idle());
+        // A shell's name is whatever a program last set: it is printed
+        // without the sequences that would drive the terminal.
+        let activity = super::ServerActivity {
+            terminals: vec!["\u{1b}]0;owned\u{7}vim\u{1b}]52;c;aGk=\u{7}\nnotes.md".into()],
+            ..Default::default()
+        };
+        assert_eq!(activity.to_string(), "1 open terminal (vim notes.md)");
+    }
+
+    #[test]
+    fn chat_titles_print_without_what_would_drive_the_terminal() {
+        for (title, printed) in [
+            ("\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}x", "x"),
+            ("\u{1b}[31mred\u{1b}[0m title", "red title"),
+            ("\u{9b}2Jclear\u{7f}ed", "2Jcleared"),
+            ("Fix bug\nin\tparser\r\n", "Fix bug in parser"),
+            ("Plain title", "Plain title"),
+        ] {
+            assert_eq!(super::printed_title(title), printed, "{title:?}");
+        }
+
+        let session = serde_json::json!({"title": "a\u{9b}2J\u{7f}\u{85}b\u{1b}c", "n": 1});
+        let printed = super::printed_json(&session).unwrap();
+        assert!(
+            !printed.contains(|c: char| c.is_control() && c != '\n'),
+            "{printed:?}"
+        );
+        assert!(
+            printed.contains(r"a\u009b2J\u007f\u0085b\u001bc"),
+            "{printed}"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&printed).unwrap(),
+            session
+        );
+        let plain = serde_json::json!({"title": "Release notes ✓"});
+        assert_eq!(
+            super::printed_json(&plain).unwrap(),
+            serde_json::to_string_pretty(&plain).unwrap()
+        );
     }
 
     #[test]

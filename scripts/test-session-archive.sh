@@ -8,6 +8,8 @@ source_data="$temporary/source-data"
 target_data="$temporary/target-data"
 source_workspace="$temporary/source-workspace"
 target_workspace="$temporary/target-workspace"
+escape_data="$temporary/escape-data"
+escape_workspace="$temporary/escape-workspace"
 full_archive="$temporary/full.json"
 sanitized_archive="$temporary/sanitized.json"
 
@@ -16,11 +18,14 @@ cleanup() {
         serve --stop >/dev/null 2>&1 || true
     "$binary" --data-dir "$target_data" --workspace "$target_workspace" \
         serve --stop >/dev/null 2>&1 || true
+    "$binary" --data-dir "$escape_data" --workspace "$escape_workspace" \
+        serve --stop >/dev/null 2>&1 || true
     rm -rf -- "$temporary"
 }
 trap cleanup EXIT HUP INT TERM
 
-mkdir -p "$source_data" "$target_data" "$source_workspace" "$target_workspace"
+mkdir -p "$source_data" "$target_data" "$source_workspace" "$target_workspace" \
+    "$escape_data" "$escape_workspace"
 if [ ! -x "$binary" ]; then
     cargo build -q -p haarness-cli
 fi
@@ -42,6 +47,10 @@ source_cli() {
 target_cli() {
     env HAARNESS_TEST_PROVIDER=1 "$binary" --data-dir "$target_data" \
         --workspace "$target_workspace" "$@"
+}
+escape_cli() {
+    env HAARNESS_TEST_PROVIDER=1 "$binary" --data-dir "$escape_data" \
+        --workspace "$escape_workspace" "$@"
 }
 
 source_cli run --provider echo --model echo-1 --title 'Archive root secret' \
@@ -92,4 +101,30 @@ if target_cli sessions import "$temporary/unsupported.json" >/dev/null 2>&1; the
 fi
 test "$(target_cli sessions list --json | jq 'length')" -eq 2
 
-printf '%s\n' 'session archive smoke passed: tree export + sanitization + transactional idempotent import'
+# An imported chat keeps the title its archive holds, escape sequences
+# included. Printed, it is plain words: listing the chats neither sets the
+# terminal's title nor writes its clipboard, and JSON writes DEL and C1
+# controls as escapes that read back as the title.
+escaped_title='\u001b]0;owned\u0007\u001b]52;c;aGk=\u0007Escaped\u009b title\u007f'
+jq --arg root "$root_id" \
+    "(.threads[] | select(.thread.id == \$root) | .thread.title) = \"$escaped_title\"" \
+    "$full_archive" > "$temporary/escaped.json"
+escape_cli sessions import "$temporary/escaped.json" >/dev/null
+listed=$(escape_cli sessions list)
+# Tabs and line ends are the list's own.
+if [ "$(printf '%s' "$listed" | jq -Rs 'test("[\u0001-\u0008\u000b-\u001f\u007f-\u009f]")')" != false ]; then
+    echo 'sessions list printed a control character from a title' >&2
+    exit 1
+fi
+printf '%s\n' "$listed" | grep -F "$(printf '%s\tEscaped title\t' "$root_id")" >/dev/null
+listed_json=$(escape_cli sessions list --json)
+if [ "$(printf '%s' "$listed_json" | jq -Rs 'test("[\u007f-\u009f]")')" != false ]; then
+    echo 'sessions list --json printed a raw DEL or C1 control' >&2
+    exit 1
+fi
+printf '%s' "$listed_json" | jq -e --arg root "$root_id" \
+    ".[] | select(.id == \$root) | .title == \"$escaped_title\"" >/dev/null
+archived=$(escape_cli sessions archive "$root_id")
+test "$archived" = "Archived Escaped title ($root_id)"
+
+printf '%s\n' 'session archive smoke passed: tree export + sanitization + transactional idempotent import + titles printed without controls'

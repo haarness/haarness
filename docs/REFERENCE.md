@@ -150,6 +150,7 @@ haarness prompt list                   # built-in prompts and the prompt files t
 haarness prompt eject system           # ~/.config/haarness/prompts/system.md to edit; see docs/PROMPT-FILES.md
 haarness prompt diff system
 haarness sessions list --all            # archived chats too
+# a title is printed on one line without escape sequences or other control characters; --json writes DEL and C1 controls as \u escapes
 haarness sessions fork SESSION_ID --title "Try another approach"
 haarness btw SESSION_ID "Which file did it change last?"  # side question; the chat is unchanged
 haarness sessions export SESSION_ID --output session.json
