@@ -338,7 +338,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                 .open(file.with_extension("lock"))?;
             fs2::FileExt::try_lock_exclusive(&lock)
                 .context("This remote connector is already running")?;
-            let id = match std::fs::read_to_string(&file) {
+            let mut id = match std::fs::read_to_string(&file) {
                 Ok(value) => serde_json::from_str::<Value>(&value)?["id"]
                     .as_str()
                     .context("Invalid remote identity")?
@@ -364,6 +364,16 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                 ("version", json!(env!("CARGO_PKG_VERSION"))),
             ] {
                 identity[key] = value;
+            }
+            if let Settled::Moved { from } = settle_identity(&mut identity, machine_id().as_deref())
+            {
+                id = identity["id"]
+                    .as_str()
+                    .context("Invalid remote identity")?
+                    .parse()?;
+                eprintln!(
+                    "This identity was copied from another computer, which keeps remote host {from}; this computer connects as a new remote host, {id}."
+                );
             }
             // Why an earlier run gave up no longer applies once this one starts.
             if let Some(fields) = identity.as_object_mut() {
@@ -1301,6 +1311,77 @@ fn identity_file(
     );
     paths.config_dir().join(format!("remote-{identity}.json"))
 }
+/// This machine's hardware id, which tells a connector identity copied from
+/// another computer (a migrated or synced configuration folder) from its own.
+/// `None` when it cannot be told, which never counts as another computer.
+/// Under the test providers (`HAARNESS_TEST_PROVIDER`)
+/// `HAARNESS_TEST_MACHINE_ID` stands in for it, empty for none.
+fn machine_id() -> Option<String> {
+    if std::env::var_os("HAARNESS_TEST_PROVIDER").is_some()
+        && let Some(id) = std::env::var_os("HAARNESS_TEST_MACHINE_ID")
+    {
+        let id = id.to_string_lossy().trim().to_owned();
+        return (!id.is_empty()).then_some(id);
+    }
+    haarness_opentui::hardware_id()
+}
+/// The `machine` an identity carries: SHA-256 of the hardware id and the host
+/// id. It does not name the machine, and no two hosts' stamps match.
+fn machine_stamp(hardware: &str, host: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(format!("{hardware}|{host}")))
+}
+/// Whether `identity` is this computer's: stamped here, written before
+/// identities were stamped, or this computer cannot tell.
+fn belongs_here(identity: &Value, hardware: Option<&str>) -> bool {
+    match (
+        hardware,
+        identity["machine"].as_str(),
+        identity["id"].as_str(),
+    ) {
+        (Some(hardware), Some(stamp), Some(host)) => stamp == machine_stamp(hardware, host),
+        _ => true,
+    }
+}
+/// What [`settle_identity`] did to a connector identity.
+#[derive(Debug, PartialEq, Eq)]
+enum Settled {
+    /// It was this computer's already, or this computer cannot tell.
+    Kept,
+    /// New, or written before identities were stamped: now stamped as this
+    /// computer's, with its id unchanged.
+    Stamped,
+    /// Another computer stamped it, so its folder was copied here: it now
+    /// names a new host, and host `from` stays with that computer.
+    Moved { from: String },
+}
+/// Make `identity` this computer's before its connector registers. Two
+/// computers connecting under one host id would take the connection from
+/// each other in Cloud, and phones would see one computer whose projects
+/// flip between them.
+fn settle_identity(identity: &mut Value, hardware: Option<&str>) -> Settled {
+    let (Some(hardware), Some(host)) = (hardware, identity["id"].as_str().map(str::to_owned))
+    else {
+        return Settled::Kept;
+    };
+    if identity["machine"].is_string() {
+        if belongs_here(identity, Some(hardware)) {
+            return Settled::Kept;
+        }
+        let id = Uuid::now_v7().to_string();
+        identity["machine"] = json!(machine_stamp(hardware, &id));
+        identity["id"] = json!(id);
+        // What Cloud said about the other computer's host is not this one's.
+        if let Some(fields) = identity.as_object_mut() {
+            for key in ["registered", "publicationId", "title", "error"] {
+                fields.remove(key);
+            }
+        }
+        return Settled::Moved { from: host };
+    }
+    identity["machine"] = json!(machine_stamp(hardware, &host));
+    Settled::Stamped
+}
 fn running(file: &Path) -> Result<bool> {
     let path = file.with_extension("lock");
     if !path.exists() {
@@ -1351,11 +1432,21 @@ pub(crate) async fn computers(
         &format!("/api/v1/remote-hosts{}", account_query(client)),
     )
     .await?;
-    let local = identities_in(config_dir)?
-        .into_iter()
-        .filter_map(|(_, identity)| identity["id"].as_str().map(str::to_owned))
-        .collect();
+    let local = own_hosts(config_dir, machine_id().as_deref())?;
     Ok(json!({ "items": other_computers(&hosts, &local) }))
+}
+/// The hosts this computer connects as: those of the connector identities in
+/// `config_dir`, except identities copied from another computer, which name
+/// that computer until this one connects under its own.
+fn own_hosts(
+    config_dir: &Path,
+    hardware: Option<&str>,
+) -> Result<std::collections::HashSet<String>> {
+    Ok(identities_in(config_dir)?
+        .into_iter()
+        .filter(|(_, identity)| belongs_here(identity, hardware))
+        .filter_map(|(_, identity)| identity["id"].as_str().map(str::to_owned))
+        .collect())
 }
 /// [`computers`] without the network: each host as Desktop shows it.
 fn other_computers(hosts: &Value, local: &std::collections::HashSet<String>) -> Vec<Value> {
@@ -1754,12 +1845,17 @@ pub(crate) async fn share_chat(paths: &Paths, workspace: &Path, thread: Uuid) ->
     }
     let computer = haarness_account::computer_name();
     let start = spawn_connector(paths, workspace, &file, &computer, Some(thread), false).await?;
-    // The connector registers and publishes as soon as it holds its lock.
+    // The connector registers and publishes as soon as it holds its lock (a
+    // copied identity's publication is the other computer's).
+    let hardware = machine_id();
     for _ in 0..150 {
         let published = std::fs::read(&file)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .is_some_and(|identity| identity["publicationId"].is_string());
+            .is_some_and(|identity| {
+                identity["publicationId"].is_string()
+                    && belongs_here(&identity, hardware.as_deref())
+            });
         if published {
             break;
         }
@@ -1828,11 +1924,14 @@ async fn stop_connector(file: &Path) -> Result<()> {
     anyhow::bail!("The connector did not stop within 15 seconds")
 }
 /// End Cloud access for a stopped chat connector and delete its identity.
+/// An identity copied from another computer is only deleted here: its share
+/// in Cloud is that computer's.
 async fn forget_chat(
     client: &haarness_account::Client,
     file: &Path,
     identity: &Value,
 ) -> Result<()> {
+    let ours = belongs_here(identity, machine_id().as_deref());
     let removals = [
         identity["publicationId"]
             .as_str()
@@ -1841,7 +1940,7 @@ async fn forget_chat(
             .as_str()
             .map(|id| format!("/api/v1/remote-hosts/{id}")),
     ];
-    for path in removals.into_iter().flatten() {
+    for path in removals.into_iter().flatten().filter(|_| ours) {
         match client.request(reqwest::Method::DELETE, &path, None).await {
             Ok(_) => {}
             Err(error) if not_found(&error) => {}
@@ -2078,12 +2177,17 @@ pub(crate) async fn enable_host(
         paths.workspace_manager()?.register_chat_home(gateway)?;
         let name = haarness_account::computer_name();
         let start = spawn_connector(paths, gateway, &file, &name, None, true).await?;
-        // The connector registers with Cloud as soon as it holds its lock.
+        // The connector registers with Cloud as soon as it holds its lock;
+        // an identity copied from another computer says it was registered
+        // until the connector has made it this one's.
+        let hardware = machine_id();
         for _ in 0..150 {
             let registered = std::fs::read(&file)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .is_some_and(|identity| identity["registered"] == true);
+                .is_some_and(|identity| {
+                    identity["registered"] == true && belongs_here(&identity, hardware.as_deref())
+                });
             if registered {
                 break;
             }
@@ -2267,11 +2371,7 @@ mod tests {
         // Files that are not connector identities never hide a host.
         std::fs::write(dir.join("remote-abc.log"), this).unwrap();
         std::fs::write(dir.join("account.json"), json!({"id": "b1"}).to_string()).unwrap();
-        let local = identities_in(&dir)
-            .unwrap()
-            .into_iter()
-            .filter_map(|(_, identity)| identity["id"].as_str().map(str::to_owned))
-            .collect();
+        let local = own_hosts(&dir, None).unwrap();
         let hosts = json!({"items": [
             {"id": this, "name": "This Mac", "mode": "host", "connected": true, "metadata": {}},
             {"id": "b1", "name": "Studio", "mode": "host", "connected": true,
@@ -2290,6 +2390,108 @@ mod tests {
             ]
         );
         assert!(other_computers(&json!({}), &local).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn an_identity_copied_from_another_computer_becomes_a_new_host_here() {
+        let (here, there) = ("HARDWARE-HERE", "HARDWARE-THERE");
+        let host = "00000000-0000-4000-8000-0000000000b1";
+        let fields = json!({"id": host, "name": "Studio", "accountId": "a1",
+            "apiUrl": "https://haarness.ai/", "chatId": null, "workspace": "/Users/sam",
+            "registered": true, "publicationId": "p1", "title": "Fix the build",
+            "error": "Remote host access was revoked"});
+
+        // Written before identities were stamped: adopted, keeping its id.
+        let mut old = fields.clone();
+        assert_eq!(settle_identity(&mut old, Some(here)), Settled::Stamped);
+        assert_eq!(old["id"], host);
+        assert_eq!(old["machine"], machine_stamp(here, host));
+        assert_eq!(old["registered"], true);
+        assert_eq!(old["publicationId"], "p1");
+        // From then on it stays as it is, however often it starts.
+        let stamped = old.clone();
+        assert_eq!(settle_identity(&mut old, Some(here)), Settled::Kept);
+        assert_eq!(old, stamped);
+        assert!(belongs_here(&old, Some(here)));
+
+        // The same file on another computer: a new host, with nothing Cloud
+        // said about the first one's, and the rest kept.
+        let mut copied = stamped.clone();
+        assert!(!belongs_here(&copied, Some(there)));
+        assert_eq!(
+            settle_identity(&mut copied, Some(there)),
+            Settled::Moved { from: host.into() }
+        );
+        let moved = copied["id"].as_str().unwrap().to_owned();
+        assert_ne!(moved, host);
+        assert!(moved.parse::<Uuid>().is_ok());
+        assert_eq!(copied["machine"], machine_stamp(there, &moved));
+        for key in ["registered", "publicationId", "title", "error"] {
+            assert!(copied.get(key).is_none(), "{key} kept: {copied}");
+        }
+        for key in ["name", "accountId", "apiUrl", "workspace"] {
+            assert_eq!(copied[key], fields[key], "{key}");
+        }
+        assert!(copied["chatId"].is_null());
+        // Each computer now keeps its own, and neither moves again.
+        let settled = copied.clone();
+        assert_eq!(settle_identity(&mut copied, Some(there)), Settled::Kept);
+        assert_eq!(copied, settled);
+        let mut first = stamped.clone();
+        assert_eq!(settle_identity(&mut first, Some(here)), Settled::Kept);
+
+        // A computer that cannot tell its hardware id changes nothing: it
+        // never stamps, and never takes a stamp for another computer's.
+        for identity in [fields.clone(), stamped.clone()] {
+            let mut unknown = identity.clone();
+            assert_eq!(settle_identity(&mut unknown, None), Settled::Kept);
+            assert_eq!(unknown, identity);
+            assert!(belongs_here(&identity, None));
+        }
+        // A stamp names neither the computer nor the host, and differs
+        // between hosts of one computer.
+        let stamp = machine_stamp(here, host);
+        assert_eq!(stamp.len(), 64);
+        assert!(!stamp.contains(here) && !stamp.contains(host));
+        assert_ne!(stamp, machine_stamp(here, &moved));
+        assert_ne!(stamp, machine_stamp(there, host));
+    }
+    #[test]
+    fn a_copied_identity_does_not_hide_the_computer_it_came_from() {
+        let dir = std::env::temp_dir().join(format!("haarness-copied-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (studio, laptop, older) = (
+            "00000000-0000-4000-8000-0000000000c1",
+            "00000000-0000-4000-8000-0000000000c2",
+            "00000000-0000-4000-8000-0000000000c3",
+        );
+        let identity = |id: &str, machine: Option<&str>| {
+            let mut identity = json!({"id": id, "name": "Desk"});
+            if let Some(machine) = machine {
+                identity["machine"] = json!(machine_stamp(machine, id));
+            }
+            identity.to_string()
+        };
+        // One copied from the studio, one of this laptop's, one from before
+        // identities were stamped.
+        std::fs::write(dir.join("remote-a.json"), identity(studio, Some("STUDIO"))).unwrap();
+        std::fs::write(dir.join("remote-b.json"), identity(laptop, Some("LAPTOP"))).unwrap();
+        std::fs::write(dir.join("remote-c.json"), identity(older, None)).unwrap();
+        let mut own = own_hosts(&dir, Some("LAPTOP"))
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
+        own.sort();
+        assert_eq!(own, [laptop, older]);
+        let hosts = json!({"items": [
+            {"id": studio, "name": "Studio", "mode": "host", "connected": true, "metadata": {}},
+            {"id": laptop, "name": "Laptop", "mode": "host", "connected": true, "metadata": {}},
+        ]});
+        let others = other_computers(&hosts, &own_hosts(&dir, Some("LAPTOP")).unwrap());
+        assert_eq!(others.len(), 1);
+        assert_eq!(others[0]["id"], studio);
+        // Without a hardware id every identity here counts as this one's.
+        assert_eq!(own_hosts(&dir, None).unwrap().len(), 3);
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]

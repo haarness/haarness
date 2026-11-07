@@ -40,7 +40,7 @@ npm --prefix sdks/typescript test
 sdks/python/.venv/bin/python -m pytest sdks/python/tests -q
 ```
 
-Broaden to `cargo test -p haarness-server --test api` for shared server/auth/event changes. For Cloud changes, run `cargo test -p cloud-api --test remote` in that checkout with private `HAARNESS_CLOUD_TEST_DATABASE_URL` configured. Its database cases skip without the variable: a skipped suite is not relay proof. Web changes also need that checkout's `npm --prefix web run typecheck`, `npm --prefix web test` and `npm --prefix web run build`.
+`scripts/test-remote-identity.py [state]` plays Cloud itself (no Cloud needed): it copies one computer's connector identity to another (`HAARNESS_TEST_MACHINE_ID` stands in for each hardware id, only with `HAARNESS_TEST_PROVIDER`) and checks that the copy becomes a host of its own without the two taking the relay connection from each other, that each bridge lists the other computer, and that unstamped identities and unreadable hardware ids change nothing. Broaden to `cargo test -p haarness-server --test api` for shared server/auth/event changes. For Cloud changes, run `cargo test -p cloud-api --test remote` in that checkout with private `HAARNESS_CLOUD_TEST_DATABASE_URL` configured. Its database cases skip without the variable: a skipped suite is not relay proof. Web changes also need that checkout's `npm --prefix web run typecheck`, `npm --prefix web test` and `npm --prefix web run build`.
 
 ```sh
 # Native checkout, SDK Python environment, local Cloud sandbox already running.
