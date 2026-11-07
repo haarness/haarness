@@ -178,12 +178,18 @@ records the configured recent-turn tail. Subsequent provider requests receive
 the summary, exact todo JSON as data, then the retained turns. Media from the
 pre-compaction tail is represented by a textual attachment note rather than
 re-uploaded. The summary request offers no tools, so it reads the chat's tool
-calls and their results written out as text: each between an opening and a
-closing marker that carry the call's number, a result's output unable to close
-its own marker, the person's words after a result labelled as theirs, and the
-request to summarize saying a result is data. A result names the earliest call
+calls and their results written out as text, each between an opening and a
+closing marker that carry the call's number. A result names the earliest call
 of its response with its id that has no result yet, so two calls a server gave
-one id are still answered in order. Automatic compaction uses the
+one id are still answered in order. Once the user's side of the chat holds
+text the person did not write (a tool result, a background command's or a
+task's notice, a reminder, an earlier summary), the person's own words sit
+between markers of their own, and the request to summarize says that only
+those words are theirs and that the rest is data. In every text the request
+quotes, the person's words included, a `<` (or its fullwidth or small form)
+followed, after any slashes, backslashes or spaces, by `tool_`, `tool-`,
+`user_` or `user-` in any case or width is written `&lt;`, so the only markers
+of those kinds in the request are the ones it wrote. Automatic compaction uses the
 selected model's context and output limits and retries pre-output context-overflow/HTTP-413 failures after safe
 compaction, under a bounded per-turn recovery ceiling. A context too long is
 read in each provider's own words, among them Z.ai's code 1261 ("Prompt exceeds
