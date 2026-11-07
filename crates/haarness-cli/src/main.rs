@@ -3052,12 +3052,22 @@ fn one_line_metadata(value: &str) -> String {
         .replace(['\r', '\n'], " ")
 }
 
-/// A chat title or a terminal's name as the CLI prints it: one line, with
-/// nothing in it a terminal would act on (a sequence that sets the window
-/// title or writes the clipboard). An older server's title or a name a
-/// program set can still hold one.
+/// A chat title, a schedule's or a terminal's name as the CLI prints it:
+/// one line, with nothing in it a terminal would act on (a sequence that
+/// sets the window title or writes the clipboard). An older server's title
+/// or a name a program set can still hold one.
 fn printed_title(title: &str) -> String {
     one_line_metadata(&haarness_protocol::clean_chat_title(title))
+}
+
+/// A schedule's row in `haarness schedule list`, `add` and `update`. An
+/// agent can name a schedule, so its name is printed as a title is.
+fn schedule_line(schedule: &haarness_scheduler::Schedule) -> String {
+    format!(
+        "{} {}",
+        schedule.id,
+        printed_title(&Scheduler::summary(schedule))
+    )
 }
 
 /// `value` as indented JSON fit for a terminal. A string holding DEL or a
@@ -3623,7 +3633,7 @@ async fn schedule_command(
                 println!("No schedules configured.");
             } else {
                 for schedule in jobs {
-                    println!("{} {}", schedule.id, Scheduler::summary(&schedule));
+                    println!("{}", schedule_line(&schedule));
                 }
             }
         }
@@ -3653,7 +3663,7 @@ async fn schedule_command(
                 trigger: schedule_trigger(args.every, args.cron, args.at)?,
                 timezone: args.timezone,
             })?;
-            println!("{} {}", schedule.id, Scheduler::summary(&schedule));
+            println!("{}", schedule_line(&schedule));
         }
         ScheduleCommand::Update(mut args) => {
             if let Some(model) = args.model.clone().filter(|model| !model.trim().is_empty()) {
@@ -3683,17 +3693,19 @@ async fn schedule_command(
                     timezone: args.timezone.map(Some),
                 },
             )?;
-            println!("{} {}", schedule.id, Scheduler::summary(&schedule));
+            println!("{}", schedule_line(&schedule));
         }
         ScheduleCommand::Remove { reference } => {
             let schedule = scheduler.remove(&reference)?;
-            println!("Removed {}", schedule.name);
+            println!("Removed {}", printed_title(&schedule.name));
         }
         ScheduleCommand::Enable { reference } => {
-            println!("Enabled {}", scheduler.toggle(&reference, true)?.name);
+            let schedule = scheduler.toggle(&reference, true)?;
+            println!("Enabled {}", printed_title(&schedule.name));
         }
         ScheduleCommand::Disable { reference } => {
-            println!("Disabled {}", scheduler.toggle(&reference, false)?.name);
+            let schedule = scheduler.toggle(&reference, false)?;
+            println!("Disabled {}", printed_title(&schedule.name));
         }
         ScheduleCommand::Run { reference, json } => {
             let schedule = scheduler.require(&reference)?;
@@ -3704,13 +3716,13 @@ async fn schedule_command(
             } else if run.status == ScheduleRunStatus::Skipped {
                 println!(
                     "{}: {}",
-                    schedule.name,
+                    printed_title(&schedule.name),
                     run.error.as_deref().unwrap_or("skipped")
                 );
             } else if run.status == ScheduleRunStatus::Success {
                 println!(
                     "Ran {}{}",
-                    schedule.name,
+                    printed_title(&schedule.name),
                     run.thread_id
                         .map(|id| format!(" in chat {id}"))
                         .unwrap_or_default()
@@ -15951,6 +15963,29 @@ request_timeout = 0
             ..Default::default()
         };
         assert_eq!(activity.to_string(), "1 open terminal (vim notes.md)");
+    }
+
+    #[test]
+    fn schedule_rows_print_the_name_without_escape_sequences() {
+        let schedule: haarness_scheduler::Schedule = serde_json::from_value(json!({
+            "id": "018f0000-1111-7222-8333-444455556666",
+            "backend": "launchd",
+            "name": "\u{1b}]0;owned\u{7}\u{1b}]52;c;aGk=\u{7}Nightly\naudit",
+            "workspace": "/repo",
+            "prompt": "Audit",
+            "trustProject": false,
+            "enabled": true,
+            "trigger": {"type": "interval", "seconds": 3600},
+            "createdAt": "2026-11-07T00:00:00Z",
+            "updatedAt": "2026-11-07T00:00:00Z",
+        }))
+        .unwrap();
+        let line = super::schedule_line(&schedule);
+        assert!(
+            line.starts_with("018f0000-1111-7222-8333-444455556666 Nightly audit | "),
+            "{line:?}"
+        );
+        assert!(!line.contains(char::is_control), "{line:?}");
     }
 
     #[test]
