@@ -467,7 +467,7 @@ enum ActivationError {
     Core(CoreError),
     AuthorizationRequired(Option<String>),
     /// A setting keeps the server from starting at all (see
-    /// [`url_problem`]): its status says so as it is, with no
+    /// [`reachable_url`]): its status says so as it is, with no
     /// "connection failed" before it, since nothing was connected to.
     NotStarted(String),
 }
@@ -1138,11 +1138,9 @@ impl NativeMcpRegistry {
             .url
             .as_deref()
             .ok_or_else(|| CoreError::Invalid("Streamable HTTP MCP requires url".into()))?;
-        if let Some(problem) = url_problem(name, url) {
-            return Err(CoreError::Invalid(problem));
-        }
+        let url = reachable_url(url).map_err(|problem| unreachable_server(name, &problem))?;
         let (manager, _) =
-            authorization_manager(url, manager_store(name, self.auth_dir.as_deref())).await?;
+            authorization_manager(&url, manager_store(name, self.auth_dir.as_deref())).await?;
         let mut request = AuthorizationRequest::new(redirect_uri).with_client_name("Haarness");
         if let Some(client_id) = config.oauth_client_id {
             request = request.with_preregistered_client(client_id);
@@ -1460,13 +1458,20 @@ impl McpStart {
             config.apps != Some(false),
         );
         let oversized = (config.transport == "stdio").then(Arc::<AtomicBool>::default);
-        let launch = launch_config(&config, folder.as_deref());
+        let mut launch = launch_config(&config, folder.as_deref());
+        // Read and checked before any header, helper or OAuth step uses it.
+        let mut not_started = None;
+        if launch.transport != "stdio"
+            && let Some(url) = launch.url.as_deref()
+        {
+            match reachable_url(url) {
+                Ok(url) => launch.url = Some(url),
+                Err(problem) => not_started = Some(problem),
+            }
+        }
         let activation = async {
             let config = &launch;
-            // Checked before any header, helper or OAuth step reads it.
-            if config.transport != "stdio"
-                && let Some(problem) = config.url.as_deref().and_then(|url| url_problem(name, url))
-            {
+            if let Some(problem) = not_started {
                 return Err(ActivationError::NotStarted(problem));
             }
             match config.transport.as_str() {
@@ -1578,8 +1583,9 @@ impl McpStart {
                 }
                 Err(ActivationError::NotStarted(problem)) => {
                     entry.info.status = "failed".into();
-                    entry.info.detail = Some(problem.clone());
-                    return (Err(CoreError::Invalid(problem)), None);
+                    let error = unreachable_server(name, &problem);
+                    entry.info.detail = Some(problem);
+                    return (Err(error), None);
                 }
                 Err(ActivationError::Core(error)) => {
                     entry.info.status = "failed".into();
@@ -1729,6 +1735,7 @@ fn effective_config(config: &McpConfigureRequest) -> McpConfigureRequest {
         .env
         .values_mut()
         .chain(effective.headers.values_mut())
+        .chain(effective.url.iter_mut())
     {
         *value = expand_env_reference(value);
     }
@@ -2040,32 +2047,65 @@ fn describe_timeout(timeout: Duration) -> String {
     }
 }
 
-/// Why remote MCP server `name` cannot be reached at `url`, or `None` when
-/// it can be asked: an http or https URL with a host, in a form an HTTP
-/// request carries. Unchecked, such a URL (an unset `${DOCS_HOST}` left in
-/// it, or none at all) failed deep in the transport with an error that
-/// named the transport's own types. The sentence names the server and never
-/// the URL, which may carry a token; an unset environment variable the URL
-/// names is named, since setting it is the fix.
-fn url_problem(name: &str, url: &str) -> Option<String> {
-    if haarness_core::links::http_url(url).is_some_and(|parsed| parsed.parse::<http::Uri>().is_ok())
-        && !without_host(url)
-    {
-        return None;
+/// The status of a remote server whose url, its references read, is not
+/// an http or https address with a host. A status sits under the server's
+/// name, so it does not repeat it.
+const URL_WITHOUT_HOST: &str = "Its URL is not an http or https address with a host.";
+
+/// The address remote server is asked at: `url` with each `${VAR}` and
+/// `${VAR:-fallback}` read from the environment when the server starts, as
+/// its headers' and environment's are, or its status when it cannot be
+/// asked there. Unchecked, such a URL failed deep in the transport with an
+/// error that named the transport's own types and quoted it. The status
+/// never holds the URL, which may carry a token; it names a variable that
+/// is not set, since setting it is the fix. A JSON setting has read its
+/// references already (and filled an unset one with nothing), so a value
+/// that itself holds `${OTHER}` is read once more here, a known limit.
+fn reachable_url(url: &str) -> Result<String, String> {
+    reachable_url_with(url, &|name| std::env::var(name).ok())
+}
+
+fn reachable_url_with(
+    url: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    match unset_references(url, lookup).as_slice() {
+        [] => {}
+        [one] => {
+            return Err(format!(
+                "Its URL names an environment variable that is not set: {one}."
+            ));
+        }
+        many => {
+            return Err(format!(
+                "Its URL names environment variables that are not set: {}.",
+                many.join(", ")
+            ));
+        }
     }
-    let unset = unset_references(url);
-    Some(match unset.as_slice() {
-        [] => format!(
-            "MCP server \"{name}\" has no usable URL: it is not an http or https address with a host."
-        ),
-        [one] => format!(
-            "MCP server \"{name}\" has no usable URL: the environment variable {one} it names is not set."
-        ),
-        [many @ .., last] => format!(
-            "MCP server \"{name}\" has no usable URL: the environment variables {} and {last} it names are not set.",
-            many.join(", ")
-        ),
-    })
+    let resolved = expand_env_reference_with(url, &|name| {
+        if name.starts_with("keychain:") {
+            Some(format!("${{{name}}}"))
+        } else {
+            lookup(name)
+        }
+    });
+    let usable = haarness_core::links::http_url(&resolved)
+        .is_some_and(|parsed| parsed.parse::<http::Uri>().is_ok())
+        && !without_host(&resolved);
+    if usable {
+        Ok(resolved)
+    } else {
+        Err(URL_WITHOUT_HOST.into())
+    }
+}
+
+/// What a request to remote server `name` says when its url cannot be
+/// asked (see [`reachable_url`]).
+fn unreachable_server(name: &str, problem: &str) -> CoreError {
+    CoreError::Invalid(format!(
+        "MCP server \"{name}\" cannot be reached. {problem}"
+    ))
 }
 
 /// Whether `url` is written with nothing where its host goes. A JSON
@@ -2080,11 +2120,10 @@ fn without_host(url: &str) -> bool {
         })
 }
 
-/// The `${NAME}` references left in `value`, each once in the order they
-/// come: configuration loading replaces those that are set, so one still
-/// written out names a variable that was not. Only names a variable may
-/// have are read.
-fn unset_references(value: &str) -> Vec<String> {
+/// The variables `value` names in a `${NAME}` without a fallback that
+/// `lookup` has no value for, each once in the order they come. Only names
+/// a variable may have are read.
+fn unset_references(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
     let mut names = Vec::new();
     let mut rest = value;
     while let Some(start) = rest.find("${") {
@@ -2096,7 +2135,7 @@ fn unset_references(value: &str) -> Vec<String> {
         let variable = name.len() <= 64
             && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if variable && !names.iter().any(|seen| seen == name) {
+        if variable && lookup(name).is_none() && !names.iter().any(|seen| seen == name) {
             names.push(name.to_owned());
         }
         rest = &after[end + 1..];
@@ -3630,54 +3669,77 @@ mod tests {
 
     #[test]
     fn a_remote_url_is_usable_only_as_an_http_or_https_address_with_a_host() {
-        for usable in [
-            "http://127.0.0.1:8123/mcp",
-            "https://docs.fixture.test/mcp?api_key=k",
-            "https://sam:secret@docs.fixture.test/mcp",
-            " HTTPS://Docs.Fixture.Test/mcp ",
-            "http://[::1]:9000/mcp",
-            // A reference left in the path still makes a request the server
-            // can answer, as before.
-            "https://docs.fixture.test/${SPACE}/mcp",
+        let environment = |name: &str| match name {
+            "DOCS_HOST" => Some("docs.fixture.test".to_owned()),
+            "DOCS_PORT" => Some("8443".to_owned()),
+            _ => None,
+        };
+        let reach = |url: &str| reachable_url_with(url, &environment);
+        for (usable, asked) in [
+            ("http://127.0.0.1:8123/mcp", "http://127.0.0.1:8123/mcp"),
+            (
+                "https://docs.fixture.test/mcp?api_key=k",
+                "https://docs.fixture.test/mcp?api_key=k",
+            ),
+            (
+                "https://sam:secret@docs.fixture.test/mcp",
+                "https://sam:secret@docs.fixture.test/mcp",
+            ),
+            (
+                " HTTPS://Docs.Fixture.Test/mcp ",
+                " HTTPS://Docs.Fixture.Test/mcp ",
+            ),
+            ("http://[::1]:9000/mcp", "http://[::1]:9000/mcp"),
+            // A TOML or API url's references are read when the server starts.
+            (
+                "https://${DOCS_HOST}:${DOCS_PORT}/mcp",
+                "https://docs.fixture.test:8443/mcp",
+            ),
+            (
+                "https://${DOCS_MIRROR:-docs.fixture.test}/mcp",
+                "https://docs.fixture.test/mcp",
+            ),
+            (
+                "https://${DOCS_HOST}/mcp?api_key=${DOCS_KEY:-none}",
+                "https://docs.fixture.test/mcp?api_key=none",
+            ),
         ] {
-            assert_eq!(url_problem("docs", usable), None, "{usable}");
+            assert_eq!(reach(usable).as_deref(), Ok(asked), "{usable}");
         }
         for (unusable, said) in [
-            (
-                "not a url",
-                "it is not an http or https address with a host",
-            ),
-            ("", "it is not an http or https address with a host"),
-            (
-                "ftp://docs.fixture.test/mcp",
-                "it is not an http or https address with a host",
-            ),
-            ("http:", "it is not an http or https address with a host"),
+            ("not a url", URL_WITHOUT_HOST),
+            ("", URL_WITHOUT_HOST),
+            ("ftp://docs.fixture.test/mcp", URL_WITHOUT_HOST),
+            ("http:", URL_WITHOUT_HOST),
+            ("file:///tmp/mcp.sock", URL_WITHOUT_HOST),
             // `https://${DOCS_HOST}/mcp` from a JSON setting, its unset
             // variable filled with nothing.
+            ("https:///mcp?api_key=tok-secret", URL_WITHOUT_HOST),
+            // An unset reference is named wherever it is: host, path,
+            // query or user name, before anything is sent.
             (
-                "https:///mcp?api_key=tok-secret",
-                "it is not an http or https address with a host",
+                "https://${DOCS_SPARE}/mcp?token=tok-secret",
+                "Its URL names an environment variable that is not set: DOCS_SPARE.",
             ),
             (
-                "file:///tmp/mcp.sock",
-                "it is not an http or https address with a host",
+                "https://${DOCS_HOST}/${DOCS_SPARE}/mcp",
+                "Its URL names an environment variable that is not set: DOCS_SPARE.",
             ),
             (
-                "https://${DOCS_HOST}/mcp?token=tok-secret",
-                "the environment variable DOCS_HOST it names is not set",
+                "https://docs.fixture.test/mcp?api_key=${DOCS_SPARE}",
+                "Its URL names an environment variable that is not set: DOCS_SPARE.",
             ),
             (
-                "${DOCS_SCHEME}://${DOCS_HOST}:${DOCS_PORT}/${DOCS_HOST}",
-                "the environment variables DOCS_SCHEME, DOCS_HOST and DOCS_PORT it names are not set",
+                "https://${DOCS_SPARE}:tok-secret@docs.fixture.test/mcp",
+                "Its URL names an environment variable that is not set: DOCS_SPARE.",
+            ),
+            (
+                "${DOCS_SCHEME}://${DOCS_HOST}:${DOCS_SPARE}/${DOCS_SCHEME}",
+                "Its URL names environment variables that are not set: DOCS_SCHEME, DOCS_SPARE.",
             ),
         ] {
-            let problem = url_problem("docs", unusable).unwrap_or_else(|| panic!("{unusable}"));
-            assert_eq!(
-                problem,
-                format!("MCP server \"docs\" has no usable URL: {said}."),
-                "{unusable}"
-            );
+            let problem = reach(unusable).expect_err(unusable);
+            assert_eq!(problem, said, "{unusable}");
             assert!(
                 !problem.contains("tok-secret") && !problem.contains("fixture.test"),
                 "{problem}"
@@ -3692,6 +3754,8 @@ mod tests {
         let auth_dir =
             std::env::temp_dir().join(format!("haarness-mcp-bad-url-{}", uuid::Uuid::now_v7()));
         let registry = NativeMcpRegistry::with_auth_dir(&auth_dir);
+        let said =
+            "Its URL names an environment variable that is not set: HAARNESS_TEST_UNSET_HOST.";
         for transport in ["streamable_http", "sse"] {
             let config: McpConfigureRequest = serde_json::from_value(json!({
                 "transport": transport,
@@ -3701,10 +3765,10 @@ mod tests {
             }))
             .unwrap();
             let error = registry.configure(transport, config).await.unwrap_err();
-            let said = format!(
-                "MCP server \"{transport}\" has no usable URL: the environment variable HAARNESS_TEST_UNSET_HOST it names is not set."
+            assert_eq!(
+                error.to_string(),
+                format!("invalid request: MCP server \"{transport}\" cannot be reached. {said}")
             );
-            assert_eq!(error.to_string(), format!("invalid request: {said}"));
             let info = registry
                 .list()
                 .await
@@ -3713,7 +3777,7 @@ mod tests {
                 .find(|info| info.name == transport)
                 .unwrap();
             assert_eq!(info.status, "failed");
-            assert_eq!(info.detail.as_deref(), Some(said.as_str()));
+            assert_eq!(info.detail.as_deref(), Some(said));
         }
         let error = registry
             .begin_oauth(
@@ -3724,9 +3788,9 @@ mod tests {
             .err()
             .expect("the sign-in is refused");
         assert!(
-            error.to_string().ends_with(
-                "MCP server \"streamable_http\" has no usable URL: the environment variable HAARNESS_TEST_UNSET_HOST it names is not set."
-            ),
+            error.to_string().ends_with(&format!(
+                "MCP server \"streamable_http\" cannot be reached. {said}"
+            )),
             "{error}"
         );
         // A server that is off stays off, whatever its URL.

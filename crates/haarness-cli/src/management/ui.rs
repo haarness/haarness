@@ -2405,11 +2405,11 @@ mod tests {
     fn an_mcp_server_page_says_what_its_server_said() {
         let failed = json!({
             "runtimeStatus": "failed",
-            "runtimeDetail": "MCP server \"docs\" has no usable URL: the environment variable DOCS_HOST it names is not set."
+            "runtimeDetail": "Its URL names an environment variable that is not set: DOCS_HOST."
         });
         assert_eq!(
             mcp_status(&failed),
-            "Status: failed · MCP server \"docs\" has no usable URL: the environment variable DOCS_HOST it names is not set."
+            "Status: failed · Its URL names an environment variable that is not set: DOCS_HOST."
         );
         assert_eq!(
             mcp_status(
