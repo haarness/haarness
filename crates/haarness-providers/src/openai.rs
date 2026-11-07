@@ -764,7 +764,7 @@ impl ModelProvider for OpenAiProvider {
                     "response.output_item.done" if event["item"]["type"] == "function_call" => {
                         let item = &event["item"];
                         let raw_arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("{}");
-                        let arguments = serde_json::from_str(raw_arguments).map_err(|error| CoreError::Provider(format!("OpenAI returned invalid function arguments: {error}")))?;
+                        let arguments = haarness_core::tool_call_arguments(raw_arguments);
                         let call_id = string(item, "call_id");
                         let name = string(item, "name");
                         if call_id.is_empty() || name.is_empty() {

@@ -11816,6 +11816,11 @@ impl RunnerTask {
     }
 
     fn validate_tool_arguments(&self, name: &str, arguments: &serde_json::Value) -> CoreResult<()> {
+        // Arguments the provider adapter could not read never run, whatever
+        // validation a tool does of its own.
+        if let Some(error) = crate::tool_validation::unparsed_arguments(name, arguments) {
+            return Err(error);
+        }
         if name == LOAD_TOOL_NAME {
             return validate_arguments(&crate::load_tool_definition(), arguments);
         }

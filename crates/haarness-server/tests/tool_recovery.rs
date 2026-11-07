@@ -206,6 +206,44 @@ async fn provider_receives_field_feedback_then_corrects_and_reads_real_file() {
             if name == "read" && output.contains("real file contents"))));
 }
 
+/// A call whose arguments were not valid JSON never runs: the model is told
+/// why, corrects the call, and the turn goes on. The refused call still goes
+/// back to the provider as an object, as Claude requires of every tool call.
+#[tokio::test]
+async fn arguments_that_are_not_json_are_refused_and_the_model_retries() {
+    let fixture = Fixture::new(RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    });
+    let broken = r#"{"path":"made.txt","content":"a\qb"}"#;
+    let items = fixture
+        .run(vec![
+            vec![call(
+                "bad",
+                "write",
+                haarness_core::tool_call_arguments(broken),
+            )],
+            vec![call("fixed", "read", json!({"path":"sample.txt"}))],
+        ])
+        .await;
+    let refusal = error(&items, "bad");
+    assert!(
+        refusal.contains("write tool did not run") && refusal.contains("not valid JSON"),
+        "{refusal}"
+    );
+    assert!(
+        !fixture.root.join("made.txt").exists(),
+        "the call never ran"
+    );
+    let requests = fixture.provider.requests.lock().unwrap();
+    assert!(requests[1].messages.iter().any(|message| matches!(message,
+        ProviderMessage::ToolCall { call_id, arguments, .. }
+            if call_id == "bad" && arguments.is_object())));
+    assert!(requests[2].messages.iter().any(|message| matches!(message,
+        ProviderMessage::ToolResult { name, output, is_error: false, .. }
+            if name == "read" && output.contains("real file contents"))));
+}
+
 fn malformed() -> ProviderEvent {
     ProviderEvent::Finished {
         reason: "MALFORMED_FUNCTION_CALL".into(),

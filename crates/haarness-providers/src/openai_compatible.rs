@@ -2606,7 +2606,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
             for (call_id, name, arguments) in calls.drain(..) {
                 if !name.is_empty() {
-                    let arguments = serde_json::from_str(&arguments).map_err(|error| CoreError::Provider(format!("OpenAI-compatible provider returned invalid tool arguments: {error}")))?;
+                    // Arguments that do not parse are answered with an error the
+                    // model can correct, as a call that fails validation is.
+                    let arguments = haarness_core::tool_call_arguments(&arguments);
                     if structured_output.is_some() && name == STRUCTURED_OUTPUT_TOOL_NAME {
                         yield ProviderEvent::StructuredOutput(arguments);
                     } else {
@@ -4523,6 +4525,67 @@ mod tests {
         assert_eq!(state.0.lock().len(), 1);
     }
 
+    /// A call whose arguments are not valid JSON (ByteDance Seed wrote a
+    /// regex's `\.` unescaped) reaches the runtime as a call it refuses to
+    /// run, not as a provider error that ends the turn.
+    #[tokio::test]
+    async fn arguments_that_are_not_json_still_make_a_call() {
+        let request = ProviderRequest {
+            model: "compat-test".into(),
+            system: "sys".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "find it".into(),
+            }],
+            tools: vec![],
+            reasoning_effort: None,
+            output_schema: None,
+            parameters: haarness_core::RequestParameters::default(),
+        };
+        let base_url = cut_after(vec![
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"command\":\"grep -r \\. src\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ])
+        .await;
+        let events = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "compat".into(),
+            name: "Compatible".into(),
+            base_url,
+            api_key: None,
+            models: vec!["compat-test".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: true,
+            headers: crate::ProviderHeaders::default(),
+        })
+        .stream(request, CancellationToken::new())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+        let call = events.iter().find_map(|event| match event {
+            Ok(ProviderEvent::ToolCall {
+                name, arguments, ..
+            }) => Some((name.clone(), arguments.clone())),
+            _ => None,
+        });
+        let (name, arguments) = call.unwrap_or_else(|| panic!("no tool call: {events:?}"));
+        assert_eq!(name, "bash");
+        assert_eq!(
+            arguments,
+            haarness_core::tool_call_arguments(r#"{"command":"grep -r \. src"}"#)
+        );
+        assert!(arguments.is_object(), "replayable as an object");
+        // The response finishes; this stand-in then cuts the connection.
+        let finished = events
+            .iter()
+            .position(|event| matches!(event, Ok(ProviderEvent::Finished { reason }) if reason == "tool_calls"))
+            .unwrap_or_else(|| panic!("no finish: {events:?}"));
+        assert!(events[..finished].iter().all(Result::is_ok), "{events:?}");
+    }
+
     /// A server that streams `events` in a chunked body and then closes the
     /// connection without ending the body, as a connection cut short does.
     async fn cut_after(events: Vec<&'static str>) -> String {
@@ -5217,7 +5280,9 @@ mod tests {
             events.last(),
             Some(Err(haarness_core::CoreError::Provider(message))) if message == "Upstream overloaded"
         ));
-        // Tool arguments that do not parse fail the request after its usage.
+        // Tool arguments that do not parse still make a call, which the
+        // runtime answers with an error instead of running it, and the usage
+        // comes first.
         let events = stream_events(concat!(
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"read\",\"arguments\":\"{broken\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":90,\"completion_tokens\":7}}\n\n",
@@ -5225,7 +5290,10 @@ mod tests {
         ))
         .await;
         assert_eq!(reported(&events), [(90, 7, 0, 0)]);
-        assert!(events.last().is_some_and(Result::is_err));
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        assert!(events.iter().any(|event| matches!(event,
+            Ok(ProviderEvent::ToolCall { arguments, .. })
+                if *arguments == haarness_core::tool_call_arguments("{broken"))));
     }
 
     #[tokio::test]

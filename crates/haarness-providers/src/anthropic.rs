@@ -652,7 +652,7 @@ impl ModelProvider for AnthropicProvider {
                         if let Some(block) = thinking_block.take() { thinking_blocks.push(block); }
                         if let Some((call_id,name,arguments,initial_input)) = tool.take() {
                         let arguments = if arguments.is_empty() { initial_input } else {
-                            serde_json::from_str(&arguments).map_err(|error| CoreError::Provider(format!("Anthropic returned invalid tool arguments: {error}")))?
+                            haarness_core::tool_call_arguments(&arguments)
                         };
                         if structured_output.is_some() && name == STRUCTURED_OUTPUT_TOOL_NAME {
                             yield ProviderEvent::StructuredOutput(arguments);

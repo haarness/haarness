@@ -487,11 +487,11 @@ impl ConverseEvents {
                 message.header(":error-code").unwrap_or("unknown"),
                 message.header(":error-message").unwrap_or_default()
             ))),
-            _ => self.event(message.header(":event-type").unwrap_or_default(), &payload),
+            _ => Ok(self.event(message.header(":event-type").unwrap_or_default(), &payload)),
         }
     }
 
-    fn event(&mut self, kind: &str, payload: &Value) -> CoreResult<Vec<ProviderEvent>> {
+    fn event(&mut self, kind: &str, payload: &Value) -> Vec<ProviderEvent> {
         let mut events = Vec::new();
         match kind {
             "contentBlockStart" => {
@@ -540,15 +540,7 @@ impl ConverseEvents {
                         .push(json!({"reasoningContent": block}));
                 }
                 if let Some((call_id, name, input)) = self.tool.take() {
-                    let arguments = if input.trim().is_empty() {
-                        json!({})
-                    } else {
-                        serde_json::from_str(&input).map_err(|error| {
-                            CoreError::Provider(format!(
-                                "Bedrock returned invalid tool arguments: {error}"
-                            ))
-                        })?
-                    };
+                    let arguments = haarness_core::tool_call_arguments(&input);
                     if name == STRUCTURED_OUTPUT_TOOL_NAME {
                         events.push(ProviderEvent::StructuredOutput(arguments));
                     } else {
@@ -592,7 +584,7 @@ impl ConverseEvents {
             }
             _ => {}
         }
-        Ok(events)
+        events
     }
 
     /// The finish, once the stream has ended: a stream that ended without
@@ -1896,8 +1888,7 @@ mod tests {
         );
         // A stream that ends without Bedrock's stop broke off.
         let mut cut = ConverseEvents::default();
-        cut.event("contentBlockDelta", &json!({"delta":{"text":"Hal"}}))
-            .unwrap();
+        cut.event("contentBlockDelta", &json!({"delta":{"text":"Hal"}}));
         assert!(
             cut.finish()
                 .unwrap_err()
