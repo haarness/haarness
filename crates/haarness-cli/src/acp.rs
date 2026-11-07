@@ -1360,11 +1360,13 @@ fn prompt_content(blocks: Vec<ContentBlock>) -> AcpResult<(String, Vec<String>)>
                     .map(str::trim)
                     .filter(|uri| !uri.is_empty())
                     .ok_or_else(|| invalid("an ACP image needs its data or a uri"))?;
-                if uri
+                if let Some(rest) = uri
                     .get(..5)
-                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+                    .filter(|scheme| scheme.eq_ignore_ascii_case("data:"))
+                    .and_then(|_| uri.get(5..))
                 {
-                    attachments.push(uri.to_owned());
+                    // Attachments are read by their scheme in lowercase.
+                    attachments.push(format!("data:{rest}"));
                 } else {
                     let _ = write!(
                         text,
@@ -1772,7 +1774,7 @@ mod tests {
         );
         assert_eq!(
             attachments,
-            ["DATA:image/png;base64,YWJj", "data:image/png;base64,YWJj"]
+            ["data:image/png;base64,YWJj", "data:image/png;base64,YWJj"]
         );
         for image in [
             ImageContent::new("", "image/png"),
