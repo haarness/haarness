@@ -216,15 +216,37 @@ pub async fn login(args: &LoginArgs) -> Result<()> {
     if args.json {
         println!("{}", json!({"type":"complete","account":status}));
     } else {
-        println!(
-            "Signed in as {}. Haarness Cloud is ready.",
-            status
-                .pointer("/user/email")
-                .and_then(Value::as_str)
-                .unwrap_or("your Haarness account")
-        );
+        let who = status
+            .pointer("/user/email")
+            .and_then(Value::as_str)
+            .unwrap_or("your Haarness account");
+        // A new account has nothing to pay for Cloud models with: say so now,
+        // with where to start, rather than after a first prompt is refused.
+        let summary =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.billing_summary())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|state| state.summary);
+        println!("{}", signed_in_line(who, summary.as_ref()));
     }
     Ok(())
+}
+
+/// What `haarness login` says once the browser comes back.
+fn signed_in_line(who: &str, summary: Option<&haarness_account::billing::Summary>) -> String {
+    match summary.filter(|summary| summary.holds_no_credits()) {
+        Some(summary) if summary.trial_available => format!(
+            "Signed in as {who}. This account has no Haarness Cloud credits yet: start the free \
+             trial or choose a plan at {}",
+            summary.billing_url
+        ),
+        Some(summary) => format!(
+            "Signed in as {who}. This account has no Haarness Cloud credits: choose a plan at {}",
+            summary.billing_url
+        ),
+        None => format!("Signed in as {who}. Haarness Cloud is ready."),
+    }
 }
 pub async fn account(args: &AccountArgs, paths: &super::Paths) -> Result<()> {
     let client = client()?;
@@ -773,6 +795,49 @@ fn print_list(value: &Value, label: &str, workspace: bool, empty: &str) {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    /// Signing in to a new account says what it needs before Cloud models
+    /// answer; an account that can pay hears that Cloud is ready.
+    #[test]
+    fn signing_in_to_a_new_account_says_where_to_start() {
+        let summary = |fields: Value| -> haarness_account::billing::Summary {
+            let mut base = json!({
+                "accountId": "a", "accountName": "Sam", "plan": "No plan", "subscriptionStatus": null,
+                "accountStatus": "active", "includedCredits": "0.000000", "purchasedCredits": "0.000000",
+                "heldCredits": "0", "cloudUnits": "0.00", "cloudUnitsHeld": "0.00", "cancelAtPeriodEnd": false,
+                "overageOptIn": false, "billingUrl": "https://haarness.ai/app/billing?accountId=a",
+                "usageUrl": "https://haarness.ai/app/billing/usage?accountId=a", "trialAvailable": true,
+            });
+            for (key, value) in fields.as_object().unwrap() {
+                base[key] = value.clone();
+            }
+            serde_json::from_value(base).unwrap()
+        };
+        assert_eq!(
+            signed_in_line("sam@example.com", Some(&summary(json!({})))),
+            "Signed in as sam@example.com. This account has no Haarness Cloud credits yet: start \
+             the free trial or choose a plan at https://haarness.ai/app/billing?accountId=a"
+        );
+        assert_eq!(
+            signed_in_line(
+                "sam@example.com",
+                Some(&summary(json!({"trialAvailable": false})))
+            ),
+            "Signed in as sam@example.com. This account has no Haarness Cloud credits: choose a \
+             plan at https://haarness.ai/app/billing?accountId=a"
+        );
+        for ready in [
+            Some(summary(
+                json!({"plan": "pro", "includedCredits": "8000.000000"}),
+            )),
+            None,
+        ] {
+            assert_eq!(
+                signed_in_line("sam@example.com", ready.as_ref()),
+                "Signed in as sam@example.com. Haarness Cloud is ready."
+            );
+        }
+    }
 
     #[tokio::test]
     async fn cloud_lists_follow_pages_and_preserve_account_filters() {

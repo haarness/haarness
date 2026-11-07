@@ -170,48 +170,76 @@ fn error(e: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(e.to_string())
 }
 
+/// Where the person reading a billing refusal finds Billing: the account's
+/// page on the web, which every surface can open (Desktop and `haarness run`
+/// have no `/billing`, and Desktop makes the address a link), or the TUI's
+/// command when no page can be named.
+fn billing_place(client: &Client) -> String {
+    client
+        .config
+        .web_origin()
+        .ok()
+        .and_then(|origin| origin.join("app/billing").ok())
+        .map_or_else(
+            || " (in the terminal: /billing)".to_owned(),
+            |url| format!(" at {url}"),
+        )
+}
+
 /// Say what an exhausted Cloud balance means for the person reading it. The
 /// router's 402 reads `[insufficient_credits] insufficient credits: unit
-/// Nanos requested …`, which is accounting, not advice.
-fn readable(error: CoreError) -> CoreError {
-    readable_with(error, " (in the terminal: /billing)")
+/// Nanos requested …`, which is accounting, not advice. `place` says where
+/// Billing is ([`billing_place`]).
+fn readable(error: CoreError, place: &str) -> CoreError {
+    readable_with(error, place)
 }
 
 /// [`readable`] for a Cloud workspace's own `router` provider, whose chat is
 /// read in a browser or on a phone as often as in a terminal.
 pub(crate) fn readable_router(error: CoreError) -> CoreError {
-    readable_with(error, "")
+    readable_with(error, " in Haarness Cloud")
 }
 
-fn readable_with(error: CoreError, terminal: &str) -> CoreError {
+/// What Cloud's router adds to a refusal for an account that has never held
+/// credits: no plan, no trial and nothing purchased.
+const NEW_ACCOUNT: &str = "no plan, trial or purchased credits yet";
+
+fn readable_with(error: CoreError, place: &str) -> CoreError {
     let CoreError::Provider(message) = error else {
         return error;
     };
     let advice = if message.contains("[insufficient_credits]") {
-        if message.contains("overage opt-in false") {
+        if message.contains(NEW_ACCOUNT) {
+            // Nothing ran out: a new account starts with nothing, and
+            // neither "included credits" nor "overage" means anything yet.
+            format!(
+                "This account has no Haarness Cloud credits yet. Start the free trial or \
+                 choose a plan under Billing{place}."
+            )
+        } else if message.contains("overage opt-in false") {
             // Purchased credits only pay once overage is on, and buying
             // more does not turn it on. With overage off the router names
             // the purchased balance as what is available.
             if purchased_available(&message) {
                 format!(
                     "Your included Haarness Cloud credits can't cover this request. Turn on \
-                     overage in Billing so your purchased credits pay{terminal}."
+                     overage under Billing{place} so your purchased credits pay."
                 )
             } else {
                 format!(
                     "Your included Haarness Cloud credits can't cover this request. Add credits \
-                     and turn on overage in Billing, or choose a plan{terminal}."
+                     and turn on overage under Billing{place}, or choose a plan."
                 )
             }
         } else if message.contains("frozen") {
             format!(
-                "Your purchased Haarness Cloud credits are on hold. Open Billing in Haarness \
-                 Cloud for details{terminal}."
+                "Your purchased Haarness Cloud credits are on hold. Open Billing{place} for \
+                 details."
             )
         } else {
             format!(
                 "Your Haarness Cloud credits can't cover this request. Add credits or choose a \
-                 plan under Billing{terminal}."
+                 plan under Billing{place}."
             )
         }
     } else if message.contains("[provider_out_of_credit]") && !message.starts_with("HTTP 402") {
@@ -260,7 +288,7 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
         // charged for those requests, but the account needs one to route them.
         format!(
             "Routing your own provider keys through Haarness Cloud needs a plan or the free \
-             trial. Start the trial or choose a plan under Billing{terminal}."
+             trial. Start the trial or choose a plan under Billing{place}."
         )
     } else if message.contains("[budget_exceeded]") {
         // The limit is checked against the request's worst case: a long
@@ -320,10 +348,7 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
          lower the output limit or shorten the conversation."
             .to_owned()
     } else if message.contains("[account_suspended]") {
-        format!(
-            "This Haarness Cloud account is suspended. Open Billing in Haarness Cloud for \
-             details{terminal}."
-        )
+        format!("This Haarness Cloud account is suspended. Open Billing{place} for details.")
     } else {
         return CoreError::Provider(message);
     };
@@ -442,11 +467,12 @@ impl ModelProvider for HaarnessCloudProvider {
         let models = self
             .catalog()
             .map_or_else(Vec::new, |(_, catalog)| catalog.get(&[]));
+        let place = billing_place(&self.client);
         let mut stream = transport
             .with_model_info(models.clone())
             .stream(request.clone(), cancel.clone())
             .await
-            .map_err(readable)?;
+            .map_err(|failure| readable(failure, &place))?;
         let client = self.client.clone();
         let grant = Arc::clone(&self.grant);
         let listed_audio = Arc::clone(&self.listed_audio);
@@ -481,7 +507,7 @@ impl ModelProvider for HaarnessCloudProvider {
                             .with_listed_audio(Arc::clone(&listed_audio))
                             .stream(request, cancel.clone())
                             .await
-                            .map_err(readable)?;
+                            .map_err(|failure| readable(failure, &place))?;
                     }
                     Err(failure) if busy(&failure) => {
                         retry = None;
@@ -492,11 +518,11 @@ impl ModelProvider for HaarnessCloudProvider {
                             () = cancel.cancelled() => {}
                             () = tokio::time::sleep(busy_jitter()) => {}
                         }
-                        Err::<(), _>(readable(failure))?;
+                        Err::<(), _>(readable(failure, &place))?;
                     }
                     event => {
                         retry = None;
-                        yield event.map_err(readable)?;
+                        yield event.map_err(|failure| readable(failure, &place))?;
                     }
                 }
             }
@@ -516,6 +542,14 @@ mod tests {
     };
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Where a signed-in client points a billing refusal ([`billing_place`]).
+    const PLACE: &str = " at https://haarness.ai/app/billing";
+
+    /// [`super::readable`] as a signed-in client words a refusal.
+    fn readable(error: CoreError) -> CoreError {
+        super::readable(error, PLACE)
+    }
 
     #[derive(Clone)]
     struct Fixture {
@@ -671,7 +705,7 @@ mod tests {
                 .into(),
         );
         assert!(
-            matches!(readable(waiting), CoreError::Provider(m) if m.contains("Turn on overage in Billing so your purchased credits pay") && !m.contains("Add credits"))
+            matches!(readable(waiting), CoreError::Provider(m) if m.contains("Turn on overage under Billing at https://haarness.ai/app/billing so your purchased credits pay") && !m.contains("Add credits"))
         );
         let spent = CoreError::Provider(
             "HTTP 402: [insufficient_credits] insufficient credits: unit Nanos requested 1, \
@@ -709,7 +743,7 @@ mod tests {
             panic!("still a provider error");
         };
         assert!(
-            message.ends_with("turn on overage in Billing, or choose a plan."),
+            message.ends_with("turn on overage under Billing in Haarness Cloud, or choose a plan."),
             "{message}"
         );
         let CoreError::Provider(message) = readable_router(CoreError::Provider(
@@ -798,8 +832,57 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.ends_with("(in the terminal: /billing)."),
+            message.ends_with("under Billing at https://haarness.ai/app/billing."),
             "{message}"
+        );
+    }
+
+    /// A new account has never had credits: its first refusal says so and
+    /// where to start, with no word about included credits or overage, which
+    /// it has neither of. Cloud's routers before it named new accounts word
+    /// the refusal as before.
+    #[test]
+    fn a_new_account_is_told_how_to_start() {
+        let raw = "HTTP 402 Payment Required: [insufficient_credits] insufficient credits: unit \
+                   Nanos requested 32500, available 0, overage opt-in false; this account has no \
+                   plan, trial or purchased credits yet";
+        let CoreError::Provider(message) = readable(CoreError::Provider(raw.into())) else {
+            panic!("still a provider error");
+        };
+        assert_eq!(
+            message,
+            "This account has no Haarness Cloud credits yet. Start the free trial or choose a \
+             plan under Billing at https://haarness.ai/app/billing."
+        );
+        let CoreError::Provider(message) = readable_router(CoreError::Provider(raw.into())) else {
+            panic!("still a provider error");
+        };
+        assert_eq!(
+            message,
+            "This account has no Haarness Cloud credits yet. Start the free trial or choose a \
+             plan under Billing in Haarness Cloud."
+        );
+        let older = "HTTP 402: [insufficient_credits] insufficient credits: unit Nanos requested \
+                     32500, available 0, overage opt-in false";
+        let CoreError::Provider(message) = readable(CoreError::Provider(older.into())) else {
+            panic!("still a provider error");
+        };
+        assert!(
+            message.starts_with("Your included Haarness Cloud credits can't cover this request."),
+            "{message}"
+        );
+    }
+
+    /// Billing's place is its page on the web: Desktop links it and `haarness
+    /// run` prints it, where no `/billing` command exists.
+    #[test]
+    fn a_billing_refusal_names_the_billing_page() {
+        let root = std::env::temp_dir().join(format!("haarness-cloud-place-{}", uuid_for_test()));
+        let config = Config::new("https://api.haarness.example/", root, "fixture").unwrap();
+        let client = Client::new(config).unwrap();
+        assert_eq!(
+            billing_place(&client),
+            " at https://api.haarness.example/app/billing"
         );
     }
 

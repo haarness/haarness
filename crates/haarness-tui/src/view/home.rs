@@ -51,25 +51,28 @@ pub fn masthead(app: &App, width: usize, identity_in_panel: bool) -> Vec<Line> {
             // The one thing standing between a fresh install and a first
             // prompt, said where the eye lands first.
             let language = app.language;
-            let missing = language.text("no provider connected");
-            let mut spans = vec![Span::new(" ".repeat(INSET), theme.muted)];
-            spans.push(Span::new(missing, theme.accent).with_attributes(attr::BOLD));
-            let room = width.saturating_sub(INSET + missing.width());
-            if room >= "  ·  /connect".width() {
-                // The command is drawn highlighted wherever the sentence
-                // puts it.
-                let template = language.text("/connect to sign in or add an API key");
-                let (before, rest) = template.split_once("/connect").unwrap_or(("", template));
-                spans.push(Span::new("  ·  ", theme.muted));
-                if room >= "  ·  /connect".width() + before.width() + rest.width() {
-                    spans.push(Span::new(before.to_owned(), theme.muted));
-                }
-                spans.push(Span::new("/connect", theme.accent).with_attributes(attr::BOLD));
-                if room >= "  ·  /connect".width() + before.width() + rest.width() {
-                    spans.push(Span::new(rest.to_owned(), theme.muted));
-                }
-            }
-            lines.push(Line::new(spans));
+            lines.push(missing_line(
+                app,
+                width,
+                language.text("no provider connected"),
+                language.text("/connect to sign in or add an API key"),
+                "/connect",
+            ));
+        } else if let Some(summary) = app.cloud_without_credits() {
+            // The same for a new Haarness account: every Cloud model refuses
+            // its first prompt until the trial, a plan or credits come in.
+            let language = app.language;
+            lines.push(missing_line(
+                app,
+                width,
+                language.text("no Haarness Cloud credits"),
+                if summary.trial_available {
+                    language.text("/billing to start the free trial or choose a plan")
+                } else {
+                    language.text("/billing to choose a plan")
+                },
+                "/billing",
+            ));
         } else if let Some(runtime) = app.local_only_runtime() {
             // Nobody chose this model: say where replies come from, and how to
             // get a larger one, before the first prompt rather than after a
@@ -111,6 +114,31 @@ pub fn masthead(app: &App, width: usize, identity_in_panel: bool) -> Vec<Line> {
     }
     lines.push(Line::empty());
     lines
+}
+
+/// What stands between this chat and its first reply (`missing`), then the
+/// command that fixes it inside its sentence (`template`), both in the
+/// reader's language, the command drawn highlighted wherever the sentence
+/// puts it. A narrow screen keeps the command alone, or only the words.
+fn missing_line(app: &App, width: usize, missing: &str, template: &str, command: &str) -> Line {
+    let theme = &app.theme;
+    let mut spans = vec![Span::new(" ".repeat(INSET), theme.muted)];
+    spans.push(Span::new(missing.to_owned(), theme.accent).with_attributes(attr::BOLD));
+    let room = width.saturating_sub(INSET + missing.width());
+    let separated = format!("  ·  {command}");
+    if room >= separated.width() {
+        let (before, rest) = template.split_once(command).unwrap_or(("", template));
+        let whole = room >= separated.width() + before.width() + rest.width();
+        spans.push(Span::new("  ·  ", theme.muted));
+        if whole {
+            spans.push(Span::new(before.to_owned(), theme.muted));
+        }
+        spans.push(Span::new(command.to_owned(), theme.accent).with_attributes(attr::BOLD));
+        if whole {
+            spans.push(Span::new(rest.to_owned(), theme.muted));
+        }
+    }
+    Line::new(spans)
 }
 
 /// The wordmark, with whatever the caller wants set against it on the same

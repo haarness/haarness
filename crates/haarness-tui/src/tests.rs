@@ -24760,6 +24760,122 @@ fn a_local_model_nobody_chose_is_named_on_the_home_screen() {
     assert!(!home(&app).contains("Replies come from"));
 }
 
+/// A new Haarness account holds no credits, so every Cloud model refuses
+/// its first prompt: the home screen says so before that prompt, with the
+/// way in, and /billing offers the trial first.
+#[test]
+fn a_new_cloud_account_is_told_how_to_start_before_its_first_prompt() {
+    let mut app = connect_fixture();
+    app.thread.provider = "haarness".into();
+    app.thread.model = "openai/gpt-6.1-sol".into();
+    let mut cloud = app.providers[0].clone();
+    cloud.id = "haarness".into();
+    cloud.name = "Haarness Cloud".into();
+    cloud.authenticated = true;
+    app.providers.push(cloud);
+    let billing = |fields: serde_json::Value| -> haarness_account::billing::State {
+        let mut summary = serde_json::json!({
+            "accountId": "a", "accountName": "Sam Rivera", "plan": "No plan", "subscriptionStatus": null,
+            "accountStatus": "active", "includedCredits": "0.000000", "purchasedCredits": "0.000000",
+            "heldCredits": "0", "cloudUnits": "0.00", "cloudUnitsHeld": "0.00", "cancelAtPeriodEnd": false,
+            "overageOptIn": false, "billingUrl": "https://haarness.ai/app/billing",
+            "usageUrl": "https://haarness.ai/app/billing/usage", "trialAvailable": true,
+        });
+        for (key, value) in fields.as_object().unwrap() {
+            summary[key] = value.clone();
+        }
+        haarness_account::billing::State {
+            logged_in: true,
+            summary: Some(serde_json::from_value(summary).unwrap()),
+            error: None,
+        }
+    };
+    let home = |app: &App, width: usize| {
+        crate::view::home::masthead(app, width, false)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    app.billing = billing(serde_json::json!({}));
+    let text = home(&app, 100);
+    assert!(
+        text.contains(
+            "no Haarness Cloud credits  ·  /billing to start the free trial or choose a plan"
+        ),
+        "{text}"
+    );
+    // Narrow: the command stays, the sentence around it goes.
+    let narrow = home(&app, 40);
+    assert!(
+        narrow.contains("no Haarness Cloud credits  ·  /billing"),
+        "{narrow}"
+    );
+    assert!(!narrow.contains("free trial"), "{narrow}");
+    app.language = crate::locale::Language::Japanese;
+    assert!(
+        home(&app, 100).contains("Haarness Cloud のクレジットがありません  ·  /billing で無料トライアルを開始するかプランを選択"),
+        "{}",
+        home(&app, 100)
+    );
+    app.language = crate::locale::Language::English;
+
+    // The trial already used: a plan is the way in.
+    app.billing = billing(serde_json::json!({"trialAvailable": false}));
+    assert!(
+        home(&app, 100).contains("no Haarness Cloud credits  ·  /billing to choose a plan"),
+        "{}",
+        home(&app, 100)
+    );
+
+    // /billing puts the trial first, ahead of credits that would not pay
+    // without overage.
+    app.billing = billing(serde_json::json!({}));
+    app.open_billing();
+    let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
+        panic!("billing options");
+    };
+    assert_eq!(entries[0].label, "Start free trial");
+    assert_eq!(entries[0].value, "open");
+    app.close_overlay();
+    app.billing = billing(serde_json::json!({"trialAvailable": false}));
+    app.open_billing();
+    let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
+        panic!("billing options");
+    };
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.label != "Start free trial")
+    );
+    app.close_overlay();
+
+    // Credits of any kind, or a chat on another provider: nothing to say.
+    for (fields, provider) in [
+        (
+            serde_json::json!({"plan": "trial", "trial": true, "includedCredits": "2000.000000"}),
+            "haarness",
+        ),
+        (
+            serde_json::json!({"purchasedCredits": "20.000000"}),
+            "haarness",
+        ),
+        (serde_json::json!({}), "openai"),
+    ] {
+        app.billing = billing(fields);
+        app.thread.provider = provider.into();
+        assert!(
+            !home(&app, 100).contains("Haarness Cloud credits"),
+            "{}",
+            home(&app, 100)
+        );
+    }
+    app.thread.provider = "haarness".into();
+    app.billing = billing(serde_json::json!({}));
+    app.billing.logged_in = false;
+    assert!(!home(&app, 100).contains("Haarness Cloud credits"));
+}
+
 /// A model list that came after the first frame (Haarness Cloud, or an
 /// endpoint that lists its models only when asked, on a slow network): the
 /// TUI said it was loading models, not that nothing is connected, and the

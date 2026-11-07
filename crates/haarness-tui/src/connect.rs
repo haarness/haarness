@@ -886,6 +886,20 @@ impl App {
         (!elsewhere).then_some(runtime)
     }
 
+    /// The signed-in account's billing when this chat's model is a Haarness
+    /// Cloud one and the account holds no credits at all (a new account):
+    /// every Cloud model refuses the chat's first prompt until the trial, a
+    /// plan or credits come in.
+    pub(crate) fn cloud_without_credits(&self) -> Option<&haarness_account::billing::Summary> {
+        if self.thread.provider != "haarness" || !self.billing.logged_in {
+            return None;
+        }
+        self.billing
+            .summary
+            .as_ref()
+            .filter(|summary| summary.holds_no_credits())
+    }
+
     /// Hint rows above the API-key prompt: where the key comes from and the
     /// environment variables that work instead.
     pub(crate) fn connect_key_hints(&self) -> Vec<String> {
