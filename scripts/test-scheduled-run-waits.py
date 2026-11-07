@@ -17,6 +17,11 @@ provider may do that):
 - ceiling: nothing holds a run past its ceiling (12 hours, shortened to 4 s), not even a command
   with a time limit of its own; the run fails, naming it.
 - person: a person's turn and dev server in the run's chat are neither waited for nor stopped.
+- deleted: a workflow of the run deleted while it waits has ended; the rest is still waited for.
+- steer: a person's message written into the run's turn is answered outside the run's record, and
+  one the run's ceiling stops unread is answered in a turn of its own.
+- nested: a workflow started from the chat of one of the run's subagents holds the run and is
+  cancelled at its limit, so nothing starts in that chat after the run either.
 """
 import json
 import os
@@ -66,10 +71,11 @@ def cli(*extra, timeout=120):
                           timeout=timeout).stdout
 
 
-def api(path, body=None):
+def api(path, body=None, method=None):
     request = urllib.request.Request(
         connection["url"] + "/v1" + path, data=None if body is None else json.dumps(body).encode(),
-        headers={"Authorization": "Bearer " + connection.get("token", ""), "Content-Type": "application/json"})
+        headers={"Authorization": "Bearer " + connection.get("token", ""), "Content-Type": "application/json"},
+        method=method)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read() or b"null")
@@ -138,6 +144,12 @@ def settled_after(record, before):
     assert activity["backgroundCommands"] == 0, activity
     assert not api(f"/threads/{thread}/background"), api(f"/threads/{thread}/background")
     assert turns(thread) == before, (sorted(before), sorted(turns(thread)))
+
+
+def chat_of(name):
+    return until(lambda: next((chat["id"] for chat in api("/threads")
+                               if chat.get("title", "").startswith(f"Schedule: {name}")), None),
+                 "the run's chat never appeared")
 
 
 def notices(thread):
@@ -252,6 +264,84 @@ try:
     assert api(f"/threads/{thread}/commands/{dev['id']}")["state"] == "running", "the run stopped the person's command"
     api(f"/threads/{thread}/commands/{dev['id']}/stop", {})
     ok("a person's turn and dev server in the run's chat are neither waited for nor stopped")
+
+    # deleted
+    schedule("deleted-flow", "!multi " + json.dumps([
+        {"name": "workflow", "arguments": {"action": "start", "name": "slow"}},
+        {"name": "task", "arguments": {"description": "Deleted flow check", "prompt": "!linger 2500 check finished",
+                                       "background": True}}]))
+    process = runner("deleted-flow", 60000)
+    thread = chat_of("deleted-flow")
+    flow = until(lambda: next((entry for entry in api(f"/workflows/runs?threadId={thread}") or []
+                               if entry.get("workflowName") == "slow"), None), "the run's workflow never started")
+    until(lambda: api(f"/threads/{thread}/activity")["activeTurn"] is None, "the run's first turn never ended")
+    # Paused first, it tells the chat nothing as it goes.
+    assert api(f"/workflows/runs/{flow['id']}/pause", {})["status"] == "paused"
+    time.sleep(0.5)
+    assert api(f"/workflows/runs/{flow['id']}", method="DELETE") is None
+    record = record_of(process)
+    before = turns(thread)
+    assert record["status"] == "success" and "error" not in record, record
+    assert "check finished" in record["response"], record
+    settled_after(record, before)
+    ok("a workflow deleted while the run waits has ended, and the rest of the run is still waited for")
+
+    # steer
+    schedule("steered", "!linger 3000 run-finished")
+    process = runner("steered", 60000)
+    thread = chat_of("steered")
+    until(lambda: api(f"/threads/{thread}/activity")["activeTurn"], "the run's turn never ran")
+    steer = api(f"/threads/{thread}/input", {"requestId": str(uuid.uuid4()), "text": "Is the report ready?"})
+    assert steer.get("queued"), steer
+    record = record_of(process)
+    before = turns(thread)
+    assert record["status"] == "success" and "error" not in record, record
+    assert "run-finished" in record["response"], record
+    assert "Is the report ready?" not in record["response"], record["response"]
+    answers = [item["data"]["text"] for item in api(f"/threads/{thread}/items")
+               if item["data"]["type"] == "assistant_message"]
+    assert any("Is the report ready?" in text for text in answers), answers
+    settled_after(record, before)
+    schedule("steered-late", "!linger 8000 never-finished")
+    process = runner("steered-late", 60000, ceiling_ms=2500)
+    thread = chat_of("steered-late")
+    until(lambda: api(f"/threads/{thread}/activity")["activeTurn"], "the run's turn never ran")
+    steer = api(f"/threads/{thread}/input", {"requestId": str(uuid.uuid4()), "text": "Are you still there?"})
+    assert steer.get("queued"), steer
+    record = record_of(process)
+    assert record["status"] == "failed", record
+    assert record["error"] == ("The run was stopped after 2.5 seconds, the longest a scheduled run may last: "
+                               "the turn in progress."), record
+    answer = until(lambda: next((item["turnId"] for item in api(f"/threads/{thread}/items")
+                                 if item.get("turnId") and item["turnId"] != record["turnId"]), None),
+                   "nothing answered the message the run's stop left unread")
+    until(lambda: api(f"/turns/{answer}")["status"] == "completed", "the answer never finished")
+    told = [item["data"] for item in api(f"/threads/{thread}/items") if item.get("turnId") == answer]
+    assert told[0]["type"] == "user_message" and "scheduled run" in told[0]["text"], told
+    assert any(data["type"] == "assistant_message" for data in told), told
+    ok("a person's message in the run's turn is answered outside its record, even when the run stops it unread")
+
+    # nested
+    schedule("nested-flow", tool("task", {"description": "Nested flow check", "prompt": "!linger 1500 sub done",
+                                          "background": True}))
+    process = runner("nested-flow", 4000)
+    thread = chat_of("nested-flow")
+    child = until(lambda: next((task["childThreadId"] for task in api(f"/threads/{thread}/background") or []), None),
+                  "the run's subagent never started")
+    nested = api("/workflows/run", {"name": "slow", "threadId": child})
+    assert nested.get("status") == "running", nested
+    record = record_of(process)
+    before = turns(thread)
+    assert record["status"] == "failed", record
+    assert record["error"] == ("Background work was still going after 4 seconds and was stopped: "
+                               "workflow “slow”."), record
+    assert "sub done" in record["response"], record
+    assert api(f"/workflows/runs/{nested['id']}")["status"] == "cancelled"
+    settled_after(record, before)
+    child_turns = turns(child)
+    time.sleep(1)
+    assert turns(child) == child_turns and api(f"/threads/{child}/activity")["activeTurn"] is None
+    ok("a workflow a subagent of the run starts holds the run and is cancelled with it, untold")
 finally:
     if connection:
         subprocess.run(args + ["serve", "--stop"], env=env, capture_output=True, timeout=60)
