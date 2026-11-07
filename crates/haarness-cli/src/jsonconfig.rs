@@ -2426,9 +2426,17 @@ pub(super) enum SaveScope {
     /// The person's own configuration: a link on the way may lead anywhere,
     /// such as into a dotfiles folder.
     Global,
-    /// A project's, whose root is this folder: the file saved, every link
-    /// and linked folder on the way followed, must be inside it.
-    Project(PathBuf),
+    /// A project's: the file saved, every link and linked folder on the way
+    /// followed, must be inside `root`, and no link may lead it into the
+    /// global configuration folder.
+    Project {
+        root: PathBuf,
+        /// The home folder, when it is the Git work tree found (a repository
+        /// of dotfiles): the root is then the workspace, and a file of a
+        /// layer between the two that no link leads to still saves, since
+        /// such a file is the person's own.
+        home: Option<PathBuf>,
+    },
 }
 
 impl SaveScope {
@@ -2436,12 +2444,42 @@ impl SaveScope {
     /// its configuration layers start: the Git work tree's top when there is
     /// one, else the workspace itself.
     pub(super) fn project(workspace: &Path) -> Self {
-        Self::Project(
-            crate::layout::project_directories(workspace)
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| workspace.to_path_buf()),
-        )
+        Self::project_beside(workspace, haarness_protocol::home_dir().as_deref())
+    }
+
+    /// [`Self::project`], with `home` as the home folder. A Git work tree
+    /// at the home folder holds every folder in it, so the project there is
+    /// the workspace, as for a folder outside Git.
+    fn project_beside(workspace: &Path, home: Option<&Path>) -> Self {
+        let top = crate::layout::project_directories(workspace)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| workspace.to_path_buf());
+        let real = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if home.is_some_and(|home| real(home) == real(&top)) {
+            return Self::Project {
+                root: workspace.to_path_buf(),
+                home: Some(top),
+            };
+        }
+        Self::Project {
+            root: top,
+            home: None,
+        }
+    }
+
+    /// Whether a project's save of `path`, which really leads to `real`
+    /// (the file, or its folder), lands where it may; a global save always
+    /// does.
+    fn holds(&self, path: &Path, real: &Path) -> bool {
+        let Self::Project { root, home } = self else {
+            return true;
+        };
+        let root = dunce::canonicalize(root).unwrap_or_else(|_| root.clone());
+        real.starts_with(&root)
+            || home
+                .as_deref()
+                .is_some_and(|home| unlinked_below(path, home))
     }
 
     /// The project's scope when `project`, else the global one.
@@ -2493,17 +2531,16 @@ pub(super) fn replace_config_file(
     // Checked again once made: nothing may have led the new folders out of
     // the project meanwhile. Folders made for a save that is then refused
     // are taken away again.
-    if let SaveScope::Project(root) = scope {
-        let root = dunce::canonicalize(root).unwrap_or_else(|_| root.clone());
-        if !dunce::canonicalize(parent).is_ok_and(|real| real.starts_with(&root)) {
-            for folder in &new_folders {
-                let _ = fs::remove_dir(folder);
-            }
-            anyhow::bail!(
-                "Haarness did not save {}: its folder leads outside the project",
-                path.display()
-            );
+    if matches!(scope, SaveScope::Project { .. })
+        && !dunce::canonicalize(parent).is_ok_and(|real| scope.holds(path, &real))
+    {
+        for folder in &new_folders {
+            let _ = fs::remove_dir(folder);
         }
+        anyhow::bail!(
+            "Haarness did not save {}: its folder leads outside the project",
+            path.display()
+        );
     }
     // Writers lock the folder itself: a lock file beside a project's
     // haarness.json would be left behind in the person's repository.
@@ -2556,14 +2593,26 @@ pub(super) fn replace_config_file(
 
 /// The file a save of `path` writes: `path`, or the file a link there
 /// leads to, through every link on the way; for a project's save, the real
-/// path of that file, which must be inside the project. No save goes into
-/// the system configuration folder, which Haarness never changes.
+/// path of that file, which must be inside the project. No link leads a
+/// save into the system configuration folder, which Haarness never
+/// changes, nor a project's save into the global one.
 fn save_target(path: &Path, scope: &SaveScope) -> Result<PathBuf> {
-    save_target_beside(path, scope, crate::layout::system_config_dir().as_deref())
+    save_target_beside(
+        path,
+        scope,
+        crate::layout::system_config_dir().as_deref(),
+        crate::layout::global_config_dir().as_deref(),
+    )
 }
 
-/// [`save_target`], with `system` as the system configuration folder.
-fn save_target_beside(path: &Path, scope: &SaveScope, system: Option<&Path>) -> Result<PathBuf> {
+/// [`save_target`], with `system` and `global` as the system and the global
+/// configuration folders.
+fn save_target_beside(
+    path: &Path,
+    scope: &SaveScope,
+    system: Option<&Path>,
+    global: Option<&Path>,
+) -> Result<PathBuf> {
     use anyhow::Context as _;
     // The folder a path is in, `.` for a bare file name.
     let folder_of = |path: &Path| {
@@ -2571,8 +2620,6 @@ fn save_target_beside(path: &Path, scope: &SaveScope, system: Option<&Path>) -> 
             .filter(|folder| !folder.as_os_str().is_empty())
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     };
-    let is_link =
-        |path: &Path| fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink());
     let mut current = path.to_path_buf();
     for _ in 0..40 {
         if !is_link(&current) {
@@ -2588,10 +2635,18 @@ fn save_target_beside(path: &Path, scope: &SaveScope, system: Option<&Path>) -> 
     let real = real_path(&folder_of(&current))
         .map_err(|why| unsaved(why.into()))?
         .join(name);
-    if let Some(system) =
-        system.map(|system| dunce::canonicalize(system).unwrap_or_else(|_| system.to_path_buf()))
-        && real.starts_with(&system)
-    {
+    // Whether a link on the way leads the save into `folder`: the file
+    // saved is there, but `path` names one elsewhere. A file `path` itself
+    // names there saves as any file does, such as a project's own in a
+    // team's checkout that is also the system folder.
+    let named = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let led_into = |folder: &Path| {
+        let real_folder = dunce::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+        real.starts_with(&real_folder)
+            && !named.starts_with(folder)
+            && !named.starts_with(&real_folder)
+    };
+    if let Some(system) = system.filter(|system| led_into(system)) {
         return Err(unsaved(format!(
             "it leads into the system configuration folder ({}), which Haarness never changes. Replace the link with a copy of the file",
             system.display()
@@ -2602,9 +2657,14 @@ fn save_target_beside(path: &Path, scope: &SaveScope, system: Option<&Path>) -> 
         SaveScope::Global => dunce::canonicalize(folder_of(&current))
             .map_err(|_| unsaved("it is a link to a folder that does not exist".into()))?
             .join(name),
-        SaveScope::Project(root) => {
-            let root = dunce::canonicalize(root).unwrap_or_else(|_| root.clone());
-            if !real.starts_with(&root) {
+        SaveScope::Project { .. } => {
+            if let Some(global) = global.filter(|global| led_into(global)) {
+                return Err(unsaved(format!(
+                    "it leads into your global configuration folder ({}). Save the setting in your global configuration instead, or replace the link with a copy of the file",
+                    global.display()
+                )));
+            }
+            if !scope.holds(path, &real) {
                 return Err(unsaved(format!(
                     "it leads to {}, outside the project. Save the setting in your global configuration instead, or replace the link with a copy of the file",
                     real.display()
@@ -2620,6 +2680,24 @@ fn save_target_beside(path: &Path, scope: &SaveScope, system: Option<&Path>) -> 
         )));
     }
     Ok(target)
+}
+
+/// Whether `path` is a link.
+fn is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink())
+}
+
+/// Whether `path` is inside `folder` where its name says: neither it nor a
+/// folder between the two is a link, and it takes no `..`.
+fn unlinked_below(path: &Path, folder: &Path) -> bool {
+    path.starts_with(folder)
+        && !path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        && path
+            .ancestors()
+            .take_while(|ancestor| *ancestor != folder)
+            .all(|ancestor| !is_link(ancestor))
 }
 
 /// Where `folder` really is, as the system will find it: each part that is
@@ -5149,7 +5227,9 @@ mod tests {
     }
 
     /// Haarness never changes the system configuration folder, so a save
-    /// that a link leads into it is refused, saying so.
+    /// that a link leads into it is refused, saying so. A project's own file
+    /// that is in it (a team's checkout opened as a project, which is also
+    /// the system folder) saves as any project file does.
     #[cfg(unix)]
     #[test]
     fn a_save_never_follows_a_link_into_the_system_folder() {
@@ -5157,25 +5237,135 @@ mod tests {
             std::env::temp_dir().join(format!("haarness-json-system-{}", uuid::Uuid::now_v7()));
         let system = root.join("team base");
         let global = root.join("config");
-        fs::create_dir_all(&system).unwrap();
-        fs::create_dir_all(&global).unwrap();
+        let project = root.join("project");
+        for folder in [&system, &global, &project] {
+            fs::create_dir_all(folder).unwrap();
+        }
         fs::write(system.join("haarness.json"), "{}\n").unwrap();
+        let refused = |path: &Path, scope: &SaveScope| {
+            let error = save_target_beside(path, scope, Some(&system), None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.ends_with(&format!(
+                    "it leads into the system configuration folder ({}), which Haarness never changes. Replace the link with a copy of the file",
+                    system.display()
+                )),
+                "{error}"
+            );
+        };
         let path = global.join("haarness.json");
         std::os::unix::fs::symlink(system.join("haarness.json"), &path).unwrap();
-        let error = save_target_beside(&path, &SaveScope::Global, Some(&system))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("it leads into the system configuration folder")
-                && error.ends_with(
-                    "which Haarness never changes. Replace the link with a copy of the file"
-                ),
-            "{error}"
-        );
+        refused(&path, &SaveScope::Global);
+        let linked = project.join("haarness.json");
+        std::os::unix::fs::symlink(system.join("haarness.json"), &linked).unwrap();
+        refused(&linked, &SaveScope::project_beside(&project, None));
         // Without a system folder there, the link is followed as before.
         assert_eq!(
-            save_target_beside(&path, &SaveScope::Global, None).unwrap(),
+            save_target_beside(&path, &SaveScope::Global, None, None).unwrap(),
             dunce::canonicalize(system.join("haarness.json")).unwrap()
+        );
+        // The team's checkout opened as a project saves its own file.
+        assert_eq!(
+            save_target_beside(
+                &system.join("haarness.json"),
+                &SaveScope::project_beside(&system, None),
+                Some(&system),
+                None
+            )
+            .unwrap(),
+            dunce::canonicalize(system.join("haarness.json")).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// With a Git repository of dotfiles at the home folder, a folder in it
+    /// is a project of its own, as one outside Git is: its file linked to the
+    /// global one saves nothing there, a secret included. No project's file
+    /// leads a save into the global folder through a link, also when the
+    /// project is the home folder. A file of a layer between the home folder
+    /// and the project that no link leads to is the person's, and still
+    /// saves.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_under_a_home_repository_never_saves_into_the_global_folder() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-json-home-git-{}", uuid::Uuid::now_v7()));
+        let home = root.join("home");
+        let global = home.join(".config/haarness");
+        let project = home.join("Downloads/proj");
+        for folder in [home.join(".git"), global.clone(), project.clone()] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let global_file = global.join("haarness.json");
+        fs::write(&global_file, "{}\n").unwrap();
+        let entry = || Some(serde_json::json!({"command":"true","env":{"TOKEN":"project-only"}}));
+        let into_global = |path: &Path, scope: &SaveScope| {
+            let error = save_target_beside(path, scope, None, Some(&global))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.ends_with(&format!(
+                    "it leads into your global configuration folder ({}). Save the setting in your global configuration instead, or replace the link with a copy of the file",
+                    global.display()
+                )),
+                "{error}"
+            );
+        };
+
+        // A downloaded folder whose file links to the global one.
+        let linked = project.join("haarness.json");
+        std::os::unix::fs::symlink("../../.config/haarness/haarness.json", &linked).unwrap();
+        let scope = SaveScope::project_beside(&project, Some(&home));
+        into_global(&linked, &scope);
+        let error = write_entry(&linked, &scope, "mcp", "docs", entry())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outside the project"), "{error}");
+        assert_eq!(fs::read_to_string(&global_file).unwrap(), "{}\n");
+        assert_eq!(
+            scope,
+            SaveScope::Project {
+                root: project.clone(),
+                home: Some(home.clone())
+            }
+        );
+
+        // The home folder itself as the project.
+        let at_home = home.join("haarness.json");
+        std::os::unix::fs::symlink(".config/haarness/haarness.json", &at_home).unwrap();
+        into_global(&at_home, &SaveScope::project_beside(&home, Some(&home)));
+
+        // A file of a layer above the project: plain, it saves; linked
+        // elsewhere in the home folder, it does not.
+        let above = home.join("Downloads/haarness.json");
+        fs::write(&above, "{}\n").unwrap();
+        write_entry(&above, &scope, "mcp", "docs", entry()).unwrap();
+        assert!(fs::read_to_string(&above).unwrap().contains("project-only"));
+        fs::create_dir_all(home.join("notes")).unwrap();
+        fs::write(home.join("notes/haarness.json"), "{}\n").unwrap();
+        fs::create_dir_all(home.join("Downloads/.haarness")).unwrap();
+        let linked_above = home.join("Downloads/.haarness/haarness.json");
+        std::os::unix::fs::symlink("../../notes/haarness.json", &linked_above).unwrap();
+        let error = write_entry(&linked_above, &scope, "mcp", "docs", entry())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outside the project"), "{error}");
+        assert_eq!(
+            fs::read_to_string(home.join("notes/haarness.json")).unwrap(),
+            "{}\n"
+        );
+
+        // A Git repository of its own under the home folder is the project.
+        let repository = home.join("code/app");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::create_dir_all(repository.join("src")).unwrap();
+        assert_eq!(
+            SaveScope::project_beside(&repository.join("src"), Some(&home)),
+            SaveScope::Project {
+                root: repository,
+                home: None
+            }
         );
         fs::remove_dir_all(root).unwrap();
     }

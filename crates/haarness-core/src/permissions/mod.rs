@@ -372,7 +372,8 @@ fn system_config_dir() -> Option<PathBuf> {
 
 /// The global configuration folder: the one the CLI recorded, else
 /// [`global_config_dir_from`] the process environment.
-fn global_config_dir() -> Option<PathBuf> {
+#[must_use]
+pub fn global_config_dir() -> Option<PathBuf> {
     if let Some(dir) = GLOBAL_CONFIG_DIR.get() {
         return Some(dir.clone());
     }
