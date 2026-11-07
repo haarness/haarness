@@ -1369,6 +1369,43 @@ pub fn resolve_permission_path(workspace: &Path, value: &str) -> PathBuf {
     resolve_joined(&joined_path(workspace, value))
 }
 
+/// What a read of `value` opens when no file has that name but one file in
+/// the same folder does once each no-break space (U+00A0, U+202F) in either
+/// name reads as a plain space. macOS puts U+202F before the AM or PM in the
+/// names it gives screenshots and recordings, where a typed name has an
+/// ordinary space. It is `value` as written with that file's name as its
+/// last part, so rules meet it in the same form, and `None` when `value`
+/// names something that is there, or its folder holds no such file, more
+/// than one, or only a folder of that name. Reads only: a write names the
+/// file it makes.
+#[must_use]
+pub fn no_break_space_twin(workspace: &Path, value: &str) -> Option<String> {
+    // A folder this big is not listed; the read fails as it would have.
+    const MAX_ENTRIES: usize = 50_000;
+    let plain = |name: &str| name.replace(['\u{a0}', '\u{202f}'], " ");
+    let name = value.rsplit(['/', std::path::MAIN_SEPARATOR]).next()?;
+    if name.is_empty() || !name.contains([' ', '\u{a0}', '\u{202f}']) {
+        return None;
+    }
+    let joined = resolve_permission_path(workspace, value);
+    if std::fs::symlink_metadata(&joined).is_ok() {
+        return None;
+    }
+    let folder = joined.parent()?;
+    let wanted = plain(name);
+    let mut twins = std::fs::read_dir(folder)
+        .ok()?
+        .take(MAX_ENTRIES)
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|entry| entry != name && plain(entry) == wanted);
+    let twin = twins.next()?;
+    if twins.next().is_some() || !folder.join(&twin).is_file() {
+        return None;
+    }
+    Some(format!("{}{twin}", &value[..value.len() - name.len()]))
+}
+
 /// Resolve a path a tool removes rather than writes through: a deleted
 /// file, or the old name of a move. The entry itself goes, not what a link
 /// there leads to, so only the folder holding it is followed and the last
@@ -2835,5 +2872,49 @@ mod tests {
             PermissionEngine::plan_defaults().evaluate("edit:haarness.json"),
             PermissionDecision::Deny
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_name_finds_the_one_file_that_differs_only_by_no_break_spaces() {
+        let root = std::env::temp_dir().join(format!("haarness-twin-{}", uuid::Uuid::now_v7()));
+        let shots = root.join("shots");
+        std::fs::create_dir_all(&shots).unwrap();
+        std::fs::write(shots.join("Shot 1.00.00\u{202f}PM.png"), "a").unwrap();
+        std::fs::write(shots.join("Recording\u{a0}2.mov"), "b").unwrap();
+        std::fs::write(shots.join("plain name.txt"), "c").unwrap();
+        // Written as typed, relative or absolute: the folder part stays as
+        // written and the file's own name takes the last part's place.
+        assert_eq!(
+            no_break_space_twin(&root, "shots/Shot 1.00.00 PM.png").as_deref(),
+            Some("shots/Shot 1.00.00\u{202f}PM.png")
+        );
+        let absolute = shots.join("Recording 2.mov").display().to_string();
+        assert_eq!(
+            no_break_space_twin(&root, &absolute),
+            Some(shots.join("Recording\u{a0}2.mov").display().to_string())
+        );
+        // A no-break space typed where the file has a plain one.
+        assert_eq!(
+            no_break_space_twin(&root, "shots/plain\u{202f}name.txt").as_deref(),
+            Some("shots/plain name.txt")
+        );
+        // A name that is there, one with no space, or a folder that is
+        // missing find nothing.
+        assert_eq!(no_break_space_twin(&root, "shots/plain name.txt"), None);
+        assert_eq!(no_break_space_twin(&root, "shots/missing.png"), None);
+        assert_eq!(
+            no_break_space_twin(&root, "nowhere/Shot 1.00.00 PM.png"),
+            None
+        );
+        // Two files that both fit, or a folder that fits, find nothing.
+        std::fs::write(shots.join("Shot 1.00.00\u{a0}PM.png"), "d").unwrap();
+        assert_eq!(
+            no_break_space_twin(&root, "shots/Shot 1.00.00 PM.png"),
+            None
+        );
+        std::fs::create_dir(shots.join("Album\u{202f}A")).unwrap();
+        assert_eq!(no_break_space_twin(&root, "shots/Album A"), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -5548,6 +5548,7 @@ impl AgentRuntime {
         arguments = tool
             .prepare_arguments(arguments, thread_id, cancel.clone())
             .await?;
+        recover_read_path(name, &mut arguments, &workspace);
         if is_resource_tool(name) {
             let custom = self.custom_agent(&thread.agent);
             arguments = scope_resource_arguments(
@@ -11719,6 +11720,7 @@ impl RunnerTask {
                 .prepare_arguments(arguments, self.thread.id, self.cancel.clone())
                 .await?;
         }
+        recover_read_path(name, &mut arguments, &self.workspace);
         if is_resource_tool(name) {
             let engine = self.permission_engine(agent);
             arguments =
@@ -15556,6 +15558,24 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
 /// each command in a chain becomes its own pattern with an arity-generalized
 /// "always" rule, and touching paths outside the workspace raises a separate
 /// `external_directory` group.
+/// A read of a file that is not there whose name differs from one file in
+/// its folder only by no-break spaces (a typed macOS screenshot name) reads
+/// that file instead: its path replaces the one written before anything
+/// judges the call, so the rules, the secret-file asks and the outside
+/// folder ask are about the file the tool opens.
+fn recover_read_path(name: &str, arguments: &mut serde_json::Value, workspace: &Path) {
+    if name != "read" {
+        return;
+    }
+    if let Some(twin) = arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|path| crate::permissions::no_break_space_twin(workspace, path))
+    {
+        arguments["path"] = serde_json::Value::String(twin);
+    }
+}
+
 fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec<AskPlan> {
     if name == "agent_switch" {
         // Hex keeps glob syntax in custom agent names literal. Session identity also
@@ -21635,5 +21655,69 @@ fn constrained_permission(
             PermissionDecision::Ask
         }
         _ => PermissionDecision::Allow,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod read_recovery_tests {
+    use super::*;
+    use crate::permissions::PermissionRule;
+
+    /// A typed macOS screenshot name (a plain space before PM, where the
+    /// file has U+202F) reads the file, and everything that judges the call
+    /// judges that file: the outside folder ask names it, and a rule written
+    /// for its real name applies. A write keeps the name it was given.
+    #[test]
+    fn a_typed_screenshot_name_is_read_and_judged_as_the_file_it_opens() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-read-twin-{}", uuid::Uuid::now_v7()));
+        let project = root.join("project");
+        let desktop = root.join("Desktop");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&desktop).unwrap();
+        let real = desktop.join("Screenshot 2026-11-05 at 10.00.00\u{202f}PM.png");
+        std::fs::write(&real, b"png").unwrap();
+        let typed = desktop
+            .join("Screenshot 2026-11-05 at 10.00.00 PM.png")
+            .display()
+            .to_string();
+        let mut arguments = json!({ "path": typed });
+        recover_read_path("read", &mut arguments, &project);
+        assert_eq!(arguments["path"], real.display().to_string());
+        let plans = ask_plans("read", &arguments, &project);
+        let outside = plans
+            .iter()
+            .find(|plan| plan.permission == "external_directory")
+            .expect("an outside folder ask");
+        assert_eq!(
+            outside.external_paths,
+            [dunce::canonicalize(&real).unwrap()]
+        );
+        let mut engine = PermissionEngine::build_defaults();
+        engine.add_rule(PermissionRule {
+            pattern: "read:*\u{202f}PM.png".into(),
+            decision: PermissionDecision::Deny,
+        });
+        let reading = plans
+            .iter()
+            .find(|plan| plan.permission == "read")
+            .expect("a read plan");
+        assert!(
+            reading
+                .patterns
+                .iter()
+                .any(|pattern| reading.evaluate(&engine, pattern).decision
+                    == PermissionDecision::Deny),
+            "{:?}",
+            reading.patterns
+        );
+
+        // Writes and other tools keep the path they were given.
+        for tool in ["write", "edit", "list"] {
+            let mut arguments = json!({ "path": typed });
+            recover_read_path(tool, &mut arguments, &project);
+            assert_eq!(arguments["path"], typed, "{tool}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
