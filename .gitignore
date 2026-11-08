@@ -14,3 +14,7 @@ node_modules/
 /apps/browser-extension/test-results/
 /apps/browser-extension/playwright-report/
 /dist/releases/
+
+# Python bytecode
+__pycache__/
+*.pyc
