@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 import uuid
 
+import e2e_env
 import e2e_scratch
 
 REPO = Path(__file__).resolve().parents[1]
@@ -40,7 +41,7 @@ home.mkdir()
     '[defaults]\nprovider="echo"\nmodel="echo-1"\n[lsp]\nenabled=false\n')
 env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "HAARNESS_HOME": str(home),
        "HAARNESS_DATA_DIR": str(root / "data"), "USER": os.environ.get("USER", "fixture"), "LANG": "en_US.UTF-8",
-       "HAARNESS_TEST_PROVIDER": "1"}
+       "HAARNESS_TEST_PROVIDER": "1", **e2e_env.ISOLATED}
 args = [str(BINARY), "--workspace", str(workspace), "--trust-project"]
 connection = {}
 

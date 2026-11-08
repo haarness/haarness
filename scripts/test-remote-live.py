@@ -23,6 +23,7 @@ from pathlib import Path
 import socket as net  # the PTY proof below names its connection `socket`
 import httpx
 from haarness_sdk import Haarness, HaarnessCloud, AsyncHaarnessCloud, ApiError
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
 
 assert os.environ.get("HAARNESS_REMOTE_E2E") == "1"
 BASE = os.environ["HAARNESS_CLOUD_API_URL"].rstrip("/")

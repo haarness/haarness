@@ -21,6 +21,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import e2e_env  # noqa: E402
 from e2e_tmux import pane_command  # noqa: E402
 
 KEY = "fixture-" + secrets.token_hex(6)
@@ -78,8 +79,8 @@ def main():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_address[1]
     session = f"haarness-custom-{os.getpid()}"
-    env = {key: value for key, value in os.environ.items() if not key.startswith("HAARNESS_")}
-    env.update({"HAARNESS_DATA_DIR": str(root), "HAARNESS_SCHEDULE_SKIP_INSTALL": "1", "SSH_TTY": "fixture"})
+    env = e2e_env.clean_env()
+    env.update({"HAARNESS_DATA_DIR": str(root), "SSH_TTY": "fixture"})
 
     def pane():
         return subprocess.run(["tmux", "capture-pane", "-p", "-t", f"{session}:0.0"], capture_output=True, text=True).stdout

@@ -8,6 +8,8 @@ environment. `pane_command` names both, so the pane matches the script.
 """
 
 import os
+
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness a script starts)
 import re
 import shlex
 

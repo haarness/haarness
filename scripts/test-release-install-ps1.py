@@ -14,6 +14,7 @@ with HAARNESS_ROUTER_BIN set, the real router build installs and runs.
 import hashlib, http.server, os, shutil, subprocess, sys, tempfile, threading
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
 
 ROOT = Path(__file__).resolve().parents[1]
 SHELL = os.environ.get('HAARNESS_POWERSHELL') or shutil.which('pwsh') or shutil.which('powershell')

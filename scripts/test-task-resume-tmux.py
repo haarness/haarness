@@ -9,6 +9,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
 
 
 def run(*args, **kwargs):

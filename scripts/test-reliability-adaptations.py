@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get('HAARNESS_BIN', REPO / 'target/debug/haarness')).resolve()

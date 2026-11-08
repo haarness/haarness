@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
 
 if os.environ.get("HAARNESS_BILLING_LIVE") != "1":
     raise SystemExit("Opt in with HAARNESS_BILLING_LIVE=1; this test consumes model credits.")

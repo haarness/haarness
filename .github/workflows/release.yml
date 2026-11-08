@@ -18,6 +18,9 @@ permissions:
 concurrency:
   group: release-${{ inputs.channel }}
   cancel-in-progress: false
+# Every Haarness a job runs is a test, never a person's install: it reports no usage statistics.
+env:
+  HAARNESS_TELEMETRY: "0"
 jobs:
   build:
     strategy:

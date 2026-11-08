@@ -15,6 +15,7 @@ import sys
 import time
 import urllib.request
 from uuid import uuid4
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "sdks/tests"))

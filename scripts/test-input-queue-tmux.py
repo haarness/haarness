@@ -2,6 +2,7 @@
 """Real TUI + daemon proof for deferred delivery and pending-message controls."""
 import json, os, shlex, subprocess, tempfile, time, urllib.request
 from pathlib import Path
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
 
 def run(*args, **kwargs):
     return subprocess.check_output(args, text=True, **kwargs)

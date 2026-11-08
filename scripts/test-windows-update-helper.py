@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
 
 ROOT = Path(__file__).resolve().parents[1]
 SHELL = os.environ.get("HAARNESS_POWERSHELL") or shutil.which("pwsh") or shutil.which("powershell")
