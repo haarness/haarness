@@ -3149,5 +3149,11 @@
   "Its URL is not a web address (http or https) with a host.": "其 URL 不是带主机的网址（http 或 https）。",
   "Its URL names an environment variable that is not set: {variable}.": "其 URL 引用了未设置的环境变量：{variable}。",
   "Its URL names environment variables that are not set: {variables}.": "其 URL 引用了未设置的环境变量：{variables}。",
-  "Left out as not valid MCP tools: {tools}": "因不是有效的 MCP 工具而略去：{tools}"
+  "Left out as not valid MCP tools: {tools}": "因不是有效的 MCP 工具而略去：{tools}",
+  "Starter credits": "免费额度",
+  "start the free trial, add credits or choose a plan": "开始免费试用、添加额度或选择套餐",
+  "add credits or choose a plan": "添加额度或选择套餐",
+  "add credits with /billing topup": "使用 /billing topup 添加额度",
+  "turn on overage so your purchased credits pay": "开启超额使用，让已购额度可以支付",
+  "add credits and turn on overage to keep working": "添加额度并开启超额使用以继续工作"
 }

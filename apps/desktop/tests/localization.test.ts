@@ -208,6 +208,8 @@ test("keys translated through a variable are in the catalog", () => {
     "No commands yet", "Save a prompt you use often, then run it with /name.",
     "Skills are instructions and files an agent loads when a task calls for them.",
     "No skills yet", "Teach Haarness a workflow once, and it will use it whenever it fits.",
+    // The purchased balance's name in the account dialog, from `purchasedLabel`.
+    "Purchased credits", "Starter credits",
     // Cloud workspace and subscription states in the account dialog.
     "Preparing…", "Starting…", "Running", "Stopping…", "Stopped", "Failed", "Deleting…",
     "Active", "Trial", "Payment due", "Canceled", "Incomplete", "Paused",

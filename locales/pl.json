@@ -3149,5 +3149,11 @@
   "Its URL is not a web address (http or https) with a host.": "Jego adres URL nie jest adresem internetowym (http lub https) z hostem.",
   "Its URL names an environment variable that is not set: {variable}.": "Jego adres URL zawiera nieustawioną zmienną środowiskową: {variable}.",
   "Its URL names environment variables that are not set: {variables}.": "Jego adres URL zawiera nieustawione zmienne środowiskowe: {variables}.",
-  "Left out as not valid MCP tools: {tools}": "Pominięto, bo nie są prawidłowymi narzędziami MCP: {tools}"
+  "Left out as not valid MCP tools: {tools}": "Pominięto, bo nie są prawidłowymi narzędziami MCP: {tools}",
+  "Starter credits": "Kredyty na start",
+  "start the free trial, add credits or choose a plan": "rozpocznij bezpłatny okres próbny, dodaj kredyty lub wybierz plan",
+  "add credits or choose a plan": "dodaj kredyty lub wybierz plan",
+  "add credits with /billing topup": "dodaj kredyty przez /billing topup",
+  "turn on overage so your purchased credits pay": "włącz nadwyżkę, aby płacić zakupionymi kredytami",
+  "add credits and turn on overage to keep working": "dodaj kredyty i włącz nadwyżkę, aby kontynuować"
 }

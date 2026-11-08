@@ -3149,5 +3149,11 @@
   "Its URL is not a web address (http or https) with a host.": "عنوان URL الخاص به ليس عنوان ويب (http أو https) يتضمن مضيفًا.",
   "Its URL names an environment variable that is not set: {variable}.": "يذكر عنوان URL متغير بيئة غير مضبوط: {variable}.",
   "Its URL names environment variables that are not set: {variables}.": "يذكر عنوان URL متغيرات بيئة غير مضبوطة: {variables}.",
-  "Left out as not valid MCP tools: {tools}": "استُبعدت لأنها ليست أدوات MCP صالحة: {tools}"
+  "Left out as not valid MCP tools: {tools}": "استُبعدت لأنها ليست أدوات MCP صالحة: {tools}",
+  "Starter credits": "رصيد مجاني",
+  "start the free trial, add credits or choose a plan": "ابدأ التجربة المجانية أو أضف رصيدًا أو اختر خطة",
+  "add credits or choose a plan": "أضف رصيدًا أو اختر خطة",
+  "add credits with /billing topup": "أضف رصيدًا عبر /billing topup",
+  "turn on overage so your purchased credits pay": "فعّل الاستخدام الإضافي ليُنفق رصيدك المشترى",
+  "add credits and turn on overage to keep working": "أضف رصيدًا وفعّل الاستخدام الإضافي لمتابعة العمل"
 }

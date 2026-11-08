@@ -220,8 +220,9 @@ pub async fn login(args: &LoginArgs) -> Result<()> {
             .pointer("/user/email")
             .and_then(Value::as_str)
             .unwrap_or("your Haarness account");
-        // A new account has nothing to pay for Cloud models with: say so now,
-        // with where to start, rather than after a first prompt is refused.
+        // Say what Cloud models are paid with now: a new account's free
+        // starter credits, or nothing (say where to start, rather than after
+        // a first prompt is refused).
         let summary =
             tokio::time::timeout(std::time::Duration::from_secs(5), client.billing_summary())
                 .await
@@ -235,7 +236,27 @@ pub async fn login(args: &LoginArgs) -> Result<()> {
 
 /// What `haarness login` says once the browser comes back.
 fn signed_in_line(who: &str, summary: Option<&haarness_account::billing::Summary>) -> String {
+    use haarness_account::billing::{NO_PLAN, display_credits};
+    if let Some(credits) = summary
+        .filter(|summary| summary.plan == NO_PLAN && summary.purchased_is_starter)
+        .map(|summary| display_credits(&summary.purchased_credits))
+        .filter(|credits| credits != "0")
+    {
+        return format!(
+            "Signed in as {who}. Haarness Cloud is ready, with {credits} free starter credits."
+        );
+    }
     match summary.filter(|summary| summary.holds_no_credits()) {
+        // Its starter credits spent: without a plan, more credits pay too.
+        Some(summary) if summary.purchased_is_starter => format!(
+            "Signed in as {who}. This account's free starter credits are used up: {} at {}",
+            if summary.trial_available {
+                "start the free trial, add credits or choose a plan"
+            } else {
+                "add credits or choose a plan"
+            },
+            summary.billing_url
+        ),
         Some(summary) if summary.trial_available => format!(
             "Signed in as {who}. This account has no Haarness Cloud credits yet: start the free \
              trial or choose a plan at {}",
@@ -826,10 +847,41 @@ mod tests {
             "Signed in as sam@example.com. This account has no Haarness Cloud credits: choose a \
              plan at https://haarness.ai/app/billing?accountId=a"
         );
+        // A person's own new account starts with free starter credits.
+        assert_eq!(
+            signed_in_line(
+                "sam@example.com",
+                Some(&summary(json!({
+                    "purchasedCredits": "1000.000000", "purchasedIsStarter": true, "purchasedPays": true,
+                })))
+            ),
+            "Signed in as sam@example.com. Haarness Cloud is ready, with 1,000 free starter credits."
+        );
+        for (trial, advice) in [
+            (true, "start the free trial, add credits or choose a plan"),
+            (false, "add credits or choose a plan"),
+        ] {
+            assert_eq!(
+                signed_in_line(
+                    "sam@example.com",
+                    Some(&summary(
+                        json!({"purchasedIsStarter": true, "trialAvailable": trial})
+                    ))
+                ),
+                format!(
+                    "Signed in as sam@example.com. This account's free starter credits are used \
+                     up: {advice} at https://haarness.ai/app/billing?accountId=a"
+                )
+            );
+        }
         for ready in [
             Some(summary(
                 json!({"plan": "pro", "includedCredits": "8000.000000"}),
             )),
+            Some(summary(json!({
+                "plan": "pro", "includedCredits": "8000.000000", "purchasedCredits": "1000.000000",
+                "purchasedIsStarter": true,
+            }))),
             None,
         ] {
             assert_eq!(

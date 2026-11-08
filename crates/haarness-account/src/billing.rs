@@ -29,7 +29,8 @@ pub struct Summary {
     /// Included AI credits left, counting what requests in flight hold: each holds its worst case and settles
     /// to far less, so the balance does not dip for the length of a reply.
     pub included_credits: String,
-    /// Purchased credits left, counted as [`Summary::included_credits`] is.
+    /// Purchased credits left, counted as [`Summary::included_credits`] is. A new account's free starter credits
+    /// are part of them ([`Summary::purchased_is_starter`]).
     pub purchased_credits: String,
     /// Credits requests in flight hold; part of the balances above.
     pub held_credits: String,
@@ -59,6 +60,14 @@ pub struct Summary {
     /// Purchased credits are on hold (a payment dispute) and pay for nothing until it is resolved.
     #[serde(default)]
     pub purchased_frozen: bool,
+    /// Purchased credits pay for model requests now: overage is on, or the account has no plan or trial (with no
+    /// allowance to keep within, its credits are what pays). Never while they are on hold.
+    #[serde(default)]
+    pub purchased_pays: bool,
+    /// The purchased balance is the free starter credits a new account gets, with nothing bought yet: it is
+    /// named for what it is.
+    #[serde(default)]
+    pub purchased_is_starter: bool,
     #[serde(default)]
     pub auto_topup: bool,
     /// Why the last automatic top-up failed (they are then off).
@@ -67,8 +76,8 @@ pub struct Summary {
     /// Whole days the credits that can pay last at the last seven days' pace; absent without recent spend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days_left: Option<u64>,
-    /// The account has a plan or purchased credits, yet no AI credit can pay: nothing included is left and
-    /// purchased credits cannot pay (none, overage off, or on hold).
+    /// The account has a plan or has held credits (purchased or starter ones), yet no AI credit can pay: nothing
+    /// included is left and purchased credits cannot pay (none left, waiting for overage on a plan, or on hold).
     #[serde(default)]
     pub out_of_credits: bool,
 }
@@ -80,24 +89,26 @@ pub const TRIAL_PLAN: &str = "trial";
 pub const NO_PLAN: &str = "No plan";
 
 impl Summary {
-    /// The account holds no AI credits at all: no plan or trial, nothing included and nothing purchased. A new
-    /// account starts here, and Cloud models refuse every request until the trial, a plan or credits come in;
-    /// an account with a plan or purchased credits that cannot pay is [`Summary::out_of_credits`] instead.
+    /// The account holds no AI credits at all: no plan or trial, nothing included and nothing purchased (or its
+    /// starter credits spent). Cloud models refuse every request until the trial, a plan or credits come in. A
+    /// person's own new account starts with starter credits instead, so only an account Cloud gave none (a
+    /// team's) starts here; an account with a plan or credits that cannot pay is [`Summary::out_of_credits`].
     #[must_use]
     pub fn holds_no_credits(&self) -> bool {
         let none = |credits: &str| credits.bytes().all(|byte| matches!(byte, b'0' | b'.'));
         self.plan == NO_PLAN && none(&self.included_credits) && none(&self.purchased_credits)
     }
 
-    /// Some AI credit of the account can pay for a request now: included credits, or purchased ones while
-    /// overage is on and they are not on hold, on an active account. Without it every Cloud model refuses,
-    /// so a new chat's automatic model comes from another connected provider instead.
+    /// Some AI credit of the account can pay for a request now: included credits, or purchased ones while they
+    /// pay ([`Summary::purchased_pays`]: overage on, or no plan) and are not on hold, on an active account.
+    /// Without it every Cloud model refuses, so a new chat's automatic model comes from another connected
+    /// provider instead.
     #[must_use]
     pub fn can_pay(&self) -> bool {
         let some = |credits: &str| credits.bytes().any(|byte| matches!(byte, b'1'..=b'9'));
         self.account_status == "active"
             && (some(&self.included_credits)
-                || (self.overage_opt_in && !self.purchased_frozen && some(&self.purchased_credits)))
+                || (self.purchased_pays && !self.purchased_frozen && some(&self.purchased_credits)))
     }
 }
 
@@ -164,17 +175,26 @@ fn balances(wallet: &Value) -> Balances {
     out
 }
 
-/// Days the credits that can pay last at the pace of `spent_7_days` nanos a week.
+/// Whether purchased credits pay for model requests now, as the wallet says. An older Cloud does not say; it let
+/// them pay only with overage on and never while on hold.
+fn purchased_pays(wallet: &Value, balance: &Balances) -> bool {
+    wallet["purchasedPays"].as_bool().unwrap_or_else(|| {
+        wallet["overageOptIn"].as_bool().unwrap_or(false) && !balance.purchased_frozen
+    })
+}
+
+/// Days the credits that can pay last at the pace of `spent_7_days` nanos a week; purchased ones count while they
+/// pay ([`Summary::purchased_pays`]).
 pub fn days_left(
     included: u128,
     purchased: u128,
-    overage: bool,
+    purchased_pays: bool,
     spent_7_days: u128,
 ) -> Option<u64> {
     if spent_7_days == 0 {
         return None;
     }
-    let left = included + if overage { purchased } else { 0 };
+    let left = included + if purchased_pays { purchased } else { 0 };
     u64::try_from(left * 7 / spent_7_days).ok()
 }
 
@@ -255,7 +275,12 @@ impl State {
                     display_credits(&s.included_credits)
                 ),
                 format!(
-                    "Purchased        {} credits {}",
+                    "{}{} credits {}",
+                    if s.purchased_is_starter {
+                        "Starter credits  "
+                    } else {
+                        "Purchased        "
+                    },
                     display_credits(&s.purchased_credits),
                     if s.purchased_frozen {
                         "on hold"
@@ -290,7 +315,14 @@ impl State {
             ));
             if s.out_of_credits {
                 lines.push(
-                    if s.overage_opt_in {
+                    // Without a plan, credits pay whatever overage says.
+                    if s.plan == NO_PLAN {
+                        if s.trial_available {
+                            "Out of credits   start the free trial, add credits or choose a plan"
+                        } else {
+                            "Out of credits   add credits or choose a plan"
+                        }
+                    } else if s.overage_opt_in {
                         "Out of credits   add credits to keep working"
                     } else if display_credits(&s.purchased_credits) != "0" && !s.purchased_frozen {
                         "Out of credits   turn overage on so purchased credits pay"
@@ -394,8 +426,8 @@ impl Client {
         let plan_code = text(&subscription, "planCode").or_else(|| text(&entitlements, "planCode"));
         let overage = wallet["overageOptIn"].as_bool().unwrap_or(false);
         let balance = balances(&wallet);
-        // Frozen purchased credits pay for nothing, overage or not.
-        let purchased_pays = overage && !balance.purchased_frozen;
+        let purchased_pays = purchased_pays(&wallet, &balance);
+        let purchased_is_starter = wallet["purchasedIsStarter"].as_bool().unwrap_or(false);
         let seats = subscription["seats"]
             .as_i64()
             .or_else(|| entitlements["seats"].as_i64())
@@ -428,7 +460,10 @@ impl Client {
                     .unwrap_or(account)
                     .into(),
                 trial: plan_code.as_deref() == Some(TRIAL_PLAN) && subscription.is_null(),
-                out_of_credits: (plan_code.is_some() || balance.purchased > 0)
+                // Spent starter credits ran out as much as bought ones do.
+                out_of_credits: (plan_code.is_some()
+                    || balance.purchased > 0
+                    || purchased_is_starter)
                     && balance.included + if purchased_pays { balance.purchased } else { 0 } == 0,
                 plan: plan_code.unwrap_or_else(|| NO_PLAN.into()),
                 subscription_status: text(&subscription, "status"),
@@ -450,6 +485,8 @@ impl Client {
                 trial_available: wallet["trialAvailable"].as_bool().unwrap_or(false),
                 trial_refused: wallet["trialRefused"].as_bool().unwrap_or(false),
                 purchased_frozen: balance.purchased_frozen,
+                purchased_pays,
+                purchased_is_starter,
                 auto_topup: wallet["autoTopup"]["enabled"].as_bool().unwrap_or(false),
                 auto_topup_failure: text(&wallet["autoTopup"], "failure"),
                 days_left: days_left(
@@ -668,7 +705,7 @@ async fn connection(
 
 #[cfg(test)]
 mod tests {
-    use super::{Balances, balances, forecast};
+    use super::{Balances, balances, forecast, purchased_pays};
     use serde_json::json;
 
     #[test]
@@ -727,7 +764,7 @@ mod tests {
     }
 
     /// Paying takes a credit that can pay now: included ones, or purchased
-    /// ones with overage on and not on hold.
+    /// ones while they pay (overage on, or no plan) and are not on hold.
     #[test]
     fn an_account_pays_with_a_credit_that_can_pay_now() {
         let summary = |fields: serde_json::Value| -> super::Summary {
@@ -750,12 +787,19 @@ mod tests {
         );
         assert!(!summary(json!({"plan": "pro", "includedCredits": "0.000000"})).can_pay());
         assert!(
-            !summary(json!({"purchasedCredits": "20.000000"})).can_pay(),
-            "overage off"
+            !summary(json!({"plan": "pro", "purchasedCredits": "20.000000"})).can_pay(),
+            "on a plan with overage off"
         );
-        assert!(summary(json!({"purchasedCredits": "20.000000", "overageOptIn": true})).can_pay());
         assert!(
-            !summary(json!({"purchasedCredits": "20.000000", "overageOptIn": true, "purchasedFrozen": true}))
+            summary(json!({"purchasedCredits": "20.000000", "purchasedPays": true})).can_pay(),
+            "no plan: purchased (or starter) credits pay without overage"
+        );
+        assert!(
+            summary(json!({"plan": "pro", "purchasedCredits": "20.000000", "overageOptIn": true, "purchasedPays": true}))
+                .can_pay()
+        );
+        assert!(
+            !summary(json!({"purchasedCredits": "20.000000", "purchasedPays": true, "purchasedFrozen": true}))
                 .can_pay()
         );
         assert!(
@@ -771,6 +815,94 @@ mod tests {
         assert!(!state(Some(summary(json!({})))).cloud_can_pay());
         assert!(state(None).cloud_can_pay(), "billing still loading");
         assert!(super::State::default().cloud_can_pay(), "signed out");
+    }
+
+    /// The wallet says whether purchased credits pay; a Cloud that does not
+    /// say lets them pay only with overage on and not on hold.
+    #[test]
+    fn purchased_credits_pay_as_the_wallet_says() {
+        let frozen = Balances {
+            purchased_frozen: true,
+            ..Balances::default()
+        };
+        let free = Balances::default();
+        for (wallet, balance, pays) in [
+            (
+                json!({"purchasedPays": true, "overageOptIn": false}),
+                &free,
+                true,
+            ),
+            (
+                json!({"purchasedPays": false, "overageOptIn": true}),
+                &free,
+                false,
+            ),
+            (json!({"overageOptIn": true}), &free, true),
+            (json!({"overageOptIn": true}), &frozen, false),
+            (json!({"overageOptIn": false}), &free, false),
+            (json!({}), &free, false),
+        ] {
+            assert_eq!(purchased_pays(&wallet, balance), pays, "{wallet}");
+        }
+    }
+
+    /// Spent starter credits read as out of credits, and an account without
+    /// a plan is never told to turn on overage.
+    #[test]
+    fn starter_credits_are_named_and_no_plan_is_not_told_about_overage() {
+        let state = |fields: serde_json::Value| -> super::State {
+            let mut base = json!({
+                "accountId": "a", "accountName": "Sam", "plan": "No plan", "subscriptionStatus": null,
+                "accountStatus": "active", "includedCredits": "0.000000", "purchasedCredits": "1000.000000",
+                "heldCredits": "0", "cloudUnits": "0.00", "cloudUnitsHeld": "0.00", "cancelAtPeriodEnd": false,
+                "overageOptIn": false, "billingUrl": "https://haarness.ai/app/billing",
+                "usageUrl": "https://haarness.ai/app/billing/usage", "trialAvailable": true,
+                "purchasedPays": true, "purchasedIsStarter": true,
+            });
+            for (key, value) in fields.as_object().unwrap() {
+                base[key] = value.clone();
+            }
+            super::State {
+                logged_in: true,
+                summary: Some(serde_json::from_value(base).unwrap()),
+                error: None,
+            }
+        };
+        let lines = state(json!({})).lines();
+        assert!(
+            lines.contains(&"Starter credits  1,000 credits available".to_owned()),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with("Purchased")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with("Out of credits")),
+            "{lines:?}"
+        );
+        let lines = state(json!({"purchasedIsStarter": false})).lines();
+        assert!(
+            lines.contains(&"Purchased        1,000 credits available".to_owned()),
+            "{lines:?}"
+        );
+        for (fields, advice) in [
+            (
+                json!({"purchasedCredits": "0.000000", "outOfCredits": true}),
+                "Out of credits   start the free trial, add credits or choose a plan",
+            ),
+            (
+                json!({"purchasedCredits": "0.000000", "outOfCredits": true, "trialAvailable": false}),
+                "Out of credits   add credits or choose a plan",
+            ),
+            (
+                json!({"plan": "pro", "outOfCredits": true, "purchasedPays": false, "purchasedIsStarter": false}),
+                "Out of credits   turn overage on so purchased credits pay",
+            ),
+        ] {
+            let lines = state(fields).lines();
+            assert!(lines.contains(&advice.to_owned()), "{lines:?}");
+        }
     }
 
     #[test]

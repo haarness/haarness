@@ -8,10 +8,12 @@ import { language, t, errorLine } from "./i18n";
 import { setAccountKnown, setSignedIn } from "./computers";
 import "./account.css";
 import {
-  addCredits,
   credits,
   creditsShort,
   planName,
+  purchasedLabel,
+  spendableCredits,
+  waitsForOverage,
   type BillingState,
 } from "../billing";
 
@@ -221,10 +223,8 @@ export function AccountMenu(props: {
     const s = summary();
     if (!s) return undefined;
     if (billing().error) return t("Billing unavailable");
-    // Credits that can pay: purchased ones only with overage on, and never while on hold.
-    const total = creditsShort(
-      s.overageOptIn && !s.purchasedFrozen ? addCredits(s.includedCredits, s.purchasedCredits) : s.includedCredits,
-    );
+    // Credits that can pay: purchased ones while they pay (no plan, or overage on), never while on hold.
+    const total = creditsShort(spendableCredits(s));
     return t("{plan} · {credits} credits", { plan: planLabel(s) ?? t("No plan"), credits: total });
   };
   return (
@@ -449,7 +449,7 @@ export function AccountMenu(props: {
                       </span>
                     </div>
                     <div>
-                      <dt>{t("Purchased credits")}</dt>
+                      <dt>{t(purchasedLabel(s()))}</dt>
                       <dd data-testid="purchased-credits">{credits(s().purchasedCredits)}</dd>
                       <span>{s().purchasedFrozen ? t("On hold") : t("Never expire")}</span>
                     </div>
@@ -462,7 +462,7 @@ export function AccountMenu(props: {
                   <Show when={/[1-9]/.test(s().heldCredits)}>
                     <p class="account-note">{t("{credits} credits are held by requests in progress.", { credits: credits(s().heldCredits) })}</p>
                   </Show>
-                  <Show when={!s().overageOptIn && !s().purchasedFrozen && /[1-9]/.test(s().purchasedCredits)}>
+                  <Show when={waitsForOverage(s())}>
                     <p class="account-note" data-testid="overage-off">{t("Overage is off, so purchased credits are not spent. Turn it on in Billing.")}</p>
                   </Show>
                   <Show when={!s().outOfCredits && s().daysLeft != null && s().daysLeft! < 30}>

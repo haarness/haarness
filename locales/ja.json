@@ -3149,5 +3149,11 @@
   "Its URL is not a web address (http or https) with a host.": "URL がホストを含む Web アドレス (http または https) ではありません。",
   "Its URL names an environment variable that is not set: {variable}.": "URL が設定されていない環境変数を参照しています: {variable}。",
   "Its URL names environment variables that are not set: {variables}.": "URL が設定されていない環境変数を参照しています: {variables}。",
-  "Left out as not valid MCP tools: {tools}": "有効な MCP ツールではないため除外: {tools}"
+  "Left out as not valid MCP tools: {tools}": "有効な MCP ツールではないため除外: {tools}",
+  "Starter credits": "無料クレジット",
+  "start the free trial, add credits or choose a plan": "無料トライアルを開始するか、クレジットを追加するか、プランを選択",
+  "add credits or choose a plan": "クレジットを追加するかプランを選択",
+  "add credits with /billing topup": "/billing topup でクレジットを追加",
+  "turn on overage so your purchased credits pay": "超過利用をオンにすると購入済みクレジットで支払えます",
+  "add credits and turn on overage to keep working": "続けるにはクレジットを追加し、超過利用をオンにしてください"
 }

@@ -3149,5 +3149,11 @@
   "Its URL is not a web address (http or https) with a host.": "Его URL — не веб-адрес (http или https) с хостом.",
   "Its URL names an environment variable that is not set: {variable}.": "Его URL ссылается на незаданную переменную окружения: {variable}.",
   "Its URL names environment variables that are not set: {variables}.": "Его URL ссылается на незаданные переменные окружения: {variables}.",
-  "Left out as not valid MCP tools: {tools}": "Пропущены, так как это не корректные инструменты MCP: {tools}"
+  "Left out as not valid MCP tools: {tools}": "Пропущены, так как это не корректные инструменты MCP: {tools}",
+  "Starter credits": "Стартовые кредиты",
+  "start the free trial, add credits or choose a plan": "начните бесплатный пробный период, пополните кредиты или выберите тариф",
+  "add credits or choose a plan": "пополните кредиты или выберите тариф",
+  "add credits with /billing topup": "пополните кредиты через /billing topup",
+  "turn on overage so your purchased credits pay": "включите перерасход, чтобы платить купленными кредитами",
+  "add credits and turn on overage to keep working": "пополните кредиты и включите перерасход, чтобы продолжить"
 }

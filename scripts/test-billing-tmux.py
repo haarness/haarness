@@ -80,7 +80,8 @@ with tempfile.TemporaryDirectory(prefix="haarness-billing-tmux-") as directory:
         run(["tmux", "new-session", "-d", "-x", "160", "-y", "46", "-s", session, "bash "+shlex.quote(str(launcher))])
         until(lambda: "/billing" in capture(), "Cloud credit indicator missing")
         send("/billing")
-        until(lambda: "Purchased" in capture() and "Included AI" in capture(), "Billing panel missing")
+        # A new account's purchased balance is its starter credits until it buys some.
+        until(lambda: ("Purchased" in capture() or "Starter credits" in capture()) and "Included AI" in capture(), "Billing panel missing")
         (evidence / "before.txt").write_text(capture())
         before = wallet()
         assert before["heldReserve"]["nanos"] == "0", "Test requires an idle billing account"

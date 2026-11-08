@@ -32,26 +32,53 @@ export type BillingState = {
     trialRefused?: boolean;
     /** Purchased credits are on hold and pay for nothing. */
     purchasedFrozen?: boolean;
+    /** Purchased credits pay for model requests now: overage is on, or there is no plan or trial. Never while on
+     * hold. Absent from an older Haarness, which let them pay only with overage on (see `purchasedPays`). */
+    purchasedPays?: boolean;
+    /** The purchased balance is a new account's free starter credits, with nothing bought yet. */
+    purchasedIsStarter?: boolean;
     autoTopup?: boolean;
     autoTopupFailure?: string | null;
     /** Days the credits that can pay last at the last week's pace. */
     daysLeft?: number | null;
-    /** The account has a plan or purchased credits, yet no AI credit can pay. */
+    /** The account has a plan or has held credits (purchased or starter ones), yet no AI credit can pay. */
     outOfCredits?: boolean;
   } | null;
 };
 
+/** Whether the account's purchased credits pay for model requests now, as its summary says; without that word,
+ * the older rule: only with overage on, and never while on hold. */
+export function purchasedPays(s: NonNullable<BillingState["summary"]>): boolean {
+  return s.purchasedPays ?? (s.overageOptIn && !s.purchasedFrozen);
+}
+
 /** Whether Haarness Cloud models can be paid for, as far as `state` says: false only for a signed-in account
  * whose summary shows no credit that can pay (nothing included left, and purchased credits none, waiting on
- * overage or on hold), or that is not active. Signed out or still loading, nothing is known. */
+ * overage on a plan, or on hold), or that is not active. Signed out or still loading, nothing is known. */
 export function cloudCanPay(state: BillingState): boolean {
   const s = state.summary;
   if (!state.loggedIn || !s) return true;
   const some = (value: string) => /[1-9]/.test(value);
   return (
     s.accountStatus === "active" &&
-    (some(s.includedCredits) || (s.overageOptIn && !s.purchasedFrozen && some(s.purchasedCredits)))
+    (some(s.includedCredits) || (purchasedPays(s) && !s.purchasedFrozen && some(s.purchasedCredits)))
   );
+}
+
+/** The credits that can pay now, for a glance: included ones, plus purchased ones while they pay. */
+export function spendableCredits(s: NonNullable<BillingState["summary"]>): string {
+  return purchasedPays(s) && !s.purchasedFrozen ? addCredits(s.includedCredits, s.purchasedCredits) : s.includedCredits;
+}
+
+/** Purchased credits sit unspent until overage is turned on: on a plan with overage off. Without a plan they pay
+ * as they are, and on hold overage would not help. */
+export function waitsForOverage(s: NonNullable<BillingState["summary"]>): boolean {
+  return !purchasedPays(s) && !s.overageOptIn && !s.purchasedFrozen && /[1-9]/.test(s.purchasedCredits);
+}
+
+/** The English key naming the purchased balance: a new account's free credits until it buys some. */
+export function purchasedLabel(s: NonNullable<BillingState["summary"]>): string {
+  return s.purchasedIsStarter ? "Starter credits" : "Purchased credits";
 }
 
 /** Round down at the display boundary so tiny balances never become overspendable. */

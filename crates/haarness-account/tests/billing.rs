@@ -49,7 +49,7 @@ async fn fixture() -> Fixture {
         .route("/api/v1/me", get(|| async { Json(json!({"defaultAccountId":A,"accounts":[{"id":A,"name":"Personal"},{"id":B,"name":"Team"}]})) }))
         .route("/api/v1/billing/wallet", get(|State(d): State<Data>, Query(q): Query<HashMap<String,String>>| async move {
             d.requests.fetch_add(1, Ordering::SeqCst);
-            Json(json!({"status":"active","includedAi":{"credits":if q.get("accountId").map(String::as_str)==Some(B) {"100".into()} else {format!("{}.123456", d.balance.load(Ordering::SeqCst))},"nanos":if q.get("accountId").map(String::as_str)==Some(B) {"100000000".into()} else {format!("{}123456", d.balance.load(Ordering::SeqCst))}},"purchased":{"credits":"9007199254740993.000001","nanos":"9007199254740993000001"},"heldReserve":{"credits":"4.5"},"cloudUnitSecondsAvailable":7200,"cloudUnitSecondsReserved":360,"overageOptIn":false,"resetsAt":"2026-10-01T00:00:00Z","trialAvailable":q.get("accountId").map(String::as_str)==Some(B),"autoTopup":{"enabled":true},"aiSpendLast7Days":{"nanos":"23123456"}}))
+            Json(json!({"status":"active","includedAi":{"credits":if q.get("accountId").map(String::as_str)==Some(B) {"100".into()} else {format!("{}.123456", d.balance.load(Ordering::SeqCst))},"nanos":if q.get("accountId").map(String::as_str)==Some(B) {"100000000".into()} else {format!("{}123456", d.balance.load(Ordering::SeqCst))}},"purchased":{"credits":"9007199254740993.000001","nanos":"9007199254740993000001"},"heldReserve":{"credits":"4.5"},"cloudUnitSecondsAvailable":7200,"cloudUnitSecondsReserved":360,"overageOptIn":false,"resetsAt":"2026-10-01T00:00:00Z","trialAvailable":q.get("accountId").map(String::as_str)==Some(B),"purchasedPays":q.get("accountId").map(String::as_str)==Some(B),"purchasedIsStarter":q.get("accountId").map(String::as_str)==Some(B),"autoTopup":{"enabled":true},"aiSpendLast7Days":{"nanos":"23123456"}}))
         }))
         .route("/api/v1/billing/subscription", get(|State(d): State<Data>, Query(q): Query<HashMap<String,String>>| async move {
             if d.fail.load(Ordering::SeqCst) { return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"message":"temporarily unavailable"}))); }
@@ -131,6 +131,8 @@ async fn snapshot_preserves_precision_holds_and_no_plan_without_hiding_errors() 
     assert_eq!(s.seats, Some(3));
     assert_eq!(s.billing_interval.as_deref(), Some("year"));
     assert!(s.auto_topup && !s.trial && !s.trial_available && !s.out_of_credits);
+    // On a plan with overage off, purchased credits wait.
+    assert!(!s.purchased_pays && !s.purchased_is_starter);
     assert_eq!(s.days_left, Some(7));
     let lines = state_lines(&f).await;
     assert!(
@@ -148,6 +150,8 @@ async fn snapshot_preserves_precision_holds_and_no_plan_without_hiding_errors() 
         b.trial_available && !b.out_of_credits,
         "no plan is not 'out of credits'"
     );
+    // Without a plan, the wallet says purchased (here starter) credits pay with overage off.
+    assert!(b.purchased_pays && b.purchased_is_starter && b.can_pay());
     f.data.fail.store(true, Ordering::SeqCst);
     assert!(
         f.client

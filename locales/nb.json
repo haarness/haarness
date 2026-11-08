@@ -3149,5 +3149,11 @@
   "Its URL is not a web address (http or https) with a host.": "URL-en er ikke en nettadresse (http eller https) med en vert.",
   "Its URL names an environment variable that is not set: {variable}.": "URL-en nevner en miljøvariabel som ikke er satt: {variable}.",
   "Its URL names environment variables that are not set: {variables}.": "URL-en nevner miljøvariabler som ikke er satt: {variables}.",
-  "Left out as not valid MCP tools: {tools}": "Utelatt fordi de ikke er gyldige MCP-verktøy: {tools}"
+  "Left out as not valid MCP tools: {tools}": "Utelatt fordi de ikke er gyldige MCP-verktøy: {tools}",
+  "Starter credits": "Startkreditter",
+  "start the free trial, add credits or choose a plan": "start den gratis prøveperioden, legg til kreditter eller velg et abonnement",
+  "add credits or choose a plan": "legg til kreditter eller velg et abonnement",
+  "add credits with /billing topup": "legg til kreditter med /billing topup",
+  "turn on overage so your purchased credits pay": "slå på overforbruk så kjøpte kreditter betaler",
+  "add credits and turn on overage to keep working": "legg til kreditter og slå på overforbruk for å jobbe videre"
 }
