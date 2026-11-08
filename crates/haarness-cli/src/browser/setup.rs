@@ -115,6 +115,8 @@ pub(crate) struct Context<'a> {
     pub(crate) isolated: bool,
     pub(crate) extension_source: Option<ExtensionSource>,
     pub(crate) extra_ids: Vec<String>,
+    /// Haarness for Chrome's Web Store listing, offered before the unpacked copy.
+    pub(crate) web_store_url: Option<&'static str>,
     /// `HAARNESS_BROWSER_MANIFEST_DIR`: folders that stand in for every
     /// browser's own, as `--manifest-dir` does, so a test run (or a Desktop
     /// started for one) never registers with the user's real Chrome.
@@ -172,6 +174,7 @@ impl Context<'static> {
                 &desktops,
             ),
             extra_ids: manifest::extension_ids(var("HAARNESS_BROWSER_EXTENSION_IDS").as_deref()),
+            web_store_url: CHROME_WEB_STORE_URL,
             manifest_dirs: std::env::var_os("HAARNESS_BROWSER_MANIFEST_DIR")
                 .map(|value| {
                     std::env::split_paths(&value)
@@ -652,7 +655,7 @@ fn report(
     Report {
         host_name: HOST_NAME,
         extension_id: EXTENSION_ID,
-        web_store_url: CHROME_WEB_STORE_URL,
+        web_store_url: context.web_store_url,
         executable: executable.display().to_string(),
         wrapper: wrapper.display().to_string(),
         removed: files.removed().exists(),
@@ -820,7 +823,7 @@ fn isolated_warning(folder: &Path) -> String {
 fn nothing_to_load(context: &Context, files: &ChromeFiles) -> bool {
     context.extension_source.is_none()
         && extension_copy(&files.extension()).is_none()
-        && CHROME_WEB_STORE_URL.is_none()
+        && context.web_store_url.is_none()
 }
 
 pub(crate) fn setup(context: &Context, options: &SetupOptions) -> Result<Report> {
@@ -1343,6 +1346,7 @@ mod tests {
                 forwarded: vec![("HAARNESS_DATA_DIR", self.root.display().to_string())],
                 isolated: false,
                 extra_ids: Vec::new(),
+                web_store_url: None,
                 manifest_dirs: Vec::new(),
                 registry: &self.registry,
             }
@@ -2178,5 +2182,35 @@ mod tests {
         assert!(step.starts_with("Next, add Haarness for Chrome: open chrome://extensions, turn on Developer mode (keep it on), click Load unpacked, press ⌘⇧G and paste:\n  "));
         assert!(step.contains("Haarness for Chrome\nThen pin Haarness to the toolbar."));
         assert!(next_step(&report, Os::Linux).contains("press Ctrl+L and paste"));
+    }
+
+    #[test]
+    fn with_a_web_store_listing_setup_sends_people_to_the_store() {
+        let fixture = Fixture::new("web-store");
+        let mut context = fixture.context(Os::Mac);
+        context.web_store_url = CHROME_WEB_STORE_URL;
+        let report = setup(&context, &options(false)).unwrap();
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["webStoreUrl"],
+            "https://chromewebstore.google.com/detail/haarness/coiilnhkjenilclbmdkmommknamllbde"
+        );
+        assert_eq!(
+            next_step(&report, Os::Mac),
+            "Next, add Haarness for Chrome from the Chrome Web Store: https://chromewebstore.google.com/detail/haarness/coiilnhkjenilclbmdkmommknamllbde\nThen pin Haarness to the toolbar."
+        );
+        // The store copy can start the host as well as the unpacked one.
+        let chrome = json["browsers"][0]["manifest"].as_str().unwrap();
+        let manifest: Value = serde_json::from_slice(&fs::read(chrome).unwrap()).unwrap();
+        assert_eq!(
+            manifest["allowed_origins"],
+            json!([
+                "chrome-extension://accdjhmcgljbadpeanajllmcembhkomn/",
+                "chrome-extension://coiilnhkjenilclbmdkmommknamllbde/"
+            ])
+        );
+        // An installation without its own copy still has the store to offer.
+        context.extension_source = None;
+        assert!(status(&context).warnings.is_empty());
     }
 }

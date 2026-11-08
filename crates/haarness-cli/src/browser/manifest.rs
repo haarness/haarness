@@ -1,7 +1,7 @@
 //! Chromium's native messaging registration: which browsers look where, the
 //! host manifest, and the wrapper script it names. Everything here is a pure
 //! function of its inputs so every platform's output is tested everywhere.
-use super::{BrowserChoice, EXTENSION_ID, HOST_NAME};
+use super::{BrowserChoice, EXTENSION_ID, HOST_NAME, WEB_STORE_EXTENSION_ID};
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::{
@@ -264,10 +264,14 @@ pub(crate) const SANDBOXED: &[(&str, &str, &str)] = &[
 
 pub(crate) const SANDBOXED_NOTE: &str = "Browsers installed as a Flatpak or Snap cannot start Haarness yet. Install the browser from its website to use Haarness for Chrome.";
 
-/// The host manifest Chrome reads. `extra` are more extension IDs allowed
-/// to start the host (`HAARNESS_BROWSER_EXTENSION_IDS`).
+/// The host manifest Chrome reads. Both copies of Haarness for Chrome may
+/// start the host, the unpacked one and the Web Store one; `extra` are more
+/// extension IDs allowed to (`HAARNESS_BROWSER_EXTENSION_IDS`).
 pub(crate) fn manifest(wrapper: &Path, extra: &[String]) -> Value {
-    let mut origins = vec![format!("chrome-extension://{EXTENSION_ID}/")];
+    let mut origins = vec![
+        format!("chrome-extension://{EXTENSION_ID}/"),
+        format!("chrome-extension://{WEB_STORE_EXTENSION_ID}/"),
+    ];
     for id in extra {
         let origin = format!("chrome-extension://{id}/");
         if !origins.contains(&origin) {
@@ -474,7 +478,8 @@ mod tests {
             manifest,
             json!({"name":"ai.haarness.browser","description":"Haarness for Chrome",
                 "path":"/data/browser/chrome/haarness-browser-host","type":"stdio",
-                "allowed_origins":["chrome-extension://accdjhmcgljbadpeanajllmcembhkomn/"]})
+                "allowed_origins":["chrome-extension://accdjhmcgljbadpeanajllmcembhkomn/",
+                    "chrome-extension://coiilnhkjenilclbmdkmommknamllbde/"]})
         );
         let ids = extension_ids(Some(
             " gioamnpfejaiiikckfpnmjkfflndgnkh,not-an-id, accdjhmcgljbadpeanajllmcembhkomn,gioamnpfejaiiikckfpnmjkfflndgnkh,",
@@ -491,6 +496,7 @@ mod tests {
             manifest["allowed_origins"],
             json!([
                 "chrome-extension://accdjhmcgljbadpeanajllmcembhkomn/",
+                "chrome-extension://coiilnhkjenilclbmdkmommknamllbde/",
                 "chrome-extension://gioamnpfejaiiikckfpnmjkfflndgnkh/"
             ])
         );

@@ -1,6 +1,6 @@
 ---
 name: haarness-release
-description: Build, verify, publish and present Haarness CLI, Electron Desktop and Haarness Router releases for macOS, Linux and Windows through the Cloud release API, and deploy the matching Haarness Cloud (web app, API, worker, router, gateway, workspace image) to staging then prod — per-platform builds (glibc-pinned Linux, static-CRT Windows), DMG/ZIP, AppImage/deb and NSIS packages, the router binaries and their GitHub release, curl and PowerShell installers (install.sh/ps1 and install-router.sh/ps1), checksums, quarantine, the download page, README/profile/docs install sections, SDK proof, rollback and a final proof report. Use when building, publishing, shipping or install-testing a release; excludes npm and Docker publication.
+description: Build, verify, publish and present Haarness CLI, Electron Desktop and Haarness Router releases for macOS, Linux and Windows through the Cloud release API, and deploy the matching Haarness Cloud (web app, API, worker, router, gateway, workspace image) to staging then prod — per-platform builds (glibc-pinned Linux, static-CRT Windows), DMG/ZIP, AppImage/deb and NSIS packages, the router binaries and their GitHub release, Haarness for Chrome on the Chrome Web Store, curl and PowerShell installers (install.sh/ps1 and install-router.sh/ps1), checksums, quarantine, the download page, README/profile/docs install sections, SDK proof, rollback and a final proof report. Use when building, publishing, shipping or install-testing a release; excludes npm and Docker publication.
 ---
 
 # Haarness binary releases
@@ -554,6 +554,40 @@ published release's tag and assets cannot change; the command warns otherwise (o
 on for haarness, off for haarness-router). Both repositories are public; haarness.ai stays the main
 download.
 
+**Chrome Web Store.** Haarness for Chrome is also a Chrome Web Store item ("Haarness", ID
+`coiilnhkjenilclbmdkmommknamllbde`, `WEB_STORE_EXTENSION_ID`; setup sends people to it first). The
+store copy updates only through the store, so every release uploads its extension there, after
+haarness.ai. The store manages the item's key and refuses a manifest with a `key` field, so upload a
+copy of the release zip without it (the zip on haarness.ai keeps its key; never change it):
+
+```sh
+python3 -I - dist/releases/haarness-chrome-<v>.zip haarness-chrome-<v>-store.zip <<'EOF'
+import json, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as zin, zipfile.ZipFile(sys.argv[2], "w", zipfile.ZIP_DEFLATED) as zout:
+    for info in zin.infolist():
+        data = zin.read(info)
+        if info.filename == "manifest.json":
+            manifest = json.loads(data)
+            manifest.pop("key")
+            data = (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode()
+        zout.writestr(info, data)
+EOF
+unzip -p haarness-chrome-<v>-store.zip manifest.json   # version <v>.1000, version_name <v>, no key
+```
+
+Upload it in the Chrome Web Store Developer Dashboard, signed in as the release owner: the item ›
+Package › Upload new package, then Submit for review. Keep the listing's text, permission
+justifications and privacy answers as they are unless the permissions changed (docs/CHROME-EXTENSION.md
+lists them). Chrome does not let extensions script Web Store pages, so a browser agent cannot do the
+upload through the owner's Chrome; the owner does it, or use the Chrome Web Store API (upload, then
+publish) with the owner's OAuth client. Review can take days (the `debugger` permission draws a longer
+one), so the store copy may trail haarness.ai for a while; the extension–bridge protocol is versioned
+(`protocol: 1`), so a store copy one release behind still works. Prove it once review passes: the
+public listing names the new version
+(`curl -s 'https://chromewebstore.google.com/detail/coiilnhkjenilclbmdkmommknamllbde?hl=en' | grep -o
+'Version</div><div[^>]*>[^<]*'`). A listing's ID never changes; if one ever must, add the new ID to
+`WEB_STORE_EXTENSION_ID` (the host's `allowed_origins`) in a release before sending people to it.
+
 ## 7. Install and run the downloaded bytes, per platform
 
 ```sh
@@ -669,6 +703,8 @@ Report, in this order:
   installers (`install-router.sh`, `install-router.ps1`) with the installed router started.
 - Desktop test results per OS, with known environment failures named and why.
 - Download page, README, profile and docs checks (screenshots or rendered previews).
+- Haarness for Chrome on the Chrome Web Store: the version uploaded and its review state (or the
+  version the public listing shows once it passed).
 - Signing and notarization state, CI state, and anything left unverified or skipped. For macOS,
   the gate's `spctl` verdicts on the DMG, the app in the DMG and the app in the ZIP, from the
   public download with quarantine set, and the CLI's ticket lookup.

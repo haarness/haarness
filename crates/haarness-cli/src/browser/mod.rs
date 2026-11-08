@@ -21,11 +21,14 @@ use std::{
 
 /// The native messaging host name Chrome looks up.
 pub(crate) const HOST_NAME: &str = "ai.haarness.browser";
-/// Haarness for Chrome's ID, pinned by the `key` in its manifest.
+/// Haarness for Chrome's ID when loaded unpacked, pinned by the `key` in its manifest.
 pub(crate) const EXTENSION_ID: &str = "accdjhmcgljbadpeanajllmcembhkomn";
-/// Where Haarness for Chrome is published. Until it is, people load the
-/// unpacked copy setup puts in the data folder.
-pub(crate) const CHROME_WEB_STORE_URL: Option<&str> = None;
+/// Haarness for Chrome's ID when installed from the Chrome Web Store, which
+/// gives a listing its own key.
+pub(crate) const WEB_STORE_EXTENSION_ID: &str = "coiilnhkjenilclbmdkmommknamllbde";
+/// Haarness for Chrome's Chrome Web Store listing, the way setup offers first.
+pub(crate) const CHROME_WEB_STORE_URL: Option<&str> =
+    Some("https://chromewebstore.google.com/detail/haarness/coiilnhkjenilclbmdkmommknamllbde");
 /// Advertised by servers that accept an extension host.
 pub(crate) const EXTENSION_CAPABILITY: &str = "browser-extension.v1";
 /// The bridge ↔ extension protocol.
