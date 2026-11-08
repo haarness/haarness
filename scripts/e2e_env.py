@@ -10,6 +10,13 @@ Scheduler, which an isolated data folder does not move.
 
 import os
 
+# Importing this module turns usage statistics off for the script's own process, so every Haarness it starts from
+# its environment (directly, or through a copy of os.environ) stays quiet even where it does not call `clean_env`:
+# a test run with a release binary must never be counted as a person's install. Every script under scripts/ that
+# starts Haarness imports this module, directly or through e2e_scratch or e2e_tmux
+# (scripts/check-test-isolation.py holds them to it).
+os.environ["HAARNESS_TELEMETRY"] = "0"
+
 # What every Haarness a test starts gets, whatever the caller's environment holds.
 ISOLATED = {
     "HAARNESS_TELEMETRY": "0",

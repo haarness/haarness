@@ -33,6 +33,8 @@ import uuid
 
 import websockets
 
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
+
 BINARY = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 REQUESTS = []
 SCRIPT = []

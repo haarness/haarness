@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import tempfile
 import time
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", ROOT / "target/debug/haarness")).resolve()

@@ -16,6 +16,17 @@ sys.path.insert(0, str(ROOT / "sdks" / "tests"))
 import e2e_tmux  # noqa: E402
 
 
+def imports_of(tree):
+    """The top-level module names a parsed script imports."""
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module.split(".")[0])
+    return names
+
+
 class UsageStatisticsTests(unittest.TestCase):
     def test_a_tmux_pane_keeps_usage_statistics_off_unless_the_script_says_otherwise(self):
         command = e2e_tmux.pane_command({"HAARNESS_HOME": "/tmp/h"}, ["haarness"])
@@ -42,6 +53,28 @@ class UsageStatisticsTests(unittest.TestCase):
         )
         self.assertEqual(env, {"PATH": "/bin", **e2e_env.ISOLATED})
         self.assertEqual(e2e_env.ISOLATED["HAARNESS_TELEMETRY"], "0")
+
+    def test_every_script_that_starts_haarness_turns_usage_statistics_off_for_itself(self):
+        # Run one at a time, outside scripts/test-all.sh, a script that hands Haarness a copy of its own
+        # environment would report the run as a person's install when HAARNESS_BIN is a release build. Importing
+        # e2e_env (directly, or through e2e_scratch or e2e_tmux) turns usage statistics off in the script's process.
+        import e2e_env
+
+        self.assertEqual(os.environ["HAARNESS_TELEMETRY"], "0")
+        helpers = {"e2e_env", "e2e_scratch", "e2e_tmux"}
+        for helper in ("e2e_scratch", "e2e_tmux"):
+            tree = ast.parse((ROOT / "scripts" / f"{helper}.py").read_text())
+            self.assertIn("e2e_env", imports_of(tree), helper)
+        starts = re.compile(r"HAARNESS_BIN|target/(?:release|debug)/haarness")
+        checked = 0
+        for path in sorted((ROOT / "scripts").glob("*.py")):
+            text = path.read_text()
+            if path.stem in helpers or not starts.search(text):
+                continue
+            checked += 1
+            self.assertTrue(imports_of(ast.parse(text)) & helpers, f"{path.name} imports none of {sorted(helpers)}")
+        self.assertGreater(checked, 50)
+        self.assertIsNotNone(e2e_env.ISOLATED)
 
     def test_no_harness_leaves_out_every_haarness_setting_without_putting_isolation_back(self):
         # Dropping every HAARNESS_* variable also drops HAARNESS_TELEMETRY=0 and a closed

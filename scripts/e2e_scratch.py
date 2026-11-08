@@ -6,6 +6,8 @@ evidence and prints where. `HAARNESS_E2E_KEEP=1` keeps every run's folder.
 """
 
 import os
+
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness a script starts)
 import shutil
 import sys
 

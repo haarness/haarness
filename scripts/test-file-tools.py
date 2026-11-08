@@ -40,6 +40,7 @@ import time
 import urllib.request
 import uuid
 from pathlib import Path
+import e2e_env
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get('HAARNESS_BIN', REPO / 'target/debug/haarness')).resolve()
@@ -51,7 +52,7 @@ home, data = root / 'home', root / 'data'
 home.mkdir(exist_ok=True)
 env = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOME': str(home),
        'HAARNESS_DATA_DIR': str(data), 'USER': os.environ.get('USER', 'fixture'), 'LANG': 'en_US.UTF-8',
-       'HAARNESS_TEST_PROVIDER': '1', 'HAARNESS_CLOUD_API_URL': 'http://127.0.0.1:9'}
+       'HAARNESS_TEST_PROVIDER': '1', **e2e_env.ISOLATED}
 TOOL_OUTPUT = data / 'data' / 'tool-output'
 CUT = '… (line truncated to 2000 characters)'
 servers = []

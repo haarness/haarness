@@ -26,6 +26,7 @@ Writes secret-free notes and the Desktop screenshots under the state folder.
 
 import http.cookiejar, json, os, pathlib, re, shutil, subprocess, sys, time
 import urllib.error, urllib.parse, urllib.request
+import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
 
 assert os.environ.get("HAARNESS_REMOTE_E2E") == "1", "Set HAARNESS_REMOTE_E2E=1"
 API = os.environ["HAARNESS_CLOUD_API_URL"].rstrip("/")

@@ -2,6 +2,9 @@ name: ci
 on:
   push:
   pull_request:
+# Every Haarness a job runs is a test, never a person's install: it reports no usage statistics.
+env:
+  HAARNESS_TELEMETRY: "0"
 jobs:
   test:
     strategy:
@@ -27,6 +30,9 @@ jobs:
       - run: sh ./scripts/check-commercial-boundary.sh --self-test
         if: runner.os != 'Windows'
       - run: sh ./scripts/check-commercial-boundary.sh
+        if: runner.os != 'Windows'
+      # The end-to-end scripts keep a run away from the person's home and from Haarness Cloud.
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
         if: runner.os != 'Windows'
       - run: cargo fmt --all -- --check
       - run: cargo run -p xtask -- architecture
