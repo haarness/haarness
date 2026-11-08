@@ -79,7 +79,8 @@ with tempfile.TemporaryDirectory(prefix="haarness-billing-tmux-") as directory:
         launcher.write_text("\n".join("export "+k+"="+shlex.quote(v) for k,v in env.items())+"\nexec "+command+"\n")
         launcher.chmod(0o600)
         run(["tmux", "new-session", "-d", "-x", "160", "-y", "46", "-s", session, "bash "+shlex.quote(str(launcher))])
-        until(lambda: "/billing" in capture(), "Cloud credit indicator missing")
+        # The status band names the Cloud model once the TUI is connected; an account with credits gets no notice.
+        until(lambda: "haarness-cloud/" in capture(), "Cloud model missing from the status band")
         send("/billing")
         # A new account's purchased balance is its starter credits until it buys some.
         until(lambda: ("Purchased" in capture() or "Starter credits" in capture()) and "Included AI" in capture(), "Billing panel missing")
