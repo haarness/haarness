@@ -3149,5 +3149,11 @@
   "Its URL is not a web address (http or https) with a host.": "Its URL is not a web address (http or https) with a host.",
   "Its URL names an environment variable that is not set: {variable}.": "Its URL names an environment variable that is not set: {variable}.",
   "Its URL names environment variables that are not set: {variables}.": "Its URL names environment variables that are not set: {variables}.",
-  "Left out as not valid MCP tools: {tools}": "Left out as not valid MCP tools: {tools}"
+  "Left out as not valid MCP tools: {tools}": "Left out as not valid MCP tools: {tools}",
+  "Starter credits": "Starter credits",
+  "start the free trial, add credits or choose a plan": "start the free trial, add credits or choose a plan",
+  "add credits or choose a plan": "add credits or choose a plan",
+  "add credits with /billing topup": "add credits with /billing topup",
+  "turn on overage so your purchased credits pay": "turn on overage so your purchased credits pay",
+  "add credits and turn on overage to keep working": "add credits and turn on overage to keep working"
 }

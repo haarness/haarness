@@ -24832,8 +24832,7 @@ fn a_new_cloud_account_is_told_how_to_start_before_its_first_prompt() {
         home(&app, 100)
     );
 
-    // /billing puts the trial first, ahead of credits that would not pay
-    // without overage.
+    // /billing puts the trial first.
     app.billing = billing(serde_json::json!({}));
     app.open_billing();
     let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
@@ -24854,7 +24853,34 @@ fn a_new_cloud_account_is_told_how_to_start_before_its_first_prompt() {
     );
     app.close_overlay();
 
-    // Credits of any kind, or a chat on another provider: nothing to say.
+    // Without a plan, bought or starter credits pay as they are: /billing
+    // never offers overage for them. On a plan they still wait for it.
+    for (fields, overage) in [
+        (
+            serde_json::json!({"purchasedCredits": "1000.000000", "purchasedPays": true, "purchasedIsStarter": true}),
+            false,
+        ),
+        (
+            serde_json::json!({"purchasedCredits": "0.000000", "purchasedIsStarter": true, "outOfCredits": true}),
+            false,
+        ),
+        (
+            serde_json::json!({"plan": "pro", "purchasedCredits": "20.000000", "trialAvailable": false}),
+            true,
+        ),
+    ] {
+        app.billing = billing(fields);
+        app.open_billing();
+        let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
+            panic!("billing options");
+        };
+        let labels: Vec<_> = entries.iter().map(|entry| entry.label.as_str()).collect();
+        assert_eq!(labels.contains(&"Turn on overage"), overage, "{labels:?}");
+        app.close_overlay();
+    }
+
+    // Credits of any kind (a new account's starter credits too), or a chat
+    // on another provider: nothing to say.
     for (fields, provider) in [
         (
             serde_json::json!({"plan": "trial", "trial": true, "includedCredits": "2000.000000"}),
@@ -24862,6 +24888,10 @@ fn a_new_cloud_account_is_told_how_to_start_before_its_first_prompt() {
         ),
         (
             serde_json::json!({"purchasedCredits": "20.000000"}),
+            "haarness",
+        ),
+        (
+            serde_json::json!({"purchasedCredits": "1000.000000", "purchasedPays": true, "purchasedIsStarter": true}),
             "haarness",
         ),
         (serde_json::json!({}), "openai"),

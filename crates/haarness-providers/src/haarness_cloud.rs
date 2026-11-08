@@ -330,6 +330,15 @@ pub(crate) fn readable_router(error: CoreError) -> CoreError {
 /// credits: no plan, no trial and nothing purchased.
 const NEW_ACCOUNT: &str = "no plan, trial or purchased credits yet";
 
+/// What Cloud's router adds to a refusal for an account with no plan or
+/// trial. Its credits pay without overage, so only more credits, the trial
+/// or a plan help.
+const WITHOUT_PLAN: &str = "the account is not on a plan";
+
+/// What follows [`WITHOUT_PLAN`] while the account can still start the
+/// free trial.
+const TRIAL_OPEN: &str = "its free trial is still open";
+
 fn readable_with(error: CoreError, place: &str) -> CoreError {
     let CoreError::Provider(message) = error else {
         return error;
@@ -342,11 +351,28 @@ fn readable_with(error: CoreError, place: &str) -> CoreError {
                 "This account has no Haarness Cloud credits yet. Start the free trial or \
                  choose a plan under Billing{place}."
             )
+        } else if message.contains(WITHOUT_PLAN) {
+            // Overage means nothing without a plan: whatever credits the
+            // account holds already paid, so only more of them, the trial or
+            // a plan help.
+            let what = if credits_left(&message) {
+                "Your Haarness Cloud credits can't cover this request."
+            } else {
+                "Your Haarness Cloud credits have run out."
+            };
+            if message.contains(TRIAL_OPEN) {
+                format!(
+                    "{what} Start the free trial, add credits or choose a plan under \
+                     Billing{place}."
+                )
+            } else {
+                format!("{what} Add credits or choose a plan under Billing{place}.")
+            }
         } else if message.contains("overage opt-in false") {
-            // Purchased credits only pay once overage is on, and buying
-            // more does not turn it on. With overage off the router names
-            // the purchased balance as what is available.
-            if purchased_available(&message) {
+            // On a plan, purchased credits only pay once overage is on, and
+            // buying more does not turn it on. With overage off the router
+            // names the purchased balance as what is available.
+            if credits_left(&message) {
                 format!(
                     "Your included Haarness Cloud credits can't cover this request. Turn on \
                      overage under Billing{place} so your purchased credits pay."
@@ -507,9 +533,10 @@ fn advised_seconds(message: &str) -> Option<u64> {
     })
 }
 
-/// Whether a refused request's `available` names credits: with overage off
-/// the router reports the purchased balance there.
-fn purchased_available(message: &str) -> bool {
+/// Whether a refused request's `available` names credits: some are left, just
+/// not enough (without a plan), or they wait for overage (on a plan, where
+/// the router reports the purchased balance there).
+fn credits_left(message: &str) -> bool {
     message
         .split_once("available ")
         .map(|(_, rest)| {
@@ -1006,6 +1033,64 @@ mod tests {
         };
         assert!(
             message.starts_with("Your included Haarness Cloud credits can't cover this request."),
+            "{message}"
+        );
+    }
+
+    /// Without a plan or trial, credits pay whatever overage says, so a
+    /// refusal says they ran out (or fall short of this request) and offers
+    /// more credits, the trial while it is open, or a plan: never overage.
+    #[test]
+    fn an_account_without_a_plan_is_never_told_to_turn_on_overage() {
+        let refusal = |tail: &str| {
+            CoreError::Provider(format!(
+                "HTTP 402 Payment Required: [insufficient_credits] insufficient credits: unit \
+                 Nanos requested 32500, {tail}"
+            ))
+        };
+        for (tail, words) in [
+            (
+                "available 0; the account is not on a plan; its free trial is still open",
+                "Your Haarness Cloud credits have run out. Start the free trial, add credits or \
+                 choose a plan under Billing",
+            ),
+            (
+                "available 0; the account is not on a plan",
+                "Your Haarness Cloud credits have run out. Add credits or choose a plan under \
+                 Billing",
+            ),
+            (
+                "available 12000; the account is not on a plan; its free trial is still open",
+                "Your Haarness Cloud credits can't cover this request. Start the free trial, add \
+                 credits or choose a plan under Billing",
+            ),
+            (
+                "available 12000; the account is not on a plan",
+                "Your Haarness Cloud credits can't cover this request. Add credits or choose a \
+                 plan under Billing",
+            ),
+        ] {
+            let CoreError::Provider(message) = readable(refusal(tail)) else {
+                panic!("still a provider error");
+            };
+            assert_eq!(
+                message,
+                format!("{words} at https://haarness.ai/app/billing."),
+                "{tail}"
+            );
+            let CoreError::Provider(message) = readable_router(refusal(tail)) else {
+                panic!("still a provider error");
+            };
+            assert_eq!(message, format!("{words} in Haarness Cloud."), "{tail}");
+            assert!(!message.contains("overage"), "{message}");
+        }
+        // A plan's refusal keeps its overage advice.
+        let CoreError::Provider(message) = readable(refusal("available 0, overage opt-in false"))
+        else {
+            panic!("still a provider error");
+        };
+        assert!(
+            message.contains("Add credits and turn on overage"),
             "{message}"
         );
     }

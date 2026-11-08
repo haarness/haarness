@@ -1174,7 +1174,7 @@ fn billing_preface(
     billing: &haarness_account::billing::State,
     language: crate::locale::Language,
 ) -> Vec<String> {
-    use haarness_account::billing::display_credits;
+    use haarness_account::billing::{NO_PLAN, display_credits};
     if !billing.logged_in {
         return vec!["Not signed in to Haarness Cloud.".into()];
     }
@@ -1245,10 +1245,16 @@ fn billing_preface(
     }
     lines.push(format!("Included AI  {included}"));
     let purchased = display_credits(&summary.purchased_credits);
-    lines.push(if summary.purchased_frozen {
-        format!("Purchased  {purchased} credits · on hold until a payment dispute is resolved")
+    // A new account's free credits, until it buys some.
+    let bucket = if summary.purchased_is_starter {
+        "Starter credits"
     } else {
-        format!("Purchased  {purchased} credits")
+        "Purchased"
+    };
+    lines.push(if summary.purchased_frozen {
+        format!("{bucket}  {purchased} credits · on hold until a payment dispute is resolved")
+    } else {
+        format!("{bucket}  {purchased} credits")
     });
     let held = display_credits(&summary.held_credits);
     if held != "0" {
@@ -1256,17 +1262,26 @@ fn billing_preface(
     }
     lines.push(format!("Cloud compute  {} units", summary.cloud_units));
     if summary.out_of_credits {
-        // Purchased credits pay only with overage on, and buying more does not turn it on.
-        lines.push(
-            if summary.overage_opt_in {
-                "\u{26a0}  Out of credits  add credits with /billing topup"
-            } else if purchased != "0" && !summary.purchased_frozen {
-                "\u{26a0}  Out of credits  turn on overage so your purchased credits pay"
+        // Without a plan, credits pay whatever overage says; on a plan,
+        // purchased ones pay only with overage on, and buying more does not
+        // turn it on.
+        let advice = if summary.plan == NO_PLAN {
+            if summary.trial_available {
+                "start the free trial, add credits or choose a plan"
             } else {
-                "\u{26a0}  Out of credits  add credits and turn on overage to keep working"
+                "add credits or choose a plan"
             }
-            .into(),
-        );
+        } else if summary.overage_opt_in {
+            "add credits with /billing topup"
+        } else if purchased != "0" && !summary.purchased_frozen {
+            "turn on overage so your purchased credits pay"
+        } else {
+            "add credits and turn on overage to keep working"
+        };
+        lines.push(format!(
+            "\u{26a0}  Out of credits  {}",
+            language.text(advice)
+        ));
     } else if let Some(days) = summary.days_left.filter(|days| *days < 30) {
         // Whole days at this week's pace: none left is under a day, not 0.
         let left = if days == 0 {
@@ -1284,7 +1299,8 @@ fn billing_preface(
     }
     if summary.overage_opt_in {
         lines.push("Overage  on · purchased credits pay past your allowance".into());
-    } else if purchased != "0" {
+    } else if purchased != "0" && !summary.purchased_pays {
+        // Without a plan they pay with overage off, so it is not worth a line.
         lines.push("Overage  off · purchased credits are not spent".into());
     }
     if let Some(reason) = &summary.auto_topup_failure {
@@ -2995,6 +3011,95 @@ mod tests {
         assert!(
             !lines.iter().any(|line| line.starts_with("Forecast")),
             "a month or more is not worth a line: {lines:?}"
+        );
+    }
+
+    /// A new account's free credits are named as such, and an account
+    /// without a plan, whose credits pay with overage off, never hears about
+    /// overage: it is offered the trial, credits or a plan.
+    #[test]
+    fn billing_without_a_plan_names_starter_credits_and_never_overage() {
+        use crate::locale::Language;
+        let no_plan = |fields: serde_json::Value| {
+            let mut base = serde_json::json!({
+                "plan": "No plan", "subscriptionStatus": null, "includedCredits": "0",
+                "purchasedCredits": "1000", "purchasedPays": true, "purchasedIsStarter": true,
+                "trialAvailable": true,
+            });
+            for (key, value) in fields.as_object().unwrap() {
+                base[key] = value.clone();
+            }
+            billing(base)
+        };
+        let lines = billing_preface(&no_plan(serde_json::json!({})), Language::English);
+        assert!(
+            lines.contains(&"Starter credits  1,000 credits".to_owned()),
+            "{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("verage") || line.contains("Out of credits")),
+            "{lines:?}"
+        );
+        let lines = billing_preface(
+            &no_plan(serde_json::json!({"purchasedIsStarter": false})),
+            Language::English,
+        );
+        assert!(
+            lines.contains(&"Purchased  1,000 credits".to_owned()),
+            "{lines:?}"
+        );
+
+        // The starter credits spent: the trial, credits or a plan.
+        for (fields, language, advice) in [
+            (
+                serde_json::json!({}),
+                Language::English,
+                "start the free trial, add credits or choose a plan",
+            ),
+            (
+                serde_json::json!({"trialAvailable": false}),
+                Language::English,
+                "add credits or choose a plan",
+            ),
+            (
+                serde_json::json!({}),
+                Language::Japanese,
+                "無料トライアルを開始するか、クレジットを追加するか、プランを選択",
+            ),
+        ] {
+            let mut fields = fields;
+            fields["purchasedCredits"] = "0".into();
+            fields["outOfCredits"] = true.into();
+            let lines = billing_preface(&no_plan(fields), language);
+            assert!(
+                lines.contains(&format!("\u{26a0}  Out of credits  {advice}")),
+                "{lines:?}"
+            );
+            assert!(
+                !lines.iter().any(|line| line.contains("verage")),
+                "{lines:?}"
+            );
+        }
+
+        // On a plan, purchased credits still wait for overage.
+        let lines = billing_preface(
+            &billing(serde_json::json!({
+                "includedCredits": "0", "purchasedCredits": "50", "outOfCredits": true,
+            })),
+            Language::English,
+        );
+        assert!(
+            lines.contains(
+                &"\u{26a0}  Out of credits  turn on overage so your purchased credits pay"
+                    .to_owned()
+            ),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"Overage  off · purchased credits are not spent".to_owned()),
+            "{lines:?}"
         );
     }
 }

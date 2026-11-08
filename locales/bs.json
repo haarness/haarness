@@ -3149,5 +3149,11 @@
   "Its URL is not a web address (http or https) with a host.": "Njegov URL nije web adresa (http ili https) s hostom.",
   "Its URL names an environment variable that is not set: {variable}.": "Njegov URL navodi varijablu okruženja koja nije postavljena: {variable}.",
   "Its URL names environment variables that are not set: {variables}.": "Njegov URL navodi varijable okruženja koje nisu postavljene: {variables}.",
-  "Left out as not valid MCP tools: {tools}": "Izostavljeno jer nisu ispravni MCP alati: {tools}"
+  "Left out as not valid MCP tools: {tools}": "Izostavljeno jer nisu ispravni MCP alati: {tools}",
+  "Starter credits": "Početni krediti",
+  "start the free trial, add credits or choose a plan": "započnite besplatni probni period, dodajte kredite ili odaberite plan",
+  "add credits or choose a plan": "dodajte kredite ili odaberite plan",
+  "add credits with /billing topup": "dodajte kredite pomoću /billing topup",
+  "turn on overage so your purchased credits pay": "uključite prekoračenje da kupljeni krediti plaćaju",
+  "add credits and turn on overage to keep working": "dodajte kredite i uključite prekoračenje da nastavite raditi"
 }

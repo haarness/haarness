@@ -3149,5 +3149,11 @@
   "Its URL is not a web address (http or https) with a host.": "URL ไม่ใช่ที่อยู่เว็บ (http หรือ https) ที่มีโฮสต์",
   "Its URL names an environment variable that is not set: {variable}.": "URL อ้างถึงตัวแปรสภาพแวดล้อมที่ไม่ได้ตั้งค่า: {variable}",
   "Its URL names environment variables that are not set: {variables}.": "URL อ้างถึงตัวแปรสภาพแวดล้อมที่ไม่ได้ตั้งค่า: {variables}",
-  "Left out as not valid MCP tools: {tools}": "ละไว้เพราะไม่ใช่เครื่องมือ MCP ที่ถูกต้อง: {tools}"
+  "Left out as not valid MCP tools: {tools}": "ละไว้เพราะไม่ใช่เครื่องมือ MCP ที่ถูกต้อง: {tools}",
+  "Starter credits": "เครดิตฟรี",
+  "start the free trial, add credits or choose a plan": "เริ่มทดลองใช้ฟรี เติมเครดิต หรือเลือกแพ็กเกจ",
+  "add credits or choose a plan": "เติมเครดิตหรือเลือกแพ็กเกจ",
+  "add credits with /billing topup": "เติมเครดิตด้วย /billing topup",
+  "turn on overage so your purchased credits pay": "เปิดการใช้เกินเพื่อให้ใช้เครดิตที่ซื้อได้",
+  "add credits and turn on overage to keep working": "เติมเครดิตและเปิดการใช้เกินเพื่อทำงานต่อ"
 }

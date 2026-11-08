@@ -4819,9 +4819,12 @@ impl App {
     /// `/billing`: balances on top, and the next step one Enter away instead
     /// of a page of URLs and a line of subcommands to retype.
     pub(crate) fn open_billing(&mut self) {
-        // Purchased credits pay only with overage on, and buying more does not turn it on.
+        // On a plan, purchased credits pay only with overage on, and buying
+        // more does not turn it on. Without a plan they pay as they are.
         let idle_purchase = self.billing.summary.as_ref().is_some_and(|summary| {
             !summary.overage_opt_in
+                && summary.plan != haarness_account::billing::NO_PLAN
+                && !summary.purchased_pays
                 && (summary.out_of_credits
                     || haarness_account::billing::display_credits(&summary.purchased_credits)
                         != "0")
@@ -4874,9 +4877,8 @@ impl App {
                 },
             );
         }
-        // A new account's way in comes first: credits bought without a plan
-        // pay only once overage is on, and the trial needs neither. Billing
-        // starts it with a saved card.
+        // The trial comes first while the account can start it: it brings a
+        // plan's allowance. Billing starts it with a saved card.
         if self
             .billing
             .summary
