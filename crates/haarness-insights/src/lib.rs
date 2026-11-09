@@ -8,7 +8,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -192,6 +192,9 @@ struct Source {
 struct RecordedTurn {
     id: String,
     session: String,
+    /// The chat the person sees: `session` itself, or for a subagent's
+    /// thread the chat whose turn started it.
+    chat: String,
     title: String,
     project: String,
     project_name: String,
@@ -385,7 +388,8 @@ pub fn daily_usage(data: &Path, days: u32, now: DateTime<Utc>) -> Result<Vec<Dai
             )
         });
         usage.total.add(&turn.metrics);
-        if sessions.insert(turn.session.clone()) {
+        // A subagent's thread is part of its chat, not a chat of its own.
+        if sessions.insert(turn.chat.clone()) {
             usage.total.sessions += 1;
         }
         usage.subagent_turns += u64::from(turn.subagent);
@@ -574,6 +578,32 @@ fn read_source(
     } else {
         "0"
     };
+    // A subagent's thread belongs to the chat whose turn started it (through
+    // any subagents between them); a fork, though it names its source as
+    // parent too, is a chat of its own.
+    let mut parents = HashMap::new();
+    if subagent != "0" {
+        let mut statement = tx.prepare(
+            "SELECT id,parent_id FROM threads WHERE is_subagent<>0 AND parent_id IS NOT NULL",
+        )?;
+        let rows =
+            statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (child, parent) = row?;
+            parents.insert(child, parent);
+        }
+    }
+    let chat_of = |thread: &str| {
+        let mut chat = thread;
+        // Bounded: a damaged history must not loop.
+        for _ in 0..64 {
+            match parents.get(chat) {
+                Some(parent) => chat = parent,
+                None => break,
+            }
+        }
+        chat.to_owned()
+    };
     let mut statement = tx.prepare(&format!("SELECT t.id,t.thread_id,h.title,t.provider,t.model,t.status,t.created_at,{subagent},{scheduled} FROM turns t JOIN threads h ON h.id=t.thread_id ORDER BY t.created_at,t.id"))?;
     let rows = statement.query_map([], |r| {
         Ok((
@@ -601,16 +631,24 @@ fn read_source(
             turns: 1,
             ..Metrics::default()
         };
-        match status.as_str() {
-            "completed" => metrics.completed = 1,
-            "failed" => metrics.failed = 1,
-            "interrupted" => metrics.interrupted = 1,
-            _ => metrics.in_progress = 1,
+        // Outcomes are those of the turns people start. A subagent's turn
+        // ends inside the turn that started it, which reads its result, an
+        // error included, and goes on: a subagent that failed fails nothing
+        // the person sees unless that turn fails too, and then it counts
+        // once, there. Its work (tokens, tools, files) still counts.
+        if !subagent {
+            match status.as_str() {
+                "completed" => metrics.completed = 1,
+                "failed" => metrics.failed = 1,
+                "interrupted" => metrics.interrupted = 1,
+                _ => metrics.in_progress = 1,
+            }
         }
         turns.insert(
             id.clone(),
             RecordedTurn {
                 id,
+                chat: chat_of(&session),
                 session,
                 title,
                 project: source.project.clone(),
@@ -802,6 +840,6 @@ fn findings(report: &Report) -> Vec<String> {
     if let Some(file) = report.files.first() {
         output.push(format!("{} has the most recorded file changes: {}, +{} / −{} lines. These are edit activity counts, not a net Git diff.", file.name, noun(file.metrics.file_changes, "change", "changes"), count(file.metrics.additions), count(file.metrics.deletions)));
     }
-    output.push(format!("Turn outcomes: {} completed, {} failed, {} interrupted and {} still queued/running. These describe execution status, not task quality.", count(total.completed), count(total.failed), count(total.interrupted), count(total.in_progress)));
+    output.push(format!("Turn outcomes: {} completed, {} failed, {} interrupted and {} still queued/running. They count the turns you started (a subagent's turn is part of the one that started it) and describe execution status, not task quality.", count(total.completed), count(total.failed), count(total.interrupted), count(total.in_progress)));
     output
 }

@@ -44,6 +44,12 @@ analytics view.
 
 - Model attribution uses each turn's provider and model, not its thread's current model.
 - Archived sessions and child agents count. Detached fork-context items do not.
+- Turn outcomes (completed, failed, interrupted, still running) count only the turns
+  people start. A child agent's turn ends inside the turn that started it, which reads
+  its result, an error included: its turn, tokens and tools count, its outcome does
+  not, so a child that failed while its parent went on to finish is no failed turn
+  (it shows as an error of the `task` tool). Daily usage statistics count a child
+  agent's thread as part of its chat, not as another chat.
 - Imported turn IDs count once across databases. The copy with the most complete
   usage wins; stable database order breaks ties.
 - Undo and soft deletion do not erase usage already spent or recorded edit activity.
