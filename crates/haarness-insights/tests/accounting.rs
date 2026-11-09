@@ -334,6 +334,130 @@ async fn daily_usage_groups_days_models_tools_and_subagents_without_names() {
     );
 }
 
+/// A subagent's turn ends inside the turn that started it. Counted as a turn
+/// of its own, a subagent the chat recovered from read as a failed turn, and
+/// one that failed with its chat counted that failure twice; its thread read
+/// as another chat.
+#[tokio::test]
+async fn a_subagent_s_outcome_and_thread_count_within_the_chat_that_started_it() {
+    // `status` is the turn's outcome; the usage is what its requests spent.
+    async fn run(
+        store: &SqliteStore,
+        thread: haarness_protocol::ThreadId,
+        status: Option<TurnStatus>,
+    ) {
+        let (turn, _, _) = store
+            .start_turn(
+                thread,
+                serde_json::from_value(json!({"requestId": RequestId::new(), "text":"work"}))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .append_item(
+                thread,
+                Some(turn.id),
+                ItemData::Usage {
+                    prompt: None,
+                    input_tokens: 100,
+                    output_tokens: 10,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    cost_usd: Some(0.01),
+                    estimated: false,
+                    first_token_ms: None,
+                    stream_ms: None,
+                    stream_tokens: None,
+                },
+            )
+            .await
+            .unwrap();
+        if let Some(status) = status {
+            store.set_turn_status(turn.id, status, None).await.unwrap();
+        }
+    }
+    let fixture = Fixture::new();
+    let store = fixture.store("w1");
+    let thread = |parent: Option<haarness_protocol::ThreadId>| CreateThreadRequest {
+        parent_id: parent,
+        provider: Some("test".into()),
+        model: Some("model-a".into()),
+        ..Default::default()
+    };
+    // Chat one: the person's turn completed after its subagent failed, and a
+    // subagent of a subagent was stopped.
+    let recovered = store.create_thread(thread(None)).await.unwrap();
+    run(&store, recovered.id, Some(TurnStatus::Completed)).await;
+    let child = store
+        .create_thread(thread(Some(recovered.id)))
+        .await
+        .unwrap();
+    run(&store, child.id, Some(TurnStatus::Failed)).await;
+    let grandchild = store.create_thread(thread(Some(child.id))).await.unwrap();
+    run(&store, grandchild.id, Some(TurnStatus::Interrupted)).await;
+    // Chat two: the credits ran out in the subagent, then in the person's
+    // turn that started it.
+    let failed = store.create_thread(thread(None)).await.unwrap();
+    run(&store, failed.id, Some(TurnStatus::Failed)).await;
+    let failed_child = store.create_thread(thread(Some(failed.id))).await.unwrap();
+    run(&store, failed_child.id, Some(TurnStatus::Failed)).await;
+    // A subagent still running counts nothing as running either.
+    let running_child = store.create_thread(thread(Some(failed.id))).await.unwrap();
+    run(&store, running_child.id, None).await;
+    // Chat three: a fork names chat one as its parent, but is a chat of its
+    // own whose turns are the person's.
+    let fork = store
+        .fork_thread(recovered.id, Some("Fork".into()), None)
+        .await
+        .unwrap();
+    run(&store, fork.id, Some(TurnStatus::Failed)).await;
+
+    let days = haarness_insights::daily_usage(&fixture.0, 7, Utc::now()).unwrap();
+    let today = &days[0];
+    assert_eq!(
+        today.total.sessions, 3,
+        "three chats, whatever their subagents"
+    );
+    assert_eq!(today.total.turns, 7, "every turn's work still counts");
+    assert_eq!(today.subagent_turns, 4);
+    assert_eq!(today.total.input_tokens, 700);
+    assert_eq!(
+        (
+            today.total.completed,
+            today.total.failed,
+            today.total.interrupted,
+            today.total.in_progress
+        ),
+        (1, 2, 0, 0),
+        "outcomes of the three turns people started"
+    );
+    let model = &today.models[0];
+    assert_eq!(model.metrics.turns, 7);
+    assert_eq!(model.metrics.failed, 2);
+
+    // `haarness stats` counts outcomes the same way and says so.
+    let report = collect_at(
+        &fixture.0,
+        std::path::Path::new("/alpha"),
+        Options::default(),
+        Utc::now(),
+    )
+    .unwrap();
+    assert_eq!((report.total.completed, report.total.failed), (1, 2));
+    assert_eq!(report.total.turns, 7);
+    let outcomes = report
+        .findings
+        .iter()
+        .find(|line| line.starts_with("Turn outcomes"))
+        .unwrap();
+    assert!(
+        outcomes.starts_with("Turn outcomes: 1 completed, 2 failed, 0 interrupted"),
+        "{outcomes}"
+    );
+    assert!(outcomes.contains("a subagent's turn is part of the one that started it"));
+}
+
 #[tokio::test]
 async fn the_chat_home_s_usage_counts_under_chats_without_a_project() {
     let fixture = Fixture::new();
