@@ -11106,6 +11106,9 @@ impl RunnerTask {
                                 || crate::tool_catalog::writes_patches(&model))
                     })
                     .collect::<Vec<_>>();
+                // Code Mode reaches only the MCP and browser tools this
+                // agent may use; with none, it is not offered.
+                let eligible_tools = crate::tool_catalog::without_idle_code_tool(eligible_tools);
                 if eligible_tools.iter().any(|tool| tool.name == "preview") {
                     // A line break before and after, as the built-in
                     // section has always been sent.
@@ -12401,6 +12404,32 @@ impl RunnerTask {
             return Err(CoreError::Tool(reason));
         }
         let advertised = self.advertised_tools.lock();
+        // Code Mode is left out when it can reach no tool (see
+        // `without_idle_code_tool`); a model that calls it anyway, meaning
+        // to run a command, is told where commands run.
+        if require_advertised
+            && name == crate::tool_catalog::CODE_TOOL_NAME
+            && !advertised.contains(name)
+            && self
+                .last_tool_catalog
+                .lock()
+                .as_ref()
+                .is_some_and(|catalog| {
+                    !catalog
+                        .tools
+                        .iter()
+                        .any(|tool| tool.enabled && crate::tool_catalog::code_can_call(&tool.id))
+                })
+        {
+            let instead = if advertised.contains("bash") {
+                " To run a command, call bash with it."
+            } else {
+                ""
+            };
+            return Err(CoreError::Tool(format!(
+                "execute runs JavaScript that calls MCP and browser tools, and this chat has none, so it isn't available.{instead}"
+            )));
+        }
         // apply_patch is offered only to the models trained on its format
         // (`writes_patches`); a call another model makes still runs, as
         // scripts, clients and workflows that name it do.

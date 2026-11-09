@@ -684,7 +684,7 @@ impl WorkflowHost for McpCodeHost {
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| HostError::new("tool name is required"))?;
-        if !name.starts_with("mcp__") && !name.starts_with("browser_") {
+        if !haarness_core::code_can_call(name) {
             return Err(HostError::new(
                 "code mode permits only mcp__-prefixed and browser_-prefixed tools",
             ));

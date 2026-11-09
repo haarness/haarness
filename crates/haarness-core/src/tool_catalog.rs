@@ -64,6 +64,31 @@ pub fn writes_patches(model: &str) -> bool {
     characters.next() == Some('o') && characters.next().is_some_and(|c| c.is_ascii_digit())
 }
 
+/// The tool that runs a model's JavaScript (Code Mode).
+pub const CODE_TOOL_NAME: &str = "execute";
+
+/// Whether the JavaScript `execute` runs may call the tool `name`: only an
+/// MCP server's tools and the browser's. Everything else (the shell, files,
+/// the web) stays out of its reach.
+#[must_use]
+pub fn code_can_call(name: &str) -> bool {
+    name.starts_with("mcp__") || name.starts_with("browser_")
+}
+
+/// `tools` without `execute` when none of them is one it can call: then it
+/// can do nothing, and a model that reads its name as "run a command" (as
+/// small local models do) calls it again and again instead of the shell.
+#[must_use]
+pub fn without_idle_code_tool(tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
+    if tools.iter().any(|tool| code_can_call(&tool.name)) {
+        return tools;
+    }
+    tools
+        .into_iter()
+        .filter(|tool| tool.name != CODE_TOOL_NAME)
+        .collect()
+}
+
 /// A compact search tool replaces deferred schemas. Search results become
 /// provider-visible on the following round and remain promoted for the thread.
 #[must_use]
