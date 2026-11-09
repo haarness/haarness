@@ -1184,6 +1184,16 @@ fn discovered_model_info(
             )
         });
     }
+    // Groq lists what each model takes as `supported_features` ("tools",
+    // "json_mode", "reasoning"). ALLaM 2 7B takes no tools and refuses every
+    // request that carries them, as a chat with Haarness's tools does.
+    if provider == "groq"
+        && let Some(features) = entry.get("supported_features").and_then(Value::as_array)
+    {
+        let takes = |feature: &str| features.iter().any(|value| value.as_str() == Some(feature));
+        info.tools = takes("tools");
+        info.reasoning |= takes("reasoning");
+    }
     // DeepSeek lists its levels as `effort.supported_levels` (its own
     // provider can also turn thinking off, `none`), xAI as
     // `capabilities.reasoning_effort`.
@@ -3993,6 +4003,41 @@ mod tests {
             .collect();
 
         assert_eq!(ids, ["openai/gpt-oss-120b", "vendor/multimodal-chat"]);
+    }
+
+    /// Groq's list as it reads today (2026-11-09): ALLaM takes no tools, so
+    /// a chat with it is sent without them instead of refused ("`tool
+    /// calling` is not supported with this model"); Qwen reasons.
+    #[test]
+    fn groq_says_which_models_take_tools() {
+        let entry = |id: &str, features: &[&str]| {
+            json!({"id": id, "object": "model", "owned_by": "Groq", "active": true,
+                "context_window": 131_072, "max_completion_tokens": 16_384,
+                "input_modalities": ["text"], "output_modalities": ["text"],
+                "supported_sampling_parameters": ["temperature", "top_p", "stop", "seed", "max_tokens"],
+                "supported_features": features})
+        };
+        let model = |entry: Value| {
+            discovered_model_info("groq", &entry, CompatibleModelDefaults::default()).unwrap()
+        };
+        let allam = model(entry("allam-2-7b", &["json_mode"]));
+        assert!(!allam.tools);
+        assert!(!allam.reasoning);
+        let qwen = model(entry(
+            "qwen/qwen3.8-27b",
+            &["tools", "json_mode", "reasoning"],
+        ));
+        assert!(qwen.tools);
+        assert!(qwen.reasoning);
+        let gpt_oss = model(entry(
+            "openai/gpt-oss-120b",
+            &["tools", "json_mode", "structured_outputs", "reasoning"],
+        ));
+        assert!(gpt_oss.tools);
+        assert!(gpt_oss.reasoning);
+        assert_eq!(gpt_oss.reasoning_efforts, ["low", "medium", "high"]);
+        // A list that says nothing of features keeps the default.
+        assert!(model(json!({"id": "vendor/chat"})).tools);
     }
 
     #[test]

@@ -35,11 +35,13 @@ impl Default for LazyToolSettings {
 
 /// Whether `model` comes from a family trained on `apply_patch`'s V4A
 /// patches, whatever provider serves it (`openai/gpt-5.4` through
-/// OpenRouter, `gpt-oss-120b` on Groq, `haarness/openai/gpt-6.1-sol`, an
-/// `openai.gpt-oss-…` Bedrock id): OpenAI's GPT models from GPT-4.1 on, its
-/// o-series reasoning models, its Codex models and gpt-oss. Other models
-/// change files with `edit`, `multiedit` and `write`, which every model has;
-/// given the patch tool too they write diffs it cannot read.
+/// OpenRouter, `haarness/openai/gpt-6.1-sol`): OpenAI's GPT models from
+/// GPT-4.1 on, its o-series reasoning models and its Codex models. Other
+/// models change files with `edit`, `multiedit` and `write`, which every
+/// model has; given the patch tool too they write diffs it cannot read.
+/// gpt-oss writes the patch well but names its argument `patch`, not
+/// `input`, call after call; a provider that checks calls against the tool
+/// (Groq) refuses each one, so it edits as other models do.
 #[must_use]
 pub fn writes_patches(model: &str) -> bool {
     let name = model
@@ -48,7 +50,10 @@ pub fn writes_patches(model: &str) -> bool {
         .unwrap_or(model)
         .to_ascii_lowercase();
     let name = name.strip_prefix("openai.").unwrap_or(&name);
-    if name.starts_with("gpt-oss") || name.contains("codex") {
+    if name.starts_with("gpt-oss") {
+        return false;
+    }
+    if name.contains("codex") {
         return true;
     }
     if let Some(version) = name.strip_prefix("gpt-") {
@@ -173,19 +178,49 @@ fn classify(name: &str) -> Classification {
 /// share with the chat, for tools a small model seldom needs.
 pub const SMALL_WINDOW: u64 = 65_536;
 
+/// The window at or under which only the tools that read, search, change and
+/// run the project go with every request, and every other tool waits for
+/// the model to load it: a model with an 8K or 16K window, or an account
+/// whose plan allows fewer tokens a minute than one request with every tool
+/// (Groq's free tier: 8,000), where the others were half of each request.
+pub const TIGHT_WINDOW: u64 = 16_384;
+
+/// The tools a chat keeps in a tight window.
+const TIGHT_RESIDENT: [&str; 8] = [
+    "read",
+    "list",
+    "glob",
+    "grep",
+    "edit",
+    "write",
+    "apply_patch",
+    "bash",
+];
+
 /// [`classify`] for a model with `context_window`: the browser's tools are
-/// optional in a small window.
+/// optional in a small window, and all but the project's own in a tight one.
 fn classify_in(name: &str, context_window: Option<u64>) -> Classification {
-    if name.starts_with("browser_")
-        && context_window.is_some_and(|window| window > 0 && window <= SMALL_WINDOW)
-    {
+    let window = context_window.filter(|window| *window > 0);
+    if name.starts_with("browser_") && window.is_some_and(|window| window <= SMALL_WINDOW) {
         return Classification {
             group: "browser",
             title: "Browser",
             essential: false,
         };
     }
-    classify(name)
+    let classification = classify(name);
+    // Computer use's tools are offered only while it is on; then they are
+    // the point.
+    if window.is_some_and(|window| window <= TIGHT_WINDOW)
+        && !TIGHT_RESIDENT.contains(&name)
+        && !name.starts_with("mac_")
+    {
+        return Classification {
+            essential: false,
+            ..classification
+        };
+    }
+    classification
 }
 
 #[must_use]
@@ -674,9 +709,6 @@ mod tests {
             "openai/gpt-6.1-sol",
             "haarness/openai/gpt-6.1-sol",
             "gpt-4.1-mini",
-            "gpt-oss-120b",
-            "openai/gpt-oss-20b",
-            "openai.gpt-oss-120b-1:0",
             "o3",
             "o4-mini",
             "gpt-5-codex",
@@ -698,6 +730,26 @@ mod tests {
             "my-deployment",
             "ollama/llama4",
             "openrouter/auto",
+        ] {
+            assert!(!writes_patches(model), "{model}");
+        }
+    }
+
+    /// gpt-oss names apply_patch's argument `patch`, and Groq refuses every
+    /// such call (four in four for the 120B model): it edits instead,
+    /// under any provider and however the id is written.
+    #[test]
+    fn gpt_oss_changes_files_with_edit_and_write_not_the_patch_tool() {
+        for model in [
+            "gpt-oss-120b",
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "openai/gpt-oss-safeguard-20b",
+            "openai.gpt-oss-120b-1:0",
+            "gpt-oss:120b",
+            "gpt-oss:20b-cloud",
+            "haarness/openai/gpt-oss-120b",
+            "GPT-OSS-120B",
         ] {
             assert!(!writes_patches(model), "{model}");
         }
@@ -826,6 +878,86 @@ mod tests {
                 .any(|tool| tool.name == "browser_snapshot")
         );
         assert!(!large.response.lazy_active);
+    }
+
+    /// An 8K window, or an account allowing 8,000 tokens a minute: the tools
+    /// that read, search, change and run the project go with each request,
+    /// and the rest wait behind the loader, which finds them.
+    #[test]
+    fn a_tight_window_keeps_only_the_projects_own_tools_at_hand() {
+        let names = [
+            "apply_patch",
+            "bash",
+            "bash_output",
+            "bash_stop",
+            "batch",
+            "edit",
+            "execute",
+            "glob",
+            "grep",
+            "list",
+            "lsp",
+            "mac_snapshot",
+            "multiedit",
+            "question",
+            "read",
+            "task",
+            "todowrite",
+            "webfetch",
+            "write",
+        ];
+        let definitions: Vec<_> = names
+            .into_iter()
+            .map(|name| definition(name, &"a description of what it does ".repeat(20)))
+            .collect();
+        let select = |window, promoted: &[&str]| {
+            select_tools(
+                definitions.clone(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &LazyToolSettings::default(),
+                &promoted
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<HashSet<_>>(),
+                Some(window),
+                false,
+            )
+        };
+        let advertised = |selection: &ToolSelection| {
+            selection
+                .advertised
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>()
+        };
+        let tight = select(TIGHT_WINDOW, &[]);
+        assert_eq!(
+            advertised(&tight),
+            [
+                "apply_patch",
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "list",
+                "mac_snapshot",
+                "read",
+                "write",
+                LOAD_TOOL_NAME
+            ]
+        );
+        assert!(tight.response.estimated_saved_tokens > 1_000);
+        assert_eq!(
+            search_deferred_tools(&definitions, &tight.response, &["task".into()]),
+            ["task"]
+        );
+        // A tool the model loaded stays.
+        assert!(advertised(&select(8_000, &["todowrite"])).contains(&"todowrite".to_owned()));
+        // A window a little larger, as a local model's 32K, keeps them all.
+        let small = select(32_768, &[]);
+        assert_eq!(small.advertised.len(), names.len());
+        assert!(!small.response.lazy_active);
     }
 
     #[test]

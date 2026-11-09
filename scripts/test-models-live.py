@@ -259,7 +259,7 @@ def main():
             passed, output = unit_tests()
             assert passed, 'Tests still fail after the fix: '+output
             assert (project/'tests/test_pricing.py').read_text() == tests, 'The model changed the tests instead of the code'
-            assert 'bash' in first and first & {'edit', 'apply_patch', 'write'}, 'Expected bash and an edit in the first coding turn, saw '+str(sorted(first))
+            assert 'bash' in first and first & {'edit', 'multiedit', 'apply_patch', 'write'}, 'Expected bash and an edit in the first coding turn, saw '+str(sorted(first))
             report['coding_turn1_tools'] = sorted(first)
             since = len(items)
             if target:

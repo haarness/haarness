@@ -1325,6 +1325,50 @@ fn free_tier_quota(lower: &str) -> Option<FreeTierQuota> {
     })
 }
 
+/// "about 43 minutes", "about 21 hours": when an allowance comes back.
+fn renews_in(wait: std::time::Duration) -> String {
+    let minutes = wait.as_secs().div_ceil(60);
+    if minutes >= 90 {
+        format!("about {} hours", (minutes + 30) / 60)
+    } else {
+        format!("about {minutes} minutes")
+    }
+}
+
+/// A day's allowance of tokens or requests for one model, used up.
+struct DailyAllowance {
+    limit: u64,
+    unit: &'static str,
+    wait: std::time::Duration,
+}
+
+/// Groq's "Rate limit reached for model `…` … on tokens per day (TPD): Limit
+/// 200000, Used 198971, Requested 6952. Please try again in 42m38.736s" (or
+/// requests per day, RPD), when the wait is longer than a turn sits out.
+fn daily_allowance(lower: &str) -> Option<DailyAllowance> {
+    if !lower.contains("rate limit reached") {
+        return None;
+    }
+    let unit = if lower.contains("tokens per day (") {
+        "tokens"
+    } else if lower.contains("requests per day (") {
+        "requests"
+    } else {
+        return None;
+    };
+    let limit = lower.match_indices("limit ").find_map(|(at, _)| {
+        lower[at + "limit ".len()..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|digits| digits.parse::<u64>().ok())
+    })?;
+    let wait = lower
+        .split_once("try again in ")
+        .and_then(|(_, rest)| advised_wait(rest))
+        .filter(|wait| *wait > LONGEST_ADVISED_WAIT)?;
+    Some(DailyAllowance { limit, unit, wait })
+}
+
 /// A wait written the way providers write it: "17.19s", "59s", "1m30s",
 /// "21h16m10.2s" or "500ms".
 fn advised_wait(text: &str) -> Option<std::time::Duration> {
@@ -1904,12 +1948,7 @@ fn describe_model_refusal(
             });
         }
         if let Some(wait) = quota.wait.filter(|wait| *wait > LONGEST_ADVISED_WAIT) {
-            let minutes = wait.as_secs().div_ceil(60);
-            let renews = if minutes >= 90 {
-                format!("about {} hours", (minutes + 30) / 60)
-            } else {
-                format!("about {minutes} minutes")
-            };
+            let renews = renews_in(wait);
             return Some(if advice {
                 format!(
                     "This API key has used up {provider}'s free allowance for {name}, which comes back in {renews}. Choose another model for this chat, or {billing}."
@@ -1926,6 +1965,35 @@ fn describe_model_refusal(
             )
         } else {
             format!("{name} is at the limit of {provider}'s free tier for this API key.")
+        });
+    }
+    // A day's allowance for the model used up (Groq's free tier: "Rate limit
+    // reached for model `…` … on tokens per day (TPD): Limit 200000, Used
+    // 198971, Requested 6952. Please try again in 42m38.736s"): back only
+    // after a longer wait than a turn sits out, and other models have their
+    // own.
+    if let Some(daily) = daily_allowance(&lower) {
+        let such_as = match others.as_slice() {
+            [] => String::new(),
+            names => format!(", such as {}", spoken_list(names, "or")),
+        };
+        let upgrade = raw
+            .split_whitespace()
+            .find(|word| word.starts_with("https://"))
+            .map_or_else(
+                || format!("upgrade the plan with {provider}"),
+                |url| format!("upgrade the plan at {}", url.trim_end_matches(['.', ','])),
+            );
+        let used = format!(
+            "This account has used today's {} {} for {name} on {provider}, which come back in {}.",
+            grouped_number(daily.limit),
+            daily.unit,
+            renews_in(daily.wait)
+        );
+        return Some(if advice {
+            format!("{used} Choose another model for this chat{such_as}, or {upgrade}.")
+        } else {
+            used
         });
     }
     if model_metadata(&info.models, model).is_some() || !refuses_unknown_model(&lower, model) {
@@ -2500,42 +2568,31 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
         };
     }
     // A request larger than the plan's per-minute token allowance (Groq's
-    // free tier allows 8,000, less than one coding turn with its tools) is
-    // not a limit that waiting clears. OpenAI says "tokens per min (TPM)".
-    if lower.contains("request too large") && lower.contains("tokens per min") {
-        let number = |label: &str| {
-            lower
-                .split_once(label)
-                .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
-                .and_then(|digits| digits.parse::<u64>().ok())
-        };
-        if let (Some(limit), Some(requested)) = (number("limit "), number("requested ")) {
-            let name = provider.unwrap_or("The provider");
-            let upgrade = raw
-                .split_whitespace()
-                .find(|word| word.starts_with("https://"))
-                .map_or_else(
-                    || format!("Upgrade the plan with {name}"),
-                    |url| format!("Upgrade the plan at {}", url.trim_end_matches(['.', ','])),
-                );
-            // "8,000" reads at a glance where "8000" does not.
-            let grouped = |value: u64| {
-                let digits = value.to_string();
-                let mut out = String::new();
-                for (index, digit) in digits.chars().enumerate() {
-                    if index > 0 && (digits.len() - index).is_multiple_of(3) {
-                        out.push(',');
-                    }
-                    out.push(digit);
-                }
-                out
-            };
-            return format!(
-                "{name} allows this account {} tokens a minute, and this request needs {}, so it can't be sent. {upgrade}, or choose another provider.",
-                grouped(limit),
-                grouped(requested)
+    // free tier allows 8,000, less than one coding turn with every tool) is
+    // not a limit that waiting clears (OpenAI says "tokens per min (TPM)").
+    // The turn has already sent it again
+    // with fewer tools, or a shorter reply asked for, where that could fit.
+    if let Some(refusal) = crate::request_ceilings::per_minute_refusal(raw) {
+        let name = provider.unwrap_or("The provider");
+        let upgrade = raw
+            .split_whitespace()
+            .find(|word| word.starts_with("https://"))
+            .map_or_else(
+                || format!("Upgrade the plan with {name}"),
+                |url| format!("Upgrade the plan at {}", url.trim_end_matches(['.', ','])),
             );
-        }
+        return match refusal {
+            crate::request_ceilings::PerMinuteRefusal::Input { limit, requested } => format!(
+                "{name} allows this account {} tokens a minute, and this request needs {}, so it can't be sent. {upgrade}, or choose another model or provider.",
+                grouped_number(limit),
+                grouped_number(requested)
+            ),
+            // Groq's estimate of the reply, which no shorter request lowers.
+            crate::request_ceilings::PerMinuteRefusal::Output { limit, .. } => format!(
+                "{name} allows this account {} reply tokens a minute on this model, fewer than a reply here needs, so it can't be sent. {upgrade}, or choose another model.",
+                grouped_number(limit)
+            ),
+        };
     }
     // OpenAI's `insufficient_quota` is an API account with no credit, or at
     // the spending limit set for it, on every model at once: no wait helps.
@@ -2830,6 +2887,9 @@ pub struct AgentRuntime {
     /// turns without leaking between threads. A restart rebuilds the
     /// promotions from each chat's history.
     tool_promotions: Arc<ToolPromotions>,
+    /// What a provider account allows one request, learned from what it says
+    /// of its limits (see [`crate::request_ceilings`]), shared by every chat.
+    request_ceilings: Arc<crate::request_ceilings::RequestCeilings>,
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
     /// Stores of the chats that work in a folder of their own: each such
     /// folder is checkpointed by itself instead of the project folder.
@@ -2990,6 +3050,7 @@ impl AgentRuntime {
             tool_settings_mutation: Arc::new(AsyncMutex::new(())),
             tool_execution_gates: Arc::new(DashMap::new()),
             tool_promotions: Arc::new(DashMap::new()),
+            request_ceilings: Arc::default(),
             snapshots: None,
             folder_snapshots: None,
             folder_choice: Arc::new(AsyncMutex::new(())),
@@ -3499,12 +3560,16 @@ impl AgentRuntime {
             let thread = self.repository.get_thread(thread_id).await?;
             let tools = self.chat_tools(&thread, &components).await?;
             (
-                components
-                    .providers
-                    .models(&thread.provider)
-                    .into_iter()
-                    .find(|candidate| candidate.id == thread.model)
-                    .and_then(|candidate| candidate.context_window),
+                self.request_ceilings
+                    .get(&thread.provider, &thread.model)
+                    .tool_window(
+                        components
+                            .providers
+                            .models(&thread.provider)
+                            .into_iter()
+                            .find(|candidate| candidate.id == thread.model)
+                            .and_then(|candidate| candidate.context_window),
+                    ),
                 tools.promoted.clone(),
                 tools.defers(&thread.provider, &thread.model),
             )
@@ -4727,12 +4792,18 @@ impl AgentRuntime {
             if engine.disables_tool(LOAD_TOOL_NAME) {
                 lazy.mode = haarness_protocol::LazyToolMode::Off;
             }
-            let context_window = components
-                .providers
-                .models(&thread.provider)
-                .into_iter()
-                .find(|model| model.id == thread.model)
-                .and_then(|model| model.context_window);
+            // The chat's own tools, sized as its turns size them.
+            let context_window = self
+                .request_ceilings
+                .get(&thread.provider, &thread.model)
+                .tool_window(
+                    components
+                        .providers
+                        .models(&thread.provider)
+                        .into_iter()
+                        .find(|model| model.id == thread.model)
+                        .and_then(|model| model.context_window),
+                );
             let tools = self.chat_tools(&thread, &components).await?;
             let selection = select_tools(
                 catalog
@@ -8216,6 +8287,7 @@ impl AgentRuntime {
             tool_settings_mutation: self.tool_settings_mutation.clone(),
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
+            request_ceilings: self.request_ceilings.clone(),
             advertised_tools: Mutex::new(HashSet::new()),
             turn_tools: Mutex::new(HashSet::new()),
             last_tool_catalog: Mutex::new(None),
@@ -8708,6 +8780,9 @@ struct RunnerTask {
     tool_settings_mutation: Arc<AsyncMutex<()>>,
     tool_execution_gates: Arc<ToolExecutionGates>,
     tool_promotions: Arc<ToolPromotions>,
+    /// What a provider account allows one request, learned from what it says
+    /// of its limits (see [`crate::request_ceilings`]), shared by every chat.
+    request_ceilings: Arc<crate::request_ceilings::RequestCeilings>,
     /// Exact schema names offered in the current provider round. This is the
     /// execution-time authority against hallucinated or prematurely-loaded
     /// calls, not merely UI bookkeeping.
@@ -10303,6 +10378,32 @@ impl RunnerTask {
         }
     }
 
+    /// A provider naming the account's tokens a minute for `model`
+    /// ([`crate::request_ceilings`]) teaches the ceiling for every later
+    /// request to it. True when this request, refused as larger than that,
+    /// can now be sent at once within it: with the optional tools behind
+    /// `load_tool`, or a reply asked to be no longer than the minute allows.
+    /// A rate limit that asks for a wait is waited out as before, and the
+    /// request after it is the smaller one, so more fit in each minute.
+    fn learn_request_ceiling(&self, error: &CoreError, provider: &str, model: &str) -> bool {
+        let CoreError::Provider(message) = error else {
+            return false;
+        };
+        let Some(limit) = crate::request_ceilings::per_minute_limit(message) else {
+            return false;
+        };
+        if !self.request_ceilings.learn(provider, model, limit.refusal) || !limit.too_large {
+            return false;
+        }
+        tracing::info!(
+            thread = %self.thread.id,
+            turn = %self.turn.id,
+            refusal = ?limit.refusal,
+            "the provider allows this account fewer tokens a minute than the request held; sending it again within them"
+        );
+        true
+    }
+
     /// Publish a `turn.status` transition once per state change. The status
     /// line is only honest if the server narrates what the turn is doing:
     /// thinking, streaming text, running a named tool, waiting on a human.
@@ -11204,10 +11305,15 @@ impl RunnerTask {
                 {
                     lazy_settings.mode = haarness_protocol::LazyToolMode::Off;
                 }
-                let context_window = provider_models
-                    .iter()
-                    .find(|candidate| candidate.id == model)
-                    .and_then(|candidate| candidate.context_window);
+                // An account whose plan allows fewer tokens a minute than
+                // this model's window holds gets its tools sized for that.
+                let ceiling = self.request_ceilings.get(provider_id, &model);
+                let context_window = ceiling.tool_window(
+                    provider_models
+                        .iter()
+                        .find(|candidate| candidate.id == model)
+                        .and_then(|candidate| candidate.context_window),
+                );
                 let selection = self
                     .round_tools(
                         eligible_tools,
@@ -11245,6 +11351,9 @@ impl RunnerTask {
                     },
                     parameters: crate::RequestParameters {
                         cache_key: Some(self.thread.id.to_string()),
+                        // A reply asked for no more than the account's
+                        // output tokens a minute.
+                        max_output_tokens: ceiling.output,
                         ..crate::RequestParameters::default()
                     },
                     output_schema: self.output_schema.clone(),
@@ -11361,6 +11470,9 @@ impl RunnerTask {
                             refused_call = Some(reason);
                             continue 'provider_round;
                         }
+                        if self.learn_request_ceiling(&error_value, provider_id, &model) {
+                            continue 'provider_round;
+                        }
                         if let Some((attempt, delay)) = retries.retry(&error_value) {
                             self.wait_before_retry(attempt, delay, &error_value).await?;
                             continue 'provider_round;
@@ -11466,6 +11578,12 @@ impl RunnerTask {
                                 drop(stream);
                                 tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "the provider refused a tool call that did not match its tool; asking the model to correct it");
                                 refused_call = Some(reason);
+                                continue 'provider_round;
+                            }
+                            if !saw_provider_event
+                                && self.learn_request_ceiling(&error_value, provider_id, &model)
+                            {
+                                drop(stream);
                                 continue 'provider_round;
                             }
                             // Providers report an HTTP failure as the stream's
@@ -14682,6 +14800,7 @@ impl RunnerTask {
             tool_settings_mutation: self.tool_settings_mutation.clone(),
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
+            request_ceilings: self.request_ceilings.clone(),
             advertised_tools: Mutex::new(HashSet::new()),
             turn_tools: Mutex::new(HashSet::new()),
             last_tool_catalog: Mutex::new(None),
@@ -15010,6 +15129,7 @@ impl RunnerTask {
             tool_settings_mutation: self.tool_settings_mutation.clone(),
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
+            request_ceilings: self.request_ceilings.clone(),
             snapshots: self.runtime_snapshots.clone(),
             folder_snapshots: self.folder_snapshots.clone(),
             folder_choice: self.folder_choice.clone(),
@@ -24452,7 +24572,7 @@ mod tests {
         assert_eq!(super::retry_delay(&too_large, 1), None);
         assert_eq!(
             super::describe_error(&too_large, Some("OpenAI")),
-            "OpenAI allows this account 30,000 tokens a minute, and this request needs 45,000, so it can't be sent. Upgrade the plan at https://platform.openai.com/account/rate-limits, or choose another provider."
+            "OpenAI allows this account 30,000 tokens a minute, and this request needs 45,000, so it can't be sent. Upgrade the plan at https://platform.openai.com/account/rate-limits, or choose another model or provider."
         );
     }
 
@@ -24629,7 +24749,17 @@ mod tests {
                 ),
                 Some("Groq")
             ),
-            "Groq allows this account 8,000 tokens a minute, and this request needs 11,419, so it can't be sent. Upgrade the plan at https://console.groq.com/settings/billing, or choose another provider."
+            "Groq allows this account 8,000 tokens a minute, and this request needs 11,419, so it can't be sent. Upgrade the plan at https://console.groq.com/settings/billing, or choose another model or provider."
+        );
+        // Groq's output allowance is of the reply it expects, not the request.
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    "HTTP 429 Too Many Requests: Request too large for model `qwen/qwen3.8-27b` in organization `org_1` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Requested 1404. The request's expected output tokens exceed the enforced limit; reduce max_tokens (or the request's expected output) and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing".into()
+                ),
+                Some("Groq")
+            ),
+            "Groq allows this account 1,000 reply tokens a minute on this model, fewer than a reply here needs, so it can't be sent. Upgrade the plan at https://console.groq.com/settings/billing, or choose another model."
         );
         assert_eq!(
             super::describe_error(
@@ -25049,6 +25179,44 @@ mod tests {
             Some(
                 "This API key has used up Google Gemini's free allowance for Gemini 3.8 Flash, which comes back in about 21 hours. Choose another model for this chat, or turn on billing for this API key's project in Google AI Studio."
             )
+        );
+        // Groq's day of tokens for one model used up: other models have
+        // their own, and its words name the organization, which stays out.
+        let mut oss = model_info("openai/gpt-oss-120b", 131_072);
+        oss.display_name = "GPT OSS 120B".into();
+        let mut qwen = model_info("qwen/qwen3.8-27b", 131_072);
+        qwen.display_name = "Qwen3.8-27B".into();
+        let groq = haarness_protocol::ProviderInfo {
+            id: "groq".into(),
+            name: "Groq".into(),
+            authenticated: true,
+            models: vec![oss, qwen],
+        };
+        let day = CoreError::Provider(
+            "HTTP 429 Too Many Requests: [rate_limit_exceeded] Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01abc` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 198971, Requested 6952. Please try again in 42m38.736s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing".into(),
+        );
+        assert_eq!(super::retry_delay(&day, 1), None);
+        assert_eq!(
+            super::describe_model_refusal(&day, &groq, "openai/gpt-oss-120b", true).as_deref(),
+            Some(
+                "This account has used today's 200,000 tokens for GPT OSS 120B on Groq, which come back in about 43 minutes. Choose another model for this chat, such as Qwen3.8-27B, or upgrade the plan at https://console.groq.com/settings/billing."
+            )
+        );
+        assert_eq!(
+            super::describe_model_refusal(&day, &groq, "openai/gpt-oss-120b", false).as_deref(),
+            Some(
+                "This account has used today's 200,000 tokens for GPT OSS 120B on Groq, which come back in about 43 minutes."
+            )
+        );
+        // A minute's limit names a wait a turn sits out: not a day's.
+        assert_eq!(
+            super::describe_model_refusal(
+                &CoreError::Provider("HTTP 429 Too Many Requests: Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01abc` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 7682, Requested 6196. Please try again in 40.8s.".into()),
+                &groq,
+                "openai/gpt-oss-120b",
+                true
+            ),
+            None
         );
         // A per-minute allowance is waited out; when the turn still fails it
         // says so plainly.
