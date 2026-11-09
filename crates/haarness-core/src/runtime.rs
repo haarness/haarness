@@ -1308,6 +1308,50 @@ fn free_tier_quota(lower: &str) -> Option<FreeTierQuota> {
     })
 }
 
+/// "about 43 minutes", "about 21 hours": when an allowance comes back.
+fn renews_in(wait: std::time::Duration) -> String {
+    let minutes = wait.as_secs().div_ceil(60);
+    if minutes >= 90 {
+        format!("about {} hours", (minutes + 30) / 60)
+    } else {
+        format!("about {minutes} minutes")
+    }
+}
+
+/// A day's allowance of tokens or requests for one model, used up.
+struct DailyAllowance {
+    limit: u64,
+    unit: &'static str,
+    wait: std::time::Duration,
+}
+
+/// Groq's "Rate limit reached for model `…` … on tokens per day (TPD): Limit
+/// 200000, Used 198971, Requested 6952. Please try again in 42m38.736s" (or
+/// requests per day, RPD), when the wait is longer than a turn sits out.
+fn daily_allowance(lower: &str) -> Option<DailyAllowance> {
+    if !lower.contains("rate limit reached") {
+        return None;
+    }
+    let unit = if lower.contains("tokens per day (") {
+        "tokens"
+    } else if lower.contains("requests per day (") {
+        "requests"
+    } else {
+        return None;
+    };
+    let limit = lower.match_indices("limit ").find_map(|(at, _)| {
+        lower[at + "limit ".len()..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|digits| digits.parse::<u64>().ok())
+    })?;
+    let wait = lower
+        .split_once("try again in ")
+        .and_then(|(_, rest)| advised_wait(rest))
+        .filter(|wait| *wait > LONGEST_ADVISED_WAIT)?;
+    Some(DailyAllowance { limit, unit, wait })
+}
+
 /// A wait written the way providers write it: "17.19s", "59s", "1m30s",
 /// "21h16m10.2s" or "500ms".
 fn advised_wait(text: &str) -> Option<std::time::Duration> {
@@ -1887,12 +1931,7 @@ fn describe_model_refusal(
             });
         }
         if let Some(wait) = quota.wait.filter(|wait| *wait > LONGEST_ADVISED_WAIT) {
-            let minutes = wait.as_secs().div_ceil(60);
-            let renews = if minutes >= 90 {
-                format!("about {} hours", (minutes + 30) / 60)
-            } else {
-                format!("about {minutes} minutes")
-            };
+            let renews = renews_in(wait);
             return Some(if advice {
                 format!(
                     "This API key has used up {provider}'s free allowance for {name}, which comes back in {renews}. Choose another model for this chat, or {billing}."
@@ -1909,6 +1948,35 @@ fn describe_model_refusal(
             )
         } else {
             format!("{name} is at the limit of {provider}'s free tier for this API key.")
+        });
+    }
+    // A day's allowance for the model used up (Groq's free tier: "Rate limit
+    // reached for model `…` … on tokens per day (TPD): Limit 200000, Used
+    // 198971, Requested 6952. Please try again in 42m38.736s"): back only
+    // after a longer wait than a turn sits out, and other models have their
+    // own.
+    if let Some(daily) = daily_allowance(&lower) {
+        let such_as = match others.as_slice() {
+            [] => String::new(),
+            names => format!(", such as {}", spoken_list(names, "or")),
+        };
+        let upgrade = raw
+            .split_whitespace()
+            .find(|word| word.starts_with("https://"))
+            .map_or_else(
+                || format!("upgrade the plan with {provider}"),
+                |url| format!("upgrade the plan at {}", url.trim_end_matches(['.', ','])),
+            );
+        let used = format!(
+            "This account has used today's {} {} for {name} on {provider}, which come back in {}.",
+            grouped_number(daily.limit),
+            daily.unit,
+            renews_in(daily.wait)
+        );
+        return Some(if advice {
+            format!("{used} Choose another model for this chat{such_as}, or {upgrade}.")
+        } else {
+            used
         });
     }
     if model_metadata(&info.models, model).is_some() || !refuses_unknown_model(&lower, model) {
@@ -25089,6 +25157,44 @@ mod tests {
             Some(
                 "This API key has used up Google Gemini's free allowance for Gemini 3.8 Flash, which comes back in about 21 hours. Choose another model for this chat, or turn on billing for this API key's project in Google AI Studio."
             )
+        );
+        // Groq's day of tokens for one model used up: other models have
+        // their own, and its words name the organization, which stays out.
+        let mut oss = model_info("openai/gpt-oss-120b", 131_072);
+        oss.display_name = "GPT OSS 120B".into();
+        let mut qwen = model_info("qwen/qwen3.8-27b", 131_072);
+        qwen.display_name = "Qwen3.8-27B".into();
+        let groq = haarness_protocol::ProviderInfo {
+            id: "groq".into(),
+            name: "Groq".into(),
+            authenticated: true,
+            models: vec![oss, qwen],
+        };
+        let day = CoreError::Provider(
+            "HTTP 429 Too Many Requests: [rate_limit_exceeded] Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01abc` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 198971, Requested 6952. Please try again in 42m38.736s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing".into(),
+        );
+        assert_eq!(super::retry_delay(&day, 1), None);
+        assert_eq!(
+            super::describe_model_refusal(&day, &groq, "openai/gpt-oss-120b", true).as_deref(),
+            Some(
+                "This account has used today's 200,000 tokens for GPT OSS 120B on Groq, which come back in about 43 minutes. Choose another model for this chat, such as Qwen3.8-27B, or upgrade the plan at https://console.groq.com/settings/billing."
+            )
+        );
+        assert_eq!(
+            super::describe_model_refusal(&day, &groq, "openai/gpt-oss-120b", false).as_deref(),
+            Some(
+                "This account has used today's 200,000 tokens for GPT OSS 120B on Groq, which come back in about 43 minutes."
+            )
+        );
+        // A minute's limit names a wait a turn sits out: not a day's.
+        assert_eq!(
+            super::describe_model_refusal(
+                &CoreError::Provider("HTTP 429 Too Many Requests: Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01abc` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 7682, Requested 6196. Please try again in 40.8s.".into()),
+                &groq,
+                "openai/gpt-oss-120b",
+                true
+            ),
+            None
         );
         // A per-minute allowance is waited out; when the turn still fails it
         // says so plainly.
