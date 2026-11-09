@@ -2128,6 +2128,46 @@ fn mark_prompt_cache(messages: &mut [Value]) {
     }
 }
 
+/// Two user messages in a row become one, for a server the person set up.
+/// A chat holds them after a turn that failed before the model answered (the
+/// next message follows the unanswered one), and after tool results that
+/// brought several files; chat templates that want roles to alternate
+/// (Gemma's, Mistral's) refuse every later request of that chat for it.
+fn join_adjacent_user_messages(messages: &mut Vec<Value>) {
+    let mut joined: Vec<Value> = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        if message["role"] == "user"
+            && let Some(previous) = joined
+                .last_mut()
+                .filter(|previous| previous["role"] == "user")
+        {
+            let parts = |content: Value| match content {
+                Value::String(text) if text.is_empty() => Vec::new(),
+                Value::String(text) => vec![json!({"type": "text", "text": text})],
+                Value::Array(parts) => parts,
+                _ => Vec::new(),
+            };
+            let earlier = previous["content"].take();
+            let later = message["content"].clone();
+            previous["content"] = match (earlier, later) {
+                (Value::String(earlier), Value::String(later)) => {
+                    json!(
+                        [earlier, later]
+                            .into_iter()
+                            .filter(|text| !text.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    )
+                }
+                (earlier, later) => Value::Array([parts(earlier), parts(later)].concat()),
+            };
+            continue;
+        }
+        joined.push(message);
+    }
+    *messages = joined;
+}
+
 fn push_tool_call_message(messages: &mut Vec<Value>, message: Value) {
     if let Some(previous) = messages.last_mut()
         && previous["role"] == "assistant"
@@ -2436,6 +2476,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
         }
         messages.append(&mut tool_media);
+        if replay == ReasoningReplay::Observed {
+            join_adjacent_user_messages(&mut messages);
+        }
         if self.marks_prompt_cache(&model) && !request.parameters.uncached {
             mark_prompt_cache(&mut messages);
         }
@@ -7613,5 +7656,67 @@ mod tests {
                 .get("extra_content")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn a_server_set_up_here_gets_user_messages_that_alternate() {
+        // After a turn that failed before any reply, the next message follows
+        // the unanswered one; Gemma's and Mistral's chat templates refuse two
+        // user messages in a row, so they go to such a server as one.
+        let state = FixtureState::default();
+        let root = serve(
+            Router::new()
+                .route(
+                    "/v1/chat/completions",
+                    post(
+                        |State(state): State<FixtureState>, Json(request): Json<Value>| async move {
+                            state.0.lock().push(request);
+                            ready_stream().await
+                        },
+                    ),
+                )
+                .with_state(state.clone()),
+        )
+        .await;
+        let user = |content: &str| ProviderMessage::Text {
+            role: "user".into(),
+            content: content.into(),
+        };
+        let mut request = hello("fixture-model");
+        request.messages = vec![
+            user("Fix the build"),
+            user("Try again"),
+            ProviderMessage::Text {
+                role: "assistant".into(),
+                content: "Done.".into(),
+            },
+            user("And the tests"),
+            ProviderMessage::Media {
+                role: "user".into(),
+                content: "This picture shows the failure".into(),
+                attachments: vec!["data:image/png;base64,iVBORw0KGgo=".into()],
+            },
+        ];
+        let provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            model_defaults: CompatibleModelDefaults {
+                images: Some(true),
+                ..CompatibleModelDefaults::default()
+            },
+            ..custom_instance(format!("{root}/v1"))
+        });
+        outcome(&provider, request).await.unwrap();
+        let sent = state.0.lock()[0]["messages"].clone();
+        let roles: Vec<_> = sent
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(roles, ["system", "user", "assistant", "user"], "{sent}");
+        assert_eq!(sent[1]["content"], "Fix the build\n\nTry again");
+        let parts = sent[3]["content"].as_array().unwrap();
+        assert_eq!(parts[0], json!({"type": "text", "text": "And the tests"}));
+        assert_eq!(parts[1]["text"], "This picture shows the failure");
+        assert_eq!(parts[2]["type"], "image_url");
     }
 }
