@@ -253,7 +253,9 @@ export default (ctx) => ({
             reports = [item["data"] for item in api("/v1/threads/" + accounting["id"] + "/items") if item["data"]["type"] == "usage"]
             assert reports and reports[-1]["input_tokens"] == 120
             prepared = reports[-1]["prompt"]
-            request = next(request for request in reversed(REQUESTS) if any(message.get("content") == "CHAT_ONLY" for message in request["messages"]))
+            # A server set up here gets adjacent user messages as one, so the hook's context may share the
+            # prompt's message.
+            request = next(request for request in reversed(REQUESTS) if any(message["role"] == "user" and "CHAT_ONLY" in json.dumps(message.get("content")) for message in request["messages"]))
             system = " ".join(message["content"] for message in request["messages"] if message["role"] in ("system", "developer"))
             # The estimator weighs character classes per tokenizer family, so
             # it lands near, not exactly on, four characters per token.
