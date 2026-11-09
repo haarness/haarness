@@ -1484,17 +1484,31 @@ const LOCAL_ROOM: u64 = 16_384;
 
 /// How well a model on this computer suits a new chat, best first: one that
 /// calls tools, runs here rather than on a cloud the runtime signs in to,
-/// isn't small (`weak`, from the runtime's details), and has room for the
-/// instructions and tools. Equal ranks keep the catalog's order.
-fn local_rank(model: &ModelInfo, weak: &HashSet<String>) -> (bool, bool, bool, bool) {
+/// isn't small (`weak`, from the runtime's details), makes its tool calls as
+/// calls rather than writing them as text, and has room for the instructions
+/// and tools. Equal ranks keep the catalog's order.
+fn local_rank(model: &ModelInfo, weak: &HashSet<String>) -> (bool, bool, bool, bool, bool) {
     (
         !model.tools,
         model.id.ends_with("-cloud") || model.id.ends_with(":cloud"),
         weak.contains(&model.id),
+        writes_calls_as_text(&model.id),
         model
             .context_window
             .is_some_and(|window| window < LOCAL_ROOM),
     )
+}
+
+/// Models a runtime lists as calling tools that mostly write their calls into
+/// the reply as text instead, and then go on as if the call had run, making up
+/// its result (Qwen2.5 Coder, measured on Ollama 2026-11-09: it read files it
+/// never opened and once wrote invented code over a real one). Haarness runs
+/// a reply that is nothing but such a call, but one inside prose can't be told
+/// from an example, so these are never a new chat's first choice.
+fn writes_calls_as_text(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    let name = id.rsplit('/').next().unwrap_or(&id);
+    name.starts_with("qwen2.5-coder")
 }
 
 /// A parameter count as runtimes write it, in billions: `7.6B`, `135M`, `30B-A3B`
@@ -4736,6 +4750,7 @@ mod tests {
         };
         // In the catalog's order, as this Mac's Ollama listed them.
         let mut models = [
+            model("qwen2.5-coder:7b", true, 32_768),
             model("gemma3:latest", false, 32_768),
             model("gpt-oss:120b-cloud", true, 32_768),
             model("llama3.2:latest", true, 32_768),
@@ -4755,6 +4770,8 @@ mod tests {
             order,
             [
                 "qwen3:8b",
+                // Pulled last, so listed first, but it writes its calls as text.
+                "qwen2.5-coder:7b",
                 "llama3.2:latest",
                 "tinyllama:1.1b",
                 "smollm2:1.7b",
