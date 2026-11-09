@@ -1808,3 +1808,104 @@ async fn a_tool_that_needs_a_browser_is_offered_only_while_one_can_serve_the_cha
     assert!(!browser(6));
     assert_eq!(provider.offered().len(), 7);
 }
+
+/// `execute` runs JavaScript that can call only MCP and browser tools. A chat
+/// with neither is not offered it: a small local model reads its name as "run
+/// a command" and calls it again and again, every call failing. One the model
+/// makes anyway says where commands run. Once a browser serves the chat,
+/// `execute` is offered with it.
+#[tokio::test]
+async fn code_mode_is_offered_only_with_a_tool_it_can_call() {
+    let root = std::env::temp_dir().join(format!("haarness-code-offer-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(SqliteStore::open(root.join("state.db")).unwrap());
+    let served = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+    for (name, description) in [
+        ("bash", "Run a shell command"),
+        (
+            "execute",
+            "Run confined JavaScript that calls MCP and browser tools",
+        ),
+    ] {
+        tools.insert(name.into(), Arc::new(FixtureTool { name, description }));
+    }
+    tools.insert(
+        "browser_fixture".into(),
+        Arc::new(NeedsBrowser {
+            served: served.clone(),
+        }),
+    );
+    tools.insert(
+        "attach".into(),
+        Arc::new(Switch {
+            name: "attach",
+            served: served.clone(),
+        }),
+    );
+    let provider = Scripted::default();
+    provider
+        .then(call("run-1", "execute", json!({"code": "ls -la"})))
+        .then(ProviderEvent::TextDelta("listed".into()))
+        .then(call("attach-1", "attach", json!({})))
+        .then(ProviderEvent::TextDelta("attached".into()));
+    let runtime = AgentRuntime::with_config(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(BrowserRegistry { tools }),
+        EventBus::new(128),
+        root.clone(),
+        String::new(),
+        RuntimeConfig {
+            lazy_tools: LazyToolSettings {
+                mode: LazyToolMode::Off,
+                ..LazyToolSettings::default()
+            },
+            ..RuntimeConfig::default()
+        },
+    );
+    runtime.recover().await.unwrap();
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("scripted".into()),
+            model: Some("scripted-1".into()),
+            ..CreateThreadRequest::default()
+        })
+        .await
+        .unwrap();
+    let offers =
+        |request: usize, name: &str| provider.offered()[request].contains(&format!("\"{name}\""));
+
+    one_turn(&runtime, thread.id, "list the files").await;
+    assert!(!offers(0, "execute") && !offers(1, "execute"));
+    assert!(offers(0, "bash"));
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let refused = items
+        .iter()
+        .find_map(|item| match &item.data {
+            haarness_protocol::ItemData::ToolResult {
+                call_id,
+                output,
+                is_error,
+                ..
+            } if call_id == "run-1" => Some((output.clone(), *is_error)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(refused.1, "{refused:?}");
+    assert!(
+        refused.0.contains("this chat has none")
+            && refused.0.contains("To run a command, call bash with it."),
+        "{refused:?}"
+    );
+
+    // A browser comes: execute can call its tools, so it is offered too.
+    one_turn(&runtime, thread.id, "attach one").await;
+    assert!(!offers(2, "execute") && offers(3, "execute") && offers(3, "browser_fixture"));
+
+    drop(runtime);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}

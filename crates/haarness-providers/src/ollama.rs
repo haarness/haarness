@@ -222,6 +222,12 @@ pub(crate) fn chat_body(body: &Value, num_ctx: u64) -> Value {
         // the front, so the chat is compacted instead of the model reading
         // half of it.
         "truncate": false,
+        // A reply that fills the context ends there (as `length`) rather
+        // than going on with the front of the chat dropped: Ollama sets no
+        // output limit, so a model caught in a loop (Qwen3 8B thought for
+        // 15,000 tokens and went on) wrote until someone stopped it, its
+        // instructions long gone.
+        "shift": false,
     });
     if let Some(tools) = body["tools"].as_array().filter(|tools| !tools.is_empty()) {
         native["tools"] = json!(tools);
@@ -568,6 +574,7 @@ mod tests {
                 "model": "qwen3:8b",
                 "stream": true,
                 "truncate": false,
+                "shift": false,
                 "think": false,
                 "options": {"num_ctx": 32_768, "num_predict": 2_048, "temperature": 0.2},
                 "tools": [{"type": "function", "function": {"name": "read", "description": "Read a file", "parameters": {"type": "object"}}}],

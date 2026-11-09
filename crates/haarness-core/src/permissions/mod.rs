@@ -1411,6 +1411,57 @@ pub fn no_break_space_twin(workspace: &Path, value: &str) -> Option<String> {
     twin_among(workspace, value, 50_000)
 }
 
+/// The project path a model meant by a path it wrote from the project's
+/// folder as if that were the disk's root: `/tests/test_app.py` (or on
+/// Windows `\tests\test_app.py`, which Windows reads as `C:\tests\…`) for
+/// `<project>/tests/test_app.py`. Small local models write the project's
+/// files that way, and every call fails with "does not exist". It is the
+/// rest of the path, relative to the project, when nothing is at the path
+/// as written, the disk's root holds nothing of its first name (so `/tmp/…`
+/// or `/Users/…` stay as written), and the project holds the path
+/// (`existing`), or for a file still to be made, the folder it goes in.
+/// `None` otherwise: a path that names something, a network or drive path,
+/// one that climbs out with `..`, or just the root.
+#[must_use]
+pub fn project_rooted_twin(workspace: &Path, value: &str, existing: bool) -> Option<String> {
+    let separators: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    let rest = value.strip_prefix(separators)?;
+    // `//server/share`, `\\?\C:\…`, and `/c/Users/…` (Git Bash's `C:\Users`).
+    if rest.is_empty() || rest.starts_with(separators) || expand_home(value) != value {
+        return None;
+    }
+    let relative = plain_relative(Path::new(rest))
+        .filter(|relative| relative.components().next().is_some())?;
+    let written = joined_path(workspace, value);
+    if std::fs::symlink_metadata(&written).is_ok() {
+        return None;
+    }
+    let first = relative.components().next()?;
+    let disk_root: PathBuf = written
+        .components()
+        .take_while(|component| matches!(component, Component::Prefix(_) | Component::RootDir))
+        .collect();
+    if std::fs::symlink_metadata(disk_root.join(first)).is_ok() {
+        return None;
+    }
+    let root =
+        crate::paths::canonicalize(workspace).unwrap_or_else(|_| normalize_absolute(workspace));
+    let inside = root.join(&relative);
+    let held = if existing {
+        std::fs::symlink_metadata(&inside).is_ok()
+    } else {
+        inside.parent().is_some_and(Path::is_dir)
+    };
+    held.then(|| {
+        let relative = relative.to_string_lossy();
+        if cfg!(windows) {
+            relative.replace('\\', "/")
+        } else {
+            relative.into_owned()
+        }
+    })
+}
+
 fn twin_among(workspace: &Path, value: &str, max_entries: usize) -> Option<String> {
     let plain = |name: &str| name.replace(['\u{a0}', '\u{202f}'], " ");
     let name = value.rsplit(['/', std::path::MAIN_SEPARATOR]).next()?;
@@ -2915,6 +2966,64 @@ mod tests {
             PermissionEngine::plan_defaults().evaluate("edit:haarness.json"),
             PermissionDecision::Deny
         );
+    }
+
+    /// Small local models write the project's files from its folder as if
+    /// that were the disk's root: `/src/app.py`, which reads nothing there.
+    #[test]
+    fn a_path_written_from_the_project_as_the_disks_root_names_the_project_file() {
+        let root = std::env::temp_dir().join(format!("haarness-rooted-{}", uuid::Uuid::now_v7()));
+        let folder = format!("rooted-{}", uuid::Uuid::now_v7());
+        std::fs::create_dir_all(root.join(&folder)).unwrap();
+        std::fs::write(root.join(&folder).join("app.py"), "x").unwrap();
+        let written = format!("/{folder}/app.py");
+        assert_eq!(
+            project_rooted_twin(&root, &written, true).as_deref(),
+            Some(format!("{folder}/app.py").as_str())
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                project_rooted_twin(&root, &format!("\\{folder}\\app.py"), true).as_deref(),
+                Some(format!("{folder}/app.py").as_str())
+            );
+        }
+        // A file still to be made goes in the project's folder of that name.
+        let new = format!("/{folder}/new.py");
+        assert_eq!(project_rooted_twin(&root, &new, true), None);
+        assert_eq!(
+            project_rooted_twin(&root, &new, false).as_deref(),
+            Some(format!("{folder}/new.py").as_str())
+        );
+        // Nothing of that name in the project either.
+        let elsewhere = format!("/{folder}-other/app.py");
+        assert_eq!(project_rooted_twin(&root, &elsewhere, false), None);
+        // A path that names something stays as written, the project's own too.
+        let absolute = root.join(&folder).join("app.py").display().to_string();
+        assert_eq!(project_rooted_twin(&root, &absolute, true), None);
+        // The disk's root holds the first name (`/tmp`, `/Users`, `C:\\Users`):
+        // a real place, though the project holds a folder of that name too.
+        let first = std::env::temp_dir()
+            .components()
+            .find_map(|component| match component {
+                Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .unwrap();
+        std::fs::create_dir_all(root.join(&first)).unwrap();
+        std::fs::write(root.join(&first).join("notes.txt"), "y").unwrap();
+        assert_eq!(
+            project_rooted_twin(&root, &format!("/{first}/notes.txt"), true),
+            None
+        );
+        // The root alone, a network path, and one climbing out with `..`.
+        for value in [
+            "/",
+            "//server/share/app.py",
+            &format!("/{folder}/../../app.py"),
+        ] {
+            assert_eq!(project_rooted_twin(&root, value, false), None, "{value}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
