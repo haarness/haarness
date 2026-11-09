@@ -952,6 +952,9 @@ fn is_provider_transient(error: &CoreError) -> bool {
         return true;
     }
     let message = message.to_ascii_lowercase();
+    if renewal_server_busy(&message) {
+        return true;
+    }
     [
         "http 500",
         "http 502",
@@ -968,6 +971,15 @@ fn is_provider_transient(error: &CoreError) -> bool {
     ]
     .iter()
     .any(|marker| message.contains(marker))
+}
+
+/// Whether a sign-in's renewal failed because its server was busy or down
+/// (it answered 429 or 5xx): such an answer spends no refresh token, so
+/// another try may renew the sign-in where signing in again is not needed.
+fn renewal_server_busy(lower: &str) -> bool {
+    lower
+        .split_once("sign-in failed: refresh token returned ")
+        .is_some_and(|(_, status)| status.starts_with('5') || status.starts_with("429"))
 }
 
 /// How a response that broke off in transit is worded: reqwest's errors for
@@ -1231,24 +1243,32 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
 }
 
 /// The wait a refusal names, read from its lowercased words: "Please retry
-/// in 17.2s" (Gemini, or a Retry-After a router passes on) or a Haarness
-/// router's "Try again in 28 seconds" (or "in 1 second").
+/// in 17.2s" (Gemini, or a Retry-After a router passes on), OpenAI's and
+/// Groq's per-minute limits ("Please try again in 11.054s", "in 1m3.2s",
+/// "in 260ms") or a Haarness router's "Try again in 28 seconds" (or "in 1
+/// second").
 fn named_wait(lower: &str) -> Option<std::time::Duration> {
     if let Some((_, rest)) = lower.split_once("retry in ") {
         return advised_wait(rest);
     }
     let (_, rest) = lower.split_once("try again in ")?;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    let value: u64 = digits.parse().ok()?;
-    let unit = rest[digits.len()..].trim_start();
+    if let Some(wait) = advised_wait(rest) {
+        return Some(wait);
+    }
+    let number: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let value: f64 = number.parse().ok()?;
+    let unit = rest[number.len()..].trim_start();
     let scale = if unit.starts_with("second") {
-        1
+        1.0
     } else if unit.starts_with("minute") {
-        60
+        60.0
     } else {
         return None;
     };
-    Some(std::time::Duration::from_secs(value.saturating_mul(scale)))
+    std::time::Duration::try_from_secs_f64(value * scale).ok()
 }
 
 /// The quotas a refusal names ("Quota exceeded for metric: …, limit: 20,
@@ -1316,7 +1336,12 @@ fn advised_wait(text: &str) -> Option<std::time::Duration> {
         rest = &rest[unit..];
         parsed = true;
     }
-    parsed.then(|| std::time::Duration::from_secs_f64(seconds))
+    // A wait too long for a duration (a run of thirty digits) is no wait
+    // at all, not a panic.
+    if !parsed {
+        return None;
+    }
+    std::time::Duration::try_from_secs_f64(seconds).ok()
 }
 
 /// How a rate limit or quota is worded. Such a refusal can also speak of too
@@ -1785,6 +1810,25 @@ fn describe_model_refusal(
         return Some(format!(
             "Your GitHub Copilot plan doesn't include {name}. Choose another model{such_as}, or turn it on at github.com/settings/copilot."
         ));
+    }
+    // A ChatGPT sign-in runs only the models its plan includes ("The
+    // 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT
+    // account"), so the model is still offered: an API key runs it.
+    if info.id == "openai"
+        && lower.contains("chatgpt account")
+        && refuses_unknown_model(&lower, model)
+    {
+        let such_as = match others.as_slice() {
+            [] => String::new(),
+            names => format!(", such as {}", spoken_list(names, "or")),
+        };
+        return Some(if advice {
+            format!(
+                "{name} isn't included with a ChatGPT sign-in. Choose another model for this chat{such_as}, or connect OpenAI with an API key to use {name}."
+            )
+        } else {
+            format!("{name} isn't included with this ChatGPT sign-in.")
+        });
     }
     let provider = &info.name;
     // Google still lists an older model to every key but refuses it to
@@ -2354,6 +2398,12 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     // only signing in again helps, and the words of the token server ("xAI
     // sign-in failed: refresh token returned 400 Bad Request: Invalid or
     // unknown refresh token") say nothing a person can act on.
+    if renewal_server_busy(&lower) {
+        return format!(
+            "{} couldn't renew your sign-in just now: its sign-in service is busy or down. Send your message again in a moment.",
+            provider.unwrap_or("The provider")
+        );
+    }
     if lower.contains("sign-in failed: refresh token returned 4") {
         return match provider {
             Some(name) => format!(
@@ -2429,8 +2479,8 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     }
     // A request larger than the plan's per-minute token allowance (Groq's
     // free tier allows 8,000, less than one coding turn with its tools) is
-    // not a limit that waiting clears.
-    if lower.contains("request too large") && lower.contains("tokens per minute") {
+    // not a limit that waiting clears. OpenAI says "tokens per min (TPM)".
+    if lower.contains("request too large") && lower.contains("tokens per min") {
         let number = |label: &str| {
             lower
                 .split_once(label)
@@ -24314,6 +24364,154 @@ mod tests {
         assert_eq!(
             super::named_wait("try again in 2 minutes."),
             Some(std::time::Duration::from_secs(120))
+        );
+    }
+
+    /// OpenAI's and Groq's per-minute limits name their wait as a duration
+    /// ("Please try again in 1.054s"): the turn sits it out instead of
+    /// failing at once.
+    #[test]
+    fn a_per_minute_limit_named_as_a_duration_is_waited_out() {
+        let provider = |raw: &str| CoreError::Provider(raw.into());
+        let openai = provider(
+            "HTTP 429 Too Many Requests: [rate_limit_exceeded] Rate limit reached for gpt-6-luna in \
+             organization org-test on tokens per min (TPM): Limit 30000, Used 29000, Requested 4600. \
+             Please try again in 1.054s. Visit https://platform.openai.com/account/rate-limits to learn more.",
+        );
+        let wait = super::retry_delay(&openai, 1).unwrap();
+        assert!((2000..2100).contains(&wait.as_millis()), "{wait:?}");
+        // The same limit as a stream's failed response event.
+        let event = provider(
+            r#"{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for gpt-6-luna on tokens per min (TPM). Please try again in 11.054s."}}}"#,
+        );
+        assert_eq!(
+            super::retry_delay(&event, 1).map(|wait| wait.as_secs()),
+            Some(12)
+        );
+        for (words, seconds) in [
+            ("try again in 1m3.2s.", 63.2),
+            ("try again in 260ms.", 0.26),
+            ("try again in 20.5 seconds.", 20.5),
+            ("try again in 2 minutes.", 120.0),
+        ] {
+            let wait = super::named_wait(words).unwrap();
+            assert!(
+                (wait.as_secs_f64() - seconds).abs() < 1e-6,
+                "{words}: {wait:?}"
+            );
+        }
+        // A wait longer than a turn sits out fails now, and one too long to
+        // hold is no wait, not a panic.
+        assert_eq!(
+            super::retry_delay(
+                &provider(
+                    "HTTP 429 Too Many Requests: Rate limit reached. Please try again in 6m0s."
+                ),
+                1
+            ),
+            None
+        );
+        assert_eq!(
+            super::named_wait("please retry in 999999999999999999999999999999s"),
+            None
+        );
+        assert_eq!(
+            super::named_wait("try again in 999999999999999999999999999999 seconds"),
+            None
+        );
+        // A request larger than the whole per-minute allowance waits for
+        // nothing, and says so in OpenAI's words for it.
+        let too_large = provider(
+            "HTTP 429 Too Many Requests: [rate_limit_exceeded] Request too large for gpt-6-luna in \
+             organization org-test on tokens per min (TPM): Limit 30000, Requested 45000. The input or \
+             output tokens must be reduced in order to run successfully. Visit \
+             https://platform.openai.com/account/rate-limits to learn more.",
+        );
+        assert_eq!(super::retry_delay(&too_large, 1), None);
+        assert_eq!(
+            super::describe_error(&too_large, Some("OpenAI")),
+            "OpenAI allows this account 30,000 tokens a minute, and this request needs 45,000, so it can't be sent. Upgrade the plan at https://platform.openai.com/account/rate-limits, or choose another provider."
+        );
+    }
+
+    /// A sign-in server that is busy or down while renewing has spent no
+    /// refresh token: the turn tries again, and says so plainly if it can't.
+    #[test]
+    fn a_busy_sign_in_server_is_retried_and_said_plainly() {
+        for raw in [
+            "OpenAI sign-in failed: refresh token returned 503 Service Unavailable",
+            "OpenAI sign-in failed: refresh token returned 429 Too Many Requests",
+        ] {
+            let error = CoreError::Provider(raw.into());
+            assert!(super::is_provider_transient(&error), "{raw}");
+            assert!(super::retry_delay(&error, 1).is_some(), "{raw}");
+            assert_eq!(
+                super::describe_error(&error, Some("OpenAI")),
+                "OpenAI couldn't renew your sign-in just now: its sign-in service is busy or down. Send your message again in a moment."
+            );
+        }
+        // A refused renewal still asks for a new sign-in, at once.
+        let spent = CoreError::Provider(
+            "OpenAI sign-in failed: refresh token returned 401 Unauthorized".into(),
+        );
+        assert!(!super::is_provider_transient(&spent));
+        assert_eq!(super::retry_delay(&spent, 1), None);
+        assert_eq!(
+            super::describe_error(&spent, Some("OpenAI")),
+            "Your OpenAI sign-in has expired or was ended elsewhere. Connect OpenAI again to sign in."
+        );
+    }
+
+    /// A ChatGPT sign-in runs only the models its plan includes: a model
+    /// outside them is still offered with an API key, not retired. The plan's
+    /// usage limit is no refused model.
+    #[test]
+    fn a_model_outside_a_chatgpt_plan_is_said_to_need_an_api_key() {
+        let named = |id: &str, name: &str| ModelInfo {
+            display_name: name.into(),
+            ..model_info(id, 272_000)
+        };
+        let chatgpt = haarness_protocol::ProviderInfo {
+            id: "openai".into(),
+            name: "OpenAI".into(),
+            authenticated: true,
+            models: vec![
+                named("gpt-6.1-sol", "GPT-6.1 Sol"),
+                named("gpt-6-astra", "GPT-6 Astra"),
+                named("gpt-6-luna", "GPT-6 Luna"),
+            ],
+        };
+        for raw in [
+            "HTTP 400 Bad Request: [model_not_found] The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account.",
+            "OpenAI model gpt-5.4-mini is not available on this ChatGPT account. Available: gpt-6.1-sol, gpt-6-astra, gpt-6-luna. Choose one of those, or sign in with an OpenAI API key for the public Responses API.",
+        ] {
+            let error = CoreError::Provider(raw.into());
+            assert_eq!(
+                super::describe_model_refusal(&error, &chatgpt, "gpt-5.4-mini", true).as_deref(),
+                Some(
+                    "GPT-5.4 Mini isn't included with a ChatGPT sign-in. Choose another model for this chat, such as GPT-6.1 Sol, GPT-6 Astra or GPT-6 Luna, or connect OpenAI with an API key to use GPT-5.4 Mini."
+                ),
+                "{raw}"
+            );
+            assert_eq!(
+                super::describe_model_refusal(&error, &chatgpt, "gpt-5.4-mini", false).as_deref(),
+                Some("GPT-5.4 Mini isn't included with this ChatGPT sign-in.")
+            );
+        }
+        let words = "Your ChatGPT Plus plan has reached its usage limit, which resets in about 3 hours. Every model on your ChatGPT sign-in counts toward it: wait for the reset, or choose a model from another provider for this chat.";
+        let limited = CoreError::Provider(words.into());
+        for model in ["gpt-6-luna", "gpt-9"] {
+            assert_eq!(
+                super::describe_model_refusal(&limited, &chatgpt, model, true),
+                None
+            );
+        }
+        assert!(super::is_provider_usage_limit(&limited));
+        assert_eq!(super::retry_delay(&limited, 1), None);
+        assert_eq!(super::describe_error(&limited, Some("OpenAI")), words);
+        assert_eq!(
+            super::stop_failure_categories(&limited),
+            ("provider", "rate_limit")
         );
     }
 

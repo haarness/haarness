@@ -385,10 +385,19 @@ impl Default for OpenAiOAuthConfig {
             .ok()
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or(OPENAI_CALLBACK_PORT);
+        // A debug build can send ChatGPT requests to a fixture too, so the
+        // backend's refusals (a plan's usage limit) are testable end to end; a
+        // release build always talks to ChatGPT.
+        let codex_endpoint = std::env::var("HAARNESS_OPENAI_CODEX_ENDPOINT")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| OPENAI_CODEX_ENDPOINT.into());
         Self {
             issuer,
             client_id: OPENAI_CLIENT_ID.into(),
-            codex_endpoint: OPENAI_CODEX_ENDPOINT.into(),
+            codex_endpoint,
             callback_port,
             user_agent: format!("haarness/{}", env!("CARGO_PKG_VERSION")),
         }
