@@ -4428,6 +4428,7 @@ mod tests {
             assert_eq!(calls.len(), 1, "{calls:?}");
             assert_eq!(calls[0]["options"]["num_ctx"], 32_768);
             assert_eq!(calls[0]["truncate"], false);
+            assert_eq!(calls[0]["shift"], false);
             assert_eq!(calls[0]["tools"][0]["function"]["name"], "read");
         }
         assert!(
