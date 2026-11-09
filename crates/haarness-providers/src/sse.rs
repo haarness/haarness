@@ -293,10 +293,11 @@ pub(crate) fn provider_error_detail(body: &str) -> Option<String> {
     if body.is_empty() {
         return None;
     }
-    let detail = match serde_json::from_str::<Value>(body) {
+    let parsed = serde_json::from_str::<Value>(body).ok().map(listed_error);
+    let detail = match &parsed {
         // xAI answers some refusals with a bare JSON string.
-        Ok(Value::String(text)) if !text.trim().is_empty() => text.trim().to_owned(),
-        Ok(parsed) => match parsed.get("error").and_then(upstream_error) {
+        Some(Value::String(text)) if !text.trim().is_empty() => text.trim().to_owned(),
+        Some(parsed) => match parsed.get("error").and_then(upstream_error) {
             Some(upstream) => upstream,
             None => [
                 "/error/message",
@@ -313,7 +314,7 @@ pub(crate) fn provider_error_detail(body: &str) -> Option<String> {
             .filter(|detail| !detail.is_empty())
             .map(str::to_owned)?,
         },
-        Err(_) => {
+        None => {
             let lower = body.to_ascii_lowercase();
             if lower.starts_with("<!doctype") || lower.starts_with("<html") {
                 return None;
@@ -323,7 +324,7 @@ pub(crate) fn provider_error_detail(body: &str) -> Option<String> {
     };
     // Keep machine-readable error codes without exposing unrelated response
     // fields. Managed-router admission failures are not upstream API quotas.
-    let code = serde_json::from_str::<Value>(body).ok().and_then(|value| {
+    let code = parsed.and_then(|value| {
         value
             .pointer("/error/code")
             .and_then(Value::as_str)
@@ -339,6 +340,20 @@ pub(crate) fn provider_error_detail(body: &str) -> Option<String> {
         detail.push('…');
     }
     Some(detail)
+}
+
+/// The error a body holds in a list of one: Gemini's OpenAI-compatible API
+/// answers `[{"error": {…}}]`, where its words and the wait a rate limit
+/// names ("Please retry in 41s.") are.
+fn listed_error(value: Value) -> Value {
+    match value {
+        Value::Array(mut items)
+            if items.len() == 1 && items[0].get("error").is_some_and(|error| !error.is_null()) =>
+        {
+            items.swap_remove(0)
+        }
+        other => other,
+    }
 }
 
 /// The upstream provider's own words in a gateway's error, which itself says
@@ -674,6 +689,41 @@ mod tests {
         assert_eq!(provider_error_detail(r#"{"error":{"code":400}}"#), None);
         assert_eq!(
             provider_error_detail("<!DOCTYPE html><html><body>Forbidden</body></html>"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_error_listed_alone_is_read_as_the_error() {
+        // Gemini's OpenAI-compatible API, as it answered a replayed call
+        // without its signature and a rate limit on its free tier.
+        let refused = "[{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Function call is missing a thought_signature in functionCall parts.\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n]\n";
+        assert_eq!(
+            provider_error_detail(refused).as_deref(),
+            Some("Function call is missing a thought_signature in functionCall parts.")
+        );
+        let limited = r#"[{"error":{"code":429,"message":"You exceeded your current quota. Please retry in 41.2s.","status":"RESOURCE_EXHAUSTED"}}]"#;
+        // The free tier's refusal of a model it leaves out keeps the words
+        // the runtime reads ("free_tier", "limit: 0").
+        let left_out = r#"[{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-4-argon\nPlease retry in 12s.","status":"RESOURCE_EXHAUSTED"}}]"#;
+        assert_eq!(
+            provider_error_detail(left_out).as_deref(),
+            Some(
+                "You exceeded your current quota, please check your plan and billing details.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-4-argon\nPlease retry in 12s."
+            )
+        );
+        let error = super::status_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            &reqwest::header::HeaderMap::new(),
+            limited,
+        );
+        assert_eq!(
+            error.to_string(),
+            "provider error: HTTP 429 Too Many Requests: You exceeded your current quota. Please retry in 41.2s."
+        );
+        // A list of anything else says nothing readable, as before.
+        assert_eq!(
+            provider_error_detail(r#"[{"message":"one"},{"message":"two"}]"#),
             None
         );
     }

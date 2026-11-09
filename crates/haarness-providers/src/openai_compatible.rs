@@ -119,6 +119,12 @@ const REASONING_SOURCE: &str = "reasoning_provider";
 /// alone, as a router serving many models cannot turn one model's opaque
 /// reasoning into another's (Anthropic refuses unsigned thinking).
 const REASONING_MODEL: &str = "reasoning_model";
+/// The metadata key keeping what a server attached to one tool call
+/// (`extra_content`: Gemini's OpenAI-compatible API puts the call's thought
+/// signature there and refuses the next request when it does not come back).
+const EXTRA_CONTENT: &str = "extra_content";
+/// The provider and model that attached it: it goes back to them alone.
+const EXTRA_CONTENT_SOURCE: &str = "extra_content_source";
 
 /// Whether an assistant message's reasoning goes back to the server with it,
 /// so a model keeps its reasoning between tool calls.
@@ -2122,6 +2128,46 @@ fn mark_prompt_cache(messages: &mut [Value]) {
     }
 }
 
+/// Two user messages in a row become one, for a server the person set up.
+/// A chat holds them after a turn that failed before the model answered (the
+/// next message follows the unanswered one), and after tool results that
+/// brought several files; chat templates that want roles to alternate
+/// (Gemma's, Mistral's) refuse every later request of that chat for it.
+fn join_adjacent_user_messages(messages: &mut Vec<Value>) {
+    let mut joined: Vec<Value> = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        if message["role"] == "user"
+            && let Some(previous) = joined
+                .last_mut()
+                .filter(|previous| previous["role"] == "user")
+        {
+            let parts = |content: Value| match content {
+                Value::String(text) if text.is_empty() => Vec::new(),
+                Value::String(text) => vec![json!({"type": "text", "text": text})],
+                Value::Array(parts) => parts,
+                _ => Vec::new(),
+            };
+            let earlier = previous["content"].take();
+            let later = message["content"].clone();
+            previous["content"] = match (earlier, later) {
+                (Value::String(earlier), Value::String(later)) => {
+                    json!(
+                        [earlier, later]
+                            .into_iter()
+                            .filter(|text| !text.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    )
+                }
+                (earlier, later) => Value::Array([parts(earlier), parts(later)].concat()),
+            };
+            continue;
+        }
+        joined.push(message);
+    }
+    *messages = joined;
+}
+
 fn push_tool_call_message(messages: &mut Vec<Value>, message: Value) {
     if let Some(previous) = messages.last_mut()
         && previous["role"] == "assistant"
@@ -2317,6 +2363,19 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     provider_metadata,
                 } => {
                     let mut message = json!({"role":"assistant","tool_calls":[{"id":call_id,"type":"function","function":{"name":name,"arguments":serde_json::to_string(&arguments).unwrap_or_else(|_|"{}".into())}}]});
+                    // The call's own extra content goes back to the server
+                    // and model that attached it (see `EXTRA_CONTENT`).
+                    if let Some(extra) = provider_metadata
+                        .get(EXTRA_CONTENT)
+                        .filter(|extra| extra.is_object())
+                        .filter(|_| {
+                            let source = &provider_metadata[EXTRA_CONTENT_SOURCE];
+                            source["provider"] == self.id.as_str()
+                                && source["model"] == model.as_str()
+                        })
+                    {
+                        message["tool_calls"][0][EXTRA_CONTENT] = extra.clone();
+                    }
                     if let Some(details) = provider_metadata
                         .get("reasoning_details")
                         .and_then(Value::as_array)
@@ -2417,6 +2476,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
         }
         messages.append(&mut tool_media);
+        if replay == ReasoningReplay::Observed {
+            join_adjacent_user_messages(&mut messages);
+        }
         if self.marks_prompt_cache(&model) && !request.parameters.uncached {
             mark_prompt_cache(&mut messages);
         }
@@ -2697,7 +2759,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         Ok(Box::pin(try_stream! {
             // Parallel tool calls stream interleaved deltas keyed by index.
-            let mut calls: Vec<(String, String, String)> = Vec::new();
+            let mut calls: Vec<StreamedCall> = Vec::new();
             let mut finish_reason: Option<String> = None;
             let mut response_id: Option<String> = None;
             let mut usage: Option<(u64, u64, u64, u64)> = None;
@@ -2849,16 +2911,18 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 }
                 if let Some(deltas)=delta["tool_calls"].as_array(){
                     for tool in deltas {
-                        let index = usize::try_from(tool["index"].as_u64().unwrap_or(0)).unwrap_or(0);
+                        let index = streamed_call_slot(&calls, tool);
                         // A call's arguments are held until the stream ends;
                         // the call starts with its first fragment.
                         if calls.len() <= index {
-                            calls.resize(index + 1, (String::new(), String::new(), String::new()));
+                            calls.resize_with(index + 1, StreamedCall::default);
                             yield ProviderEvent::ContentStarted;
                         }
-                        if let Some(id)=tool["id"].as_str(){calls[index].0 = id.into();}
-                        if let Some(name)=tool["function"]["name"].as_str(){calls[index].1 = name.into();}
-                        if let Some(args)=tool["function"]["arguments"].as_str(){calls[index].2.push_str(args);}
+                        let call = &mut calls[index];
+                        if let Some(id)=tool["id"].as_str().filter(|id| !id.is_empty()){call.id = id.into();}
+                        if let Some(name)=tool["function"]["name"].as_str().filter(|name| !name.is_empty()){call.name = name.into();}
+                        if let Some(args)=tool["function"]["arguments"].as_str(){call.arguments.push_str(args);}
+                        if let Some(extra)=tool.get("extra_content").filter(|extra| extra.is_object()){call.extra_content = Some(extra.clone());}
                     }
                 }
                 if let Some(reason)=event["choices"][0]["finish_reason"].as_str(){finish_reason = Some(reason.to_owned());}
@@ -2890,15 +2954,27 @@ impl ModelProvider for OpenAiCompatibleProvider {
             if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
                 yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }; if let Some(usd) = charged.take() { yield ProviderEvent::Cost { usd }; }
             }
-            for (call_id, name, arguments) in calls.drain(..) {
+            for StreamedCall { id: call_id, name, arguments, extra_content } in calls.drain(..) {
                 if !name.is_empty() {
+                    // What the server attached to this call alone (Gemini's
+                    // thought signature) goes back with it, to this server
+                    // and model only.
+                    let provider_metadata = match extra_content {
+                        Some(extra) => {
+                            let mut metadata = if provider_metadata.is_object() { provider_metadata.clone() } else { json!({}) };
+                            metadata[EXTRA_CONTENT] = extra;
+                            metadata[EXTRA_CONTENT_SOURCE] = json!({"provider": provider_id, "model": reasoning_model});
+                            metadata
+                        }
+                        None => provider_metadata.clone(),
+                    };
                     // Arguments that do not parse are answered with an error the
                     // model can correct, as a call that fails validation is.
                     let arguments = haarness_core::tool_call_arguments(&arguments);
                     if structured_output.is_some() && name == STRUCTURED_OUTPUT_TOOL_NAME {
                         yield ProviderEvent::StructuredOutput(arguments);
                     } else {
-                        yield ProviderEvent::ToolCall{call_id,name,arguments,provider_metadata:provider_metadata.clone()};
+                        yield ProviderEvent::ToolCall{call_id,name,arguments,provider_metadata};
                     }
                 }
             }
@@ -2968,6 +3044,43 @@ fn openai_compatible_media_message(
     }
     Ok(json!({"role":role,"content":blocks}))
 }
+/// A tool call as its stream's fragments build it.
+#[derive(Debug, Default)]
+struct StreamedCall {
+    id: String,
+    name: String,
+    arguments: String,
+    /// What the server attached to this call alone (`extra_content`).
+    extra_content: Option<Value>,
+}
+
+/// Which call a tool-call fragment belongs to. A fragment names its call by
+/// `index`, as OpenAI's API does; Gemini's OpenAI-compatible API sends each
+/// call of a batch whole and without one. Then a new ID starts a call, an
+/// ID already seen continues its own, and a fragment naming neither
+/// continues the latest call.
+fn streamed_call_slot(calls: &[StreamedCall], fragment: &Value) -> usize {
+    if let Some(index) = fragment["index"].as_u64() {
+        return usize::try_from(index).unwrap_or(0);
+    }
+    let Some(last) = calls.last() else {
+        return 0;
+    };
+    let latest = calls.len() - 1;
+    match fragment["id"].as_str().filter(|id| !id.is_empty()) {
+        Some(id) => calls
+            .iter()
+            .position(|call| call.id == id)
+            // A call begun by a fragment that named no ID yet.
+            .unwrap_or(if last.id.is_empty() {
+                latest
+            } else {
+                calls.len()
+            }),
+        None => latest,
+    }
+}
+
 /// A whole reply's message as one chunk's delta: each tool call gets the
 /// index a stream would have given it.
 fn whole_reply_delta(message: &Value) -> Value {
@@ -7030,7 +7143,11 @@ mod tests {
 
     /// A custom endpoint at `base` for `model`, with a key.
     fn custom_at(base: String) -> OpenAiCompatibleProvider {
-        OpenAiCompatibleProvider::new(CompatibleInstance {
+        OpenAiCompatibleProvider::new(custom_instance(base))
+    }
+
+    fn custom_instance(base: String) -> CompatibleInstance {
+        CompatibleInstance {
             id: "my-endpoint".into(),
             name: "My endpoint".into(),
             base_url: base,
@@ -7042,7 +7159,7 @@ mod tests {
             model_defaults: CompatibleModelDefaults::default(),
             assume_authenticated: false,
             headers: crate::ProviderHeaders::default(),
-        })
+        }
     }
 
     fn hello(model: &str) -> ProviderRequest {
@@ -7354,5 +7471,252 @@ mod tests {
         assert_eq!(sent[2]["tool_calls"][0]["id"], "call_a");
         assert_eq!(sent[2]["reasoning_content"], "");
         assert_eq!(sent[3]["role"], "tool");
+    }
+
+    /// Gemini's OpenAI-compatible API, as it streamed two parallel calls:
+    /// each whole and without an index, the first with its thought signature
+    /// in `extra_content`, and the batch finished as `stop`.
+    const GEMINI_PARALLEL: &str = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"I will read both files.\",\"role\":\"assistant\"},\"index\":0}],\"usage\":{\"completion_tokens\":10,\"prompt_tokens\":78,\"total_tokens\":147}}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"extra_content\":{\"google\":{\"thought_signature\":\"sig-a\"}},\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\",\"name\":\"read\"},\"id\":\"call_a\",\"type\":\"function\"}]},\"index\":0}],\"usage\":{\"completion_tokens\":42,\"prompt_tokens\":78,\"total_tokens\":179}}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"b.txt\\\"}\",\"name\":\"read\"},\"id\":\"call_b\",\"type\":\"function\"}]},\"index\":0}],\"usage\":{\"completion_tokens\":42,\"prompt_tokens\":78,\"total_tokens\":179}}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":\"stop\",\"index\":0}],\"usage\":{\"completion_tokens\":42,\"prompt_tokens\":78,\"total_tokens\":179}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    fn calls_of(events: &[ProviderEvent]) -> Vec<(String, String, Value, Value)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                    provider_metadata,
+                } => Some((
+                    call_id.clone(),
+                    name.clone(),
+                    arguments.clone(),
+                    provider_metadata.clone(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn calls_streamed_without_an_index_stay_apart() {
+        // Gemini's parallel calls, whole and unnumbered: two calls, not one
+        // with both argument objects run together.
+        let streamed = stream_events(GEMINI_PARALLEL).await;
+        assert_eq!(reported(&streamed), [(78, 42, 0, 0)]);
+        let events: Vec<_> = streamed.into_iter().map(Result::unwrap).collect();
+        let calls = calls_of(&events);
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(
+            (calls[0].0.as_str(), calls[0].1.as_str()),
+            ("call_a", "read")
+        );
+        assert_eq!(calls[0].2, json!({"path": "a.txt"}));
+        assert_eq!(
+            (calls[1].0.as_str(), calls[1].1.as_str()),
+            ("call_b", "read")
+        );
+        assert_eq!(calls[1].2, json!({"path": "b.txt"}));
+        assert_eq!(
+            calls[0].3["extra_content"],
+            json!({"google": {"thought_signature": "sig-a"}})
+        );
+        assert!(
+            calls[1].3.get("extra_content").is_none(),
+            "{:?}",
+            calls[1].3
+        );
+        // A fragment naming neither index nor ID continues the latest call;
+        // an ID first seen later names the call it began; an ID seen before
+        // continues its own call.
+        let events: Vec<_> = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"pa\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\",\"function\":{\"arguments\":\"th\\\":\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"y\",\"function\":{\"name\":\"list\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\",\"function\":{\"arguments\":\"\\\"a\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+        let calls = calls_of(&events);
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(
+            (calls[0].0.as_str(), calls[0].1.as_str(), &calls[0].2),
+            ("x", "read", &json!({"path": "a"}))
+        );
+        assert_eq!(
+            (calls[1].0.as_str(), calls[1].1.as_str(), &calls[1].2),
+            ("y", "list", &json!({}))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_calls_thought_signature_goes_back_to_the_model_that_gave_it() {
+        // A stand-in for Gemini's OpenAI-compatible API: it refuses a
+        // follow-up whose call lacks the signature it gave, in its own
+        // envelope (a list of one error).
+        let state = FixtureState::default();
+        let root = serve(
+            Router::new()
+                .route(
+                    "/v1/chat/completions",
+                    post(
+                        |State(state): State<FixtureState>, Json(request): Json<Value>| async move {
+                            state.0.lock().push(request.clone());
+                            let messages = request["messages"].as_array().cloned().unwrap_or_default();
+                            let stream = |body: String| {
+                                axum::response::Response::builder()
+                                    .header(CONTENT_TYPE, "text/event-stream")
+                                    .body(axum::body::Body::from(body))
+                                    .unwrap()
+                            };
+                            if !messages.iter().any(|message| message["role"] == "tool") {
+                                return stream(GEMINI_PARALLEL.to_owned());
+                            }
+                            let signed = messages.iter().any(|message| {
+                                message["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "sig-a"
+                            });
+                            if signed {
+                                return stream(concat!(
+                                    "data: {\"choices\":[{\"delta\":{\"content\":\"Both read.\"},\"finish_reason\":\"stop\",\"index\":0}]}\n\n",
+                                    "data: [DONE]\n\n"
+                                ).to_owned());
+                            }
+                            axum::response::Response::builder()
+                                .status(400)
+                                .header(CONTENT_TYPE, "application/json")
+                                .body(axum::body::Body::from("[{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Function call is missing a thought_signature in functionCall parts.\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n]\n"))
+                                .unwrap()
+                        },
+                    ),
+                )
+                .with_state(state.clone()),
+        )
+        .await;
+        let provider = custom_at(format!("{root}/v1"));
+        let mut request = hello("fixture-model");
+        request.tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "Read a file".into(),
+            input_schema: json!({"type": "object"}),
+        }];
+        let calls = calls_of(&outcome(&provider, request.clone()).await.unwrap());
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        let mut follow_up = request.clone();
+        follow_up.messages.push(ProviderMessage::Text {
+            role: "assistant".into(),
+            content: "I will read both files.".into(),
+        });
+        for (call_id, name, arguments, provider_metadata) in &calls {
+            follow_up.messages.push(ProviderMessage::ToolCall {
+                call_id: call_id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+                provider_metadata: provider_metadata.clone(),
+            });
+        }
+        for (call_id, name, ..) in &calls {
+            follow_up.messages.push(ProviderMessage::ToolResult {
+                call_id: call_id.clone(),
+                name: name.clone(),
+                output: "contents".into(),
+                is_error: false,
+                attachments: Vec::new(),
+            });
+        }
+        let answer = outcome(&provider, follow_up.clone()).await.unwrap();
+        assert_eq!(text_of(&answer), "Both read.");
+        let sent = state.0.lock()[1]["messages"].clone();
+        let batch = &sent[2]["tool_calls"];
+        assert_eq!(batch.as_array().unwrap().len(), 2, "{sent}");
+        assert_eq!(
+            batch[0]["extra_content"],
+            json!({"google": {"thought_signature": "sig-a"}})
+        );
+        assert!(batch[1].get("extra_content").is_none(), "{sent}");
+        // Another model of the same server, or another server, never gets
+        // the signature; the refusal then keeps the server's own words.
+        follow_up.model = "other-model".into();
+        let refused = outcome(&provider, follow_up).await.unwrap_err();
+        assert!(
+            refused.to_string().contains("missing a thought_signature"),
+            "{refused}"
+        );
+        assert!(
+            state.0.lock()[2]["messages"][2]["tool_calls"][0]
+                .get("extra_content")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_set_up_here_gets_user_messages_that_alternate() {
+        // After a turn that failed before any reply, the next message follows
+        // the unanswered one; Gemma's and Mistral's chat templates refuse two
+        // user messages in a row, so they go to such a server as one.
+        let state = FixtureState::default();
+        let root = serve(
+            Router::new()
+                .route(
+                    "/v1/chat/completions",
+                    post(
+                        |State(state): State<FixtureState>, Json(request): Json<Value>| async move {
+                            state.0.lock().push(request);
+                            ready_stream().await
+                        },
+                    ),
+                )
+                .with_state(state.clone()),
+        )
+        .await;
+        let user = |content: &str| ProviderMessage::Text {
+            role: "user".into(),
+            content: content.into(),
+        };
+        let mut request = hello("fixture-model");
+        request.messages = vec![
+            user("Fix the build"),
+            user("Try again"),
+            ProviderMessage::Text {
+                role: "assistant".into(),
+                content: "Done.".into(),
+            },
+            user("And the tests"),
+            ProviderMessage::Media {
+                role: "user".into(),
+                content: "This picture shows the failure".into(),
+                attachments: vec!["data:image/png;base64,iVBORw0KGgo=".into()],
+            },
+        ];
+        let provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            model_defaults: CompatibleModelDefaults {
+                images: Some(true),
+                ..CompatibleModelDefaults::default()
+            },
+            ..custom_instance(format!("{root}/v1"))
+        });
+        outcome(&provider, request).await.unwrap();
+        let sent = state.0.lock()[0]["messages"].clone();
+        let roles: Vec<_> = sent
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(roles, ["system", "user", "assistant", "user"], "{sent}");
+        assert_eq!(sent[1]["content"], "Fix the build\n\nTry again");
+        let parts = sent[3]["content"].as_array().unwrap();
+        assert_eq!(parts[0], json!({"type": "text", "text": "And the tests"}));
+        assert_eq!(parts[1]["text"], "This picture shows the failure");
+        assert_eq!(parts[2]["type"], "image_url");
     }
 }
