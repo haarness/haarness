@@ -12459,18 +12459,46 @@ impl RunnerTask {
     /// is validated: Llama 3.1 sends `"timeout": "0"` and
     /// `"run_in_background": "false"`, and refused, sends them again the
     /// same way and then makes up what the command printed.
-    fn coerce_tool_arguments(&self, name: &str, arguments: &mut serde_json::Value) {
+    ///
+    /// A call to a tool that changes nothing whose only other fault is fields
+    /// the tool does not take runs without them (gpt-oss asks `read` for
+    /// `line_start` and `line_end`), and the words returned, added to what
+    /// the tool answers, say which fields were left out and which it takes.
+    fn coerce_tool_arguments(
+        &self,
+        name: &str,
+        arguments: &mut serde_json::Value,
+    ) -> Option<String> {
+        let tool = (name != LOAD_TOOL_NAME)
+            .then(|| self.tools.get(name))
+            .flatten();
         let coerced = if name == LOAD_TOOL_NAME {
             crate::tool_validation::coerced_arguments(&crate::load_tool_definition(), arguments)
         } else {
-            self.tools
-                .get(name)
+            tool.as_ref()
                 .and_then(|tool| tool.coerced_arguments(arguments))
         };
         if let Some(coerced) = coerced {
             tracing::info!(thread = %self.thread.id, tool = name, "reading scalars a model wrote as strings as the tool's types");
             *arguments = coerced;
+            return None;
         }
+        let tool = tool?;
+        let (kept, unknown) = tool.without_unknown_fields(arguments)?;
+        tracing::info!(thread = %self.thread.id, tool = name, fields = ?unknown, "leaving out fields a tool that changes nothing does not take");
+        *arguments = kept;
+        let fields = tool
+            .definition()
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        Some(format!(
+            "(Not used: {}. {name} takes {}.)",
+            spoken_list(&unknown, "and"),
+            spoken_list(&fields, "and")
+        ))
     }
 
     fn validate_tool_arguments(&self, name: &str, arguments: &serde_json::Value) -> CoreResult<()> {
@@ -13007,7 +13035,7 @@ impl RunnerTask {
             return Err(CoreError::Cancelled);
         }
         self.check_tool_name(agent, name, require_advertised)?;
-        self.coerce_tool_arguments(name, &mut arguments);
+        let unused_fields = self.coerce_tool_arguments(name, &mut arguments);
         self.validate_tool_arguments(name, &arguments)?;
         if name == LOAD_TOOL_NAME {
             return self.execute_load_tool(&arguments);
@@ -13403,6 +13431,13 @@ impl RunnerTask {
                     .await);
             }
         };
+        if let Some(note) = unused_fields {
+            output.text = if output.text.is_empty() {
+                note
+            } else {
+                format!("{}\n\n{note}", output.text)
+            };
+        }
         if let Some(context) = hook_context {
             use std::fmt::Write as _;
             let _ = write!(
@@ -17545,23 +17580,45 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
 /// the outside-folder ask are about the file the tool opens. The folder is
 /// listed off the async workers, and Stop ends a listing that hangs (an
 /// unreachable network share).
+///
+/// A file tool's path written from the project's folder as if it were the
+/// disk's root (`/src/app.py` for `<project>/src/app.py`, as small local
+/// models write it) becomes the project's path the same way, when nothing
+/// is at the path as written (`permissions::project_rooted_twin`).
 async fn recover_read_path(
     name: &str,
     arguments: &mut serde_json::Value,
     workspace: &Path,
     cancel: &CancellationToken,
 ) -> CoreResult<()> {
+    // Whether the tool needs the path to be there already; `write` makes it.
+    let existing = match name {
+        "read" | "list" | "glob" | "grep" | "edit" | "multiedit" => true,
+        "write" => false,
+        _ => return Ok(()),
+    };
     let Some(path) = arguments
         .get("path")
         .and_then(serde_json::Value::as_str)
-        .filter(|path| name == "read" && path.contains([' ', '\u{a0}', '\u{202f}']))
         .map(str::to_owned)
     else {
         return Ok(());
     };
+    let spaced = name == "read" && path.contains([' ', '\u{a0}', '\u{202f}']);
+    let rooted = path.starts_with('/') || (cfg!(windows) && path.starts_with('\\'));
+    if !spaced && !rooted {
+        return Ok(());
+    }
     let workspace = workspace.to_path_buf();
     let lookup = tokio::task::spawn_blocking(move || {
-        crate::permissions::no_break_space_twin(&workspace, &path)
+        rooted
+            .then(|| crate::permissions::project_rooted_twin(&workspace, &path, existing))
+            .flatten()
+            .or_else(|| {
+                spaced
+                    .then(|| crate::permissions::no_break_space_twin(&workspace, &path))
+                    .flatten()
+            })
     });
     let twin = tokio::select! {
         () = cancel.cancelled() => return Err(CoreError::Cancelled),

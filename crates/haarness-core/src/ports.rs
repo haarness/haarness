@@ -892,6 +892,18 @@ pub trait Tool: Send + Sync {
         definition.input_schema = self.validation_schema();
         crate::tool_validation::coerced_arguments(&definition, arguments)
     }
+    /// A model's arguments to a tool that changes nothing, with the fields
+    /// the tool does not take left out, and their names, when that is their
+    /// only fault (see `tool_validation::without_unknown_fields`); `None` for
+    /// any other arguments, and for every tool that changes something.
+    fn without_unknown_fields(&self, arguments: &Value) -> Option<(Value, Vec<String>)> {
+        if self.side_effectful() {
+            return None;
+        }
+        let mut definition = self.definition();
+        definition.input_schema = self.validation_schema();
+        crate::tool_validation::without_unknown_fields(&definition, arguments)
+    }
     fn side_effectful(&self) -> bool;
     /// Whether the registry lists this tool now. A tool that depends on a
     /// setting the person can switch (computer use) leaves the list while it

@@ -3613,6 +3613,12 @@ impl Tool for BuiltinTool {
                         });
                     }
                 }
+                if tokio::fs::metadata(&path)
+                    .await
+                    .is_ok_and(|metadata| metadata.is_dir())
+                {
+                    return read_folder(string(&args, "path")?, &path, &context).await;
+                }
                 if haarness_core::attachments::is_image_source(&path.to_string_lossy()) {
                     return read_image(&path, context.execution.media_max_bytes).await;
                 }
@@ -3752,11 +3758,24 @@ impl Tool for BuiltinTool {
                     () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
                     found = walk => found.map_err(tool_error)??,
                 };
-                let output = with_skipped(
-                    truncate_output(found.values.join("\n")).await?,
-                    found.skipped,
-                    found.partial,
-                );
+                let mut listed = truncate_output(found.values.join("\n")).await?;
+                if listed.text.is_empty() && !(found.stopped || found.large || found.partial) {
+                    // `*.py` finds nothing in `src` when the files are in
+                    // `src/app`: models write it first, then guess. Not when
+                    // matches were left out: then there were some.
+                    let pattern = string(&args, "pattern")?;
+                    listed.text = if pattern.contains("**")
+                        || pattern.contains(['/', '\\'])
+                        || !found.skipped.is_empty()
+                    {
+                        "No files found".into()
+                    } else {
+                        format!(
+                            "No files found. * matches inside one folder only; **/{pattern} also looks in every folder below it"
+                        )
+                    };
+                }
+                let output = with_skipped(listed, found.skipped, found.partial);
                 Ok(if found.stopped {
                     with_stop(output, GLOB_LOOK_LIMIT)
                 } else if found.large {
@@ -3766,11 +3785,22 @@ impl Tool for BuiltinTool {
                 })
             }
             Kind::Grep => {
-                let regex = regex::Regex::new(string(&args, "pattern")?).map_err(|error| {
-                    CoreError::Invalid(format!(
-                        "pattern is not a valid regular expression: {error}\nEscape ( ) [ ] {{ }} . * + ? | ^ $ and \\ with a backslash to search for them as written"
-                    ))
-                })?;
+                let pattern = string(&args, "pattern")?;
+                // A pattern that is no regular expression (`discount(`, as
+                // models write a call they look for) has one meaning: the
+                // text as written. Refused, Qwen3 Coder escaped it twice and
+                // gave up.
+                let (regex, as_written) = match regex::Regex::new(pattern) {
+                    Ok(regex) => (regex, false),
+                    Err(error) => (
+                        regex::Regex::new(&regex::escape(pattern)).map_err(|_| {
+                            CoreError::Invalid(format!(
+                                "pattern is not a valid regular expression: {error}"
+                            ))
+                        })?,
+                        true,
+                    ),
+                };
                 let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
                 let root = resolve_existing(requested, &context)?;
                 // A file a `read` rule denies is left out like a secret one.
@@ -3816,6 +3846,16 @@ impl Tool for BuiltinTool {
                     found.skipped,
                     found.stopped.is_some(),
                 );
+                if found.stopped.is_none() {
+                    output = nothing_found(output);
+                }
+                if as_written {
+                    use std::fmt::Write as _;
+                    let _ = write!(
+                        output.text,
+                        "\n\n({pattern} is not a regular expression, so it was searched for as written.)"
+                    );
+                }
                 if let Some(stop) = found.stopped {
                     output.text = if output.text.is_empty() {
                         stop.note()
@@ -4044,13 +4084,14 @@ impl Tool for BuiltinTool {
                     }
                     None => context.workspace.clone(),
                 };
-                let given = args
+                let written = args
                     .get("timeout")
                     .or_else(|| args.get("timeout_ms"))
                     .and_then(Value::as_u64);
+                let (given, in_seconds) = shell_timeout(written);
                 let agent = (!context.execution.person_shell).then_some(context.thread_id);
-                if let Some(call) = &context.execution.shell_call {
-                    return crate::shell::run_call(
+                let ran = if let Some(call) = &context.execution.shell_call {
+                    crate::shell::run_call(
                         call,
                         haarness_core::CommandRequest {
                             command: command.to_owned(),
@@ -4067,18 +4108,30 @@ impl Tool for BuiltinTool {
                         &context.execution.shell_env,
                         agent,
                     )
-                    .await;
+                    .await
+                } else {
+                    crate::shell::run(
+                        command,
+                        &workdir,
+                        given.unwrap_or(context.execution.shell_timeout_ms),
+                        &context.cancel,
+                        &tool_output_dir(),
+                        &context.execution.shell_env,
+                        agent,
+                    )
+                    .await
+                };
+                match (ran, in_seconds) {
+                    (Ok(mut output), Some(seconds)) => {
+                        use std::fmt::Write as _;
+                        let _ = write!(
+                            output.text,
+                            "\n\n(timeout {seconds} was read as {seconds} seconds: it is in milliseconds.)"
+                        );
+                        Ok(output)
+                    }
+                    (ran, _) => ran,
                 }
-                crate::shell::run(
-                    command,
-                    &workdir,
-                    given.unwrap_or(context.execution.shell_timeout_ms),
-                    &context.cancel,
-                    &tool_output_dir(),
-                    &context.execution.shell_env,
-                    agent,
-                )
-                .await
             }
             Kind::WebFetch => {
                 let written = string(&args, "url")?;
@@ -4684,9 +4737,11 @@ fn not_one_match(named: &str, count: usize, number: Option<usize>) -> String {
         format!(
             "{which} was not found in {named}; {unchanged}. Read the file again and copy the text exactly as it is now, with its indentation and line breaks"
         )
-    } else if number.is_some() {
+    } else if let Some(number) = number {
+        // Said of this edit: Qwen2.5 Coder, told to "set replaceAll", set it
+        // on another edit and sent the same call three times.
         format!(
-            "{which} occurs {count} times in {named}; {unchanged}. Add the lines around the place to change so old names one, or set replaceAll to change every one"
+            "{which} occurs {count} times in {named}; {unchanged}. Add the lines around the place to change so old names one, or give edit {number} \"replaceAll\": true to change every one"
         )
     } else {
         format!(
@@ -4811,13 +4866,8 @@ async fn list(
     context: &ToolContext,
     follow: fn(&Path) -> bool,
 ) -> CoreResult<ToolOutput> {
-    let requested = requested.to_owned();
-    let call = context.clone();
-    let listing = tokio::task::spawn_blocking(move || list_folder(&requested, &call, follow));
-    let (names, skipped) = tokio::select! {
-        () = context.cancel.cancelled() => return Err(CoreError::Cancelled),
-        listed = listing => listed.map_err(tool_error)??,
-    };
+    let (entries, skipped) = listed_entries(requested, context, follow).await?;
+    let names: Vec<_> = entries.into_iter().map(|(name, _)| name).collect();
     Ok(with_skipped(
         truncate_output(names.join("\n")).await?,
         skipped,
@@ -4825,13 +4875,72 @@ async fn list(
     ))
 }
 
-/// [`list`]'s listing, run synchronously.
+/// What `read` shows of a folder: what `list` does, each folder's name
+/// ending in `/`, under a line that says it is a folder. Small models read
+/// a folder to see what is in it as often as they list it, and refused,
+/// they try again.
+async fn read_folder(
+    requested: &str,
+    path: &Path,
+    context: &ToolContext,
+) -> CoreResult<ToolOutput> {
+    let (entries, skipped) = listed_entries(requested, context, Path::is_dir).await?;
+    let names: Vec<_> = entries
+        .into_iter()
+        .map(|(name, folder)| if folder { format!("{name}/") } else { name })
+        .collect();
+    let heading = if names.is_empty() {
+        format!("{} is an empty folder.", path.display())
+    } else {
+        format!(
+            "{} is a folder. It holds (folders end in /):",
+            path.display()
+        )
+    };
+    Ok(with_skipped(
+        truncate_output(
+            format!("{heading}\n{}", names.join("\n"))
+                .trim_end()
+                .to_owned(),
+        )
+        .await?,
+        skipped,
+        false,
+    ))
+}
+
+/// [`list_folder`] off the async workers, ended by Stop.
+async fn listed_entries(
+    requested: &str,
+    context: &ToolContext,
+    follow: fn(&Path) -> bool,
+) -> CoreResult<(Vec<(String, bool)>, Skipped)> {
+    let requested = requested.to_owned();
+    let call = context.clone();
+    let listing = tokio::task::spawn_blocking(move || list_folder(&requested, &call, follow));
+    tokio::select! {
+        () = context.cancel.cancelled() => Err(CoreError::Cancelled),
+        listed = listing => listed.map_err(tool_error)?,
+    }
+}
+
+/// [`list`]'s listing, run synchronously: each entry's name, and whether it
+/// is a folder.
 fn list_folder(
     requested: &str,
     context: &ToolContext,
     follow: fn(&Path) -> bool,
-) -> CoreResult<(Vec<String>, Skipped)> {
+) -> CoreResult<(Vec<(String, bool)>, Skipped)> {
     let path = resolve_existing(requested, context)?;
+    // A file's path, which reading a folder fails on with the system's
+    // own words (`Not a directory (os error 20)`, or on Windows `The
+    // directory name is invalid. (os error 267)`).
+    if std::fs::metadata(&path).is_ok_and(|metadata| !metadata.is_dir()) {
+        return Err(CoreError::Tool(format!(
+            "{} is a file, not a folder; read shows what it holds",
+            path.display()
+        )));
+    }
     let secrets = SecretFilter::new(&context.workspace, requested, &path, None);
     let mut names = Vec::new();
     let mut skipped = Skipped::default();
@@ -4851,7 +4960,7 @@ fn list_folder(
             skipped.count(hidden);
             continue;
         }
-        names.push(entry.file_name().to_string_lossy().into_owned());
+        names.push((entry.file_name().to_string_lossy().into_owned(), folder));
     }
     names.sort();
     Ok((names, skipped))
@@ -4895,6 +5004,11 @@ struct Skipped {
 }
 
 impl Skipped {
+    /// Whether nothing was left out.
+    fn is_empty(self) -> bool {
+        self.secret == 0 && self.denied == 0 && self.sign_ins == 0 && self.outside == 0
+    }
+
     fn one(hidden: Hidden) -> Self {
         let mut skipped = Self::default();
         skipped.count(hidden);
@@ -5193,6 +5307,28 @@ fn same_file(left: &Path, right: &Path) -> bool {
 /// refuses them). The note follows any truncation so the model always sees
 /// it; `partial` means the search stopped at its result limit, so files it
 /// never reached went uncounted.
+/// The deadline in milliseconds a shell call's `timeout` gives, and the
+/// seconds it was read as when the model wrote seconds: under one second no
+/// command a model runs can finish (Git Bash alone takes longer to start on
+/// Windows), and Llama 3.1, meaning two and five minutes, sent `120` and
+/// `300`, every command then ending at once. Zero keeps its meaning (no
+/// deadline).
+fn shell_timeout(written: Option<u64>) -> (Option<u64>, Option<u64>) {
+    match written {
+        Some(seconds @ 1..1_000) => (Some(seconds * 1_000), Some(seconds)),
+        written => (written, None),
+    }
+}
+
+/// A search that found nothing says so: an empty result reads to a small
+/// model as nothing to go on, and it makes up what the files hold.
+fn nothing_found(mut output: ToolOutput) -> ToolOutput {
+    if output.text.is_empty() {
+        output.text = "No files found".into();
+    }
+    output
+}
+
 fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> ToolOutput {
     let at_least = if partial { "at least " } else { "" };
     let plural = |count: usize| if count == 1 { "" } else { "s" };
@@ -9287,7 +9423,7 @@ export default workflow({
         let texts = receiver
             .recv_timeout(Duration::from_secs(30))
             .expect("the globs end by themselves");
-        assert_eq!(texts[0], "");
+        assert_eq!(texts[0], "No files found");
         // A link to another folder of the project is still followed.
         assert_eq!(
             texts[1],
@@ -10063,25 +10199,147 @@ export default workflow({
         assert!(!patch.contains("src/core.pyi: src/core.pyi"), "{patch}");
     }
 
+    /// Qwen2.5 Coder reads the project's folder before anything else, and
+    /// every such read failed (26 of 26 one day on Windows); it is listed.
     #[tokio::test]
-    async fn a_pattern_that_is_not_a_regular_expression_says_how_to_search_as_written() {
-        let (root, _) = read_fixture("main.py", b"print(total)\n");
-        let refused = edit_in(&root, "grep", json!({"pattern":"print(total"}))
+    async fn read_of_a_folder_shows_what_it_holds() {
+        let (root, _) = read_fixture("README.md", b"# app\n");
+        std::fs::create_dir_all(root.join("src/app")).unwrap();
+        std::fs::write(root.join("src/main.py"), "x").unwrap();
+        std::fs::write(root.join(".env"), "TOKEN=1").unwrap();
+        let listed = edit_in(&root, "read", json!({"path": root.display().to_string()}))
+            .await
+            .unwrap();
+        assert_eq!(
+            listed.text,
+            format!(
+                "{} is a folder. It holds (folders end in /):\nREADME.md\nsrc/\n\n(skipped 1 file with a secret's name)",
+                root.display()
+            )
+        );
+        let listed = edit_in(&root, "read", json!({"path": "src"}))
+            .await
+            .unwrap();
+        assert!(
+            listed
+                .text
+                .ends_with("src is a folder. It holds (folders end in /):\napp/\nmain.py"),
+            "{}",
+            listed.text
+        );
+        std::fs::create_dir(root.join("empty")).unwrap();
+        let empty = edit_in(&root, "read", json!({"path": "empty"}))
+            .await
+            .unwrap();
+        assert!(
+            empty.text.ends_with("empty is an empty folder."),
+            "{}",
+            empty.text
+        );
+        // A file's path given to list says what it is, not the system's
+        // `Not a directory (os error 20)`.
+        let refused = edit_in(&root, "list", json!({"path": "README.md"}))
             .await
             .unwrap_err()
             .to_string();
         assert!(
-            refused.starts_with("invalid request: pattern is not a valid regular expression: "),
+            refused.ends_with("README.md is a file, not a folder; read shows what it holds"),
             "{refused}"
         );
+        assert!(!refused.contains("os error"), "{refused}");
+    }
+
+    /// Llama 3.1 meant minutes and wrote `"timeout": "120"`: every command
+    /// ended after 120 ms. Under a second is read as seconds.
+    #[test]
+    fn a_shell_timeout_under_a_second_is_read_as_seconds() {
+        assert_eq!(shell_timeout(Some(120)), (Some(120_000), Some(120)));
+        assert_eq!(shell_timeout(Some(999)), (Some(999_000), Some(999)));
+        for kept in [None, Some(0), Some(1_000), Some(120_000)] {
+            assert_eq!(shell_timeout(kept), (kept, None), "{kept:?}");
+        }
+    }
+
+    /// A glob or grep that finds nothing says so: an empty answer reads to
+    /// a small model as nothing to go on, and it made up what the files hold.
+    #[tokio::test]
+    async fn a_search_that_finds_nothing_says_so() {
+        let (root, _) = read_fixture("README.md", b"# app\n");
+        std::fs::create_dir_all(root.join("src/app")).unwrap();
+        std::fs::write(root.join("src/app/main.py"), "x").unwrap();
+        let shallow = edit_in(&root, "glob", json!({"path": "src", "pattern": "*.py"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            shallow.text,
+            "No files found. * matches inside one folder only; **/*.py also looks in every folder below it"
+        );
+        let deep = edit_in(&root, "glob", json!({"path": "src", "pattern": "**/*.rs"}))
+            .await
+            .unwrap();
+        assert_eq!(deep.text, "No files found");
+        // A pattern with a folder in it gets no hint: `**/src/*.py` is no
+        // better a guess than `src/**/*.py`.
+        let foldered = edit_in(&root, "glob", json!({"pattern": "src/*.py"}))
+            .await
+            .unwrap();
+        assert_eq!(foldered.text, "No files found");
+        let none = edit_in(&root, "grep", json!({"pattern": "nowhere"}))
+            .await
+            .unwrap();
+        assert_eq!(none.text, "No files found");
+    }
+
+    /// Told to "set replaceAll", Qwen2.5 Coder set it on the other edit and
+    /// sent the same call three times: the words name the edit.
+    #[tokio::test]
+    async fn a_multiedit_old_found_twice_names_the_edit_to_give_replace_all() {
+        let (root, _) = read_fixture("rates.py", b"RATE = 1\nprint(RATE)\nLIMIT = 2\n");
+        let refused = edit_in(
+            &root,
+            "multiedit",
+            json!({"path": "rates.py", "edits": [
+                {"old": "RATE", "new": "SPEED"},
+                {"old": "LIMIT", "new": "CAP", "replaceAll": true}
+            ]}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(
-            refused.contains("with a backslash to search for them as written"),
+            refused.contains(
+                "edit 1's old occurs 2 times in rates.py; nothing was changed. Add the lines around the place to change so old names one, or give edit 1 \"replaceAll\": true to change every one"
+            ),
             "{refused}"
         );
+    }
+
+    /// Qwen3 Coder looks for `discount(`; refused, it escaped the bracket
+    /// twice and gave up. A pattern that is no regular expression has one
+    /// meaning: the text as written.
+    #[tokio::test]
+    async fn a_pattern_that_is_not_a_regular_expression_is_searched_for_as_written() {
+        let (root, _) = read_fixture("main.py", b"print(total)\nprint total\n");
+        let found = edit_in(&root, "grep", json!({"pattern":"print(total"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            found.text,
+            "main.py:1:print(total)\n\n(print(total is not a regular expression, so it was searched for as written.)"
+        );
+        // One that is a regular expression is read as one.
         let found = edit_in(&root, "grep", json!({"pattern":"print\\(total"}))
             .await
             .unwrap();
         assert_eq!(found.text, "main.py:1:print(total)");
+        let none = edit_in(&root, "grep", json!({"pattern":"[unclosed"}))
+            .await
+            .unwrap();
+        assert!(
+            none.text.starts_with("No files found\n\n([unclosed is not"),
+            "{}",
+            none.text
+        );
     }
 
     #[cfg(windows)]

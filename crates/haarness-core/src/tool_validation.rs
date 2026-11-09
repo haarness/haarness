@@ -192,13 +192,31 @@ pub(crate) fn validate_arguments(tool: &ToolDefinition, arguments: &Value) -> Co
 /// Arguments in which each value that failed the schema only for being a
 /// string where the schema wants a number, an integer, a boolean or null,
 /// and that is exactly one written out (Llama 3.1 sends `"timeout": "0"` and
-/// `"run_in_background": "false"`), is that value, when every fault was such
+/// `"run_in_background": "false"`), or where it wants an array or an object
+/// and the string is the JSON of one (Llama 3.1 sends multiedit's `edits` as
+/// the text `"[{\"old\": …}]"`), is that value, when every fault was such
 /// a string and the arguments then pass. `None` otherwise: valid arguments,
 /// any other fault, and a string the schema takes as a string are never
 /// changed. In `anyOf` or `oneOf` the value is changed only when exactly one
 /// alternative takes it. Nested objects and arrays are read the same way.
 pub(crate) fn coerced_arguments(tool: &ToolDefinition, arguments: &Value) -> Option<Value> {
     let validator = jsonschema::validator_for(&tool.input_schema).ok()?;
+    let coerced = coerced_once(tool, &validator, arguments)?;
+    if validator.is_valid(&coerced) {
+        return Some(coerced);
+    }
+    // An array or object read from its text may hold scalars written as
+    // strings too (`"replaceAll": "false"`): read once more.
+    coerced_once(tool, &validator, &coerced).filter(|coerced| validator.is_valid(coerced))
+}
+
+/// One reading of [`coerced_arguments`]: every fault's string as its value,
+/// or `None` when a fault is anything else or nothing changed.
+fn coerced_once(
+    tool: &ToolDefinition,
+    validator: &jsonschema::Validator,
+    arguments: &Value,
+) -> Option<Value> {
     let mut coerced = arguments.clone();
     let mut changed = false;
     for error in validator.iter_errors(arguments) {
@@ -211,17 +229,21 @@ pub(crate) fn coerced_arguments(tool: &ToolDefinition, arguments: &Value) -> Opt
                     TypeKind::Single(kind) => vec![*kind],
                     TypeKind::Multiple(kinds) => kinds.iter().collect(),
                 };
-                written_scalar(text).filter(|value| {
-                    wanted.iter().any(|kind| match (kind, value) {
-                        (JsonType::Boolean, Value::Bool(_))
-                        | (JsonType::Null, Value::Null)
-                        | (JsonType::Number, Value::Number(_)) => true,
-                        (JsonType::Integer, Value::Number(number)) => {
-                            number.is_i64() || number.is_u64()
-                        }
-                        _ => false,
+                written_scalar(text)
+                    .or_else(|| written_structure(text))
+                    .filter(|value| {
+                        wanted.iter().any(|kind| match (kind, value) {
+                            (JsonType::Boolean, Value::Bool(_))
+                            | (JsonType::Null, Value::Null)
+                            | (JsonType::Number, Value::Number(_))
+                            | (JsonType::Array, Value::Array(_))
+                            | (JsonType::Object, Value::Object(_)) => true,
+                            (JsonType::Integer, Value::Number(number)) => {
+                                number.is_i64() || number.is_u64()
+                            }
+                            _ => false,
+                        })
                     })
-                })
             }
             ValidationErrorKind::AnyOf { .. } | ValidationErrorKind::OneOfNotValid { .. } => {
                 let alternatives = tool
@@ -247,18 +269,104 @@ pub(crate) fn coerced_arguments(tool: &ToolDefinition, arguments: &Value) -> Opt
         *coerced.pointer_mut(error.instance_path().as_str())? = value;
         changed = true;
     }
-    (changed && validator.is_valid(&coerced)).then_some(coerced)
+    changed.then_some(coerced)
+}
+
+/// Arguments with the top-level fields the tool does not take left out, and
+/// the names of those fields, when leaving them out (and reading scalars
+/// written as strings, as [`coerced_arguments`] does) is all the call needs
+/// to pass: gpt-oss asks `read` for `line_start` and `line_end`, and `list`
+/// for a `depth`. `None` for valid arguments, any other fault, a schema that
+/// takes any field, and arguments that could not be read at all. For tools
+/// that change nothing only: a field left out narrows nothing it changes.
+pub(crate) fn without_unknown_fields(
+    tool: &ToolDefinition,
+    arguments: &Value,
+) -> Option<(Value, Vec<String>)> {
+    if unparsed_arguments(&tool.name, arguments).is_some()
+        || tool.input_schema.get("additionalProperties") != Some(&Value::Bool(false))
+    {
+        return None;
+    }
+    let validator = jsonschema::validator_for(&tool.input_schema).ok()?;
+    if validator.is_valid(arguments) {
+        return None;
+    }
+    let properties = tool.input_schema.get("properties")?.as_object()?;
+    let mut kept = arguments.as_object()?.clone();
+    let unknown: Vec<String> = kept
+        .keys()
+        .filter(|field| !properties.contains_key(*field))
+        .cloned()
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    kept.retain(|field, _| properties.contains_key(field));
+    let kept = Value::Object(kept);
+    if validator.is_valid(&kept) {
+        return Some((kept, unknown));
+    }
+    coerced_arguments(tool, &kept).map(|coerced| (coerced, unknown))
+}
+
+/// The array or object a string is the JSON of, the spaces around it aside.
+/// Line breaks and tabs inside its strings may be there as they are: Qwen3
+/// Coder 30B writes the code it quotes in multiedit's `edits` that way,
+/// which JSON itself does not allow.
+fn written_structure(text: &str) -> Option<Value> {
+    let text = text.trim();
+    if !(text.starts_with('[') || text.starts_with('{')) {
+        return None;
+    }
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .or_else(|| serde_json::from_str::<Value>(&with_escaped_controls(text)?).ok())
+        .filter(|value| value.is_array() || value.is_object())
+}
+
+/// `text` with each control character inside a JSON string written as its
+/// escape, or `None` when it has none there.
+fn with_escaped_controls(text: &str) -> Option<String> {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(text.len() + 16);
+    let (mut in_string, mut escaped, mut changed) = (false, false, false);
+    for character in text.chars() {
+        let control = u32::from(character) < 0x20;
+        if in_string && !escaped && control {
+            changed = true;
+            match character {
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ => {
+                    let _ = write!(out, "\\u{:04x}", u32::from(character));
+                }
+            }
+            continue;
+        }
+        if in_string && !escaped && character == '"' {
+            in_string = false;
+        } else if !in_string && character == '"' {
+            in_string = true;
+        }
+        escaped = in_string && !escaped && character == '\\';
+        out.push(character);
+    }
+    changed.then_some(out)
 }
 
 /// The JSON literal a string is, ignoring the spaces around it, when it is
-/// one that a model writes for a scalar: `true`, `false`, `null` or a number
+/// one that a model writes for a scalar: `true`, `false` (or `True` and
+/// `False`, as Python writes them), `null` or a number
 /// in JSON's own form (`-3`, `1.5`, `1e5`; not `01`, `+1`, `.5`, `1.` or
 /// `0x10`). An integer is one only within what a JSON integer holds.
 fn written_scalar(text: &str) -> Option<Value> {
     let text = text.trim();
     match text {
-        "true" => return Some(Value::Bool(true)),
-        "false" => return Some(Value::Bool(false)),
+        // And as Python writes them: Llama 3.1 sends `"run_in_background": "True"`.
+        "true" | "True" => return Some(Value::Bool(true)),
+        "false" | "False" => return Some(Value::Bool(false)),
         "null" => return Some(Value::Null),
         _ => {}
     }
@@ -401,6 +509,9 @@ mod tests {
         assert_eq!(one("ratio", "-3"), Some(json!(-3)));
         assert_eq!(one("ratio", "1e5"), Some(json!(1e5)));
         assert_eq!(one("run_in_background", "true"), Some(json!(true)));
+        // Python's spellings, as Llama 3.1 writes them.
+        assert_eq!(one("run_in_background", "True"), Some(json!(true)));
+        assert_eq!(one("run_in_background", "False"), Some(json!(false)));
         assert_eq!(one("limit", "null"), Some(json!(null)));
         assert_eq!(one("limit", "7"), Some(json!(7)));
         // An integer is written as one: no exponent, no fraction.
@@ -409,13 +520,134 @@ mod tests {
         }
         // Not JSON literals.
         for text in [
-            "01", "+1", ".5", "1.", "0x10", "NaN", "Infinity", "True", "FALSE", "yes", "", "1 2",
+            "01", "+1", ".5", "1.", "0x10", "NaN", "Infinity", "TRUE", "FALSE", "yes", "", "1 2",
             "\"1\"",
         ] {
             assert_eq!(one("timeout", text), None, "{text}");
             assert_eq!(one("ratio", text), None, "{text}");
             assert_eq!(one("run_in_background", text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn an_array_a_model_wrote_as_its_json_text_reads_as_the_array() {
+        let tool = ToolDefinition {
+            name: "multiedit".into(),
+            description: String::new(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "edits": {"type": "array", "minItems": 1, "items": {
+                        "type": "object",
+                        "properties": {
+                            "old": {"type": "string", "minLength": 1},
+                            "new": {"type": "string"},
+                            "replaceAll": {"type": "boolean"}
+                        },
+                        "required": ["old", "new"],
+                        "additionalProperties": false
+                    }}
+                },
+                "required": ["path", "edits"],
+                "additionalProperties": false,
+            }),
+        };
+        // Llama 3.1 8B on Ollama, renaming two names in one file.
+        let written = json!({"path": "src/pricing.py", "edits": "[{\"new\": \"BULK_MINIMUM\", \"old\": \"BULK_THRESHOLD\", \"replaceAll\": false}, {\"new\": \"BULK_RATE\", \"old\": \"BULK_DISCOUNT\"}]"});
+        let coerced = coerced_arguments(&tool, &written).expect("read as the array");
+        assert_eq!(
+            coerced["edits"],
+            json!([
+                {"new": "BULK_MINIMUM", "old": "BULK_THRESHOLD", "replaceAll": false},
+                {"new": "BULK_RATE", "old": "BULK_DISCOUNT"}
+            ])
+        );
+        // Scalars written as strings inside it read as theirs too.
+        let nested = json!({"path": "a", "edits": " [{\"old\": \"x\", \"new\": \"y\", \"replaceAll\": \"true\"}] "});
+        assert_eq!(
+            coerced_arguments(&tool, &nested).expect("read twice")["edits"][0]["replaceAll"],
+            json!(true)
+        );
+        // Qwen3 Coder 30B: the code it quotes keeps its line breaks and tabs.
+        let lines = json!({"path": "a", "edits": "[{\"old\": \"if x:\n\treturn 1\", \"new\": \"if x:\n\treturn \\\"2\\\"\"}]"});
+        assert_eq!(
+            coerced_arguments(&tool, &lines).expect("read with its line breaks")["edits"],
+            json!([{"old": "if x:\n\treturn 1", "new": "if x:\n\treturn \"2\""}])
+        );
+        // Text that is not the JSON of what the schema wants, or what then
+        // fails the schema, changes nothing.
+        for edits in [
+            "old: x, new: y",
+            "{\"old\": \"x\", \"new\": \"y\"}",
+            "[]",
+            "[{\"old\": \"\", \"new\": \"y\"}]",
+            "[{\"old\": \"x\"",
+        ] {
+            assert_eq!(
+                coerced_arguments(&tool, &json!({"path": "a", "edits": edits})),
+                None,
+                "{edits}"
+            );
+        }
+    }
+
+    fn read_like() -> ToolDefinition {
+        ToolDefinition {
+            name: "read".into(),
+            description: String::new(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1}
+                },
+                "required": ["path"],
+                "additionalProperties": false,
+            }),
+        }
+    }
+
+    #[test]
+    fn fields_a_tool_does_not_take_are_left_out_when_that_is_the_only_fault() {
+        let tool = read_like();
+        // gpt-oss 20B on Ollama, reading a file.
+        let written = json!({"path": "README.md", "line_start": 1, "line_end": 400});
+        let (kept, unknown) = without_unknown_fields(&tool, &written).expect("left out");
+        assert_eq!(kept, json!({"path": "README.md"}));
+        assert_eq!(unknown, ["line_start", "line_end"]);
+        validate_arguments(&tool, &kept).unwrap();
+        // With a number written as a string too, as Llama 3.1 writes them.
+        let (kept, _) = without_unknown_fields(
+            &tool,
+            &json!({"path": "a", "limit": "50", "encoding": "utf-8"}),
+        )
+        .expect("left out and read");
+        assert_eq!(kept, json!({"path": "a", "limit": 50}));
+        // Valid arguments, another fault, or nothing unknown: no change.
+        for unchanged in [
+            json!({"path": "a"}),
+            json!({"path": 42, "depth": 1}),
+            json!({"line_start": 1}),
+            json!({"path": "a", "limit": 0}),
+        ] {
+            assert_eq!(
+                without_unknown_fields(&tool, &unchanged),
+                None,
+                "{unchanged}"
+            );
+        }
+        // Arguments that could not be read never run, with or without fields.
+        let unparsed = tool_call_arguments("{\"path\": \"a\",");
+        assert_eq!(without_unknown_fields(&tool, &unparsed), None);
+        // A schema that takes any field has nothing to leave out.
+        let mut open = read_like();
+        open.input_schema["additionalProperties"] = json!(true);
+        assert_eq!(
+            without_unknown_fields(&open, &json!({"path": 1, "x": 2})),
+            None
+        );
     }
 
     #[test]
