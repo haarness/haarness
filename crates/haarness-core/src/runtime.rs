@@ -848,6 +848,24 @@ fn parse_goal_criteria_selection(proposed: &[String], answer: &str) -> CoreResul
         .collect())
 }
 
+/// Whether a provider error is Haarness Cloud's refusal for credits, a
+/// budget, a plan or a suspended account, which its provider words as advice
+/// for the person before the turn sees it ("Your Haarness Cloud credits can't
+/// cover this request. Add credits …"): what the account can't pay, not what
+/// a provider got wrong.
+fn cloud_billing_advice(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    !lower.starts_with("http ")
+        && [
+            "haarness cloud credits",
+            "cost more than a spending limit allows",
+            "haarness cloud account is suspended",
+            "through haarness cloud needs a plan",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
 /// The `StopFailure` categories of a turn's terminal error: `error`, as hook
 /// scripts and extensions have always read it (every provider error is
 /// `provider`), and `error_type`, which names a provider error for what its
@@ -879,8 +897,7 @@ fn stop_failure_categories(error: &CoreError) -> (&'static str, &'static str) {
     } else if is_provider_usage_limit(error)
         // Haarness Cloud's refusals for credits and budgets arrive as advice,
         // without the 402 they came with: they are quotas all the same.
-        || lower.contains("haarness cloud credits")
-        || lower.contains("cost more than a spending limit allows")
+        || cloud_billing_advice(message)
     {
         "rate_limit"
     } else if status == Some(529) || lower.contains("overloaded") || lower.contains("high demand") {
@@ -2405,6 +2422,11 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             "{} refused the model's tool calls, which did not match the tools' definitions, even after it was asked to correct them. Send the message again, or choose another model.",
             provider.unwrap_or("The provider")
         );
+    }
+    // Haarness Cloud's own refusal for credits or a budget already says what
+    // happened and what to do: it is the account's, not a provider's error.
+    if cloud_billing_advice(raw) {
+        return clean_error_text(raw.trim(), 600);
     }
     // A Haarness router's words already say whose account ran out of credit:
     // the key's owner, or the router's own (which its users can't top up).
@@ -24907,6 +24929,42 @@ mod tests {
         assert!(
             super::describe_error(&unfunded, Some("Haarness Router"))
                 .starts_with("Haarness Router rate limit or quota reached: ")
+        );
+    }
+
+    /// Haarness Cloud's provider words its refusals for credits, budgets and
+    /// plans as advice before the turn sees them. Read as "Provider error:
+    /// Your Haarness Cloud credits …", in the chat and in the result a
+    /// subagent's parent reads, they blamed a provider for the account.
+    #[test]
+    fn haarness_cloud_billing_refusals_read_as_the_advice_they_are() {
+        for advice in [
+            "Your Haarness Cloud credits can't cover this request. Start the free trial, add credits or choose a plan under Billing at https://haarness.ai/app/billing.",
+            "Your Haarness Cloud credits have run out. Add credits or choose a plan under Billing at https://haarness.ai/app/billing.",
+            "This account has no Haarness Cloud credits yet. Start the free trial or choose a plan under Billing (in the terminal: /billing).",
+            "Your included Haarness Cloud credits can't cover this request. Turn on overage under Billing in Haarness Cloud so your purchased credits pay.",
+            "Your purchased Haarness Cloud credits are on hold. Open Billing at https://haarness.ai/app/billing for details.",
+            "This request could cost more than a spending limit allows. Compact or shorten the conversation, or raise the limit on the API key in Haarness Cloud.",
+            "This Haarness Cloud account is suspended. Open Billing at https://haarness.ai/app/billing for details.",
+            "Routing your own provider keys through Haarness Cloud needs a plan or the free trial. Start the trial or choose a plan under Billing at https://haarness.ai/app/billing.",
+        ] {
+            let error = CoreError::Provider(advice.into());
+            assert_eq!(super::user_facing_error(&error), advice);
+            assert_eq!(
+                super::describe_failure(&error, Some("Haarness Cloud"), true),
+                advice
+            );
+            assert_eq!(
+                super::stop_failure_categories(&error),
+                ("provider", "rate_limit")
+            );
+        }
+        // A router's 402 status line is no such advice: its own wording stays.
+        assert!(
+            super::user_facing_error(&CoreError::Provider(
+                "HTTP 402 Payment Required: [insufficient_credits] insufficient credits".into()
+            ))
+            .starts_with("The provider account is out of credit")
         );
     }
 
