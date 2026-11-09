@@ -35,11 +35,13 @@ impl Default for LazyToolSettings {
 
 /// Whether `model` comes from a family trained on `apply_patch`'s V4A
 /// patches, whatever provider serves it (`openai/gpt-5.4` through
-/// OpenRouter, `gpt-oss-120b` on Groq, `haarness/openai/gpt-6.1-sol`, an
-/// `openai.gpt-oss-…` Bedrock id): OpenAI's GPT models from GPT-4.1 on, its
-/// o-series reasoning models, its Codex models and gpt-oss. Other models
-/// change files with `edit`, `multiedit` and `write`, which every model has;
-/// given the patch tool too they write diffs it cannot read.
+/// OpenRouter, `haarness/openai/gpt-6.1-sol`): OpenAI's GPT models from
+/// GPT-4.1 on, its o-series reasoning models and its Codex models. Other
+/// models change files with `edit`, `multiedit` and `write`, which every
+/// model has; given the patch tool too they write diffs it cannot read.
+/// gpt-oss writes the patch well but names its argument `patch`, not
+/// `input`, call after call; a provider that checks calls against the tool
+/// (Groq) refuses each one, so it edits as other models do.
 #[must_use]
 pub fn writes_patches(model: &str) -> bool {
     let name = model
@@ -48,7 +50,10 @@ pub fn writes_patches(model: &str) -> bool {
         .unwrap_or(model)
         .to_ascii_lowercase();
     let name = name.strip_prefix("openai.").unwrap_or(&name);
-    if name.starts_with("gpt-oss") || name.contains("codex") {
+    if name.starts_with("gpt-oss") {
+        return false;
+    }
+    if name.contains("codex") {
         return true;
     }
     if let Some(version) = name.strip_prefix("gpt-") {
@@ -674,9 +679,6 @@ mod tests {
             "openai/gpt-6.1-sol",
             "haarness/openai/gpt-6.1-sol",
             "gpt-4.1-mini",
-            "gpt-oss-120b",
-            "openai/gpt-oss-20b",
-            "openai.gpt-oss-120b-1:0",
             "o3",
             "o4-mini",
             "gpt-5-codex",
@@ -698,6 +700,26 @@ mod tests {
             "my-deployment",
             "ollama/llama4",
             "openrouter/auto",
+        ] {
+            assert!(!writes_patches(model), "{model}");
+        }
+    }
+
+    /// gpt-oss names apply_patch's argument `patch`, and Groq refuses every
+    /// such call (four in four for the 120B model): it edits instead,
+    /// under any provider and however the id is written.
+    #[test]
+    fn gpt_oss_changes_files_with_edit_and_write_not_the_patch_tool() {
+        for model in [
+            "gpt-oss-120b",
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "openai/gpt-oss-safeguard-20b",
+            "openai.gpt-oss-120b-1:0",
+            "gpt-oss:120b",
+            "gpt-oss:20b-cloud",
+            "haarness/openai/gpt-oss-120b",
+            "GPT-OSS-120B",
         ] {
             assert!(!writes_patches(model), "{model}");
         }
