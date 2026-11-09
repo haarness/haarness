@@ -1892,3 +1892,205 @@ async fn reliability_a_tool_call_refused_after_the_reasoning_streamed_is_correct
     assert!(hooks.failures.lock().unwrap().is_empty());
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+/// Groq's free tier allows 8,000 tokens a minute for most models, and
+/// refuses a request with more at once (a 413, no wait helps). Haarness's
+/// request with every tool was over it after a few rounds.
+const OVER_THE_MINUTE: &str = "HTTP 413 Payload Too Large: Request too large for model `echo-1` in organization `org_1` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 8421, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing";
+
+fn tool_names(request: &ProviderRequest) -> Vec<String> {
+    let mut names: Vec<_> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn reliability_a_request_over_the_accounts_tokens_a_minute_goes_again_with_the_projects_tools()
+ {
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![cut(OVER_THE_MINUTE)],
+            vec![Ok(text("fixed")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("fix the failing test"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let size = |request: &ProviderRequest| serde_json::to_vec(&request.tools).unwrap().len();
+    {
+        let requests = provider.requests.lock().unwrap();
+        let every = tool_names(&requests[0]);
+        for name in ["task", "todowrite", "question", "webfetch", "bash_output"] {
+            assert!(every.contains(&name.to_owned()), "{name} in {every:?}");
+        }
+        // Sent again at once with the tools that read, search, change and
+        // run the project, and the loader that finds the others.
+        let lean = tool_names(&requests[1]);
+        assert_eq!(
+            lean,
+            [
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "list",
+                "load_tool",
+                "read",
+                "write"
+            ],
+            "{lean:?}"
+        );
+        assert!(
+            size(&requests[1]) * 2 < size(&requests[0]),
+            "{} of {} bytes",
+            size(&requests[1]),
+            size(&requests[0])
+        );
+        // The chat itself is sent whole.
+        assert_eq!(requests[0].messages, requests[1].messages);
+        assert!(requests[1].system.contains(haarness_core::LOAD_TOOL_NAME));
+    }
+    // Another chat with the same model starts within the account's ceiling.
+    let second = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(second.id, turn_request("and this one"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        tool_names(&provider.requests.lock().unwrap()[2]),
+        [
+            "bash",
+            "edit",
+            "glob",
+            "grep",
+            "list",
+            "load_tool",
+            "read",
+            "write"
+        ]
+    );
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn reliability_a_request_still_over_the_accounts_tokens_a_minute_fails_once_in_plain_words() {
+    let (directory, runtime, provider, _hooks) = setup_streams(
+        vec![vec![cut(OVER_THE_MINUTE)]],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("fix the failing test"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Failed);
+    // Once as it was, once within the ceiling: no wait, no third request.
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let error = items
+        .iter()
+        .find_map(|item| match &item.data {
+            ItemData::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        error.contains("allows this account 8,000 tokens a minute, and this request needs 8,421")
+            && !error.contains("org_1"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Groq also counts the reply it expects against a model's output tokens a
+/// minute (1,000 for Qwen on the free tier), and says to ask for less.
+#[tokio::test]
+async fn reliability_a_reply_over_the_accounts_output_a_minute_is_asked_for_within_it() {
+    let refused = "HTTP 429 Too Many Requests: Request too large for model `echo-1` in organization `org_1` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Requested 1404. The request's expected output tokens exceed the enforced limit; reduce max_tokens (or the request's expected output) and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing";
+    let (directory, runtime, provider, _hooks) = setup_streams(
+        vec![
+            vec![cut(refused)],
+            vec![Ok(text("fixed")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("fix the failing test"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].parameters.max_output_tokens, None);
+    assert_eq!(requests[1].parameters.max_output_tokens, Some(1_000));
+    // Only the reply was too long: the tools stay.
+    assert_eq!(tool_names(&requests[0]), tool_names(&requests[1]));
+    drop(requests);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Groq's rate limit that asks for a wait names the same tokens a minute: the
+/// request after the wait is the smaller one, so more fit in each minute.
+#[tokio::test]
+async fn reliability_a_wait_for_the_accounts_tokens_a_minute_is_followed_by_the_smaller_request() {
+    let wait = "HTTP 429 Too Many Requests: [rate_limit_exceeded] Rate limit reached for model `echo-1` in organization `org_1` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 5410, Requested 5380. Please try again in 0.05s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing";
+    let (directory, runtime, provider, _hooks) = setup_streams(
+        vec![vec![cut(wait)], vec![Ok(text("fixed")), Ok(finish("stop"))]],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("fix the failing test"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(tool_names(&requests[0]).contains(&"task".to_owned()));
+    assert_eq!(
+        tool_names(&requests[1]),
+        [
+            "bash",
+            "edit",
+            "glob",
+            "grep",
+            "list",
+            "load_tool",
+            "read",
+            "write"
+        ]
+    );
+    drop(requests);
+    std::fs::remove_dir_all(directory).unwrap();
+}

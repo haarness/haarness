@@ -27,6 +27,7 @@ pub mod process_groups;
 pub mod process_tree;
 pub mod prompts;
 pub mod redact;
+mod request_ceilings;
 mod runtime;
 pub mod shared_chats;
 pub mod shell_text;

@@ -178,19 +178,49 @@ fn classify(name: &str) -> Classification {
 /// share with the chat, for tools a small model seldom needs.
 pub const SMALL_WINDOW: u64 = 65_536;
 
+/// The window at or under which only the tools that read, search, change and
+/// run the project go with every request, and every other tool waits for
+/// the model to load it: a model with an 8K or 16K window, or an account
+/// whose plan allows fewer tokens a minute than one request with every tool
+/// (Groq's free tier: 8,000), where the others were half of each request.
+pub const TIGHT_WINDOW: u64 = 16_384;
+
+/// The tools a chat keeps in a tight window.
+const TIGHT_RESIDENT: [&str; 8] = [
+    "read",
+    "list",
+    "glob",
+    "grep",
+    "edit",
+    "write",
+    "apply_patch",
+    "bash",
+];
+
 /// [`classify`] for a model with `context_window`: the browser's tools are
-/// optional in a small window.
+/// optional in a small window, and all but the project's own in a tight one.
 fn classify_in(name: &str, context_window: Option<u64>) -> Classification {
-    if name.starts_with("browser_")
-        && context_window.is_some_and(|window| window > 0 && window <= SMALL_WINDOW)
-    {
+    let window = context_window.filter(|window| *window > 0);
+    if name.starts_with("browser_") && window.is_some_and(|window| window <= SMALL_WINDOW) {
         return Classification {
             group: "browser",
             title: "Browser",
             essential: false,
         };
     }
-    classify(name)
+    let classification = classify(name);
+    // Computer use's tools are offered only while it is on; then they are
+    // the point.
+    if window.is_some_and(|window| window <= TIGHT_WINDOW)
+        && !TIGHT_RESIDENT.contains(&name)
+        && !name.starts_with("mac_")
+    {
+        return Classification {
+            essential: false,
+            ..classification
+        };
+    }
+    classification
 }
 
 #[must_use]
@@ -848,6 +878,86 @@ mod tests {
                 .any(|tool| tool.name == "browser_snapshot")
         );
         assert!(!large.response.lazy_active);
+    }
+
+    /// An 8K window, or an account allowing 8,000 tokens a minute: the tools
+    /// that read, search, change and run the project go with each request,
+    /// and the rest wait behind the loader, which finds them.
+    #[test]
+    fn a_tight_window_keeps_only_the_projects_own_tools_at_hand() {
+        let names = [
+            "apply_patch",
+            "bash",
+            "bash_output",
+            "bash_stop",
+            "batch",
+            "edit",
+            "execute",
+            "glob",
+            "grep",
+            "list",
+            "lsp",
+            "mac_snapshot",
+            "multiedit",
+            "question",
+            "read",
+            "task",
+            "todowrite",
+            "webfetch",
+            "write",
+        ];
+        let definitions: Vec<_> = names
+            .into_iter()
+            .map(|name| definition(name, &"a description of what it does ".repeat(20)))
+            .collect();
+        let select = |window, promoted: &[&str]| {
+            select_tools(
+                definitions.clone(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &LazyToolSettings::default(),
+                &promoted
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<HashSet<_>>(),
+                Some(window),
+                false,
+            )
+        };
+        let advertised = |selection: &ToolSelection| {
+            selection
+                .advertised
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>()
+        };
+        let tight = select(TIGHT_WINDOW, &[]);
+        assert_eq!(
+            advertised(&tight),
+            [
+                "apply_patch",
+                "bash",
+                "edit",
+                "glob",
+                "grep",
+                "list",
+                "mac_snapshot",
+                "read",
+                "write",
+                LOAD_TOOL_NAME
+            ]
+        );
+        assert!(tight.response.estimated_saved_tokens > 1_000);
+        assert_eq!(
+            search_deferred_tools(&definitions, &tight.response, &["task".into()]),
+            ["task"]
+        );
+        // A tool the model loaded stays.
+        assert!(advertised(&select(8_000, &["todowrite"])).contains(&"todowrite".to_owned()));
+        // A window a little larger, as a local model's 32K, keeps them all.
+        let small = select(32_768, &[]);
+        assert_eq!(small.advertised.len(), names.len());
+        assert!(!small.response.lazy_active);
     }
 
     #[test]
