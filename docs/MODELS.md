@@ -121,6 +121,20 @@ but never a provider's page: confirming a price is a person's job. Fix or add th
 entry in haarness-cloud from the provider's page with today's `checked` date,
 then `--sync` copies the table here.
 
+## OpenAI refusals: 2026-11-09
+
+Found by tracing chats that failed every turn on a ChatGPT sign-in or an OpenAI API key, on the released 0.1.18
+and on main. A ChatGPT sign-in runs the models its account catalog lists (today GPT-6.1 Sol, GPT-6 Astra,
+GPT-6.1 Terra, GPT-6 Sol, GPT-6 Luna and GPT-5.6 Sol, Terra and Luna); an API key runs the whole public catalog,
+dated snapshots and GPT-4o included.
+
+| Case | Change |
+| --- | --- |
+| ChatGPT plan's usage limit | Every model on the sign-in shares it, so once it is used up each turn failed at once with "rate limit or quota reached: wait and retry". The chat now says the plan has reached its usage limit, when it resets (from the backend's reset time, or the used-up window in its `x-codex-*` headers), and to wait or choose another provider. A plan without Codex (`usage_not_included`) says to upgrade it or use an API key. |
+| A model a ChatGPT plan leaves out | GPT-5.4 Mini, GPT-4o Mini, o3 and the dated snapshots run only on an API key. The chat said OpenAI "no longer offers" them; it now says the model isn't included with a ChatGPT sign-in, names models that are, and that an API key runs it. |
+| OpenAI's per-minute limits | OpenAI and Groq name the wait as a duration ("Please try again in 1.054s", "in 1m3.2s", "in 260ms"). Only whole seconds and minutes in words were read, so the turn failed at once; it now waits that long (up to 90 seconds) and sends the request again. A single request larger than OpenAI's tokens-per-minute allowance says so, as Groq's does. |
+| Sign-in renewal while the sign-in server is busy | A renewal answered with 429 or 5xx spends no refresh token, so the turn tries again, as for a busy provider, and if it still can't, says the sign-in service is busy instead of "refresh token returned 503 Service Unavailable". |
+
 ## Provider fixes: 2026-11-08
 
 Found by running coding chats on each provider with the owner's own keys, on the released 0.1.16 and on main.

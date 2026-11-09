@@ -718,6 +718,19 @@ impl ModelProvider for OpenAiProvider {
         }
         request = request.json(&body);
         let response = crate::sse::send(request, limits).await?;
+        // The ChatGPT transport refuses for the plan as well as for the
+        // request: its usage limit and a plan without Codex are said in
+        // words, with when the limit resets.
+        if subscription && !response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            let text = crate::sse::within(limits.idle(false), response.text())
+                .await?
+                .unwrap_or_default();
+            return Err(chatgpt_plan_refusal(&headers, &text, unix_millis() / 1000)
+                .unwrap_or_else(|| crate::sse::status_error(status, &headers, &text)));
+        }
+        let plan_headers = subscription.then(|| response.headers().clone());
         let request_id = crate::request_id(response.headers());
         let mut events = json_stream(response, cancel.clone(), limits);
         Ok(Box::pin(try_stream! {
@@ -786,6 +799,12 @@ impl ModelProvider for OpenAiProvider {
                     // A failed response can still have been billed.
                     "response.failed" | "error" => {
                         if let Some(usage) = response_usage(&event) { yield usage; }
+                        if let Some(headers) = &plan_headers
+                            && let Some(error) = event.pointer("/response/error").or_else(|| event.get("error")).filter(|error| error.is_object())
+                            && let Some(refusal) = chatgpt_plan_refusal(headers, &json!({"error": error}).to_string(), unix_millis() / 1000)
+                        {
+                            Err(refusal)?;
+                        }
                         Err(CoreError::Provider(event.to_string()))?;
                     }
                     _ => {}
@@ -982,6 +1001,121 @@ fn response_usage(event: &Value) -> Option<ProviderEvent> {
 
 fn number(value: &Value, key: &str) -> u64 {
     value.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// A ChatGPT transport refusal about the plan rather than the request, in
+/// words: the plan's usage limit, when it resets and what to do meanwhile, or
+/// a plan that does not include Codex. Every model on the sign-in shares the
+/// limit, so the advice is to wait or to leave the sign-in, never another
+/// OpenAI model. `None` for anything else, which keeps the backend's words.
+fn chatgpt_plan_refusal(
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+    now: u64,
+) -> Option<CoreError> {
+    let value: Value = serde_json::from_str(body.trim()).ok()?;
+    let error = value.get("error").filter(|error| error.is_object())?;
+    let says = |kind: &str| {
+        ["type", "code"]
+            .iter()
+            .any(|key| error.get(*key).and_then(Value::as_str) == Some(kind))
+    };
+    let header = |name: &str| {
+        headers
+            .get(name)?
+            .to_str()
+            .ok()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let your_plan = error["plan_type"]
+        .as_str()
+        .or_else(|| header("x-codex-plan-type"))
+        .and_then(plan_name)
+        .map_or_else(
+            || "Your ChatGPT plan".to_owned(),
+            |plan| format!("Your ChatGPT {plan} plan"),
+        );
+    if says("usage_not_included") {
+        return Some(CoreError::ProviderUnavailable(format!(
+            "{your_plan} doesn't include Codex, which Haarness uses when you sign in with ChatGPT. Upgrade the plan at chatgpt.com/pricing, or connect OpenAI with an API key instead."
+        )));
+    }
+    if !says("usage_limit_reached") {
+        return None;
+    }
+    // A moment in seconds, or in milliseconds when it is that large, as the
+    // time left until it.
+    let left = |at: u64| {
+        let at = if at > 100_000_000_000 { at / 1000 } else { at };
+        at.saturating_sub(now)
+    };
+    let number = |value: &Value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    };
+    // The body names the reset; failing that, the window used up does (the
+    // longest, when both are).
+    let resets = number(&error["resets_at"])
+        .map(left)
+        .or_else(|| number(&error["resets_in_seconds"]))
+        .or_else(|| {
+            ["primary", "secondary"]
+                .iter()
+                .filter(|window| {
+                    header(&format!("x-codex-{window}-used-percent"))
+                        .and_then(|used| used.parse::<f64>().ok())
+                        .is_some_and(|used| used >= 100.0)
+                })
+                .filter_map(|window| {
+                    header(&format!("x-codex-{window}-reset-after-seconds"))
+                        .and_then(|seconds| seconds.parse().ok())
+                        .or_else(|| {
+                            header(&format!("x-codex-{window}-reset-at"))
+                                .and_then(|at| at.parse().ok())
+                                .map(left)
+                        })
+                })
+                .max()
+        })
+        .filter(|seconds| *seconds > 0)
+        .map(|seconds| format!(", which resets {}", in_about(seconds)))
+        .unwrap_or_default();
+    Some(CoreError::Provider(format!(
+        "{your_plan} has reached its usage limit{resets}. Every model on your ChatGPT sign-in counts toward it: wait for the reset, or choose a model from another provider for this chat."
+    )))
+}
+
+/// A plan as ChatGPT names it (`plus` is Plus); `None` for anything that is
+/// not one plain word.
+fn plan_name(plan: &str) -> Option<String> {
+    let plan = plan.trim();
+    if plan.is_empty() || !plan.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return None;
+    }
+    let (first, rest) = plan.split_at(1);
+    Some(format!(
+        "{}{}",
+        first.to_ascii_uppercase(),
+        rest.to_ascii_lowercase()
+    ))
+}
+
+/// How long until a moment, roughly, for a sentence: "in about 3 hours".
+fn in_about(seconds: u64) -> String {
+    let minutes = seconds.div_ceil(60);
+    if minutes <= 1 {
+        return "in about a minute".into();
+    }
+    if minutes < 90 {
+        return format!("in about {minutes} minutes");
+    }
+    let hours = (minutes + 30) / 60;
+    if hours < 36 {
+        return format!("in about {hours} hours");
+    }
+    format!("in about {} days", (hours + 12) / 24)
 }
 
 /// Like the other providers' errors, this one says how to connect.
@@ -2163,5 +2297,176 @@ mod tests {
         assert!(!sampling_allowed("o5", None));
         assert!(sampling_allowed("gpt-5.5", Some("high")));
         assert!(sampling_allowed("gpt-4.1", None));
+    }
+
+    /// The ChatGPT plan's usage limit, as the backend refuses it once the
+    /// plan has used it up: in words, with when it resets, and the advice to
+    /// wait or leave the sign-in (every model on it shares the limit).
+    #[test]
+    fn a_chatgpt_plan_refusal_says_what_happened_and_when_it_resets() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let now = 1_800_000_000;
+        let none = HeaderMap::new();
+        let words = |error: Option<haarness_core::CoreError>| match error {
+            Some(haarness_core::CoreError::Provider(words)) => words,
+            other => panic!("expected a usage limit, got {other:?}"),
+        };
+        let limited = words(super::chatgpt_plan_refusal(
+            &none,
+            &json!({"error": {"type": "usage_limit_reached", "message": "The usage limit has been reached", "plan_type": "plus", "resets_at": now + 2 * 3600 + 600}}).to_string(),
+            now,
+        ));
+        assert_eq!(
+            limited,
+            "Your ChatGPT Plus plan has reached its usage limit, which resets in about 2 hours. Every model on your ChatGPT sign-in counts toward it: wait for the reset, or choose a model from another provider for this chat."
+        );
+        // It reads as a usage limit, which is not retried, and names no wait
+        // the retry rule would sit out.
+        let lower = limited.to_ascii_lowercase();
+        assert!(lower.contains("usage limit"));
+        assert!(!lower.contains("try again in") && !lower.contains("retry in"));
+
+        // Without a time in the body, the window the headers say is used up
+        // gives it; the plan comes from the headers too.
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("x-codex-plan-type", "pro"),
+            ("x-codex-primary-used-percent", "100"),
+            ("x-codex-primary-reset-after-seconds", "200000"),
+            ("x-codex-secondary-used-percent", "40"),
+            ("x-codex-secondary-reset-after-seconds", "600"),
+        ] {
+            headers.insert(name, HeaderValue::from_static(value));
+        }
+        assert_eq!(
+            words(super::chatgpt_plan_refusal(
+                &headers,
+                r#"{"error":{"type":"usage_limit_reached"}}"#,
+                now
+            )),
+            "Your ChatGPT Pro plan has reached its usage limit, which resets in about 2 days. Every model on your ChatGPT sign-in counts toward it: wait for the reset, or choose a model from another provider for this chat."
+        );
+        // No time anywhere: the limit is still said plainly. A reset in
+        // milliseconds, or in seconds from now, reads the same.
+        assert!(
+            words(super::chatgpt_plan_refusal(
+                &none,
+                r#"{"error":{"code":"usage_limit_reached","plan_type":"enterprise"}}"#,
+                now
+            ))
+            .starts_with("Your ChatGPT Enterprise plan has reached its usage limit. Every model")
+        );
+        for body in [
+            json!({"error": {"type": "usage_limit_reached", "resets_at": (now + 1500) * 1000}}),
+            json!({"error": {"type": "usage_limit_reached", "resets_in_seconds": 1500}}),
+        ] {
+            assert!(
+                words(super::chatgpt_plan_refusal(&none, &body.to_string(), now))
+                    .starts_with("Your ChatGPT plan has reached its usage limit, which resets in about 25 minutes."),
+                "{body}"
+            );
+        }
+
+        // A plan without Codex is no wait at all.
+        match super::chatgpt_plan_refusal(
+            &none,
+            r#"{"error":{"type":"invalid_request_error","code":"usage_not_included","plan_type":"free"}}"#,
+            now,
+        ) {
+            Some(haarness_core::CoreError::ProviderUnavailable(words)) => assert_eq!(
+                words,
+                "Your ChatGPT Free plan doesn't include Codex, which Haarness uses when you sign in with ChatGPT. Upgrade the plan at chatgpt.com/pricing, or connect OpenAI with an API key instead."
+            ),
+            other => panic!("{other:?}"),
+        }
+        // Anything else keeps the backend's own words.
+        for body in [
+            r#"{"error":{"type":"invalid_request_error","code":"model_not_found","message":"The 'gpt-5.4-mini' model is not supported when using Codex with a ChatGPT account."}}"#,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached. Please try again in 1.5s."}}"#,
+            "<html>busy</html>",
+            r#"{"detail":"Unauthorized"}"#,
+        ] {
+            assert!(
+                super::chatgpt_plan_refusal(&none, body, now).is_none(),
+                "{body}"
+            );
+        }
+        assert_eq!(super::in_about(30), "in about a minute");
+        assert_eq!(super::in_about(89 * 60), "in about 89 minutes");
+        assert_eq!(super::in_about(35 * 3600), "in about 35 hours");
+    }
+
+    /// End to end on the ChatGPT transport: a turn refused for the plan's
+    /// usage limit fails with those words, the first request and only one.
+    #[tokio::test]
+    async fn a_chatgpt_usage_limit_fails_the_request_in_words() {
+        async fn limited(State(state): State<FixtureState>) -> Response<Body> {
+            state.requests.lock().push(json!({}));
+            let resets = crate::auth::unix_millis() / 1000 + 3 * 3600;
+            Response::builder()
+                .status(429)
+                .header(CONTENT_TYPE, "application/json")
+                .header("x-codex-plan-type", "plus")
+                .header("x-codex-primary-used-percent", "100")
+                .body(Body::from(
+                    json!({"error": {"type": "usage_limit_reached", "message": "The usage limit has been reached", "plan_type": "plus", "resets_at": resets}}).to_string(),
+                ))
+                .unwrap()
+        }
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/responses", post(limited))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!(
+            "haarness-chatgpt-limit-{}-{}",
+            std::process::id(),
+            crate::auth::unix_millis()
+        ));
+        let store = Arc::new(crate::auth::CredentialStore::new(root.join("auth.json")));
+        store
+            .set(
+                "openai",
+                &crate::auth::Credential::oauth(
+                    "live-token".into(),
+                    "refresh-1".into(),
+                    crate::auth::unix_millis() + 3_600_000,
+                    Some("account-1".into()),
+                ),
+            )
+            .unwrap();
+        let provider = OpenAiProvider::for_oauth_test(
+            format!("http://{address}/responses"),
+            format!("http://{address}"),
+            store,
+        );
+        let request = ProviderRequest {
+            model: "gpt-6-luna".into(),
+            system: "test".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let error = provider
+            .stream(request, CancellationToken::new())
+            .await
+            .err()
+            .expect("a refused request");
+        let haarness_core::CoreError::Provider(words) = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(
+            words,
+            "Your ChatGPT Plus plan has reached its usage limit, which resets in about 3 hours. Every model on your ChatGPT sign-in counts toward it: wait for the reset, or choose a model from another provider for this chat."
+        );
+        assert_eq!(state.requests.lock().len(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
