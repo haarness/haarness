@@ -79,7 +79,8 @@ try:
         until(lambda: not api('/turns/active'), 'turn still active')
         assert not result['is_error'], result
         outputs.append((result['output'], time.monotonic() - started))
-    assert outputs[0][0] == '', outputs
+    # A search that finds nothing says so, as one that skipped files always has.
+    assert outputs[0][0] == 'No files found', outputs
     assert outputs[1][0].splitlines() == ['a/docs/guide.txt', 'a/note.txt'], outputs
     check(f'glob over links back up the project ends ({outputs[0][1]:.1f} s with no match) and follows a linked folder')
 
