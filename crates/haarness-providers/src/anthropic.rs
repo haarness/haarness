@@ -369,7 +369,7 @@ impl ModelProvider for AnthropicProvider {
                 json!({"type":"text","text":place.stand_in(&item)?})
             })
         };
-        let mut messages: Vec<_> = request
+        let built: Vec<(Value, bool)> = request
             .messages
             .into_iter()
             .enumerate()
@@ -379,7 +379,7 @@ impl ModelProvider for AnthropicProvider {
                 ProviderMessage::Text { role, content }
                     if role != "developer" && !content.trim().is_empty() =>
                 {
-                    Some(Ok(json!({"role":role,"content":[{"type":"text","text":content}]})))
+                    Some(Ok((json!({"role":role,"content":[{"type":"text","text":content}]}), false)))
                 }
                 ProviderMessage::Text { .. } => None,
                 ProviderMessage::Media { role, .. } if role == "developer" => None,
@@ -396,7 +396,7 @@ impl ModelProvider for AnthropicProvider {
                     for item in media {
                         blocks.push(block(item, place)?);
                     }
-                    Ok(json!({"role":role,"content":blocks}))
+                    Ok((json!({"role":role,"content":blocks}), false))
                 })),
                 ProviderMessage::ToolCall {
                     call_id,
@@ -406,8 +406,10 @@ impl ModelProvider for AnthropicProvider {
                 } => {
                     let mut blocks = provider_metadata.get("anthropic_thinking")
                         .and_then(Value::as_array).cloned().unwrap_or_default();
+                    let thinking_first = !blocks.is_empty()
+                        && provider_metadata[THINKING_AFTER_WORDS].as_bool() != Some(true);
                     blocks.push(json!({"type":"tool_use","id":crate::tool_ids::portable(&call_id),"name":name,"input":arguments}));
-                    Some(Ok(json!({"role":"assistant","content":blocks})))
+                    Some(Ok((json!({"role":"assistant","content":blocks}), thinking_first)))
                 },
                 ProviderMessage::ToolResult {
                     call_id,
@@ -430,10 +432,11 @@ impl ModelProvider for AnthropicProvider {
                         }
                         Value::Array(blocks)
                     };
-                    Ok(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":crate::tool_ids::portable(&call_id),"content":content,"is_error":is_error}]}))
+                    Ok((json!({"role":"user","content":[{"type":"tool_result","tool_use_id":crate::tool_ids::portable(&call_id),"content":content,"is_error":is_error}]}), false))
                 })),
             })
             .collect::<CoreResult<_>>()?;
+        let mut messages = thinking_in_place(built);
         let mut marked = 0;
         for message in messages.iter_mut().rev().filter(|_| cached) {
             if marked == 2 {
@@ -580,6 +583,12 @@ impl ModelProvider for AnthropicProvider {
             // tool call in between already ends the reasoning run.
             let mut thinking_seen = false;
             let mut thinking_break = false;
+            // Whether Claude wrote words since its last call, and whether the
+            // thinking going with the next call came after such words. Saved
+            // with the call, so its thinking goes back to Claude in its place
+            // (see [`thinking_in_place`]).
+            let mut words_since_call = false;
+            let mut thinking_after_words = false;
             // input/cache counters arrive on message_start; output arrives on
             // message_delta. Each event reports the merged total so far.
             let mut input_tokens = 0_u64;
@@ -610,12 +619,17 @@ impl ModelProvider for AnthropicProvider {
                     }},
                     "content_block_start" if matches!(event["content_block"]["type"].as_str(), Some("thinking" | "redacted_thinking")) => {
                         thinking_break = thinking_seen;
+                        if thinking_blocks.is_empty() {
+                            thinking_after_words = words_since_call;
+                        }
                         thinking_block = Some(event["content_block"].clone());
                     },
                     "content_block_start" => {
                         thinking_seen = false;
                         thinking_break = false;
+                        words_since_call |= event["content_block"]["type"] == "text";
                         if event["content_block"]["type"] == "tool_use" {
+                            words_since_call = false;
                             // The arguments stream as JSON fragments, held
                             // until the block stops; the call starts now.
                             yield ProviderEvent::ContentStarted;
@@ -656,7 +670,11 @@ impl ModelProvider for AnthropicProvider {
                             yield ProviderEvent::StructuredOutput(arguments);
                         } else {
                             let provider_metadata = if thinking_blocks.is_empty() { Value::Null } else {
-                                json!({"anthropic_thinking":std::mem::take(&mut thinking_blocks)})
+                                let mut metadata = json!({"anthropic_thinking":std::mem::take(&mut thinking_blocks)});
+                                if std::mem::take(&mut thinking_after_words) {
+                                    metadata[THINKING_AFTER_WORDS] = json!(true);
+                                }
+                                metadata
                             };
                             yield ProviderEvent::ToolCall { call_id, name, arguments, provider_metadata };
                         }
@@ -757,11 +775,54 @@ pub(crate) fn adaptive_thinking(id: &str) -> bool {
     })
 }
 
-/// Claude 5.5 onwards (Fable from 5.1) binds its thinking blocks to the
-/// prompt before them, so a refreshed prompt must retire them.
+/// Set on a call's metadata when Claude wrote its thinking after words of the
+/// same response, which is where that thinking then goes back.
+const THINKING_AFTER_WORDS: &str = "anthropic_thinking_after_words";
+
+/// Messages as Claude wrote them. The words Claude writes before a call are
+/// kept as their own message, ahead of the call that carries the turn's
+/// thinking; Anthropic joins the two into one turn, which would put the
+/// thinking after words it was written before. Claude 5.5 binds a thinking
+/// block to everything before it, so such a block was retired on every
+/// request (and Claude lost its reasoning, and the cache from there on).
+/// A call marked `true` gets the words before it placed after its thinking.
+fn thinking_in_place(built: Vec<(Value, bool)>) -> Vec<Value> {
+    let mut messages: Vec<Value> = Vec::with_capacity(built.len());
+    for (mut message, thinking_first) in built {
+        if thinking_first
+            && let Some(previous) = messages.last_mut().filter(|previous| {
+                previous["role"] == "assistant"
+                    && previous["content"]
+                        .as_array()
+                        .is_some_and(|blocks| blocks.iter().all(|block| block["type"] == "text"))
+            })
+            && let Some(blocks) = message["content"].as_array_mut()
+        {
+            let thinking = blocks
+                .iter()
+                .take_while(|block| {
+                    matches!(
+                        block["type"].as_str(),
+                        Some("thinking" | "redacted_thinking")
+                    )
+                })
+                .count();
+            let words = previous["content"].as_array().cloned().unwrap_or_default();
+            blocks.splice(thinking..thinking, words);
+            *previous = message;
+            continue;
+        }
+        messages.push(message);
+    }
+    messages
+}
+
+/// Claude 5.5 onwards (Fable and Mythos from 5.1) binds its thinking blocks to
+/// the prompt before them, so a refreshed prompt must retire them.
 fn binds_thinking(id: &str) -> bool {
     claude_release(id).is_some_and(|release| {
-        release.version >= (5, 5) || (release.family == "fable" && release.version >= (5, 1))
+        release.version >= (5, 5)
+            || (matches!(release.family.as_str(), "fable" | "mythos") && release.version >= (5, 1))
     })
 }
 
@@ -969,7 +1030,7 @@ mod tests {
         }
     }
 
-    use super::{AnthropicProvider, discovered_model, discovered_model_for};
+    use super::{AnthropicProvider, THINKING_AFTER_WORDS, discovered_model, discovered_model_for};
 
     #[derive(Clone, Default)]
     struct FixtureState(Arc<Mutex<Vec<Value>>>);
@@ -1300,6 +1361,158 @@ mod tests {
         assert_eq!(reasoning, "Tracing TLS downgrade\n\nIdentifying SSRF");
     }
 
+    /// Claude thinks, says what it will do, calls a tool, then (with words
+    /// first this time) thinks again and calls another.
+    async fn narrated_calls(
+        State(state): State<FixtureState>,
+        Json(request): Json<Value>,
+    ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        state.0.lock().push(request);
+        let stream = [
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"first"}}"#,
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Reading the date module."}}"#,
+            r#"data: {"type":"content_block_stop","index":1}"#,
+            r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"read"}}"#,
+            r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            r#"data: {"type":"content_block_stop","index":2}"#,
+            r#"data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":" Then its tests."}}"#,
+            r#"data: {"type":"content_block_stop","index":3}"#,
+            r#"data: {"type":"content_block_start","index":4,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"data: {"type":"content_block_delta","index":4,"delta":{"type":"signature_delta","signature":"second"}}"#,
+            r#"data: {"type":"content_block_stop","index":4}"#,
+            r#"data: {"type":"content_block_start","index":5,"content_block":{"type":"tool_use","id":"toolu_2","name":"read"}}"#,
+            r#"data: {"type":"content_block_delta","index":5,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            r#"data: {"type":"content_block_stop","index":5}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]
+        .join("\n\n")
+            + "\n\n";
+        ([(CONTENT_TYPE, "text/event-stream")], stream)
+    }
+
+    /// Haarness keeps the words before a call as their own message; Anthropic
+    /// joins them with the call's turn. Claude 5.5 refuses (or, asked to,
+    /// retires) a thinking block that ends up after words it was written
+    /// before, so each block goes back where Claude wrote it.
+    #[tokio::test]
+    async fn thinking_goes_back_before_the_words_claude_wrote_after_it() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/messages", post(narrated_calls))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        let request = |messages| ProviderRequest {
+            model: "claude-opus-5-5".into(),
+            system: "test".into(),
+            messages,
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let user = ProviderMessage::Text {
+            role: "user".into(),
+            content: "fix the date bug".into(),
+        };
+        let events = provider
+            .stream(request(vec![user.clone()]), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let calls: Vec<_> = events
+            .into_iter()
+            .filter_map(|event| match event.unwrap() {
+                ProviderEvent::ToolCall {
+                    call_id,
+                    provider_metadata,
+                    ..
+                } => Some((call_id, provider_metadata)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1["anthropic_thinking"][0]["signature"], "first");
+        assert!(calls[0].1.get(THINKING_AFTER_WORDS).is_none(), "{calls:?}");
+        assert_eq!(calls[1].1["anthropic_thinking"][0]["signature"], "second");
+        assert_eq!(calls[1].1[THINKING_AFTER_WORDS], true);
+
+        // The chat as the runtime keeps it: each call's words before it, the
+        // results after the calls.
+        let mut history = vec![user];
+        let mut results = Vec::new();
+        for ((call_id, provider_metadata), words) in calls
+            .into_iter()
+            .zip(["Reading the date module.", " Then its tests."])
+        {
+            history.push(ProviderMessage::Text {
+                role: "assistant".into(),
+                content: words.into(),
+            });
+            history.push(ProviderMessage::ToolCall {
+                call_id: call_id.clone(),
+                name: "read".into(),
+                arguments: json!({}),
+                provider_metadata,
+            });
+            results.push(ProviderMessage::ToolResult {
+                call_id,
+                name: "read".into(),
+                output: "fn month() {}".into(),
+                is_error: false,
+                attachments: Vec::new(),
+            });
+        }
+        history.extend(results);
+        provider
+            .stream(request(history), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let requests = state.0.lock();
+        let shape: Vec<Vec<String>> = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| {
+                message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| {
+                        block["signature"]
+                            .as_str()
+                            .or(block["text"].as_str())
+                            .or(block["id"].as_str())
+                            .or(block["type"].as_str())
+                            .unwrap()
+                            .to_owned()
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                vec!["fix the date bug"],
+                vec!["first", "Reading the date module.", "toolu_1"],
+                vec![" Then its tests."],
+                vec!["second", "toolu_2"],
+                vec!["tool_result"],
+                vec!["tool_result"],
+            ]
+        );
+    }
+
     async fn structured_messages(
         State(state): State<FixtureState>,
         Json(request): Json<Value>,
@@ -1538,6 +1751,7 @@ mod tests {
         }
         for id in [
             "claude-fable-5-1",
+            "claude-mythos-5-1",
             "claude-opus-5-5",
             "claude-sonnet-5-5",
             "claude-haiku-5-5",
@@ -1545,7 +1759,7 @@ mod tests {
         ] {
             assert!(binds_thinking(id), "{id}");
         }
-        for id in ["claude-fable-5", "claude-opus-5", "claude-mythos-5-1"] {
+        for id in ["claude-fable-5", "claude-opus-5", "claude-mythos-5"] {
             assert!(!binds_thinking(id), "{id}");
         }
     }
