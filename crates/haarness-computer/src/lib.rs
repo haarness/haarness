@@ -553,6 +553,7 @@ impl Computer {
                 "version": terms::VERSION,
                 "accepted": settings.accepted(),
                 "acceptedAt": settings.terms.as_ref().filter(|_| settings.accepted()).map(|terms| terms.accepted_at.clone()),
+                "changed": settings.terms_changed(),
                 "text": terms::json(),
             },
             "permissions": permissions.as_ref().map(|state| json!({

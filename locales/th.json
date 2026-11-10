@@ -3153,6 +3153,8 @@
   "add credits with /billing topup": "เติมเครดิตด้วย /billing topup",
   "turn on overage so your purchased credits pay": "เปิดการใช้เกินเพื่อให้ใช้เครดิตที่ซื้อได้",
   "add credits and turn on overage to keep working": "เติมเครดิตและเปิดการใช้เกินเพื่อทำงานต่อ",
+  "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "เอเจนต์จะถามก่อนทำงานในแอปที่คุณยังไม่อนุญาต ในแชทที่ตั้งเป็นอัตโนมัติ ผู้ตรวจของโหมดอัตโนมัติอาจตอบแทนคุณได้ ยกเว้นในแอปที่คุณตั้งให้ถามทุกครั้ง ส่วนแชทที่ตั้งเป็น Yolo จะอนุมัติทุกอย่าง เมื่อคุณอนุญาตแอปแล้ว เอเจนต์จะทำงานในแอปนั้นโดยไม่ถาม และสิ่งที่เอเจนต์ทำยังคงเป็นความรับผิดชอบของคุณ",
+  "These terms changed since you last agreed to them.": "ข้อกำหนดเหล่านี้เปลี่ยนไปตั้งแต่ครั้งล่าสุดที่คุณยอมรับ",
   "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "ถามก่อนหมายถึงการอนุมัติหนึ่งครั้งต่อแอปในแต่ละแชท แชทในโหมดอัตโนมัติจะให้ผู้ตรวจเป็นผู้ตอบ",
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "ตัวจัดการรหัสผ่านและ Haarness เองจะไม่ถูกใช้เลย และเอเจนต์จะไม่พิมพ์ลงในเทอร์มินัลเลย ในโหมดอัตโนมัติ แอปที่ตั้งให้ถามทุกครั้งจะยังคงถามคุณ"
 }

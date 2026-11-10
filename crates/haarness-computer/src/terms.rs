@@ -4,7 +4,8 @@
 
 use serde_json::{Value, json};
 
-pub const VERSION: &str = "1";
+/// Version 2: Auto's reviewer may answer computer use requests in a chat set to Auto.
+pub const VERSION: &str = "2";
 
 pub const TITLE: &str = "Terms for computer use";
 
@@ -28,7 +29,7 @@ pub const NOT_FOR: &[&str] = &[
 pub const UNDERSTAND: &[&str] = &[
     "Whatever is visible while an agent works, notifications and unrelated windows too, may be sent to your chat's AI model and is kept in the chat history.",
     "App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off.",
-    "An agent asks before acting in an app you haven't allowed, except in a chat set to Yolo, which approves everything. Once you allow an app it acts there without asking, and what it does remains your responsibility.",
+    "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.",
     "macOS grants Accessibility and Screen Recording to whichever app launched Haarness, either Haarness itself or your terminal, and every program launched from that app inherits them.",
     "Switch computer use off whenever you like under Settings → Computer use, or run haarness mac off.",
 ];

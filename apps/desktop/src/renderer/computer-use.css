@@ -162,6 +162,11 @@
   font-size: var(--ui-lg);
   font-weight: 600;
 }
+.computer-terms-changed {
+  margin: var(--s1) 0 0;
+  font-size: var(--ui);
+  line-height: 1.5;
+}
 .computer-agree {
   display: flex;
   align-items: center;

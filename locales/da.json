@@ -3153,6 +3153,8 @@
   "add credits with /billing topup": "tilføj kreditter med /billing topup",
   "turn on overage so your purchased credits pay": "slå overforbrug til, så dine købte kreditter betaler",
   "add credits and turn on overage to keep working": "tilføj kreditter og slå overforbrug til for at arbejde videre",
+  "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "En agent spørger, før den handler i en app, du ikke har tilladt. I en chat sat til Auto kan Auto-bedømmeren svare for dig, undtagen i apps, du har sat til at spørge hver gang; en chat sat til Yolo godkender alt. Når du har tilladt en app, handler agenten der uden at spørge, og det, den gør, er stadig dit ansvar.",
+  "These terms changed since you last agreed to them.": "Disse vilkår er ændret, siden du sidst accepterede dem.",
   "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Spørg først betyder én godkendelse pr. app i hver chat; chats i Auto overlader den til bedømmeren.",
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Adgangskodeadministratorer og Haarness selv bruges aldrig, og agenter skriver aldrig i terminaler. I Auto spørger apps, der er sat til at spørge hver gang, stadig dig."
 }

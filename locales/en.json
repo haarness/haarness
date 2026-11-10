@@ -3153,6 +3153,8 @@
   "add credits with /billing topup": "add credits with /billing topup",
   "turn on overage so your purchased credits pay": "turn on overage so your purchased credits pay",
   "add credits and turn on overage to keep working": "add credits and turn on overage to keep working",
+  "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.",
+  "These terms changed since you last agreed to them.": "These terms changed since you last agreed to them.",
   "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.",
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you."
 }

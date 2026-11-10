@@ -108,7 +108,7 @@ pub async fn run(computer: &Computer, args: &MacArgs) -> Result<()> {
             if computer.settings().accepted() {
                 computer.enable(true).map_err(anyhow::Error::msg)?;
             } else {
-                if !agree()? {
+                if !agree(computer.settings().terms_changed())? {
                     bail!("Nothing changed: computer use is still off.");
                 }
                 computer
@@ -165,9 +165,15 @@ fn set(computer: &Computer, app: &str, rule: Option<Rule>) -> Result<()> {
     Ok(())
 }
 
+/// What a person who agreed to earlier terms reads above today's.
+const TERMS_CHANGED: &str = "These terms changed since you last agreed to them.";
+
 /// Prints the terms and waits for the person to type "I agree"; any other reply, or a non-interactive stdin,
-/// counts as no.
-fn agree() -> Result<bool> {
+/// counts as no. `changed`: the person agreed to earlier terms, which is said first.
+fn agree(changed: bool) -> Result<bool> {
+    if changed {
+        println!("{TERMS_CHANGED}\n");
+    }
     println!("{}\n", terms::text());
     if !std::io::stdin().is_terminal() {
         eprintln!(
@@ -283,6 +289,10 @@ pub fn view(status: Value) -> View {
     if status["supported"].as_bool() != Some(true) {
         lines.push("Computer use gives agents this Mac's screen, mouse and keyboard. It is available on macOS, in Haarness builds that ship the helper.".into());
     } else if status["terms"]["accepted"].as_bool() != Some(true) {
+        if status["terms"]["changed"] == true {
+            lines.push(TERMS_CHANGED.into());
+            lines.push(String::new());
+        }
         lines.extend(terms::text().lines().map(str::to_owned));
         entries.push(Entry {
             label: "Agree to the terms and turn on".into(),
@@ -396,9 +406,24 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Don't use it for"))
         );
+        assert_ne!(view.lines[0], TERMS_CHANGED);
         assert_eq!(view.entries.len(), 1);
         assert_eq!(view.entries[0].request["action"], "accept");
         assert!(view.entries[0].confirm.is_some());
+    }
+
+    #[test]
+    fn after_the_terms_changed_the_view_says_so_above_them_and_agreeing_is_one_step() {
+        let mut changed = status(false, true);
+        changed["terms"]["changed"] = json!(true);
+        let view = view(changed);
+        assert_eq!(view.lines[0], TERMS_CHANGED);
+        assert_eq!(view.lines[2], terms::TITLE);
+        assert_eq!(view.entries.len(), 1);
+        assert_eq!(
+            view.entries[0].request,
+            json!({"action": "accept", "version": terms::VERSION})
+        );
     }
 
     #[test]

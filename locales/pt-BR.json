@@ -3153,6 +3153,8 @@
   "add credits with /billing topup": "adicione créditos com /billing topup",
   "turn on overage so your purchased credits pay": "ative o excedente para que seus créditos comprados paguem",
   "add credits and turn on overage to keep working": "adicione créditos e ative o excedente para continuar",
+  "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "Um agente pergunta antes de agir em um app que você não permitiu. Em uma conversa no modo Auto, o revisor do Auto pode responder por você, exceto nos apps que você configurou para perguntar toda vez; uma conversa no modo Yolo aprova tudo. Depois que você permite um app, o agente age ali sem perguntar, e o que ele faz continua sendo sua responsabilidade.",
+  "These terms changed since you last agreed to them.": "Estes termos mudaram desde a última vez que você concordou com eles.",
   "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Perguntar antes significa uma aprovação por app em cada conversa; conversas no modo Auto deixam isso para o revisor.",
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Gerenciadores de senhas e o próprio Haarness nunca são usados, e agentes nunca digitam em terminais. No modo Auto, apps configurados para perguntar toda vez continuam perguntando a você."
 }

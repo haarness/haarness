@@ -21,6 +21,8 @@ export interface ComputerUseStatus {
     version: string;
     accepted: boolean;
     acceptedAt?: string | null;
+    /** The person agreed to earlier terms, which changed since. Older servers leave it out. */
+    changed?: boolean;
     text?: { title: string; intro: string; sections: { heading: string; items: string[] }[] };
   };
   permissions?: { accessibility: boolean; screenRecording: boolean } | null;

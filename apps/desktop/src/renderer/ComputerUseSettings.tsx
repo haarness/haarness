@@ -342,7 +342,10 @@ function Terms(props: { status: ComputerUseStatus }) {
   );
 }
 
-/** Before computer use is on for the first time: the terms, and one way to agree to them. */
+/**
+ * Before computer use is on for the first time, or again after the terms changed (said in one quiet line): the terms,
+ * and one way to agree to them.
+ */
 function Agreement(props: {
   status: ComputerUseStatus;
   busy: boolean;
@@ -353,6 +356,11 @@ function Agreement(props: {
   return (
     <div class="computer-agreement" data-setting="Terms for computer use">
       <strong class="computer-agreement-title">{t(props.status.terms.text?.title ?? "Terms for computer use")}</strong>
+      <Show when={props.status.terms.changed}>
+        <p class="muted computer-terms-changed" data-testid="computer-terms-changed">
+          {t("These terms changed since you last agreed to them.")}
+        </p>
+      </Show>
       <Terms status={props.status} />
       <label class="computer-agree">
         <input
