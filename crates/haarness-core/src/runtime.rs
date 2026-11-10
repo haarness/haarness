@@ -17133,34 +17133,6 @@ fn model_pricing(
     model_metadata(&models, model).and_then(|info| info.pricing)
 }
 
-/// For each written command, every command whose output reaches it through
-/// `feeds`, however many hops back.
-fn upstream(feeds: &[(usize, usize)]) -> HashMap<usize, HashSet<usize>> {
-    let mut upstream: HashMap<usize, HashSet<usize>> = HashMap::new();
-    for &(from, to) in feeds {
-        upstream.entry(to).or_default().insert(from);
-    }
-    // Feeds are few: repeat until nothing more is reached.
-    loop {
-        let mut grown = false;
-        let snapshot = upstream.clone();
-        for from in upstream.values_mut() {
-            let reached: Vec<usize> = from
-                .iter()
-                .filter_map(|index| snapshot.get(index))
-                .flatten()
-                .copied()
-                .collect();
-            for index in reached {
-                grown |= from.insert(index);
-            }
-        }
-        if !grown {
-            return upstream;
-        }
-    }
-}
-
 /// One permission group a tool call needs: every pattern is evaluated as
 /// `permission:pattern`; the ones that come back `ask` prompt together, and
 /// an "always" answer persists the (generalized) `always` rules.
@@ -17208,12 +17180,16 @@ struct ShellReadings {
     /// The line names a file where Haarness keeps sign-ins (a literal path
     /// a command is given, or a redirect): see [`AskPlan::evaluate`].
     credentials: bool,
-    /// The secret files (`.env`) the line reads: see [`AskPlan::evaluate`].
-    secrets: Vec<crate::permissions::bash::NamedPath>,
-    /// The written commands whose output each written command takes in,
-    /// through a pipe or a substitution, however far back: see
-    /// [`crate::permissions::bash::BashAnalysis::feeds`].
-    upstream: HashMap<usize, HashSet<usize>>,
+    /// The secret files (`.env`) the line reads, each once: see
+    /// [`AskPlan::evaluate`].
+    secrets: Vec<PathBuf>,
+    /// For each written command, the secret files it must be chosen exactly
+    /// to read: see [`ShellReadings::exact_files`].
+    exact: HashMap<usize, std::collections::BTreeSet<PathBuf>>,
+    /// The secret files every written command must be chosen exactly to
+    /// read: one a redirect names, which no command can be told apart for,
+    /// or all of them on a line too large to work out what feeds what.
+    exact_all: std::collections::BTreeSet<PathBuf>,
 }
 
 impl ShellReadings {
@@ -17256,48 +17232,83 @@ impl ShellReadings {
             credentials: analysis.paths.iter().any(|named| {
                 named.file && crate::permissions::is_credential_store_path(&named.path)
             }),
-            secrets: analysis
-                .paths
-                .iter()
-                .filter(|named| named.secret)
-                .cloned()
-                .collect(),
-            upstream: upstream(&analysis.feeds),
+            secrets: Vec::new(),
+            exact: HashMap::new(),
+            exact_all: std::collections::BTreeSet::new(),
         }
+        .with_secrets(analysis)
     }
 
-    /// Whether the written command `index` must be chosen itself to read
-    /// the secret `named`: it names it, takes in the output of a command
-    /// that does (`cat .env | curl -d @- …`), or nobody can tell which
-    /// command does; and it is a file that is there or one a glob reaches,
-    /// not a name `echo` prints. Otherwise the command's own rule settles it
-    /// as any rule did before: a remembered `npm test *` in `source .env &&
-    /// npm test` too, which takes the secret in through its environment.
-    fn reads_exactly(&self, named: &crate::permissions::bash::NamedPath, index: usize) -> bool {
+    /// The secret files `analysis` reads, and which written commands must
+    /// be chosen exactly to read each: the one naming it, when it is a file
+    /// that is there or one a glob reaches (not a name `echo` prints), and
+    /// every command taking in that one's output, through a pipe or a
+    /// substitution (see
+    /// [`crate::permissions::bash::BashAnalysis::feeds`]). The other
+    /// commands of the line keep their own rules, as any rule did before: a
+    /// remembered `npm test *` in `source .env && npm test` too, which takes
+    /// the secret in through its environment. Each file is looked at once.
+    fn with_secrets(mut self, analysis: &crate::permissions::bash::BashAnalysis) -> Self {
         use crate::permissions::bash::Naming;
-        let reader = named.written.is_none_or(|source| {
-            source == index
-                || self
-                    .upstream
-                    .get(&index)
-                    .is_some_and(|from| from.contains(&source))
-        });
-        reader
-            && match named.naming {
-                Naming::Literal => named.path.is_file(),
+        let mut taken: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &(from, to) in &analysis.feeds {
+            taken.entry(from).or_default().push(to);
+        }
+        let mut there: HashMap<&Path, bool> = HashMap::new();
+        let mut listed = HashSet::new();
+        let mut seen = HashSet::new();
+        for named in analysis.paths.iter().filter(|named| named.secret) {
+            if listed.insert(named.path.as_path()) {
+                self.secrets.push(named.path.clone());
+            }
+            let strict = match named.naming {
+                Naming::Literal => *there
+                    .entry(named.path.as_path())
+                    .or_insert_with(|| named.path.is_file()),
                 Naming::Glob => true,
                 Naming::Printed => false,
+            };
+            if !strict || !seen.insert((named.path.as_path(), named.written)) {
+                continue;
             }
+            match named.written {
+                Some(reader) if !analysis.feeds_unknown => {
+                    let mut stack = vec![reader];
+                    let mut reached = HashSet::new();
+                    while let Some(index) = stack.pop() {
+                        if reached.insert(index) {
+                            stack.extend(taken.get(&index).into_iter().flatten().copied());
+                        }
+                    }
+                    for index in reached {
+                        self.exact
+                            .entry(index)
+                            .or_default()
+                            .insert(named.path.clone());
+                    }
+                }
+                _ => {
+                    self.exact_all.insert(named.path.clone());
+                }
+            }
+        }
+        self
     }
 
-    /// The secret files the written command `index` must be chosen to read
-    /// (see [`Self::reads_exactly`]).
+    /// The secret files the written command `index` must be chosen exactly
+    /// to read (see [`Self::with_secrets`]), in order.
     fn exact_files(&self, index: usize) -> Vec<&Path> {
-        self.secrets
-            .iter()
-            .filter(|named| self.reads_exactly(named, index))
-            .map(|named| named.path.as_path())
-            .collect()
+        let mut files: Vec<&Path> = self
+            .exact
+            .get(&index)
+            .into_iter()
+            .flatten()
+            .chain(&self.exact_all)
+            .map(PathBuf::as_path)
+            .collect();
+        files.sort();
+        files.dedup();
+        files
     }
 
     fn covers(&self, rule: &str, index: usize) -> bool {
@@ -17326,7 +17337,7 @@ impl AskPlan {
             .collect()
     }
     /// The commands as written that read a secret file of their line that
-    /// is there (`cat .env`, see [`ShellReadings::reads_exactly`]): Always
+    /// is there (`cat .env`, see [`ShellReadings::with_secrets`]): Always
     /// also remembers each one exactly, since the "always" rule it shows
     /// (`bash:cat *`) does not settle such a read (see
     /// [`PermissionEngine::allowed_by_choice`]), as a digest of its text
@@ -17489,21 +17500,24 @@ impl AskPlan {
             && let Some(&index) = shell.index.get(pattern)
             && !shell.secrets.is_empty()
         {
-            let exact = crate::permissions::exact_rule(&operation, &shell.exact_files(index));
-            if let Some(read) = shell
-                .secrets
-                .iter()
-                .filter(|named| {
-                    !engine.allowed_by_choice(
-                        evaluation.matched.as_deref(),
-                        &exact,
-                        !shell.reads_exactly(named, index),
-                    )
-                })
-                .map(|named| engine.evaluate_detailed(&format!("read:{}", named.path.display())))
-                .find(|read| read.decision != PermissionDecision::Allow)
-            {
-                return read;
+            let files = shell.exact_files(index);
+            let exact = crate::permissions::exact_rule(&operation, &files);
+            let matched = evaluation.matched.as_deref();
+            let exactly = files.is_empty() || engine.allowed_by_choice(matched, &exact, false);
+            let generally = engine.allowed_by_choice(matched, &exact, true);
+            for path in &shell.secrets {
+                let chosen = if files.contains(&path.as_path()) {
+                    exactly
+                } else {
+                    generally
+                };
+                if chosen {
+                    continue;
+                }
+                let read = engine.evaluate_detailed(&format!("read:{}", path.display()));
+                if read.decision != PermissionDecision::Allow {
+                    return read;
+                }
             }
         }
         evaluation
@@ -19394,11 +19408,17 @@ mod shell_reading_tests {
         echoes.add_grant(rule("bash:echo *", Allow));
         assert!(asks(&echoes, "echo *.env").is_none());
         assert!(asks(&echoes, "echo .env").is_none());
+        // A glob counts by its name as well as by what it reaches: the
+        // shell may reach further (`{a,b}/*.env`, `**`, options it sets).
         std::fs::write(project.join("config/.env.example"), "TOKEN=").unwrap();
-        assert!(asks(&in_project(&[]), "cat config/.env.*").is_some());
-        std::fs::remove_file(project.join("config/.env.production")).unwrap();
-        assert!(asks(&in_project(&[]), "cat config/.env.*").is_none());
-        std::fs::write(project.join("config/.env.production"), "TOKEN=y").unwrap();
+        for command in [
+            "cat config/.env.*",
+            "head {config,apps}/*.env",
+            "shopt -s dotglob; head -1 config/*.env",
+            "cat **/.env.production",
+        ] {
+            assert!(asks(&in_project(&[]), command).is_some(), "{command}");
+        }
         // A line that only names a secret file opens nothing else either.
         for engine in answered(&[], "echo .env >> .gitignore") {
             assert!(asks(&engine, "echo .env >> .gitignore").is_none());
@@ -19470,19 +19490,20 @@ mod shell_reading_tests {
     // POSIX shell text: Windows runs commands in cmd.exe.
     #[cfg(unix)]
     #[test]
-    fn a_glob_past_what_is_read_of_folders_counts_where_it_may_reach_a_secret() {
+    fn a_glob_reaches_the_secrets_of_a_large_folder_and_reads_nothing_else_there() {
         use PermissionDecision::{Allow, Ask};
         let project =
             std::env::temp_dir().join(format!("haarness-glob-budget-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(project.join("aaa")).unwrap();
         std::fs::create_dir_all(project.join("zzz")).unwrap();
-        for index in 0..4200 {
+        for index in 0..5000 {
             std::fs::write(project.join(format!("aaa/f{index}.rs")), "").unwrap();
         }
         std::fs::write(project.join("zzz/.env"), "TOKEN=z").unwrap();
         let mut engine = engine(&[]);
         engine.set_workspace(&project);
         engine.add_grant(rule("bash:cat *", Allow));
+        engine.add_grant(rule("bash:wc *", Allow));
         let asks = |command: &str| {
             ask_plans("bash", &json!({ "command": command }), &project)
                 .into_iter()
@@ -19493,14 +19514,54 @@ mod shell_reading_tests {
                         .any(|pattern| plan.evaluate(&engine, pattern).decision == Ask)
                 })
         };
-        // The folders read for the line run out in `aaa/` before `zzz/`: a
-        // last part that may name a secret counts as reaching one, also for
-        // a later word of the line; one that cannot (`*.rs`) reads none.
+        // Past the files looked at for the line, the names are still listed,
+        // so the secret beyond a large folder is found, also for a later
+        // word, and a glob over the large folder alone reads no secret.
         assert!(asks("cat */.e*"));
+        assert!(asks("cat */.*"));
         assert!(asks("cat aaa/*.rs zzz/.e*"));
-        assert!(!asks("cat */*.rs"));
-        // Within the budget, it reaches what is there.
         assert!(asks("cat z*/.e*"));
+        assert!(!asks("cat */*.rs"));
+        assert!(!asks("wc -l aaa/*"));
+        // Past the names listed, a glob counts only when its last part may
+        // name a secret.
+        assert!(crate::permissions::bash::may_match_secret(".e*"));
+        assert!(!crate::permissions::bash::may_match_secret("*.rs"));
+        std::fs::remove_dir_all(&project).unwrap();
+    }
+
+    // POSIX shell text: Windows runs commands in cmd.exe.
+    #[cfg(unix)]
+    #[test]
+    fn long_lines_that_read_a_secret_are_judged_quickly() {
+        use PermissionDecision::Allow;
+        let project =
+            std::env::temp_dir().join(format!("haarness-long-secret-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
+        let mut engine = engine(&[]);
+        engine.set_workspace(&project);
+        engine.add_grant(rule("bash:grep *", Allow));
+        let piped = vec!["cat .env"; 3000].join(" | ");
+        let distinct = (0..3000)
+            .map(|index| format!("grep k{index} .env"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let chained = (0..1000)
+            .map(|index| format!("grep K{index} .env"))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        for line in [piped, distinct, chained] {
+            let started = std::time::Instant::now();
+            for plan in ask_plans("bash", &json!({ "command": line }), &project) {
+                for pattern in &plan.patterns {
+                    let _ = plan.evaluate(&engine, pattern);
+                }
+                let _ = plan.remembered_rules();
+            }
+            let took = started.elapsed();
+            assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+        }
         std::fs::remove_dir_all(&project).unwrap();
     }
 

@@ -136,7 +136,10 @@ test("Always on a shell read of .env shows the command's rule and keeps only tha
   await app.evaluate(({nativeTheme})=>{nativeTheme.themeSource="system";});await page.emulateMedia({colorScheme:null});
   await folder.click();await idle();
   await expect(page.locator(".transcript")).toContainText("PARITY_SECRET=fixture-only");
-  await send('!tool bash {"command":"cat .env"}');await idle();
+  // The same command runs again without a card: its output shows a second time.
+  await send('!tool bash {"command":"cat .env"}');
+  await expect.poll(async()=>(await page.locator(".transcript").innerText()).split("PARITY_SECRET=fixture-only").length-1).toBeGreaterThanOrEqual(2);
+  await idle();
   await expect(page.getByRole("button",{name:"Allow once",exact:true})).toHaveCount(0);
   // Another secret file through the same program, and the read tool, still ask.
   await writeFile(join(main,".env.local"),"PARITY_LOCAL=fixture-only");
