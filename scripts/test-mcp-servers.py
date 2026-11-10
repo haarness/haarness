@@ -31,6 +31,9 @@
 - A tool listed without an `inputSchema` is left out by name and the server's other tools work.
 - A 20 MB tool result reaches the model cut to 50 KiB with the whole saved to a file; base64 text and an image in
   capitals read from a resource come back as text and as an attachment.
+- An HTTP server that restarted and forgot its sessions, answering the session a request names with a 400 as servers
+  built on the TypeScript SDK's examples do (JSON that names no request, or text), answers the TUI's next call of its
+  tool on a new session instead of the call waiting until it is stopped or failing until a reconnect.
 
 The keychain is a test file (HAARNESS_TEST_KEYCHAIN_FILE, honoured by debug builds only), so the script never
 touches the system's keychain, and it fails if a secret reaches anything else.
@@ -57,6 +60,36 @@ NO_HOST = 'Its URL is not a web address (http or https) with a host.'
 # Quotes, backslashes and length the old `security -i` path split or mangled.
 AWKWARD = 'a"b\\c\\"d \'e\' $(f) %g% ' + 'x' * 4096
 python = sys.executable
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
+
+
+# Streamable HTTP servers that forget their sessions when started again, by how they refuse a session they forgot.
+forgetful = {mode: {'port': free_port(), 'log': root/f'forgetful-{mode}.log', 'process': None} for mode in ('json', 'text')}
+
+
+def start_forgetful(mode):
+    entry = forgetful[mode]
+    entry['process'] = subprocess.Popen([python, str(fixtures/'forgetful.py'), str(entry['port']), mode, str(entry['log'])],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with socket.socket() as probe:
+            if probe.connect_ex(('127.0.0.1', entry['port'])) == 0:
+                return
+        time.sleep(.05)
+    raise AssertionError(f'forgetful-{mode} did not start')
+
+
+def stop_forgetful(mode):
+    process = forgetful[mode]['process']
+    if process and process.poll() is None:
+        process.terminate()
+        process.wait(timeout=10)
 
 
 def server(fixture, **extra):
@@ -177,6 +210,8 @@ settings.write_text(json.dumps({
         # Lists a tool without an inputSchema beside two good ones.
         'shelf': server('names.py', env={'LABEL': 'shelf', 'TOOLS': json.dumps(['first', 'second']),
                                          'LISTED': json.dumps([{'name': 'broken', 'description': 'no input schema'}])}),
+        **{f'forgetful-{mode}': {'type': 'http', 'url': f"http://127.0.0.1:{entry['port']}/mcp", 'oauth': False}
+           for mode, entry in forgetful.items()},
     },
 }, indent=2) + '\n')
 (workspace/'.haarness/config.toml').write_text('[tool_availability]\n"mcp__Docs_Server__plain" = false\n')
@@ -228,6 +263,8 @@ def alive(pid): return subprocess.run(['ps', '-p', str(pid)], capture_output=Tru
 
 
 try:
+    for mode in forgetful:
+        start_forgetful(mode)
     # The entry `keyed` needs, stored the way a TUI user stores it: piped, never echoed.
     stored = cli('mcp', 'secret', 'set', 'fixture-token', input=SECRET + '\n')
     assert 'Stored fixture-token in the' in stored and SECRET not in stored, stored
@@ -521,6 +558,34 @@ try:
     if os.environ.get('HAARNESS_SCREENSHOTS'):
         (pathlib.Path(os.environ['HAARNESS_SCREENSHOTS'])/'tui-mcp-resource-rows.txt').write_text(pane())
     check('the TUI names the resource read and the server listed beside the tool')
+
+    # --- an HTTP server that restarted and forgot its sessions
+    def tui_send(text):
+        subprocess.run(['tmux', 'send-keys', '-l', '-t', session, ' ' + text], check=True)
+        subprocess.run(['tmux', 'send-keys', '-t', session, 'Enter'], check=True)
+    def lines(mode, kind):
+        log = forgetful[mode]['log']
+        return log.read_text().split().count(kind) if log.exists() else 0
+    for mode in forgetful:
+        assert servers()[f'forgetful-{mode}']['status'] == 'connected', servers()[f'forgetful-{mode}']
+        answer = f'forgetful-{mode} answered'
+        tui_send(f'!tool mcp__forgetful-{mode}__echo {{}}')
+        until(lambda: pane().count(answer) >= 1, f'the TUI did not show forgetful-{mode}\'s answer', 30)
+        before = {kind: lines(mode, kind) for kind in ('initialize', 'refused', 'call')}
+        stop_forgetful(mode)
+        start_forgetful(mode)
+        started = time.monotonic()
+        tui_send(f'!tool mcp__forgetful-{mode}__echo {{}}')
+        until(lambda: pane().count(answer) >= 2, f'the call after forgetful-{mode} restarted did not answer', 20)
+        took = time.monotonic() - started
+        (root/f'tui-forgetful-{mode}.txt').write_text(pane())
+        if os.environ.get('HAARNESS_SCREENSHOTS'):
+            (pathlib.Path(os.environ['HAARNESS_SCREENSHOTS'])/f'tui-mcp-forgetful-{mode}.txt').write_text(pane())
+        # One new session, opened once the old one was refused, and the call sent again on it.
+        assert lines(mode, 'initialize') == before['initialize'] + 1, forgetful[mode]['log'].read_text()
+        assert lines(mode, 'refused') > before['refused'] and lines(mode, 'call') == before['call'] + 1, forgetful[mode]['log'].read_text()
+        assert servers()[f'forgetful-{mode}']['status'] == 'connected', servers()[f'forgetful-{mode}']
+        check(f'an HTTP server that restarted and refuses the session it forgot with a 400 ({"JSON naming no request" if mode == "json" else "text"}) answers the TUI\'s next call on a new session, in {took:.1f} s')
     for keys in (['-l', '/mcp'], ['Enter']):
         subprocess.run(['tmux', 'send-keys', '-t', session, *keys], check=True)
         time.sleep(.5)
@@ -642,6 +707,8 @@ try:
     print(f'PASS {len(checks)} MCP server scenarios.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)
+    for mode in forgetful:
+        stop_forgetful(mode)
     if stand_in:
         stand_in.shutdown()
     if foreground:

@@ -6,7 +6,9 @@ pub mod keychain;
 mod process;
 #[cfg(all(test, unix))]
 mod process_tests;
+mod session;
 use credentials::FileCredentialStore;
+use session::SessionClient;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -2266,7 +2268,7 @@ async fn activate_remote(
                 activate_streamable(
                     handler.clone(),
                     StreamableHttpClientTransport::with_client(
-                        AuthClient::new(http, manager),
+                        AuthClient::new(SessionClient(http), manager),
                         transport_config,
                     ),
                     url,
@@ -2275,7 +2277,10 @@ async fn activate_remote(
             } else {
                 activate_streamable(
                     handler.clone(),
-                    StreamableHttpClientTransport::with_client(http, transport_config),
+                    StreamableHttpClientTransport::with_client(
+                        SessionClient(http),
+                        transport_config,
+                    ),
                     url,
                 )
                 .await
@@ -2283,7 +2288,7 @@ async fn activate_remote(
         } else {
             activate_streamable(
                 handler.clone(),
-                StreamableHttpClientTransport::with_client(http, transport_config),
+                StreamableHttpClientTransport::with_client(SessionClient(http), transport_config),
                 url,
             )
             .await
@@ -4152,6 +4157,241 @@ mod tests {
                 .as_deref()
                 .is_some_and(|detail| detail.contains("after 300 ms"))
         );
+        server.abort();
+    }
+
+    /// How [`run_forgetful_fixture`] refuses a request: a session it does not
+    /// know, as servers built on the TypeScript SDK's examples do, as JSON
+    /// that names no request or as text; or every tool call, for bad
+    /// parameters, as JSON that names no request.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Refusal {
+        JsonSession,
+        TextSession,
+        Params,
+    }
+
+    /// A Streamable HTTP server that gives each `initialize` a session and
+    /// forgets them all when it restarts (`restart`).
+    struct Forgetful {
+        refusal: Refusal,
+        sessions: parking_lot::Mutex<std::collections::HashSet<String>>,
+        initialized: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Forgetful {
+        fn restart(&self) {
+            self.sessions.lock().clear();
+        }
+        fn initialized(&self) -> usize {
+            self.initialized.load(Ordering::SeqCst)
+        }
+    }
+
+    /// The session a request names, from its `Mcp-Session-Id` header.
+    fn session_of(headers: &str) -> Option<String> {
+        headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("mcp-session-id")
+                .then(|| value.trim().to_owned())
+        })
+    }
+
+    async fn write_response(
+        stream: &mut TcpStream,
+        status: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) {
+        use std::fmt::Write as _;
+        let mut head = format!("HTTP/1.1 {status}\r\n");
+        for (name, value) in headers {
+            let _ = write!(head, "{name}: {value}\r\n");
+        }
+        let _ = write!(
+            head,
+            "Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes()).await;
+        let _ = stream.write_all(body).await;
+    }
+
+    /// What a server built on the TypeScript SDK's examples answers a
+    /// request whose session it does not know (`refusal`), or `None` for a
+    /// refusal of another kind.
+    fn session_refusal(refusal: Refusal) -> Option<(&'static str, Vec<u8>)> {
+        match refusal {
+            Refusal::JsonSession => Some((
+                "application/json",
+                serde_json::to_vec(&json!({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32000, "message": "Bad Request: No valid session ID provided"},
+                    "id": null
+                }))
+                .unwrap(),
+            )),
+            Refusal::TextSession => Some((
+                "text/plain",
+                b"Bad Request: Server not initialized".to_vec(),
+            )),
+            Refusal::Params => None,
+        }
+    }
+
+    async fn run_forgetful_fixture(listener: TcpListener, state: Arc<Forgetful>) {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let state = state.clone();
+            tokio::spawn(async move {
+                let (request, headers, body) = read_http_exchange(&mut stream).await;
+                if !request.starts_with("POST ") {
+                    write_response(&mut stream, "405 Method Not Allowed", &[], b"").await;
+                    return;
+                }
+                let message: Value = serde_json::from_slice(&body).unwrap();
+                let method = message.get("method").and_then(Value::as_str);
+                if method == Some("initialize") {
+                    let session = uuid::Uuid::now_v7().to_string();
+                    state.sessions.lock().insert(session.clone());
+                    state.initialized.fetch_add(1, Ordering::SeqCst);
+                    let reply = json!({"jsonrpc": "2.0", "id": message["id"], "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "forgetful-fixture", "version": "1.0.0" }
+                    }});
+                    write_response(
+                        &mut stream,
+                        "200 OK",
+                        &[
+                            ("Content-Type", "application/json"),
+                            ("Mcp-Session-Id", &session),
+                        ],
+                        &serde_json::to_vec(&reply).unwrap(),
+                    )
+                    .await;
+                    return;
+                }
+                let known = session_of(&headers)
+                    .is_some_and(|session| state.sessions.lock().contains(&session));
+                if !known && let Some((kind, body)) = session_refusal(state.refusal) {
+                    write_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        &[("Content-Type", kind)],
+                        &body,
+                    )
+                    .await;
+                    return;
+                }
+                let Some(id) = message.get("id").cloned() else {
+                    write_response(&mut stream, "202 Accepted", &[], b"").await;
+                    return;
+                };
+                let result = match method {
+                    Some("tools/list") => json!({
+                        "tools": [{ "name": "echo", "inputSchema": { "type": "object" } }]
+                    }),
+                    Some("tools/call") if state.refusal == Refusal::Params => {
+                        let refusal = json!({
+                            "jsonrpc": "2.0",
+                            "error": {"code": -32602, "message": "Invalid params: city is required"},
+                            "id": null
+                        });
+                        write_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            &[("Content-Type", "application/json")],
+                            &serde_json::to_vec(&refusal).unwrap(),
+                        )
+                        .await;
+                        return;
+                    }
+                    Some("tools/call") => json!({
+                        "content": [{ "type": "text", "text": "echoed" }],
+                        "isError": false
+                    }),
+                    method => panic!("unexpected forgetful fixture method {method:?}"),
+                };
+                let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                write_response(
+                    &mut stream,
+                    "200 OK",
+                    &[("Content-Type", "application/json")],
+                    &serde_json::to_vec(&reply).unwrap(),
+                )
+                .await;
+            });
+        }
+    }
+
+    /// A server built on the TypeScript SDK's examples that restarted
+    /// answered the session its client still named with a 400: as JSON that
+    /// names no request, which rmcp let go, so the call waited until it was
+    /// stopped; or as text, which failed every request until a reconnect.
+    #[tokio::test]
+    async fn a_server_that_restarted_and_forgot_the_session_answers_on_a_new_one() {
+        for refusal in [Refusal::JsonSession, Refusal::TextSession] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let state = Arc::new(Forgetful {
+                refusal,
+                sessions: parking_lot::Mutex::default(),
+                initialized: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let server = tokio::spawn(run_forgetful_fixture(listener, state.clone()));
+            let registry = NativeMcpRegistry::default();
+            let info = registry
+                .configure("forgetful", streamable_config(address, 2_000))
+                .await
+                .unwrap();
+            assert_eq!(info.status, "connected");
+            let call = || registry.call("forgetful", "mcp__forgetful__echo", json!({}));
+            assert_eq!(call().await.unwrap().text, "echoed");
+            state.restart();
+            let output = tokio::time::timeout(Duration::from_secs(5), call())
+                .await
+                .expect("the call after the restart waited")
+                .unwrap();
+            assert_eq!(output.text, "echoed");
+            assert_eq!(state.initialized(), 2);
+            assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+            server.abort();
+        }
+    }
+
+    /// Any other 400 is the request's own answer, even one that names no
+    /// request: it fails the call at once, and the session is kept.
+    #[tokio::test]
+    async fn a_refusal_that_is_not_about_the_session_fails_the_call_on_the_same_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let state = Arc::new(Forgetful {
+            refusal: Refusal::Params,
+            sessions: parking_lot::Mutex::default(),
+            initialized: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let server = tokio::spawn(run_forgetful_fixture(listener, state.clone()));
+        let registry = NativeMcpRegistry::default();
+        registry
+            .configure("strict", streamable_config(address, 2_000))
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            registry.call("strict", "mcp__strict__echo", json!({})),
+        )
+        .await
+        .expect("the refused call waited")
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid params: city is required"),
+            "{error}"
+        );
+        assert_eq!(state.initialized(), 1);
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
         server.abort();
     }
 

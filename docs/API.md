@@ -711,6 +711,12 @@ server reports `needs_auth` with a non-secret detail until the CLI completes
 the public OAuth authorization-code + PKCE flow. `disconnect` drops the live
 worker and advertised tools without deleting configuration; `reconnect`
 performs initialization and capability discovery again.
+A Streamable HTTP server that restarted, or ended its session, gets a new
+session: when it turns down the session a request names (a 404, or a 400 that
+says the session is unknown or the server not initialized, as servers built on
+the TypeScript SDK's examples answer), the connection opens a new session once
+and sends the request again. Any other 400 is that request's own error, even
+one whose JSON-RPC error carries no `id`.
 A local server, and a remote server's `headersHelper`, run in the server's
 project folder (the chat home's own folder there); a relative `cwd` is read
 from the project folder, `~/…` from the home folder, and the settings keep
