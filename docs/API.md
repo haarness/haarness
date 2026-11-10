@@ -219,7 +219,8 @@ Automatic compaction uses the
 selected model's context and output limits and retries pre-output context-overflow/HTTP-413 failures after safe
 compaction, under a bounded per-turn recovery ceiling. A context too long is
 read in each provider's own words, among them Z.ai's code 1261 ("Prompt exceeds
-max length"), Amazon Nova's "Input Tokens Exceeded", DeepInfra's "Requested
+max length", or "Prompt 超长" in Chinese), a gateway's "too large for the model's
+configured input limit", Amazon Nova's "Input Tokens Exceeded", DeepInfra's "Requested
 input length … exceeds maximum input length" and Text Generation Inference's
 (Together, Hugging Face) "`inputs` tokens + `max_new_tokens` must be <= …"; an
 HTTP 429 is a rate limit whatever its words, and never compacts. A refusal of the request
@@ -699,7 +700,13 @@ estimate, and, for a request that finished cleanly after streaming something,
 a tool call counting from when it starts streaming, not when its arguments
 are whole), `stream_ms` (the span the output streamed across) and
 `stream_tokens` (the tokens that streamed). A stopped or failed request
-records none of the three, and a retry runs its own clock. Output speed is `stream_tokens /
+records none of the three, and a retry runs its own clock. When the provider
+had reported usage before a request was stopped or broke off mid-reply, the
+record keeps that report and adds Haarness's estimate of what streamed after
+it (Anthropic reports a single output token until the reply ends, Gemini
+counts with every chunk); `estimated` stays unset then, though part of the
+output is estimated. A request with no report by then is estimated whole.
+Output speed is `stream_tokens /
 stream_ms`, not `output_tokens`, which also counts reasoning that never
 streamed. Desktop's Context panel and the TUI's `/usage` and sidebar show
 them; records from before requests were timed have none.
@@ -919,8 +926,9 @@ and in forks, sends a short note in place of those images, so the prompt stays
 stable for caching; the original attachments stay in their messages. When the
 provider names the image by its place in the request (Anthropic's
 `messages.N.content.M`) only that image is left out. A refusal of the request
-for how many images it carries ("too many images", recorded with
-`too_many: true`) or how large they make it (HTTP 413, Gemini's "Request
+for how many images it carries ("too many images", or Z.ai's "prompt too
+long; exceeded max image count", also in Chinese, which never compacts the
+chat; recorded with `too_many: true`) or how large they make it (HTTP 413, Gemini's "Request
 payload size exceeds the limit", recorded with `too_large: true` whichever
 images it leaves out) leaves out the oldest half of them by that measure
 (`oldest: true`), so the newest images then reach the model. The turn's own

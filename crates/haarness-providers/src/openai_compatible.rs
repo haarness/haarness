@@ -2115,8 +2115,10 @@ fn apply_model_defaults(mut info: ModelInfo, defaults: CompatibleModelDefaults) 
     if let Some(value) = defaults.context_window {
         info.context_window = Some(value);
     }
+    // An output limit of 0 asks for none: the model lists none, whatever the
+    // catalog or the server says, and its requests carry none.
     if let Some(value) = defaults.max_output_tokens {
-        info.max_output_tokens = Some(value);
+        info.max_output_tokens = (value > 0).then_some(value);
     }
     info
 }
@@ -2301,8 +2303,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
             || self.model_defaults.reasoning.unwrap_or(false),
             |model| model.reasoning,
         );
+        // A configured output limit of 0 asks for none, whatever a model lists.
         let max_output_tokens = selected
             .and_then(|model| model.max_output_tokens)
+            .filter(|_| self.model_defaults.max_output_tokens != Some(0))
             .or(self.model_defaults.max_output_tokens)
             .filter(|limit| *limit > 0);
         // Ollama runs the model with the window Haarness compacts against.

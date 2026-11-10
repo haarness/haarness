@@ -85,7 +85,13 @@ fn configured_models(
                 .map(str::to_owned)
                 .collect();
             }
-            crate::catalog::annotate(catalog_provider, model)
+            let mut model = crate::catalog::annotate(catalog_provider, model);
+            // An output limit of 0 asks for none: no limit is listed, and the
+            // Chat Completions requests carry none.
+            if defaults.max_output_tokens == Some(0) {
+                model.max_output_tokens = None;
+            }
+            model
         })
         .collect()
 }
@@ -393,7 +399,12 @@ impl CopilotProvider {
             let (discovered, wires): (Vec<_>, HashMap<_, _>) = entries
                 .iter()
                 .filter_map(copilot_model)
-                .map(|(model, wire)| {
+                .map(|(mut model, wire)| {
+                    // An output limit of 0 asks for none: the list agrees
+                    // with the requests, which carry none.
+                    if self.instance.model_defaults.max_output_tokens == Some(0) {
+                        model.max_output_tokens = None;
+                    }
                     let id = model.id.clone();
                     (model, (id, wire))
                 })
@@ -1013,6 +1024,47 @@ mod tests {
         ]}))
     }
 
+    async fn copilot_limited_catalog() -> Json<Value> {
+        Json(serde_json::json!({"data":[{
+            "id":"chat-model",
+            "supported_endpoints":["/chat/completions"],
+            "capabilities":{"limits":{"max_output_tokens":32_000}}
+        }]}))
+    }
+
+    #[tokio::test]
+    async fn a_copilot_output_limit_of_0_clears_the_limit_copilot_lists() {
+        let capture = Capture::default();
+        let router = Router::new()
+            .route("/models", axum::routing::get(copilot_limited_catalog))
+            .route("/chat/completions", post(openai_fixture))
+            .with_state(capture.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut native = instance("github-copilot", format!("http://{address}"), "gh-token");
+        native.discover_models = true;
+        let listed = CopilotProvider::new(native.clone(), None)
+            .discover_models()
+            .await
+            .info()
+            .models[0]
+            .max_output_tokens;
+        assert_eq!(listed, Some(32_000));
+        native.model_defaults.max_output_tokens = Some(0);
+        let provider = CopilotProvider::new(native, None).discover_models().await;
+        assert_eq!(provider.info().models[0].max_output_tokens, None);
+        let mut chat = request();
+        chat.model = "chat-model".into();
+        collect_text_with(&provider, chat).await;
+        let requests = capture.0.lock();
+        assert!(
+            requests[0].1.get("max_tokens").is_none(),
+            "{:?}",
+            requests[0].1
+        );
+    }
+
     async fn responses_fixture(
         State(capture): State<Capture>,
         headers: HeaderMap,
@@ -1108,6 +1160,34 @@ mod tests {
         assert_eq!(requests[0].0["api-key"], "azure-secret");
         assert!(!requests[0].0.contains_key("authorization"));
         assert_eq!(requests[0].1["model"], "test-model");
+    }
+
+    #[tokio::test]
+    async fn an_azure_output_limit_of_0_lists_none_and_sends_none() {
+        let capture = Capture::default();
+        let router = Router::new()
+            .route("/chat/completions", post(openai_fixture))
+            .with_state(capture.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut azure = instance("azure", format!("http://{address}"), "azure-secret");
+        // A deployment the catalog gives an output limit.
+        azure.models = vec!["gpt-5.4".into()];
+        let listed = AzureProvider::new(azure.clone(), None).info().models[0].max_output_tokens;
+        assert!(listed.is_some_and(|limit| limit > 0), "{listed:?}");
+        azure.model_defaults.max_output_tokens = Some(0);
+        let provider = AzureProvider::new(azure, None);
+        assert_eq!(provider.info().models[0].max_output_tokens, None);
+        let mut request = request();
+        request.model = "gpt-5.4".into();
+        collect_text_with(&provider, request).await;
+        let requests = capture.0.lock();
+        assert!(
+            requests[0].1.get("max_tokens").is_none(),
+            "{:?}",
+            requests[0].1
+        );
     }
 
     #[tokio::test]

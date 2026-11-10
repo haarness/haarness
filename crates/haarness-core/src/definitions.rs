@@ -87,6 +87,11 @@ fn yaml_front(front: &str) -> CoreResult<Value> {
             // fields still fail YAML parsing instead of becoming permissive.
             yaml_rust::YamlLoader::load_from_str(&legacy_description(front))
                 .or_else(|_| yaml_rust::YamlLoader::load_from_str(&text_values(front)))
+                // A command file can need both: a description that opens
+                // with a tag beside `argument-hint: [version] [channel]`.
+                .or_else(|_| {
+                    yaml_rust::YamlLoader::load_from_str(&text_values(&legacy_description(front)))
+                })
                 .map_err(|_| original)
         })
         .map_err(|e| CoreError::Invalid(format!("invalid definition frontmatter: {e}")))?;
@@ -1209,6 +1214,56 @@ mod tests {
         ] {
             assert!(!plain_value(value), "{value}");
         }
+    }
+    #[test]
+    fn a_description_that_opens_with_a_bracketed_tag_loads_as_text() {
+        // Claude Code reads a leading tag as part of the text; YAML alone
+        // starts a list there and refuses what follows it.
+        for description in [
+            "[Team] Reviews PRs. Use when: asked",
+            "[Infra] Checks the deploy scripts",
+            "[Sam's team] Drafts release notes",
+            "[Docs]: proofreads a page",
+            "[Team] [Infra] Plans a migration",
+        ] {
+            let text = format!(
+                "---\nname: reviewer\ndescription: {description}\nmodel: inherit\ntools: [Read, Grep]\n---\nBody"
+            );
+            let (front, body) = markdown(&text).unwrap();
+            assert_eq!(front["description"], description);
+            assert_eq!(front["name"], "reviewer");
+            assert_eq!(front["model"], "inherit");
+            assert_eq!(list(front.get("tools")), vec!["Read", "Grep"]);
+            assert_eq!(body, "Body");
+        }
+        // Command files: another field beside it can need its own repair.
+        for (description, field, value) in [
+            (
+                "[Release] Tags a version",
+                "argument-hint",
+                "[version] [channel]",
+            ),
+            (
+                "[Git] Writes the commit message",
+                "allowed-tools",
+                "Bash(git commit: *)",
+            ),
+        ] {
+            let text = format!(
+                "---\ndescription: {description}\n{field}: {value}\nmodel: inherit\n---\nBody"
+            );
+            let (front, _) = markdown(&text).unwrap();
+            assert_eq!(front["description"], description);
+            assert_eq!(front[field], value);
+            assert_eq!(front["model"], "inherit");
+        }
+        // A malformed list beside it still fails the file.
+        assert!(
+            markdown(
+                "---\nname: reviewer\ndescription: [Team] Reviews PRs. Use when: asked\nallowed-tools: [Read] [Grep]\n---\nBody"
+            )
+            .is_err()
+        );
     }
     #[test]
     fn tool_masks_handle_defaults_and_mcp_patterns() {

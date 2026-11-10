@@ -12242,9 +12242,20 @@ fn provider_instances(
             video: section.video,
             tools: section.tools,
             // A window of 0 says nothing: the model's own one applies, and no
-            // app shows "0 context".
+            // app shows "0 context". An output limit of 0 asks a Chat
+            // Completions wire to send none (some gateways refuse
+            // `max_tokens`); the other wires always send one, so there it
+            // says nothing and thinking keeps its usual room for the answer.
             context_window: section.context_window.filter(|window| *window > 0),
-            max_output_tokens: section.max_output_tokens,
+            max_output_tokens: section.max_output_tokens.filter(|limit| {
+                *limit > 0
+                    || matches!(
+                        protocol,
+                        haarness_providers::CompatibleProtocol::OpenAiChatCompletions
+                            | haarness_providers::CompatibleProtocol::AzureOpenAi
+                            | haarness_providers::CompatibleProtocol::GithubCopilot
+                    )
+            }),
         };
         let instance = haarness_providers::NativeInstance {
             id: id.clone(),
@@ -20297,6 +20308,119 @@ request_timeout = 0
         };
         assert_eq!(window("zero"), None);
         assert_eq!(window("given"), Some(65_536));
+    }
+
+    #[tokio::test]
+    async fn a_provider_s_output_limit_of_0_is_never_listed_or_sent_as_0() {
+        use futures::StreamExt as _;
+        use haarness_providers::ProviderInstance;
+        // Each endpoint keeps what it was sent and refuses it.
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let record = {
+            let bodies = bodies.clone();
+            move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                bodies.lock().unwrap().push(body);
+                axum::http::StatusCode::BAD_REQUEST
+            }
+        };
+        let app = axum::Router::new()
+            .route("/v1/chat/completions", axum::routing::post(record.clone()))
+            .route("/gateway/v1/messages", axum::routing::post(record));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config: super::FileConfig = toml::from_str(&format!(
+            r#"
+            [providers.zero]
+            base_url = "http://{address}/v1"
+            requires_auth = false
+            models = ["local-model"]
+            max_output_tokens = 0
+
+            [providers.given]
+            base_url = "http://{address}/v1"
+            requires_auth = false
+            models = ["local-model"]
+            max_output_tokens = 4096
+
+            [providers.catalogued]
+            base_url = "http://{address}/v1"
+            requires_auth = false
+            models = ["gpt-5.4"]
+            max_output_tokens = 0
+
+            [providers.catalogued-plain]
+            base_url = "http://{address}/v1"
+            requires_auth = false
+            models = ["gpt-5.4"]
+
+            [providers.gateway]
+            protocol = "anthropic-messages"
+            base_url = "http://{address}/gateway/v1"
+            requires_auth = false
+            models = ["gateway-model"]
+            max_output_tokens = 0
+        "#
+        ))
+        .unwrap();
+        let (instances, _) = super::provider_instances(&config, &std::collections::HashMap::new());
+        let provider = |id: &str| -> std::sync::Arc<dyn haarness_core::ModelProvider> {
+            match instances
+                .iter()
+                .find(|instance| instance.id() == id)
+                .cloned()
+            {
+                Some(ProviderInstance::OpenAiChatCompletions(instance)) => {
+                    std::sync::Arc::new(haarness_providers::OpenAiCompatibleProvider::new(instance))
+                }
+                Some(ProviderInstance::AnthropicMessages(instance)) => {
+                    std::sync::Arc::new(haarness_providers::AnthropicProvider::new(instance))
+                }
+                _ => panic!("{id} must be configured"),
+            }
+        };
+        // The body of the request the provider `id` sends for one message.
+        let sent = async |id: &str, effort: Option<&str>| {
+            let provider = provider(id);
+            let request = haarness_core::ProviderRequest {
+                model: provider.info().models[0].id.clone(),
+                system: "Be brief.".into(),
+                messages: vec![haarness_core::ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                tools: Vec::new(),
+                reasoning_effort: effort.map(str::to_owned),
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            };
+            if let Ok(stream) = provider
+                .stream(request, tokio_util::sync::CancellationToken::new())
+                .await
+            {
+                stream.collect::<Vec<_>>().await;
+            }
+            bodies.lock().unwrap().drain(..).next().unwrap()
+        };
+        // No app shows an output limit of 0, and a Chat Completions request
+        // then carries none, even for a model the catalog gives a limit.
+        let limit = |id: &str| provider(id).info().models[0].max_output_tokens;
+        assert_eq!(limit("zero"), None);
+        assert!(sent("zero", None).await.get("max_tokens").is_none());
+        assert_eq!(limit("given"), Some(4096));
+        assert_eq!(sent("given", None).await["max_tokens"], 4096);
+        let catalogued = limit("catalogued-plain").expect("the catalog lists a limit");
+        assert_eq!(
+            sent("catalogued-plain", None).await["max_tokens"],
+            catalogued
+        );
+        assert_eq!(limit("catalogued"), None);
+        assert!(sent("catalogued", None).await.get("max_tokens").is_none());
+        // Claude always gets a limit: thinking keeps the usual room for the
+        // answer after it, not the least Claude allows.
+        assert_eq!(limit("gateway"), None);
+        assert_eq!(sent("gateway", Some("low")).await["max_tokens"], 8192);
+        server.abort();
     }
 
     #[test]

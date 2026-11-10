@@ -1429,6 +1429,13 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
     {
         return false;
     }
+    // Z.ai words a limit on how many images a request may carry as a prompt
+    // too long ("prompt too long; exceeded max image count", or 图片数 for
+    // "image count" in Chinese): leaving images out answers it (see
+    // `is_provider_image_rejection`), compacting cannot.
+    if message.contains("image count") || message.contains("图片数") {
+        return false;
+    }
     // Phrasings collected across providers and local servers (after
     // opencode's provider-error list).
     [
@@ -1459,9 +1466,13 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         "input is too long",
         // Ollama: "prompt too long; exceeded max context length by 1520
         // tokens"; Z.ai says it with no more words, or as code 1261,
-        // "Prompt exceeds max length".
+        // "Prompt exceeds max length", or in Chinese, "Prompt 超长".
         "prompt too long",
         "prompt exceeds max length",
+        "prompt 超长",
+        // Gateways that hold each model to an input limit of their own:
+        // "too large for the model's configured input limit".
+        "configured input limit",
         // Amazon Nova on Bedrock: "Input Tokens Exceeded: Number of input
         // tokens exceeds maximum length."
         "number of input tokens exceeds maximum length",
@@ -1513,6 +1524,8 @@ fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> b
         "many-image",
         "too many images",
         "maximum number of images",
+        "image count",
+        "图片数",
     ]
     .iter()
     .any(|marker| message.contains(marker))
@@ -1750,7 +1763,12 @@ const OVERSIZED_REQUEST: [&str; 8] = [
 fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
     let message = message.to_ascii_lowercase();
     let says = |markers: &[&str]| markers.iter().any(|marker| message.contains(marker));
-    if says(&["too many images", "maximum number of images"]) {
+    if says(&[
+        "too many images",
+        "maximum number of images",
+        "image count",
+        "图片数",
+    ]) {
         Some(ImageVolume::Count)
     } else if says(&OVERSIZED_REQUEST) {
         Some(ImageVolume::Bytes)
@@ -11490,6 +11508,8 @@ impl RunnerTask {
                 // Everything the model streamed, for the local output estimate
                 // when the provider reports no usage.
                 let mut streamed = String::new();
+                // How much of it the provider's output count covers.
+                let mut reported_at = 0;
                 let mut calls = Vec::new();
                 let mut structured_output = None;
                 let mut blocked = None;
@@ -11511,6 +11531,7 @@ impl RunnerTask {
                                 self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text).await?;
                             }
                             // A stopped request has no finished stream to time.
+                            let usage = unfinished_round_usage(usage, &streamed[reported_at..], &model);
                             self.publish_round_usage(usage, charged, prompt_usage.clone(), &streamed, None, provider_id, &model).await?;
                             return Err(CoreError::Cancelled);
                         }
@@ -11766,6 +11787,12 @@ impl RunnerTask {
                                 "gen_ai.usage.cache_creation.input_tokens",
                                 count(cache_write_tokens),
                             );
+                            // Only a count of more output covers what
+                            // streamed before it; one of the prompt alone
+                            // covers none of it.
+                            if output_tokens > usage.map_or(0, |(_, output, _, _)| output) {
+                                reported_at = streamed.len();
+                            }
                             usage = Some((
                                 input_tokens,
                                 output_tokens,
@@ -11913,6 +11940,12 @@ impl RunnerTask {
                     self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
                         .await?;
                 }
+                // A reply that broke off is booked as a stopped one is.
+                let usage = if blocked.is_some() {
+                    unfinished_round_usage(usage, &streamed[reported_at..], &model)
+                } else {
+                    usage
+                };
                 let usage = self
                     .publish_round_usage(
                         usage,
@@ -16889,6 +16922,28 @@ async fn summarize_context(
     Ok(text)
 }
 
+/// The usage to book for a round that ended before its reply did: stopped,
+/// or broken off mid-stream. A provider can report the prompt before the
+/// reply and count the output as it goes or only once it ends (Gemini counts
+/// with every chunk; Anthropic says 1 output token at the start), so the
+/// estimate of what streamed after it last counted more output
+/// (`unreported`) is added to the output it reported.
+fn unfinished_round_usage(
+    reported: Option<(u64, u64, u64, u64)>,
+    unreported: &str,
+    model: &str,
+) -> Option<(u64, u64, u64, u64)> {
+    reported.map(|(input, output, cache_read, cache_write)| {
+        let estimate = Tokenizer::for_model(model).text(unreported);
+        (
+            input,
+            output.saturating_add(estimate),
+            cache_read,
+            cache_write,
+        )
+    })
+}
+
 /// Per-turn cost from the model's catalog pricing, when known.
 fn cost_usd(
     pricing: Option<haarness_protocol::ModelPricing>,
@@ -21614,9 +21669,13 @@ mod tests {
             "prompt too long; exceeded context length by 12 tokens",
             "Prompt contains 140000 tokens and 0 draft tokens, too large for model with 131072 maximum context length",
             r#"HTTP 400: {"error":{"message":"model_context_window_exceeded","type":"invalid_request_error"}}"#,
-            // Z.ai's code 1261, and the same words without the code.
+            // Z.ai's code 1261, and the same words without the code or in
+            // Chinese.
             "HTTP 400 Bad Request: [1261] Prompt exceeds max length",
             "Prompt too long",
+            "HTTP 400 Bad Request: [1261] Prompt 超长",
+            // A gateway's own input limit for the model.
+            "HTTP 400 Bad Request: this request (212000 tokens) is too large for the model's configured input limit",
             // Amazon Nova on Bedrock.
             "HTTP 400 Bad Request: [ValidationException] The model returned the following errors: Input Tokens Exceeded: Number of input tokens exceeds maximum length. Please update the input to try again.",
             // DeepInfra.
@@ -21629,6 +21688,8 @@ mod tests {
         for message in [
             // A limit on images, not on the context: compacting cannot help.
             "Image too large for model with 20 maximum images",
+            "HTTP 400 Bad Request: prompt too long; exceeded max image count",
+            "HTTP 400 Bad Request: Prompt too long; 图片数超出限制",
             "Rate limit reached for gpt-5.5: too many tokens per minute",
             "[upstream_429] RESOURCE_EXHAUSTED: quota exceeded",
             // A plan's tokens a minute: a shorter chat would not get through.
@@ -22476,6 +22537,9 @@ mod tests {
             "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes.",
             r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.1.image.source.base64: image exceeds 5 MB maximum"}}"#,
             r#"HTTP 400 Bad Request: {"error":{"code":400,"message":"Request payload size exceeds the limit: 20971520 bytes.","status":"INVALID_ARGUMENT"}}"#,
+            // Z.ai, for how many images the request carries.
+            "HTTP 400 Bad Request: prompt too long; exceeded max image count",
+            "HTTP 400 Bad Request: Prompt too long; 图片数超出限制",
         ] {
             assert!(refused(message), "{message}");
         }
@@ -22734,6 +22798,18 @@ mod tests {
             .map(|index| format!("old-{index:02}.png"))
             .collect::<Vec<_>>();
         assert_eq!(names, expected);
+        // Z.ai says the same as a prompt too long, in English or Chinese.
+        for refusal in [
+            "HTTP 400 Bad Request: prompt too long; exceeded max image count",
+            "HTTP 400 Bad Request: Prompt too long; 图片数超出限制",
+        ] {
+            let (names, choice) = left_out(refusal, &messages, &[]);
+            assert_eq!(
+                choice,
+                super::RefusedImages::Oldest(super::ImageVolume::Count)
+            );
+            assert_eq!(names, expected);
+        }
 
         // A request too large in bytes loses its large old image first.
         let mut messages = vec![shot_result(sized_image("big.png", 5 * MIB))];
