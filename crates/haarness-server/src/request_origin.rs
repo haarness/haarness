@@ -16,7 +16,12 @@ use haarness_core::{
     process_tree::{Peer, peer},
 };
 use haarness_protocol::{ApprovalMode, ApprovalModeSetting, ThreadId};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 /// The header a forwarding Haarness program sets on what it forwards: [`Sender`]'s word for whoever sent it the
 /// request, in place of whatever the sender wrote.
@@ -42,14 +47,52 @@ pub fn forwarding_key() -> &'static str {
     &KEY
 }
 
-/// The keys of the servers this process forwards to, by address and token.
-static KEYS: std::sync::LazyLock<parking_lot::Mutex<HashMap<(String, String), String>>> =
+/// The addresses this server listens on (see [`note_own_listener`]).
+static OWN_LISTENERS: std::sync::LazyLock<parking_lot::Mutex<Vec<SocketAddr>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// The key of the server at `base` (signed in with `token`), to vouch for what this process forwards there: asked
-/// once. A server does not hand its key to itself, so where it will not answer this process's own key stands in,
-/// which is right when the server is this one and is refused, unknown, by any other.
-pub async fn forwarding_key_of(client: &reqwest::Client, base: &str, token: &str) -> String {
+/// Notes that this server listens on `address`, where what it forwards to itself is vouched for with its own key.
+pub fn note_own_listener(address: SocketAddr) {
+    OWN_LISTENERS.lock().push(address);
+}
+
+/// Whether `base` is one of this server's own listeners ([`note_own_listener`]): its address, or a loopback one on the
+/// port of a listener on every address.
+fn own_listener(base: &str) -> bool {
+    let Ok(url) = url::Url::parse(base) else {
+        return false;
+    };
+    let ip = match url.host() {
+        Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip),
+        Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip),
+        _ => return false,
+    };
+    let port = url.port_or_known_default();
+    OWN_LISTENERS.lock().iter().any(|own| {
+        Some(own.port()) == port
+            && (own.ip() == ip || (own.ip().is_unspecified() && ip.is_loopback()))
+    })
+}
+
+/// The keys of the servers this process forwards to, by address and token: none for one that would not say.
+type Keys = HashMap<(String, String), Option<String>>;
+
+/// [`Keys`] as this process has asked for them.
+static KEYS: std::sync::LazyLock<parking_lot::Mutex<Keys>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The key of the server at `base` (signed in with `token`), to vouch for what this process forwards there: this
+/// server's own for its own listener, and no other server's ever. Another server is asked once, and has none here when
+/// it will not say (an older server, or one that did not take this process for a person's); what is forwarded to it
+/// then counts as from an unknown sender.
+pub async fn forwarding_key_of(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+) -> Option<String> {
+    if own_listener(base) {
+        return Some(forwarding_key().to_owned());
+    }
     let index = (base.trim_end_matches('/').to_owned(), token.to_owned());
     if let Some(key) = KEYS.lock().get(&index) {
         return key.clone();
@@ -68,29 +111,35 @@ pub async fn forwarding_key_of(client: &reqwest::Client, base: &str, token: &str
             .ok()
             .and_then(|value| value["key"].as_str().map(str::to_owned)),
         None => None,
-    }
-    .unwrap_or_else(|| forwarding_key().to_owned());
+    };
     KEYS.lock().insert(index, key.clone());
     key
 }
 
 /// Forgets the key of the server at `base`, which refused a forwarded request as from an unknown sender: it may have
-/// started again with another.
+/// started again with another, or now take this process for a person's.
 pub fn forget_forwarding_key(base: &str, token: &str) {
     KEYS.lock()
         .remove(&(base.trim_end_matches('/').to_owned(), token.to_owned()));
 }
 
-/// The headers a forwarder sets on a request it forwards to the server whose key is `key`, saying `sender` sent it.
+/// Whether the answer to a forwarded request refused it as from an unknown sender, before doing anything: the
+/// forwarder asks for the server's key again ([`forget_forwarding_key`]) and sends the request once more.
 #[must_use]
-pub fn forwarded_headers(sender: Sender, key: &str) -> [(&'static str, HeaderValue); 2] {
-    [
-        (SENDER_HEADER, sender.header()),
-        (
-            FORWARDER_HEADER,
-            HeaderValue::from_str(key).unwrap_or_else(|_| HeaderValue::from_static("")),
-        ),
-    ]
+pub fn unknown_sender(headers: &HeaderMap) -> bool {
+    headers.contains_key(UNKNOWN_SENDER_HEADER)
+}
+
+/// The headers a forwarder sets on a request it forwards, in place of any the sender set: that `sender` sent it,
+/// vouched for with `key`, the key of the server it goes to, when the forwarder has it.
+#[must_use]
+pub fn forwarded_headers(sender: Sender, key: Option<&str>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(SENDER_HEADER, sender.header());
+    if let Some(key) = key.and_then(|key| HeaderValue::from_str(key).ok()) {
+        headers.insert(FORWARDER_HEADER, key);
+    }
+    headers
 }
 
 /// How long a guarded request waits for its connection's program to be found before it counts as unknown.
@@ -493,6 +542,48 @@ mod tests {
         assert_eq!(sender(&connection, &headers).await, Sender::Person);
         assert_eq!(sender(&connection, &headers).await, Sender::Person);
         assert_eq!(LOOKS.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_forwarder_vouches_with_its_own_key_only_to_its_own_listener() {
+        // A listener on every address, and one on loopback.
+        note_own_listener("0.0.0.0:50301".parse().unwrap());
+        note_own_listener("127.0.0.1:50302".parse().unwrap());
+        assert!(own_listener("http://127.0.0.1:50301"));
+        assert!(own_listener("http://127.0.0.1:50302/"));
+        assert!(!own_listener("http://[::1]:50302"));
+        assert!(!own_listener("http://192.0.2.1:50302"));
+        assert!(!own_listener("http://localhost:50302"));
+        let client = reqwest::Client::new();
+        assert_eq!(
+            forwarding_key_of(&client, "http://127.0.0.1:50302", "t")
+                .await
+                .as_deref(),
+            Some(forwarding_key())
+        );
+        // A listener that will not say its key, and one that is gone, get no key at all.
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_address = other.local_addr().unwrap();
+        let refusing = tokio::spawn(async move {
+            let app = axum::Router::new().fallback(|| async { axum::http::StatusCode::FORBIDDEN });
+            axum::serve(other, app).await.unwrap();
+        });
+        let refused = forwarding_key_of(&client, &format!("http://{other_address}"), "t").await;
+        refusing.abort();
+        let gone = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let unreachable = forwarding_key_of(&client, &format!("http://{gone}"), "t").await;
+        assert_eq!((refused, unreachable), (None, None));
+        // The headers carry the sender's word, and the key only when there is one.
+        let keyed = forwarded_headers(Sender::Agent, Some("k"));
+        assert_eq!(keyed.get(SENDER_HEADER).unwrap(), "agent");
+        assert_eq!(keyed.get(FORWARDER_HEADER).unwrap(), "k");
+        let bare = forwarded_headers(Sender::Person, None);
+        assert_eq!(bare.get(SENDER_HEADER).unwrap(), "person");
+        assert!(bare.get(FORWARDER_HEADER).is_none());
     }
 
     #[test]

@@ -419,10 +419,6 @@ class Api(Transport):
         """GET /v1/turns/{id}/wait."""
         return cast("T.Turn", self.request('GET', f'/v1/turns/{self.segment(id)}/wait', query=query, binary_body=False, binary_response=False, options=options))
 
-    def forwarding_key(self, *, options: RequestOptions | None = None) -> T.JsonValue:
-        """GET /v1/host/forwarding."""
-        return cast("T.JsonValue", self.request('GET', f'/v1/host/forwarding', binary_body=False, binary_response=False, options=options))
-
     def list_permissions(self, *, options: RequestOptions | None = None) -> list[T.PendingPermissionInfo]:
         """GET /v1/permissions."""
         return cast("list[T.PendingPermissionInfo]", self.request('GET', f'/v1/permissions', binary_body=False, binary_response=False, options=options))
@@ -955,10 +951,6 @@ class AsyncApi(AsyncTransport):
     async def wait_turn(self, id: str, query: T.WaitQuery | None = None, *, options: RequestOptions | None = None) -> T.Turn:
         """GET /v1/turns/{id}/wait."""
         return cast("T.Turn", await self.request('GET', f'/v1/turns/{self.segment(id)}/wait', query=query, binary_body=False, binary_response=False, options=options))
-
-    async def forwarding_key(self, *, options: RequestOptions | None = None) -> T.JsonValue:
-        """GET /v1/host/forwarding."""
-        return cast("T.JsonValue", await self.request('GET', f'/v1/host/forwarding', binary_body=False, binary_response=False, options=options))
 
     async def list_permissions(self, *, options: RequestOptions | None = None) -> list[T.PendingPermissionInfo]:
         """GET /v1/permissions."""

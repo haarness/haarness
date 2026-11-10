@@ -8,13 +8,16 @@
 //! started under changes: `haarness`, a copy kept under a longer name (`haarness-test`, `haarness-0.1.19`), or the
 //! program asking, whatever its file is called. So a server checking a request knows every program below itself, and
 //! `haarness mac` run from the same copy as the server above it knows that server. Not known: a server run from a file
-//! named otherwise, to a `haarness mac` run from yet another copy.
+//! named otherwise, to a `haarness mac` run from yet another copy. Desktop is the person's app, not a Haarness program,
+//! on Linux too, where its file is `haarness-desktop`. Of the Haarness programs a person runs, a server is one whose
+//! runtime record names it and the port it listens on ([`note_server_records`]).
 //!
 //! Three marks tell inside: the process's ancestry; the process group Haarness starts each command, hook and language
 //! server in; and a process group a Haarness program leads. A program that left the tree (put in the background with
 //! `nohup` or `( … & )`, or left by a process that exited) still runs in its group. What escapes them is a program
-//! that moves to a group or session of its own once the process that started it is gone, or one launchd or another
-//! app starts for it: this guards the routes an agent would take, not a determined program.
+//! that moves to a group or session of its own once the process that started it is gone, one launchd or another app
+//! starts for it, and what a relay a person runs (a proxy, a port forward, a tunnel) carries, which reaches a server as
+//! the relay's own: this guards the routes an agent would take, not a determined program.
 //!
 //! A terminal a person opened is one this process noted when it started its shell ([`mark_terminal`]), or, started by
 //! another Haarness program that runs for a person, a shell leading a session with a terminal of its own.
@@ -35,14 +38,21 @@ use std::path::Path;
 #[cfg(unix)]
 const PROGRAM: &str = "haarness";
 
+/// The file Desktop runs from on Linux: the person's app, as Desktop is elsewhere (`Haarness`).
+#[cfg(unix)]
+const DESKTOP: &str = "haarness-desktop";
+
 /// Whether `program`, the name of the file the system ran for a process, is a Haarness program: `haarness`, a copy of
 /// it under a longer name (`haarness-test`, `haarness_old`, `haarness.new`), or `own`, the program of the process
-/// asking, which is Haarness whatever its file is called.
+/// asking, which is Haarness whatever its file is called. Desktop's file is not one, nor the 15 bytes of it Linux
+/// gives (`haarness-deskto`).
 #[cfg(unix)]
 fn is_haarness(program: &str, own: Option<&str>) -> bool {
-    program
-        .strip_prefix(PROGRAM)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '_', '.']))
+    let desktop = program.len() >= 15 && DESKTOP.starts_with(program);
+    (!desktop
+        && program
+            .strip_prefix(PROGRAM)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '_', '.'])))
         || own.is_some_and(|own| own == program)
 }
 
@@ -70,8 +80,8 @@ pub enum Peer {
     Unknown,
     /// This very process, sending on behalf of someone it heard from (a request it forwards).
     Itself,
-    /// Another Haarness server on this computer, running for a person: what it sends, it sends for someone it heard
-    /// from (a request it forwards, a browser's connection it carries).
+    /// Another Haarness server on this computer, running for a person, that its runtime record names: what it sends,
+    /// it sends for someone it heard from (a request it forwards).
     Server,
     /// A program on this computer: whether it runs inside Haarness, and whether for an agent.
     Program { inside: bool, agent: bool },
@@ -128,8 +138,8 @@ fn judge(pids: &[u32]) -> Peer {
             Some(launcher) => view.launcher_for_agent(launcher),
             None => view.for_agent(pid, 0),
         };
-        // A Haarness program of a person's that listens is a server: it may be carrying someone else's request.
-        server |= !within && view.haarness(row) && listens(pid);
+        // A server of a person's may be carrying someone else's request.
+        server |= !within && view.haarness(row) && serves(pid);
     }
     if server && !agent {
         return Peer::Server;
@@ -137,11 +147,36 @@ fn judge(pids: &[u32]) -> Peer {
     Peer::Program { inside, agent }
 }
 
-/// Whether `pid` listens for TCP connections, as a server does. Also so when it cannot be told in time.
+/// Where the servers of this process's Haarness leave their runtime records (see [`note_server_records`]).
 #[cfg(unix)]
-fn listens(pid: u32) -> bool {
-    let Some(program) = lsof() else {
+static RECORDS: std::sync::LazyLock<Mutex<Option<std::path::PathBuf>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Notes `cache`, the folder where each server of this process's Haarness leaves its runtime record (`runtime.json`,
+/// there or in a project's folder in `workspaces`), which names the server's process and address. A Haarness program
+/// of a person's is taken for a server ([`Peer::Server`]) only when a record names it and the port it listens on.
+pub fn note_server_records(cache: &Path) {
+    #[cfg(unix)]
+    {
+        *RECORDS.lock() = Some(cache.to_path_buf());
+    }
+    #[cfg(not(unix))]
+    let _ = cache;
+}
+
+/// Whether `pid` is a server: a runtime record names it ([`note_server_records`]) and it listens on the record's port,
+/// or, once a record names it, its listeners cannot be told in time.
+#[cfg(unix)]
+fn serves(pid: u32) -> bool {
+    let Some(cache) = RECORDS.lock().clone() else {
         return false;
+    };
+    let ports = recorded_ports(&cache, pid);
+    if ports.is_empty() {
+        return false;
+    }
+    let Some(program) = lsof() else {
+        return true;
     };
     let mut command = std::process::Command::new(program);
     command.args([
@@ -154,10 +189,42 @@ fn listens(pid: u32) -> bool {
         "-Fn",
     ]);
     output_within(command, LOOKUP_TIME).is_none_or(|output| {
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .any(|line| line.starts_with('n'))
+        listening_ports(&String::from_utf8_lossy(&output.stdout))
+            .iter()
+            .any(|port| ports.contains(port))
     })
+}
+
+/// The ports the runtime records in `cache` give for the server `pid`.
+#[cfg(unix)]
+fn recorded_ports(cache: &Path, pid: u32) -> Vec<u16> {
+    let projects = std::fs::read_dir(cache.join("workspaces"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path().join("runtime.json"));
+    std::iter::once(cache.join("runtime.json"))
+        .chain(projects)
+        .filter_map(|file| {
+            let record: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
+            if record["pid"].as_u64()? != u64::from(pid) {
+                return None;
+            }
+            url::Url::parse(record["url"].as_str()?)
+                .ok()?
+                .port_or_known_default()
+        })
+        .collect()
+}
+
+/// The ports in `lsof -Fn` output of listening sockets (`n127.0.0.1:4096`, `n*:4096`, `n[::1]:4096`).
+#[cfg(unix)]
+fn listening_ports(listing: &str) -> Vec<u16> {
+    listing
+        .lines()
+        .filter_map(|line| line.strip_prefix('n')?.rsplit_once(':')?.1.parse().ok())
+        .collect()
 }
 
 /// Whether a Haarness program, this process included, listens on `address`'s port when `address` is one of this
@@ -734,6 +801,27 @@ mod tests {
         }
     }
 
+    /// What `look` finds, looked for again while it reads as unknown: on a busy computer (a whole test run starting
+    /// processes at once) `ps` or `lsof` may take longer than a lookup waits, which tells nothing, and a client sends
+    /// such a request once more.
+    fn settled(look: impl Fn() -> Peer) -> Peer {
+        let mut found = look();
+        for _ in 0..3 {
+            if found != Peer::Unknown {
+                break;
+            }
+            found = look();
+        }
+        found
+    }
+
+    /// [`inside_haarness`], from a process table that could be read.
+    fn inside_once_read(pid: u32) -> bool {
+        (0..4)
+            .find_map(|_| table().map(|rows| View::new(&rows).inside(pid)))
+            .unwrap_or(false)
+    }
+
     #[test]
     fn the_table_reads_names_sessions_and_terminals() {
         let rows = parse_table(TABLE);
@@ -810,8 +898,16 @@ mod tests {
         for pid in [501, 502, 600, 601, 620] {
             assert!(!in_haarness_group(&rows, pid, &none, Some("hn")), "{pid}");
         }
-        // Names that only start like Haarness's, or differ in case, are other programs.
-        for program in ["haarnessd", "Haarness", "haarnes", "xhaarness"] {
+        // Names that only start like Haarness's, or differ in case, are other programs, and so is Desktop's file on
+        // Linux, whole or cut to 15 bytes.
+        for program in [
+            "haarnessd",
+            "Haarness",
+            "haarnes",
+            "xhaarness",
+            "haarness-desktop",
+            "haarness-deskto",
+        ] {
             let rows = renamed(program);
             assert!(!below_program(&rows, 604, None), "{program}");
             assert!(!in_haarness_group(&rows, 610, &none, None), "{program}");
@@ -978,6 +1074,37 @@ mod tests {
     }
 
     #[test]
+    fn a_server_is_known_by_its_runtime_record() {
+        let folder =
+            std::env::temp_dir().join(format!("haarness-process-tree-{}", uuid::Uuid::now_v7()));
+        let project = folder.join("workspaces/01a1");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            folder.join("runtime.json"),
+            r#"{"url":"http://127.0.0.1:4096","token":"t","pid":42}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("runtime.json"),
+            r#"{"url":"http://[::1]:50200","token":"t","pid":42}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(folder.join("workspaces/01a2")).unwrap();
+        std::fs::write(folder.join("workspaces/01a2/runtime.json"), "{").unwrap();
+        let mut found = recorded_ports(&folder, 42);
+        found.sort_unstable();
+        let other = recorded_ports(&folder, 43);
+        let missing = recorded_ports(&folder.join("missing"), 42);
+        let _ = std::fs::remove_dir_all(&folder);
+        assert_eq!(found, [4096, 50200]);
+        assert!(other.is_empty() && missing.is_empty());
+        assert_eq!(
+            listening_ports("p42\nf7\nn127.0.0.1:4096\nf8\nn*:50200\nf9\nn[::1]:50201\n"),
+            [4096, 50200, 50201]
+        );
+    }
+
+    #[test]
     fn this_computer_is_known_by_its_own_addresses() {
         assert!(this_machine("127.0.0.1".parse().unwrap()));
         assert!(this_machine("::1".parse().unwrap()));
@@ -1034,9 +1161,9 @@ mod tests {
             .spawn()
             .unwrap();
         let checked = (
-            inside_haarness(left),
-            inside_haarness(stray),
-            inside_haarness(child.id()),
+            inside_once_read(left),
+            inside_once_read(stray),
+            inside_once_read(child.id()),
         );
         for pid in [left, stray] {
             let _ = nix::sys::signal::kill(
@@ -1076,13 +1203,14 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "no session");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let before = (agent(judge(&[helper.id()])), agent(judge(&[session.id()])));
+        let judged = |pid: u32| settled(|| judge(&[pid]));
+        let before = (agent(judged(helper.id())), agent(judged(session.id())));
         mark_helper(helper.id());
         mark_terminal(session.id());
-        let noted = (judge(&[helper.id()]), agent(judge(&[session.id()])));
+        let noted = (judged(helper.id()), agent(judged(session.id())));
         forget_helper(helper.id());
         forget_terminal(session.id());
-        let forgotten = (agent(judge(&[helper.id()])), agent(judge(&[session.id()])));
+        let forgotten = (agent(judged(helper.id())), agent(judged(session.id())));
         let own = this_process_for_agent();
         for child in [&mut helper, &mut session] {
             let _ = child.kill();
@@ -1127,10 +1255,10 @@ mod tests {
             },
             address.port(),
         );
-        let placed = (peer(address), peer(mapped));
+        let placed = (settled(|| peer(address)), settled(|| peer(mapped)));
         let own = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         let (_mine, own_address) = listener.accept().unwrap();
-        let itself = peer(own_address);
+        let itself = settled(|| peer(own_address));
         let _ = child.kill();
         let _ = child.wait();
         let mut rest = Vec::new();
@@ -1176,6 +1304,109 @@ mod tests {
         let _ = sleep.wait();
     }
 
+    /// What [`a_person_program_is_taken_for_a_server_only_by_its_record`] runs from links to this test program: it
+    /// listens, writes its pid and port to the file it is given, and connects to the port it is given.
+    #[test]
+    #[ignore = "run by another test"]
+    fn listen_and_connect() {
+        let (Ok(port), Ok(report)) = (
+            std::env::var("HAARNESS_TEST_CONNECT_PORT"),
+            std::env::var("HAARNESS_TEST_REPORT"),
+        ) else {
+            return;
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let written = format!(
+            "{} {}",
+            std::process::id(),
+            listener.local_addr().unwrap().port()
+        );
+        std::fs::write(&report, written).unwrap();
+        let _stream =
+            std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    /// The real thing: a person's program outside Haarness that listens is a person's, Desktop's file on Linux
+    /// included, until a runtime record names it and its port, and then only if it is a Haarness program.
+    #[test]
+    fn a_person_program_is_taken_for_a_server_only_by_its_record() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let folder =
+            std::env::temp_dir().join(format!("haarness-process-tree-{}", uuid::Uuid::now_v7()));
+        let cache = folder.join("cache");
+        std::fs::create_dir_all(cache.join("workspaces/01a1")).unwrap();
+        // Started from a file of `name`, outside this process's tree and in a session of its own, as a person's
+        // program is; its pid, the port it listens on, the address it connected from, and the connection.
+        let start = |name: &str| {
+            let file = folder.join(name);
+            let test = std::env::current_exe().unwrap();
+            if std::fs::hard_link(&test, &file).is_err() {
+                std::fs::copy(&test, &file).unwrap();
+            }
+            let report = folder.join(format!("{name}.report"));
+            let detached = std::process::Command::new("python3")
+                .args([
+                    "-c",
+                    "import os, sys\nif os.fork() == 0:\n    os.setsid()\n    if os.fork() == 0:\n        os.execv(sys.argv[1], sys.argv[1:])\n    os._exit(0)\nos.wait()",
+                ])
+                .arg(&file)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "process_tree::tests::listen_and_connect",
+                ])
+                .env("HAARNESS_TEST_CONNECT_PORT", port.to_string())
+                .env("HAARNESS_TEST_REPORT", &report)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(detached.success());
+            let (accepted, address) = listener.accept().unwrap();
+            let report = std::fs::read_to_string(&report).unwrap();
+            let (pid, listening) = report.split_once(' ').unwrap();
+            (
+                pid.parse::<u32>().unwrap(),
+                listening.parse::<u16>().unwrap(),
+                address,
+                accepted,
+            )
+        };
+        let desktop = start("haarness-desktop");
+        let copy = start("haarness-relay");
+        note_server_records(&cache);
+        let record = |pid: u32, port: u16| {
+            std::fs::write(
+                cache.join("workspaces/01a1/runtime.json"),
+                format!(r#"{{"url":"http://127.0.0.1:{port}","token":"t","pid":{pid}}}"#),
+            )
+            .unwrap();
+        };
+        let unrecorded = (settled(|| peer(desktop.2)), settled(|| peer(copy.2)));
+        record(copy.0, copy.1.wrapping_add(1));
+        let other_port = settled(|| peer(copy.2));
+        record(copy.0, copy.1);
+        let recorded = settled(|| peer(copy.2));
+        record(desktop.0, desktop.1);
+        let desktop_recorded = settled(|| peer(desktop.2));
+        for pid in [desktop.0, copy.0] {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+        let person = Peer::Program {
+            inside: false,
+            agent: false,
+        };
+        assert_eq!(unrecorded, (person, person));
+        assert_eq!(other_port, person);
+        assert_eq!(recorded, Peer::Server);
+        assert_eq!(desktop_recorded, person);
+    }
+
     /// The real thing: a program whose file is named like a process id (`x:1 y`), connected through a socket it hands
     /// down to another, is placed by the processes that hold the socket, whatever their names say.
     #[test]
@@ -1199,20 +1430,21 @@ mod tests {
             .unwrap();
         let (_accepted, address) = listener.accept().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        // Once `sleep` holds the socket too, both are found.
-        while holders(address).is_some_and(|holders| holders.len() < 2)
-            && std::time::Instant::now() < deadline
-        {
+        // Once `sleep` holds the socket too, both are found. A look that ran out of time finds none, so the most found
+        // counts.
+        let mut found = 0;
+        while found < 2 && std::time::Instant::now() < deadline {
+            found = found.max(holders(address).map_or(0, |holders| holders.len()));
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let placed = (holders(address).map(|holders| holders.len()), peer(address));
+        let placed = (found, settled(|| peer(address)));
         let _ = child.kill();
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&folder);
         assert_eq!(
             placed,
             (
-                Some(2),
+                2,
                 Peer::Program {
                     inside: true,
                     agent: true

@@ -159,6 +159,8 @@ pub async fn serve_with_access(
     access: crate::auth::ServerAccess,
 ) -> anyhow::Result<ServerHandle> {
     let address = listener.local_addr()?;
+    // What its host gateway forwards to this address, it vouches for with its own key.
+    crate::request_origin::note_own_listener(address);
     let workflow_coordinator = state.workflows.clone();
     // A background workflow run is owed to the chat that launched it until
     // its result is delivered there; the runtime counts it through this.
@@ -337,6 +339,7 @@ pub async fn serve_with_access(
         .route("/turns/{id}", get(get_turn))
         .route("/turns/{id}/interrupt", post(interrupt_turn))
         .route("/turns/{id}/wait", get(wait_turn))
+        // Internal: between Haarness's own programs, and left out of the SDKs.
         .route("/host/forwarding", get(forwarding_key))
         .route("/permissions", get(list_permissions))
         .route("/permissions/{id}", post(reply_permission))
@@ -1943,7 +1946,8 @@ pub(crate) fn guard(
     }
 }
 /// This server's key, for a forwarder a person runs (a front, another server's host gateway) to vouch with for who sent
-/// what it forwards. Never for a program that runs for an agent, nor for this server itself.
+/// what it forwards: handed to whichever client this server takes for a person's, never to a program that runs for an
+/// agent, nor to this server itself, which has its own. Internal, as the SDKs leave it out.
 async fn forwarding_key(
     headers: HeaderMap,
     connection: crate::request_origin::Connection,

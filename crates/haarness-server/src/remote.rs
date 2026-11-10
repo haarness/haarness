@@ -243,6 +243,8 @@ async fn forward(
     // connection, and nothing has reached it: find (or start) it again,
     // once, before saying it could not be reached.
     let mut retried = false;
+    // A server that could not tell who sent a request did nothing with it: ask for its key again and send it once more.
+    let mut asked_again = false;
     if let Ok(ws) = ws {
         let upstream = loop {
             let handshake = address(&target)
@@ -260,11 +262,30 @@ async fn forward(
                 &target.token,
             )
             .await;
-            for (name, value) in crate::request_origin::forwarded_headers(sender, &key) {
-                handshake.headers_mut().insert(name, value);
-            }
+            handshake
+                .headers_mut()
+                .extend(crate::request_origin::forwarded_headers(
+                    sender,
+                    key.as_deref(),
+                ));
             match tokio_tungstenite::connect_async(handshake).await {
                 Ok((socket, _)) => break socket,
+                Err(tokio_tungstenite::tungstenite::Error::Http(refusal))
+                    if crate::request_origin::unknown_sender(refusal.headers()) =>
+                {
+                    crate::request_origin::forget_forwarding_key(&target.url, &target.token);
+                    if asked_again {
+                        // Say what the server said.
+                        let (parts, body) = refusal.into_parts();
+                        let mut answer = Response::new(Body::from(body.unwrap_or_default()));
+                        *answer.status_mut() = parts.status;
+                        if let Some(kind) = parts.headers.get("content-type") {
+                            answer.headers_mut().insert("content-type", kind.clone());
+                        }
+                        return answer;
+                    }
+                    asked_again = true;
+                }
                 Err(_) if !retried => {
                     retried = true;
                     target = match resolve(&gateway, &id, chat, read).await {
@@ -293,10 +314,11 @@ async fn forward(
         let mut upstream = gateway
             .client
             .request(parts.method.clone(), &url)
-            .bearer_auth(&target.token);
-        for (name, value) in crate::request_origin::forwarded_headers(sender, &key) {
-            upstream = upstream.header(name, value);
-        }
+            .bearer_auth(&target.token)
+            .headers(crate::request_origin::forwarded_headers(
+                sender,
+                key.as_deref(),
+            ));
         for name in [
             "content-type",
             "accept",
@@ -309,12 +331,12 @@ async fn forward(
         }
         match upstream.body(body.clone()).send().await {
             Ok(response) => {
-                // The server did not take the key: it may have started again with another.
-                if response
-                    .headers()
-                    .contains_key(crate::request_origin::UNKNOWN_SENDER_HEADER)
-                {
+                if crate::request_origin::unknown_sender(response.headers()) {
                     crate::request_origin::forget_forwarding_key(&target.url, &target.token);
+                    if !asked_again {
+                        asked_again = true;
+                        continue;
+                    }
                 }
                 let mut result = Response::builder().status(response.status());
                 for name in [
@@ -718,6 +740,77 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["body"], "{}");
         assert_eq!(host.resolved.load(std::sync::atomic::Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    /// The text of header `name`, if it has one.
+    fn header_text(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn a_request_refused_for_its_unknown_sender_is_sent_once_more_with_a_fresh_key() {
+        // A project's server that started again: it hands out a new key each time it is asked, and refuses the first
+        // request as from an unknown sender.
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route(
+                "/v1/host/forwarding",
+                get({
+                    let asked = asked.clone();
+                    move || async move {
+                        let count = asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        Json(serde_json::json!({"key": format!("key-{count}")}))
+                    }
+                }),
+            )
+            .route(
+                "/v1/permissions/p",
+                post({
+                    let heard = heard.clone();
+                    move |headers: axum::http::HeaderMap| async move {
+                        let count = {
+                            let mut heard = heard.lock().unwrap();
+                            heard.push((
+                                header_text(&headers, crate::request_origin::SENDER_HEADER),
+                                header_text(&headers, crate::request_origin::FORWARDER_HEADER),
+                            ));
+                            heard.len()
+                        };
+                        if count == 1 {
+                            return (
+                                StatusCode::CONFLICT,
+                                [(crate::request_origin::UNKNOWN_SENDER_HEADER, "1")],
+                            )
+                                .into_response();
+                        }
+                        StatusCode::NO_CONTENT.into_response()
+                    }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let host = Arc::new(Moved {
+            addresses: std::sync::Mutex::new(vec![live]),
+            resolved: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = routes(host, tokio_util::sync::CancellationToken::new());
+        let (status, _) = send(&router, "POST", "/v1/host/workspaces/w/v1/permissions/p").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let word = Some("person".to_owned());
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [
+                (word.clone(), Some("key-1".to_owned())),
+                (word, Some("key-2".to_owned()))
+            ]
+        );
         server.abort();
     }
 

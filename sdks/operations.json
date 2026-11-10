@@ -1356,13 +1356,6 @@
     }
   },
   {
-    "name": "forwarding_key",
-    "method": "GET",
-    "path": "/v1/host/forwarding",
-    "pathParams": [],
-    "response": {}
-  },
-  {
     "name": "list_permissions",
     "method": "GET",
     "path": "/v1/permissions",

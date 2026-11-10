@@ -38,6 +38,14 @@ times on Linux, and `--disabled` saves without registering. Other entry points u
 (the server-authored form), and the model's `schedule` tool (create, list, update, delete, enable,
 disable, run, history). The model's `cloud_schedule` tool is the Cloud counterpart.
 
+A schedule's runs approve their own requests, so setting one up, changing it, switching it on and
+starting a run are the person's to approve. The `schedule` tool's create, update, enable and run
+wait for an answer in the chat, which neither Auto's reviewer nor a hook gives. Yolo gives it, as it
+does for computer use, since choosing Yolo is approving everything; so do a `--yolo` run and a
+scheduled run, which approve their own requests. From an agent's shell, `haarness schedule
+add|update|enable` and the server's requests to set up or start a schedule are refused
+([Automatic approvals](AUTO-APPROVALS.md#the-server-keeps-the-mode)).
+
 ## Where things live
 
 | What | Path |

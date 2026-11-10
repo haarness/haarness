@@ -1568,6 +1568,8 @@ async fn cli_main() -> Result<()> {
     haarness_core::set_system_config_dir(crate::layout::system_config_dir());
     // A model-run read of where sign-ins are kept asks a person every time.
     base_paths.record_credential_stores();
+    // A Haarness program that may carry someone else's request is known for a server by its runtime record.
+    haarness_core::process_tree::note_server_records(&base_paths.cache);
     if let Some(problem) = haarness_protocol::system_config_dir_problem() {
         tracing::warn!("{problem}");
         // A server started in the background has only its log.

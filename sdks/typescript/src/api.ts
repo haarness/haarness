@@ -421,10 +421,6 @@ export class Api extends Transport {
   waitTurn(id: string, query: T.WaitQuery = {}, options: RequestOptions = {}): Promise<T.Turn> {
     return this.request("GET", `/v1/turns/${this.segment(id)}/wait`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
-  /** GET /v1/host/forwarding */
-  forwardingKey(options: RequestOptions = {}): Promise<T.JsonValue> {
-    return this.request("GET", `/v1/host/forwarding`, { binaryBody: false, binaryResponse: false, ...options });
-  }
   /** GET /v1/permissions */
   listPermissions(options: RequestOptions = {}): Promise<Array<T.PendingPermissionInfo>> {
     return this.request("GET", `/v1/permissions`, { binaryBody: false, binaryResponse: false, ...options });

@@ -60,7 +60,15 @@ impl Fixture {
             url: String::new(),
             token: String::new(),
         };
-        let mut connect = fixture.haarness();
+        let (url, token) = fixture.connect(&fixture.workspace);
+        fixture.url = url;
+        fixture.token = token;
+        fixture
+    }
+
+    /// The address and token of the server of the project in `workspace`, started as Desktop starts it.
+    fn connect(&self, workspace: &std::path::Path) -> (String, String) {
+        let mut connect = self.haarness_in(workspace);
         connect
             .arg("desktop")
             .stdin(Stdio::piped())
@@ -78,19 +86,22 @@ impl Fixture {
         let output = child.wait_with_output().expect("the bridge answers");
         let connection: Value =
             serde_json::from_slice(&output.stdout).expect("the bridge answers JSON");
-        connection["url"]
-            .as_str()
-            .expect("a server address")
-            .clone_into(&mut fixture.url);
-        connection["token"]
-            .as_str()
-            .unwrap_or_default()
-            .clone_into(&mut fixture.token);
-        fixture
+        (
+            connection["url"]
+                .as_str()
+                .expect("a server address")
+                .to_owned(),
+            connection["token"].as_str().unwrap_or_default().to_owned(),
+        )
     }
 
     /// The Haarness command line, as the person runs it in a terminal of their own.
     fn haarness(&self) -> Command {
+        self.haarness_in(&self.workspace)
+    }
+
+    /// [`Self::haarness`] for the project in `workspace`.
+    fn haarness_in(&self, workspace: &std::path::Path) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_haarness"));
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("HAARNESS_") {
@@ -98,8 +109,12 @@ impl Fixture {
             }
         }
         command
-            .args(self.program_args())
-            .current_dir(&self.workspace)
+            .args([
+                "--workspace".into(),
+                workspace.display().to_string(),
+                "--trust-project".into(),
+            ])
+            .current_dir(workspace)
             .env("HOME", self.root.join("home"))
             .env("HAARNESS_HOME", self.root.join("home"))
             .env("HAARNESS_DATA_DIR", self.root.join("data"))
@@ -832,4 +847,149 @@ fn only_a_person_connects_a_browser_and_its_connections_never_reach_haarness() {
         "{tunneled}"
     );
     drop(other);
+}
+
+#[test]
+fn a_front_and_another_projects_gateway_say_who_sent_what_they_forward() {
+    let fixture = Fixture::new();
+    let outside = fixture.root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let asking = fixture.chat("Asking");
+    fixture.start(
+        &asking,
+        &format!(
+            "!tool bash {}",
+            json!({"command": format!("touch '{}'", outside.join("asked").display())})
+        ),
+    );
+    until("the request", || {
+        !fixture.waiting("permissions", &asking).is_empty()
+    });
+    let permission = fixture.waiting("permissions", &asking).remove(0);
+    let other = fixture.chat("Other");
+    let id = gateway_id(&fixture);
+    // Another project's server, whose host gateway reaches this one: a server its runtime record names.
+    let second = fixture.root.join("second");
+    std::fs::create_dir_all(second.join(".haarness")).unwrap();
+    std::fs::copy(
+        fixture.workspace.join(".haarness/haarness.json"),
+        second.join(".haarness/haarness.json"),
+    )
+    .unwrap();
+    let (second_url, second_token) = fixture.connect(&second);
+    // A front the person starts for this project: a Haarness program that listens, with no record of its own.
+    let mut front = fixture
+        .haarness()
+        .args(["serve", "--port", "0"])
+        .env("HAARNESS_SERVER_TOKEN", "front-token")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the front");
+    let front_url = {
+        use std::io::BufRead as _;
+        let mut line = String::new();
+        std::io::BufReader::new(front.stdout.take().expect("front stdout"))
+            .read_line(&mut line)
+            .expect("the front's address");
+        line.trim()
+            .rsplit(' ')
+            .next()
+            .expect("an address")
+            .to_owned()
+    };
+    // The routes, as `curl` arguments after the method: an address and its token.
+    let routes = [
+        (front_url.clone(), "front-token".to_owned()),
+        (
+            format!("{second_url}/v1/host/workspaces/{id}"),
+            second_token.clone(),
+        ),
+    ];
+    let line = |(base, token): &(String, String),
+                method: &str,
+                path: &str,
+                body: &Value,
+                answer: &str| {
+        format!(
+            "curl -s -X {method} -H 'Authorization: Bearer {token}' -H 'Content-Type: application/json' {base}/v1{path} -d '{body}' > out/{answer}\n"
+        )
+    };
+    let mut script = String::new();
+    for (route, name) in routes.iter().zip(["front", "gateway"]) {
+        script += &line(
+            route,
+            "PUT",
+            &format!("/threads/{other}/approval-mode"),
+            &json!({"mode": "yolo"}),
+            &format!("{name}-raise.json"),
+        );
+        script += &line(
+            route,
+            "POST",
+            &format!("/permissions/{permission}"),
+            &json!({"decision": "once"}),
+            &format!("{name}-allow.json"),
+        );
+    }
+    std::fs::write(fixture.workspace.join("out/forwarded.sh"), script).unwrap();
+    let agent = fixture.chat("Agent");
+    fixture.agent_runs(&agent, "sh out/forwarded.sh");
+    let person = |(base, token): &(String, String), method: &str, path: &str, body: &Value| {
+        let output = Command::new("curl")
+            .args([
+                "-s",
+                "-X",
+                method,
+                "-H",
+                "Content-Type: application/json",
+                "-H",
+            ])
+            .arg(format!("Authorization: Bearer {token}"))
+            .arg(format!("{base}/v1{path}"))
+            .arg("-d")
+            .arg(body.to_string())
+            .output()
+            .expect("run curl");
+        serde_json::from_slice::<Value>(&output.stdout).unwrap_or(Value::Null)
+    };
+    let refusals = [
+        ("front-raise.json", haarness_core::APPROVALS_RAISE_REFUSAL),
+        ("front-allow.json", haarness_core::PERMISSION_ANSWER_REFUSAL),
+        ("gateway-raise.json", haarness_core::APPROVALS_RAISE_REFUSAL),
+        (
+            "gateway-allow.json",
+            haarness_core::PERMISSION_ANSWER_REFUSAL,
+        ),
+    ]
+    .map(|(name, refusal)| (name, fixture.read(name), refusal));
+    let mode_after_agent = fixture.mode(&other);
+    // The person, through each.
+    let raised = person(
+        &routes[0],
+        "PUT",
+        &format!("/threads/{other}/approval-mode"),
+        &json!({"mode": "yolo"}),
+    );
+    let answered = person(
+        &routes[1],
+        "POST",
+        &format!("/permissions/{permission}"),
+        &json!({"decision": "once"}),
+    );
+    let _ = front.kill();
+    let _ = front.wait();
+    let _ = fixture
+        .haarness_in(&second)
+        .args(["serve", "--stop"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    for (name, answer, refusal) in refusals {
+        assert!(answer.contains(refusal), "{name}: {answer}");
+    }
+    assert_eq!(mode_after_agent, "review");
+    assert_eq!(raised["mode"], "yolo", "{raised}");
+    assert!(answered.is_null(), "{answered}");
+    until("the request to run", || outside.join("asked").exists());
 }
