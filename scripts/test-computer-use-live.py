@@ -237,10 +237,10 @@ def helpers_running():
 def fresh_direct():
     """The test's own helper again, once the server's has gone: macOS's screen capture stops answering a second helper
     process while another one that captured the screen still runs, so the two never capture side by side. Turning
-    computer use off and on makes the server's helper exit."""
-    cli("mac", "off")
+    computer use off through the server makes its helper exit."""
+    api("/manage/computer-use", {"action": "enable", "enabled": False})
     until(lambda: not helpers_running(), "the server's helper exits", seconds=20)
-    switch_on()
+    api("/manage/computer-use", {"action": "enable", "enabled": True})
     return Direct()
 
 
