@@ -336,6 +336,39 @@ impl CatalogClient {
                 && stored.token_received_at.is_some_and(|at| at >= sent)
         )
     }
+    /// Whether the sign-in Haarness keeps for this server can no longer be
+    /// used: there is none, it has no refresh token, or its access token has
+    /// expired (or is within the 30 s before it, when rmcp renews it), which
+    /// a request that was refused could not renew. A sign-in still current,
+    /// or one whose store cannot be read, is not given up on.
+    async fn sign_in_unusable(&self) -> bool {
+        let Some(store) = &self.credential else {
+            return false;
+        };
+        let Ok(stored) = OAuthCredentialStore::load(store).await else {
+            return false;
+        };
+        let Some(token) = stored.and_then(|stored| {
+            let token = serde_json::to_value(stored.token_response.as_ref()?).ok()?;
+            Some((token, stored.token_received_at))
+        }) else {
+            return true;
+        };
+        let (token, received) = token;
+        if token
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return true;
+        }
+        match (token.get("expires_in").and_then(Value::as_u64), received) {
+            (Some(lasts), Some(received)) => {
+                lasts.saturating_sub(epoch_seconds().saturating_sub(received)) < RENEWAL_MARGIN_SECS
+            }
+            _ => false,
+        }
+    }
     /// The server no longer takes this connection's sign-in: its refresh
     /// token was refused, or there was none to renew an expired access
     /// token with. Connecting again would end there too, so the server needs
@@ -1386,12 +1419,18 @@ impl NativeMcpRegistry {
         self.revoke_stale();
         // The read guard ends with this statement: `stopped` reads the lock
         // again, and a second read while a writer waits would never return.
-        let worker = self
+        let (worker, signed_out_now) = self
             .servers
             .read()
             .get(name)
-            .and_then(|entry| entry.worker.clone());
+            .map(|entry| (entry.worker.clone(), entry.info.status == "needs_auth"))
+            .unwrap_or_default();
         let Some(worker) = worker else {
+            // A server waiting for a sign-in says so, to a script or a later
+            // call too, so the model tells the person what to do.
+            if signed_out_now {
+                return Err(signed_out(name));
+            }
             return Err(self.stopped(name).unwrap_or_else(|| {
                 CoreError::Conflict(format!("MCP server {name} is not connected"))
             }));
@@ -2717,13 +2756,15 @@ impl Connection {
     /// epoch). When the server refused it for want of a sign-in, on a
     /// connection that signs in with the one Haarness keeps for the server,
     /// the request goes once more through `again` if that sign-in was stored
-    /// since (another process signed in, or refreshed a token both share and
-    /// the server rotated); refused all the same, or with nothing newer to
-    /// try, the server needs authorization (see
-    /// [`CatalogClient::sign_in_lost`]) and the request fails saying so. An
-    /// authorization server that is only down leaves the request's own
-    /// error and the connection as they are. `None` when `again` was not
-    /// waited for.
+    /// since (another process signed in, or renewed a token both share and
+    /// the authorization server rotated), or is stored within
+    /// [`SIGN_IN_SETTLES`] while the one there cannot be used. Refused all
+    /// the same, the server needs authorization only when the stored sign-in
+    /// cannot be used (see [`CatalogClient::sign_in_unusable`],
+    /// [`CatalogClient::sign_in_lost`]), and the request fails saying so.
+    /// Otherwise (an authorization server or a token check down for now,
+    /// clocks that disagree) the request keeps its own error and the
+    /// connection stays. `None` when `again` was not waited for.
     async fn signed_in<T, Fut>(
         &self,
         sent: u64,
@@ -2736,15 +2777,24 @@ impl Connection {
         let Some(sign_in) = &self.sign_in else {
             return Some(first.map_err(mcp_error));
         };
-        let Some(mut challenge) = first.as_ref().err().and_then(sign_in_refused) else {
-            return Some(first.map_err(mcp_error));
+        let mut result = first;
+        let Some(mut challenge) = result.as_ref().err().and_then(sign_in_refused) else {
+            return Some(result.map_err(mcp_error));
         };
-        if sign_in.stored_since(sent).await {
-            let result = again().await?;
+        let mut newer = sign_in.stored_since(sent).await;
+        if !newer && sign_in.sign_in_unusable().await {
+            tokio::time::sleep(SIGN_IN_SETTLES).await;
+            newer = sign_in.stored_since(sent).await;
+        }
+        if newer {
+            result = again().await?;
             match result.as_ref().err().and_then(sign_in_refused) {
                 Some(refused) => challenge = refused,
                 None => return Some(result.map_err(mcp_error)),
             }
+        }
+        if !sign_in.sign_in_unusable().await {
+            return Some(result.map_err(mcp_error));
         }
         sign_in.sign_in_lost(challenge.0);
         Some(Err(signed_out(&sign_in.name)))
@@ -2782,13 +2832,22 @@ fn sign_in_refused(error: &rmcp::ServiceError) -> Option<SignInRefused> {
     None
 }
 
-/// What a request fails with once its server no longer takes the sign-in
-/// Haarness keeps for it. The model reads it and tells the person.
+/// What a request fails with when its server needs a sign-in it does not
+/// have: one it no longer takes, or none. The model reads it and tells the
+/// person.
 fn signed_out(name: &str) -> CoreError {
     CoreError::Tool(format!(
-        "MCP server \"{name}\" no longer accepts its sign-in; the user needs to sign in to it again before its tools work"
+        "MCP server \"{name}\" needs the user to sign in to it before its tools work: its sign-in is missing or no longer accepted"
     ))
 }
+
+/// How long before its access token expires rmcp renews a sign-in.
+const RENEWAL_MARGIN_SECS: u64 = 30;
+
+/// How long a request refused for an unusable sign-in waits for another
+/// process that may be renewing the sign-in both share to store the new
+/// one, before the server is marked as needing authorization.
+const SIGN_IN_SETTLES: Duration = Duration::from_secs(1);
 
 fn epoch_seconds() -> u64 {
     std::time::SystemTime::now()
@@ -4444,6 +4503,9 @@ mod tests {
         /// It refuses this process's refresh token, which another process
         /// rotated a moment before, storing a newer sign-in.
         RotatedElsewhere,
+        /// As [`Self::RotatedElsewhere`], the other process storing its
+        /// newer sign-in a moment after the refusal.
+        RotatedLater,
     }
 
     /// An OAuth-protected Streamable HTTP server and its authorization
@@ -4457,6 +4519,23 @@ mod tests {
         sessions: parking_lot::Mutex<std::collections::HashSet<String>>,
         refreshes: std::sync::atomic::AtomicUsize,
         calls: std::sync::atomic::AtomicUsize,
+        /// The server refuses every token, as one whose own token check is
+        /// down, or that disagrees with this computer's clock.
+        rejecting: AtomicBool,
+    }
+
+    /// What another process stores in `store` once it renewed the sign-in
+    /// both share: a newer access and refresh token, received now.
+    async fn store_newer_sign_in(store: &FileCredentialStore) {
+        let mut stored =
+            serde_json::to_value(OAuthCredentialStore::load(store).await.unwrap().unwrap())
+                .unwrap();
+        stored["token_response"]["access_token"] = json!(SIGNED_IN[1]);
+        stored["token_response"]["refresh_token"] = json!("fixture-refresh-2");
+        stored["token_received_at"] = json!(epoch_seconds());
+        OAuthCredentialStore::save(store, serde_json::from_value(stored).unwrap())
+            .await
+            .unwrap();
     }
 
     const SIGNED_IN: [&str; 2] = ["fixture-access-token", "fixture-access-token-2"];
@@ -4514,22 +4593,14 @@ mod tests {
                             return;
                         }
                         if renewal == Renewal::RotatedElsewhere {
-                            let mut stored = serde_json::to_value(
-                                OAuthCredentialStore::load(&state.store)
-                                    .await
-                                    .unwrap()
-                                    .unwrap(),
-                            )
-                            .unwrap();
-                            stored["token_response"]["access_token"] = json!(SIGNED_IN[1]);
-                            stored["token_response"]["refresh_token"] = json!("fixture-refresh-2");
-                            stored["token_received_at"] = json!(epoch_seconds());
-                            OAuthCredentialStore::save(
-                                &state.store,
-                                serde_json::from_value(stored).unwrap(),
-                            )
-                            .await
-                            .unwrap();
+                            store_newer_sign_in(&state.store).await;
+                        }
+                        if renewal == Renewal::RotatedLater {
+                            let state = state.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(300)).await;
+                                store_newer_sign_in(&state.store).await;
+                            });
                         }
                         write_json_response(
                             &mut stream,
@@ -4559,7 +4630,7 @@ mod tests {
                         line.eq_ignore_ascii_case(&format!("authorization: Bearer {token}"))
                     })
                 });
-                if path == "/mcp" && !signed_in {
+                if path == "/mcp" && (!signed_in || state.rejecting.load(Ordering::SeqCst)) {
                     let challenge = format!(
                         "Bearer resource_metadata=\"http://{address}/.well-known/oauth-protected-resource\", scope=\"mcp\""
                     );
@@ -4654,6 +4725,7 @@ mod tests {
             sessions: parking_lot::Mutex::default(),
             refreshes: std::sync::atomic::AtomicUsize::new(0),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            rejecting: AtomicBool::new(false),
         });
         let server = tokio::spawn(run_sign_in_fixture(listener, state.clone()));
         let registry = NativeMcpRegistry::with_auth_dir(&auth_dir);
@@ -4722,7 +4794,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            error.to_string().contains("no longer accepts its sign-in"),
+            error
+                .to_string()
+                .contains("needs the user to sign in to it"),
             "{error}"
         );
         let info = registry.list().await.unwrap().remove(0);
@@ -4737,6 +4811,21 @@ mod tests {
         assert!(manager_store("secure", Some(&auth_dir)).path.exists());
         assert_eq!(told.load(Ordering::SeqCst), 1);
         assert_eq!(state.calls.load(Ordering::SeqCst), 0);
+        // A later request, a script's or the CLI's, says so too.
+        for error in [
+            registry
+                .call("secure", "secure_echo", json!({}))
+                .await
+                .unwrap_err(),
+            registry.resources("secure").await.unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("needs the user to sign in to it"),
+                "{error}"
+            );
+        }
         server.abort();
         let _ = std::fs::remove_dir_all(auth_dir);
     }
@@ -4759,7 +4848,9 @@ mod tests {
             listing.unwrap_err(),
         ] {
             assert!(
-                error.to_string().contains("no longer accepts its sign-in"),
+                error
+                    .to_string()
+                    .contains("needs the user to sign in to it"),
                 "{error}"
             );
         }
@@ -4781,12 +4872,67 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            !error.to_string().contains("no longer accepts its sign-in"),
+            !error
+                .to_string()
+                .contains("needs the user to sign in to it"),
             "{error}"
         );
         assert_eq!(state.refreshes.load(Ordering::SeqCst), 1);
         assert_eq!(registry.list().await.unwrap()[0].status, "connected");
         assert_eq!(registry.tool_snapshot().len(), 1);
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// A token the server refuses though it has not expired (its token check
+    /// down, or a clock that disagrees), while the authorization server is
+    /// down too, so it cannot be renewed: rmcp reports the request refused
+    /// for want of a sign-in, which made the server need authorization and
+    /// the person sign in again.
+    #[tokio::test]
+    async fn a_refused_token_that_has_not_expired_leaves_the_server_connected() {
+        let (registry, state, server, auth_dir) = signed_in("secure", Renewal::Down).await;
+        let told = announcements(&registry);
+        state.rejecting.store(true, Ordering::SeqCst);
+        let error = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            !error
+                .to_string()
+                .contains("needs the user to sign in to it"),
+            "{error}"
+        );
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+        assert_eq!(registry.tool_snapshot().len(), 1);
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+        // Once the server takes the token again, so does the call.
+        state.rejecting.store(false, Ordering::SeqCst);
+        let output = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(output.text, "OAuth MCP call succeeded");
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// The other process stored its renewed sign-in a moment after this one
+    /// was refused: read once only, the store still held the spent one, and
+    /// the server needed a sign-in in the browser though a good one landed.
+    #[tokio::test]
+    async fn a_sign_in_another_process_stores_a_moment_later_is_used_too() {
+        let (registry, state, server, auth_dir) = signed_in("secure", Renewal::RotatedLater).await;
+        let told = announcements(&registry);
+        expire_sign_in(&state.store).await;
+        let output = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(output.text, "OAuth MCP call succeeded");
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
         assert_eq!(told.load(Ordering::SeqCst), 0);
         server.abort();
         let _ = std::fs::remove_dir_all(auth_dir);
