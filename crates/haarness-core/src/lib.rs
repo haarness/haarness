@@ -96,6 +96,13 @@ pub use workflows::{WorkflowLogDraft, WorkflowRepository};
 /// provider error bodies, approval prompts, paths and client addresses.
 pub const TRACE_EVENT_TARGET: &str = "haarness::trace";
 
+/// How a provider error begins when the provider could not read a tool call
+/// the model wrote and ended its reply (Ollama's parsers for gpt-oss, Qwen
+/// and others do): the provider's own reason follows. The runtime asks the
+/// model to write the call again, as it does when a provider refuses a call
+/// that does not match its tool.
+pub const UNREADABLE_TOOL_CALL: &str = "the provider couldn't read a tool call the model wrote: ";
+
 /// Why a chat refuses a new turn while one is running: read by people, from
 /// `haarness run --session` or an editor over ACP sending to a chat busy
 /// elsewhere.

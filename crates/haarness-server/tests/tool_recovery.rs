@@ -272,7 +272,8 @@ async fn arguments_that_are_not_json_are_refused_and_the_model_retries() {
         approval_mode: haarness_protocol::ApprovalMode::Review,
         ..RuntimeConfig::default()
     });
-    let broken = r#"{"path":"made.txt","content":"a\qb"}"#;
+    // A quote the model left unescaped: no reading of it is sure.
+    let broken = r#"{"path":"made.txt","content":"a"b"}"#;
     let items = fixture
         .run(vec![
             vec![call(

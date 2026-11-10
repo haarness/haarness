@@ -41,7 +41,42 @@ use crate::{
     ToolRegistry,
 };
 
-const MAX_COMPACTIONS_PER_TURN: u8 = 4;
+/// Compactions in a row the provider has not answered yet: each one after
+/// a refusal aims lower ([`overflow_share`]), and more would only summarize
+/// the last summary. A request the provider takes starts the count again, so
+/// a long turn compacts as often as its growth needs, not a fixed number of
+/// times.
+const MAX_COMPACTIONS_UNANSWERED: u8 = 4;
+
+/// How much a turn's context must grow after a compaction before it compacts
+/// again by itself: a quarter of the size at which compaction starts. Where
+/// a summary and the part kept with it leave the context still large, each
+/// further summary then covers that much new work, so compacting never costs
+/// more than the rounds it makes room for.
+const COMPACTION_REGROWTH_DIVISOR: u64 = 4;
+
+/// How a refusal of a request as longer than the model's window begins when
+/// the turn had already compacted the chat as often as it may: the turn
+/// outgrew the window while it ran (a model reading one large file after
+/// another), not its instructions and the person's message. The provider's
+/// words follow.
+const OUTGREW_WINDOW: &str = "the turn outgrew the model's context after compacting the chat: ";
+
+/// `error` as [`OUTGREW_WINDOW`] says it, when it refuses the request as too
+/// long once the turn has compacted `compactions` times in a row without the
+/// provider taking a request, as often as it may.
+fn outgrew_window(error: CoreError, compactions: u8) -> CoreError {
+    match error {
+        CoreError::Provider(message)
+            if compactions >= MAX_COMPACTIONS_UNANSWERED
+                && !message.starts_with(OUTGREW_WINDOW)
+                && is_provider_context_overflow(&CoreError::Provider(message.clone())) =>
+        {
+            CoreError::Provider(format!("{OUTGREW_WINDOW}{message}"))
+        }
+        other => other,
+    }
+}
 
 fn latest_todos(items: &[Item], through: Option<u64>) -> Vec<TodoEntry> {
     items
@@ -177,8 +212,9 @@ fn compaction_input_limit(
 #[derive(Debug, Clone, Copy)]
 pub struct ContextUsage {
     pub estimate: tokens::ContextEstimate,
-    /// The model's context window, when its metadata states one; compaction
-    /// assumes 128k otherwise.
+    /// The model's context window, when its metadata states one or the
+    /// provider showed a smaller one by refusing a request as too long;
+    /// compaction assumes 128k otherwise.
     pub window: Option<u64>,
     /// Automatic compaction starts above this many tokens.
     pub compact_at: u64,
@@ -986,6 +1022,14 @@ fn is_provider_transient(error: &CoreError) -> bool {
     if renewal_server_busy(&message) {
         return true;
     }
+    // Any server error but a method or HTTP version the server does not
+    // have: a proxy before a server set up here answers 520 to 524 (the
+    // origin was unreachable, or slow to answer), and 507 or 508 pass too.
+    if http_status(&message)
+        .is_some_and(|status| (500..600).contains(&status) && !matches!(status, 501 | 505))
+    {
+        return true;
+    }
     [
         "http 500",
         "http 502",
@@ -1076,8 +1120,23 @@ fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
             "The connection to {} broke off before this call ran, so it did not run.",
             provider.unwrap_or("the provider")
         ),
+        CoreError::ProviderIncomplete(inner) if unfinished_ending(inner) => {
+            "The response that made this call ended before it was done, so the call did not run."
+                .to_owned()
+        }
         error => error.to_string(),
     }
+}
+
+/// Whether an incomplete response's reason is that it ended without saying
+/// it was done ("missing completion event", a finish reason of
+/// "incomplete", "unknown" or "other", or none at all), rather than a
+/// transport's cut or a dropped call.
+fn unfinished_ending(reason: &str) -> bool {
+    matches!(
+        reason.to_ascii_lowercase().as_str(),
+        "" | "incomplete" | "unknown" | "other" | "missing completion event"
+    )
 }
 
 /// What a call the model made at its step limit says, unrun.
@@ -1088,16 +1147,34 @@ const STEP_LIMIT_CALL: &str =
 /// says, before the provider's reason.
 const REFUSED_CALL: &str = "The provider refused your last reply before it reached Haarness, because a tool call in it did not match the tool's definition. Call the tool again with arguments that match its schema, or answer without it. The provider said: ";
 
+/// What the request after a reply whose tool call the provider could not
+/// read says, before the provider's reason.
+const UNREADABLE_CALL: &str = "Your last reply ended in a tool call that couldn't be read, so it didn't run. Write the call again with its arguments complete and well formed, or answer without it. The reason given: ";
+
+/// What the request after a reply that ended partway through a tool call
+/// says: the model broke the call off (gpt-oss wrote `{"path":"src","}`), or
+/// the reply filled the room left in its context, where Ollama ends it and
+/// the same call would end there again.
+const CUT_CALL: &str = "Your last reply ended partway through a tool call, so the call didn't run. Write the call again in full. If it is long, such as a whole file, make smaller calls instead: create the file with its first part, then add the rest with edits.";
+
 /// How often a turn asks the model to correct a tool call the provider
 /// refused, before the turn fails.
 const REFUSED_CALL_RETRIES: u8 = 2;
 
-/// The provider's reason when it refused the model's own reply for a tool
-/// call that does not match its tool (Groq's `tool_use_failed`: "Tool call
-/// validation failed: parameters for tool apply_patch did not match
-/// schema…", or a call of a tool it was not sent). The request was fine; a
-/// model asked again usually gets the call right.
+/// What the model is told when the provider refused its own reply for a
+/// tool call that does not match its tool (Groq's `tool_use_failed`: "Tool
+/// call validation failed: parameters for tool apply_patch did not match
+/// schema…", or a call of a tool it was not sent), or could not read the
+/// call at all (see [`unreadable_tool_call`]). The request was fine; a model
+/// asked again usually gets the call right.
 fn refused_tool_call(error: &CoreError) -> Option<String> {
+    if let Some((reason, cut)) = unreadable_tool_call(error) {
+        return Some(if cut {
+            CUT_CALL.to_owned()
+        } else {
+            format!("{UNREADABLE_CALL}{reason}")
+        });
+    }
     let CoreError::Provider(message) = error else {
         return None;
     };
@@ -1110,7 +1187,27 @@ fn refused_tool_call(error: &CoreError) -> Option<String> {
         .map_or(message.as_str(), |at| {
             &message[at + "tool call validation failed: ".len()..]
         });
-    Some(clean_error_text(reason, 600))
+    Some(format!("{REFUSED_CALL}{}", clean_error_text(reason, 600)))
+}
+
+/// The provider's reason when it could not read a tool call the model wrote
+/// ([`crate::UNREADABLE_TOOL_CALL`]), and whether the call was cut off
+/// before it ended rather than written wrong.
+fn unreadable_tool_call(error: &CoreError) -> Option<(String, bool)> {
+    let CoreError::Provider(message) = error else {
+        return None;
+    };
+    let (_, reason) = message.split_once(crate::UNREADABLE_TOOL_CALL)?;
+    let lower = reason.to_ascii_lowercase();
+    let cut = [
+        "unexpected end of json input",
+        "unexpected eof",
+        "incomplete",
+        "unterminated",
+    ]
+    .iter()
+    .any(|words| lower.contains(words));
+    Some((clean_error_text(reason, 300), cut))
 }
 
 /// What the request after an empty reply says, when a call before it failed.
@@ -1146,27 +1243,37 @@ const TRANSIENT_RETRIES: u8 = 4;
 const RECOVERIES: u8 = 3;
 
 /// How many rounds' worth of retries after a failure, and of recoveries,
-/// one turn may spend in all, however its rounds share them. A provider or
+/// one turn may spend in all, however its rounds share them, beyond what its
+/// finished responses give back ([`RESPONSES_PER_REFUND`]). A provider or
 /// gateway that keeps failing round after round then ends the turn, instead
 /// of quietly multiplying what a long turn costs.
 const TURN_RETRY_ROUNDS: u8 = 4;
+
+/// Finished responses that give a turn back one retry after a failure and
+/// one recovery. A long turn against a server that fails now and then (a
+/// gateway's 502 every few dozen requests) goes on for as many rounds as it
+/// takes; one that fails more often than once in this many responses still
+/// ends the turn, so failures cost no more than about one round in this many.
+const RESPONSES_PER_REFUND: u16 = 8;
 
 /// What a turn has spent on retrying a busy or unreachable provider and on
 /// recovering responses cut short. Each round has its own budget, back once
 /// the provider takes a request (retries) or a response finishes
 /// (recoveries), so failures spread over a long turn of tool rounds do not
-/// add up to fail it; the turn's totals bound the failures. A provider at
-/// its rate limit (a 429, or a key or router already running as many
-/// requests at once as it allows) is waited out in each round but not
-/// counted for the turn: it refused the request, so nothing ran or was
-/// charged, and a fan-out of agents can wait on a free slot for a long time.
-/// An overloaded provider counts, as any server error does.
+/// add up to fail it; the turn's totals bound the failures, less what
+/// finished responses gave back. A provider at its rate limit (a 429, or a
+/// key or router already running as many requests at once as it allows) is
+/// waited out in each round but not counted for the turn: it refused the
+/// request, so nothing ran or was charged, and a fan-out of agents can wait
+/// on a free slot for a long time. An overloaded provider counts, as any
+/// server error does.
 #[derive(Debug, Default)]
 struct RetryBudget {
     retries: u8,
     recoveries: u8,
     turn_retries: u8,
     turn_recoveries: u8,
+    finished_responses: u16,
 }
 
 impl RetryBudget {
@@ -1205,9 +1312,16 @@ impl RetryBudget {
         self.retries = 0;
     }
 
-    /// A response finished: the next one may be recovered as often again.
+    /// A response finished: the next one may be recovered as often again,
+    /// and every [`RESPONSES_PER_REFUND`] of them give the turn back one
+    /// retry and one recovery.
     fn finished(&mut self) {
         self.recoveries = 0;
+        self.finished_responses = self.finished_responses.wrapping_add(1);
+        if self.finished_responses.is_multiple_of(RESPONSES_PER_REFUND) {
+            self.turn_retries = self.turn_retries.saturating_sub(1);
+            self.turn_recoveries = self.turn_recoveries.saturating_sub(1);
+        }
     }
 }
 
@@ -1246,8 +1360,10 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
     };
     let lower = message.to_ascii_lowercase();
     // A quota of nothing ("limit: 0", Google's free tier for a model it
-    // leaves out) names a wait all the same, but no wait lifts it.
-    if quota_limits(&lower).any(|limit| limit == 0) {
+    // leaves out) names a wait all the same, but no wait lifts it; nor does
+    // a wait of seconds lift a day's quota used up, which Google names with
+    // the same short wait as a minute's.
+    if quota_limits(&lower).any(|limit| limit == 0) || names_daily_quota(&lower) {
         return None;
     }
     let Some(advised) = named_wait(&lower) else {
@@ -1320,11 +1436,62 @@ fn quota_limits(lower: &str) -> impl Iterator<Item = u64> + '_ {
     })
 }
 
+/// Whether a refusal names a quota of a day (Google's quota ids, which the
+/// provider adapters add to its words: "Quota id:
+/// GenerateRequestsPerDayPerProjectPerModel-FreeTier"), in a lower-cased
+/// message. Google names a wait of seconds for it ("Please retry in
+/// 11.6s"), as for a minute's quota, but it comes back only after midnight
+/// Pacific time.
+fn names_daily_quota(lower: &str) -> bool {
+    lower
+        .split("quota id: ")
+        .skip(1)
+        .filter_map(|rest| rest.split_whitespace().next())
+        .any(|id| id.contains("perday"))
+}
+
+/// How long until midnight Pacific time after `now`, when Google renews a
+/// day's quotas. Pacific daylight time runs from the second Sunday of March
+/// to the first Sunday of November (from 2 a.m. local time).
+fn until_pacific_midnight(now: DateTime<Utc>) -> std::time::Duration {
+    use chrono::{Datelike as _, NaiveDate, TimeZone as _, Weekday};
+    let nth_sunday = |year: i32, month: u32, nth: u32| {
+        NaiveDate::from_weekday_of_month_opt(year, month, Weekday::Sun, u8::try_from(nth).ok()?)
+    };
+    let daylight = |at: DateTime<Utc>| {
+        let year = at.year();
+        let (Some(start), Some(end)) = (nth_sunday(year, 3, 2), nth_sunday(year, 11, 1)) else {
+            return false;
+        };
+        // 2 a.m. standard time (UTC-8) and 2 a.m. daylight time (UTC-7).
+        let start = Utc.from_utc_datetime(&start.and_hms_opt(10, 0, 0).unwrap_or_default());
+        let end = Utc.from_utc_datetime(&end.and_hms_opt(9, 0, 0).unwrap_or_default());
+        at >= start && at < end
+    };
+    let offset = |at: DateTime<Utc>| chrono::Duration::hours(if daylight(at) { -7 } else { -8 });
+    let local = now + offset(now);
+    let Some(next_midnight) = local
+        .date_naive()
+        .succ_opt()
+        .and_then(|day| day.and_hms_opt(0, 0, 0))
+    else {
+        return std::time::Duration::from_secs(24 * 3600);
+    };
+    // Midnight keeps the offset of the evening before it: the clocks change
+    // at 2 a.m.
+    let midnight = Utc.from_utc_datetime(&next_midnight) - offset(now);
+    (midnight - now)
+        .to_std()
+        .unwrap_or(std::time::Duration::from_secs(0))
+}
+
 /// A refusal of Google's free tier: the smallest quota it names (`0` for a
-/// model the free tier leaves out) and the wait it names.
+/// model the free tier leaves out), the wait it names, and whether the quota
+/// is a day's.
 struct FreeTierQuota {
     limit: u64,
     wait: Option<std::time::Duration>,
+    daily: bool,
 }
 
 fn free_tier_quota(lower: &str) -> Option<FreeTierQuota> {
@@ -1336,6 +1503,7 @@ fn free_tier_quota(lower: &str) -> Option<FreeTierQuota> {
         wait: lower
             .split_once("retry in ")
             .and_then(|(_, rest)| advised_wait(rest)),
+        daily: names_daily_quota(lower),
     })
 }
 
@@ -1440,6 +1608,10 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
     // words read: waiting fixes it, compacting does not.
     if http_status(&message) == Some(429)
         || RATE_LIMITED.iter().any(|marker| message.contains(marker))
+        // An output limit above the model's ("max_tokens must be less than
+        // …", which Cohere also calls too many tokens): compacting cannot
+        // help.
+        || message.contains("max_tokens must be less than")
     {
         return false;
     }
@@ -1493,11 +1665,34 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         // Text Generation Inference (Together, Hugging Face): "`inputs`
         // tokens + `max_new_tokens` must be <= 131073". It says the same when
         // the output limit alone is too large, which compacting cannot fix;
-        // `MAX_COMPACTIONS_PER_TURN` bounds the attempts then.
+        // `MAX_COMPACTIONS_UNANSWERED` bounds the attempts then.
         "tokens + `max_new_tokens` must be <=",
+        // vLLM's engine: "The decoder prompt (length 40000) is longer than
+        // the maximum model length of 32768".
+        "longer than the maximum model length",
+        // LM Studio: "the model is loaded with context length of only 4096
+        // tokens, which is not enough".
+        "context length of only",
+        // Qwen on DashScope: "Range of input length should be [1, 129024]".
+        "range of input length should be",
+        // Z.ai's code 1261 in Chinese.
+        "prompt 超长",
+        // LiteLLM's own name for it, whatever the model behind it said.
+        "contextwindowexceedederror",
+        // Cloudflare Workers AI.
+        "exceeded this model context window limit",
+        "exceeds the maximum allowed input length",
+        "tokens in request more than max tokens allowed",
     ]
     .iter()
     .any(|marker| message.contains(marker))
+        // Ollama's OpenAI-compatible API, SGLang and others: "the input
+        // length exceeds the context length", "Input length (40000 tokens)
+        // exceeds the maximum allowed context length".
+        || message.split_once("input length").is_some_and(|(_, rest)| {
+            rest.split_once("exceeds")
+                .is_some_and(|(_, rest)| rest.contains("context length"))
+        })
         // DeepInfra: "Requested input length 600010 exceeds maximum input
         // length 131071", read whole: a field of a request can be longer
         // than its own limit too.
@@ -1979,6 +2174,20 @@ fn describe_model_refusal(
                 format!("{provider}'s free tier doesn't include {name} for this API key.")
             });
         }
+        // A day's free allowance is the model's own: other Flash models have
+        // theirs.
+        if quota.daily {
+            let renews = renews_in(until_pacific_midnight(Utc::now()));
+            return Some(if advice {
+                format!(
+                    "This API key has used up today's free allowance for {name} on {provider}, which comes back at midnight Pacific time, in {renews}. Choose another model for this chat{such_as}, or {billing}."
+                )
+            } else {
+                format!(
+                    "This API key has used up today's free allowance for {name} on {provider}, which comes back at midnight Pacific time, in {renews}."
+                )
+            });
+        }
         if let Some(wait) = quota.wait.filter(|wait| *wait > LONGEST_ADVISED_WAIT) {
             let renews = renews_in(wait);
             return Some(if advice {
@@ -1997,6 +2206,25 @@ fn describe_model_refusal(
             )
         } else {
             format!("{name} is at the limit of {provider}'s free tier for this API key.")
+        });
+    }
+    // A day's quota of a paid Google project (the same refusal without the
+    // free tier) is back at midnight Pacific time too.
+    if lower.contains("quota exceeded") && names_daily_quota(&lower) {
+        let renews = renews_in(until_pacific_midnight(Utc::now()));
+        let used = format!(
+            "This API key's project has used today's quota for {name} on {provider}, which comes back at midnight Pacific time, in {renews}."
+        );
+        return Some(if advice {
+            let such_as = match others.as_slice() {
+                [] => String::new(),
+                names => format!(", such as {}", spoken_list(names, "or")),
+            };
+            format!(
+                "{used} Choose another model for this chat{such_as}, or raise the project's limits in Google AI Studio."
+            )
+        } else {
+            used
         });
     }
     // A day's allowance for the model used up (Groq's free tier: "Rate limit
@@ -2075,6 +2303,10 @@ fn describe_local_model_failure(
     let CoreError::Provider(raw) = error else {
         return None;
     };
+    // Said by `describe_error`, whatever the parser's words name.
+    if unreadable_tool_call(error).is_some() {
+        return None;
+    }
     if info.id == "lmstudio" && raw.starts_with(EMPTY_LOCAL_REPLY) {
         let name = haarness_protocol::model_display_name(
             model,
@@ -2203,6 +2435,22 @@ fn describe_local_model_failure(
                     ),
                 }
             ),
+        )
+    } else if let Some(window) = ollama_window_refused(&lower)
+        && raw.starts_with(OUTGREW_WINDOW)
+    {
+        (
+            format!(
+                "{name} reads at most {} tokens at once here, and this turn outgrew that while it ran, though the chat was compacted {MAX_COMPACTIONS_UNANSWERED} times to make room.",
+                grouped_number(window)
+            ),
+            match instead(window.saturating_add(1)).as_slice() {
+                [] => "Ask for less in one message, such as fewer or smaller files at a time, or start a new chat.".to_owned(),
+                names => format!(
+                    "Ask for less in one message, such as fewer or smaller files at a time, or choose a model with a longer context for this chat, such as {}.",
+                    spoken_list(names, "or")
+                ),
+            },
         )
     } else if let Some(window) = ollama_window_refused(&lower) {
         (
@@ -2357,6 +2605,15 @@ fn describe_cut(error: &CoreError, provider: Option<&str>, advice: bool) -> Opti
             format!("The connection to {name} kept breaking off mid-answer."),
             "Check the network connection, then send a message to continue.",
         ),
+        // A response that ended without saying it was done, or saying it
+        // was not, each time it was continued.
+        CoreError::ProviderIncomplete(inner) if unfinished_ending(inner) => (
+            format!(
+                "{} kept ending its answer before it was done.",
+                provider.unwrap_or("The provider")
+            ),
+            "Send a message to continue. If it keeps happening, the server may be cutting its answers short.",
+        ),
         CoreError::Provider(raw)
             if is_transport_cut(raw)
                 && !raw.to_ascii_lowercase().contains("error sending request") =>
@@ -2405,6 +2662,28 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             "{} is not available in your country or region. Choose a model from another provider.",
             provider.unwrap_or("This provider")
         );
+    }
+    // Other providers' refusals read as they did; Ollama's are said by
+    // `describe_local_model_failure`.
+    if let Some(words) = raw.strip_prefix(OUTGREW_WINDOW) {
+        return describe_error(&CoreError::Provider(words.to_owned()), provider);
+    }
+    // Asked twice, the model wrote no summary of the chat (it called a tool,
+    // or only reasoned).
+    if raw == EMPTY_SUMMARY {
+        return "The model didn't write a summary of this chat, though Haarness asked twice, so the chat wasn't compacted. Try again, or start a new chat to go on.".into();
+    }
+    // The model's tool calls kept coming out unreadable, or cut off where
+    // its context filled up, though it was asked to write them again.
+    if let Some((_, cut)) = unreadable_tool_call(error) {
+        return if cut {
+            "The model's tool calls kept breaking off before they ended, though it was asked to write them again, in smaller parts if long. Send the message again, start a new chat, or choose another model.".into()
+        } else {
+            format!(
+                "{} couldn't read the model's tool calls, even after the model was asked to write them again. Send the message again, or choose another model.",
+                provider.unwrap_or("The provider")
+            )
+        };
     }
     if let Some((message, code, kind)) = provider_error_fields(raw) {
         let label = code.or_else(|| {
@@ -2656,6 +2935,19 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     if let Some(reason) = refusal_reason_text(raw) {
         return format!(
             "{} rejected the request: {reason}",
+            provider.unwrap_or("The provider")
+        );
+    }
+    // Still overloaded after the turn's retries ("HTTP 503 Service
+    // Unavailable: The model is overloaded. Please try again later."): the
+    // status line says nothing more to the person.
+    let status = http_status(&lower);
+    if matches!(status, Some(503 | 529))
+        || (status.is_none_or(|status| status >= 500)
+            && (lower.contains("overloaded") || lower.contains("high demand")))
+    {
+        return format!(
+            "{} is overloaded or unavailable right now, and didn't take the request after several tries. Send the message again in a moment, or choose another model.",
             provider.unwrap_or("The provider")
         );
     }
@@ -4659,7 +4951,10 @@ impl AgentRuntime {
             items.retain(|item| item.sequence <= revert.sequence);
         }
         let models = self.components().providers.models(&thread.provider);
-        let window = stated_window(model_metadata(&models, &thread.model));
+        let window = self
+            .request_ceilings
+            .get(&thread.provider, &thread.model)
+            .context_window(stated_window(model_metadata(&models, &thread.model)));
         Ok(ContextUsage {
             estimate: tokens::context(&items, Tokenizer::for_model(&thread.model)),
             window,
@@ -5707,7 +6002,10 @@ impl AgentRuntime {
         let metadata = model_metadata(&models, model);
         compaction_input_limit(
             &components.config.compaction,
-            stated_window(metadata).unwrap_or(128_000),
+            self.request_ceilings
+                .get(provider, model)
+                .context_window(stated_window(metadata))
+                .unwrap_or(128_000),
             metadata.and_then(|info| info.max_output_tokens),
         )
     }
@@ -10720,14 +11018,22 @@ impl RunnerTask {
     }
 
     /// Bounded recovery for a provider which rejects the request before it
-    /// emits any semantic output. The caller enforces the per-turn recovery
-    /// ceiling; the same queue gate used by proactive compaction protects
-    /// steering that may arrive while summarization runs.
+    /// emits any semantic output. The caller bounds the compactions the
+    /// provider has not answered yet; the same queue gate used by proactive
+    /// compaction protects steering that may arrive while summarization runs.
+    ///
+    /// A refusal of the request as too long (`error`) also shows the model's
+    /// window where its metadata states none or a larger one (a server set up
+    /// here, whose window Haarness otherwise takes as 128K): the window the
+    /// refusal names, or no more than the refused request held. It is kept for
+    /// the model, so this compaction aims below it, and later rounds and chats
+    /// compact before reaching it and size their tools for it.
     async fn recover_context_overflow(
         &self,
         provider: &Arc<dyn ModelProvider>,
         model: &str,
         compactions: u8,
+        error: &CoreError,
     ) -> CoreResult<bool> {
         if !self.config.compaction.enabled {
             return Ok(false);
@@ -10736,11 +11042,35 @@ impl RunnerTask {
         if !unconsumed_queued(&items, self.turn.id).is_empty() {
             return Ok(false);
         }
+        // A request refused for its bytes (its attachments) says nothing of
+        // the window.
+        if let CoreError::Provider(message) = error
+            && is_provider_context_overflow(error)
+            && !is_provider_oversized_request(error)
+        {
+            let refused = tokens::context(&items, Tokenizer::for_model(model)).tokens;
+            if let Some(window) = crate::request_ceilings::shown_window(message, refused)
+                && self
+                    .request_ceilings
+                    .learn_window(provider.id(), model, window)
+            {
+                tracing::info!(
+                    thread = %self.thread.id,
+                    turn = %self.turn.id,
+                    window,
+                    refused,
+                    "the provider refused the request as longer than the model takes; compacting below that from now on"
+                );
+            }
+        }
         let models = self.providers.models(provider.id());
         let metadata = model_metadata(&models, model);
         let input_limit = compaction_input_limit(
             &self.config.compaction,
-            stated_window(metadata).unwrap_or(128_000),
+            self.request_ceilings
+                .get(provider.id(), model)
+                .context_window(stated_window(metadata))
+                .unwrap_or(128_000),
             metadata.and_then(|info| info.max_output_tokens),
         );
         request_fits(
@@ -10908,7 +11238,15 @@ impl RunnerTask {
                 .goal_max_turns
                 .filter(|turns| *turns > 0)
                 .unwrap_or(crate::goal::MAX_GOAL_TURNS);
-            let mut compactions_this_turn = 0_u8;
+            // Compactions since the provider last took a request, and the
+            // size of the context right after this turn's latest compaction.
+            let mut compactions_unanswered = 0_u8;
+            let mut compacted_at: Option<u64> = None;
+            // An automatic compaction whose summary the model did not write
+            // (or that failed) is not tried again this turn: the request
+            // still fits below the threshold's reserve, and one the provider
+            // then refuses as too long compacts on that refusal instead.
+            let mut summary_failed = false;
             // A refusal of the request's bytes compacts once until the
             // provider takes a request again: when the summary leaves the
             // request too large, more summaries would only summarize the
@@ -10932,9 +11270,10 @@ impl RunnerTask {
             let mut failure_beside_text = false;
             let mut explain_failure = false;
             let mut asked_to_explain = false;
-            // Why the provider refused the model's last reply for a tool call
-            // that did not match its tool, for the next request to say, and
-            // how often this turn has asked the model to correct one.
+            // What the next request tells the model when the provider refused
+            // its last reply for a tool call that did not match its tool, or
+            // could not read the call, and how often this turn has asked the
+            // model to correct one.
             let mut refused_call: Option<String> = None;
             let mut refused_calls = 0_u8;
             // Whether this turn asked again for the summary at its step limit.
@@ -11165,20 +11504,30 @@ impl RunnerTask {
                     Some(ItemData::Compaction { .. })
                 );
                 // A subagent's turn compacts its own chat as a person's does.
-                if self.config.compaction.enabled
-                    && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
-                    && !has_unconsumed_queued
-                    && !just_compacted
-                {
+                if self.config.compaction.enabled && !has_unconsumed_queued && !summary_failed {
                     let provider_models = self.providers.models(provider_id);
                     let model_info = model_metadata(&provider_models, &model);
-                    let context_window = stated_window(model_info).unwrap_or(128_000);
+                    let context_window = self
+                        .request_ceilings
+                        .get(provider_id, &model)
+                        .context_window(stated_window(model_info))
+                        .unwrap_or(128_000);
                     let budget = compaction_input_limit(
                         &self.config.compaction,
                         context_window,
                         model_info.and_then(|info| info.max_output_tokens),
                     );
-                    if tokens::context(&items, Tokenizer::for_model(&model)).tokens > budget {
+                    let context = tokens::context(&items, Tokenizer::for_model(&model)).tokens;
+                    if just_compacted {
+                        compacted_at = Some(context);
+                    }
+                    if !just_compacted
+                        && compactions_unanswered < MAX_COMPACTIONS_UNANSWERED
+                        && context > budget
+                        && compacted_at.is_none_or(|after| {
+                            context >= after.saturating_add(budget / COMPACTION_REGROWTH_DIVISOR)
+                        })
+                    {
                         request_fits(
                             &self.config.compaction,
                             &items,
@@ -11187,7 +11536,7 @@ impl RunnerTask {
                             1.0,
                         )?;
                         self.set_status("compacting", None);
-                        let summary = summarize_context(
+                        let summary = match summarize_context(
                             &provider,
                             &model,
                             self.config.prompts.text(crate::PromptName::Compaction),
@@ -11195,7 +11544,23 @@ impl RunnerTask {
                             self.cancel.clone(),
                             Some(budget),
                         )
-                        .await?;
+                        .await
+                        {
+                            Ok(summary) => Some(summary),
+                            Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+                            // The chat is near its threshold, not over the
+                            // window: the turn goes on as it is rather than
+                            // failing for want of a summary.
+                            Err(error) => {
+                                tracing::warn!(thread = %self.thread.id, turn = %self.turn.id, %error, "no summary for an automatic compaction; going on without compacting");
+                                summary_failed = true;
+                                None
+                            }
+                        };
+                        let Some(summary) = summary else {
+                            self.set_status("thinking", None);
+                            continue 'provider_round;
+                        };
                         // Summarization is intentionally outside the queue gate:
                         // it may take seconds and queued steering must persist
                         // immediately. Re-enter the gate only for the commit,
@@ -11243,7 +11608,7 @@ impl RunnerTask {
                                     expected_tail,
                                 )
                                 .await?;
-                            compactions_this_turn = compactions_this_turn.saturating_add(1);
+                            compactions_unanswered = compactions_unanswered.saturating_add(1);
                             self.events.publish_scoped(
                                 "item.created",
                                 Some(self.thread.id),
@@ -11262,6 +11627,8 @@ impl RunnerTask {
                             );
                             compacted = Some(item);
                             items = self.repository.list_items(self.thread.id, None).await?;
+                            compacted_at =
+                                Some(tokens::context(&items, Tokenizer::for_model(&model)).tokens);
                         } else {
                             items = current_items;
                         }
@@ -11317,10 +11684,10 @@ impl RunnerTask {
                         "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
                     recovering = false;
                 }
-                if let Some(reason) = refused_call.take() {
+                if let Some(note) = refused_call.take() {
                     messages.push(ProviderMessage::Text {
                         role: "user".into(),
-                        content: format!("{REFUSED_CALL}{reason}"),
+                        content: note,
                     });
                 }
                 // Asked in every request until a reply to it shows words, a
@@ -11643,16 +12010,22 @@ impl RunnerTask {
                         if oversized && compacted_for_size {
                             return Err(still_too_large(error_value));
                         }
-                        if compactions_this_turn < MAX_COMPACTIONS_PER_TURN
+                        if compactions_unanswered < MAX_COMPACTIONS_UNANSWERED
                             && (oversized || is_provider_context_overflow(&error_value))
                             && self
-                                .recover_context_overflow(&provider, &model, compactions_this_turn)
+                                .recover_context_overflow(
+                                    &provider,
+                                    &model,
+                                    compactions_unanswered,
+                                    &error_value,
+                                )
                                 .await?
                         {
-                            compactions_this_turn = compactions_this_turn.saturating_add(1);
+                            compactions_unanswered = compactions_unanswered.saturating_add(1);
                             compacted_for_size |= oversized;
                             continue 'provider_round;
                         }
+                        let error_value = outgrew_window(error_value, compactions_unanswered);
                         if let Some(reason) = refused_tool_call(&error_value)
                             && refused_calls < REFUSED_CALL_RETRIES
                         {
@@ -11746,20 +12119,26 @@ impl RunnerTask {
                                 break;
                             }
                             if !saw_provider_event
-                                && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
+                                && compactions_unanswered < MAX_COMPACTIONS_UNANSWERED
                                 && (oversized || is_provider_context_overflow(&error_value))
                                 && self
                                     .recover_context_overflow(
                                         &provider,
                                         &model,
-                                        compactions_this_turn,
+                                        compactions_unanswered,
+                                        &error_value,
                                     )
                                     .await?
                             {
-                                compactions_this_turn = compactions_this_turn.saturating_add(1);
+                                compactions_unanswered = compactions_unanswered.saturating_add(1);
                                 compacted_for_size |= oversized;
                                 continue 'provider_round;
                             }
+                            let error_value = if saw_provider_event {
+                                error_value
+                            } else {
+                                outgrew_window(error_value, compactions_unanswered)
+                            };
                             // A provider that checks the model's tool calls
                             // itself (Groq) refuses a reply whose call does
                             // not match its tool, before anything streamed:
@@ -11825,9 +12204,11 @@ impl RunnerTask {
                     }
                     saw_provider_event = true;
                     // The provider took this request: a later one refused
-                    // for its size may compact again, and a later one it
-                    // turns away while busy backs off from the first wait.
+                    // for its size may compact again, aiming as high as the
+                    // first time, and a later one it turns away while busy
+                    // backs off from the first wait.
                     compacted_for_size = false;
+                    compactions_unanswered = 0;
                     retries.accepted();
                     // The request to explain a failure is answered once the
                     // reply shows something (words, a tool call or structured
@@ -12895,6 +13276,10 @@ impl RunnerTask {
     /// `"run_in_background": "false"`, and refused, sends them again the
     /// same way and then makes up what the command printed.
     ///
+    /// A call whose fields are named the way other coding agents' tools name
+    /// them (`file_path`, `old_string`, `new_string`), or that adds a
+    /// `description` of itself, gets the tool's names and loses the caption.
+    ///
     /// A call to a tool that changes nothing whose only other fault is fields
     /// the tool does not take runs without them (gpt-oss asks `read` for
     /// `line_start` and `line_end`), and the words returned, added to what
@@ -12919,6 +13304,11 @@ impl RunnerTask {
             return None;
         }
         let tool = tool?;
+        if let Some(aliased) = tool.aliased_arguments(arguments) {
+            tracing::info!(thread = %self.thread.id, tool = name, "reading fields a model named the way other agents' tools name them");
+            *arguments = aliased;
+            return None;
+        }
         let (kept, unknown) = tool.without_unknown_fields(arguments)?;
         tracing::info!(thread = %self.thread.id, tool = name, fields = ?unknown, "leaving out fields a tool that changes nothing does not take");
         *arguments = kept;
@@ -17134,7 +17524,57 @@ fn fit_summary_input(messages: &mut [ProviderMessage], room: u64, tokenizer: Tok
     }
 }
 
-/// Run a tools-disabled summarization request and collect the text.
+/// Where a summary request is still larger than `room` with its tool
+/// outputs cut ([`fit_summary_input`]), as when the model wrote long answers
+/// or long files, leaves out its oldest messages after the first (which
+/// holds the earlier summary, or the chat's first request) until it fits,
+/// keeping the last two and every message the person wrote: what they asked
+/// for is what the summary is for. How many it left out.
+fn drop_oldest_to_fit(
+    messages: &mut Vec<ProviderMessage>,
+    origins: &mut Vec<crate::image_budget::Origin>,
+    room: u64,
+    tokenizer: Tokenizer,
+) -> usize {
+    let size = |message: &ProviderMessage| match message {
+        ProviderMessage::Text { content, .. } | ProviderMessage::Media { content, .. } => {
+            4 + tokenizer.text(content)
+        }
+        ProviderMessage::ToolCall {
+            name, arguments, ..
+        } => 4 + tokenizer.text(name) + tokenizer.text(&arguments.to_string()),
+        ProviderMessage::ToolResult { name, output, .. } => {
+            4 + tokenizer.text(name) + tokenizer.text(output)
+        }
+    };
+    let mut total: u64 = messages.iter().map(size).sum();
+    let mut left_out = 0;
+    while total > room {
+        let last_kept = messages.len().saturating_sub(2);
+        let Some(oldest) =
+            (1..last_kept).find(|index| !origins.get(*index).is_some_and(|origin| origin.person))
+        else {
+            break;
+        };
+        total = total.saturating_sub(size(&messages.remove(oldest)));
+        if oldest < origins.len() {
+            origins.remove(oldest);
+        }
+        left_out += 1;
+    }
+    left_out
+}
+
+/// Shares of the room a summary request that the provider refused as too
+/// long is sent again in: the estimate of it ran low.
+const SUMMARY_SHRINKS: [f64; 3] = [0.7, 0.5, 0.35];
+
+/// The summary of `items` for a compaction, asked of `model` within `room`
+/// tokens. A summary request meets what any request meets, and the turn that
+/// compacts fails with it: a busy, failing or unreachable provider is asked
+/// again after the waits a turn's own round gets, a summary cut short is
+/// asked for again as often as a round's response is recovered, and a request
+/// refused as too long for the model goes again in less room, each time.
 #[instrument(
     name = "context.compact",
     skip_all,
@@ -17148,22 +17588,83 @@ async fn summarize_context(
     cancel: CancellationToken,
     room: Option<u64>,
 ) -> CoreResult<String> {
+    let mut retries = RetryBudget::default();
+    let mut room = room;
+    let mut shrinks = SUMMARY_SHRINKS.iter();
+    loop {
+        let error = match summarize_once(
+            provider,
+            model,
+            system.clone(),
+            items.clone(),
+            cancel.clone(),
+            room,
+        )
+        .await
+        {
+            Ok(summary) => return Ok(summary),
+            Err(error) => error,
+        };
+        let pause = if is_provider_context_overflow(&error) || is_provider_oversized_request(&error)
+        {
+            let (Some(current), Some(share)) = (room, shrinks.next()) else {
+                return Err(error);
+            };
+            room = Some(scaled(current, *share));
+            None
+        } else if matches!(error, CoreError::ProviderIncomplete(_)) || is_stream_cut(&error) {
+            Some(retries.recover().ok_or(error)?)
+        } else {
+            Some(retries.retry(&error).ok_or(error)?.1)
+        };
+        tracing::info!(
+            model,
+            room,
+            delay_ms = pause.map_or(0, |pause| u64::try_from(pause.as_millis())
+                .unwrap_or(u64::MAX)),
+            "asking again for the compaction summary"
+        );
+        if let Some(pause) = pause {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                () = tokio::time::sleep(pause) => {}
+            }
+        }
+    }
+}
+
+/// Run a tools-disabled summarization request and collect the text.
+async fn summarize_once(
+    provider: &Arc<dyn ModelProvider>,
+    model: &str,
+    system: String,
+    items: Vec<Item>,
+    cancel: CancellationToken,
+    room: Option<u64>,
+) -> CoreResult<String> {
     // Summaries need the textual meaning of media turns, not the original
     // potentially huge or now-missing binary payload. This also makes overflow
     // recovery safe after an attachment pushed the provider over its limit.
-    let (mut messages, origins) = provider_messages_with_origins(items);
+    let (mut messages, mut origins) = provider_messages_with_origins(items);
+    leave_out_unanswered(&mut messages, &mut origins);
     if let Some(room) = room {
         let tokenizer = Tokenizer::for_model(model);
-        fit_summary_input(
-            &mut messages,
-            room.saturating_sub(tokenizer.text(&system)),
-            tokenizer,
-        );
+        let room = room.saturating_sub(tokenizer.text(&system));
+        fit_summary_input(&mut messages, room, tokenizer);
+        let left_out = drop_oldest_to_fit(&mut messages, &mut origins, room, tokenizer);
+        if left_out > 0 {
+            tracing::info!(
+                model,
+                left_out,
+                "the oldest messages left out of the summary request to fit the model"
+            );
+        }
     }
     let messages = summary_messages(messages, &origins, &summary_key());
-    let request = ProviderRequest {
+    let ask = |messages: Vec<ProviderMessage>| ProviderRequest {
         model: model.to_owned(),
-        system,
+        system: system.clone(),
         messages,
         tools: Vec::new(),
         reasoning_effort: None,
@@ -17176,12 +17677,96 @@ async fn summarize_context(
         },
         output_schema: None,
     };
+    let missing = match summary_reply(provider, ask(messages.clone()), &cancel).await? {
+        Ok(text) => return Ok(text),
+        Err(missing) => missing,
+    };
+    // A reply with no summary in it is asked for once more, saying what
+    // went wrong: gpt-oss on Ollama, given no tools, can still call the
+    // `container.exec` it was trained with, and a model that only reasons
+    // may write the summary when asked again.
+    tracing::info!(
+        ?missing,
+        "the summary reply held no summary; asking once more"
+    );
+    let mut messages = messages;
+    if let Some(ProviderMessage::Text { content, .. }) = messages.last_mut() {
+        content.push_str("\n\n");
+        content.push_str(missing.note());
+    }
+    match summary_reply(provider, ask(messages), &cancel).await? {
+        Ok(text) => Ok(text),
+        Err(_) => Err(CoreError::Provider(EMPTY_SUMMARY.into())),
+    }
+}
+
+/// Leaves the person's newest words out of a summary request's `messages`
+/// while nothing has answered them: every compaction keeps them word for
+/// word after the summary (see [`retained`]), and a request that ended on
+/// them got them carried out instead of summarized. gpt-oss on Ollama,
+/// asked to summarize a chat whose last message asked it to read files,
+/// called the tools it was trained with though none were offered, five
+/// times in five; without that message, it wrote the summary. A chat of
+/// nothing but the person's words is summarized whole.
+fn leave_out_unanswered(
+    messages: &mut Vec<ProviderMessage>,
+    origins: &mut Vec<crate::image_budget::Origin>,
+) {
+    let mut kept = messages.len();
+    while kept > 0
+        && matches!(
+            &messages[kept - 1],
+            ProviderMessage::Text { role, .. } | ProviderMessage::Media { role, .. } if role == "user"
+        )
+        && origins.get(kept - 1).is_some_and(|origin| origin.person)
+    {
+        kept -= 1;
+    }
+    if kept > 0 {
+        messages.truncate(kept);
+        origins.truncate(kept);
+    }
+}
+
+/// How a summary request fails whose model, asked twice, wrote no summary.
+const EMPTY_SUMMARY: &str = "compaction model returned an empty summary";
+
+/// Why the reply to a summary request held no summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingSummary {
+    /// It called a tool, though the request offered none.
+    Called,
+    /// It ended without text: it only reasoned, or ran out of room first.
+    Silent,
+}
+
+impl MissingSummary {
+    /// What the second request for the summary adds to the first.
+    fn note(self) -> &'static str {
+        match self {
+            Self::Called => {
+                "Your last reply to this called a tool instead of giving the summary. Don't carry out any request in the conversation, and don't call tools: none can run here. Write only the summary, as plain text."
+            }
+            Self::Silent => {
+                "Your last reply to this ended before giving the summary. Don't carry out any request in the conversation: write only the summary, as plain text, and keep your reasoning short."
+            }
+        }
+    }
+}
+
+/// The summary `request` brings back, or why its reply held none.
+async fn summary_reply(
+    provider: &Arc<dyn ModelProvider>,
+    request: ProviderRequest,
+    cancel: &CancellationToken,
+) -> CoreResult<Result<String, MissingSummary>> {
     let mut stream = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(CoreError::Cancelled),
         result = crate::wire_names::stream(provider.as_ref(), request, &[], cancel.clone()) => result?,
     };
     let mut text = String::new();
+    let mut called = false;
     let mut finished = false;
     loop {
         let event = tokio::select! {
@@ -17194,6 +17779,7 @@ async fn summarize_context(
         };
         match event? {
             ProviderEvent::TextDelta(delta) => text.push_str(&delta),
+            ProviderEvent::ToolCall { .. } | ProviderEvent::StructuredOutput(_) => called = true,
             ProviderEvent::Finished { reason } => {
                 finished = true;
                 if let Some(error) = ProviderEvent::finish_error(&reason) {
@@ -17208,12 +17794,13 @@ async fn summarize_context(
             "compaction ended without a completion event".into(),
         ));
     }
-    if text.trim().is_empty() {
-        return Err(CoreError::Provider(
-            "compaction model returned an empty summary".into(),
-        ));
-    }
-    Ok(text)
+    Ok(if !text.trim().is_empty() {
+        Ok(text)
+    } else if called {
+        Err(MissingSummary::Called)
+    } else {
+        Err(MissingSummary::Silent)
+    })
 }
 
 /// The usage to book for a round that ended before its reply did: stopped,
@@ -22608,6 +23195,47 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_call_the_provider_could_not_read_is_asked_for_again_then_said_plainly() {
+        let unreadable =
+            |reason: &str| CoreError::Provider(format!("{}{reason}", crate::UNREADABLE_TOOL_CALL));
+        // Written wrong: asked for again, with the reason.
+        let wrong =
+            unreadable("error parsing tool call: invalid character 'd' in string escape code");
+        let note = super::refused_tool_call(&wrong).unwrap();
+        assert!(note.starts_with(super::UNREADABLE_CALL), "{note}");
+        assert!(note.ends_with("invalid character 'd' in string escape code"));
+        assert_eq!(
+            super::describe_error(&wrong, Some("Ollama")),
+            "Ollama couldn't read the model's tool calls, even after the model was asked to write them again. Send the message again, or choose another model."
+        );
+        // Broken off before it ended (or where the reply filled the
+        // context): in full, or in smaller calls.
+        for reason in [
+            "error parsing tool call: unexpected end of JSON input",
+            "XML syntax error on line 9: unexpected EOF",
+            "incomplete GLM tool call: missing </tool_call>",
+        ] {
+            let cut = unreadable(reason);
+            assert_eq!(
+                super::refused_tool_call(&cut).as_deref(),
+                Some(super::CUT_CALL)
+            );
+            assert!(
+                super::describe_error(&cut, Some("Ollama"))
+                    .starts_with("The model's tool calls kept breaking off"),
+            );
+        }
+        // Groq's refusal reads as it did.
+        let groq = CoreError::Provider("HTTP 400 Bad Request: [tool_use_failed] Tool call validation failed: parameters for tool read did not match schema".into());
+        assert!(
+            super::refused_tool_call(&groq)
+                .unwrap()
+                .starts_with(super::REFUSED_CALL)
+        );
+        assert!(super::unreadable_tool_call(&groq).is_none());
+    }
+
+    #[test]
     fn a_picture_refused_for_a_model_without_vision_reads_as_advice() {
         // Every refusal the provider adapters write (haarness-providers
         // `media::Unreadable::stand_in` and the Chat Completions audio one).
@@ -22732,12 +23360,104 @@ mod tests {
         assert_eq!(pause(&mut budget), None);
         budget.finished();
         assert_eq!(pause(&mut budget), Some(250));
+        // Four rounds' worth of recoveries in all.
         let mut budget = super::RetryBudget::default();
-        for _ in 0..12 {
-            assert!(budget.recover().is_some());
+        for _ in 0..4 {
+            for _ in 0..3 {
+                assert!(budget.recover().is_some());
+            }
             budget.finished();
         }
         assert_eq!(budget.recover(), None);
+    }
+
+    #[test]
+    fn a_summary_request_too_long_with_its_outputs_cut_leaves_out_its_oldest_messages() {
+        let text = |index: usize| ProviderMessage::Text {
+            role: if index.is_multiple_of(2) {
+                "user"
+            } else {
+                "assistant"
+            }
+            .into(),
+            content: format!("message {index} ") + &"long answer words ".repeat(200),
+        };
+        let tokenizer = Tokenizer::for_model("coder");
+        let mut messages: Vec<_> = (0..10).map(text).collect();
+        let mut origins = vec![crate::image_budget::Origin::default(); 10];
+        // The person's request, kept behind the earlier summary.
+        origins[1].person = true;
+        let one = match &messages[0] {
+            ProviderMessage::Text { content, .. } => 4 + tokenizer.text(content),
+            _ => unreachable!(),
+        };
+        let left_out = super::drop_oldest_to_fit(&mut messages, &mut origins, one * 5, tokenizer);
+        assert_eq!(left_out, 5);
+        assert_eq!(messages.len(), 5);
+        assert_eq!(origins.len(), 5);
+        assert!(origins[1].person);
+        let starts: Vec<_> = messages
+            .iter()
+            .map(|message| match message {
+                ProviderMessage::Text { content, .. } => {
+                    content.split(' ').nth(1).unwrap().to_owned()
+                }
+                _ => unreachable!(),
+            })
+            .collect();
+        // The first (the earlier summary), the person's words and the newest
+        // stay.
+        assert_eq!(starts, ["0", "1", "7", "8", "9"]);
+        // A request that fits, or one down to three messages, loses nothing.
+        let mut few: Vec<_> = (0..3).map(text).collect();
+        let mut origins = vec![crate::image_budget::Origin::default(); 3];
+        assert_eq!(
+            super::drop_oldest_to_fit(&mut few, &mut origins, 10, tokenizer),
+            0
+        );
+        assert_eq!(few.len(), 3);
+    }
+
+    #[test]
+    fn a_long_turn_outlasts_failures_once_in_eight_responses_but_not_more() {
+        let busy = CoreError::Provider("HTTP 502 Bad Gateway".into());
+        // A gateway that answers 502 before one response in eight and cuts
+        // another short: a turn of 400 rounds goes on to its end.
+        let mut budget = super::RetryBudget::default();
+        for round in 0..400 {
+            if round % 8 == 3 {
+                assert!(budget.retry(&busy).is_some(), "round {round}");
+            }
+            budget.accepted();
+            if round % 8 == 5 {
+                assert!(budget.recover().is_some(), "round {round}");
+            }
+            budget.finished();
+        }
+        // One that fails before every other response still ends the turn,
+        // after not much more than the turn's own allowance.
+        let mut budget = super::RetryBudget::default();
+        let mut failed_at = None;
+        for round in 0..400 {
+            if round % 2 == 0 && budget.retry(&busy).is_none() {
+                failed_at = Some(round);
+                break;
+            }
+            budget.accepted();
+            budget.finished();
+        }
+        let failed_at = failed_at.expect("the turn ended");
+        assert!((32..48).contains(&failed_at), "{failed_at}");
+        let mut budget = super::RetryBudget::default();
+        let mut recovered = 0;
+        for _ in 0..400 {
+            if budget.recover().is_none() {
+                break;
+            }
+            recovered += 1;
+            budget.finished();
+        }
+        assert!((12..16).contains(&recovered), "{recovered}");
     }
 
     #[test]
@@ -22769,6 +23489,19 @@ mod tests {
             "HTTP 400 Bad Request: Requested input length 600010 exceeds maximum input length 131071",
             // Text Generation Inference (Together, Hugging Face).
             "HTTP 422 Unprocessable Entity: Input validation error: `inputs` tokens + `max_new_tokens` must be <= 131073. Given: 600035 `inputs` tokens and 16 `max_new_tokens`",
+            // Servers people set up themselves, and the gateways before them.
+            "HTTP 400 Bad Request: This model's maximum context length is 32768 tokens. However, you requested 33905 tokens in the messages, Please reduce the length of the messages.",
+            "HTTP 400 Bad Request: The decoder prompt (length 40000) is longer than the maximum model length of 32768. Make sure that `max_model_len` is no smaller than the number of text tokens.",
+            "HTTP 400 Bad Request: request (17565 tokens) exceeds the available context size (16384 tokens), try increasing it",
+            "Trying to keep the first 5000 tokens when context the overflows. However, the model is loaded with context length of only 4096 tokens, which is not enough. Try to load the model with a larger context length, or provide a shorter input",
+            "HTTP 400 Bad Request: <400> InternalError.Algo.InvalidParameter: Range of input length should be [1, 129024]",
+            "HTTP 400 Bad Request: [1261] Prompt 超长",
+            "HTTP 400 Bad Request: litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError",
+            "HTTP 400 Bad Request: Invalid request: Your request exceeded model token limit: 131072",
+            "HTTP 400 Bad Request: invalid params, context window exceeds limit (2013)",
+            "HTTP 413 Payload Too Large: AiError: AiError: Input exceeded this model context window limit",
+            "HTTP 400 Bad Request: the input length exceeds the context length",
+            "HTTP 400 Bad Request: This endpoint's maximum context length is 131072 tokens. However, you requested about 140210 tokens (124210 of text input, 16000 in the output).",
         ] {
             assert!(overflow(message), "{message}");
         }
@@ -22792,6 +23525,8 @@ mod tests {
             "The prompt is fine",
             "Requested input length is unknown",
             "HTTP 400 Bad Request: field `query` exceeds maximum input length of 512",
+            "HTTP 400 Bad Request: too many tokens: max_tokens must be less than or equal to 4096",
+            "HTTP 400 Bad Request: input length is fine; the request exceeds nothing",
         ] {
             assert!(!overflow(message), "{message}");
         }
@@ -23110,6 +23845,58 @@ mod tests {
             ask.push(super::summary_data_note(KEY));
         }
         ask.join(" ")
+    }
+
+    #[test]
+    fn a_summary_leaves_out_the_persons_words_nothing_answered_yet() {
+        let summarized = |items: Vec<ItemData>| {
+            let items = (1..)
+                .zip(items)
+                .map(|(sequence, data)| item(sequence, data))
+                .collect::<Vec<_>>();
+            let (mut messages, mut origins) = super::provider_messages_with_origins(items);
+            super::leave_out_unanswered(&mut messages, &mut origins);
+            assert_eq!(messages.len(), origins.len());
+            messages
+                .into_iter()
+                .map(|message| match message {
+                    ProviderMessage::Text { content, .. } => content,
+                    message => panic!("not text: {message:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        // The compaction keeps the new request word for word after the
+        // summary: the summary is asked of what came before it.
+        assert_eq!(
+            summarized(vec![
+                summary_user("Read the parser", false),
+                summary_reply("It parses JSON."),
+                summary_user("Now read the lexer and explain it", false),
+            ]),
+            ["Read the parser", "It parses JSON."]
+        );
+        // Words Haarness wrote last stay, and so does a chat of nothing but
+        // the person's words.
+        let notice = summarized(vec![
+            summary_user("Read the parser", false),
+            summary_reply("It parses JSON."),
+            summary_user("<task-result>done</task-result>", true),
+        ]);
+        assert!(
+            notice
+                .last()
+                .is_some_and(|text| text.contains("<task-result>"))
+        );
+        let words = summarized(vec![
+            summary_user("history", false),
+            summary_user("more", false),
+        ]);
+        assert!(words.last().is_some_and(|text| text.contains("more")));
+        // A summary the model never wrote, though asked twice.
+        assert_eq!(
+            super::describe_error(&CoreError::Provider(super::EMPTY_SUMMARY.into()), None),
+            "The model didn't write a summary of this chat, though Haarness asked twice, so the chat wasn't compacted. Try again, or start a new chat to go on."
+        );
     }
 
     #[test]
@@ -25613,6 +26400,10 @@ mod tests {
             "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
             "error decoding response body: unexpected EOF during chunk size line",
             "upstream stream became idle",
+            // A tunnel or proxy before a server set up here.
+            "HTTP 524: A timeout occurred",
+            "HTTP 520 <unknown status code>: Web server is returning an unknown error",
+            "HTTP 508 Loop Detected",
         ] {
             assert!(
                 super::is_provider_transient(&provider(retried)),
@@ -25623,6 +26414,7 @@ mod tests {
             "HTTP 429: rate limit exceeded",
             "HTTP 400 Bad Request: API key not valid",
             "HTTP 413 Payload Too Large: maximum context length exceeded",
+            "HTTP 501 Not Implemented",
         ] {
             assert!(!super::is_provider_transient(&provider(failed)), "{failed}");
         }
@@ -26202,6 +26994,33 @@ mod tests {
             words("HTTP 400 Bad Request: request (14112 tokens) exceeds the available context size (8192 tokens), try increasing it", "llama3:8b").as_deref(),
             Some("llama3:8b reads at most 8,192 tokens at once here, fewer than Haarness's instructions, tools and this message take. Choose one with a longer context for this chat, such as qwen3:8b or gpt-oss:20b.")
         );
+        // A turn that read one large file after another outgrew the window
+        // though the chat was compacted as often as a turn may: not the
+        // instructions and the message. gpt-oss on Ollama, 2026-11-10.
+        let refused = "HTTP 400 Bad Request: request (40069 tokens) exceeds the available context size (32768 tokens), try increasing it";
+        let outgrown = super::outgrew_window(
+            CoreError::Provider(refused.into()),
+            super::MAX_COMPACTIONS_UNANSWERED,
+        );
+        assert!(matches!(
+            super::outgrew_window(CoreError::Provider(refused.into()), super::MAX_COMPACTIONS_UNANSWERED - 1),
+            CoreError::Provider(words) if words == refused
+        ));
+        assert_eq!(
+            super::describe_local_model_failure(&outgrown, &ollama, "gpt-oss:20b", true).as_deref(),
+            Some(
+                "gpt-oss:20b reads at most 32,768 tokens at once here, and this turn outgrew that while it ran, though the chat was compacted 4 times to make room. Ask for less in one message, such as fewer or smaller files at a time, or start a new chat."
+            )
+        );
+        // Any other provider's refusal reads as it did.
+        let claude = super::outgrew_window(
+            CoreError::Provider(
+                "HTTP 400 Bad Request: prompt is too long: 210000 tokens > 200000 maximum".into(),
+            ),
+            super::MAX_COMPACTIONS_UNANSWERED,
+        );
+        assert!(super::describe_error(&claude, Some("Anthropic")).contains("prompt is too long"));
+        assert!(!super::describe_error(&claude, Some("Anthropic")).contains("outgrew"));
         // With nothing here that could, one to download.
         let alone = haarness_protocol::ProviderInfo {
             models: vec![gemma, cloud],
@@ -26518,6 +27337,127 @@ mod tests {
         );
     }
 
+    /// Google refuses a free-tier key that has used a model's 20 requests
+    /// of the day with "Please retry in 11.6s", the wait a minute's limit
+    /// names too; the quota's id says it is a day's. A turn sat out four
+    /// such waits and then said "Wait a minute and send the message again".
+    #[test]
+    fn a_day_of_google_quota_used_up_is_not_waited_for_and_says_when_it_returns() {
+        let mut flash = model_info("gemini-3.8-flash", 1_048_576);
+        flash.display_name = "Gemini 3.8 Flash".into();
+        let mut older = model_info("gemini-3.7-flash", 1_048_576);
+        older.display_name = "Gemini 3.7 Flash".into();
+        let mut argon = model_info("gemini-4-argon", 1_048_576);
+        argon.display_name = "Gemini 4 Argon".into();
+        let catalog = haarness_protocol::ProviderInfo {
+            id: "gemini".into(),
+            name: "Google Gemini".into(),
+            authenticated: true,
+            models: vec![flash, argon, older],
+        };
+        let refusal = |tier: &str, quota: &str| {
+            CoreError::Provider(format!(
+                "HTTP 429 Too Many Requests: You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_{tier}_requests, limit: 20, model: gemini-3.8-flash\nPlease retry in 11.615098148s.\n* Quota id: {quota}"
+            ))
+        };
+        let daily = refusal(
+            "free_tier",
+            "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+        );
+        assert_eq!(super::retry_delay(&daily, 1), None);
+        let words =
+            super::describe_model_refusal(&daily, &catalog, "gemini-3.8-flash", true).unwrap();
+        let (said, renews) = words
+            .split_once(", which comes back at midnight Pacific time, in about ")
+            .unwrap();
+        assert_eq!(
+            said,
+            "This API key has used up today's free allowance for Gemini 3.8 Flash on Google Gemini"
+        );
+        assert!(
+            renews.ends_with(
+                ". Choose another model for this chat, such as Gemini 3.7 Flash, or turn on billing for this API key's project in Google AI Studio."
+            ),
+            "{words}"
+        );
+        assert!(
+            super::describe_model_refusal(&daily, &catalog, "gemini-3.8-flash", false)
+                .unwrap()
+                .starts_with("This API key has used up today's free allowance for Gemini 3.8 Flash on Google Gemini, which comes back at midnight Pacific time, in about ")
+        );
+        // A paid project's day of quota is not waited for either.
+        let paid = refusal("paid_tier", "GenerateRequestsPerDayPerProjectPerModel");
+        assert_eq!(super::retry_delay(&paid, 1), None);
+        let words =
+            super::describe_model_refusal(&paid, &catalog, "gemini-3.8-flash", true).unwrap();
+        assert!(
+            words.starts_with("This API key's project has used today's quota for Gemini 3.8 Flash on Google Gemini, which comes back at midnight Pacific time, in about "),
+            "{words}"
+        );
+        assert!(
+            words.ends_with(". Choose another model for this chat, such as Gemini 4 Argon or Gemini 3.7 Flash, or raise the project's limits in Google AI Studio."),
+            "{words}"
+        );
+        // A minute's quota names the same wait and is still waited out.
+        let minute = refusal(
+            "free_tier",
+            "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+        );
+        assert!(super::retry_delay(&minute, 1).is_some_and(|wait| {
+            wait > std::time::Duration::from_secs(12) && wait < std::time::Duration::from_secs(13)
+        }));
+        assert!(
+            super::describe_model_refusal(&minute, &catalog, "gemini-3.8-flash", true)
+                .unwrap()
+                .starts_with("Gemini 3.8 Flash is at the limit of Google Gemini's free tier")
+        );
+    }
+
+    #[test]
+    fn google_renews_a_days_quota_at_midnight_pacific_time() {
+        let at = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let hours = |text: &str| super::until_pacific_midnight(at(text)).as_secs_f64() / 3600.0;
+        // Daylight time (UTC-7): midnight is 07:00 UTC.
+        assert!((hours("2026-07-01T06:00:00Z") - 1.0).abs() < 1e-9);
+        assert!((hours("2026-07-01T07:00:00Z") - 24.0).abs() < 1e-9);
+        // Standard time (UTC-8): midnight is 08:00 UTC.
+        assert!((hours("2026-11-10T14:00:00Z") - 18.0).abs() < 1e-9);
+        assert!((hours("2026-01-15T07:30:00Z") - 0.5).abs() < 1e-9);
+        // Daylight time ends on the first Sunday of November (2026-11-01)
+        // and begins on the second Sunday of March (2026-03-08).
+        assert!((hours("2026-10-31T20:00:00Z") - 11.0).abs() < 1e-9);
+        assert!((hours("2026-11-01T10:00:00Z") - 22.0).abs() < 1e-9);
+        assert!((hours("2026-03-08T11:00:00Z") - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_provider_still_overloaded_after_the_retries_says_so_plainly() {
+        for raw in [
+            "HTTP 503 Service Unavailable: The model is overloaded. Please try again later.",
+            "HTTP 529: overloaded_error",
+            "HTTP 503 Service Unavailable",
+            "the model is overloaded",
+        ] {
+            assert_eq!(
+                super::describe_error(&CoreError::Provider(raw.into()), Some("Google Gemini")),
+                "Google Gemini is overloaded or unavailable right now, and didn't take the request after several tries. Send the message again in a moment, or choose another model.",
+                "{raw}"
+            );
+        }
+        // A refusal that only mentions load keeps its own words.
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider("HTTP 400 Bad Request: [invalid] overloaded field".into()),
+                Some("Google Gemini")
+            ),
+            "Google Gemini rejected the request: overloaded field"
+        );
+    }
+
     #[test]
     fn a_refused_sign_in_renewal_and_an_unfunded_api_account_say_what_to_do() {
         for raw in [
@@ -26739,15 +27679,29 @@ mod tests {
             super::describe_failure(&silent, Some("Anthropic"), true),
             "Anthropic sent nothing for 5 minutes, so the request was stopped. Try again, or check the network connection."
         );
-        // Other endings keep their words.
+        // A response that kept ending before it was done says so.
         let missing = CoreError::ProviderIncomplete("missing completion event".into());
         assert_eq!(
-            super::describe_failure(&missing, None, true),
-            "Provider response ended before completion (missing completion event)."
+            super::describe_failure(&missing, Some("Self-hosted"), true),
+            "Self-hosted kept ending its answer before it was done. Send a message to continue. If it keeps happening, the server may be cutting its answers short."
+        );
+        assert_eq!(
+            super::describe_failure(
+                &CoreError::ProviderIncomplete("incomplete".into()),
+                None,
+                false
+            ),
+            "The provider kept ending its answer before it was done."
         );
         assert_eq!(
             super::closed_call_reason(&missing, Some("Anthropic")),
-            "Provider response ended before completion (missing completion event)."
+            "The response that made this call ended before it was done, so the call did not run."
+        );
+        // Other endings keep their words.
+        let dropped = CoreError::ProviderIncomplete("MALFORMED_FUNCTION_CALL".into());
+        assert_eq!(
+            super::describe_failure(&dropped, None, true),
+            "Provider response ended before completion (MALFORMED_FUNCTION_CALL)."
         );
     }
 

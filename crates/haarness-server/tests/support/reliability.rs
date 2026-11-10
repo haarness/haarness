@@ -1092,17 +1092,18 @@ async fn reliability_cuts_spread_over_tool_rounds_each_get_their_own_recoveries(
 
 #[tokio::test]
 async fn reliability_a_turn_ends_once_its_rounds_together_spent_four_rounds_of_recoveries() {
-    // A cut in each of thirteen rounds: every round is within its own three
-    // recoveries, but the turn has twelve in all.
+    // A cut in each of fourteen rounds: every round is within its own three
+    // recoveries, but the turn has twelve in all, and the one its first
+    // eight finished responses gave back.
     let mut rounds = Vec::new();
-    for round in 0..12 {
+    for round in 0..13 {
         rounds.push(vec![Ok(text(&format!("part {round}"))), cut(CUTS[0])]);
         rounds.push(vec![
             Ok(read_notes(&format!("read-{round}"))),
             Ok(finish("tool_use")),
         ]);
     }
-    rounds.push(vec![Ok(text("part 12")), cut(CUTS[0])]);
+    rounds.push(vec![Ok(text("part 13")), cut(CUTS[0])]);
     rounds.push(vec![Ok(text("never asked")), Ok(finish("stop"))]);
     let (directory, runtime, provider, hooks) =
         setup_streams(rounds, RuntimeConfig::default(), true);
@@ -1121,7 +1122,7 @@ async fn reliability_a_turn_ends_once_its_rounds_together_spent_four_rounds_of_r
             "The connection to Echo kept breaking off mid-answer. Check the network connection, then send a message to continue."
         )
     );
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 25);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 27);
     assert_eq!(hooks.failures.lock().unwrap().len(), 1);
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -2092,4 +2093,365 @@ async fn reliability_a_wait_for_the_accounts_tokens_a_minute_is_followed_by_the_
     );
     drop(requests);
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// What the Ollama provider says when Ollama ended a reply over a tool call
+/// its parser could not read: gpt-oss's call written with a bad escape.
+fn unreadable(reason: &str) -> String {
+    format!("{}{reason}", haarness_core::UNREADABLE_TOOL_CALL)
+}
+
+fn note_says(request: &ProviderRequest, words: &str) -> bool {
+    request.messages.iter().any(|message| matches!(message, ProviderMessage::Text {role, content} if role == "user" && content.contains(words)))
+}
+
+/// gpt-oss on Ollama reasons, then writes a call whose arguments Ollama can't
+/// parse, and Ollama ends the stream with an error: the reasoning stays and
+/// the model is asked to write the call again, with the reason.
+#[tokio::test]
+async fn reliability_a_tool_call_ollama_could_not_read_is_written_again() {
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![
+                Ok(ProviderEvent::ReasoningDelta("Write the parser.".into())),
+                cut(&unreadable(
+                    "error parsing tool call: invalid character 'd' in string escape code",
+                )),
+            ],
+            vec![Ok(text("written")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("write parse.py"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(!note_says(&requests[0], "couldn't be read"));
+        assert!(
+            note_says(&requests[1], "a tool call that couldn't be read")
+                && note_says(&requests[1], "invalid character 'd' in string escape code"),
+            "{:?}",
+            requests[1].messages
+        );
+    }
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(
+        |item| matches!(&item.data, ItemData::Reasoning { text, .. } if text == "Write the parser.")
+    ));
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// A call that ended before its arguments did (Ollama's "unexpected end of
+/// JSON input": gpt-oss broke one off, or the reply filled the context) is
+/// asked for again in full, or in smaller calls when long. When that keeps
+/// happening, the turn ends in plain words, without Ollama's.
+#[tokio::test]
+async fn reliability_a_tool_call_broken_off_is_asked_for_in_full_or_in_smaller_calls() {
+    let cut_off = unreadable("error parsing tool call: unexpected end of JSON input");
+    let (directory, runtime, provider, _hooks) =
+        setup_streams(vec![vec![cut(&cut_off)]], RuntimeConfig::default(), true);
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("write snake.py"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Failed);
+    // Asked twice, then the turn ends.
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(note_says(&requests[1], "ended partway through a tool call"));
+        assert!(note_says(&requests[1], "make smaller calls"));
+    }
+    let error = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|item| match &item.data {
+            ItemData::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        error.contains("tool calls kept breaking off before they ended") && !error.contains("JSON"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// A model that answers a summary request with a call to a tool it was not
+/// offered, as gpt-oss on Ollama calls its own `repo_browser.open_file` or
+/// `container.exec`, `refusals` times, then with a summary. Its window is
+/// small, so a chat with some history compacts before its next request.
+struct ToolCallingSummarizer {
+    refusals: usize,
+    /// The first request of the chat is refused as longer than the window.
+    overflow_first: bool,
+    summaries: AtomicUsize,
+    rounds: AtomicUsize,
+    requests: Mutex<Vec<ProviderRequest>>,
+}
+
+impl ToolCallingSummarizer {
+    fn new(refusals: usize, overflow_first: bool) -> Arc<Self> {
+        Arc::new(Self {
+            refusals,
+            overflow_first,
+            summaries: AtomicUsize::new(0),
+            rounds: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl ModelProvider for ToolCallingSummarizer {
+    fn id(&self) -> &str {
+        "summarizer"
+    }
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "summarizer".into(),
+            name: "Summarizer fixture".into(),
+            authenticated: true,
+            models: vec![ModelInfo {
+                id: "small".into(),
+                display_name: "Small".into(),
+                reasoning: false,
+                reasoning_efforts: Vec::new(),
+                images: false,
+                video: false,
+                tools: true,
+                context_window: Some(1_000),
+                max_output_tokens: Some(200),
+                pricing: None,
+            }],
+        }
+    }
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        if let Some(title) = title_fixture(&request) {
+            return title;
+        }
+        let compacting = is_compaction_request(&request);
+        self.requests.lock().unwrap().push(request);
+        let events = if compacting {
+            if self.summaries.fetch_add(1, Ordering::SeqCst) < self.refusals {
+                vec![
+                    Ok(ProviderEvent::ReasoningDelta("Open the file first.".into())),
+                    Ok(ProviderEvent::ToolCall {
+                        call_id: "call_1".into(),
+                        name: "repo_browser.open_file".into(),
+                        arguments: serde_json::json!({"path": "src/lib.rs"}),
+                        provider_metadata: Value::Null,
+                    }),
+                    Ok(finish("tool_calls")),
+                ]
+            } else {
+                vec![
+                    Ok(text("The person is reading the stream code.")),
+                    Ok(finish("stop")),
+                ]
+            }
+        } else if self.overflow_first && self.rounds.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![cut(
+                "HTTP 400 Bad Request: request (1342 tokens) exceeds the available context size (1000 tokens), try increasing it",
+            )]
+        } else {
+            vec![Ok(text("normal response")), Ok(finish("stop"))]
+        };
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+/// A runtime with `provider` and a chat on it holding more history than
+/// its window's threshold.
+async fn long_chat(provider: Arc<ToolCallingSummarizer>) -> (AgentRuntime, Thread) {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let runtime = AgentRuntime::new(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            provider as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(128),
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Long chat".into()),
+            provider: Some("summarizer".into()),
+            model: Some("small".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    store
+        .append_item(
+            thread.id,
+            None,
+            ItemData::UserMessage {
+                text: "history ".repeat(600),
+                attachments: vec![],
+                queued: false,
+                synthetic: false,
+                command_line: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .append_item(
+            thread.id,
+            None,
+            ItemData::AssistantMessage {
+                text: "Read it all.".into(),
+            },
+        )
+        .await
+        .unwrap();
+    (runtime, thread)
+}
+
+/// The person's message that starts the turn after a long chat.
+const NEXT: &str = "Now read src/lib.rs and say what it does.";
+
+fn summary_requests(provider: &ToolCallingSummarizer) -> Vec<ProviderRequest> {
+    provider
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| is_compaction_request(request))
+        .cloned()
+        .collect()
+}
+
+fn compactions(items: &[Item]) -> usize {
+    items
+        .iter()
+        .filter(|item| matches!(item.data, ItemData::Compaction { .. }))
+        .count()
+}
+
+/// The chat's second message started with a compaction whose summary
+/// request gpt-oss answered with a tool call, and the turn failed with
+/// "compaction model returned an empty summary". It is asked once more,
+/// told that no tool can run, and its summary compacts the chat.
+#[tokio::test]
+async fn reliability_a_summary_answered_with_a_tool_call_is_asked_for_again() {
+    let provider = ToolCallingSummarizer::new(1, false);
+    let (runtime, thread) = long_chat(provider.clone()).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request(NEXT))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    let summaries = summary_requests(&provider);
+    assert_eq!(summaries.len(), 2);
+    assert!(!note_says(&summaries[0], "none can run here"));
+    assert!(
+        note_says(&summaries[1], "called a tool instead of giving the summary")
+            && note_says(&summaries[1], "none can run here"),
+        "{:?}",
+        summaries[1].messages.last()
+    );
+    // The person's new message is kept word for word after the summary, so
+    // the summary isn't asked of it: a model asked to summarize a chat that
+    // ends on a request carries it out.
+    assert!(summaries.iter().all(|summary| {
+        !serde_json::to_string(&summary.messages)
+            .unwrap()
+            .contains(NEXT)
+    }));
+    let main = provider
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .rfind(|request| !is_compaction_request(request))
+        .cloned()
+        .unwrap();
+    assert!(
+        serde_json::to_string(&main.messages)
+            .unwrap()
+            .contains(NEXT)
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert_eq!(compactions(&items), 1);
+    assert!(items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage { text } if text == "normal response")));
+}
+
+/// When even the second request brings no summary, the chat is near its
+/// threshold, not over its window: the turn goes on without compacting
+/// instead of failing, and doesn't ask for a summary again.
+#[tokio::test]
+async fn reliability_an_automatic_compaction_without_a_summary_does_not_fail_the_turn() {
+    let provider = ToolCallingSummarizer::new(usize::MAX, false);
+    let (runtime, thread) = long_chat(provider.clone()).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request(NEXT))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(summary_requests(&provider).len(), 2);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert_eq!(compactions(&items), 0);
+    assert!(items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage { text } if text == "normal response")));
+}
+
+/// A chat the provider refuses as longer than the window can't go on
+/// without a summary: the turn ends saying so in plain words.
+#[tokio::test]
+async fn reliability_a_chat_over_its_window_without_a_summary_ends_in_plain_words() {
+    let provider = ToolCallingSummarizer::new(usize::MAX, true);
+    let (runtime, thread) = long_chat(provider.clone()).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request(NEXT))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Failed);
+    let error = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|item| match &item.data {
+            ItemData::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        error.contains("didn't write a summary of this chat")
+            && !error.contains("compaction model"),
+        "{error}"
+    );
 }

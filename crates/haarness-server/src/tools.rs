@@ -3895,6 +3895,19 @@ impl Tool for BuiltinTool {
             }
             Kind::Edit => {
                 let requested_path = string(&args, "path")?;
+                // An empty old where nothing is there yet is how other
+                // agents' edit tools make a file: here write does that.
+                if string(&args, "old")?.is_empty()
+                    && std::fs::symlink_metadata(haarness_core::resolve_permission_path(
+                        &context.workspace,
+                        requested_path,
+                    ))
+                    .is_err()
+                {
+                    return Err(CoreError::Invalid(format!(
+                        "{requested_path} does not exist yet: to make a new file, use write with its whole contents"
+                    )));
+                }
                 let path = resolve_existing(requested_path, &context)?;
                 // A byte order mark the model copied from an older read is
                 // not part of the text it means: the file keeps its own.
@@ -10447,6 +10460,14 @@ export default workflow({
         .await
         .unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), b"# Notes\n");
+        // Nothing there yet: write makes new files.
+        let refused = edit_in(&root, "edit", json!({"path":"new.md","old":"","new":"x"})).await;
+        assert!(
+            matches!(&refused, Err(CoreError::Invalid(message))
+                if message == "new.md does not exist yet: to make a new file, use write with its whole contents"),
+            "{refused:?}"
+        );
+        assert!(!root.join("new.md").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

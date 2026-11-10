@@ -311,6 +311,8 @@ tools=true
     (root / 'tui-hook-feedback.txt').write_text(capture())
     check('the TUI shows the feedback under the tool output', '<hook-feedback>' in capture(), capture())
     # A person's own command, rejected: the call failed, and PostToolUseFailure hooks say so.
+    # The chat already holds a call a hook refused; the new result is the one after it.
+    errored_before = len([r for r in chat.results('bash') if r['is_error']])
     api(c, '/threads/' + chat.thread['id'] + '/shell', {'command': 'touch refused.txt'})
     pending = until(lambda: api(c, '/permissions'), 'the shell command asks')[0]
     api(c, '/permissions/' + pending['permissionId'], {'decision': 'reject'})
@@ -318,7 +320,8 @@ tools=true
     check('a rejected command runs PostToolUseFailure hooks under that name', len(failed) == 1
           and failed[0]['hook_event_name'] == 'PostToolUseFailure' and failed[0]['tool_name'] == 'bash'
           and failed[0]['tool_response']['is_error'] is True and failed[0]['error'], failed)
-    refused = until(lambda: [r for r in chat.results('bash') if r['is_error']], 'the refused result')[-1]
+    refused = until(lambda: (v if len(v := [r for r in chat.results('bash') if r['is_error']]) > errored_before else None),
+                    'the refused result')[-1]
     check('its feedback follows the failed result', refused['output'].endswith(
         '\n\n<hook-feedback>\nrefusal noted by PostToolUseFailure\n</hook-feedback>')
           and not (ws / 'refused.txt').exists(), refused)

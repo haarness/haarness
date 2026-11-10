@@ -898,6 +898,16 @@ pub trait Tool: Send + Sync {
         definition.input_schema = self.validation_schema();
         crate::tool_validation::coerced_arguments(&definition, arguments)
     }
+    /// A model's arguments with fields named the way other coding agents
+    /// name them given this tool's names, and a call's `description` the
+    /// tool does not take left out, when that is their only fault (see
+    /// `tool_validation::with_field_aliases`); `None` for any other
+    /// arguments.
+    fn aliased_arguments(&self, arguments: &Value) -> Option<Value> {
+        let mut definition = self.definition();
+        definition.input_schema = self.validation_schema();
+        crate::tool_validation::with_field_aliases(&definition, arguments)
+    }
     /// A model's arguments to a tool that changes nothing, with the fields
     /// the tool does not take left out, and their names, when that is their
     /// only fault (see `tool_validation::without_unknown_fields`); `None` for

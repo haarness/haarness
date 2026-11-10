@@ -398,6 +398,69 @@ pub(crate) fn chat_chunks(mut lines: JsonStream, tools: HashSet<String>) -> Json
     })
 }
 
+/// Ollama's error for a reply it ended, said as a tool call the model wrote
+/// that Ollama could not read ([`haarness_core::UNREADABLE_TOOL_CALL`]) when
+/// it is one, for the model to write again; any other error as it was.
+///
+/// Ollama reads the calls of gpt-oss, Qwen 3.5, Qwen3-Coder, GLM, Gemma 4 and
+/// others with a parser of its own, and ends the reply with an error when one
+/// doesn't parse: in the stream once the reply has begun (gpt-oss reasons
+/// first), as a 500 before. gpt-oss's call to `write` that runs out of room
+/// in the context ends `error parsing tool call: raw='{"content":"…',
+/// err=unexpected end of JSON input`, the file so far quoted whole: the
+/// model's own words, which are left out.
+pub(crate) fn readable_error(error: CoreError) -> CoreError {
+    let CoreError::Provider(message) = &error else {
+        return error;
+    };
+    if message.starts_with(haarness_core::UNREADABLE_TOOL_CALL) {
+        return error;
+    }
+    // A refusal before the reply began: "HTTP 500 Internal Server Error: …".
+    let words = message
+        .strip_prefix("HTTP 5")
+        .and_then(|rest| rest.split_once(": "))
+        .map_or(message.as_str(), |(_, words)| words);
+    if !unreadable_call(words) {
+        return error;
+    }
+    // gpt-oss's: the call as written, then why it doesn't parse.
+    let reason = match words.split_once(" raw='") {
+        Some((what, rest)) => match rest.rsplit_once("', err=") {
+            Some((_, why)) => format!("{what} {why}"),
+            None => what.to_owned(),
+        },
+        None => words.to_owned(),
+    };
+    CoreError::Provider(format!("{}{reason}", haarness_core::UNREADABLE_TOOL_CALL))
+}
+
+/// Whether `words` are an Ollama parser's for a model's tool call it could
+/// not read (Ollama 0.40): gpt-oss's `error parsing tool call`, Qwen's
+/// `failed to parse JSON` and Qwen3-Coder's XML errors, GLM's and Gemma 4's
+/// calls, llama-server's `invalid tool call arguments`, OLMo 3's `function
+/// call`, and Ministral's `tool '…' not found`.
+fn unreadable_call(words: &str) -> bool {
+    let lower = words.to_ascii_lowercase();
+    [
+        "tool call",
+        "failed to parse json",
+        "xml syntax error",
+        "expected element type",
+        "failed to parse xml",
+        "is not declared",
+        "required argument",
+        "mismatched arg_key",
+        "empty function name",
+        "empty argument name",
+        "function call",
+        "failed to parse arguments",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+        || (lower.starts_with("tool '") && lower.ends_with("' not found"))
+}
+
 fn tool_call(index: usize, id: &str, name: &Value, arguments: String) -> Value {
     json!({
         "index": index,
@@ -457,7 +520,7 @@ fn written_calls(text: &str, tools: &HashSet<String>) -> Option<Vec<(String, Val
 }
 
 /// An id for a call Ollama sent without one.
-fn call_id() -> String {
+pub(crate) fn call_id() -> String {
     use rand::RngCore as _;
     let mut bytes = [0_u8; 8];
     rand::rng().fill_bytes(&mut bytes);
@@ -673,6 +736,55 @@ mod tests {
             error.to_string().contains("error parsing tool call"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_tool_call_ollama_could_not_read_is_said_as_one() {
+        use haarness_core::{CoreError, UNREADABLE_TOOL_CALL};
+        let read = |message: &str| match super::readable_error(CoreError::Provider(message.into()))
+        {
+            CoreError::Provider(words) => words,
+            other => panic!("{other:?}"),
+        };
+        // gpt-oss on Ollama 0.40.6, its call to `write` cut off where the
+        // reply filled the context: the file so far is left out.
+        let file = "#!/usr/bin/env python3\\n\\\"\\\"\\\"Snake game', err= for the terminal";
+        assert_eq!(
+            read(&format!(
+                "error parsing tool call: raw='{{\"content\":\"{file}', err=unexpected end of JSON input"
+            )),
+            format!("{UNREADABLE_TOOL_CALL}error parsing tool call: unexpected end of JSON input")
+        );
+        // The same refused before the reply began, as a 500.
+        assert_eq!(
+            read(
+                "HTTP 500 Internal Server Error: error parsing tool call: raw='{\"path\": calc.py}', err=invalid character 'c' looking for beginning of value"
+            ),
+            format!(
+                "{UNREADABLE_TOOL_CALL}error parsing tool call: invalid character 'c' looking for beginning of value"
+            )
+        );
+        // Qwen 3.5's and Qwen3-Coder's parsers, Ministral's, llama-server's.
+        for words in [
+            "failed to parse JSON: invalid character '}' after object key",
+            "XML syntax error on line 4: unexpected EOF",
+            "tool 'deploy' not found",
+            "llama-server returned invalid tool call arguments for \"read\": unexpected end of JSON input",
+        ] {
+            assert_eq!(read(words), format!("{UNREADABLE_TOOL_CALL}{words}"));
+        }
+        // Said once, however often it is read.
+        let once = read("failed to parse JSON: x");
+        assert_eq!(read(&once), once);
+        // Anything else stays in Ollama's words.
+        for words in [
+            "model runner has unexpectedly stopped, this may be due to resource limitations or an internal error, check ollama server logs for details",
+            "HTTP 400 Bad Request: request (40211 tokens) exceeds the available context size (32768 tokens), try increasing it",
+            "HTTP 404 Not Found: model 'qwen3:14b' not found",
+            "HTTP 500 Internal Server Error: llama-server process has terminated: exit status 2",
+        ] {
+            assert_eq!(read(words), words);
+        }
     }
 
     fn text(chunks: &[Value]) -> String {

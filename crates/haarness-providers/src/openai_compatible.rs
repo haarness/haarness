@@ -2529,14 +2529,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         // A forced call to a Gemini model through a gateway meets the bound
         // Google refuses under forced calling, as the native adapter does.
-        let forced_gemini = structured_output.is_some()
-            && !native_json
-            && model
-                .rsplit('/')
-                .next()
-                .is_some_and(|name| name.starts_with("gemini-"));
+        // Gemini refuses a few JSON Schema shapes common in MCP tools through
+        // a gateway as it does directly (`gemini_compatible`).
+        let gemini = crate::tool_schema::gemini_model(&model);
+        let forced_gemini = structured_output.is_some() && !native_json && gemini;
         let tools:Vec<_>=requested_tools.into_iter().map(|t|{
-            let parameters = if forced_gemini { crate::gemini::without_max_items(t.input_schema) } else { t.input_schema };
+            let parameters = if gemini { crate::tool_schema::gemini_compatible(t.input_schema) } else { t.input_schema };
+            let parameters = if forced_gemini { crate::gemini::without_max_items(parameters) } else { parameters };
             json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":parameters}})
         }).collect();
         let mut body = json!({"model":model,"messages":messages,"stream":true});
@@ -2782,7 +2781,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         if self.id == "ollama" {
             let model = model.clone();
             events = Box::pin(futures::StreamExt::map(events, move |event| {
-                event.map_err(|error| local_model_missing(error, &model))
+                event.map_err(|error| ollama::readable_error(local_model_missing(error, &model)))
             }));
         }
         Ok(Box::pin(try_stream! {
@@ -2953,7 +2952,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         if let Some(extra)=tool.get("extra_content").filter(|extra| extra.is_object()){call.extra_content = Some(extra.clone());}
                     }
                 }
-                if let Some(reason)=event["choices"][0]["finish_reason"].as_str(){finish_reason = Some(reason.to_owned());}
+                // Some gateways put an empty reason on every chunk, the last
+                // one after the real reason among them.
+                if let Some(reason)=event["choices"][0]["finish_reason"].as_str().filter(|reason| !reason.is_empty()){finish_reason = Some(reason.to_owned());}
                 if response_id.is_none() { response_id = event["id"].as_str().map(str::to_owned); }
             }
             let mut provider_metadata = json!({});
@@ -2978,12 +2979,26 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
             if !mistral_content.is_empty() { provider_metadata["mistral_content"] = json!(mistral_content); }
             if provider_metadata.as_object().is_some_and(serde_json::Map::is_empty) { provider_metadata = Value::Null; }
+            // A server that ends its stream as it means to, with no finish
+            // reason, after tool calls whose arguments all arrived whole made
+            // those calls: they run, rather than being closed unrun as a
+            // response cut short, which is all the turn could do with them.
+            // Words alone stay a response cut short, which is continued.
+            if finish_reason.is_none() && !calls.is_empty() && calls.iter().all(StreamedCall::whole) {
+                tracing::debug!(provider = %provider_id, "stream ended without a finish reason after whole tool calls");
+                finish_reason = Some("tool_calls".into());
+            }
             // Report usage before the tool calls, whose arguments may not parse.
             if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
                 yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }; if let Some(usd) = charged.take() { yield ProviderEvent::Cost { usd }; }
             }
             for StreamedCall { id: call_id, name, arguments, extra_content } in calls.drain(..) {
                 if !name.is_empty() {
+                    // Some servers give a call no ID (Text Generation
+                    // Inference, gateways before a model's own API): it gets
+                    // one, which its result answers to, instead of failing
+                    // the turn as a call nothing could answer.
+                    let call_id = if call_id.is_empty() { crate::ollama::call_id() } else { call_id };
                     // What the server attached to this call alone (Gemini's
                     // thought signature) goes back with it, to this server
                     // and model only.
@@ -3080,6 +3095,15 @@ struct StreamedCall {
     arguments: String,
     /// What the server attached to this call alone (`extra_content`).
     extra_content: Option<Value>,
+}
+
+impl StreamedCall {
+    /// Whether the call arrived whole: named, with its arguments one JSON
+    /// object.
+    fn whole(&self) -> bool {
+        !self.name.is_empty()
+            && serde_json::from_str::<Value>(&self.arguments).is_ok_and(|value| value.is_object())
+    }
 }
 
 /// Which call a tool-call fragment belongs to. A fragment names its call by
@@ -4664,6 +4688,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tool_call_ollama_could_not_read_ends_the_stream_as_one() {
+        // gpt-oss on Ollama 0.40.6 reasons, then writes a call to `write`
+        // that the reply's full context cuts off: Ollama ends the stream
+        // with its parser's error, the file so far quoted in it.
+        let router = Router::new().route(
+            "/api/chat",
+            post(|| async {
+                (
+                    [(CONTENT_TYPE, "application/x-ndjson")],
+                    [
+                        json!({"model": "gpt-oss:20b", "message": {"role": "assistant", "content": "", "thinking": "Write the game."}, "done": false}),
+                        json!({"error": "error parsing tool call: raw='{\"content\":\"import curses\\nimport random\\n', err=unexpected end of JSON input"}),
+                    ]
+                    .iter()
+                    .fold(String::new(), |mut body, line| {
+                        body.push_str(&line.to_string());
+                        body.push('\n');
+                        body
+                    }),
+                )
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/v1/chat/completions"));
+        provider.id = "ollama".into();
+        let request = ProviderRequest {
+            model: "gpt-oss:20b".into(),
+            system: "You are Haarness.".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "Write snake.py".into(),
+            }],
+            tools: vec![ToolDefinition {
+                name: "write".into(),
+                description: "Write a file".into(),
+                input_schema: json!({"type": "object", "properties": {"content": {"type": "string"}}}),
+            }],
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let events: Vec<_> = provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert!(
+            matches!(&events[0], Ok(ProviderEvent::ReasoningDelta(text)) if text == "Write the game."),
+            "{events:?}"
+        );
+        let error = events
+            .into_iter()
+            .find_map(Result::err)
+            .expect("an error")
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "{}error parsing tool call: unexpected end of JSON input",
+                haarness_core::UNREADABLE_TOOL_CALL
+            )) && !error.contains("import curses"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
     async fn lmstudio_short_of_memory_loads_the_least_that_works() {
         #[derive(Clone, Default)]
         struct Calls(Arc<Mutex<Vec<String>>>);
@@ -5096,6 +5189,40 @@ mod tests {
         assert_eq!(requests[0]["tool_choice"], "required");
         assert_eq!(bound(0), None);
         assert_eq!(bound(1), Some(json!(100)));
+    }
+
+    /// Gemini through a gateway refuses the JSON Schema shapes it refuses
+    /// directly; other models get the tool's schema as it is.
+    #[tokio::test]
+    async fn gemini_through_a_gateway_gets_tool_schemas_it_takes() {
+        let (provider, state) = openrouter_fixture(post(completions_recording_headers)).await;
+        let schema = json!({"type":"object","properties":{
+            "pair":{"type":"array","items":[{"type":"string"},{"type":"integer"}]}
+        },"required":["pair","missing"]});
+        for model in ["google/gemini-3.8-flash", "anthropic/claude-haiku-5.5"] {
+            let mut request = short_request();
+            request.model = model.into();
+            request.tools = vec![haarness_core::ToolDefinition {
+                name: "store".into(),
+                description: "store a pair".into(),
+                input_schema: schema.clone(),
+            }];
+            let _ = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+        }
+        let requests = state.0.lock();
+        assert_eq!(
+            requests[0]["tools"][0]["function"]["parameters"],
+            json!({"type":"object","properties":{
+                "pair":{"type":"array","prefixItems":[{"type":"string"},{"type":"integer"}]},
+                "missing":{}
+            },"required":["pair","missing"]})
+        );
+        assert_eq!(requests[1]["tools"][0]["function"]["parameters"], schema);
     }
 
     #[tokio::test]
@@ -6081,6 +6208,63 @@ mod tests {
         ))
         .await;
         assert_eq!(reported(&events), [(300, 2, 0, 250)]);
+    }
+
+    #[tokio::test]
+    async fn whole_calls_in_a_stream_without_a_finish_reason_are_made() {
+        let finish = |events: &[Result<ProviderEvent, haarness_core::CoreError>]| {
+            events.iter().find_map(|event| match event {
+                Ok(ProviderEvent::Finished { reason }) => Some(reason.clone()),
+                _ => None,
+            })
+        };
+        let calls = |events: &[Result<ProviderEvent, haarness_core::CoreError>]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, Ok(ProviderEvent::ToolCall { .. })))
+                .count()
+        };
+        // A server that streams whole calls and ends without saying why.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"dir\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(calls(&events), 2, "{events:?}");
+        assert_eq!(finish(&events).as_deref(), Some("tool_calls"));
+        // A call without an ID gets one.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert!(
+            events.iter().any(|event| matches!(event, Ok(ProviderEvent::ToolCall { call_id, .. }) if call_id.starts_with("call_") && call_id.len() > 5)),
+            "{events:?}"
+        );
+        // An empty reason on a later chunk does not hide the real one.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"edit\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(finish(&events).as_deref(), Some("tool_calls"));
+        // A call whose arguments stop partway is a response cut short, and so
+        // are words alone with no reason.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"write\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\",\\\"content\\\":\\\"par\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(finish(&events).as_deref(), Some("incomplete"));
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Halfway thr\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(finish(&events).as_deref(), Some("incomplete"));
     }
 
     #[tokio::test]
