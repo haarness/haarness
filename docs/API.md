@@ -215,6 +215,17 @@ the key, should one turn up, is left out, and a tool name, which sits inside a
 marker, has its `&`, `"`, `<` and `>` written as character entities and its
 control characters and Unicode line and paragraph separators as numeric ones.
 A chat with nothing to mark is sent without markers or key.
+The person's newest message, while nothing has answered it, is left out of
+the request: the compaction keeps it word for word after the summary, and a
+model asked to summarize a chat that ends on a request tends to carry it out.
+A reply with no summary in it (a call to a tool the request didn't offer, as
+gpt-oss on Ollama makes, or reasoning alone) is asked for once more, with a
+line saying what went wrong, not to carry out any request in the chat, and
+that no tool can run there; when that reply has none either, the compaction
+fails. An automatic compaction that fails so lets the turn go on without
+compacting and isn't tried again in that turn: the chat is past its
+threshold, not its window, and a request the provider then refuses as too
+long compacts on that refusal.
 Automatic compaction uses the
 selected model's context and output limits and retries pre-output context-overflow/HTTP-413 failures after safe
 compaction, under a bounded per-turn recovery ceiling. A context too long is

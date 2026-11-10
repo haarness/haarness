@@ -121,6 +121,15 @@ but never a provider's page: confirming a price is a person's job. Fix or add th
 entry in haarness-cloud from the provider's page with today's `checked` date,
 then `--sync` copies the table here.
 
+## Local models' failed turns: 2026-11-10
+
+Found by running two-message coding chats on every model Ollama 0.40.6 had on a Mac, on the released 0.1.19, with a
+project whose files fill most of a 32K context.
+
+| Change | Why |
+| --- | --- |
+| A summary request no longer ends on the person's newest message while nothing has answered it: the compaction keeps that message word for word after the summary, as it always has, so it's left out of what is summarized. A reply that still brings no summary (a tool call, or reasoning and nothing more) is asked for once more, saying not to carry out any request in the chat and that no tool can run there. A chat's automatic compaction whose summary still doesn't come goes on without compacting instead of failing the turn, and isn't tried again in that turn; a request the provider then refuses as too long compacts on that refusal, and if that summary doesn't come either the turn ends saying so in plain words. | gpt-oss on Ollama, asked to summarize a chat whose last message asked it to read files, carried that message out with the tools it was trained with (`repo_browser.open_file`, `container.exec`), though the request offered none: no summary in 5 replays of one such request, 6 summaries in 6 with that message left out (asked again with a note saying not to carry out its requests or call tools, it wrote one 5 times in 5, the message left in). A chat's second message that started past the compaction threshold therefore failed with "Provider error: compaction model returned an empty summary", 3 times in 3. |
+
 ## Groq's free tier: 2026-11-09
 
 Found by running the coding task (fix a failing test, then add a function and its test) on every chat model Groq lists, with a free-tier key, on the released 0.1.18.
