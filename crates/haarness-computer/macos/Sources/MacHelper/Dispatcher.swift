@@ -218,7 +218,7 @@ final class Dispatcher {
             Thread.sleep(forTimeInterval: 0.6)
         } else if !waitForWindow(app, seconds: 4) && fallback == nil {
             Self.bringForward(app)
-            fallback = "no-window"
+            fallback = "no-key-window"
             _ = waitForWindow(app, seconds: 4)
         }
         let back = fallback == nil && handBack(from: app, to: prior, since: started)
@@ -636,6 +636,13 @@ final class Dispatcher {
         }
     }
 
+    /// Refuses keystrokes bound for a terminal inside another app, such as a code editor's built-in terminal: whatever
+    /// is typed there runs as a command, outside Haarness's approvals, as in a terminal app.
+    func refuseTerminal(_ element: AXUIElement?, in app: NSRunningApplication?) throws {
+        guard let element, AXTree.isTerminal(element) else { return }
+        throw HelperFailure("terminal", "\(app?.localizedName ?? "This app")'s built-in terminal runs whatever is typed into it, outside Haarness's approvals, so agents may click and scroll there but never type or press keys. Run commands with the shell tool instead, under its usual approvals.")
+    }
+
     /// Puts the keyboard focus in `field` before typing, and makes sure it went there: setting focus can report success
     /// while it stays in the field that had it (web content does this), and the text would go to that other field.
     /// Where focus cannot be read at all, the click is trusted as before.
@@ -679,6 +686,7 @@ final class Dispatcher {
             app = owner
             try confirm(input, "expect", app.bundleIdentifier)
         }
+        try refuseTerminal(field ?? AXTree.focused(in: app.processIdentifier), in: app)
         var fallback: String?
         switch route(inFront: WindowServer.frontPID() == app.processIdentifier) {
         case .behind:
@@ -703,6 +711,7 @@ final class Dispatcher {
         let check = {
             try self.confirm(input, "expect", Self.keyboardApp())
             try self.refusePassword(nil)
+            try self.refuseTerminal(Self.keyboardFocus(), in: app)
         }
         try check()
         try Synth.type(text, check: check)
@@ -724,6 +733,7 @@ final class Dispatcher {
         if inFront { try Presence.shared.waitForQuiet() }
         // The value is set on the element itself, whatever has the keyboard.
         try refusePassword(element, secureInput: false)
+        try refuseTerminal(element, in: app)
         let before = windowFacts(app)
         if inFront { Marker.shared.flash(x, y) } else { AgentPointer.shared.show(at: x, y) }
         guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString) == .success else {
@@ -741,6 +751,7 @@ final class Dispatcher {
         let times = max(1, min(50, Int(double(input["times"]) ?? 1)))
         guard let app = workingApp() else { throw HelperFailure("not_found", "No app is open to press keys in. Look at one with mac_snapshot first.") }
         try confirm(input, "expect", app.bundleIdentifier)
+        try refuseTerminal(AXTree.focused(in: app.processIdentifier), in: app)
         var fallback: String?
         switch route(inFront: WindowServer.frontPID() == app.processIdentifier) {
         case .behind:
@@ -758,9 +769,11 @@ final class Dispatcher {
         try confirm(input, "expect", Self.keyboardApp())
         // A printable key sent to a password field would be part of a password.
         if combo.types { try refusePassword(nil) }
+        try refuseTerminal(Self.keyboardFocus(), in: app)
         try Synth.press(combo, times: times) {
             try self.confirm(input, "expect", Self.keyboardApp())
             if combo.types { try self.refusePassword(nil) }
+            try self.refuseTerminal(Self.keyboardFocus(), in: app)
         }
         Thread.sleep(forTimeInterval: settle)
         return reply(app, via: "pointer", background: false, before: before, fallback: fallback)

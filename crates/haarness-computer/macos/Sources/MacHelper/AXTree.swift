@@ -177,6 +177,24 @@ final class AXTree {
         return false
     }
 
+    /// Whether `element` is the input of a terminal an app hosts in its window, such as a code editor's built-in
+    /// terminal panel (see `looksLikeTerminal`).
+    static func isTerminal(_ element: AXUIElement) -> Bool {
+        var current: AXUIElement? = element
+        for depth in 0..<16 {
+            guard let here = current else { return false }
+            let role = text(here, kAXRoleAttribute) ?? ""
+            if role == "AXWindow" || role == "AXApplication" { return false }
+            let label = [text(here, kAXDescriptionAttribute), text(here, kAXTitleAttribute)].compactMap { $0 }.first { !$0.isEmpty }
+            if looksLikeTerminal(classes: (value(here, "AXDOMClassList") as? [String]) ?? [], identifier: text(here, kAXIdentifierAttribute),
+                                 label: label, nearby: depth <= 1) {
+                return true
+            }
+            current = parent(here)
+        }
+        return false
+    }
+
     /// A fingerprint of what `root` shows: roles, titles, values and selection of up to `limit` elements, read a few
     /// attributes per call. Two equal fingerprints mean nothing visible to Accessibility changed.
     static func digest(_ root: AXUIElement, limit: Int = 400) -> Int {

@@ -90,7 +90,8 @@ enum Engine {
 }
 
 /// Thrown by a background attempt that cannot go on behind the person's window: the action comes forward instead, and
-/// the reply's `fallback` gives the reason.
+/// the reply's `fallback` gives the reason. Every case where the target's window cannot take the input from behind
+/// (no key window proven, no window on screen, a menu item kept disabled there) reports `no-key-window`.
 struct ComeForward: Error {
     let reason: String
 
@@ -328,7 +329,7 @@ extension Dispatcher {
             }
         }
         if app.isHidden { throw Self.hiddenFailure(app) }
-        guard let window = found.window else { throw ComeForward("offscreen") }
+        guard let window = found.window else { throw ComeForward("no-key-window") }
         // macOS's password suggestions open as a pop-up of the app under its focused password field.
         if window.layer != 0 && passwordInUse(app) {
             throw HelperFailure("password", "A password suggestion menu is open there, under a focused password field, and passwords stay with the person. Press Escape to close it, or click another field first.")
@@ -423,7 +424,7 @@ extension Dispatcher {
             return reply(app, via: "ax", background: true, before: before, confirmed: true, handedBack: handBack(from: app, to: prior, since: started))
         }
         if app.isHidden { throw Self.hiddenFailure(app) }
-        guard let window = found.window else { throw ComeForward("offscreen") }
+        guard let window = found.window else { throw ComeForward("no-key-window") }
         let position = area.map(scrollPosition)
         let (dx, dy): (Int32, Int32) = switch direction {
         case "up": (0, lines)
@@ -457,42 +458,40 @@ extension Dispatcher {
     /// window or field of the same app (a search field, another document) could do anything there.
     func prove(_ app: NSRunningApplication, window: CGWindowID, field: AXUIElement?, spot: (Double, Double)?) -> Bool {
         let pid = app.processIdentifier
-        func holds() -> Bool {
-            guard keyWindow(pid) == window else { return false }
-            guard let field else { return true }
-            return AXTree.focused(in: pid).map { AXTree.serves($0, field) } ?? false
-        }
-        func waitFor(_ seconds: Double) -> Bool {
+        let keyed = { self.keyWindow(pid) == window }
+        let focused = { field.map { field in AXTree.focused(in: pid).map { AXTree.serves($0, field) } ?? false } ?? true }
+        func waitFor(_ seconds: Double, _ test: () -> Bool) -> Bool {
             let end = Date().addingTimeInterval(seconds)
-            repeat {
-                if holds() { return true }
+            while !test() {
+                if Date() >= end { return false }
                 Thread.sleep(forTimeInterval: 0.04)
-            } while Date() < end
-            return holds()
+            }
+            return true
         }
         // The window is made key even when Accessibility already reports it focused: an app that is not active may have
         // no key window at all, and would drop the keys.
         let current = keyWindow(pid)
         _ = WindowServer.makeKey(pid: pid, window: window, current: current == window ? nil : current)
-        if waitFor(0.4) { return true }
         for attempt in 0..<2 {
-            if keyWindow(pid) != window {
+            if !waitFor(0.4, keyed) {
                 _ = WindowServer.makeKey(pid: pid, window: window, current: keyWindow(pid))
-                _ = waitFor(0.4)
+                if !waitFor(0.4, keyed) { continue }
             }
-            if let field, !(AXTree.focused(in: pid).map { AXTree.serves($0, field) } ?? false) {
+            if focused() { return true }
+            if let field {
                 AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-                if waitFor(0.2) { return true }
+                if waitFor(0.2, { keyed() && focused() }) { return true }
                 // A field that will not take focus that way takes it from a click, as a person's would.
                 if attempt == 0, let spot, let entry = WindowList.entries().first(where: { $0.id == window }) {
                     Synth.clickBehind(pid: pid, window: window, origin: Point(entry.frame.x, entry.frame.y), at: Point(spot.0, spot.1),
                                       button: "left", count: 1, held: [], outsidePress: Engine.isChromium(app))
+                    if waitFor(0.3, { keyed() && focused() }) { return true }
                 }
             }
-            if waitFor(0.25) { return true }
         }
-        return false
+        return keyed() && focused()
     }
+
 
     /// Inserts a single line at the cursor of an app's own text field through Accessibility, then reads the field
     /// back. Returns whether the text arrived.
@@ -531,6 +530,7 @@ extension Dispatcher {
                 throw HelperFailure("target_changed", "The field lost the keyboard focus in \(app.localizedName ?? "the app"), so typing stopped. Call mac_snapshot and retry.")
             }
             try self.refusePasswordBehind(app, element: now)
+            try self.refuseTerminal(now, in: app)
         }
         try check()
         try Synth.type(text, to: .process(pid), interruptible: false, check: check)
@@ -589,7 +589,7 @@ extension Dispatcher {
                 _ = prove(app, window: window, field: nil, spot: nil)
                 menu = menuItem(pid, for: combo) ?? menu
             }
-            guard menu.enabled else { throw ComeForward("menu-disabled") }
+            guard menu.enabled else { throw ComeForward("no-key-window") }
             for index in 0..<max(1, times) {
                 if index > 0 { try ControlBar.shared.refuseWhilePaused() }
                 AXUIElementPerformAction(menu.item, kAXPressAction as CFString)
@@ -609,6 +609,7 @@ extension Dispatcher {
                 throw HelperFailure("target_changed", "\(app.localizedName ?? "The app")'s window lost the keyboard focus, so the remaining presses were not sent. Call mac_snapshot and retry.")
             }
             if combo.types { try self.refusePasswordBehind(app, element: nil) }
+            try self.refuseTerminal(AXTree.focused(in: pid), in: app)
         }
         Thread.sleep(forTimeInterval: settle)
         let changed = observe(app, root: focusedWindow) != earlier

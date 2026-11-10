@@ -284,4 +284,20 @@ final class MacKitTests: XCTestCase {
                                         ["app": "Lab", "role": "menu"]])
         XCTAssertEqual(changes.closed, [["app": "Mail", "role": "window"]])
     }
+
+    // MARK: Terminals inside other apps
+
+    func testTerminalPanelsAreRecognised() {
+        // A code editor's terminal panel: xterm.js classes, or its input labelled as the terminal.
+        XCTAssertTrue(looksLikeTerminal(classes: ["xterm-helper-textarea"], identifier: nil, label: nil, nearby: false))
+        XCTAssertTrue(looksLikeTerminal(classes: ["terminal", "xterm"], identifier: nil, label: nil, nearby: false))
+        XCTAssertTrue(looksLikeTerminal(classes: [], identifier: nil, label: "Terminal 1, zsh", nearby: true))
+        XCTAssertTrue(looksLikeTerminal(classes: [], identifier: nil, label: "Terminal", nearby: true))
+        XCTAssertTrue(looksLikeTerminal(classes: [], identifier: "terminalPanel", label: nil, nearby: false))
+        // Words that only start the same, and labels further out, are not.
+        XCTAssertFalse(looksLikeTerminal(classes: [], identifier: nil, label: "Terminals list", nearby: true))
+        XCTAssertFalse(looksLikeTerminal(classes: [], identifier: nil, label: "Terminal 1, zsh", nearby: false))
+        XCTAssertFalse(looksLikeTerminal(classes: ["terminal-status-badge"], identifier: nil, label: "Name", nearby: true))
+        XCTAssertFalse(looksLikeTerminal(classes: [], identifier: nil, label: nil, nearby: true))
+    }
 }
