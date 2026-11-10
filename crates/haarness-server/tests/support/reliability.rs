@@ -2095,8 +2095,102 @@ async fn reliability_a_wait_for_the_accounts_tokens_a_minute_is_followed_by_the_
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+/// What the Ollama provider says when Ollama ended a reply over a tool call
+/// its parser could not read: gpt-oss's call written with a bad escape.
+fn unreadable(reason: &str) -> String {
+    format!("{}{reason}", haarness_core::UNREADABLE_TOOL_CALL)
+}
+
 fn note_says(request: &ProviderRequest, words: &str) -> bool {
     request.messages.iter().any(|message| matches!(message, ProviderMessage::Text {role, content} if role == "user" && content.contains(words)))
+}
+
+/// gpt-oss on Ollama reasons, then writes a call whose arguments Ollama can't
+/// parse, and Ollama ends the stream with an error: the reasoning stays and
+/// the model is asked to write the call again, with the reason.
+#[tokio::test]
+async fn reliability_a_tool_call_ollama_could_not_read_is_written_again() {
+    let (directory, runtime, provider, hooks) = setup_streams(
+        vec![
+            vec![
+                Ok(ProviderEvent::ReasoningDelta("Write the parser.".into())),
+                cut(&unreadable(
+                    "error parsing tool call: invalid character 'd' in string escape code",
+                )),
+            ],
+            vec![Ok(text("written")), Ok(finish("stop"))],
+        ],
+        RuntimeConfig::default(),
+        true,
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("write parse.py"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(!note_says(&requests[0], "couldn't be read"));
+        assert!(
+            note_says(&requests[1], "a tool call that couldn't be read")
+                && note_says(&requests[1], "invalid character 'd' in string escape code"),
+            "{:?}",
+            requests[1].messages
+        );
+    }
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(
+        |item| matches!(&item.data, ItemData::Reasoning { text, .. } if text == "Write the parser.")
+    ));
+    assert!(hooks.failures.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// A call that ended before its arguments did (Ollama's "unexpected end of
+/// JSON input": gpt-oss broke one off, or the reply filled the context) is
+/// asked for again in full, or in smaller calls when long. When that keeps
+/// happening, the turn ends in plain words, without Ollama's.
+#[tokio::test]
+async fn reliability_a_tool_call_broken_off_is_asked_for_in_full_or_in_smaller_calls() {
+    let cut_off = unreadable("error parsing tool call: unexpected end of JSON input");
+    let (directory, runtime, provider, _hooks) =
+        setup_streams(vec![vec![cut(&cut_off)]], RuntimeConfig::default(), true);
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("write snake.py"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Failed);
+    // Asked twice, then the turn ends.
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(note_says(&requests[1], "ended partway through a tool call"));
+        assert!(note_says(&requests[1], "make smaller calls"));
+    }
+    let error = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|item| match &item.data {
+            ItemData::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        error.contains("tool calls kept breaking off before they ended") && !error.contains("JSON"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 /// A model that answers a summary request with a call to a tool it was not

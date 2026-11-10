@@ -1074,16 +1074,34 @@ const STEP_LIMIT_CALL: &str =
 /// says, before the provider's reason.
 const REFUSED_CALL: &str = "The provider refused your last reply before it reached Haarness, because a tool call in it did not match the tool's definition. Call the tool again with arguments that match its schema, or answer without it. The provider said: ";
 
+/// What the request after a reply whose tool call the provider could not
+/// read says, before the provider's reason.
+const UNREADABLE_CALL: &str = "Your last reply ended in a tool call that couldn't be read, so it didn't run. Write the call again with its arguments complete and well formed, or answer without it. The reason given: ";
+
+/// What the request after a reply that ended partway through a tool call
+/// says: the model broke the call off (gpt-oss wrote `{"path":"src","}`), or
+/// the reply filled the room left in its context, where Ollama ends it and
+/// the same call would end there again.
+const CUT_CALL: &str = "Your last reply ended partway through a tool call, so the call didn't run. Write the call again in full. If it is long, such as a whole file, make smaller calls instead: create the file with its first part, then add the rest with edits.";
+
 /// How often a turn asks the model to correct a tool call the provider
 /// refused, before the turn fails.
 const REFUSED_CALL_RETRIES: u8 = 2;
 
-/// The provider's reason when it refused the model's own reply for a tool
-/// call that does not match its tool (Groq's `tool_use_failed`: "Tool call
-/// validation failed: parameters for tool apply_patch did not match
-/// schema…", or a call of a tool it was not sent). The request was fine; a
-/// model asked again usually gets the call right.
+/// What the model is told when the provider refused its own reply for a
+/// tool call that does not match its tool (Groq's `tool_use_failed`: "Tool
+/// call validation failed: parameters for tool apply_patch did not match
+/// schema…", or a call of a tool it was not sent), or could not read the
+/// call at all (see [`unreadable_tool_call`]). The request was fine; a model
+/// asked again usually gets the call right.
 fn refused_tool_call(error: &CoreError) -> Option<String> {
+    if let Some((reason, cut)) = unreadable_tool_call(error) {
+        return Some(if cut {
+            CUT_CALL.to_owned()
+        } else {
+            format!("{UNREADABLE_CALL}{reason}")
+        });
+    }
     let CoreError::Provider(message) = error else {
         return None;
     };
@@ -1096,7 +1114,27 @@ fn refused_tool_call(error: &CoreError) -> Option<String> {
         .map_or(message.as_str(), |at| {
             &message[at + "tool call validation failed: ".len()..]
         });
-    Some(clean_error_text(reason, 600))
+    Some(format!("{REFUSED_CALL}{}", clean_error_text(reason, 600)))
+}
+
+/// The provider's reason when it could not read a tool call the model wrote
+/// ([`crate::UNREADABLE_TOOL_CALL`]), and whether the call was cut off
+/// before it ended rather than written wrong.
+fn unreadable_tool_call(error: &CoreError) -> Option<(String, bool)> {
+    let CoreError::Provider(message) = error else {
+        return None;
+    };
+    let (_, reason) = message.split_once(crate::UNREADABLE_TOOL_CALL)?;
+    let lower = reason.to_ascii_lowercase();
+    let cut = [
+        "unexpected end of json input",
+        "unexpected eof",
+        "incomplete",
+        "unterminated",
+    ]
+    .iter()
+    .any(|words| lower.contains(words));
+    Some((clean_error_text(reason, 300), cut))
 }
 
 /// What the request after an empty reply says, when a call before it failed.
@@ -2043,6 +2081,10 @@ fn describe_local_model_failure(
     let CoreError::Provider(raw) = error else {
         return None;
     };
+    // Said by `describe_error`, whatever the parser's words name.
+    if unreadable_tool_call(error).is_some() {
+        return None;
+    }
     if info.id == "lmstudio" && raw.starts_with(EMPTY_LOCAL_REPLY) {
         let name = haarness_protocol::model_display_name(
             model,
@@ -2378,6 +2420,18 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     // or only reasoned).
     if raw == EMPTY_SUMMARY {
         return "The model didn't write a summary of this chat, though Haarness asked twice, so the chat wasn't compacted. Try again, or start a new chat to go on.".into();
+    }
+    // The model's tool calls kept coming out unreadable, or cut off where
+    // its context filled up, though it was asked to write them again.
+    if let Some((_, cut)) = unreadable_tool_call(error) {
+        return if cut {
+            "The model's tool calls kept breaking off before they ended, though it was asked to write them again, in smaller parts if long. Send the message again, start a new chat, or choose another model.".into()
+        } else {
+            format!(
+                "{} couldn't read the model's tool calls, even after the model was asked to write them again. Send the message again, or choose another model.",
+                provider.unwrap_or("The provider")
+            )
+        };
     }
     if let Some((message, code, kind)) = provider_error_fields(raw) {
         let label = code.or_else(|| {
@@ -10758,9 +10812,10 @@ impl RunnerTask {
             let mut failure_beside_text = false;
             let mut explain_failure = false;
             let mut asked_to_explain = false;
-            // Why the provider refused the model's last reply for a tool call
-            // that did not match its tool, for the next request to say, and
-            // how often this turn has asked the model to correct one.
+            // What the next request tells the model when the provider refused
+            // its last reply for a tool call that did not match its tool, or
+            // could not read the call, and how often this turn has asked the
+            // model to correct one.
             let mut refused_call: Option<String> = None;
             let mut refused_calls = 0_u8;
             // Whether this turn asked again for the summary at its step limit.
@@ -11156,10 +11211,10 @@ impl RunnerTask {
                         "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
                     recovering = false;
                 }
-                if let Some(reason) = refused_call.take() {
+                if let Some(note) = refused_call.take() {
                     messages.push(ProviderMessage::Text {
                         role: "user".into(),
-                        content: format!("{REFUSED_CALL}{reason}"),
+                        content: note,
                     });
                 }
                 // Asked in every request until a reply to it shows words, a
@@ -21577,6 +21632,47 @@ mod tests {
             ),
             "Amazon Bedrock rejected the request: anthropic.claude-haiku-5-5 is not available for this account."
         );
+    }
+
+    #[test]
+    fn a_tool_call_the_provider_could_not_read_is_asked_for_again_then_said_plainly() {
+        let unreadable =
+            |reason: &str| CoreError::Provider(format!("{}{reason}", crate::UNREADABLE_TOOL_CALL));
+        // Written wrong: asked for again, with the reason.
+        let wrong =
+            unreadable("error parsing tool call: invalid character 'd' in string escape code");
+        let note = super::refused_tool_call(&wrong).unwrap();
+        assert!(note.starts_with(super::UNREADABLE_CALL), "{note}");
+        assert!(note.ends_with("invalid character 'd' in string escape code"));
+        assert_eq!(
+            super::describe_error(&wrong, Some("Ollama")),
+            "Ollama couldn't read the model's tool calls, even after the model was asked to write them again. Send the message again, or choose another model."
+        );
+        // Broken off before it ended (or where the reply filled the
+        // context): in full, or in smaller calls.
+        for reason in [
+            "error parsing tool call: unexpected end of JSON input",
+            "XML syntax error on line 9: unexpected EOF",
+            "incomplete GLM tool call: missing </tool_call>",
+        ] {
+            let cut = unreadable(reason);
+            assert_eq!(
+                super::refused_tool_call(&cut).as_deref(),
+                Some(super::CUT_CALL)
+            );
+            assert!(
+                super::describe_error(&cut, Some("Ollama"))
+                    .starts_with("The model's tool calls kept breaking off"),
+            );
+        }
+        // Groq's refusal reads as it did.
+        let groq = CoreError::Provider("HTTP 400 Bad Request: [tool_use_failed] Tool call validation failed: parameters for tool read did not match schema".into());
+        assert!(
+            super::refused_tool_call(&groq)
+                .unwrap()
+                .starts_with(super::REFUSED_CALL)
+        );
+        assert!(super::unreadable_tool_call(&groq).is_none());
     }
 
     #[test]

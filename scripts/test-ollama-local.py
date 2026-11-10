@@ -18,6 +18,8 @@ unless the request asks for more. Checked:
 
 A second stand-in serves gpt-oss as Ollama 0.40.6 does:
 
+- A call to `write` cut off where the reply filled the context ends the stream with Ollama's parser error; the model
+  is asked to write it again, in smaller calls when long, and the turn goes on.
 - A chat's second message, past the compaction threshold, compacts: asked to summarize, gpt-oss calls a tool it was
   never offered, is asked again, and its summary is used; the new message isn't summarized but kept as it is.
 
@@ -125,11 +127,12 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 oss_chats = []
+WRITE_CUT = "error parsing tool call: raw='{\"content\":\"import curses\\nimport random\\n', err=unexpected end of JSON input"
 
 
 class GptOss(Ollama):
     """Ollama with gpt-oss:20b alone, which calls the tools it was trained with when asked to summarize a chat that
-    ends on a request."""
+    ends on a request, and whose long `write` runs out of context."""
 
     def do_GET(self):
         if self.path == '/api/tags':
@@ -163,6 +166,11 @@ class GptOss(Ollama):
             call = {'id': 'call_1', 'function': {'index': 0, 'name': 'repo_browser.open_file', 'arguments': {'path': 'calc.py'}}}
             return self.stream([{'message': {'role': 'assistant', 'content': '', 'thinking': 'Open it.'}, 'done': False},
                                 {'message': {'role': 'assistant', 'content': '', 'tool_calls': [call]}, 'done': False}, done()])
+        if 'ended partway through a tool call' in text:
+            return self.stream([say('I will write snake.py in parts.'), done()])
+        if 'Write snake.py' in text:
+            return self.stream([{'message': {'role': 'assistant', 'content': '', 'thinking': 'Write it all.'}, 'done': False},
+                                {'error': WRITE_CUT}])
         # The first message of the long chat leaves it past its threshold (24K of a 32K window).
         return self.stream([say('I looked over the project.'), done(30_000)])
 
@@ -253,6 +261,13 @@ try:
 
     # gpt-oss, on an Ollama of its own and a profile of its own.
     env.update(HAARNESS_DATA_DIR=str(root/'oss-state'), OLLAMA_HOST=f'127.0.0.1:{oss.server_address[1]}')
+    code, out = run('gpt-oss:20b', 'Write snake.py')
+    assert code == 0, out
+    assert 'I will write snake.py in parts.' in out and 'import curses' not in out, out
+    assert len(oss_chats) == 2, len(oss_chats)
+    assert 'ended partway through a tool call' in json.dumps(oss_chats[1]['messages']), oss_chats[1]['messages'][-1]
+    print('PASS a tool call cut off where the context filled up is asked for again, in smaller parts')
+
     before = len(oss_chats)
     code, out = run('gpt-oss:20b', 'Look over the project.')
     assert code == 0, out
