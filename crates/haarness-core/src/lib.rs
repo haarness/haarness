@@ -101,6 +101,15 @@ pub const TRACE_EVENT_TARGET: &str = "haarness::trace";
 /// elsewhere.
 pub const CHAT_BUSY: &str = "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.";
 
+/// Why the server refuses to let a chat's agents do more without asking when
+/// the change comes from a program Haarness started (an agent's command, a
+/// hook, a Haarness terminal; see [`process_tree::request_from_inside`]).
+pub const APPROVALS_RAISE_REFUSAL: &str = "Only you can let agents do more without asking. This change came from a program Haarness started (an agent's command, a hook or a Haarness terminal), so the chat's approvals did not change. Switch them in the chat, or with haarness --approvals in a terminal of your own.";
+
+/// Why the server refuses a turn that approves its own requests from a
+/// program Haarness started. A scheduled run's own turn is not refused.
+pub const AUTO_APPROVE_REFUSAL: &str = "Only you can start a turn that approves its own requests. This request came from a program Haarness started (an agent's command, a hook or a Haarness terminal), so no turn started. Run haarness --yolo in a terminal of your own.";
+
 /// The variable that names the chat an agent's shell command runs for. The
 /// shell tool sets it for each command the agent runs (see
 /// [`ExecutionSettings::person_shell`]); the other processes the server

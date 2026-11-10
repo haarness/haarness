@@ -21,6 +21,7 @@ pub mod preview;
 mod profiles;
 pub mod remote;
 mod remote_scope;
+pub mod request_origin;
 pub mod sharing;
 pub mod skills;
 pub mod tools;

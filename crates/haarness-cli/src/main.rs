@@ -186,7 +186,30 @@ impl From<ApprovalsArg> for haarness_protocol::ApprovalMode {
     }
 }
 
+/// Why `flag` is refused in a program Haarness started.
+fn approvals_refused(flag: &str) -> String {
+    format!(
+        "Only you can let agents do more without asking, and this command runs in a program Haarness started (an agent's command, a hook or a Haarness terminal), so {flag} was refused. Run it in a terminal of your own, or switch approvals in the chat."
+    )
+}
+
 impl Cli {
+    /// The flag that lets this command's agents do more without asking:
+    /// `--yolo`, `--auto`, or `--approvals` auto or yolo.
+    fn raised_approvals(&self) -> Option<&'static str> {
+        if self.yolo {
+            return Some("--yolo");
+        }
+        if self.auto {
+            return Some("--auto");
+        }
+        match self.approvals {
+            Some(ApprovalsArg::Auto) => Some("--approvals auto"),
+            Some(ApprovalsArg::Yolo) => Some("--approvals yolo"),
+            Some(ApprovalsArg::Review) | None => None,
+        }
+    }
+
     /// How this command's chat answers approvals, from `--yolo`, `--auto`
     /// and `--approvals`.
     fn approval_launch(&self) -> haarness_tui::ApprovalLaunch {
@@ -1496,6 +1519,24 @@ async fn cli_main() -> Result<()> {
                 .exit();
         }
         return upgrade::run(upgrade::UpgradeArgs::latest());
+    }
+    // Letting agents do more without asking is a person's call, never that of
+    // a program Haarness started. A server a launcher leaves running in the
+    // background is judged by that launcher, which was judged itself.
+    if let Some(flag) = cli.raised_approvals()
+        && if matches!(
+            &cli.command,
+            Some(Command::Serve(ServeArgs {
+                background_child: true,
+                ..
+            }))
+        ) {
+            haarness_core::process_tree::parent_inside()
+        } else {
+            haarness_core::process_tree::this_process_inside()
+        }
+    {
+        anyhow::bail!(approvals_refused(flag));
     }
     if let Some(Command::Serve(ServeArgs {
         start_log: Some(path),
@@ -9968,6 +10009,9 @@ async fn application_at(
         file_config.formatter.clone().unwrap_or_default(),
     ));
     let scheduler = Scheduler::discover(std::env::current_exe()?, paths.root.clone())?;
+    // A scheduled run's turn approves its own requests; the server tells it
+    // from an agent's by its schedule.
+    haarness_server::request_origin::use_schedules(scheduler.clone());
     let browser_global = paths.config_dir().to_path_buf();
     let browser_workspace = workspace.to_path_buf();
     // Both browsers' settings, read live: `browser.policy` for the Haarness

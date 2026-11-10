@@ -61,11 +61,7 @@ pub fn inside_haarness(pid: u32) -> bool {
     {
         table().is_some_and(|rows| {
             let started = STARTED.lock().clone();
-            let own = std::process::id();
-            let own = rows
-                .iter()
-                .find(|row| row.pid == own)
-                .map(|row| row.program.as_str());
+            let own = own_program(&rows);
             below_program(&rows, pid, own) || in_haarness_group(&rows, pid, &started, own)
         })
     }
@@ -74,6 +70,127 @@ pub fn inside_haarness(pid: u32) -> bool {
         let _ = pid;
         false
     }
+}
+
+/// Whether this very process runs inside Haarness: started for an agent's command, which names its chat, or as
+/// [`inside_haarness`] tells, which also catches a command that cleared that variable and one put in the background.
+#[must_use]
+pub fn this_process_inside() -> bool {
+    names_a_chat() || inside_haarness(std::process::id())
+}
+
+/// For a process a Haarness program started for itself, such as the server a launcher leaves running: whether the one
+/// that started it runs inside Haarness, as [`this_process_inside`] would tell there. A process whose parent is no
+/// Haarness program was not started that way, and counts as inside.
+#[must_use]
+pub fn parent_inside() -> bool {
+    if names_a_chat() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        let parent = std::os::unix::process::parent_id();
+        table().is_some_and(|rows| {
+            let started = STARTED.lock().clone();
+            launcher_inside(&rows, parent, &started, own_program(&rows))
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Whether a request this process received from the local process `pid` comes from a program Haarness started, as
+/// [`inside_haarness`] tells, unless `pid` is a helper this process started to carry requests for people elsewhere
+/// ([`mark_helper`]): what the connector for phones and Haarness Cloud sends comes from those people.
+#[must_use]
+pub fn request_from_inside(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        table().is_some_and(|rows| {
+            let started = STARTED.lock().clone();
+            let helpers = HELPERS.lock().clone();
+            let own = own_program(&rows);
+            !helper(&rows, pid, std::process::id(), &helpers, &started)
+                && (below_program(&rows, pid, own) || in_haarness_group(&rows, pid, &started, own))
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Whether `parent`, which started a process for itself, is no Haarness program (`own` as in [`is_haarness`]) or runs
+/// inside Haarness.
+#[cfg(unix)]
+fn launcher_inside(
+    rows: &[Process],
+    parent: u32,
+    started: &BTreeSet<i32>,
+    own: Option<&str>,
+) -> bool {
+    let launcher = rows
+        .iter()
+        .find(|row| row.pid == parent && parent > 1)
+        .is_some_and(|row| is_haarness(&row.program, own));
+    !launcher || below_program(rows, parent, own) || in_haarness_group(rows, parent, started, own)
+}
+
+/// Whether an agent's command runs here: the shell tool names the chat it runs for.
+fn names_a_chat() -> bool {
+    std::env::var_os(crate::SESSION_ID_ENV).is_some_and(|value| !value.is_empty())
+}
+
+/// The program this process runs, as the table names it.
+#[cfg(unix)]
+fn own_program(rows: &[Process]) -> Option<&str> {
+    let own = std::process::id();
+    rows.iter()
+        .find(|row| row.pid == own)
+        .map(|row| row.program.as_str())
+}
+
+/// The helpers this process started to carry requests for people elsewhere (see [`mark_helper`]).
+#[cfg(unix)]
+static HELPERS: std::sync::LazyLock<Mutex<BTreeSet<u32>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Notes that this process just started `pid` to carry requests for people elsewhere, such as the connector that
+/// brings requests from phones and Haarness Cloud, so [`request_from_inside`] takes what it sends as theirs.
+/// [`forget_helper`] once it has ended, before its id can come back.
+pub fn mark_helper(pid: u32) {
+    #[cfg(unix)]
+    HELPERS.lock().insert(pid);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Forgets a helper [`mark_helper`] noted, once it has ended.
+pub fn forget_helper(pid: u32) {
+    #[cfg(unix)]
+    HELPERS.lock().remove(&pid);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Whether `pid` is one of `helpers` started by `own` (this process): still its child, and in no process group it
+/// started for a command.
+#[cfg(unix)]
+fn helper(
+    rows: &[Process],
+    pid: u32,
+    own: u32,
+    helpers: &BTreeSet<u32>,
+    started: &BTreeSet<i32>,
+) -> bool {
+    helpers.contains(&pid)
+        && rows
+            .iter()
+            .find(|row| row.pid == pid)
+            .is_some_and(|row| row.parent == own && !started.contains(&row.group))
 }
 
 /// The process groups this process started for commands. A server stops a command's group when the command ends, a
@@ -408,6 +525,68 @@ mod tests {
         assert!(in_haarness_group(&rows, 610, &started, None));
         assert!(in_haarness_group(&rows, 611, &started, None));
         assert!(!in_haarness_group(&rows, 620, &started, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launcher_is_judged_by_where_it_runs() {
+        let rows = parse_table(TABLE);
+        let none = BTreeSet::new();
+        // The terminal UI the person started, and Desktop's server, start their own servers.
+        assert!(!launcher_inside(&rows, 502, &none, None));
+        assert!(!launcher_inside(&rows, 602, &none, None));
+        // A command's shell or program is no Haarness program; neither is a process that is gone.
+        for parent in [503, 603, 604, 999, 1] {
+            assert!(launcher_inside(&rows, parent, &none, None), "{parent}");
+        }
+        // A Haarness program an agent's command runs is inside.
+        let rows = parse_table(&format!("{TABLE}  605   603   603 haarness\n"));
+        assert!(launcher_inside(&rows, 605, &none, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_helper_this_process_started_outside_any_command_speaks_for_others() {
+        // Desktop's server (602) started a connector (630) in a group of its own, and runs a command (603).
+        let rows = parse_table(&format!(
+            "{TABLE}  630   602   630 haarness\n  631   603   603 haarness\n"
+        ));
+        let helpers = BTreeSet::from([630, 631]);
+        let none = BTreeSet::new();
+        assert!(helper(&rows, 630, 602, &helpers, &none));
+        // Not one this process noted, not its child, or in a group it started for a command.
+        assert!(!helper(&rows, 630, 602, &BTreeSet::new(), &none));
+        assert!(!helper(&rows, 630, 502, &helpers, &none));
+        assert!(!helper(&rows, 630, 602, &helpers, &BTreeSet::from([630])));
+        assert!(!helper(&rows, 631, 602, &helpers, &none));
+        assert!(!helper(&rows, 999, 602, &BTreeSet::from([999]), &none));
+    }
+
+    /// The real thing: of two programs this process (a Haarness program) started, the one it noted as a helper speaks
+    /// for others until it is forgotten; the other is inside.
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_this_process_started_is_not_inside_while_noted() {
+        let start = || {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap()
+        };
+        let (mut noted, mut other) = (start(), start());
+        mark_helper(noted.id());
+        let while_noted = (
+            request_from_inside(noted.id()),
+            request_from_inside(other.id()),
+        );
+        forget_helper(noted.id());
+        let forgotten = request_from_inside(noted.id());
+        for child in [&mut noted, &mut other] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert_eq!(while_noted, (false, true));
+        assert!(forgotten);
     }
 
     #[cfg(unix)]

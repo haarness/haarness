@@ -1723,6 +1723,7 @@ async fn start_turn(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
     headers: HeaderMap,
+    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Json(mut request): Json<StartTurnRequest>,
 ) -> ApiResult<(StatusCode, Json<Turn>)> {
     // A published chat follows its own Auto/Review setting; a remote client
@@ -1732,6 +1733,13 @@ async fn start_turn(
             "A shared chat cannot start a turn that approves its own requests".into(),
         )
         .into());
+    }
+    // Nor can a program Haarness started, but for a scheduled run's own turn.
+    if request.auto_approve
+        && crate::request_origin::from_inside(peer(connection)).await
+        && !crate::request_origin::scheduled_run(&state.runtime, id, &request).await
+    {
+        return Err(refused(haarness_core::AUTO_APPROVE_REFUSAL));
     }
     // Levels are an open set: a provider can list one this release has never
     // seen, and the runtime fits any level to the levels the model lists.
@@ -1875,9 +1883,38 @@ async fn get_approval_mode(
 async fn set_approval_mode(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
+    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Json(request): Json<haarness_protocol::SetApprovalModeRequest>,
 ) -> ApiResult<Json<haarness_protocol::ApprovalModeInfo>> {
-    Ok(Json(state.runtime.set_approval_mode(id, request).await?))
+    let peer = peer(connection);
+    // Carried through even when the client goes away meanwhile (a window
+    // reloaded right after the pick): telling who asks takes a moment.
+    tokio::spawn(async move {
+        // Only a person lets agents do more without asking; lowering works from anywhere.
+        if crate::request_origin::raises(&state.runtime, id, request.mode).await?
+            && crate::request_origin::from_inside(peer).await
+        {
+            return Err(refused(haarness_core::APPROVALS_RAISE_REFUSAL));
+        }
+        Ok(Json(state.runtime.set_approval_mode(id, request).await?))
+    })
+    .await
+    .map_err(|error| CoreError::Storage(format!("The approval mode change stopped: {error}")))?
+}
+
+/// The address a request came from, when it came over the network.
+fn peer(
+    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+) -> Option<std::net::SocketAddr> {
+    connection.map(|axum::Extension(axum::extract::ConnectInfo(peer))| peer)
+}
+
+/// A refusal said as its own sentence, without the category prefix.
+fn refused(message: &str) -> ApiFailure {
+    ApiFailure(
+        CoreError::PermissionDenied(message.into()),
+        Some(message.into()),
+    )
 }
 async fn get_goal(
     State(state): State<ServerState>,
@@ -2842,13 +2879,7 @@ async fn manage_resource(
         )
         && let Some(object) = input.as_object_mut()
     {
-        let peer = connection.map(|axum::Extension(axum::extract::ConnectInfo(peer))| peer);
-        let inside = tokio::task::spawn_blocking(move || {
-            peer.and_then(haarness_core::process_tree::local_client)
-                .is_some_and(haarness_core::process_tree::inside_haarness)
-        })
-        .await
-        .unwrap_or(false);
+        let inside = crate::request_origin::from_inside(peer(connection)).await;
         object.insert("__insideHaarness".into(), Value::Bool(inside));
     }
     Ok(Json(

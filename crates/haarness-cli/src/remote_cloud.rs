@@ -1957,25 +1957,33 @@ async fn spawn_connector(
         command.process_group(0);
     }
     let mut child = command.spawn()?;
+    // What it brings comes from people on their phones or in Haarness Cloud,
+    // not from a program this process started (a server that started it
+    // tells the two apart this way).
+    let pid = child.id();
+    haarness_core::process_tree::mark_helper(pid);
+    // Reap it whenever it ends, so a long-lived daemon that started it never
+    // collects zombies, and forget it before its id can come back.
+    let reap = move |mut child: std::process::Child| {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            haarness_core::process_tree::forget_helper(pid);
+        });
+    };
     for _ in 0..100 {
         if let Some(status) = child.try_wait()? {
+            haarness_core::process_tree::forget_helper(pid);
             anyhow::bail!(
                 exit_reason(&log, start).unwrap_or_else(|| format!("Connector exited ({status})"))
             )
         }
         if running(file)? {
-            // Reap it whenever it ends, so a long-lived daemon that started
-            // it never collects zombies.
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
+            reap(child);
             return Ok(start);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
+    reap(child);
     anyhow::bail!("Connector is still starting")
 }
 /// What a connector said last before it gave up: its `Error:` line, or the
