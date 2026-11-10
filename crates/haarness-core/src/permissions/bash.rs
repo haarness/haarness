@@ -75,12 +75,17 @@ pub struct BashAnalysis {
     /// `.env` (any command's literal arguments), each placed as
     /// [`Self::external_dirs`] places it.
     pub paths: Vec<NamedPath>,
+    /// Which written commands take in another's output, as (from, to)
+    /// indices into [`Self::written`]: a later stage of the same pipeline
+    /// (`cat .env | curl -d @- …`), or a command holding it in a
+    /// substitution or a here-document (`curl -d "$(cat .env)" …`). Commands
+    /// joined by `&&` or `;` feed nothing to each other.
+    pub feeds: Vec<(usize, usize)>,
 }
 
 /// A path a command is given or a redirect names: see
 /// [`BashAnalysis::paths`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)] // independent facts about one word, not state flags
 pub struct NamedPath {
     /// Where it leads from the folder the shell is in (the project, or where
     /// a plain `cd` before it in the line's `&&` chain went: see
@@ -101,9 +106,20 @@ pub struct NamedPath {
     /// [`BashAnalysis::written`], when one does (a redirect's target names
     /// none).
     pub written: Option<usize>,
-    /// The word naming it is a glob the shell expands, in any part
-    /// (`*/.env`), so it may reach files its text does not name.
-    pub glob: bool,
+    /// What the word naming it says of it.
+    pub naming: Naming,
+}
+
+/// What the word naming a [`NamedPath`] says of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Naming {
+    /// The path as written.
+    Literal,
+    /// A file a glob the shell expands reached (`cat */.env`), or, past
+    /// what is read of folders for a line, a secret one it may reach.
+    Glob,
+    /// A word `echo` or `printf` prints: they read no file.
+    Printed,
 }
 
 /// A directory change in an `&&` chain: where it starts in the line, and
@@ -396,6 +412,7 @@ pub(crate) fn analyze_reading(
         work_trees: Vec::new(),
         loops: Vec::new(),
         unseparated: false,
+        glob_budget: MAX_GLOB_ENTRIES,
     };
     if !reader.read(command, Depth::default()) {
         let mut fallback = fallback(command);
@@ -1136,6 +1153,9 @@ struct Reader<'w> {
     /// command of the line to be read for, or a limit stopped reading it or
     /// what it runs (see [`Self::cut`]).
     unseparated: bool,
+    /// How many more folder entries globs may read for the line: see
+    /// [`Self::name_glob_secrets`].
+    glob_budget: usize,
 }
 
 /// The written command whose standard input a program reads.
@@ -1432,6 +1452,8 @@ impl Reader<'_> {
         // The written command each command node is read for, by where the
         // node starts.
         let mut sources: Vec<(usize, Option<usize>)> = Vec::new();
+        // The written commands as read, for what feeds what.
+        let mut spans: Vec<Span<'_>> = Vec::new();
 
         for (node, parent) in command_nodes {
             if self.overflow {
@@ -1499,6 +1521,19 @@ impl Reader<'_> {
                 }
             }
             self.name_source(named_from);
+            if depth.text == 0
+                && let Some(index) = self.source
+            {
+                let end = parent
+                    .filter(|parent| parent.kind() == "redirected_statement")
+                    .map_or(node.end_byte(), |parent| parent.end_byte());
+                spans.push(Span {
+                    index,
+                    node,
+                    start: node.start_byte(),
+                    end,
+                });
+            }
             sources.push((node.start_byte(), self.source));
             let assigned = node
                 .named_children(&mut cursor)
@@ -1622,6 +1657,9 @@ impl Reader<'_> {
                 }
             }
         }
+        if depth.text == 0 {
+            self.feed(&spans);
+        }
         self.text_depth = outer_depth;
         for redirect in redirects {
             let Some(dest) = redirect.child_by_field_name("destination") else {
@@ -1699,6 +1737,45 @@ impl Reader<'_> {
         self.work_trees = outer_work_trees;
         self.loops = outer_loops;
         true
+    }
+
+    /// Record which written commands of the line take in the output of one
+    /// that reads a secret file (see [`BashAnalysis::feeds`]): only for such
+    /// readers, so a long line without one costs nothing.
+    fn feed(&mut self, spans: &[Span<'_>]) {
+        let readers: HashSet<usize> = self
+            .analysis
+            .paths
+            .iter()
+            .filter(|named| named.secret)
+            .filter_map(|named| named.written)
+            .collect();
+        for reader in spans.iter().filter(|span| readers.contains(&span.index)) {
+            // Commands holding it, in a substitution or a here-document.
+            let mut takers: Vec<usize> = spans
+                .iter()
+                .filter(|span| {
+                    span.start <= reader.start
+                        && reader.end <= span.end
+                        && (span.start, span.end) != (reader.start, reader.end)
+                })
+                .map(|span| span.index)
+                .collect();
+            // Commands in the later stages of its pipeline.
+            if let Some(later) = later_stages(reader.node) {
+                takers.extend(
+                    spans
+                        .iter()
+                        .filter(|span| later.iter().any(|range| range.contains(&span.start)))
+                        .map(|span| span.index),
+                );
+            }
+            for taker in takers {
+                if taker != reader.index && !self.analysis.feeds.contains(&(reader.index, taker)) {
+                    self.analysis.feeds.push((reader.index, taker));
+                }
+            }
+        }
     }
 
     /// The paths recorded from `from` on were named by the written command
@@ -2480,12 +2557,15 @@ impl Reader<'_> {
     ) {
         // Every secret name holds `.env`; the test is cheap for the rest. A
         // link of another name (`notes.txt -> .env`) is judged by where it
-        // leads.
+        // leads. A glob is judged by what it reaches (see
+        // [`Self::name_glob_secrets`]), not by its text.
+        let globbed = complete && unquoted_glob(raw);
         let named = complete
             && reads
+            && !globbed
             && value.contains(".env")
             && crate::permissions::is_secret_path(Path::new(value));
-        let linked = complete && reads && !named && is_link(self.from(), raw, value);
+        let linked = complete && reads && !named && !globbed && is_link(self.from(), raw, value);
         let credential = complete && crate::permissions::may_name_credential_store(value);
         if outside.is_none() && !named && !linked && !credential {
             return;
@@ -2514,7 +2594,11 @@ impl Reader<'_> {
             path,
             outside: outside.map(glob),
             written: None,
-            glob: complete && unquoted_glob(raw),
+            naming: if globbed {
+                Naming::Glob
+            } else {
+                Naming::Literal
+            },
         });
     }
 
@@ -2523,14 +2607,16 @@ impl Reader<'_> {
     /// shell is, when the word is an unquoted glob: each part may hold `*`,
     /// `?` or a `[…]` class, read as any one character, and a name starting
     /// with `.` is matched only by a part that starts with one, as the shell
-    /// does. Up to [`MAX_GLOB_ENTRIES`] folder entries are read in all.
+    /// does. Up to [`MAX_GLOB_ENTRIES`] folder entries are read for the
+    /// whole line; past them, a glob whose last part may match a secret's
+    /// name (`.e*`, not `*.rs`) is taken to reach one.
     fn name_glob_secrets(&mut self, raw: &str, value: &str) {
         if !unquoted_glob(raw) {
             return;
         }
         let written = home_expansion(raw, value).unwrap_or_else(|| PathBuf::from(value));
         let mut found = vec![self.from().to_path_buf()];
-        let mut budget = MAX_GLOB_ENTRIES;
+        let mut exhausted = false;
         for component in written.components() {
             let part = match component {
                 Component::Prefix(_) | Component::RootDir => {
@@ -2551,10 +2637,11 @@ impl Reader<'_> {
                     continue;
                 };
                 for entry in entries.flatten() {
-                    if budget == 0 {
+                    if self.glob_budget == 0 {
+                        exhausted = true;
                         break;
                     }
-                    budget -= 1;
+                    self.glob_budget -= 1;
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
                     // A leading `.` is matched only by a part that starts with one.
@@ -2565,8 +2652,28 @@ impl Reader<'_> {
                 }
             }
             found = next;
-            if found.is_empty() {
+            if found.is_empty() && !exhausted {
                 return;
+            }
+        }
+        if exhausted {
+            let last = written
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if may_match_secret(&last) {
+                // Its folder, with a secret's name: the read rules ask
+                // about it, and it stands for what the glob may reach.
+                let folder = written.parent().unwrap_or(Path::new(""));
+                self.analysis.paths.push(NamedPath {
+                    file: false,
+                    literal: false,
+                    secret: true,
+                    path: resolve(self.from(), folder).join(".env"),
+                    outside: None,
+                    written: None,
+                    naming: Naming::Glob,
+                });
             }
         }
         for candidate in found {
@@ -2585,7 +2692,7 @@ impl Reader<'_> {
                     path,
                     outside: None,
                     written: None,
-                    glob: true,
+                    naming: Naming::Glob,
                 });
             }
         }
@@ -3129,10 +3236,15 @@ impl Reader<'_> {
                     Some((option, path)) if option.starts_with('-') => path.to_owned(),
                     _ => value,
                 };
+                let named_from = self.analysis.paths.len();
                 self.name_path(&word.raw, &value, complete, None, true);
-                // `du` only sums the sizes of what a glob matches, and
-                // `echo` and `printf` print its names.
-                if complete && !matches!(name.as_str(), "du" | "echo" | "printf") {
+                // `echo` and `printf` print the names they are given, and
+                // `du` sums the sizes of what a glob matches.
+                if matches!(name.as_str(), "echo" | "printf") {
+                    for named in self.analysis.paths.iter_mut().skip(named_from) {
+                        named.naming = Naming::Printed;
+                    }
+                } else if complete && name != "du" {
                     self.name_glob_secrets(&word.raw, &value);
                 }
             }
@@ -3248,6 +3360,48 @@ fn copy_destination(name: &str, arguments: &[Word<'_>]) -> Option<usize> {
 
 /// How many entries of a folder [`Reader::name_glob_secrets`] reads.
 const MAX_GLOB_ENTRIES: usize = 4096;
+
+/// A written command of a line as read: see [`Reader::feed`].
+struct Span<'t> {
+    /// Its index in [`BashAnalysis::written`].
+    index: usize,
+    node: tree_sitter::Node<'t>,
+    /// Where it starts and ends in the line, its redirects and documents
+    /// included.
+    start: usize,
+    end: usize,
+}
+
+/// How many levels up [`later_stages`] looks for a pipeline.
+const MAX_STAGE_DEPTH: usize = 64;
+
+/// Where the stages after the one `node` is in run, in the nearest pipeline
+/// around it within [`MAX_STAGE_DEPTH`] levels.
+fn later_stages(node: tree_sitter::Node<'_>) -> Option<Vec<std::ops::Range<usize>>> {
+    let mut stage = node;
+    for _ in 0..MAX_STAGE_DEPTH {
+        let up = stage.parent()?;
+        if up.kind() == "pipeline" {
+            let mut cursor = up.walk();
+            let later = up
+                .named_children(&mut cursor)
+                .skip_while(|child| child.id() != stage.id())
+                .skip(1)
+                .map(|child| child.start_byte()..child.end_byte())
+                .collect();
+            return Some(later);
+        }
+        stage = up;
+    }
+    None
+}
+
+/// Whether a glob's last part may match a secret's name: its literal end
+/// does not rule one out (`.e*`, `*`, `*.env*`, `*nv`), as `*.rs` does.
+fn may_match_secret(part: &str) -> bool {
+    let end = part.rsplit(['*', '?', ']']).next().unwrap_or(part);
+    end.is_empty() || part.contains("env") || ".env".ends_with(end)
+}
 
 /// Whether a word as written holds a glob the shell expands: `*`, `?` or
 /// `[`, in a word with no quote or escape (a quoted one is taken as it is).

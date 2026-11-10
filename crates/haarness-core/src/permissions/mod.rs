@@ -498,17 +498,27 @@ const SECRET_READ_RULES: [(&str, PermissionDecision); 8] = [
 const EXACT_RULE: &str = "bash:=";
 
 /// The remembered rule for exactly the shell command `operation`
-/// (`bash:cat .env`): [`EXACT_RULE`] and the SHA-256 of the operation, so
-/// the stores that keep Always answers never hold the command's text, which
-/// may carry a credential. It is compared by equality alone, never matched
-/// as a pattern (see [`PermissionEngine::allowed_by_choice`]).
+/// (`bash:cat .env`) reading exactly `files` (where they really are):
+/// [`EXACT_RULE`] and the SHA-256 of both, so the stores that keep Always
+/// answers never hold the command's text, which may carry a credential, and
+/// the same text reading another file (after a `cd`, from another folder or
+/// worktree, or a file a glob newly matches) is another command. It is
+/// compared by equality alone, never matched as a pattern (see
+/// [`PermissionEngine::allowed_by_choice`]).
 #[must_use]
-pub fn exact_rule(operation: &str) -> String {
+pub fn exact_rule(operation: &str, files: &[&Path]) -> String {
     use sha2::Digest;
-    format!(
-        "{EXACT_RULE}{}",
-        hex::encode(sha2::Sha256::digest(operation.as_bytes()))
-    )
+    let mut files: Vec<std::borrow::Cow<'_, str>> =
+        files.iter().map(|file| file.to_string_lossy()).collect();
+    files.sort();
+    files.dedup();
+    let mut digest = sha2::Sha256::new();
+    digest.update(operation.as_bytes());
+    for file in files {
+        digest.update([0]);
+        digest.update(file.as_bytes());
+    }
+    format!("{EXACT_RULE}{}", hex::encode(digest.finalize()))
 }
 
 /// Whether `pattern` is an [`exact_rule`].
@@ -729,23 +739,17 @@ impl PermissionEngine {
         self.evaluate_passing_over(operation, &|_| false, PermissionDecision::Ask)
     }
 
-    /// Whether someone chose to allow `operation` itself rather than
+    /// Whether someone chose to allow one shell command itself rather than
     /// everything: `matched`, the rule its evaluation names, is a configured
     /// allow narrower than everything (a blanket `bash:*` says nothing about
     /// any one command), or a remembered allow (an "always" answer or a
-    /// repository grant) is for exactly this command: its
-    /// [`exact_rule`], or its own text holding no `*` or `?`. A remembered
-    /// allow that is a pattern (`bash:cat *`, what Always shows for `cat
-    /// .env`) was given for one command and reaches others only by being
-    /// generalized: when `generalized` says so, the remembered rule
+    /// repository grant) is `exact`, the command's [`exact_rule`]. A
+    /// remembered allow that is a pattern (`bash:cat *`, what Always shows
+    /// for `cat .env`) was given for one command and reaches others only by
+    /// being generalized: when `generalized` says so, the remembered rule
     /// `matched` names counts too, whatever its shape.
     #[must_use]
-    pub fn allowed_by_choice(
-        &self,
-        matched: Option<&str>,
-        operation: &str,
-        generalized: bool,
-    ) -> bool {
+    pub fn allowed_by_choice(&self, matched: Option<&str>, exact: &str, generalized: bool) -> bool {
         let configured = matched.is_some_and(|matched| {
             self.rules.iter().skip(self.builtin).any(|rule| {
                 rule.decision == PermissionDecision::Allow
@@ -753,7 +757,6 @@ impl PermissionEngine {
                     && !catch_all(rule)
             })
         });
-        let exact = exact_rule(operation);
         configured
             || self
                 .session_rules
@@ -763,7 +766,6 @@ impl PermissionEngine {
                     rule.decision == PermissionDecision::Allow
                         && !catch_all(rule)
                         && (rule.pattern == exact
-                            || (rule.pattern == operation && !rule.pattern.contains(['*', '?']))
                             || (generalized && matched == Some(rule.pattern.as_str())))
                 })
     }
