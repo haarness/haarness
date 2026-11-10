@@ -78,11 +78,47 @@ test("history deduplicates consecutive submissions and copies complete prompt co
   assert.equal(prependHistory(values, entry(" ")), values);
   assert.equal(
     prependHistory(
-      Array.from({ length: 100 }, (_, i) => entry(String(i))),
+      Array.from({ length: 200 }, (_, i) => entry(String(i))),
       entry("latest"),
     ).length,
-    100,
+    200,
   );
+});
+test("history keeps 200 prompts, but only the newest 100 bring back attachments or context", () => {
+  const withFile = (text: string) => ({
+    ...entry(text),
+    context: [{ kind: "file" as const, path: "notes.md", content: "notes" }],
+  });
+  const withPicture = (text: string) => ({
+    ...entry(text),
+    attachments: [{ name: "picture", data: "data:image/png;base64,YQ==" }],
+  });
+  // Newest first: the two rich entries sit at places 99 and 100, the plain
+  // one beside them at 101.
+  let values = [
+    ...Array.from({ length: 98 }, (_, i) => entry("recent " + i)),
+    withFile("file at 99"),
+    withPicture("picture at 100"),
+    entry("plain at 101"),
+    withFile("file at 102"),
+  ];
+  values = readHistory(values);
+  assert.equal(values.length, 101);
+  assert.ok(values.some((item) => item.text === "picture at 100"));
+  assert.ok(!values.some((item) => item.text === "file at 102"));
+  // One more prompt pushes the picture past the newest 100: it goes, and the
+  // plain prompt after it stays.
+  values = prependHistory(values, entry("newest"));
+  const texts = values.map((item) => item.text);
+  assert.ok(texts.includes("file at 99"));
+  assert.ok(!texts.includes("picture at 100"));
+  assert.ok(texts.includes("plain at 101"));
+  assert.equal(values.length, 101);
+  // Plain prompts go back as far as 200.
+  for (let i = 0; i < 150; i++) values = prependHistory(values, entry("later " + i));
+  assert.equal(values.length, 200);
+  assert.equal(values.at(-1)?.text, "recent 48");
+  assert.ok(values.slice(100).every((item) => !item.attachments.length && !item.context.length));
 });
 test("stored history rejects malformed values and bounds oversized media without losing in-memory entries", () => {
   assert.deepEqual(readHistory([{ text: "bad" }, entry("valid")]), [

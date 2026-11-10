@@ -9,14 +9,25 @@ export interface PromptHistoryEntry {
 }
 export const historyKey = (workspace: string) =>
   `prompt-history:v1:chat:${workspace}`;
-const MAX_ENTRIES = 100;
+const MAX_ENTRIES = 200;
+/** Only this many of the newest entries may bring back attachments or
+ * context; an older one is kept only while it is plain text. */
+const MAX_RICH_ENTRIES = 100;
 const MAX_BYTES = 1536 * 1024;
+/** Whether recalling the entry brings back more than its text. */
+const rich = (entry: PromptHistoryEntry) =>
+  entry.attachments.length > 0 || entry.context.length > 0;
+/** History within its bounds, newest first. */
+const bounded = (entries: PromptHistoryEntry[]) =>
+  entries
+    .filter((entry, index) => index < MAX_RICH_ENTRIES || !rich(entry))
+    .slice(0, MAX_ENTRIES);
 export const copyEntry = (entry: PromptHistoryEntry): PromptHistoryEntry =>
   structuredClone(entry);
 
 export function readHistory(value: unknown): PromptHistoryEntry[] {
   if (!Array.isArray(value)) return [];
-  return value
+  const entries = value
     .filter(
       (entry): entry is PromptHistoryEntry =>
         !!entry &&
@@ -30,8 +41,8 @@ export function readHistory(value: unknown): PromptHistoryEntry[] {
         ) &&
         Array.isArray(entry.context) &&
         readContext(entry.context).length === entry.context.length,
-    )
-    .slice(0, MAX_ENTRIES);
+    );
+  return bounded(entries);
 }
 export function prependHistory(
   entries: PromptHistoryEntry[],
@@ -42,7 +53,7 @@ export function prependHistory(
   if (JSON.stringify(entries[0]) === JSON.stringify(entry)) return entries;
   if (entry.thread && entries[0] && !entries[0].thread && samePrompt(entries[0], entry))
     return [copyEntry(entry), ...entries.slice(1)];
-  return [copyEntry(entry), ...entries.filter(item => item.thread !== entry.thread || !samePrompt(item, entry))].slice(0, MAX_ENTRIES);
+  return bounded([copyEntry(entry), ...entries.filter(item => item.thread !== entry.thread || !samePrompt(item, entry))]);
 }
 function samePrompt(a: PromptHistoryEntry, b: PromptHistoryEntry) {
   return a.text === b.text && JSON.stringify(a.attachments) === JSON.stringify(b.attachments)
