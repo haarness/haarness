@@ -218,6 +218,30 @@ async fn reply_to_permission(
     }
 }
 
+/// Send `answer` to question `id` and close its card. A question the server
+/// no longer holds (answered from another client, or its turn ended) closes
+/// too, with one quiet line, and gives false; any other failure keeps the
+/// card and is the caller's error.
+pub(crate) async fn reply_to_question(
+    app: &mut App,
+    client: &ApiClient,
+    id: &str,
+    answer: String,
+) -> Result<bool> {
+    match client.reply_question(id, QuestionReply { answer }).await {
+        Ok(()) => {
+            app.question_answered(id);
+            Ok(true)
+        }
+        Err(error) if crate::api::refusal_code(&error) == Some("not_found") => {
+            app.question_answered(id);
+            app.notice = app.language.text("Already answered").into();
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// How long a choice staged by its letter must have been on screen before the
 /// same letter confirms it: long enough to read what it grants, longer than
 /// the gap between the doubled letters of a typed word.
@@ -926,17 +950,12 @@ pub async fn handle_key_at(
                 // The protocol's question channel is textual; resolve it with
                 // an explicit cancellation answer so the waiting tool does not
                 // hang.
-                client
-                    .reply_question(
-                        &id,
-                        QuestionReply {
-                            answer: "Cancelled by user".into(),
-                        },
-                    )
-                    .await?;
-                app.question_answered(&id);
+                let cancelled =
+                    reply_to_question(app, client, &id, "Cancelled by user".into()).await?;
                 app.composer.clear();
-                app.notice = "Question cancelled".into();
+                if cancelled {
+                    app.notice = "Question cancelled".into();
+                }
                 return Ok(AppAction::Continue);
             }
             KeyCode::Enter
@@ -968,8 +987,7 @@ pub async fn handle_key_at(
                     );
                 }
                 let answer = serde_json::to_string(&answers)?;
-                client.reply_question(&id, QuestionReply { answer }).await?;
-                app.question_answered(&id);
+                reply_to_question(app, client, &id, answer).await?;
                 return Ok(AppAction::Continue);
             }
             KeyCode::Enter if plain => {
@@ -981,8 +999,7 @@ pub async fn handle_key_at(
                     app.question_choice(app.question_selection)
                 };
                 if let Some(answer) = answer {
-                    client.reply_question(&id, QuestionReply { answer }).await?;
-                    app.question_answered(&id);
+                    reply_to_question(app, client, &id, answer).await?;
                 }
                 return Ok(AppAction::Continue);
             }
@@ -1013,10 +1030,7 @@ pub async fn handle_key_at(
                     return Ok(AppAction::Continue);
                 }
                 if let Some(choice) = app.question_choice(index) {
-                    client
-                        .reply_question(&id, QuestionReply { answer: choice })
-                        .await?;
-                    app.question_answered(&id);
+                    reply_to_question(app, client, &id, choice).await?;
                     return Ok(AppAction::Continue);
                 }
             }

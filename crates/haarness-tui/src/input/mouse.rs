@@ -308,10 +308,7 @@ async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> 
             let Some(answer) = app.question_choice(index) else {
                 return Ok(AppAction::Continue);
             };
-            client
-                .reply_question(&id, haarness_protocol::QuestionReply { answer })
-                .await?;
-            app.question_answered(&id);
+            crate::input::reply_to_question(app, client, &id, answer).await?;
             app.hovered_cell = None;
         }
         HitTarget::QueueList => app.open_input_queue(client).await?,

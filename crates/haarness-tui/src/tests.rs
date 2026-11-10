@@ -8369,6 +8369,111 @@ async fn esc_on_a_card_closes_it_only_when_the_reject_lands_or_was_settled() {
 }
 
 #[tokio::test]
+async fn a_question_closed_elsewhere_goes_quietly_and_a_failed_reply_keeps_it() {
+    let thread = fixture_thread();
+    let asked = async || {
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        let question = serde_json::json!({
+            "questionId": "q-settled",
+            "prompt": "Which branch?",
+            "choices": ["main", "dev"],
+            "multiple": false,
+            "custom": false,
+        });
+        app.reduce(
+            fixture_event("question.requested", thread.id, thread.id, question),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        app
+    };
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    // Enter on a choice, its digit, and Esc's cancellation all reach a
+    // question the server no longer holds: the card goes, saying so.
+    for press in [KeyCode::Enter, KeyCode::Char('2'), KeyCode::Esc] {
+        let mut app = asked().await;
+        let (client, seen) = answering_server(thread.id, "settled").await;
+        crate::input::handle_key(&mut app, key(press), &client)
+            .await
+            .unwrap();
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.starts_with("POST /v1/questions/q-settled ")),
+            "{press:?}"
+        );
+        assert!(app.pending_questions.is_empty(), "{press:?}");
+        assert_eq!(app.notice, "Already answered", "{press:?}");
+    }
+
+    // A cancellation that lands still says so.
+    let mut app = asked().await;
+    let (client, _) = answering_server(thread.id, "ok").await;
+    crate::input::handle_key(&mut app, key(KeyCode::Esc), &client)
+        .await
+        .unwrap();
+    assert!(app.pending_questions.is_empty());
+    assert_eq!(app.notice, "Question cancelled");
+
+    // Any other failure leaves the question waiting, the error the caller's.
+    let mut app = asked().await;
+    let (client, _) = answering_server(thread.id, "proxy").await;
+    for press in [KeyCode::Enter, KeyCode::Esc] {
+        assert!(
+            crate::input::handle_key(&mut app, key(press), &client)
+                .await
+                .is_err()
+        );
+        assert_eq!(app.pending_questions.len(), 1, "{press:?}");
+    }
+
+    // A click on a choice takes the same path.
+    let mut app = asked().await;
+    let rendered = crate::view::transcript::transcript_lines(&app, 80);
+    let row = rendered
+        .tags
+        .iter()
+        .find(|(_, target)| matches!(target, crate::view::frame::HitTarget::QuestionChoice(1)))
+        .map(|(row, _)| *row)
+        .expect("second choice hit row");
+    app.hit_rows.replace(
+        rendered
+            .tags
+            .iter()
+            .map(|(row, target)| crate::view::frame::HitRegion {
+                row: *row,
+                start: 0,
+                end: 80,
+                target: target.clone(),
+                paint_hover: false,
+            })
+            .collect(),
+    );
+    let (client, _) = answering_server(thread.id, "settled").await;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        crate::input::mouse::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind,
+                column: 2,
+                row: u16::try_from(row).unwrap(),
+                modifiers: KeyModifiers::NONE,
+            },
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(app.pending_questions.is_empty());
+    assert_eq!(app.notice, "Already answered");
+}
+
+#[tokio::test]
 async fn in_a_chat_already_in_auto_u_types_instead_of_staging_auto() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
