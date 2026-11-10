@@ -8197,12 +8197,14 @@ async fn auto_turning_on_keeps_the_cards_focus_and_a_re_announce_keeps_every_car
     assert_eq!(focused(&app), PermissionChoice::Once);
 }
 
-/// A server that answers each request by its path: `POST
-/// /v1/permissions/…` with `permission`, `PUT …/approval-mode` with Auto.
-/// It hands back the request lines it saw.
+/// A server that answers each request by its path: a `POST` reply to
+/// `/v1/permissions/…` or `/v1/questions/…` as `reply` says (`"ok"` takes
+/// it, `"settled"` no longer holds the request, anything else is a proxy's
+/// 404), `PUT …/approval-mode` with Auto. It hands back the request lines it
+/// saw.
 async fn answering_server(
     thread: ThreadId,
-    permission: &'static str,
+    reply: &'static str,
 ) -> (
     crate::api::ApiClient,
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -8241,8 +8243,11 @@ async fn answering_server(
             let text = String::from_utf8_lossy(&request).into_owned();
             let line = text.lines().next().unwrap_or_default().to_owned();
             log.lock().unwrap().push(line.clone());
-            let (status, body) = if line.starts_with("POST /v1/permissions/") {
-                match permission {
+            let (status, body) = if line.starts_with("POST /v1/permissions/")
+                || line.starts_with("POST /v1/questions/")
+            {
+                match reply {
+                    "ok" => ("204 No Content", String::new()),
                     "settled" => (
                         "404 Not Found",
                         serde_json::json!({"code": "not_found", "message": "not found: permission perm-1", "retryable": false}).to_string(),
@@ -8332,6 +8337,35 @@ async fn a_card_answered_already_goes_quietly_and_once_plus_auto_still_turns_aut
         "{}",
         app.notice
     );
+}
+
+#[tokio::test]
+async fn esc_on_a_card_closes_it_only_when_the_reject_lands_or_was_settled() {
+    let thread = fixture_thread();
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    for (reply, closes, notice) in [
+        ("ok", true, "Permission rejected"),
+        ("settled", true, "Already answered"),
+        ("proxy", false, "Could not answer permission"),
+    ] {
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.pending_permissions
+            .push(pending_permission_fixture(&thread, "perm-esc"));
+        app.permission_focus = true;
+        let (client, seen) = answering_server(thread.id, reply).await;
+        crate::input::handle_key(&mut app, esc, &client)
+            .await
+            .unwrap();
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.starts_with("POST /v1/permissions/perm-esc ")),
+            "{reply}"
+        );
+        assert_eq!(app.pending_permissions.is_empty(), closes, "{reply}");
+        assert!(app.notice.starts_with(notice), "{reply}: {}", app.notice);
+    }
 }
 
 #[tokio::test]

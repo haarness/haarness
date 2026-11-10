@@ -155,41 +155,67 @@ pub(crate) async fn answer_permission(
         'r' => PermissionReplyDecision::AlwaysRepository,
         _ => PermissionReplyDecision::Reject,
     };
-    // A failed reply (typically: the server already resolved this prompt
-    // through a cascade) drops the stale entry rather than erroring the
-    // whole app.
+    let reply = reply_to_permission(app, client, &id, decision).await;
+    // Once + Auto switches the chat even when something else answered this
+    // request first; a failed reply never does.
+    if choice == 'u' && reply != PermissionReplied::Failed {
+        app.set_approval_mode(haarness_protocol::ApprovalMode::Auto, client)
+            .await;
+        if reply == PermissionReplied::Settled {
+            app.notice = app.language.text("Already answered").into();
+        }
+    }
+    Ok(())
+}
+
+/// How a reply to a permission request ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PermissionReplied {
+    /// The server took the answer.
+    Sent,
+    /// The server no longer held the request: Auto's reviewer or another
+    /// client settled it first.
+    Settled,
+    /// Anything else (a timeout, a proxy, a host that went away): the
+    /// request may still be waiting.
+    Failed,
+}
+
+/// Send `decision` for permission `id` and settle its card by the outcome,
+/// the one path every answer takes, keys, chips, clicks and Esc alike. A
+/// request already settled goes with one quiet line; a failed reply keeps
+/// the card on screen with the error, since the agent is still waiting.
+async fn reply_to_permission(
+    app: &mut App,
+    client: &ApiClient,
+    id: &str,
+    decision: PermissionReplyDecision,
+) -> PermissionReplied {
     let result = client
         .reply_permission(
-            &id,
+            id,
             PermissionReply {
                 decision,
                 feedback: None,
             },
         )
         .await;
-    if let Err(error) = result {
-        // Settled already (Auto's reviewer, another client): the card goes
-        // with one quiet line, and Once + Auto still switches the chat.
-        if crate::api::refusal_code(&error) == Some("not_found") {
-            app.permission_answered(&id);
-            if choice == 'u' {
-                app.set_approval_mode(haarness_protocol::ApprovalMode::Auto, client)
-                    .await;
-            }
-            app.notice = app.language.text("Already answered").into();
-            return Ok(());
+    match result {
+        Ok(()) => {
+            app.auto_permissions_seen.insert(id.to_owned(), true);
+            app.permission_answered(id);
+            PermissionReplied::Sent
         }
-        // Keep the request visible when a reply fails; never enable Auto on failure.
-        app.notice = format!("Could not answer permission: {error}");
-        return Ok(());
+        Err(error) if crate::api::refusal_code(&error) == Some("not_found") => {
+            app.permission_answered(id);
+            app.notice = app.language.text("Already answered").into();
+            PermissionReplied::Settled
+        }
+        Err(error) => {
+            app.notice = format!("Could not answer permission: {error}");
+            PermissionReplied::Failed
+        }
     }
-    app.auto_permissions_seen.insert(id.clone(), true);
-    app.permission_answered(&id);
-    if choice == 'u' {
-        app.set_approval_mode(haarness_protocol::ApprovalMode::Auto, client)
-            .await;
-    }
-    Ok(())
 }
 
 /// How long a choice staged by its letter must have been on screen before the
@@ -777,17 +803,11 @@ pub async fn handle_key_at(
                             app.update_permission_notice();
                         } else if let Some(pending) = app.first_pending_permission() {
                             let id = pending.permission_id.clone();
-                            let _ = client
-                                .reply_permission(
-                                    &id,
-                                    PermissionReply {
-                                        decision: PermissionReplyDecision::Reject,
-                                        feedback: None,
-                                    },
-                                )
-                                .await;
-                            app.permission_answered(&id);
-                            app.notice = "Permission rejected".into();
+                            let decision = PermissionReplyDecision::Reject;
+                            let reply = reply_to_permission(app, client, &id, decision).await;
+                            if reply == PermissionReplied::Sent {
+                                app.notice = "Permission rejected".into();
+                            }
                         }
                         return Ok(AppAction::Continue);
                     }
