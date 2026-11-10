@@ -11,6 +11,7 @@ import time
 import urllib.request
 
 import e2e_scratch
+import e2e_tmux
 
 repo = Path(__file__).resolve().parents[1]
 binary = str(Path(os.environ.get('HAARNESS_BIN', repo / 'target/debug/haarness')).resolve())
@@ -143,6 +144,19 @@ try:
     check('f2-preserves-unsent-draft', len(api('/threads/' + thread + '/items')) == before and 'DRAFT-F2' in pane())
     keys('Escape')
     check('enter-still-submits', submit(thread) == 'DRAFT-F2')
+    # A program before the TUI left the keypad in application mode (ESC =), where tmux sends
+    # keypad digits as ESC O q, ESC O r, which typed nothing: the TUI's own numeric mode makes
+    # them type. (tmux sends the keypad's Enter as a line feed in numeric mode, which reads as
+    # Ctrl+J, so the main Enter sends here.)
+    thread = api('/threads', {'title': 'keypad', 'provider': 'echo', 'model': 'echo-1'})['id']
+    subprocess.run(['tmux', '-L', socket, 'kill-session', '-t', session], capture_output=True)
+    keypad = ['sh', '-c', 'printf "\\033="; exec "$@"', 'sh', *args, '--thread', thread]
+    tmux('new-session', '-d', '-x', '120', '-y', '36', '-s', session, e2e_tmux.pane_command(env, keypad))
+    until(lambda: 'h a a r n e s s' in pane(), 'TUI did not launch')
+    keys('KP1', 'KP2')
+    check('keypad-digits-type', tmux('display', '-p', '-t', session, '#{keypad_flag}').strip() == '0'
+          and any(line.strip() == '12' for line in pane().splitlines()[-6:]))
+    check('keypad-digits-send', submit(thread) == '12')
     thread = new('normal-draft-mode')
     text('printf THIS-IS-A-CHAT-MESSAGE')
     keys('M-n')

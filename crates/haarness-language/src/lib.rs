@@ -1473,13 +1473,29 @@ fn language_id(config: &LspServerConfig, file: &Path) -> String {
             "py" | "pyi" => "python".into(),
             "go" => "go".into(),
             "c" | "h" => "c".into(),
-            "cc" | "cpp" | "cxx" | "hpp" => "cpp".into(),
+            "cc" | "cpp" | "cxx" | "c++" | "hh" | "hpp" | "hxx" | "h++" | "ipp" | "inl"
+            | "cppm" | "ccm" | "cxxm" | "c++m" | "ixx" => "cpp".into(),
             "sh" | "bash" => "shellscript".into(),
             "yaml" | "yml" => "yaml".into(),
             "toml" => "toml".into(),
             _ => bare.to_owned(),
         })
 }
+
+/// C and C++ sources and headers clangd reads on its own, with no compile
+/// database: the compiler driver knows each of these spellings.
+const CLANGD_FILES: &[&str] = &[
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".c++", ".hh", ".hpp", ".hxx", ".h++",
+];
+
+/// What clang-format formats: those, inline and template implementation files,
+/// and C++20 module interface units. clangd is left these: without a compile
+/// database the driver has no file type for them, or parses `export module`
+/// as an error, and its diagnostics would reach the model after every edit.
+const CLANG_FORMAT_FILES: &[&str] = &[
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".c++", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".inl",
+    ".cppm", ".ccm", ".cxxm", ".c++m", ".ixx",
+];
 
 fn server(command: &[&str], extensions: &[&str]) -> LspServerConfig {
     LspServerConfig {
@@ -1504,10 +1520,7 @@ fn builtin_servers() -> BTreeMap<String, LspServerConfig> {
             server(&["pyright-langserver", "--stdio"], &[".py", ".pyi"]),
         ),
         ("gopls".into(), server(&["gopls"], &[".go"])),
-        (
-            "clangd".into(),
-            server(&["clangd"], &[".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"]),
-        ),
+        ("clangd".into(), server(&["clangd"], CLANGD_FILES)),
         (
             "bash".into(),
             server(&["bash-language-server", "start"], &[".sh", ".bash"]),
@@ -1553,10 +1566,7 @@ fn builtin_formatters() -> BTreeMap<String, FormatterDefinition> {
         ),
         (
             "clang-format".into(),
-            formatter(
-                &["clang-format", "-i", "$FILE"],
-                &[".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"],
-            ),
+            formatter(&["clang-format", "-i", "$FILE"], CLANG_FORMAT_FILES),
         ),
         (
             "shfmt".into(),
@@ -1693,5 +1703,42 @@ mod tests {
         let formatters = builtin_formatters();
         assert!(formatters.contains_key("rustfmt"));
         assert!(formatters.contains_key("prettier"));
+    }
+
+    #[test]
+    fn every_cpp_spelling_is_cpp_and_clangd_gets_only_what_it_can_read() {
+        let clangd = &builtin_servers()["clangd"];
+        let clang_format = &builtin_formatters()["clang-format"];
+        let reads = |config: &LspServerConfig, name: &str| {
+            matches_file(&config.extensions, &config.filenames, Path::new(name))
+        };
+        let formats = |name: &str| {
+            matches_file(
+                &clang_format.extensions,
+                &clang_format.filenames,
+                Path::new(name),
+            )
+        };
+        for name in [
+            "a.cc", "a.cpp", "a.cxx", "a.c++", "a.hh", "a.hpp", "a.hxx", "a.h++", "A.HXX",
+        ] {
+            assert_eq!(language_id(clangd, Path::new(name)), "cpp", "{name}");
+            assert!(reads(clangd, name), "{name}");
+            assert!(formats(name), "{name}");
+        }
+        // Without a compile database clangd cannot read these, so it is not
+        // started for them; they are still C++ and clang-format takes them.
+        for name in [
+            "a.ipp", "a.inl", "a.cppm", "a.ccm", "a.cxxm", "a.c++m", "a.ixx", "A.IXX",
+        ] {
+            assert_eq!(language_id(clangd, Path::new(name)), "cpp", "{name}");
+            assert!(!reads(clangd, name), "{name}");
+            assert!(formats(name), "{name}");
+        }
+        for name in ["a.c", "a.h"] {
+            assert_eq!(language_id(clangd, Path::new(name)), "c", "{name}");
+            assert!(reads(clangd, name), "{name}");
+        }
+        assert!(!reads(clangd, "a.rs"));
     }
 }

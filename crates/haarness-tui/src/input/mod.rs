@@ -155,41 +155,115 @@ pub(crate) async fn answer_permission(
         'r' => PermissionReplyDecision::AlwaysRepository,
         _ => PermissionReplyDecision::Reject,
     };
-    // A failed reply (typically: the server already resolved this prompt
-    // through a cascade) drops the stale entry rather than erroring the
-    // whole app.
+    let reply = reply_to_permission(app, client, &id, decision).await;
+    // Once + Auto switches the chat even when something else answered this
+    // request first; a failed reply never does.
+    if choice == 'u' && reply != PermissionReplied::Failed {
+        app.set_approval_mode(haarness_protocol::ApprovalMode::Auto, client)
+            .await;
+        if reply == PermissionReplied::Settled {
+            app.notice = app.language.text("Already answered").into();
+        }
+    }
+    Ok(())
+}
+
+/// How a reply to a permission request ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PermissionReplied {
+    /// The server took the answer.
+    Sent,
+    /// The server no longer held the request: Auto's reviewer or another
+    /// client settled it first.
+    Settled,
+    /// Anything else (a timeout, a proxy, a host that went away): the
+    /// request may still be waiting.
+    Failed,
+}
+
+/// Send `decision` for permission `id` and settle its card by the outcome,
+/// the one path every answer takes, keys, chips, clicks and Esc alike. A
+/// request already settled goes with one quiet line; a failed reply keeps
+/// the card on screen with the error, since the agent is still waiting.
+async fn reply_to_permission(
+    app: &mut App,
+    client: &ApiClient,
+    id: &str,
+    decision: PermissionReplyDecision,
+) -> PermissionReplied {
     let result = client
         .reply_permission(
-            &id,
+            id,
             PermissionReply {
                 decision,
                 feedback: None,
             },
         )
         .await;
-    if let Err(error) = result {
-        // Settled already (Auto's reviewer, another client): the card goes
-        // with one quiet line, and Once + Auto still switches the chat.
-        if crate::api::refusal_code(&error) == Some("not_found") {
-            app.permission_answered(&id);
-            if choice == 'u' {
-                app.set_approval_mode(haarness_protocol::ApprovalMode::Auto, client)
-                    .await;
-            }
-            app.notice = app.language.text("Already answered").into();
-            return Ok(());
+    match result {
+        Ok(()) => {
+            app.auto_permissions_seen.insert(id.to_owned(), true);
+            app.permission_answered(id);
+            PermissionReplied::Sent
         }
-        // Keep the request visible when a reply fails; never enable Auto on failure.
-        app.notice = format!("Could not answer permission: {error}");
-        return Ok(());
+        Err(error) if crate::api::refusal_code(&error) == Some("not_found") => {
+            app.permission_answered(id);
+            app.notice = app.language.text("Already answered").into();
+            PermissionReplied::Settled
+        }
+        Err(error) => {
+            app.notice = app.language.format(
+                "Could not answer permission: {error}",
+                &[("error", &error.to_string())],
+            );
+            PermissionReplied::Failed
+        }
     }
-    app.auto_permissions_seen.insert(id.clone(), true);
-    app.permission_answered(&id);
-    if choice == 'u' {
-        app.set_approval_mode(haarness_protocol::ApprovalMode::Auto, client)
-            .await;
+}
+
+/// Send `answer` to question `id` and close its card. A question the server
+/// no longer holds (answered from another client, or its turn ended) closes
+/// too, with one quiet line, and gives false; any other failure keeps the
+/// card and is the caller's error.
+pub(crate) async fn reply_to_question(
+    app: &mut App,
+    client: &ApiClient,
+    id: &str,
+    answer: String,
+) -> Result<bool> {
+    match client.reply_question(id, QuestionReply { answer }).await {
+        Ok(()) => {
+            app.question_answered(id);
+            Ok(true)
+        }
+        Err(error) if crate::api::refusal_code(&error) == Some("not_found") => {
+            app.question_answered(id);
+            app.notice = app.language.text("Already answered").into();
+            Ok(false)
+        }
+        Err(error) => Err(error),
     }
-    Ok(())
+}
+
+/// An answer typed for a question that did not take it goes back into the
+/// prompt as it was, pastes and picks included: for another try when the
+/// reply failed (the question still waits), and as a draft when the question
+/// had closed already, unless another question waits now, whose answer the
+/// prompt would send it as. ↑ recalls it from the history either way.
+fn give_back_typed_answer(
+    app: &mut App,
+    typed: Option<crate::input::composer::SetAside>,
+    sent: &Result<bool>,
+) {
+    let give_back = match sent {
+        Ok(answered) => !answered && app.first_pending_question().is_none(),
+        Err(_) => true,
+    };
+    if let Some(typed) = typed
+        && give_back
+    {
+        app.composer.restore(typed);
+    }
 }
 
 /// How long a choice staged by its letter must have been on screen before the
@@ -777,17 +851,11 @@ pub async fn handle_key_at(
                             app.update_permission_notice();
                         } else if let Some(pending) = app.first_pending_permission() {
                             let id = pending.permission_id.clone();
-                            let _ = client
-                                .reply_permission(
-                                    &id,
-                                    PermissionReply {
-                                        decision: PermissionReplyDecision::Reject,
-                                        feedback: None,
-                                    },
-                                )
-                                .await;
-                            app.permission_answered(&id);
-                            app.notice = "Permission rejected".into();
+                            let decision = PermissionReplyDecision::Reject;
+                            let reply = reply_to_permission(app, client, &id, decision).await;
+                            if reply == PermissionReplied::Sent {
+                                app.notice = app.language.text("Permission rejected").into();
+                            }
                         }
                         return Ok(AppAction::Continue);
                     }
@@ -906,17 +974,12 @@ pub async fn handle_key_at(
                 // The protocol's question channel is textual; resolve it with
                 // an explicit cancellation answer so the waiting tool does not
                 // hang.
-                client
-                    .reply_question(
-                        &id,
-                        QuestionReply {
-                            answer: "Cancelled by user".into(),
-                        },
-                    )
-                    .await?;
-                app.question_answered(&id);
+                let cancelled =
+                    reply_to_question(app, client, &id, "Cancelled by user".into()).await?;
                 app.composer.clear();
-                app.notice = "Question cancelled".into();
+                if cancelled {
+                    app.notice = app.language.text("Question cancelled").into();
+                }
                 return Ok(AppAction::Continue);
             }
             KeyCode::Enter
@@ -935,7 +998,9 @@ pub async fn handle_key_at(
                     .iter()
                     .filter_map(|index| question.choices.get(*index).cloned())
                     .collect::<Vec<_>>();
+                let mut typed = None;
                 if question.custom && !app.composer.text().trim().is_empty() {
+                    typed = Some(app.composer.copy_aside());
                     // A pick in an answer is its `@name`, never its marker.
                     let custom = crate::resource_mentions::plain(&app.composer.take());
                     app.save_prompt_history();
@@ -948,21 +1013,25 @@ pub async fn handle_key_at(
                     );
                 }
                 let answer = serde_json::to_string(&answers)?;
-                client.reply_question(&id, QuestionReply { answer }).await?;
-                app.question_answered(&id);
+                let sent = reply_to_question(app, client, &id, answer).await;
+                give_back_typed_answer(app, typed, &sent);
+                sent?;
                 return Ok(AppAction::Continue);
             }
             KeyCode::Enter if plain => {
-                let answer = if custom_allowed && !app.composer.text().trim().is_empty() {
-                    let answer = crate::resource_mentions::plain(&app.composer.take());
+                let typed = (custom_allowed && !app.composer.text().trim().is_empty())
+                    .then(|| app.composer.copy_aside());
+                let answer = if typed.is_some() {
+                    let text = app.composer.take();
                     app.save_prompt_history();
-                    Some(answer)
+                    Some(crate::resource_mentions::plain(&text))
                 } else {
                     app.question_choice(app.question_selection)
                 };
                 if let Some(answer) = answer {
-                    client.reply_question(&id, QuestionReply { answer }).await?;
-                    app.question_answered(&id);
+                    let sent = reply_to_question(app, client, &id, answer).await;
+                    give_back_typed_answer(app, typed, &sent);
+                    sent?;
                 }
                 return Ok(AppAction::Continue);
             }
@@ -993,10 +1062,7 @@ pub async fn handle_key_at(
                     return Ok(AppAction::Continue);
                 }
                 if let Some(choice) = app.question_choice(index) {
-                    client
-                        .reply_question(&id, QuestionReply { answer: choice })
-                        .await?;
-                    app.question_answered(&id);
+                    reply_to_question(app, client, &id, choice).await?;
                     return Ok(AppAction::Continue);
                 }
             }

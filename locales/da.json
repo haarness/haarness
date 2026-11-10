@@ -3155,5 +3155,12 @@
   "add credits or choose a plan": "tilføj kreditter eller vælg et abonnement",
   "add credits with /billing topup": "tilføj kreditter med /billing topup",
   "turn on overage so your purchased credits pay": "slå overforbrug til, så dine købte kreditter betaler",
-  "add credits and turn on overage to keep working": "tilføj kreditter og slå overforbrug til for at arbejde videre"
+  "add credits and turn on overage to keep working": "tilføj kreditter og slå overforbrug til for at arbejde videre",
+  "Permission rejected": "Tilladelse afvist",
+  "Question cancelled": "Spørgsmål annulleret",
+  "Could not answer permission: {error}": "Kunne ikke besvare tilladelsen: {error}",
+  "↑ parent": "↑ overordnet",
+  "← previous": "← forrige",
+  "next →": "næste →",
+  "Child agent view — ↑ parent · ←/→ siblings": "Underagentvisning — ↑ overordnet · ←/→ andre underagenter"
 }

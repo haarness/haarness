@@ -233,6 +233,9 @@ pub struct SubjectFit {
     pub expandable: bool,
 }
 
+/// See [`ChildTask::sibling_order`].
+pub type SiblingOrder = (bool, Option<u64>, Option<usize>, uuid::Uuid);
+
 /// Live progress of one child-agent task, keyed by its `task` call id and fed
 /// by `task.updated` events from the server.
 #[derive(Clone)]
@@ -249,9 +252,27 @@ pub struct ChildTask {
     pub tool_calls: u64,
     pub last_tool: Option<String>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Where the call that started this child sits in its conversation's
+    /// transcript, once that call has been read: sibling agents are listed
+    /// and stepped through in the order of their rows there, whatever order
+    /// the server happened to create their threads in.
+    pub call_sequence: Option<u64>,
 }
 
 impl ChildTask {
+    /// How this child, listed under its call id `row`, sorts among its
+    /// siblings: by the call that started it, then by its step in that call
+    /// (the children of one `batch` call share the call), then, for a call
+    /// not read yet, by thread id, which follows creation.
+    pub fn sibling_order(&self, row: &str) -> SiblingOrder {
+        (
+            self.call_sequence.is_none(),
+            self.call_sequence,
+            batch_step(row),
+            self.child_thread_id.0,
+        )
+    }
+
     pub fn is_active(&self) -> bool {
         !matches!(
             self.state.as_str(),
@@ -377,6 +398,24 @@ pub(crate) fn first_task_result(
     })
 }
 
+/// Where the call that started a child agent sits in `items`: its `task`
+/// call, or the `batch` call it ran a step of.
+pub(crate) fn task_call_sequence(items: &[Item], call_id: &str) -> Option<u64> {
+    let batch = batch_parent_call(call_id);
+    items.iter().find_map(|item| match &item.data {
+        ItemData::ToolCall {
+            call_id: candidate,
+            name,
+            ..
+        } if (candidate == call_id && name == "task")
+            || (name == "batch" && batch == Some(candidate.as_str())) =>
+        {
+            Some(item.sequence)
+        }
+        _ => None,
+    })
+}
+
 fn durable_children(items: &[Item]) -> std::collections::HashMap<String, ChildTask> {
     let mut children = std::collections::HashMap::<String, ChildTask>::new();
     let mut child_rows = std::collections::HashMap::<ThreadId, String>::new();
@@ -421,6 +460,7 @@ fn durable_children(items: &[Item]) -> std::collections::HashMap<String, ChildTa
                             tool_calls: 0,
                             last_tool: None,
                             started_at: Some(call.map_or(item.created_at, |call| call.created_at)),
+                            call_sequence: task_call_sequence(items, call_id),
                         },
                     );
                 }
@@ -1451,18 +1491,19 @@ impl App {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(task);
                 }
-                std::collections::hash_map::Entry::Occupied(mut entry)
-                    if matches!(
-                        task.state.as_str(),
-                        "background" | "done" | "failed" | "cancelled" | "interrupted"
-                    ) =>
-                {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let known = entry.get_mut();
+                    known.call_sequence = known.call_sequence.or(task.call_sequence);
                     // A paired durable task result is authoritative after an
                     // SSE replay gap. Preserve richer live activity metadata,
                     // but never leave the lifecycle stuck on running.
-                    entry.get_mut().state = task.state;
+                    if matches!(
+                        task.state.as_str(),
+                        "background" | "done" | "failed" | "cancelled" | "interrupted"
+                    ) {
+                        known.state = task.state;
+                    }
                 }
-                std::collections::hash_map::Entry::Occupied(_) => {}
             }
         }
     }
@@ -3957,6 +3998,12 @@ pub fn default_model_for(
                 .first()
                 .map(|model| (provider.id.clone(), model.id.clone()))
         })
+}
+
+/// The step of a `batch` call that a child's call id names (`<batch>:2`).
+pub(crate) fn batch_step(call_id: &str) -> Option<usize> {
+    batch_parent_call(call_id)?;
+    call_id.rsplit_once(':')?.1.parse().ok()
 }
 
 /// The `batch` call a numbered child call id (`call_x:3`) belongs to.

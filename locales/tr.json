@@ -3155,5 +3155,12 @@
   "add credits or choose a plan": "kredi ekleyin veya bir plan seçin",
   "add credits with /billing topup": "/billing topup ile kredi ekleyin",
   "turn on overage so your purchased credits pay": "satın alınan kredilerinizin ödemesi için aşımı açın",
-  "add credits and turn on overage to keep working": "çalışmaya devam etmek için kredi ekleyin ve aşımı açın"
+  "add credits and turn on overage to keep working": "çalışmaya devam etmek için kredi ekleyin ve aşımı açın",
+  "Permission rejected": "İzin reddedildi",
+  "Question cancelled": "Soru iptal edildi",
+  "Could not answer permission: {error}": "İzin isteği yanıtlanamadı: {error}",
+  "↑ parent": "↑ üst",
+  "← previous": "← önceki",
+  "next →": "sonraki →",
+  "Child agent view — ↑ parent · ←/→ siblings": "Alt ajan görünümü — ↑ üst · ←/→ diğer alt ajanlar"
 }

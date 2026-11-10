@@ -7699,6 +7699,7 @@ fn completed_child_elapsed_time_stops_rendering() {
         tool_calls: 2,
         last_tool: Some("read".into()),
         started_at: Some(started_at),
+        call_sequence: None,
     };
     assert!(task.elapsed_seconds().is_some());
     task.state = "done".into();
@@ -8197,12 +8198,14 @@ async fn auto_turning_on_keeps_the_cards_focus_and_a_re_announce_keeps_every_car
     assert_eq!(focused(&app), PermissionChoice::Once);
 }
 
-/// A server that answers each request by its path: `POST
-/// /v1/permissions/…` with `permission`, `PUT …/approval-mode` with Auto.
-/// It hands back the request lines it saw.
+/// A server that answers each request by its path: a `POST` reply to
+/// `/v1/permissions/…` or `/v1/questions/…` as `reply` says (`"ok"` takes
+/// it, `"settled"` no longer holds the request, anything else is a proxy's
+/// 404), `PUT …/approval-mode` with Auto. It hands back the request lines it
+/// saw.
 async fn answering_server(
     thread: ThreadId,
-    permission: &'static str,
+    reply: &'static str,
 ) -> (
     crate::api::ApiClient,
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -8241,8 +8244,11 @@ async fn answering_server(
             let text = String::from_utf8_lossy(&request).into_owned();
             let line = text.lines().next().unwrap_or_default().to_owned();
             log.lock().unwrap().push(line.clone());
-            let (status, body) = if line.starts_with("POST /v1/permissions/") {
-                match permission {
+            let (status, body) = if line.starts_with("POST /v1/permissions/")
+                || line.starts_with("POST /v1/questions/")
+            {
+                match reply {
+                    "ok" => ("204 No Content", String::new()),
                     "settled" => (
                         "404 Not Found",
                         serde_json::json!({"code": "not_found", "message": "not found: permission perm-1", "retryable": false}).to_string(),
@@ -8332,6 +8338,241 @@ async fn a_card_answered_already_goes_quietly_and_once_plus_auto_still_turns_aut
         "{}",
         app.notice
     );
+}
+
+#[tokio::test]
+async fn esc_on_a_card_closes_it_only_when_the_reject_lands_or_was_settled() {
+    let thread = fixture_thread();
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    for (reply, closes, notice) in [
+        ("ok", true, "Permission rejected"),
+        ("settled", true, "Already answered"),
+        ("proxy", false, "Could not answer permission"),
+    ] {
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.pending_permissions
+            .push(pending_permission_fixture(&thread, "perm-esc"));
+        app.permission_focus = true;
+        let (client, seen) = answering_server(thread.id, reply).await;
+        crate::input::handle_key(&mut app, esc, &client)
+            .await
+            .unwrap();
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.starts_with("POST /v1/permissions/perm-esc ")),
+            "{reply}"
+        );
+        assert_eq!(app.pending_permissions.is_empty(), closes, "{reply}");
+        assert!(app.notice.starts_with(notice), "{reply}: {}", app.notice);
+    }
+    // The band shows a notice as it was set while a card waits, so it is
+    // set in the interface's language.
+    for (reply, notice) in [
+        ("ok", "Berechtigung abgelehnt"),
+        (
+            "proxy",
+            "Berechtigungsanfrage konnte nicht beantwortet werden: ",
+        ),
+    ] {
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.language = crate::locale::Language::German;
+        app.pending_permissions
+            .push(pending_permission_fixture(&thread, "perm-esc"));
+        app.permission_focus = true;
+        let (client, _) = answering_server(thread.id, reply).await;
+        crate::input::handle_key(&mut app, esc, &client)
+            .await
+            .unwrap();
+        assert!(app.notice.starts_with(notice), "{reply}: {}", app.notice);
+    }
+}
+
+#[tokio::test]
+async fn a_question_closed_elsewhere_goes_quietly_and_a_failed_reply_keeps_it() {
+    let thread = fixture_thread();
+    let asked = async || {
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        let question = serde_json::json!({
+            "questionId": "q-settled",
+            "prompt": "Which branch?",
+            "choices": ["main", "dev"],
+            "multiple": false,
+            "custom": false,
+        });
+        app.reduce(
+            fixture_event("question.requested", thread.id, thread.id, question),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        app
+    };
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    // Enter on a choice, its digit, and Esc's cancellation all reach a
+    // question the server no longer holds: the card goes, saying so.
+    for press in [KeyCode::Enter, KeyCode::Char('2'), KeyCode::Esc] {
+        let mut app = asked().await;
+        let (client, seen) = answering_server(thread.id, "settled").await;
+        crate::input::handle_key(&mut app, key(press), &client)
+            .await
+            .unwrap();
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.starts_with("POST /v1/questions/q-settled ")),
+            "{press:?}"
+        );
+        assert!(app.pending_questions.is_empty(), "{press:?}");
+        assert_eq!(app.notice, "Already answered", "{press:?}");
+    }
+
+    // A cancellation that lands still says so.
+    let mut app = asked().await;
+    let (client, _) = answering_server(thread.id, "ok").await;
+    crate::input::handle_key(&mut app, key(KeyCode::Esc), &client)
+        .await
+        .unwrap();
+    assert!(app.pending_questions.is_empty());
+    assert_eq!(app.notice, "Question cancelled");
+
+    // Any other failure leaves the question waiting, the error the caller's.
+    let mut app = asked().await;
+    let (client, _) = answering_server(thread.id, "proxy").await;
+    for press in [KeyCode::Enter, KeyCode::Esc] {
+        assert!(
+            crate::input::handle_key(&mut app, key(press), &client)
+                .await
+                .is_err()
+        );
+        assert_eq!(app.pending_questions.len(), 1, "{press:?}");
+    }
+
+    // A click on a choice takes the same path.
+    let mut app = asked().await;
+    let rendered = crate::view::transcript::transcript_lines(&app, 80);
+    let row = rendered
+        .tags
+        .iter()
+        .find(|(_, target)| matches!(target, crate::view::frame::HitTarget::QuestionChoice(1)))
+        .map(|(row, _)| *row)
+        .expect("second choice hit row");
+    app.hit_rows.replace(
+        rendered
+            .tags
+            .iter()
+            .map(|(row, target)| crate::view::frame::HitRegion {
+                row: *row,
+                start: 0,
+                end: 80,
+                target: target.clone(),
+                paint_hover: false,
+            })
+            .collect(),
+    );
+    let (client, _) = answering_server(thread.id, "settled").await;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        crate::input::mouse::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind,
+                column: 2,
+                row: u16::try_from(row).unwrap(),
+                modifiers: KeyModifiers::NONE,
+            },
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(app.pending_questions.is_empty());
+    assert_eq!(app.notice, "Already answered");
+}
+
+/// A typed answer to a question that did not take it comes back to the
+/// prompt as it was typed, its paste still a chip: as a draft when the
+/// question had closed already, for another try when the reply failed.
+#[tokio::test]
+async fn a_typed_answer_that_did_not_land_comes_back_to_the_prompt() {
+    let thread = fixture_thread();
+    let paste = (1..=12)
+        .map(|line| format!("log line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (reply, closes) in [("settled", true), ("proxy", false)] {
+        let mut app = asked_free_text(&thread, &["q-typed"]).await;
+        let (client, _) = answering_server(thread.id, reply).await;
+        type_text(&mut app, "the release branch ", &client).await;
+        app.paste_into_prompt(&paste, false);
+        let typed = app.composer.text().to_owned();
+        assert!(typed.contains("[#1 pasted 12 lines]"), "{typed}");
+        let sent = crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &client,
+        )
+        .await;
+        assert_eq!(sent.is_ok(), closes, "{reply}");
+        assert_eq!(app.pending_questions.is_empty(), closes, "{reply}");
+        assert_eq!(app.composer.text(), typed, "{reply}");
+        assert!(
+            app.composer.expanded_text().ends_with("log line 12"),
+            "{reply}"
+        );
+    }
+}
+
+/// When the question a typed answer was for had closed and another waits,
+/// the prompt now answers that one: the text is not put there to be sent as
+/// its answer by the next Enter. ↑ still brings it back.
+#[tokio::test]
+async fn a_typed_answer_never_becomes_the_next_questions_answer() {
+    let thread = fixture_thread();
+    let mut app = asked_free_text(&thread, &["q-first", "q-second"]).await;
+    let (client, _) = answering_server(thread.id, "settled").await;
+    type_text(&mut app, "the release branch", &client).await;
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.first_pending_question()
+            .map(|pending| pending.question_id.as_str()),
+        Some("q-second")
+    );
+    assert_eq!(app.notice, "Already answered");
+    assert!(app.composer.is_empty(), "{}", app.composer.text());
+    assert!(app.composer.history_prev());
+    assert_eq!(app.composer.text(), "the release branch");
+}
+
+/// An App with free-text questions waiting, in the order given.
+async fn asked_free_text(thread: &Thread, ids: &[&str]) -> App {
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    for id in ids {
+        let question = serde_json::json!({
+            "questionId": id,
+            "prompt": "Which branch?",
+            "choices": ["main"],
+            "multiple": false,
+            "custom": true,
+        });
+        app.reduce(
+            fixture_event("question.requested", thread.id, thread.id, question),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+    }
+    app
 }
 
 #[tokio::test]
@@ -12981,6 +13222,7 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
             tool_calls: 1,
             last_tool: Some("read".into()),
             started_at: Some(Utc::now()),
+            call_sequence: None,
         },
     );
     let client = offline_client();
@@ -13160,6 +13402,7 @@ fn sidebar_renders_on_wide_terminals_and_collapses_on_narrow() {
             tool_calls: 3,
             last_tool: Some("grep".into()),
             started_at: Some(Utc::now()),
+            call_sequence: None,
         },
     );
     let wide: String = app
@@ -15749,6 +15992,7 @@ fn child_navigation_fixture() -> (App, Thread, Thread, Thread) {
                 tool_calls: 1,
                 last_tool: Some("read".into()),
                 started_at: Some(Utc::now()),
+                call_sequence: None,
             },
         );
     }
@@ -15836,11 +16080,11 @@ async fn clicking_child_header_navigates_to_a_sibling_and_back_to_the_parent() {
 
     let lines = app.lines((100, 30));
     let first_header = lines[0].text();
-    let first_id = first.id.to_string();
     assert!(
-        first_header.contains(crate::view::span::short_id(&first_id)),
+        first_header.contains("build · 1 of 2"),
         "a truncated breadcrumb must retain the current child's discriminator: {first_header}"
     );
+    assert!(!first_header.contains(crate::view::span::short_id(&first.id.to_string())));
     let next = app
         .hit_rows
         .borrow()
@@ -15881,9 +16125,8 @@ async fn clicking_child_header_navigates_to_a_sibling_and_back_to_the_parent() {
 
     let lines = app.lines((100, 30));
     let second_header = lines[0].text();
-    let second_id = second.id.to_string();
     assert!(
-        second_header.contains(crate::view::span::short_id(&second_id)),
+        second_header.contains("build · 2 of 2"),
         "the sibling click must expose the new child's discriminator: {second_header}"
     );
     assert_ne!(
@@ -15924,6 +16167,415 @@ async fn clicking_child_header_navigates_to_a_sibling_and_back_to_the_parent() {
             .is_some_and(|request| request.contains(&format!("/{}/items", root.id))),
         "parent click loaded the wrong thread: {requests:?}"
     );
+}
+
+/// Three agents one reply started, read from the parent's transcript as a
+/// resumed chat reads it: their calls' random ids sort the other way round,
+/// the server created their threads last call first (as it does for calls
+/// that run together), and a later call continued the first agent.
+fn three_children_fixture() -> (App, Vec<Thread>) {
+    let (mut app, root, first, _) = child_navigation_fixture();
+    let mut children = Vec::new();
+    for (index, title) in ["Map the repo", "Read the tests", "Check the docs"]
+        .into_iter()
+        .enumerate()
+    {
+        children.push(Thread {
+            id: ThreadId(uuid::Uuid::from_u128(
+                0x0190_0000_0000_7000_8000_0000_0000_0003 - index as u128,
+            )),
+            title: title.into(),
+            agent: "explore".into(),
+            ..first.clone()
+        });
+    }
+    let mut items = Vec::new();
+    for (call_id, child) in [
+        ("toolu_zz", &children[0]),
+        ("toolu_mm", &children[1]),
+        ("toolu_aa", &children[2]),
+    ] {
+        items.push(ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "task".into(),
+            arguments: serde_json::json!({"prompt": child.title, "agent": "explore"}),
+            provider_metadata: serde_json::Value::Null,
+        });
+    }
+    for (call_id, child) in [
+        ("toolu_aa", &children[2]),
+        ("toolu_mm", &children[1]),
+        ("toolu_zz", &children[0]),
+    ] {
+        items.push(ItemData::TaskLink {
+            call_id: call_id.into(),
+            child_thread_id: child.id,
+        });
+    }
+    items.push(ItemData::ToolCall {
+        call_id: "toolu_ab".into(),
+        name: "task".into(),
+        arguments: serde_json::json!({"prompt": "And the benches", "task_id": children[0].id}),
+        provider_metadata: serde_json::Value::Null,
+    });
+    items.push(ItemData::TaskLink {
+        call_id: "toolu_ab".into(),
+        child_thread_id: children[0].id,
+    });
+    app.thread = root.clone();
+    app.parent_stack.clear();
+    app.children.clear();
+    app.items = items
+        .into_iter()
+        .zip(1..)
+        .map(|(data, sequence)| message_item(sequence, &root, data))
+        .collect();
+    app.hydrate_child_links();
+    app.threads = std::iter::once(root.clone())
+        .chain(children.iter().cloned())
+        .collect();
+    app.thread = children[0].clone();
+    app.items.clear();
+    app.parent_stack.push(root);
+    (app, children)
+}
+
+#[tokio::test]
+async fn left_and_right_step_through_child_agents_in_the_order_they_started() {
+    let (mut app, children) = three_children_fixture();
+    app.agents.push(haarness_protocol::AgentProfile {
+        id: "explore".into(),
+        name: "Explore".into(),
+        description: "Read-only search".into(),
+        hidden: false,
+        max_subagents: 0,
+        mode: Some("subagent".into()),
+        model: None,
+    });
+    let header = |app: &App| app.lines((100, 30))[0].text();
+    assert!(
+        header(&app).contains("Explore · 1 of 3"),
+        "{}",
+        header(&app)
+    );
+    // Each child once, the one continued by a second call included.
+    assert_eq!(
+        app.sibling_children(),
+        children.iter().map(|child| child.id).collect::<Vec<_>>()
+    );
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut visited = Vec::new();
+    for _ in 0..3 {
+        let (client, _) = navigation_client().await;
+        crate::input::handle_key(&mut app, key(KeyCode::Right), &client)
+            .await
+            .unwrap();
+        visited.push((app.thread.id, header(&app)));
+    }
+    assert_eq!(
+        visited.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [children[1].id, children[2].id, children[0].id]
+    );
+    assert!(
+        visited[0].1.contains("Explore · 2 of 3"),
+        "{}",
+        visited[0].1
+    );
+    assert!(
+        visited[1].1.contains("Explore · 3 of 3"),
+        "{}",
+        visited[1].1
+    );
+    assert!(
+        visited[2].1.contains("Explore · 1 of 3"),
+        "{}",
+        visited[2].1
+    );
+
+    // ← from the first wraps round to the last.
+    let (client, _) = navigation_client().await;
+    crate::input::handle_key(&mut app, key(KeyCode::Left), &client)
+        .await
+        .unwrap();
+    assert_eq!(app.thread.id, children[2].id);
+    assert_eq!(app.parent_stack.len(), 1);
+
+    // The sidebar and /tasks list them in that order too.
+    let sidebar = app
+        .lines((140, 30))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let agents = &sidebar[sidebar.find("agents").expect("agents section")..];
+    let rows = ["Map the repo", "Read the tests", "Check the docs"].map(|title| {
+        agents
+            .find(title)
+            .unwrap_or_else(|| panic!("{title}: {sidebar}"))
+    });
+    assert!(rows[0] < rows[1] && rows[1] < rows[2], "{sidebar}");
+    app.open_tasks_overlay();
+    let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
+        panic!("tasks overlay");
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.label.as_str())
+            .collect::<Vec<_>>(),
+        ["Map the repo", "Read the tests", "Check the docs"]
+    );
+}
+
+/// Agents of one reply arrive live in whatever order the server schedules
+/// them (task updates, task states and links, last call first, threads
+/// created that way too), and so do the steps of one `batch` call: they
+/// still line up as the calls and steps that started them.
+#[tokio::test]
+async fn live_children_line_up_as_their_calls_and_batch_steps() {
+    let root = fixture_thread();
+    let mut app = App::new(root.clone(), vec![root.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+    // c1..c4, then batch steps 0..2: thread ids sort the other way round.
+    let child = |index: u128| {
+        ThreadId(uuid::Uuid::from_u128(
+            0x0190_0000_0000_7000_8000_0000_0000_0010 - index,
+        ))
+    };
+    let item = |sequence: u64, data: ItemData| {
+        fixture_event(
+            "item.created",
+            root.id,
+            root.id,
+            serde_json::json!(message_item(sequence, &root, data)),
+        )
+    };
+    let call = |call_id: &str, name: &str| ItemData::ToolCall {
+        call_id: call_id.into(),
+        name: name.into(),
+        arguments: serde_json::json!({"prompt": call_id}),
+        provider_metadata: serde_json::Value::Null,
+    };
+    let update = |call_id: &str, thread: ThreadId| {
+        fixture_event(
+            "task.updated",
+            root.id,
+            root.id,
+            serde_json::json!({"callId": call_id, "childThreadId": thread, "state": "running"}),
+        )
+    };
+    let mut events = vec![
+        item(1, call("c1", "task")),
+        item(2, call("c2", "task")),
+        item(3, call("c3", "task")),
+        item(4, call("c4", "task")),
+        item(5, call("b", "batch")),
+        update("c3", child(2)),
+        update("c2", child(1)),
+        item(
+            6,
+            ItemData::TaskState {
+                call_id: "c4".into(),
+                child_thread_id: child(3),
+                child_turn_id: TurnId::new(),
+                state: "running".into(),
+            },
+        ),
+    ];
+    for (sequence, (call_id, index)) in (7..).zip([("c3", 2), ("c2", 1), ("c1", 0)]) {
+        events.push(item(
+            sequence,
+            ItemData::TaskLink {
+                call_id: call_id.into(),
+                child_thread_id: child(index),
+            },
+        ));
+    }
+    for (call_id, index) in [("b:2", 6), ("b:1", 5), ("b:0", 4)] {
+        events.push(update(call_id, child(index)));
+    }
+    for event in events {
+        app.reduce(event, &client).await.unwrap();
+    }
+    let expected = (0..7).map(child).collect::<Vec<_>>();
+    assert_eq!(app.sibling_children(), expected);
+
+    // A resumed chat reads the same order from its transcript.
+    let mut resumed = App::new(root.clone(), vec![root.clone()], vec![], vec![], vec![]);
+    resumed.items = [
+        call("c1", "task"),
+        call("c2", "task"),
+        call("c3", "task"),
+        call("c4", "task"),
+        call("b", "batch"),
+    ]
+    .into_iter()
+    .chain(
+        [
+            ("b:2", 6),
+            ("c4", 3),
+            ("b:0", 4),
+            ("c3", 2),
+            ("b:1", 5),
+            ("c2", 1),
+            ("c1", 0),
+        ]
+        .map(|(call_id, index)| ItemData::TaskLink {
+            call_id: call_id.into(),
+            child_thread_id: child(index),
+        }),
+    )
+    .zip(1..)
+    .map(|(data, sequence)| message_item(sequence, &root, data))
+    .collect();
+    resumed.hydrate_child_links();
+    assert_eq!(resumed.sibling_children(), expected);
+}
+
+/// With agents that start their own, a child's children are not its
+/// siblings.
+#[test]
+fn a_childs_own_agents_are_not_its_siblings() {
+    let (mut app, children) = three_children_fixture();
+    let grandchild = Thread {
+        id: ThreadId(uuid::Uuid::from_u128(1)),
+        title: "Nested".into(),
+        parent_id: Some(children[0].id),
+        ..children[0].clone()
+    };
+    app.threads.push(grandchild.clone());
+    app.children.insert(
+        "toolu_nested".into(),
+        crate::state::ChildTask {
+            child_thread_id: grandchild.id,
+            child_turn_id: None,
+            invoked_turn_id: None,
+            state: "running".into(),
+            tool_calls: 0,
+            last_tool: None,
+            started_at: None,
+            call_sequence: Some(1),
+        },
+    );
+    assert_eq!(
+        app.sibling_children(),
+        children.iter().map(|child| child.id).collect::<Vec<_>>()
+    );
+    assert!(app.lines((100, 30))[0].text().contains("1 of 3"));
+}
+
+/// A forked chat's child agents step together, those its history brought
+/// along (started by the chat it was forked from) and those started since.
+#[test]
+fn a_forked_chats_copied_and_new_agents_are_siblings_alike() {
+    let (mut app, children) = three_children_fixture();
+    let source = app.parent_stack[0].clone();
+    let fork = Thread {
+        id: ThreadId::new(),
+        title: "Survey, again".into(),
+        parent_id: Some(source.id),
+        ..source.clone()
+    };
+    let mut started_since = children[2].clone();
+    started_since.parent_id = Some(fork.id);
+    for thread in &mut app.threads {
+        if thread.id == started_since.id {
+            thread.parent_id = Some(fork.id);
+        }
+    }
+    app.threads.push(fork.clone());
+    app.parent_stack = vec![fork];
+    let all = children.iter().map(|child| child.id).collect::<Vec<_>>();
+    for (open, place) in [(started_since, "3 of 3"), (children[0].clone(), "1 of 3")] {
+        app.thread = open;
+        assert_eq!(app.sibling_children(), all);
+        let header = app.lines((100, 30))[0].text();
+        assert!(header.contains(place), "{header}");
+    }
+}
+
+/// The child header fits the terminal in every language at every width
+/// from 30 to 120 columns, its place among siblings and its controls whole.
+#[test]
+fn the_child_header_fits_every_width_in_every_language() {
+    let (mut app, children) = three_children_fixture();
+    for parent_title in [
+        "Echo: Reply with only the requested tmux fixture output",
+        "Plan",
+    ] {
+        app.parent_stack[0].title = parent_title.into();
+        for (language, code, _) in crate::locale::Language::ALL {
+            app.language = language;
+            let place = language
+                .text("{index} of {total}")
+                .replace("{index}", "1")
+                .replace("{total}", "3");
+            for siblings in [true, false] {
+                if !siblings {
+                    app.children
+                        .retain(|_, task| task.child_thread_id == children[0].id);
+                }
+                for width in 30..=120 {
+                    let (lines, hits) = crate::view::header_rows(&app, width);
+                    for line in &lines {
+                        assert!(line.width() <= width, "{code} {width}: {}", line.text());
+                    }
+                    assert!(hits.iter().all(|hit| hit.end <= width), "{code} {width}");
+                    let text = lines.iter().map(Line::text).collect::<Vec<_>>().join("\n");
+                    assert!(text.contains('↑'), "{code} {width}: {text}");
+                    if siblings {
+                        assert!(lines[0].text().contains(&place), "{code} {width}: {text}");
+                        assert!(
+                            text.contains('←') && text.contains('→'),
+                            "{code} {width}: {text}"
+                        );
+                    }
+                }
+            }
+            app = three_children_fixture().0;
+            app.parent_stack[0].title = parent_title.into();
+        }
+    }
+}
+
+#[test]
+fn a_lone_child_keeps_its_short_id_and_its_agent_reads_in_the_language() {
+    let (mut app, children) = three_children_fixture();
+    app.language = crate::locale::Language::German;
+    let header = app.lines((140, 30))[0].text();
+    assert!(header.contains("explore · 1 von 3"), "{header}");
+    assert!(
+        header.contains("↑ übergeordnet  ← vorheriger  nächster →"),
+        "{header}"
+    );
+    app.children
+        .retain(|_, task| task.child_thread_id == children[0].id);
+    let header = app.lines((100, 30))[0].text();
+    assert!(
+        header.contains(&format!(
+            "#{}",
+            crate::view::span::short_id(&children[0].id.to_string())
+        )),
+        "{header}"
+    );
+    assert!(!header.contains("1 von 1"), "{header}");
+}
+
+#[test]
+fn a_long_agent_name_leaves_the_childs_place_in_view() {
+    let (mut app, _) = three_children_fixture();
+    app.thread.agent = "documentation-and-release-notes-reviewer".into();
+    for width in [40_u32, 100] {
+        let lines = app.lines((width, 12));
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.width() <= usize::try_from(width).unwrap()),
+            "{width}"
+        );
+        assert!(lines[0].text().contains(" · 1 of 3"), "{}", lines[0].text());
+    }
 }
 
 #[test]
@@ -17926,6 +18578,7 @@ async fn opening_a_foreign_workflow_session_uses_its_launching_parent() {
             tool_calls: 1,
             last_tool: Some("grep".into()),
             started_at: Some(Utc::now()),
+            call_sequence: None,
         },
     );
     let (client, server) = navigation_client().await;
@@ -23725,6 +24378,7 @@ fn report_wording_is_precise() {
             tool_calls: 0,
             last_tool: None,
             started_at: None,
+            call_sequence: None,
         },
     );
     app.children.insert(call, task);

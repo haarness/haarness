@@ -570,6 +570,7 @@ impl App {
                         let row = self
                             .child_row_for_thread(child_thread_id)
                             .unwrap_or_else(|| call_id.to_owned());
+                        let call_sequence = crate::state::task_call_sequence(&self.items, call_id);
                         let task = self.children.entry(row).or_insert(ChildTask {
                             child_thread_id,
                             child_turn_id,
@@ -578,9 +579,11 @@ impl App {
                             tool_calls: 0,
                             last_tool: None,
                             started_at,
+                            call_sequence,
                         });
                         task.child_thread_id = child_thread_id;
                         task.invoked_turn_id = invoked_turn_id.or(task.invoked_turn_id);
+                        task.call_sequence = task.call_sequence.or(call_sequence);
                         if child_turn_id.is_some() {
                             task.child_turn_id = child_turn_id;
                         }
@@ -892,6 +895,8 @@ impl App {
                                 call_id,
                                 child_thread_id,
                             } => {
+                                let call_sequence =
+                                    crate::state::task_call_sequence(&self.items, &call_id);
                                 let row = self
                                     .child_row_for_thread(child_thread_id)
                                     .unwrap_or(call_id);
@@ -903,8 +908,10 @@ impl App {
                                     tool_calls: 0,
                                     last_tool: None,
                                     started_at: Some(item.created_at),
+                                    call_sequence,
                                 });
                                 task.invoked_turn_id = item_turn_id.or(task.invoked_turn_id);
+                                task.call_sequence = task.call_sequence.or(call_sequence);
                             }
                             ItemData::ToolResult {
                                 call_id,
@@ -944,6 +951,8 @@ impl App {
                                 state,
                             } => {
                                 let shared_state = state.clone();
+                                let call_sequence =
+                                    crate::state::task_call_sequence(&self.items, &call_id);
                                 let row = self
                                     .child_row_for_thread(child_thread_id)
                                     .unwrap_or(call_id);
@@ -955,7 +964,9 @@ impl App {
                                     tool_calls: 0,
                                     last_tool: None,
                                     started_at: Some(item.created_at),
+                                    call_sequence,
                                 });
+                                task.call_sequence = task.call_sequence.or(call_sequence);
                                 task.child_thread_id = child_thread_id;
                                 task.child_turn_id = Some(child_turn_id);
                                 task.state.clone_from(&shared_state);

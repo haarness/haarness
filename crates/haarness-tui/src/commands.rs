@@ -4424,7 +4424,7 @@ impl App {
             };
             return;
         }
-        tasks.sort_by(|a, b| a.0.cmp(b.0));
+        tasks.sort_by_key(|(row, task)| task.sibling_order(row));
         let mut entries = Vec::with_capacity(tasks.len());
         for (call_id, task) in tasks {
             let (title, agent) = self.child_task_identity(call_id, task);
@@ -4515,7 +4515,10 @@ impl App {
                 self.turn_started = Some(std::time::Instant::now());
             }
         }
-        self.notice = "Child agent view — ↑ parent · ←/→ siblings".into();
+        self.notice = self
+            .language
+            .text("Child agent view — ↑ parent · ←/→ siblings")
+            .into();
         Ok(())
     }
 
@@ -4625,21 +4628,53 @@ impl App {
         Ok(())
     }
 
+    /// The child agents ← and → step through, in the order the conversation
+    /// started them (its calls' ids are random), each once however many
+    /// calls continued it. A child that another of them started (where
+    /// agents may start their own) is not one of them; the agents of a
+    /// forked chat, copied and new alike, all are.
+    pub(crate) fn sibling_children(&self) -> Vec<haarness_protocol::ThreadId> {
+        let listed = self
+            .children
+            .values()
+            .map(|task| task.child_thread_id)
+            .collect::<std::collections::HashSet<_>>();
+        let sibling = |child: haarness_protocol::ThreadId| {
+            self.threads
+                .iter()
+                .find(|thread| thread.id == child)
+                .and_then(|thread| thread.parent_id)
+                .is_none_or(|parent| !listed.contains(&parent))
+        };
+        let mut first = std::collections::HashMap::new();
+        for (row, task) in &self.children {
+            if !sibling(task.child_thread_id) {
+                continue;
+            }
+            let order = task.sibling_order(row);
+            first
+                .entry(task.child_thread_id)
+                .and_modify(|known: &mut crate::state::SiblingOrder| *known = (*known).min(order))
+                .or_insert(order);
+        }
+        let mut siblings = first.into_iter().collect::<Vec<_>>();
+        siblings.sort_by_key(|(_, order)| *order);
+        siblings
+            .into_iter()
+            .map(|(thread_id, _)| thread_id)
+            .collect()
+    }
+
     /// Move between child-agent threads without growing or losing the parent
     /// breadcrumb stack.
     pub async fn cycle_child(&mut self, direction: isize, client: &ApiClient) -> Result<()> {
         if self.parent_stack.is_empty() || self.children.is_empty() {
             return Ok(());
         }
-        let mut siblings: Vec<_> = self
-            .children
-            .iter()
-            .map(|(call_id, task)| (call_id.clone(), task.child_thread_id))
-            .collect();
-        siblings.sort_by(|left, right| left.0.cmp(&right.0));
+        let siblings = self.sibling_children();
         let Some(current) = siblings
             .iter()
-            .position(|(_, thread_id)| *thread_id == self.thread.id)
+            .position(|thread_id| *thread_id == self.thread.id)
         else {
             return Ok(());
         };
@@ -4651,7 +4686,7 @@ impl App {
         if next == current {
             return Ok(());
         }
-        let thread_id = siblings[next].1;
+        let thread_id = siblings[next];
         if !self.threads.iter().any(|thread| thread.id == thread_id) {
             self.refresh_threads(client).await?;
         }
@@ -4668,7 +4703,10 @@ impl App {
         let result = self.switch_thread(thread, client).await;
         self.parent_stack = stack;
         result?;
-        self.notice = "Child agent view — ↑ parent · ←/→ siblings".into();
+        self.notice = self
+            .language
+            .text("Child agent view — ↑ parent · ←/→ siblings")
+            .into();
         Ok(())
     }
 

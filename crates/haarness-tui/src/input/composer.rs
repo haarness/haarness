@@ -10,7 +10,9 @@ use unicode_segmentation::UnicodeSegmentation as _;
 const PASTE_LINE_THRESHOLD: usize = 8;
 const PASTE_CHAR_THRESHOLD: usize = 1000;
 const UNDO_CAP: usize = 100;
-pub const HISTORY_CAP: usize = 100;
+/// Prompts ↑ reaches back through in a project, and the history file keeps
+/// for it: the text alone, so a long reach costs little.
+pub const HISTORY_CAP: usize = 200;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum LastEdit {
@@ -541,6 +543,12 @@ impl Composer {
         expand(&self.text, &self.expansions)
     }
 
+    /// A copy of the draft as [`Self::set_aside`] would lift it, leaving the
+    /// prompt as it is.
+    pub fn copy_aside(&self) -> SetAside {
+        SetAside(self.edit_snapshot())
+    }
+
     /// Lift the draft out of the prompt whole, collapsed pastes and attached
     /// context included, leaving the prompt empty. History stays put.
     pub fn set_aside(&mut self) -> SetAside {
@@ -850,6 +858,22 @@ mod tests {
         assert!(!c.history_prev());
         assert!(!c.history_next());
         assert_eq!(c.text(), "git diff --stat");
+    }
+
+    #[test]
+    fn history_keeps_the_newest_two_hundred_prompts() {
+        let mut c = Composer::with_history(Vec::new());
+        for index in 0..super::HISTORY_CAP + 50 {
+            c.insert_str(&format!("prompt {index}"));
+            c.take();
+        }
+        let mut recalled = Vec::new();
+        while c.history_prev() {
+            recalled.push(c.text().to_owned());
+        }
+        assert_eq!(recalled.len(), 200);
+        assert_eq!(recalled.first().map(String::as_str), Some("prompt 249"));
+        assert_eq!(recalled.last().map(String::as_str), Some("prompt 50"));
     }
 
     #[test]

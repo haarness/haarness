@@ -194,6 +194,10 @@ fn config_dir() -> Option<PathBuf> {
 /// The prompt history, as `save_scoped_history` keeps it.
 pub(crate) const HISTORY_FILE: &str = "tui-history-v2.json";
 
+/// The most prompt text the history file keeps for one project, as Desktop
+/// keeps for one.
+const HISTORY_BYTES: usize = 1536 * 1024;
+
 /// The text of one of the TUI's own files, or nothing when it is missing.
 pub(crate) fn client_file_text(name: &str) -> String {
     config_dir()
@@ -292,14 +296,22 @@ pub(crate) fn save_scoped_history(scope: &str, thread: &str, text: &str) -> std:
         thread: Some(thread.into()),
         text: text.into(),
     });
-    let mut count = 0;
+    // Newest first, the project keeps what fits both the count and the
+    // byte budget. A prompt too large for what is left (a long paste) is not
+    // saved, and older ones that fit still are; the session that sent it
+    // still recalls it.
+    let (mut count, mut bytes) = (0, 0);
     entries.reverse();
     entries.retain(|entry| {
         if entry.scope != scope {
             return true;
         }
+        if count == HISTORY_CAP || bytes + entry.text.len() > HISTORY_BYTES {
+            return false;
+        }
         count += 1;
-        count <= HISTORY_CAP
+        bytes += entry.text.len();
+        true
     });
     entries.truncate(5000);
     entries.reverse();
@@ -330,6 +342,51 @@ mod history_tests {
             ["latest", "shared", "mine"]
         );
         assert_eq!(super::history_order(&entries, "b", "first"), ["private"]);
+    }
+
+    #[test]
+    fn the_history_file_keeps_two_hundred_prompts_a_project() {
+        let directory =
+            std::env::temp_dir().join(format!("haarness-history-cap-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        super::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+        for index in 0..250 {
+            super::save_scoped_history("a", "chat", &format!("prompt {index}")).unwrap();
+        }
+        super::save_scoped_history("b", "chat", "elsewhere").unwrap();
+        let kept = super::load_scoped_history("a", "chat");
+        let other = super::load_scoped_history("b", "chat");
+        super::THREAD_CONFIG_DIR.set(None);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(kept.len(), super::HISTORY_CAP);
+        assert_eq!(kept.first().map(String::as_str), Some("prompt 50"));
+        assert_eq!(kept.last().map(String::as_str), Some("prompt 249"));
+        assert_eq!(other, ["elsewhere"]);
+    }
+
+    #[test]
+    fn the_history_file_keeps_what_fits_a_projects_byte_budget() {
+        let directory =
+            std::env::temp_dir().join(format!("haarness-history-bytes-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        super::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+        let paste = |index: usize| format!("{index}{}", "x".repeat(600 * 1024));
+        for index in 0..4 {
+            super::save_scoped_history("a", "chat", &paste(index)).unwrap();
+        }
+        super::save_scoped_history("a", "chat", "short").unwrap();
+        let after_pastes = super::load_scoped_history("a", "chat");
+        // One prompt larger than the whole budget is not saved; the rest stay.
+        super::save_scoped_history("a", "chat", &"y".repeat(2 * 1024 * 1024)).unwrap();
+        let after_huge = super::load_scoped_history("a", "chat");
+        let size = std::fs::metadata(directory.join(super::HISTORY_FILE))
+            .unwrap()
+            .len();
+        super::THREAD_CONFIG_DIR.set(None);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(after_pastes, [paste(2), paste(3), "short".into()]);
+        assert_eq!(after_huge, after_pastes);
+        assert!(size < 1600 * 1024, "{size}");
     }
 }
 

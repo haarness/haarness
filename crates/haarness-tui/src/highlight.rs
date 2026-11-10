@@ -310,6 +310,8 @@ pub fn highlight_block(code: &str, language_name: &str, theme: &Theme) -> Vec<Ve
                 "shell" | "zsh" => set.find_syntax_by_token("bash"),
                 "jsonc" => set.find_syntax_by_token("json"),
                 "ts" | "tsx" => set.find_syntax_by_token("typescript"),
+                // C++20 module interface units; the bundled grammar predates them.
+                "cppm" | "ccm" | "cxxm" | "c++m" | "ixx" => set.find_syntax_by_token("cpp"),
                 _ => None,
             });
     let Some(syntax) = syntax else {
@@ -398,6 +400,21 @@ mod tests {
             .iter()
             .find(|span| span.text.contains(text))
             .unwrap_or_else(|| panic!("missing {text:?} in {spans:?}"))
+    }
+
+    #[test]
+    fn cpp_module_files_highlight_as_cpp() {
+        let theme = Theme::editorial_dark();
+        let code = "export module shapes;\nint area(int side) { return side * side; } // square";
+        let cpp = super::highlight_block(code, "cpp", &theme);
+        assert!(cpp[1].iter().any(|span| span.fg == theme.syntax.comment));
+        for extension in ["cppm", "ccm", "cxxm", "c++m", "ixx", "IXX"] {
+            assert_eq!(
+                super::highlight_block(code, extension, &theme),
+                cpp,
+                "{extension}"
+            );
+        }
     }
 
     #[test]

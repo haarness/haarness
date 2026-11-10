@@ -3155,5 +3155,12 @@
   "add credits or choose a plan": "クレジットを追加するかプランを選択",
   "add credits with /billing topup": "/billing topup でクレジットを追加",
   "turn on overage so your purchased credits pay": "超過利用をオンにすると購入済みクレジットで支払えます",
-  "add credits and turn on overage to keep working": "続けるにはクレジットを追加し、超過利用をオンにしてください"
+  "add credits and turn on overage to keep working": "続けるにはクレジットを追加し、超過利用をオンにしてください",
+  "Permission rejected": "権限を拒否しました",
+  "Question cancelled": "質問をキャンセルしました",
+  "Could not answer permission: {error}": "権限リクエストに応答できませんでした: {error}",
+  "↑ parent": "↑ 親",
+  "← previous": "← 前へ",
+  "next →": "次へ →",
+  "Child agent view — ↑ parent · ←/→ siblings": "子エージェントの表示 — ↑ 親 · ←/→ 他の子エージェント"
 }
