@@ -2525,14 +2525,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         // A forced call to a Gemini model through a gateway meets the bound
         // Google refuses under forced calling, as the native adapter does.
-        let forced_gemini = structured_output.is_some()
-            && !native_json
-            && model
-                .rsplit('/')
-                .next()
-                .is_some_and(|name| name.starts_with("gemini-"));
+        // Gemini refuses a few JSON Schema shapes common in MCP tools through
+        // a gateway as it does directly (`gemini_compatible`).
+        let gemini = crate::tool_schema::gemini_model(&model);
+        let forced_gemini = structured_output.is_some() && !native_json && gemini;
         let tools:Vec<_>=requested_tools.into_iter().map(|t|{
-            let parameters = if forced_gemini { crate::gemini::without_max_items(t.input_schema) } else { t.input_schema };
+            let parameters = if gemini { crate::tool_schema::gemini_compatible(t.input_schema) } else { t.input_schema };
+            let parameters = if forced_gemini { crate::gemini::without_max_items(parameters) } else { parameters };
             json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":parameters}})
         }).collect();
         let mut body = json!({"model":model,"messages":messages,"stream":true});
@@ -5092,6 +5091,40 @@ mod tests {
         assert_eq!(requests[0]["tool_choice"], "required");
         assert_eq!(bound(0), None);
         assert_eq!(bound(1), Some(json!(100)));
+    }
+
+    /// Gemini through a gateway refuses the JSON Schema shapes it refuses
+    /// directly; other models get the tool's schema as it is.
+    #[tokio::test]
+    async fn gemini_through_a_gateway_gets_tool_schemas_it_takes() {
+        let (provider, state) = openrouter_fixture(post(completions_recording_headers)).await;
+        let schema = json!({"type":"object","properties":{
+            "pair":{"type":"array","items":[{"type":"string"},{"type":"integer"}]}
+        },"required":["pair","missing"]});
+        for model in ["google/gemini-3.8-flash", "anthropic/claude-haiku-5.5"] {
+            let mut request = short_request();
+            request.model = model.into();
+            request.tools = vec![haarness_core::ToolDefinition {
+                name: "store".into(),
+                description: "store a pair".into(),
+                input_schema: schema.clone(),
+            }];
+            let _ = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+        }
+        let requests = state.0.lock();
+        assert_eq!(
+            requests[0]["tools"][0]["function"]["parameters"],
+            json!({"type":"object","properties":{
+                "pair":{"type":"array","prefixItems":[{"type":"string"},{"type":"integer"}]},
+                "missing":{}
+            },"required":["pair","missing"]})
+        );
+        assert_eq!(requests[1]["tools"][0]["function"]["parameters"], schema);
     }
 
     #[tokio::test]

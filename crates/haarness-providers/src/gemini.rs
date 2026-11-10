@@ -247,7 +247,8 @@ impl ModelProvider for GeminiProvider {
             self.base_url.trim_end_matches('/'),
             request.model
         );
-        let contents = gemini_contents(request.messages)?;
+        let mut contents = gemini_contents(request.messages)?;
+        sign_unsigned_calls(&mut contents, &request.model);
         let structured_output = request.output_schema;
         let mut requested_tools = request.tools;
         if let Some(schema) = structured_output.as_ref() {
@@ -258,10 +259,11 @@ impl ModelProvider for GeminiProvider {
         let declarations: Vec<_> = requested_tools
             .into_iter()
             .map(|t| {
+                let schema = crate::tool_schema::gemini_compatible(t.input_schema);
                 let schema = if forced {
-                    without_max_items(t.input_schema)
+                    without_max_items(schema)
                 } else {
-                    t.input_schema
+                    schema
                 };
                 json!({"name":t.name,"description":t.description,"parametersJsonSchema":schema})
             })
@@ -630,6 +632,51 @@ fn provider_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(error.to_string())
 }
 
+/// What Google asks a replayed function call to carry in place of a thought
+/// signature it no longer has.
+const SKIP_SIGNATURE_CHECK: &str = "skip_thought_signature_validator";
+
+/// Whether `model` refuses a function call of the current turn that comes
+/// without its thought signature ("Function call is missing a
+/// thought_signature in functionCall parts"): Gemini 3 and later, and a
+/// Gemini name without a version, which follows the current models.
+fn checks_call_signatures(model: &str) -> bool {
+    let name = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    name.starts_with("gemini-") && gemini_generation(&name).is_none_or(|generation| generation >= 3)
+}
+
+/// Give the first function call of each model content that has no thought
+/// signature the one Google takes in place of a lost signature. Gemini signs
+/// the first call of every step and refuses a request whose current turn has
+/// an unsigned one: a side question replayed the model's parallel calls one
+/// by one, which left every call after the first unsigned. Calls Haarness
+/// made for the person, or that another model made, carry it too.
+/// Signatures the model gave are kept as they are.
+fn sign_unsigned_calls(contents: &mut [Value], model: &str) {
+    if !checks_call_signatures(model) {
+        return;
+    }
+    for content in contents
+        .iter_mut()
+        .filter(|content| content["role"] == "model")
+    {
+        let Some(parts) = content["parts"].as_array_mut() else {
+            continue;
+        };
+        if let Some(first) = parts
+            .iter_mut()
+            .find(|part| part.get("functionCall").is_some())
+            && first.get("thoughtSignature").is_none()
+        {
+            first["thoughtSignature"] = json!(SKIP_SIGNATURE_CHECK);
+        }
+    }
+}
+
 fn gemini_contents(messages: Vec<ProviderMessage>) -> CoreResult<Vec<Value>> {
     let mut contents = Vec::new();
     let mut function_ids = std::collections::HashMap::new();
@@ -759,7 +806,7 @@ mod tests {
 
     use super::{
         GeminiProvider, api_key_from, discovered_model, gemini_contents, gemini_reasoning_efforts,
-        thinking_config, uses_thinking_level,
+        sign_unsigned_calls, thinking_config, uses_thinking_level,
     };
 
     #[derive(Clone, Default)]
@@ -1526,5 +1573,132 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 1, "{parts:?}");
         assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
+    }
+
+    /// Gemini 3 and later refuse a current-turn call without its thought
+    /// signature ("Function call is missing a thought_signature"), as a
+    /// side question's parallel calls replayed one by one had: each unsigned
+    /// first call of a model content carries the signature Google takes in
+    /// place of a lost one; the model's own signatures stay.
+    #[test]
+    fn unsigned_calls_carry_the_signature_google_takes_for_a_lost_one() {
+        let call = |id: &str, signature: Option<&str>| ProviderMessage::ToolCall {
+            call_id: id.into(),
+            name: "read".into(),
+            arguments: json!({"path": "a.txt"}),
+            provider_metadata: signature.map_or(
+                Value::Null,
+                |signature| json!({"thoughtSignature": signature}),
+            ),
+        };
+        let result = |id: &str| ProviderMessage::ToolResult {
+            call_id: id.into(),
+            name: "read".into(),
+            output: "banana".into(),
+            is_error: false,
+            attachments: Vec::new(),
+        };
+        let history = || {
+            vec![
+                ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "read both".into(),
+                },
+                call("a", Some("sig-a")),
+                result("a"),
+                call("b", None),
+                result("b"),
+                call("c", Some("sig-c")),
+                call("d", None),
+                result("c"),
+                result("d"),
+            ]
+        };
+        let signatures = |contents: &[Value]| -> Vec<Value> {
+            contents
+                .iter()
+                .filter(|content| content["role"] == "model")
+                .flat_map(|content| content["parts"].as_array().unwrap().clone())
+                .map(|part| part["thoughtSignature"].clone())
+                .collect()
+        };
+        for model in [
+            "gemini-4-argon",
+            "gemini-3.8-flash",
+            "models/gemini-flash-latest",
+        ] {
+            let mut contents = gemini_contents(history()).unwrap();
+            sign_unsigned_calls(&mut contents, model);
+            assert_eq!(
+                signatures(&contents),
+                [
+                    json!("sig-a"),
+                    json!("skip_thought_signature_validator"),
+                    json!("sig-c"),
+                    Value::Null
+                ],
+                "{model}"
+            );
+        }
+        // Gemini 2.5 checks no signatures.
+        let mut contents = gemini_contents(history()).unwrap();
+        sign_unsigned_calls(&mut contents, "gemini-2.5-flash");
+        assert_eq!(
+            signatures(&contents),
+            [json!("sig-a"), Value::Null, json!("sig-c"), Value::Null]
+        );
+    }
+
+    /// An MCP tool whose schema Gemini refuses failed every request of the
+    /// chat that loaded it, on every Gemini model: it is sent in the shape
+    /// Gemini takes.
+    #[tokio::test]
+    async fn tool_schemas_are_sent_in_the_shape_gemini_takes() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route(
+                "/models/gemini-3.8-flash:streamGenerateContent",
+                post(structured_content),
+            )
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = GeminiProvider::for_test(format!("http://{address}"));
+        provider
+            .stream(
+                ProviderRequest {
+                    model: "gemini-3.8-flash".into(),
+                    system: "test".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "look it up".into(),
+                    }],
+                    tools: vec![haarness_core::ToolDefinition {
+                        name: "mcp__glossary__lookup".into(),
+                        description: "Look up a word".into(),
+                        input_schema: json!({"type":"object","properties":{
+                            "word":{"type":"string"},
+                            "score":{"type":"number","minimum":0,"exclusiveMinimum":true}
+                        },"required":["word","language"]}),
+                    }],
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            state.0.lock()[0]["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"],
+            json!({"type":"object","properties":{
+                "word":{"type":"string"},
+                "score":{"type":"number","exclusiveMinimum":0},
+                "language":{}
+            },"required":["word","language"]})
+        );
     }
 }
