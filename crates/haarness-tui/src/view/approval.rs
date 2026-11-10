@@ -466,17 +466,6 @@ fn always_rules(
         .filter(|rule| !link_targets(pending).any(|target| target == rule))
         // A bare `*` is the whole category; say so rather than print a glob.
         .map(|rule| {
-            // A shell card also keeps the read of each secret file its line
-            // reads (`read:.env`): named in words, as the headline names the
-            // card's own kind.
-            if let Some(path) = rule
-                .strip_prefix("read:")
-                .filter(|_| category(pending) != "read")
-            {
-                return language
-                    .text("reading {path}")
-                    .replace("{path}", &show(path));
-            }
             if rule == "*" {
                 match category(pending) {
                     "edit" => language.text("every file edit").into(),

@@ -119,14 +119,14 @@ test("Always on a file beside the project names that file, never the folder hold
   expect(errors).toEqual([]);
 });
 
-test("Always on a shell read of .env names that file's read in words, and keeps only it open",async()=>{
+test("Always on a shell read of .env shows the command's rule and keeps only that command open",async()=>{
   await choose(main);await session();
   await send('!tool bash {"command":"cat .env"}');
   await expect(page.getByRole("button",{name:"Allow once",exact:true})).toBeVisible();
   await page.getByRole("button",{name:"Always allow",exact:true}).click();
+  // The menu names the rule the card always named; the exact command Always also keeps is not shown.
   const folder=page.getByRole("menuitem",{name:"Always for this folder",exact:true});
-  await expect(folder).toHaveAttribute("aria-description",/Reading \.env$/);
-  await expect(folder).not.toContainText("read:");
+  await expect(folder).toHaveAttribute("aria-description","Commands starting with cat");
   for(const scheme of ["light","dark"] as const){
     await app.evaluate(({nativeTheme},value)=>{nativeTheme.themeSource=value;},scheme);
     await page.emulateMedia({colorScheme:scheme});
@@ -138,11 +138,13 @@ test("Always on a shell read of .env names that file's read in words, and keeps 
   await expect(page.locator(".transcript")).toContainText("PARITY_SECRET=fixture-only");
   await send('!tool bash {"command":"cat .env"}');await idle();
   await expect(page.getByRole("button",{name:"Allow once",exact:true})).toHaveCount(0);
-  // Another secret file read through the same program still asks.
+  // Another secret file through the same program, and the read tool, still ask.
   await writeFile(join(main,".env.local"),"PARITY_LOCAL=fixture-only");
-  await send('!tool bash {"command":"cat .env.local"}');
-  await expect(page.getByRole("button",{name:"Allow once",exact:true})).toBeVisible();
-  await page.getByRole("button",{name:"Deny",exact:true}).click();await idle();
+  for(const call of ['!tool bash {"command":"cat .env.local"}','!tool read {"path":".env"}']){
+    await send(call);
+    await expect(page.getByRole("button",{name:"Allow once",exact:true})).toBeVisible();
+    await page.getByRole("button",{name:"Deny",exact:true}).click();await idle();
+  }
   await expect(page.locator(".transcript")).not.toContainText("PARITY_LOCAL=fixture-only");
   expect(errors).toEqual([]);
 });

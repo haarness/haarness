@@ -9322,25 +9322,6 @@ fn pending_permission_fixture(
 }
 
 #[test]
-fn a_shell_card_names_the_secret_file_read_its_always_keeps_in_words() {
-    let thread = fixture_thread();
-    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
-    let mut pending = pending_permission_fixture(&thread, "secret-read");
-    pending.operation = "bash:cat .env".into();
-    pending.detail = serde_json::json!({"command": "cat .env"});
-    pending.patterns = vec!["cat .env".into()];
-    pending.always_patterns = vec!["bash:cat *".into(), "read:.env".into()];
-    app.pending_permissions.push(pending);
-    app.permission_focus = true;
-    let text = frame_text(&app, (100, 40));
-    assert!(
-        text.contains("always allows: cat *  reading .env"),
-        "{text}"
-    );
-    assert!(!text.contains("read:"), "{text}");
-}
-
-#[test]
 fn approval_names_the_file_a_linked_path_leads_to() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);

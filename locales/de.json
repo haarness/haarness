@@ -1792,7 +1792,6 @@
   "every URL fetch": "jeder URL-Abruf",
   "every {kind} request": "jede {kind}-Anfrage",
   "only agent {agent} in this chat": "nur Agent {agent} in diesem Chat",
-  "reading {path}": "{path} lesen",
   "1 of {count}": "1 von {count}",
   "{count} more lines": "{count} weitere Zeilen",
   "rejected": "abgelehnt",

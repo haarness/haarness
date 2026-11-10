@@ -1792,7 +1792,6 @@
   "every URL fetch": "toda busca de URL",
   "every {kind} request": "toda solicitação de {kind}",
   "only agent {agent} in this chat": "apenas o agente {agent} neste chat",
-  "reading {path}": "leitura de {path}",
   "1 of {count}": "1 de {count}",
   "{count} more lines": "mais {count} linhas",
   "rejected": "rejeitado",

@@ -248,10 +248,6 @@ export function describeAlwaysRule(
       ? rule.slice(permission.length + 1)
       : rule;
   if (permission === "agent_switch") return t("Only this agent, in this chat");
-  // A shell card also keeps the read of each secret file its line reads
-  // (`read:.env`): it reads as a read card's own rule does.
-  if (permission !== "read" && rule.startsWith("read:"))
-    return t("Reading {path}", { path: rule.slice("read:".length) });
   if (permission === "external_directory") {
     if (pattern === "*") return t("Any folder outside the project");
     // An outside folder that holds the project is remembered by the path

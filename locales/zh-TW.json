@@ -1792,7 +1792,6 @@
   "every URL fetch": "所有 URL 擷取",
   "every {kind} request": "所有 {kind} 請求",
   "only agent {agent} in this chat": "僅限此聊天中的代理程式 {agent}",
-  "reading {path}": "讀取 {path}",
   "1 of {count}": "第 1 個，共 {count} 個",
   "{count} more lines": "還有 {count} 行",
   "rejected": "已拒絕",
