@@ -108,6 +108,7 @@
 | `get_turn` | `getTurn` | `GET /v1/turns/{id}` |
 | `interrupt_turn` | `interruptTurn` | `POST /v1/turns/{id}/interrupt` |
 | `wait_turn` | `waitTurn` | `GET /v1/turns/{id}/wait` |
+| `forwarding_key` | `forwardingKey` | `GET /v1/host/forwarding` |
 | `list_permissions` | `listPermissions` | `GET /v1/permissions` |
 | `reply_permission` | `replyPermission` | `POST /v1/permissions/{id}` |
 | `list_questions` | `listQuestions` | `GET /v1/questions` |

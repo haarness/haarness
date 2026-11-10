@@ -1740,11 +1740,10 @@ impl ApiClient {
             request.follows_background |= self.follows_background;
             request.attachments = self.attachments(request.attachments).await?;
             Ok(self
-                .request(reqwest::Method::POST, &format!("/v1/threads/{id}/turns"))
-                .json(&request)
-                .sent()
-                .await?
-                .checked()
+                .guarded(|| {
+                    self.request(reqwest::Method::POST, &format!("/v1/threads/{id}/turns"))
+                        .json(&request)
+                })
                 .await?
                 .json()
                 .await?)
@@ -1885,36 +1884,46 @@ impl ApiClient {
         id: haarness_protocol::ThreadId,
         request: &haarness_protocol::SetApprovalModeRequest,
     ) -> Result<haarness_protocol::ApprovalModeInfo> {
+        // The caller tells a 409 (changed elsewhere) apart by its status (`refusal_status`).
         Ok(self
-            .request(
-                reqwest::Method::PUT,
-                &format!("/v1/threads/{id}/approval-mode"),
-            )
-            .json(request)
-            .sent()
+            .guarded(|| {
+                self.request(
+                    reqwest::Method::PUT,
+                    &format!("/v1/threads/{id}/approval-mode"),
+                )
+                .json(request)
+            })
             .await?
-            // The caller tells a 409 (changed elsewhere) apart by reqwest's status.
-            .error_for_status()?
             .json()
             .await?)
     }
     pub async fn reply_permission(&self, id: &str, reply: PermissionReply) -> Result<()> {
-        self.request(reqwest::Method::POST, &format!("/v1/permissions/{id}"))
-            .json(&reply)
-            .sent()
-            .await?
-            .checked()
-            .await?;
+        self.guarded(|| {
+            self.request(reqwest::Method::POST, &format!("/v1/permissions/{id}"))
+                .json(&reply)
+        })
+        .await?;
         Ok(())
     }
     pub async fn reply_question(&self, id: &str, reply: QuestionReply) -> Result<()> {
-        self.request(reqwest::Method::POST, &format!("/v1/questions/{id}"))
-            .json(&reply)
-            .sent()
-            .await?
-            .checked()
-            .await?;
+        self.guarded(|| {
+            self.request(reqwest::Method::POST, &format!("/v1/questions/{id}"))
+                .json(&reply)
+        })
+        .await?;
         Ok(())
+    }
+
+    /// Sends what `request` builds, checked, and once more when the server could not find who sent it: that answer
+    /// closed the connection, so the second try comes on a new one.
+    async fn guarded(
+        &self,
+        request: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        match request().sent().await?.checked().await {
+            Err(error) if unknown_sender(&error) => request().sent().await?.checked().await,
+            other => other,
+        }
     }
 
     async fn run_pty_connection(
@@ -2363,6 +2372,15 @@ pub fn missing_undo_copy(error: &anyhow::Error) -> Option<&str> {
         .downcast_ref::<ApiRefusal>()
         .filter(|refusal| refusal.reason.as_deref() == Some("no_undo_copy"))
         .and_then(|refusal| refusal.path.as_deref())
+}
+
+/// Whether `error` is a server's refusal of a request that would let agents do more, because it could not find which
+/// program on this computer sent it: a new try may get past it.
+#[must_use]
+pub fn unknown_sender(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ApiRefusal>()
+        .is_some_and(|refusal| refusal.code.as_deref() == Some("unknown_sender"))
 }
 
 /// The HTTP status of a refused request, whichever way it was checked.

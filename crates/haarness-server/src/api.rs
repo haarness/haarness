@@ -337,6 +337,7 @@ pub async fn serve_with_access(
         .route("/turns/{id}", get(get_turn))
         .route("/turns/{id}/interrupt", post(interrupt_turn))
         .route("/turns/{id}/wait", get(wait_turn))
+        .route("/host/forwarding", get(forwarding_key))
         .route("/permissions", get(list_permissions))
         .route("/permissions/{id}", post(reply_permission))
         .route("/questions", get(list_questions))
@@ -1924,7 +1925,10 @@ async fn set_approval_mode(
 
 /// Refuses what would let agents do more when its sender runs for an agent, saying `refusal`, or cannot be found, in
 /// an answer a client may try again.
-fn guard(sender: crate::request_origin::Sender, refusal: &str) -> Result<(), ApiFailure> {
+pub(crate) fn guard(
+    sender: crate::request_origin::Sender,
+    refusal: &str,
+) -> Result<(), ApiFailure> {
     use crate::request_origin::Sender;
     match sender {
         Sender::Person | Sender::Terminal => Ok(()),
@@ -1937,6 +1941,20 @@ fn guard(sender: crate::request_origin::Sender, refusal: &str) -> Result<(), Api
             Some(haarness_core::UNKNOWN_SENDER.into()),
         )),
     }
+}
+/// This server's key, for a forwarder a person runs (a front, another server's host gateway) to vouch with for who sent
+/// what it forwards. Never for a program that runs for an agent, nor for this server itself.
+async fn forwarding_key(
+    headers: HeaderMap,
+    connection: crate::request_origin::Connection,
+) -> ApiResult<Json<Value>> {
+    guard(
+        crate::request_origin::key_asker(&connection, &headers).await,
+        haarness_core::FORWARDING_REFUSAL,
+    )?;
+    Ok(Json(
+        json!({"key": crate::request_origin::forwarding_key()}),
+    ))
 }
 async fn get_goal(
     State(state): State<ServerState>,
@@ -3670,6 +3688,30 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
 }
 impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
+        // A guarded request whose sender could not be found: a code of its own, and the connection closes with it, so
+        // the client's next try comes on a new one and a forwarder asks for the key again.
+        if matches!(&self.0, CoreError::Conflict(message) if message == haarness_core::UNKNOWN_SENDER)
+        {
+            return (
+                StatusCode::CONFLICT,
+                [
+                    (axum::http::header::CONNECTION, "close"),
+                    (
+                        axum::http::HeaderName::from_static(
+                            crate::request_origin::UNKNOWN_SENDER_HEADER,
+                        ),
+                        "1",
+                    ),
+                ],
+                Json(ApiError {
+                    code: "unknown_sender".into(),
+                    message: haarness_core::UNKNOWN_SENDER.into(),
+                    retryable: true,
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
         let (status, code, retryable) = failure_parts(&self.0);
         let details = match &self.0 {
             CoreError::Refused(refusal) => Some(haarness_protocol::ApiErrorDetails {

@@ -8051,10 +8051,10 @@ async fn parallel_child_questions_hydrate_and_resolve_independently_over_rest() 
         Some(pending[0].question_id.clone())
     );
 
-    // The server runs in this test's own process, which it hears as a request it forwarded: say who sent it.
+    // The server runs in this test's own process, which is its own client here.
+    haarness_server::request_origin::hear_this_process_as_a_person();
     client
         .post(format!("{base}/v1/questions/{}", pending[0].question_id))
-        .header("x-haarness-sender", "person")
         .json(&haarness_protocol::QuestionReply {
             answer: pending[0].choices[0].clone(),
         })
@@ -8078,7 +8078,6 @@ async fn parallel_child_questions_hydrate_and_resolve_independently_over_rest() 
 
     client
         .post(format!("{base}/v1/questions/{}", remaining[0].question_id))
-        .header("x-haarness-sender", "person")
         .json(&haarness_protocol::QuestionReply {
             answer: remaining[0].choices[1].clone(),
         })

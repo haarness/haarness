@@ -5,22 +5,93 @@
 //! from another computer, those the connector brings from phones and Haarness Cloud, and what a person runs in a
 //! terminal Haarness hosts come from people; computer use also refuses those terminals.
 //!
-//! The program at the other end of a connection is found once, in the background, when the connection is accepted
-//! ([`Client`]), and every request on it is judged by that. A request another Haarness program forwards (the host
-//! gateway, a front) carries the forwarder's judgement of its own sender in [`SENDER_HEADER`].
+//! The program at the other end of a connection is found on the first guarded request on it ([`Client`]), and every
+//! later one is judged by that. A request another Haarness program forwards (the host gateway, a front) carries the
+//! forwarder's judgement of its own sender in [`SENDER_HEADER`], vouched for by this server's key in
+//! [`FORWARDER_HEADER`]; the key is only ever in memory, here and in the forwarders a person runs, which ask for it
+//! ([`forwarding_key_of`]). A sender's word without the key counts for nothing but an unknown sender.
 use axum::http::{HeaderMap, HeaderValue};
 use haarness_core::{
     AgentRuntime,
     process_tree::{Peer, peer},
 };
 use haarness_protocol::{ApprovalMode, ApprovalModeSetting, ThreadId};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::sync::OnceCell;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 /// The header a forwarding Haarness program sets on what it forwards: [`Sender`]'s word for whoever sent it the
-/// request. It replaces any the sender wrote; a server takes it at its word only from itself, and otherwise as more
-/// that the request might be.
+/// request, in place of whatever the sender wrote.
 pub const SENDER_HEADER: &str = "x-haarness-sender";
+
+/// The header that vouches for [`SENDER_HEADER`]: the key of the server the request is forwarded to.
+pub const FORWARDER_HEADER: &str = "x-haarness-forwarder";
+
+/// The header on an answer refusing a request whose sender could not be found, so a forwarder asks for the key again.
+pub const UNKNOWN_SENDER_HEADER: &str = "x-haarness-unknown-sender";
+
+/// This server's key, made when it starts and never written anywhere.
+static KEY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    use rand::RngCore as _;
+    let mut bytes = [0_u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+});
+
+/// This server's key, for a forwarder a person runs ([`forwarding_key_of`]).
+#[must_use]
+pub fn forwarding_key() -> &'static str {
+    &KEY
+}
+
+/// The keys of the servers this process forwards to, by address and token.
+static KEYS: std::sync::LazyLock<parking_lot::Mutex<HashMap<(String, String), String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The key of the server at `base` (signed in with `token`), to vouch for what this process forwards there: asked
+/// once. A server does not hand its key to itself, so where it will not answer this process's own key stands in,
+/// which is right when the server is this one and is refused, unknown, by any other.
+pub async fn forwarding_key_of(client: &reqwest::Client, base: &str, token: &str) -> String {
+    let index = (base.trim_end_matches('/').to_owned(), token.to_owned());
+    if let Some(key) = KEYS.lock().get(&index) {
+        return key.clone();
+    }
+    let asked = client
+        .get(format!("{}/v1/host/forwarding", index.0))
+        .bearer_auth(token)
+        .send()
+        .await
+        .ok()
+        .filter(|response| response.status().is_success());
+    let key = match asked {
+        Some(response) => response
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|value| value["key"].as_str().map(str::to_owned)),
+        None => None,
+    }
+    .unwrap_or_else(|| forwarding_key().to_owned());
+    KEYS.lock().insert(index, key.clone());
+    key
+}
+
+/// Forgets the key of the server at `base`, which refused a forwarded request as from an unknown sender: it may have
+/// started again with another.
+pub fn forget_forwarding_key(base: &str, token: &str) {
+    KEYS.lock()
+        .remove(&(base.trim_end_matches('/').to_owned(), token.to_owned()));
+}
+
+/// The headers a forwarder sets on a request it forwards to the server whose key is `key`, saying `sender` sent it.
+#[must_use]
+pub fn forwarded_headers(sender: Sender, key: &str) -> [(&'static str, HeaderValue); 2] {
+    [
+        (SENDER_HEADER, sender.header()),
+        (
+            FORWARDER_HEADER,
+            HeaderValue::from_str(key).unwrap_or_else(|_| HeaderValue::from_static("")),
+        ),
+    ]
+}
 
 /// How long a guarded request waits for its connection's program to be found before it counts as unknown.
 const ATTRIBUTION_WAIT: Duration = Duration::from_secs(10);
@@ -70,29 +141,21 @@ impl Sender {
     }
 }
 
-/// The other end of a connection this server accepted. Its program is found once, in the background, from the moment
-/// the connection is accepted, so a request on it does not wait for that and its sender cannot leave before it.
+/// The other end of a connection this server accepted. Its program is looked for on the first guarded request on it,
+/// while that request waits, so a sender that leaves before the answer is not found; once found, it stands for the
+/// connection's life. A look that found nothing is not kept: the next guarded request looks again.
 #[derive(Clone, Debug)]
 pub struct Client {
     pub address: SocketAddr,
-    peer: Arc<OnceCell<Peer>>,
+    peer: Arc<tokio::sync::Mutex<Option<Peer>>>,
+    lookup: fn(SocketAddr) -> Peer,
 }
 
 impl Client {
-    /// The other end of a connection from `address`, its program looked for at once.
+    /// The other end of a connection from `address`.
     #[must_use]
     pub fn accepted(address: SocketAddr) -> Self {
-        let client = Self {
-            address,
-            peer: Arc::default(),
-        };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let cell = client.peer.clone();
-            runtime.spawn(async move {
-                cell.get_or_init(|| attribute(address)).await;
-            });
-        }
-        client
+        Self::looked_up_with(address, peer)
     }
 
     /// The other end of a connection whose program is already known (tests).
@@ -100,25 +163,40 @@ impl Client {
     pub fn known(address: SocketAddr, peer: Peer) -> Self {
         Self {
             address,
-            peer: Arc::new(OnceCell::new_with(Some(peer))),
+            peer: Arc::new(tokio::sync::Mutex::new(Some(peer))),
+            lookup: |_| Peer::Unknown,
+        }
+    }
+
+    /// The other end of a connection whose program `lookup` finds (tests).
+    #[must_use]
+    pub fn looked_up_with(address: SocketAddr, lookup: fn(SocketAddr) -> Peer) -> Self {
+        Self {
+            address,
+            peer: Arc::default(),
+            lookup,
         }
     }
 
     async fn peer(&self) -> Peer {
-        let address = self.address;
-        tokio::time::timeout(
+        let mut known = self.peer.lock().await;
+        if let Some(peer) = *known {
+            return peer;
+        }
+        let (address, lookup) = (self.address, self.lookup);
+        let found = tokio::time::timeout(
             ATTRIBUTION_WAIT,
-            self.peer.get_or_init(|| attribute(address)),
+            tokio::task::spawn_blocking(move || lookup(address)),
         )
         .await
-        .map_or(Peer::Unknown, |peer| *peer)
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(Peer::Unknown);
+        if found != Peer::Unknown {
+            *known = Some(found);
+        }
+        found
     }
-}
-
-async fn attribute(address: SocketAddr) -> Peer {
-    tokio::task::spawn_blocking(move || peer(address))
-        .await
-        .unwrap_or(Peer::Unknown)
 }
 
 /// A server's listener, with what it does to each connection it accepts (`tap`, as keep-alive settings) before the
@@ -179,32 +257,60 @@ pub fn hear_this_process_as_a_person() {
 /// The connection a request came on, when it came over the network.
 pub type Connection = Option<axum::Extension<axum::extract::ConnectInfo<Client>>>;
 
-/// Who sent a request that came on `connection` with `headers`. A request this server forwarded to itself is judged
-/// by the sender its forwarder found, and is unknown without one; any other may only be judged stricter by the header.
-/// A request with no connection was made inside this server.
+/// Who sent a request that came on `connection` with `headers`. A forwarded request is judged by the word its
+/// forwarder vouched for with this server's key, and never more leniently than the forwarder itself; a word without
+/// the key makes the sender unknown. A request with no connection was made inside this server.
 pub async fn sender(connection: &Connection, headers: &HeaderMap) -> Sender {
-    let forwarded = headers
-        .get(SENDER_HEADER)
-        .map(|word| Sender::from_word(word.as_bytes()));
+    let forwarded = match (headers.get(SENDER_HEADER), headers.get(FORWARDER_HEADER)) {
+        (None, _) => None,
+        (Some(word), Some(key)) if same(key.as_bytes(), forwarding_key().as_bytes()) => {
+            Some(Sender::from_word(word.as_bytes()))
+        }
+        (Some(_), _) => return Sender::Unknown,
+    };
     let Some(axum::Extension(axum::extract::ConnectInfo(client))) = connection else {
         return forwarded.unwrap_or(Sender::Person);
     };
-    let own = match client.peer().await {
+    let peer = client.peer().await;
+    let own = match peer {
         Peer::Unknown => Sender::Unknown,
-        Peer::Itself => {
-            let own = if OWN_REQUESTS_ARE_A_PERSONS.load(std::sync::atomic::Ordering::Relaxed) {
-                Sender::Person
-            } else {
-                Sender::Unknown
-            };
-            return forwarded.unwrap_or(own);
+        // This server, or another, sending for someone it heard from: only its vouched word tells who.
+        Peer::Itself | Peer::Server => {
+            if let Some(forwarded) = forwarded {
+                return forwarded;
+            }
+            let own = peer == Peer::Itself
+                && OWN_REQUESTS_ARE_A_PERSONS.load(std::sync::atomic::Ordering::Relaxed);
+            if own { Sender::Person } else { Sender::Unknown }
         }
         Peer::Program { agent: true, .. } => Sender::Agent,
         Peer::Program { inside: true, .. } => Sender::Terminal,
         // Another computer, one where the program cannot be told, or a program outside Haarness.
         Peer::Elsewhere | Peer::Untold | Peer::Program { .. } => Sender::Person,
     };
-    own.max(forwarded.unwrap_or(Sender::Person))
+    forwarded.map_or(own, |forwarded| forwarded.max(own))
+}
+
+/// Who asks for this server's key ([`forwarding_key`]), on `connection` with `headers`: as [`sender`], except that
+/// another Haarness server of the person's, asking for itself (with no forwarded word), may have it to vouch with.
+pub async fn key_asker(connection: &Connection, headers: &HeaderMap) -> Sender {
+    if headers.get(SENDER_HEADER).is_none()
+        && let Some(axum::Extension(axum::extract::ConnectInfo(client))) = connection
+        && client.peer().await == Peer::Server
+    {
+        return Sender::Person;
+    }
+    sender(connection, headers).await
+}
+
+/// Whether two keys are the same, taking as long whichever byte differs.
+fn same(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0_u8, |differ, (left, right)| differ | (left ^ right))
+            == 0
 }
 
 /// How much `mode` lets agents do without asking.
@@ -304,44 +410,89 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_forwarders_word_counts_only_from_this_process_and_only_ever_stricter() {
+    async fn a_forwarders_word_counts_only_with_this_servers_key() {
         let address: SocketAddr = "127.0.0.1:50123".parse().unwrap();
-        let judge = |peer: Peer, word: Option<&'static str>| async move {
-            let mut headers = HeaderMap::new();
-            if let Some(word) = word {
-                headers.insert(SENDER_HEADER, HeaderValue::from_static(word));
+        let judge = |peer: Peer, word: Option<&'static str>, key: Option<&str>| {
+            let key = key.map(str::to_owned);
+            async move {
+                let mut headers = HeaderMap::new();
+                if let Some(word) = word {
+                    headers.insert(SENDER_HEADER, HeaderValue::from_static(word));
+                }
+                if let Some(key) = key {
+                    headers.insert(FORWARDER_HEADER, HeaderValue::from_str(&key).unwrap());
+                }
+                let connection = Some(axum::Extension(axum::extract::ConnectInfo(Client::known(
+                    address, peer,
+                ))));
+                sender(&connection, &headers).await
             }
-            let connection = Some(axum::Extension(axum::extract::ConnectInfo(Client::known(
-                address, peer,
-            ))));
-            sender(&connection, &headers).await
         };
         let program = |inside, agent| Peer::Program { inside, agent };
-        // This process forwarding: its word, and unknown without one.
-        assert_eq!(judge(Peer::Itself, Some("person")).await, Sender::Person);
-        assert_eq!(judge(Peer::Itself, Some("agent")).await, Sender::Agent);
-        assert_eq!(judge(Peer::Itself, None).await, Sender::Unknown);
-        // Anyone else: what its own program says, made stricter by a word but never laxer.
+        let key = Some(forwarding_key());
+        // This server, or another, forwarding: its vouched word, unknown without one.
         assert_eq!(
-            judge(program(true, true), Some("person")).await,
-            Sender::Agent
+            judge(Peer::Itself, Some("person"), key).await,
+            Sender::Person
         );
+        assert_eq!(judge(Peer::Server, Some("agent"), key).await, Sender::Agent);
+        assert_eq!(judge(Peer::Itself, None, None).await, Sender::Unknown);
+        assert_eq!(judge(Peer::Server, None, None).await, Sender::Unknown);
+        // A word without the key, or with another, says nothing but that the sender is unknown.
         assert_eq!(
-            judge(program(false, false), Some("agent")).await,
-            Sender::Agent
-        );
-        assert_eq!(judge(program(false, false), None).await, Sender::Person);
-        assert_eq!(judge(program(true, false), None).await, Sender::Terminal);
-        assert_eq!(
-            judge(Peer::Elsewhere, Some("unknown")).await,
+            judge(Peer::Itself, Some("person"), None).await,
             Sender::Unknown
         );
-        assert_eq!(judge(Peer::Elsewhere, Some("??")).await, Sender::Unknown);
-        assert_eq!(judge(Peer::Untold, None).await, Sender::Person);
-        assert_eq!(judge(Peer::Unknown, Some("person")).await, Sender::Unknown);
+        assert_eq!(
+            judge(program(false, false), Some("person"), Some("guess")).await,
+            Sender::Unknown
+        );
+        // A vouched word never makes a sender laxer than its own program.
+        assert_eq!(
+            judge(program(true, true), Some("person"), key).await,
+            Sender::Agent
+        );
+        assert_eq!(
+            judge(program(false, false), None, None).await,
+            Sender::Person
+        );
+        assert_eq!(
+            judge(program(true, false), None, None).await,
+            Sender::Terminal
+        );
+        assert_eq!(judge(Peer::Elsewhere, None, None).await, Sender::Person);
+        assert_eq!(judge(Peer::Untold, None, None).await, Sender::Person);
         // Made inside this server, with no connection.
         assert_eq!(sender(&None, &HeaderMap::new()).await, Sender::Person);
         assert!(Sender::Terminal.inside() && !Sender::Person.inside());
+    }
+
+    static LOOKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// The first look finds nothing (a `ps` that failed under load, say); every later one finds a person.
+    fn flaky_lookup(_address: SocketAddr) -> Peer {
+        if LOOKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            Peer::Unknown
+        } else {
+            Peer::Program {
+                inside: false,
+                agent: false,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_connections_program_is_looked_for_when_first_needed_and_kept_once_found() {
+        let client = Client::looked_up_with("127.0.0.1:50124".parse().unwrap(), flaky_lookup);
+        // Nothing is looked for until a guarded request needs it.
+        assert_eq!(LOOKS.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let connection = Some(axum::Extension(axum::extract::ConnectInfo(client)));
+        let headers = HeaderMap::new();
+        // A look that found nothing is not kept: the next request looks again, and keeps what it finds.
+        assert_eq!(sender(&connection, &headers).await, Sender::Unknown);
+        assert_eq!(sender(&connection, &headers).await, Sender::Person);
+        assert_eq!(sender(&connection, &headers).await, Sender::Person);
+        assert_eq!(LOOKS.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

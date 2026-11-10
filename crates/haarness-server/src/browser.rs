@@ -1218,6 +1218,20 @@ impl BrowserBroker {
     }
 }
 
+/// Refuses to let a program that runs for an agent act as a browser: what a browser host sends, and the connections it
+/// opens through the server, count as a person's.
+async fn browser_host_refused(
+    connection: &crate::request_origin::Connection,
+    headers: &axum::http::HeaderMap,
+) -> Option<Response> {
+    crate::api::guard(
+        crate::request_origin::sender(connection, headers).await,
+        haarness_core::BROWSER_HOST_REFUSAL,
+    )
+    .err()
+    .map(IntoResponse::into_response)
+}
+
 pub fn routes() -> Router<ServerState> {
     Router::new()
         .route("/threads/{id}/browser/host", get(attach))
@@ -1234,8 +1248,13 @@ async fn attach_draft(
     State(state): State<ServerState>,
     Path(id): Path<uuid::Uuid>,
     axum::Extension(shutdown): axum::Extension<CancellationToken>,
+    headers: axum::http::HeaderMap,
+    connection: crate::request_origin::Connection,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    if let Some(refused) = browser_host_refused(&connection, &headers).await {
+        return refused;
+    }
     let Some(broker) = state.browser else {
         return (StatusCode::NOT_IMPLEMENTED, "Browser unavailable").into_response();
     };
@@ -1264,8 +1283,13 @@ async fn adopt_draft(
 async fn draft_tunnel(
     State(state): State<ServerState>,
     Path((id, action)): Path<(uuid::Uuid, String)>,
+    headers: axum::http::HeaderMap,
+    connection: crate::request_origin::Connection,
     Json(input): Json<Value>,
 ) -> Response {
+    if let Some(refused) = browser_host_refused(&connection, &headers).await {
+        return refused;
+    }
     let host = state
         .browser
         .ok_or_else(|| error("Browser unavailable"))
@@ -1352,8 +1376,13 @@ async fn attach(
     Query(options): Query<HostOptions>,
     Path(thread): Path<ThreadId>,
     axum::Extension(shutdown): axum::Extension<CancellationToken>,
+    headers: axum::http::HeaderMap,
+    connection: crate::request_origin::Connection,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    if let Some(refused) = browser_host_refused(&connection, &headers).await {
+        return refused;
+    }
     if !matches!(options.version.unwrap_or(1), 1 | 2) {
         return (StatusCode::BAD_REQUEST, "Unsupported browser host version").into_response();
     }
@@ -1391,8 +1420,12 @@ async fn attach_extension(
     headers: HeaderMap,
     anonymous: Option<axum::Extension<crate::auth::AnonymousAccess>>,
     axum::Extension(shutdown): axum::Extension<CancellationToken>,
+    connection: crate::request_origin::Connection,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    if let Some(refused) = browser_host_refused(&connection, &headers).await {
+        return refused;
+    }
     if headers.contains_key(header::ORIGIN) {
         return (
             StatusCode::FORBIDDEN,
@@ -1636,8 +1669,13 @@ fn valid_state(state: &Value) -> bool {
 async fn tunnel(
     State(state): State<ServerState>,
     Path((thread, action)): Path<(ThreadId, String)>,
+    headers: axum::http::HeaderMap,
+    connection: crate::request_origin::Connection,
     Json(input): Json<Value>,
 ) -> Response {
+    if let Some(refused) = browser_host_refused(&connection, &headers).await {
+        return refused;
+    }
     let result = tunnel_request(state, thread, &action, input).await;
     match result {
         Ok(value) => Json(value).into_response(),
@@ -1762,6 +1800,17 @@ async fn host_tunnel(host: Arc<Host>, action: &str, input: Value) -> CoreResult<
             .filter(|port| *port > 0)
             .ok_or_else(|| error("Invalid tunnel port"))?;
         let socket = tokio::select! {()=host.closed.cancelled()=>return Err(error(RECOVERY)),value=dial(hostname,port)=>value.map_err(error)?};
+        // Not to a Haarness server on this computer, this one included: what arrives through the tunnel would come from
+        // the server itself.
+        let reached = socket.peer_addr().map_err(error)?;
+        if tokio::task::spawn_blocking(move || {
+            haarness_core::process_tree::haarness_listens(reached)
+        })
+        .await
+        .unwrap_or(true)
+        {
+            return Err(error(haarness_core::TUNNEL_REFUSAL));
+        }
         socket.set_nodelay(true).map_err(error)?;
         let (read, write) = socket.into_split();
         let id = uuid::Uuid::now_v7().to_string();

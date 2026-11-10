@@ -26422,6 +26422,76 @@ async fn ctrl_y_cycles_review_auto_yolo_and_the_band_shows_yolo_in_red() {
     }
 }
 
+/// A server that could not tell which program asked refuses with `unknown_sender` and closes the connection: the
+/// client asks once more, on a new connection, and says the server's own words if that fails too, never that the
+/// approvals changed in another window.
+#[tokio::test]
+async fn a_request_whose_sender_the_server_could_not_find_is_sent_once_more() {
+    use haarness_protocol::ApprovalMode;
+    let thread = fixture_thread();
+    let unknown = serde_json::json!({
+        "code": "unknown_sender",
+        "message": "Haarness could not tell which program on this computer sent this request, so nothing changed. Try again.",
+        "retryable": true,
+    })
+    .to_string();
+    let info = |mode: &str| {
+        serde_json::json!({
+            "threadId": thread.id,
+            "mode": mode,
+            "sourceThreadId": thread.id,
+            "explicit": true,
+            "revision": "1",
+        })
+        .to_string()
+    };
+    let request = haarness_protocol::SetApprovalModeRequest {
+        mode: haarness_protocol::ApprovalModeSetting::Auto,
+        revision: None,
+    };
+    // Once: the second try is answered.
+    let (client, server) =
+        workspace_http_status_client(vec![(409, unknown.clone()), (200, info("auto"))], false)
+            .await;
+    let changed = client.set_approval_mode(thread.id, &request).await.unwrap();
+    assert_eq!(changed.mode, ApprovalMode::Auto);
+    assert_eq!(server.await.unwrap().len(), 2);
+    let (client, server) =
+        workspace_http_status_client(vec![(409, unknown.clone()), (204, String::new())], false)
+            .await;
+    client
+        .reply_permission(
+            "perm-1",
+            haarness_protocol::PermissionReply {
+                decision: haarness_protocol::PermissionReplyDecision::Once,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(server.await.unwrap().len(), 2);
+    // Twice: the server's words, not a change made elsewhere.
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.approval_server = true;
+    app.approval_mode = Some(serde_json::from_str(&info("review")).unwrap());
+    let (client, _server) = workspace_http_status_client(
+        vec![
+            (409, unknown.clone()),
+            (409, unknown),
+            (200, info("review")),
+        ],
+        false,
+    )
+    .await;
+    app.set_approval_mode(ApprovalMode::Auto, &client).await;
+    assert!(
+        app.notice.contains("could not tell which program"),
+        "{}",
+        app.notice
+    );
+    assert!(!app.notice.contains("another window"), "{}", app.notice);
+}
+
 /// On a server that cannot keep Yolo, Ctrl+Y goes Auto → Review, and
 /// `/approvals yolo` says why instead of asking the server. On a
 /// server that can, it puts the chat in Yolo.

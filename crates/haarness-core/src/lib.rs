@@ -128,6 +128,18 @@ pub const SCHEDULE_REFUSAL: &str = "Only you can set up or start a schedule: its
 /// again.
 pub const UNKNOWN_SENDER: &str = "Haarness could not tell which program on this computer sent this request, so nothing changed. Try again.";
 
+/// Why the server refuses its forwarding key to a program that runs for an
+/// agent: with it, a request could say whom it was forwarded for.
+pub const FORWARDING_REFUSAL: &str = "Only a program you run may forward requests to this server for others. This request came from a program Haarness started, such as an agent's command or a hook.";
+
+/// Why the server refuses to act as a browser for a program that runs for an
+/// agent: a browser host's traffic, and what it opens, count as a person's.
+pub const BROWSER_HOST_REFUSAL: &str = "Only you can connect a browser to Haarness. This request came from a program Haarness started, such as an agent's command or a hook.";
+
+/// Why a browser tunnel will not reach a Haarness server on this computer:
+/// what arrives through it would come from the server itself.
+pub const TUNNEL_REFUSAL: &str = "A browser here cannot open Haarness's own server.";
+
 /// Why the server refuses to open or connect a terminal for a program that
 /// runs for an agent: what runs in a terminal counts as a person's.
 pub const TERMINAL_REFUSAL: &str = "Only you can open or use a terminal here. This request came from a program Haarness started, such as an agent's command or a hook.";

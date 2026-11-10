@@ -220,10 +220,9 @@ async fn forward(
         Ok(value) => value,
         Err(error) => return failure(error),
     };
-    // The project's server sees this server as the sender: say who sent it the request.
-    let sender = crate::request_origin::sender(&connection, request.headers())
-        .await
-        .header();
+    // The project's server sees this server as the sender: say who sent it the request, vouched for with that
+    // server's key.
+    let sender = crate::request_origin::sender(&connection, request.headers()).await;
     let prefix = format!("/v1/host/workspaces/{id}/");
     let raw_path = request
         .uri()
@@ -255,9 +254,15 @@ async fn forward(
                 return unreachable("bad upstream address");
             };
             handshake.headers_mut().insert("authorization", auth);
-            handshake
-                .headers_mut()
-                .insert(crate::request_origin::SENDER_HEADER, sender.clone());
+            let key = crate::request_origin::forwarding_key_of(
+                &gateway.client,
+                &target.url,
+                &target.token,
+            )
+            .await;
+            for (name, value) in crate::request_origin::forwarded_headers(sender, &key) {
+                handshake.headers_mut().insert(name, value);
+            }
             match tokio_tungstenite::connect_async(handshake).await {
                 Ok((socket, _)) => break socket,
                 Err(_) if !retried => {
@@ -282,11 +287,16 @@ async fn forward(
     };
     let mut url = address(&target);
     loop {
+        let key =
+            crate::request_origin::forwarding_key_of(&gateway.client, &target.url, &target.token)
+                .await;
         let mut upstream = gateway
             .client
             .request(parts.method.clone(), &url)
-            .bearer_auth(&target.token)
-            .header(crate::request_origin::SENDER_HEADER, sender.clone());
+            .bearer_auth(&target.token);
+        for (name, value) in crate::request_origin::forwarded_headers(sender, &key) {
+            upstream = upstream.header(name, value);
+        }
         for name in [
             "content-type",
             "accept",
@@ -299,6 +309,13 @@ async fn forward(
         }
         match upstream.body(body.clone()).send().await {
             Ok(response) => {
+                // The server did not take the key: it may have started again with another.
+                if response
+                    .headers()
+                    .contains_key(crate::request_origin::UNKNOWN_SENDER_HEADER)
+                {
+                    crate::request_origin::forget_forwarding_key(&target.url, &target.token);
+                }
                 let mut result = Response::builder().status(response.status());
                 for name in [
                     "content-type",

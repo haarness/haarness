@@ -615,7 +615,7 @@ fn an_agent_is_told_through_the_gateway_on_a_closed_connection_and_whatever_ps_i
             &json!({"decision": "once"}),
             "gateway-allow.json",
         ),
-        // Saying it is a person.
+        // Saying it is a person, with no key to vouch for it.
         fixture
             .curl_line(
                 "PUT",
@@ -642,7 +642,7 @@ fn an_agent_is_told_through_the_gateway_on_a_closed_connection_and_whatever_ps_i
             "gateway-allow.json",
             haarness_core::PERMISSION_ANSWER_REFUSAL,
         ),
-        ("said-person.json", haarness_core::APPROVALS_RAISE_REFUSAL),
+        ("said-person.json", haarness_core::UNKNOWN_SENDER),
         ("fake-ps.txt", CLI_REFUSAL),
     ] {
         let answer = fixture.read(name);
@@ -744,4 +744,92 @@ open(os.path.join(os.environ['CLAUDE_PROJECT_DIR'], 'out', 'hook.txt'), 'w').wri
         "{}",
         String::from_utf8_lossy(&listed.stdout)
     );
+}
+
+#[test]
+fn only_a_person_connects_a_browser_and_its_connections_never_reach_haarness() {
+    let fixture = Fixture::new();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let draft = Uuid::now_v7();
+    let port: u16 = fixture.url.rsplit(':').next().unwrap().parse().unwrap();
+    // A listener of this test's, which is no Haarness program.
+    let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let other_port = other.local_addr().unwrap().port();
+    // The tunnel's answer as it came: an id, or a refusal in plain text.
+    let tunnel = |lease: &str, port: u16| {
+        let output = Command::new("curl")
+            .args([
+                "-s",
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-H",
+            ])
+            .arg(format!("Authorization: Bearer {}", fixture.token))
+            .arg(format!(
+                "{}/v1/browser/drafts/{draft}/tunnel/open",
+                fixture.url
+            ))
+            .arg("-d")
+            .arg(json!({"lease": lease, "target": {"host": "127.0.0.1", "port": port}}).to_string())
+            .output()
+            .expect("run curl");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    // The person's browser: a draft's host, its tunnel to a page on this computer, and none to the server itself.
+    let (host, lease) = runtime.block_on(async {
+        use futures::StreamExt as _;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+        let mut request = format!("ws://127.0.0.1:{port}/v1/browser/drafts/{draft}/host")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", fixture.token).parse().unwrap(),
+        );
+        let (mut host, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let hello = loop {
+            if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) = host.next().await
+            {
+                break serde_json::from_str::<Value>(&text).unwrap();
+            }
+        };
+        (host, hello["lease"].as_str().expect("a lease").to_owned())
+    });
+    let opened = tunnel(&lease, other_port);
+    let refused = tunnel(&lease, port);
+    runtime.block_on(async move { drop(host) });
+    assert!(
+        serde_json::from_str::<Value>(&opened).is_ok_and(|id| id.is_string()),
+        "{opened}"
+    );
+    assert!(refused.contains(haarness_core::TUNNEL_REFUSAL), "{refused}");
+
+    // An agent's command can be no browser host, nor use a tunnel.
+    let script = [
+        format!(
+            "curl -s -o /dev/null -w '%{{http_code}}' -H 'Authorization: Bearer {}' -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' {}/v1/browser/drafts/{}/host > out/host.txt\n",
+            fixture.token,
+            fixture.url,
+            Uuid::now_v7()
+        ),
+        fixture.curl_line(
+            "POST",
+            &format!("/browser/drafts/{draft}/tunnel/open"),
+            &json!({"lease": "guess", "target": {"host": "127.0.0.1", "port": port}}),
+            "agent-tunnel.json",
+        ),
+    ]
+    .concat();
+    std::fs::write(fixture.workspace.join("out/browser.sh"), script).unwrap();
+    let agent = fixture.chat("Agent");
+    fixture.agent_runs(&agent, "sh out/browser.sh");
+    assert_eq!(fixture.read("host.txt"), "403");
+    let tunneled = fixture.read("agent-tunnel.json");
+    assert!(
+        tunneled.contains(haarness_core::BROWSER_HOST_REFUSAL),
+        "{tunneled}"
+    );
+    drop(other);
 }

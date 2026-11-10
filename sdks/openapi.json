@@ -9101,6 +9101,30 @@
         ]
       }
     },
+    "/v1/host/forwarding": {
+      "get": {
+        "operationId": "forwarding_key",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/v1/host/open": {
       "post": {
         "operationId": "host_open",

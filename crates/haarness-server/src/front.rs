@@ -213,12 +213,8 @@ async fn forward(
     mut request: Request,
 ) -> Response {
     // The project's server sees this front as the sender: say who sent it the request, in place of whatever the
-    // sender said.
+    // sender said, vouched for with that server's key.
     let sender = crate::request_origin::sender(&connection, request.headers()).await;
-    request.headers_mut().insert(
-        HeaderName::from_static(crate::request_origin::SENDER_HEADER),
-        sender.header(),
-    );
     let admitted = protected(request.uri().path());
     let anonymous = request.extensions().get::<AnonymousAccess>().is_some();
     let path = request.uri().path_and_query().map_or_else(
@@ -229,6 +225,13 @@ async fn forward(
         Ok(target) => target,
         Err(error) => return unavailable(&error, admitted),
     };
+    let key =
+        crate::request_origin::forwarding_key_of(&front.client, &target.url, &target.token).await;
+    for (name, value) in crate::request_origin::forwarded_headers(sender, &key) {
+        request
+            .headers_mut()
+            .insert(HeaderName::from_static(name), value);
+    }
     if let Ok(ws) = ws {
         return forward_websocket(
             front,
@@ -275,6 +278,10 @@ async fn forward(
     };
     let status = response.status();
     let headers = response.headers().clone();
+    // The server did not take the key: it may have started again with another.
+    if headers.contains_key(crate::request_origin::UNKNOWN_SENDER_HEADER) {
+        crate::request_origin::forget_forwarding_key(&target.url, &target.token);
+    }
     let mut result = Response::new(Body::from_stream(
         response
             .bytes_stream()

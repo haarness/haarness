@@ -2091,6 +2091,14 @@ impl Tool for ScheduleTool {
         }
     }
 
+    /// A schedule's runs approve their own requests: only a person sets one up, changes it, switches it on or starts
+    /// a run, as on the command line and through the server.
+    fn explicit_approval(&self, arguments: &Value, _operation: &str) -> bool {
+        matches!(
+            arguments["action"].as_str(),
+            Some("create" | "update" | "enable" | "run")
+        )
+    }
     fn side_effectful(&self) -> bool {
         // Scheduler registration is external state, not a workspace mutation.
         false
@@ -7108,6 +7116,19 @@ mod tests {
             !tool.side_effectful(),
             "external scheduler state must not create workspace snapshots"
         );
+        // Setting a schedule up, changing it, switching it on and starting a run are a person's to answer.
+        for action in ["create", "update", "enable", "run"] {
+            assert!(
+                tool.explicit_approval(&json!({"action": action}), "schedule"),
+                "{action}"
+            );
+        }
+        for action in ["list", "history", "disable", "delete"] {
+            assert!(
+                !tool.explicit_approval(&json!({"action": action}), "schedule"),
+                "{action}"
+            );
+        }
         let context = ToolContext {
             execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),

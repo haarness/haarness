@@ -19,9 +19,9 @@
 //! A terminal a person opened is one this process noted when it started its shell ([`mark_terminal`]), or, started by
 //! another Haarness program that runs for a person, a shell leading a session with a terminal of its own.
 //!
-//! This reads the process table (`/bin/ps`), and places a local connection with `netstat` on macOS and `lsof`
-//! elsewhere. Unix only: elsewhere no process reads as inside, and on Linux without `lsof` a connection's program
-//! cannot be told ([`Peer::Untold`]).
+//! This reads the process table (`/bin/ps`), and finds the processes holding a local connection with `lsof`, whose
+//! process ids are exact: a program's name never enters it. Unix only: elsewhere no process reads as inside, and where
+//! `lsof` is missing (some Linux systems) a connection's program cannot be told ([`Peer::Untold`]).
 
 #[cfg(unix)]
 use parking_lot::Mutex;
@@ -70,6 +70,9 @@ pub enum Peer {
     Unknown,
     /// This very process, sending on behalf of someone it heard from (a request it forwards).
     Itself,
+    /// Another Haarness server on this computer, running for a person: what it sends, it sends for someone it heard
+    /// from (a request it forwards, a browser's connection it carries).
+    Server,
     /// A program on this computer: whether it runs inside Haarness, and whether for an agent.
     Program { inside: bool, agent: bool },
 }
@@ -83,13 +86,17 @@ pub fn peer(address: SocketAddr) -> Peer {
     }
     #[cfg(unix)]
     {
-        let pid = match local_client(address) {
-            Client::Found(pid) => pid,
-            Client::Itself => return Peer::Itself,
-            Client::Missing => return Peer::Unknown,
-            Client::NoTool => return Peer::Untold,
+        let Some(holders) = holders(address) else {
+            return Peer::Untold;
         };
-        judge(pid)
+        let own = std::process::id();
+        match holders.as_slice() {
+            [] => Peer::Unknown,
+            [only] if *only == own => Peer::Itself,
+            // Shared with this process, which cannot speak for the others.
+            _ if holders.contains(&own) => Peer::Unknown,
+            _ => judge(&holders),
+        }
     }
     #[cfg(not(unix))]
     {
@@ -97,31 +104,104 @@ pub fn peer(address: SocketAddr) -> Peer {
     }
 }
 
-/// Whether the local program `pid`, at the other end of a connection, runs inside Haarness and for an agent. A helper
-/// this process started speaks for others ([`mark_helper`]), and a Haarness program another started for itself is
-/// judged by that launcher.
+/// Whether the local programs `pids`, which hold the other end of a connection, run inside Haarness and for an agent,
+/// judged by the strictest of them. A helper this process started speaks for others ([`mark_helper`]), and a Haarness
+/// program another started for itself is judged by that launcher.
 #[cfg(unix)]
-fn judge(pid: u32) -> Peer {
+fn judge(pids: &[u32]) -> Peer {
     let Some(rows) = table() else {
         return Peer::Unknown;
     };
     let view = View::new(&rows);
-    if view.row(pid).is_none() {
-        return Peer::Unknown;
-    }
-    if view.helper(pid, &HELPERS.lock()) {
-        return Peer::Program {
-            inside: false,
-            agent: false,
+    let helpers = HELPERS.lock().clone();
+    let (mut inside, mut agent, mut server) = (false, false, false);
+    for &pid in pids {
+        let Some(row) = view.row(pid) else {
+            return Peer::Unknown;
         };
+        if view.helper(pid, &helpers) {
+            continue;
+        }
+        let within = view.inside(pid);
+        inside |= within;
+        agent |= match view.launcher(pid) {
+            Some(launcher) => view.launcher_for_agent(launcher),
+            None => view.for_agent(pid, 0),
+        };
+        // A Haarness program of a person's that listens is a server: it may be carrying someone else's request.
+        server |= !within && view.haarness(row) && listens(pid);
     }
-    let agent = match view.launcher(pid) {
-        Some(launcher) => view.launcher_for_agent(launcher),
-        None => view.for_agent(pid, 0),
+    if server && !agent {
+        return Peer::Server;
+    }
+    Peer::Program { inside, agent }
+}
+
+/// Whether `pid` listens for TCP connections, as a server does. Also so when it cannot be told in time.
+#[cfg(unix)]
+fn listens(pid: u32) -> bool {
+    let Some(program) = lsof() else {
+        return false;
     };
-    Peer::Program {
-        inside: view.inside(pid),
-        agent,
+    let mut command = std::process::Command::new(program);
+    command.args([
+        "-nP",
+        "-a",
+        "-p",
+        &pid.to_string(),
+        "-iTCP",
+        "-sTCP:LISTEN",
+        "-Fn",
+    ]);
+    output_within(command, LOOKUP_TIME).is_none_or(|output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.starts_with('n'))
+    })
+}
+
+/// Whether a Haarness program, this process included, listens on `address`'s port when `address` is one of this
+/// computer's own: a connection there reaches a Haarness server. Also so when the listeners cannot be told.
+#[must_use]
+pub fn haarness_listens(address: SocketAddr) -> bool {
+    let address = SocketAddr::new(address.ip().to_canonical(), address.port());
+    if !this_machine(address.ip()) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let Some(program) = lsof() else {
+            return false;
+        };
+        let mut command = std::process::Command::new(program);
+        command.args([
+            "-nP",
+            "-a",
+            &format!("-iTCP:{}", address.port()),
+            "-sTCP:LISTEN",
+            "-Fp",
+        ]);
+        let Some(output) = output_within(command, LOOKUP_TIME) else {
+            return true;
+        };
+        let listeners: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix('p')?.trim().parse().ok())
+            .collect();
+        if listeners.is_empty() {
+            return false;
+        }
+        let own = std::process::id();
+        table().is_none_or(|rows| {
+            let view = View::new(&rows);
+            listeners
+                .iter()
+                .any(|pid| *pid == own || view.row(*pid).is_none_or(|row| view.haarness(row)))
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        false
     }
 }
 
@@ -449,97 +529,91 @@ fn in_haarness_group(
     false
 }
 
-/// What holds the client end of a connection to this process.
+/// How long `lsof` or `ps` may take before the answer counts as unknown (a stale mount can hang `lsof`).
 #[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Client {
-    Found(u32),
-    Itself,
-    Missing,
-    NoTool,
-}
+const LOOKUP_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The process on this computer that holds the client end of a connection from `address`, one of this computer's own.
+/// The system's `lsof`, if it has one.
 #[cfg(unix)]
-fn local_client(address: SocketAddr) -> Client {
-    let own = std::process::id();
-    #[cfg(target_os = "macos")]
-    if let Some(client) = std::process::Command::new("/usr/sbin/netstat")
-        .args(["-anv", "-p", "tcp"])
-        .env("LC_ALL", "C")
-        .output()
-        .ok()
-        .and_then(|output| {
-            client_in_netstat(&String::from_utf8_lossy(&output.stdout), address, own)
-        })
-    {
-        return client;
-    }
-    let Some(program) = ["/usr/sbin/lsof", "/usr/bin/lsof"]
+fn lsof() -> Option<&'static str> {
+    ["/usr/sbin/lsof", "/usr/bin/lsof"]
         .into_iter()
         .find(|path| Path::new(path).exists())
-    else {
-        return Client::NoTool;
-    };
-    std::process::Command::new(program)
-        .args(["-nP", "-a", &format!("-iTCP:{}", address.port()), "-Fpn"])
-        .env("LC_ALL", "C")
-        .output()
-        .map_or(Client::Missing, |output| {
-            client_in_listing(&String::from_utf8_lossy(&output.stdout), address, own)
-        })
 }
 
-/// The holder, in `lsof -Fpn` output, of the socket that starts at `address`: the server's own end of the same
-/// connection starts at the server's address instead.
+/// `command`'s output, if it ends within `limit`; it is stopped otherwise.
 #[cfg(unix)]
-fn client_in_listing(listing: &str, address: SocketAddr, own: u32) -> Client {
+fn output_within(
+    mut command: std::process::Command,
+    limit: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::io::Read as _;
+    command
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Some(std::process::Output {
+                    status,
+                    stdout: reader.join().ok()?,
+                    stderr: Vec::new(),
+                });
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// The processes on this computer that hold the client end of a connection from `address`, one of this computer's
+/// own; `None` when they cannot be told, for want of `lsof`. One that did not answer in time finds none.
+#[cfg(unix)]
+fn holders(address: SocketAddr) -> Option<Vec<u32>> {
+    let mut command = std::process::Command::new(lsof()?);
+    command.args(["-nP", "-a", &format!("-iTCP:{}", address.port()), "-Fpn"]);
+    Some(
+        output_within(command, LOOKUP_TIME).map_or_else(Vec::new, |output| {
+            holders_in_listing(&String::from_utf8_lossy(&output.stdout), address)
+        }),
+    )
+}
+
+/// The processes, in `lsof -Fpn` output, that hold the socket starting at `address`: the server's own end of the same
+/// connection starts at the server's address instead. A socket a program handed down to another is held by both.
+#[cfg(unix)]
+fn holders_in_listing(listing: &str, address: SocketAddr) -> Vec<u32> {
     let start = format!("{address}->");
     let mut pid = None;
+    let mut holders = Vec::new();
     for line in listing.lines() {
         if let Some(number) = line.strip_prefix('p') {
             pid = number.trim().parse::<u32>().ok();
         } else if let Some(name) = line.strip_prefix('n')
             && name.starts_with(&start)
             && let Some(pid) = pid
+            && !holders.contains(&pid)
         {
-            return if pid == own {
-                Client::Itself
-            } else {
-                Client::Found(pid)
-            };
+            holders.push(pid);
         }
     }
-    Client::Missing
-}
-
-/// The holder, in `netstat -anv` output on macOS, of the socket whose local address is `address` (written
-/// `127.0.0.1.50123`), from its `process:pid` column. `None` when the listing has no such column (an older macOS).
-#[cfg(unix)]
-fn client_in_netstat(listing: &str, address: SocketAddr, own: u32) -> Option<Client> {
-    let mut lines = listing.lines();
-    lines
-        .by_ref()
-        .find(|line| line.contains("Local Address"))
-        .filter(|header| header.contains("process:pid"))?;
-    let local = format!("{}.{}", address.ip(), address.port());
-    for line in lines {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.get(3) != Some(&local.as_str()) {
-            continue;
-        }
-        // The process's name may hold spaces: its pid ends the first field after the counters that ends in `:<pid>`.
-        let pid = fields.iter().skip(10).find_map(|field| {
-            let (_, number) = field.rsplit_once(':')?;
-            number.parse::<u32>().ok()
-        });
-        return Some(match pid {
-            Some(pid) if pid == own => Client::Itself,
-            Some(pid) => Client::Found(pid),
-            None => Client::Missing,
-        });
-    }
-    Some(Client::Missing)
+    holders
 }
 
 /// Whether a Haarness program (`own` as in [`is_haarness`]) is among the ancestors of `pid`.
@@ -564,11 +638,9 @@ fn below_program(rows: &[Process], pid: u32, own: Option<&str>) -> bool {
 /// process was started under, which a link or its parent chooses. `ps` is the system's own, whatever the PATH says.
 #[cfg(unix)]
 fn table() -> Option<Vec<Process>> {
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-A", "-o", "pid=,ppid=,pgid=,stat=,tty=,ucomm="])
-        .env("LC_ALL", "C")
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new("/bin/ps");
+    command.args(["-A", "-o", "pid=,ppid=,pgid=,stat=,tty=,ucomm="]);
+    let output = output_within(command, LOOKUP_TIME)?;
     output
         .status
         .success()
@@ -888,44 +960,21 @@ mod tests {
     }
 
     #[test]
-    fn the_client_end_of_a_connection_is_the_one_starting_at_its_address() {
+    fn the_holders_of_a_connection_are_those_of_the_socket_starting_at_its_address() {
         let peer: SocketAddr = "127.0.0.1:50123".parse().unwrap();
         let listing = "p4242\nf9\nn127.0.0.1:4096->127.0.0.1:50123\np777\nf3\nn127.0.0.1:50123->127.0.0.1:4096\n";
-        assert_eq!(client_in_listing(listing, peer, 4242), Client::Found(777));
-        assert_eq!(client_in_listing(listing, peer, 777), Client::Itself);
-        assert_eq!(
-            client_in_listing("p777\nf3\nn127.0.0.1:4096->127.0.0.1:50124\n", peer, 1),
-            Client::Missing
+        assert_eq!(holders_in_listing(listing, peer), [777]);
+        assert!(
+            holders_in_listing("p777\nf3\nn127.0.0.1:4096->127.0.0.1:50124\n", peer).is_empty()
         );
         let six: SocketAddr = "[::1]:50123".parse().unwrap();
         assert_eq!(
-            client_in_listing("p88\nf4\nn[::1]:50123->[::1]:4096\n", six, 1),
-            Client::Found(88)
+            holders_in_listing("p88\nf4\nn[::1]:50123->[::1]:4096\n", six),
+            [88]
         );
-        // macOS's netstat names the holder in a column of its own, and a program's name may hold spaces.
-        let netstat = "Active Internet connections (including servers)
-Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)          rxbytes      txbytes  rhiwat  shiwat          process:pid    state  options
-tcp4       0      0  127.0.0.1.4096         127.0.0.1.50123        ESTABLISHED            0            0  408300  146988       haarness:4242  00002 00000000
-tcp4       0      0  127.0.0.1.50123        127.0.0.1.4096         ESTABLISHED            0            0  408300  146988  Google Chrome H:777  00002 00000000
-tcp6       0      0  ::1.50123              ::1.4096               ESTABLISHED            0            0  408300  146988           curl:88  00002 00000000
-";
-        assert_eq!(
-            client_in_netstat(netstat, peer, 4242),
-            Some(Client::Found(777))
-        );
-        assert_eq!(client_in_netstat(netstat, peer, 777), Some(Client::Itself));
-        assert_eq!(client_in_netstat(netstat, six, 1), Some(Client::Found(88)));
-        let other: SocketAddr = "127.0.0.1:50999".parse().unwrap();
-        assert_eq!(client_in_netstat(netstat, other, 1), Some(Client::Missing));
-        // Without the column, netstat cannot tell.
-        assert_eq!(
-            client_in_netstat(
-                "Proto Recv-Q Send-Q  Local Address  Foreign Address  (state)\n",
-                peer,
-                1
-            ),
-            None
-        );
+        // A socket a program handed down is held by both, each named once.
+        let shared = "p10\nf3\nn127.0.0.1:50123->127.0.0.1:4096\nf4\nn127.0.0.1:50123->127.0.0.1:4096\np11\nf3\nn127.0.0.1:50123->127.0.0.1:4096\n";
+        assert_eq!(holders_in_listing(shared, peer), [10, 11]);
     }
 
     #[test]
@@ -1027,13 +1076,13 @@ tcp6       0      0  ::1.50123              ::1.4096               ESTABLISHED  
             assert!(std::time::Instant::now() < deadline, "no session");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let before = (agent(judge(helper.id())), agent(judge(session.id())));
+        let before = (agent(judge(&[helper.id()])), agent(judge(&[session.id()])));
         mark_helper(helper.id());
         mark_terminal(session.id());
-        let noted = (judge(helper.id()), agent(judge(session.id())));
+        let noted = (judge(&[helper.id()]), agent(judge(&[session.id()])));
         forget_helper(helper.id());
         forget_terminal(session.id());
-        let forgotten = (agent(judge(helper.id())), agent(judge(session.id())));
+        let forgotten = (agent(judge(&[helper.id()])), agent(judge(&[session.id()])));
         let own = this_process_for_agent();
         for child in [&mut helper, &mut session] {
             let _ = child.kill();
@@ -1095,5 +1144,80 @@ tcp6       0      0  ::1.50123              ::1.4096               ESTABLISHED  
         assert_eq!(placed, (program, program));
         assert_eq!(itself, Peer::Itself);
         assert_eq!(peer("192.0.2.1:50123".parse().unwrap()), Peer::Elsewhere);
+        // A Haarness program (this test) listens there; nothing listens on a port just let go.
+        assert!(haarness_listens(listener.local_addr().unwrap()));
+        let free = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        assert!(!haarness_listens(free));
+        assert!(!haarness_listens("192.0.2.1:80".parse().unwrap()));
+    }
+
+    /// What [`a_program_named_like_a_process_id_is_placed_by_its_own`] runs from a copy of this test program: it
+    /// connects to the port it is given and hands the socket down to a `sleep`, which then holds it too.
+    #[test]
+    #[ignore = "run by another test"]
+    fn connect_and_hand_down() {
+        let Ok(port) = std::env::var("HAARNESS_TEST_CONNECT_PORT") else {
+            return;
+        };
+        let stream =
+            std::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+        let handed = std::os::fd::OwnedFd::from(stream.try_clone().unwrap());
+        let mut sleep = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::from(handed))
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        drop(stream);
+        let _ = sleep.kill();
+        let _ = sleep.wait();
+    }
+
+    /// The real thing: a program whose file is named like a process id (`x:1 y`), connected through a socket it hands
+    /// down to another, is placed by the processes that hold the socket, whatever their names say.
+    #[test]
+    fn a_program_named_like_a_process_id_is_placed_by_its_own() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let folder =
+            std::env::temp_dir().join(format!("haarness-process-tree-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let named = folder.join("x:1 y");
+        std::fs::copy(std::env::current_exe().unwrap(), &named).unwrap();
+        let mut child = std::process::Command::new(&named)
+            .args([
+                "--ignored",
+                "--exact",
+                "process_tree::tests::connect_and_hand_down",
+            ])
+            .env("HAARNESS_TEST_CONNECT_PORT", port.to_string())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let (_accepted, address) = listener.accept().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        // Once `sleep` holds the socket too, both are found.
+        while holders(address).is_some_and(|holders| holders.len() < 2)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let placed = (holders(address).map(|holders| holders.len()), peer(address));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&folder);
+        assert_eq!(
+            placed,
+            (
+                Some(2),
+                Peer::Program {
+                    inside: true,
+                    agent: true
+                }
+            )
+        );
     }
 }
