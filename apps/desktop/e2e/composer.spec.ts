@@ -1224,3 +1224,105 @@ test("a configured reasoning level is the one in use until Model default overrid
     await new Promise<void>((resolve) => provider.close(() => resolve()));
   }
 });
+
+/** The right-click menus main built since the last read, each as its items'
+ * labels (a separator as "-"), from its test-only recorder (`haarnessContextMenus`). */
+async function contextMenus(app: ElectronApplication) {
+  return app.evaluate(() => {
+    const record = globalThis as { haarnessContextMenus?: Electron.Menu[] };
+    const menus = record.haarnessContextMenus ?? [];
+    record.haarnessContextMenus = [];
+    return menus.map((menu) => menu.items.map((item) => (item.type === "separator" ? "-" : item.label)));
+  });
+}
+
+test("a right-click offers what fits where it lands, nothing on the sidebar, and the app's menus still answer after it", async ({}, info) => {
+  const { app, page, errors, close } = await launch(info);
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("[Haarness docs](https://haarness.ai/docs) then words to select");
+    await input.press("Enter");
+    const reply = page.locator(".message.assistant").last();
+    const link = reply.getByRole("link", { name: "Haarness docs", exact: true });
+    await expect(link).toBeVisible();
+    await contextMenus(app);
+    /** Right-clicks `target`, whose menu must not offer Paste, then the
+     * message box, whose menu (with Paste) marks the end: main hears the two in
+     * order, so a first click that opened nothing has recorded nothing. */
+    const menusAt = async (target: () => Promise<void>) => {
+      await target();
+      await input.click({ button: "right" });
+      let menus: string[][] = [];
+      await expect.poll(async () => (menus = [...menus, ...(await contextMenus(app))]).at(-1) ?? []).toContain("Paste");
+      return menus.slice(0, -1);
+    };
+
+    // The message box: the edit commands its text allows.
+    await input.fill("a draft to cut");
+    await input.selectText();
+    // On the selected words, which a right-click elsewhere could replace.
+    const start = await input.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { x: parseFloat(style.paddingLeft) + 12, y: parseFloat(style.paddingTop) + (parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.4) / 2 };
+    });
+    await input.click({ button: "right", position: start });
+    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Cut", "Copy", "Paste", "Select all"]);
+
+    // The sidebar's empty space: nothing.
+    const sidebar = (await page.locator(".sidebar-lists").boundingBox())!;
+    expect(
+      await menusAt(() => page.mouse.click(sidebar.x + sidebar.width / 2, sidebar.y + sidebar.height - 24, { button: "right" })),
+    ).toEqual([]);
+
+    // Words selected in a reply: Copy.
+    const words = reply.locator("p").filter({ hasText: "then words to select" }).first();
+    await words.evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element.lastChild!);
+      getSelection()!.removeAllRanges();
+      getSelection()!.addRange(range);
+    });
+    const box = await page.evaluate(() => getSelection()!.getRangeAt(0).getBoundingClientRect().toJSON());
+    expect(await menusAt(() => page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" }))).toEqual([["Copy"]]);
+
+    // A link in a reply: Copy link, which copies its address.
+    await page.evaluate(() => getSelection()!.removeAllRanges());
+    const [linkMenu] = await menusAt(() => link.click({ button: "right" }));
+    expect(linkMenu[0]).toBe("Copy link");
+    const before = await app.evaluate(({ clipboard }) => clipboard.readText());
+    try {
+      // The menu just recorded is gone from the record, so build it again.
+      await link.click({ button: "right" });
+      await expect
+        .poll(() =>
+          app.evaluate(({ clipboard }) => {
+            const menu = (globalThis as { haarnessContextMenus?: Electron.Menu[] }).haarnessContextMenus?.at(-1);
+            menu?.items.find((item) => item.label === "Copy link")?.click();
+            return clipboard.readText();
+          }),
+        )
+        .toBe("https://haarness.ai/docs");
+    } finally {
+      await app.evaluate(({ clipboard }, text) => clipboard.writeText(text), before);
+    }
+    await contextMenus(app);
+
+    // The terminal moves its own field under the pointer: Paste there.
+    await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+    await expect(page.locator(".xterm-helper-textarea")).toBeFocused();
+    const screen = (await page.locator(".xterm-screen").boundingBox())!;
+    await page.mouse.click(screen.x + screen.width - 20, screen.y + screen.height - 20, { button: "right" });
+    await expect.poll(async () => (await contextMenus(app)).at(-1) ?? []).toContain("Paste");
+    await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+
+    // The approvals menu still opens and its choice still runs.
+    const approvals = page.locator(".composer .approval-mode").first();
+    await approvals.click();
+    await page.getByRole("menuitemradio", { name: "Review", exact: true }).click();
+    await expect(approvals).toContainText("Review");
+    expect(await contextMenus(app)).toEqual([]);
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});

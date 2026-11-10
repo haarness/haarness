@@ -74,7 +74,7 @@ test("translations keep the @ and / a text tells the reader to type", () => {
 // (and the menu's own `t()`), so their literals get the same check.
 test("every main-process dialog and menu key is in the shared catalog", async () => {
   const missing = new Set<string>();
-  for (const name of ["index.ts", "browser-data.ts", "store.ts", "notifications.ts"]) {
+  for (const name of ["index.ts", "browser-data.ts", "store.ts", "notifications.ts", "context-menu.ts"]) {
     const source = await readFile(new URL(`../src/main/${name}`, import.meta.url), "utf8");
     for (const [, key] of source.matchAll(/\b(?:say|t)\(\s*"((?:[^"\\]|\\.)*)"/g))
       if (!Object.hasOwn(dictionaries.en, key)) missing.add(`${name}: ${key}`);

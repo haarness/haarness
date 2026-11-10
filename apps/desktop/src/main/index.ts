@@ -51,6 +51,7 @@ import {
   ipcMain,
   dialog,
   shell,
+  clipboard,
   Menu,
   Notification,
   powerMonitor,
@@ -110,6 +111,7 @@ import { createVoiceInput, launchVoice } from "./voice";
 import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
 import { createNotifications } from "./notifications";
+import { contextMenuItems } from "./context-menu";
 import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
 import { quietClosedSocketReads } from "./closed-socket-read";
 import { removalSurvivesFailedStart } from "./unlinked-worktree";
@@ -1949,6 +1951,27 @@ function createWindow() {
   win.webContents.on("input-event", (_event, input) => {
     const kind = inputKind(input);
     if (kind) screenshotIntents.input(win.id, kind);
+  });
+  // The right-click menu (see context-menu.ts), for the window's own page and
+  // its frames (previews, app frames). A page in the Browser panel is a view
+  // of its own, which this does not reach.
+  win.webContents.on("context-menu", (_event, params) => {
+    const items = contextMenuItems(params, {
+      t: say,
+      replace: (word) => win.webContents.replaceMisspelling(word),
+      learn: (word) => win.webContents.session.addWordToSpellCheckerDictionary(word),
+      copy: (text) => clipboard.writeText(text),
+    });
+    if (!items.length) return;
+    const menu = Menu.buildFromTemplate(items);
+    // End-to-end tests read each menu from `haarnessContextMenus` instead of
+    // a native menu they could not close.
+    if (process.env.HAARNESS_DESKTOP_TEST === "1") {
+      const record = globalThis as { haarnessContextMenus?: Menu[] };
+      (record.haarnessContextMenus ??= []).push(menu);
+      return;
+    }
+    menu.popup({ window: win, ...(params.frame ? { frame: params.frame } : {}) });
   });
   win.webContents.session.setPermissionRequestHandler(
     (_web, permission, callback) =>
