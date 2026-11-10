@@ -5,7 +5,16 @@ what they did. It checks looking, approvals and their scope, clicking, typing, R
 password-field refusal, Escape stopping a turn mid-typing, the bar showing while the agent works, Pause on the bar
 with Resume on the bar or in a client, turning computer use off, and quitting an app.
 
-It moves the pointer and types into the lab window only (the helper refuses an event whose spot belongs to another
+A second part works behind the person's window: the lab copy runs as the person's app (`--person`), in front and
+covering the lab, while a typist types into it as the person would. The agent looks at the covered lab, presses,
+clicks a canvas by pixel, scrolls, types one line and several, uses a menu shortcut and Return, opens an app behind,
+and is refused a password field; the person's app must stay in front with its key window, typing and pointer. It
+also checks that the front is handed back, that a drag comes forward, that the agent's pointer shows, that the
+display's awake hold comes and goes, that Escape stops the agent only while it works in the front app, and a
+Command-letter shortcut. Reply fields the tool layer does not show are read from a helper the test starts itself.
+Set HAARNESS_COMPUTER_LIVE_ELECTRON=<bundle id> of a running Electron app with a text field to add a row for it.
+
+It moves the pointer and types into the lab windows only (the helper refuses an event whose spot belongs to another
 app), but it does use the screen: run it while nobody needs the Mac.
 
     HAARNESS_COMPUTER_LIVE=1 python3 scripts/test-computer-use-live.py
@@ -16,11 +25,13 @@ Set HAARNESS_COMPUTER_EVIDENCE=<dir> to keep the run's folder.
 import json
 import os
 import pathlib
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import uuid
@@ -45,13 +56,21 @@ home = root / "home"
 (home / "config").mkdir(parents=True)
 settings_file = home / "config/computer-use.json"
 state_file = root / "lab-state.json"
+person_file = root / "person-state.json"
 LAB = "dev.haarness.test.lab"
+PERSON = "dev.haarness.test.person"
+LAB2 = "dev.haarness.test.lab2"
+LSREGISTER = str(pathlib.Path("/System/Library/Frameworks/CoreServices.framework/Frameworks") / "LaunchServices.framework"
+                 / "Support/lsregister")
 
 env = clean_env()
 env.update(HAARNESS_HOME=str(home), HAARNESS_TEST_PROVIDER="1")
 checks = []
 connection = {}
 lab_process = None
+person_process = None
+direct = None
+registered = []
 
 
 def check(label):
@@ -91,21 +110,129 @@ def state():
         return {}
 
 
-def build_lab():
-    app = root / "Haarness Lab.app"
+def bundle(name, identifier, executable=None):
+    """An app bundle around the lab's executable: the lab itself, the person's app, or a second lab to open."""
+    app = root / (name + ".app")
     (app / "Contents/MacOS").mkdir(parents=True)
     (app / "Contents/Info.plist").write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>{LAB}</string>
-<key>CFBundleName</key><string>Haarness Lab</string>
+<key>CFBundleIdentifier</key><string>{identifier}</string>
+<key>CFBundleName</key><string>{name}</string>
 <key>CFBundleExecutable</key><string>HaarnessLab</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 </dict></plist>
 """)
+    if executable:
+        shutil.copy2(executable, app / "Contents/MacOS/HaarnessLab")
+    return app
+
+
+def build_lab():
+    app = bundle("Haarness Lab", LAB)
     subprocess.run(["xcrun", "swiftc", "-O", str(repo / "scripts/computer-use-lab.swift"), "-o",
                     str(app / "Contents/MacOS/HaarnessLab")], check=True)
     return app
+
+
+def person():
+    try:
+        return json.loads(person_file.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def windows_of(pid, sizes=False):
+    out = subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--window-sizes" if sizes else "--windows", str(pid)],
+                         capture_output=True, text=True).stdout.strip()
+    return json.loads(out or "[]") if sizes else int(out or 0)
+
+
+def awake_hold():
+    return "Haarness is working on the screen" in subprocess.run(["pmset", "-g", "assertions"], capture_output=True,
+                                                                 text=True).stdout
+
+
+BEHIND_ELEMENTS = {
+    "canvas": r'\[group\][^\n]*description="Canvas"',
+    "notes": r'\[text-area\][^\n]*description="Notes"',
+    "forward": r'\[button\] "Come forward"',
+}
+
+
+class Direct:
+    """The helper the server unpacked, started by the test itself, for the reply fields the tool layer does not
+    show (how an action was delivered, whether it reached the app, what a look says about the app behind)."""
+
+    def __init__(self):
+        found = sorted(home.rglob("haarness-mac"), key=lambda path: path.stat().st_mtime)
+        assert found, "the server unpacked no helper under " + str(home)
+        self.process = subprocess.Popen([str(found[-1])], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.lines = queue.Queue()
+        self.events = []
+        self.refs = {}
+        self.frames = {}
+        self.next = 0
+        threading.Thread(target=self.read, daemon=True).start()
+        self.ok("hello")
+
+    def read(self):
+        for line in self.process.stdout:
+            self.lines.put(line)
+        self.lines.put(None)
+
+    def call(self, op, seconds=60, **fields):
+        self.next += 1
+        self.process.stdin.write(json.dumps({"id": self.next, "op": op, **fields}) + "\n")
+        self.process.stdin.flush()
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            try:
+                line = self.lines.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            assert line is not None, "the helper exited"
+            message = json.loads(line)
+            if "event" in message:
+                self.events.append(message["event"])
+            elif message.get("id") == self.next:
+                return message
+        raise AssertionError("no answer to " + op)
+
+    def ok(self, op, **fields):
+        answer = self.call(op, **fields)
+        assert answer["ok"], (op, answer)
+        return answer["data"]
+
+    def look(self, app=LAB, **fields):
+        data = self.ok("snapshot", bundle=app, **fields)
+        outline = data.get("outline", "")
+        for key, pattern in {**LAB_ELEMENTS, **BEHIND_ELEMENTS}.items():
+            match = re.search(r"@e(\d+) " + pattern + r"[^\n]* at=(\d+),(\d+) size=(\d+)x(\d+)", outline)
+            if match:
+                self.refs[key] = int(match.group(1))
+                self.frames[key] = tuple(map(int, match.groups()[1:]))
+        return data
+
+    def middle(self, key):
+        x, y, width, height = self.frames[key]
+        return {"x": x + width / 2, "y": y + height / 2}
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.stdin.close()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+
+
+def person_undisturbed(label):
+    """The person's app is still in front with its key window, and their pointer never moved."""
+    now = person()
+    assert now.get("frontmost") == PERSON and now.get("active") and now.get("key"), (label, now)
+    assert now.get("resigned") == 0 and now.get("keyLost") == 0, (label, now)
+    assert not now.get("pointerMoved"), (label, now)
 
 
 def outline_ref(output, pattern):
@@ -449,8 +576,184 @@ try:
     assert pending["detail"]["__mac"]["summary"] == "Quit Haarness Lab"
     until(lambda: lab_process.poll() is not None, "the lab quits")
     check("quitting an app asks and quits it")
+
+    # Behind the person's window. The lab opens first; the person's app opens over it and stays in front.
+    lab_process = subprocess.Popen([str(lab / "Contents/MacOS/HaarnessLab"), str(state_file)])
+    until(lambda: state().get("pid") == lab_process.pid, "the lab starts again")
+    person_app = bundle("Haarness Person", PERSON, lab / "Contents/MacOS/HaarnessLab")
+    person_process = subprocess.Popen([str(person_app / "Contents/MacOS/HaarnessLab"), "--person", str(person_file)])
+    until(lambda: person().get("frontmost") == PERSON and person().get("active") and person().get("key"),
+          "the person's app is in front")
+    time.sleep(0.5)
+    direct = Direct()
+    data = direct.look()
+    assert data.get("behind") is True and data.get("offscreen") is None, {key: data.get(key) for key in ("behind", "offscreen", "frontmost")}
+    assert {"count", "name", "rows", "canvas", "notes", "forward"} <= set(direct.refs), direct.refs
+    person_undisturbed("after the look")
+    check("a look at the covered lab says it is behind, and leaves the person's app in front")
+
+    # The person types in their app while the agent presses Count in the lab behind it.
+    typist = subprocess.Popen([str(lab / "Contents/MacOS/HaarnessLab"), "--typist", "3", "abc "])
+    until(lambda: len(person().get("text", "")) >= 3, "the person types")
+    reply = direct.ok("click", ref=direct.refs["count"], expect=LAB)
+    assert reply["via"] == "ax" and reply["background"] is True and reply["target"]["bundle"] == LAB, reply
+    typist.wait(timeout=10)
+    until(lambda: state().get("count") == 1, "the press counted")
+    typed = person().get("text", "")
+    assert len(typed) >= 20 and set(typed) <= set("abc "), typed
+    assert not state().get("keys"), state().get("keys")
+    person_undisturbed("after the press")
+    check(f"a press in the covered lab while the person types: their {len(typed)} characters all stay in their app")
+
+    # A pixel click on a view without controls, which only pointer events reach.
+    reply = direct.ok("click", expect=LAB, **direct.middle("canvas"))
+    assert reply["via"] == "process" and reply["background"] is True, reply
+    until(lambda: state().get("canvasClicks") == 1, "the canvas was clicked")
+    assert [22, 28] in windows_of(direct.process.pid, sizes=True), windows_of(direct.process.pid, sizes=True)
+    person_undisturbed("after the pixel click")
+    check("a pixel click lands on the covered lab's canvas, and the agent's pointer shows there")
+    check("the agent's pointer is on screen at a background click")
+
+    reply = direct.ok("scroll", ref=direct.refs["rows"], direction="down", amount=10, expect=LAB)
+    assert reply["background"] is True, reply
+    until(lambda: state().get("scrollY", 0) > 0, "the covered list scrolled")
+    person_undisturbed("after scrolling")
+    check(f"scrolling the covered lab ({reply['via']})")
+
+    direct.look()
+    reply = direct.ok("type", ref=direct.refs["name"], text="behind", expect=LAB)
+    assert reply["via"] == "ax" and reply["background"] is True and reply.get("confirmed") is True, reply
+    until(lambda: state().get("name", "").endswith("behind"), "one line went into Name")
+    assert "behind" not in person().get("text", "")
+    person_undisturbed("after one line")
+    check("one line goes into the covered lab's Name field through Accessibility")
+
+    count = state().get("count")
+    reply = direct.ok("press", keys="Meta+b", expect=LAB)
+    assert reply["via"] == "menu" and reply["background"] is True, reply
+    until(lambda: state().get("count") == count + 10, "the menu shortcut reached the lab")
+    person_undisturbed("after the menu shortcut")
+    check("a menu shortcut reaches the covered lab through its menu item")
+
+    reply = direct.ok("type", ref=direct.refs["notes"], text="line one\nline two", expect=LAB)
+    assert reply["via"] == "process" and reply["background"] is True, reply
+    until(lambda: state().get("notes") == "line one\nline two", "several lines went into Notes")
+    assert "line" not in person().get("text", "")
+    person_undisturbed("after several lines")
+    check("several lines go into the covered lab's text view as keys to its process")
+
+    # Through the server: text without a ref lands in the lab the agent looked at, not in the person's app in front.
+    behind = Chat()
+    output, error, _, _ = behind.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
+    assert not error, output
+    output, error, _, _ = behind.turn("mac_type", {"text": "zq", "snapshot": False}, answer="always", expect_ask=True)
+    assert not error, output
+    until(lambda: "zq" in state().get("notes", ""), "the text went to the lab")
+    assert "zq" not in person().get("text", ""), person().get("text")
+    person_undisturbed("after typing without a ref")
+    check("typing without a ref goes to the looked-at lab, not to the person's app in front")
+
+    # Return reaches the covered lab's default button, and the agent's own Escape does not stop its turn.
+    direct.look()
+    direct.ok("click", ref=direct.refs["name"], expect=LAB)
+    behind.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
+    output, error, _, _ = behind.turn("mac_press", {"key": "Enter", "snapshot": False}, expect_ask=False)
+    assert not error, output
+    until(lambda: state().get("submitted"), "Return pressed Submit behind the person's window")
+    turn = api("/threads/" + behind.thread + "/turns",
+               {"requestId": str(uuid.uuid4()), "text": "!tool mac_press " + json.dumps({"key": "Escape", "snapshot": False})})
+    finished = until(lambda: (value if (value := api("/turns/" + turn["id"]))["status"] not in ("running", "queued") else None),
+                     "the turn with the agent's Escape ends")
+    assert finished["status"] == "completed", finished
+    person_undisturbed("after Return and Escape")
+    check("Return reaches the covered lab, and the agent's own Escape leaves its turn alone")
+
+    # The person's Escape in their own app leaves an agent working behind them alone.
+    escapes = person().get("escapes", 0)
+    turn = api("/threads/" + behind.thread + "/turns",
+               {"requestId": str(uuid.uuid4()), "text": "!linger 5000 !tool mac_snapshot " + json.dumps({"app": LAB})})
+    until(lambda: api("/turns/" + turn["id"])["status"] == "running", "the lingering look runs")
+    time.sleep(1)
+    subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--press-escape"], check=True)
+    until(lambda: person().get("escapes", 0) > escapes, "the person's Escape reached their app", seconds=5)
+    finished = until(lambda: (value if (value := api("/turns/" + turn["id"]))["status"] not in ("running", "queued") else None),
+                     "the lingering look ends", seconds=30)
+    assert finished["status"] == "completed", finished
+    check("the person's Escape in their own app does not stop an agent working behind them")
+
+    # A password field in the covered lab is refused; the person's own password field blocks nothing there.
+    direct.look()
+    direct.ok("click", ref=direct.refs["password"], expect=LAB)
+    refused = direct.call("type", text="hunter2", expect=LAB)
+    assert not refused["ok"] and refused["code"] in ("password", "focus_unknown"), refused
+    assert state().get("passwordLength") == 0, state()
+    direct.ok("click", ref=direct.refs["name"], expect=LAB)
+    (person_file.parent / (person_file.name + ".cmd")).write_text("secure")
+    until(lambda: person().get("secureInput"), "the person's password field holds secure input", seconds=5)
+    reply = direct.ok("type", ref=direct.refs["name"], text=" ok", expect=LAB)
+    until(lambda: state().get("name", "").endswith(" ok"), "typing went on beside the person's password field")
+    (person_file.parent / (person_file.name + ".cmd")).write_text("text")
+    until(lambda: not person().get("secureInput"), "the person left their password field", seconds=5)
+    check("a password field behind is refused, and the person's own password field blocks nothing in another app")
+
+    # A button that brings the lab forward: the person gets the front again.
+    reply = direct.ok("click", ref=direct.refs["forward"], expect=LAB)
+    until(lambda: state().get("forwardPresses") == 1, "the button was pressed")
+    until(lambda: person().get("frontmost") == PERSON and person().get("active"), "the person's app is in front again", seconds=5)
+    check(f"an app that brings itself forward hands the front back (handed back: {reply.get('handedBack', False)})")
+
+    # Opening an app starts it behind the person's window.
+    lab2 = bundle("Haarness Lab Two", LAB2, lab / "Contents/MacOS/HaarnessLab")
+    subprocess.run([LSREGISTER, "-f", str(lab2)], check=True)
+    registered.append(lab2)
+    reply = direct.ok("launch", bundle=LAB2)
+    assert reply.get("background") is True and reply.get("bundle") == LAB2, reply
+    assert windows_of(reply["pid"]) >= 1
+    until(lambda: person().get("frontmost") == PERSON and person().get("active"), "the person's app keeps the front", seconds=5)
+    direct.ok("quit", bundle=LAB2)
+    check(f"opening an app starts it behind the person's window (handed back: {reply.get('handedBack', False)})")
+
+    optional = os.environ.get("HAARNESS_COMPUTER_LIVE_ELECTRON")
+    if optional:
+        data = direct.look(optional)
+        field = re.search(r"@e(\d+) \[text-field\]", data.get("outline", ""))
+        assert data.get("behind") and field, data.get("outline", "")[:800]
+        reply = direct.ok("type", ref=int(field.group(1)), text="from behind", expect=optional)
+        assert reply["background"] is True, reply
+        check(f"an Electron app covered by the person's window takes one line ({reply['via']})")
+
+    # The display stays awake while requests flow, and the hold goes with the end of the turn.
+    direct.look()
+    assert awake_hold(), "no display hold while the agent works"
+    direct.ok("release")
+    until(lambda: not awake_hold(), "the display hold goes with the turn", seconds=10)
+    check("the display is kept awake while the agent works, and let go when its turn ends")
+
+    # A drag needs the real pointer: the lab comes forward for it.
+    direct.look()
+    x, y, width, height = direct.frames["level"]
+    before = state().get("slider")
+    reply = direct.ok("drag", **{"from": {"x": x + width * 0.9, "y": y + height / 2}, "to": {"x": x + width * 0.1, "y": y + height / 2},
+                                 "expect": LAB, "expectEnd": LAB})
+    assert reply.get("fallback") == "drag" and reply["background"] is False, reply
+    until(lambda: state().get("slider", 100) < before - 30, "the slider moved")
+    until(lambda: state().get("active"), "the lab came forward")
+    check("a drag brings the covered lab forward and works there")
+
+    # A Command-letter shortcut through the keyboard, in front: the layout's Command keys.
+    count = state().get("count")
+    reply = direct.ok("press", keys="Meta+b", expect=LAB)
+    assert reply["via"] == "pointer" and reply["background"] is False, reply
+    until(lambda: state().get("count") == count + 10, "Command-B reached the lab in front")
+    check("a Command-letter shortcut works in the app in front")
     print(f"PASS {len(checks)} live computer use checks", flush=True)
 finally:
+    if direct:
+        direct.close()
+    for app in registered:
+        subprocess.run([LSREGISTER, "-u", str(app)], capture_output=True)
+    if person_process and person_process.poll() is None:
+        person_process.terminate()
     if lab_process and lab_process.poll() is None:
         lab_process.terminate()
     if connection:
