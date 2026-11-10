@@ -3163,5 +3163,7 @@
   "↑ parent": "↑ 上级",
   "← previous": "← 上一个",
   "next →": "下一个 →",
-  "Child agent view — ↑ parent · ←/→ siblings": "子代理视图 — ↑ 上级 · ←/→ 同级代理"
+  "Child agent view — ↑ parent · ←/→ siblings": "子代理视图 — ↑ 上级 · ←/→ 同级代理",
+  "Add to dictionary": "添加到词典",
+  "Copy email address": "复制电子邮件地址"
 }

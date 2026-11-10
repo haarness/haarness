@@ -3163,5 +3163,7 @@
   "↑ parent": "↑ หลัก",
   "← previous": "← ก่อนหน้า",
   "next →": "ถัดไป →",
-  "Child agent view — ↑ parent · ←/→ siblings": "มุมมองเอเจนต์ย่อย — ↑ หลัก · ←/→ เอเจนต์ย่อยอื่น"
+  "Child agent view — ↑ parent · ←/→ siblings": "มุมมองเอเจนต์ย่อย — ↑ หลัก · ←/→ เอเจนต์ย่อยอื่น",
+  "Add to dictionary": "เพิ่มลงในพจนานุกรม",
+  "Copy email address": "คัดลอกที่อยู่อีเมล"
 }

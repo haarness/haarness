@@ -3163,5 +3163,7 @@
   "↑ parent": "↑ 親",
   "← previous": "← 前へ",
   "next →": "次へ →",
-  "Child agent view — ↑ parent · ←/→ siblings": "子エージェントの表示 — ↑ 親 · ←/→ 他の子エージェント"
+  "Child agent view — ↑ parent · ←/→ siblings": "子エージェントの表示 — ↑ 親 · ←/→ 他の子エージェント",
+  "Add to dictionary": "辞書に追加",
+  "Copy email address": "メールアドレスをコピー"
 }

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import AVFoundation
 import Speech
 import Darwin
@@ -10,6 +11,52 @@ func emit(_ value: [String: Any]) {
     FileHandle.standardOutput.write(data + Data([10]))
 }
 let args = CommandLine.arguments
+
+// The right-click menu's spellings for a misspelled word, one per line:
+// `--spelling -- <word>`. Pages leave spelling to the system on macOS and get
+// no guesses from it, so Desktop asks here: the checker's own language first,
+// up to five. Only when it has fewer do the person's other languages (System
+// Settings → Language & Region) that the checker knows and that mark the word
+// wrong add theirs, in turn. (Its spelling languages are every installed one
+// while it chooses them automatically, so they are not asked.)
+if args.count == 4 && args[1] == "--spelling" && args[2] == "--" {
+    let word = args[3]
+    let checker = NSSpellChecker.shared
+    let range = NSRange(location: 0, length: (word as NSString).length)
+    let available = checker.availableLanguages
+    var languages = [checker.language()]
+    for preferred in Locale.preferredLanguages {
+        let code = preferred.replacingOccurrences(of: "-", with: "_")
+        let base = String(code.prefix { $0 != "_" })
+        if let known = available.first(where: { $0 == code }) ?? available.first(where: { $0 == base }),
+           !languages.contains(where: { $0 == base || $0.hasPrefix(base + "_") }) {
+            languages.append(known)
+        }
+    }
+    let guesses = { (language: String) in
+        checker.guesses(forWordRange: range, in: word, language: language, inSpellDocumentWithTag: 0) ?? []
+    }
+    var spellings: [String] = []
+    let add = { (guess: String) in
+        if spellings.count < 5 && !spellings.contains(guess) { spellings.append(guess) }
+    }
+    guesses(languages[0]).forEach(add)
+    if spellings.count < 5 {
+        let others = languages.dropFirst().prefix(2).compactMap { language -> [String]? in
+            let wrong = checker.checkSpelling(of: word, startingAt: 0, language: language, wrap: false,
+                                              inSpellDocumentWithTag: 0, wordCount: nil)
+            let list = wrong.location == NSNotFound ? [] : guesses(language)
+            return list.isEmpty ? nil : list
+        }
+        var index = 0
+        while spellings.count < 5 && others.contains(where: { index < $0.count }) {
+            for list in others where index < list.count { add(list[index]) }
+            index += 1
+        }
+    }
+    FileHandle.standardOutput.write(Data((spellings.map { $0 + "\n" }.joined()).utf8))
+    exit(0)
+}
 func argument(_ name: String) -> String? {
     guard let index = args.firstIndex(of: name), index + 1 < args.count else { return nil }
     return args[index + 1]

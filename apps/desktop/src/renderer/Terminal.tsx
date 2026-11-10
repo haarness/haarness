@@ -418,6 +418,27 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     });
     window.addEventListener("blur", option.reset);
     onCleanup(() => window.removeEventListener("blur", option.reset));
+    // A right-click never opens the page's menu here: a program that reads
+    // the mouse (tmux, vim, htop, Haarness's own TUI) takes it as its own,
+    // unless Shift is held, and otherwise main shows the terminal's menu,
+    // Copy and Paste. Heard after xterm's own handler, which selects the word
+    // under the pointer on a Mac, so Copy takes what is selected then.
+    const contextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+      if (terminal.modes.mouseTrackingMode !== "none" && !event.shiftKey) return;
+      void window.haarness.terminalMenu(terminal.getSelection()).catch(() => {});
+    };
+    host.addEventListener("contextmenu", contextMenu);
+    onCleanup(() => host.removeEventListener("contextmenu", contextMenu));
+    // Shift with the right button is for that menu, so the program is not
+    // told of the press. (Off a Mac, xterm already keeps Shift presses to
+    // itself; on a Mac it does so for Option.)
+    const menuPress = (event: MouseEvent) => {
+      if (event.button === 2 && event.shiftKey && terminal.modes.mouseTrackingMode !== "none")
+        event.stopPropagation();
+    };
+    host.addEventListener("mousedown", menuPress, true);
+    onCleanup(() => host.removeEventListener("mousedown", menuPress, true));
     fit.fit();
     // This view's own connection: main ignores a late connect or detach of
     // a view of the same terminal that was replaced.
@@ -458,6 +479,14 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       if (answer && !stream.open()) return;
       // A long paste goes in several writes; IPC keeps them in order.
       for (const chunk of writeChunks(new TextEncoder().encode(data))) send(chunk, answer);
+    });
+    // Mouse reports in the original encoding (a program that turns on mouse
+    // reporting without asking for SGR) are bytes, one per character, not
+    // text: past column 95 a byte is over 127.
+    const binary = terminal.onBinary((data) => {
+      const answer = !typing();
+      if (answer && !stream.open()) return;
+      send(Uint8Array.from(data, (character) => character.charCodeAt(0) & 0xff), answer);
     });
     // The PTY learns every size xterm takes: a panel resize, and a font size
     // change, which refits without the panel changing size. A push waits for
@@ -616,6 +645,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       sizes.dispose();
       sized.dispose();
       input.dispose();
+      binary.dispose();
       resize.disconnect();
       unsubscribe();
       void window.haarness.terminal(connection, "detach", props.id, view);

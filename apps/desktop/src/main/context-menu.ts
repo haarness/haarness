@@ -1,0 +1,156 @@
+import { execFile } from "node:child_process";
+import type { ContextMenuParams, MenuItemConstructorOptions } from "electron";
+
+/** What a right-click in a window says about the place it was made. */
+export type ContextMenuPlace = Pick<
+  ContextMenuParams,
+  "isEditable" | "editFlags" | "selectionText" | "linkURL" | "pageURL" | "misspelledWord" | "dictionarySuggestions"
+>;
+
+export interface ContextMenuActions {
+  /** The interface language's text for an English catalog key. */
+  t(key: string): string;
+  /** Puts a spelling suggestion in place of the misspelled word. */
+  replace(word: string): void;
+  /** Stops marking a word as misspelled. */
+  learn(word: string): void;
+  copy(text: string): void;
+}
+
+/** A misspelled word offers at most this many spellings. */
+const MAX_SUGGESTIONS = 5;
+
+/**
+ * The window's right-click menu, built from what Electron says about the place
+ * clicked: spellings and Add to dictionary on a misspelled word, the edit
+ * commands a text field allows right now, Copy on selected text, Copy link on
+ * a web link and Copy email address on a mail link. Anywhere else it is empty,
+ * and no menu opens. (The terminal keeps the page's right-click to itself and
+ * asks for `terminalMenuItems`.) The edit commands keep Electron's roles, so
+ * they act as the Edit menu's do, and they are named in the interface
+ * language as that menu names them.
+ */
+export function contextMenuItems(
+  place: ContextMenuPlace,
+  actions: ContextMenuActions,
+): MenuItemConstructorOptions[] {
+  const { t } = actions;
+  const groups: MenuItemConstructorOptions[][] = [];
+  const word = place.misspelledWord.trim();
+  if (place.isEditable && word)
+    groups.push([
+      ...place.dictionarySuggestions.slice(0, MAX_SUGGESTIONS).map((suggestion) => ({
+        label: suggestion,
+        click: () => actions.replace(suggestion),
+      })),
+      { label: t("Add to dictionary"), click: () => actions.learn(word) },
+    ]);
+  const link = webLink(place.linkURL, place.pageURL);
+  const mail = mailAddress(place.linkURL);
+  if (link) groups.push([{ label: t("Copy link"), click: () => actions.copy(link) }]);
+  else if (mail) groups.push([{ label: t("Copy email address"), click: () => actions.copy(mail) }]);
+  const flags = place.editFlags;
+  if (place.isEditable) {
+    const edits: MenuItemConstructorOptions[] = [];
+    if (flags.canCut) edits.push({ label: t("Cut"), role: "cut" });
+    if (flags.canCopy) edits.push({ label: t("Copy"), role: "copy" });
+    if (flags.canPaste) edits.push({ label: t("Paste"), role: "paste" });
+    if (flags.canSelectAll) edits.push({ label: t("Select all"), role: "selectAll" });
+    if (edits.length) groups.push(edits);
+  } else if (flags.canCopy && place.selectionText.trim())
+    groups.push([{ label: t("Copy"), role: "copy" }]);
+  return groups.flatMap((group, index) =>
+    index ? [{ type: "separator" as const }, ...group] : group,
+  );
+}
+
+/**
+ * The terminal's right-click menu, which the terminal asks main for (see
+ * Terminal.tsx) in place of the page's: Copy while text is selected there,
+ * which copies that text, and Paste, which the terminal's own field takes and
+ * sends to the shell as it does Command/Ctrl+V.
+ */
+export function terminalMenuItems(
+  selection: string,
+  actions: Pick<ContextMenuActions, "t" | "copy">,
+): MenuItemConstructorOptions[] {
+  return [
+    ...(selection ? [{ label: actions.t("Copy"), click: () => actions.copy(selection) }] : []),
+    { label: actions.t("Paste"), role: "paste" },
+  ];
+}
+
+/**
+ * The address worth copying from a link: a web address. A link inside a reply
+ * that names a project file has no address of its own (Electron hands it over
+ * resolved against the app's page), so it offers none.
+ */
+function webLink(url: string, page: string) {
+  if (!url) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+  try {
+    if (parsed.origin === new URL(page).origin) return undefined;
+  } catch {}
+  return url;
+}
+
+/** A mail link's address, as it goes in a To field: without `mailto:` or the
+ * fields after `?`, and decoded (`sam%40example.com` is `sam@example.com`). */
+function mailAddress(url: string) {
+  if (!/^mailto:/i.test(url)) return undefined;
+  const address = url.slice("mailto:".length).split("?")[0];
+  try {
+    return decodeURIComponent(address).trim() || undefined;
+  } catch {
+    return address.trim() || undefined;
+  }
+}
+
+/** How many words' spellings a window's menus remember. */
+const REMEMBERED_SPELLINGS = 64;
+
+/**
+ * The system's spellings for misspelled words, on macOS. There a page names
+ * the misspelled word it was right-clicked on but suggests nothing (the system
+ * checks spelling outside the page, and Electron does not ask it for guesses),
+ * so main asks Desktop's native helper (`haarness-voice --spelling -- <word>`,
+ * see native/voice.swift). A word's answer is remembered. With no helper, no
+ * answer within a second, or the lookup called off by `signal`, there are none
+ * and the menu offers Add to dictionary alone.
+ */
+export function systemSpellings(helper: string | undefined, run: typeof execFile = execFile) {
+  const known = new Map<string, string[]>();
+  return (word: string, signal?: AbortSignal): Promise<string[]> => {
+    const remembered = known.get(word);
+    if (remembered) {
+      known.delete(word);
+      known.set(word, remembered);
+      return Promise.resolve(remembered);
+    }
+    if (!helper || !word || signal?.aborted) return Promise.resolve([]);
+    return new Promise((resolve) => {
+      run(
+        helper,
+        ["--spelling", "--", word],
+        { timeout: 1000, encoding: "utf8", ...(signal ? { signal } : {}) },
+        (error, stdout) => {
+          if (error) return resolve([]);
+          const spellings = String(stdout)
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .slice(0, MAX_SUGGESTIONS);
+          known.set(word, spellings);
+          if (known.size > REMEMBERED_SPELLINGS) known.delete(known.keys().next().value!);
+          resolve(spellings);
+        },
+      );
+    });
+  };
+}

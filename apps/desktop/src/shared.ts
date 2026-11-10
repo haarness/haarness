@@ -498,6 +498,8 @@ export interface Bridge {
   logLevel(action: "status" | "detail-on" | "detail-off"): Promise<import("./diagnostics").LogLevelStatus>;
   /** Saves this computer's logs where the person chooses and shows the zip; null when cancelled. */
   exportLogs(): Promise<import("./diagnostics").ExportedLogs | null>;
+  /** Opens the terminal's right-click menu: Copy for `selection`, when there is one, and Paste. */
+  terminalMenu(selection: string): Promise<void>;
   reveal(connection: string, path?: string): Promise<void>;
   /** `write` (the person's keys) and `answer` (xterm answering a program's
    * query, which only one window does per terminal) answer false when the

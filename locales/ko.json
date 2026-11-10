@@ -3163,5 +3163,7 @@
   "↑ parent": "↑ 상위",
   "← previous": "← 이전",
   "next →": "다음 →",
-  "Child agent view — ↑ parent · ←/→ siblings": "하위 에이전트 보기 — ↑ 상위 · ←/→ 같은 단계 에이전트"
+  "Child agent view — ↑ parent · ←/→ siblings": "하위 에이전트 보기 — ↑ 상위 · ←/→ 같은 단계 에이전트",
+  "Add to dictionary": "사전에 추가",
+  "Copy email address": "이메일 주소 복사"
 }

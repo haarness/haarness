@@ -267,7 +267,10 @@ test("background completion opens a collapsed project and preserves both convers
   expect(
     (await turn(clients[0], first, "alpha background completed")).status,
   ).toBe("completed");
-  await clickNotification(await notification(first.title));
+  const index = await notification(first.title);
+  // A project on this computer is named alone.
+  expect((await records())[index].body).toBe(`${first.title} · alpha`);
+  await clickNotification(index);
   await selected(
     "local:" + directories[0],
     first,
@@ -291,7 +294,10 @@ test("background completion opens a collapsed project and preserves both convers
 test("remote notification switches to the exact server project and returns to the local draft", async () => {
   await background();
   await turn(clients[2], remote, "remote notification result 日本");
-  await clickNotification(await notification(remote.title));
+  const index = await notification(remote.title);
+  // One on another computer is named with that computer, as the server list names it.
+  expect((await records())[index].body).toBe(`${remote.title} · remote 日本 · Fixture server`);
+  await clickNotification(index);
   await selected(remoteId, remote, "Echo: remote notification result 日本");
   await expect(
     page.getByRole("button", { name: "Switch server", exact: true }),

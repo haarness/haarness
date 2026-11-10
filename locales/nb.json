@@ -3163,5 +3163,7 @@
   "↑ parent": "↑ overordnet",
   "← previous": "← forrige",
   "next →": "neste →",
-  "Child agent view — ↑ parent · ←/→ siblings": "Underagentvisning — ↑ overordnet · ←/→ andre underagenter"
+  "Child agent view — ↑ parent · ←/→ siblings": "Underagentvisning — ↑ overordnet · ←/→ andre underagenter",
+  "Add to dictionary": "Legg til i ordlisten",
+  "Copy email address": "Kopier e-postadressen"
 }

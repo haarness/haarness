@@ -3163,5 +3163,7 @@
   "↑ parent": "↑ nadrzędny",
   "← previous": "← poprzedni",
   "next →": "następny →",
-  "Child agent view — ↑ parent · ←/→ siblings": "Widok podagenta — ↑ nadrzędny · ←/→ inne podagenty"
+  "Child agent view — ↑ parent · ←/→ siblings": "Widok podagenta — ↑ nadrzędny · ←/→ inne podagenty",
+  "Add to dictionary": "Dodaj do słownika",
+  "Copy email address": "Kopiuj adres e-mail"
 }

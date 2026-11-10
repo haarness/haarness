@@ -3163,5 +3163,7 @@
   "↑ parent": "↑ principal",
   "← previous": "← anterior",
   "next →": "próximo →",
-  "Child agent view — ↑ parent · ←/→ siblings": "Visão do subagente — ↑ principal · ←/→ outros subagentes"
+  "Child agent view — ↑ parent · ←/→ siblings": "Visão do subagente — ↑ principal · ←/→ outros subagentes",
+  "Add to dictionary": "Adicionar ao dicionário",
+  "Copy email address": "Copiar o endereço de e-mail"
 }

@@ -51,6 +51,7 @@ import {
   ipcMain,
   dialog,
   shell,
+  clipboard,
   Menu,
   Notification,
   powerMonitor,
@@ -109,7 +110,8 @@ import { fetchRemoteImage } from "./remote-image";
 import { createVoiceInput, launchVoice } from "./voice";
 import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
-import { createNotifications } from "./notifications";
+import { createNotifications, notificationPlace } from "./notifications";
+import { contextMenuItems, systemSpellings, terminalMenuItems } from "./context-menu";
 import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
 import { quietClosedSocketReads } from "./closed-socket-read";
 import { removalSurvivesFailedStart } from "./unlinked-worktree";
@@ -248,17 +250,20 @@ const screenshotListings = createScreenshotListings<{ path: string; identity: Fi
 /** Each window's presses and Attach menu: the screenshots folder is listed for that menu's choice. */
 const screenshotIntents = createScreenshotIntents();
 const worktreeOperations = new Set<string>();
+/** Desktop's native macOS helper: dictation, and spellings for the right-click menu. */
+const nativeHelper = app.isPackaged
+  ? join(process.resourcesPath, "bin/haarness-voice")
+  : resolve(here, "../../resources/haarness-voice");
 const voice = createVoiceInput((locale) =>
   launchVoice(
     process.env.HAARNESS_DESKTOP_TEST === "1" &&
       process.env.HAARNESS_VOICE_TEST_HELPER
       ? process.env.HAARNESS_VOICE_TEST_HELPER
-      : app.isPackaged
-        ? join(process.resourcesPath, "bin/haarness-voice")
-        : resolve(here, "../../resources/haarness-voice"),
+      : nativeHelper,
     locale,
   ),
 );
+const spellings = systemSpellings(process.platform === "darwin" ? nativeHelper : undefined);
 // Windows and Linux start the app with a clicked haarness:// link as an
 // argument (macOS sends open-url instead); hold it until a window can open it.
 let pendingLink: string | undefined =
@@ -410,10 +415,11 @@ function watchNotifications(id: string, owner: number) {
         }
         cursor = event.eventId;
         retry = 0;
+        const view = connections.get(id)?.view ?? item.view;
         void notifications
           .receive(
             id,
-            projectLabel(connections.get(id)?.view ?? item.view),
+            notificationPlace(projectLabel(view), view, data().servers),
             watch.owner,
             event,
             (thread) => client.getThread(thread),
@@ -1791,6 +1797,14 @@ function installHandlers() {
     logLevel(z.enum(["status", "detail-on", "detail-off"]).parse(action)),
   );
   handle("exportLogs", (win) => exportLogs(win, say));
+  // The terminal's right-click menu (see Terminal.tsx), with the text
+  // selected there.
+  handle("terminalMenu", (win, raw: unknown) =>
+    showContextMenu(
+      win,
+      terminalMenuItems(z.string().parse(raw), { t: say, copy: (text) => clipboard.writeText(text) }),
+    ),
+  );
   // An image a reply links to on another host, once the person asks for it.
   // End-to-end tests pin fixture host names with `haarnessImageHosts`.
   handle("remoteImage", (_, raw: unknown) =>
@@ -1950,6 +1964,35 @@ function createWindow() {
     const kind = inputKind(input);
     if (kind) screenshotIntents.input(win.id, kind);
   });
+  // The right-click menu (see context-menu.ts), for the window's own page and
+  // its frames (previews, app frames). A page in the Browser panel is a view
+  // of its own, which this does not reach.
+  // A menu waiting for the system's spellings (macOS) is called off by the
+  // next press or key, as by the next right-click.
+  let spelling: AbortController | undefined;
+  win.webContents.on("input-event", (_event, input) => {
+    if (input.type === "mouseDown" || input.type === "rawKeyDown" || input.type === "keyDown") spelling?.abort();
+  });
+  win.webContents.on("context-menu", async (_event, params) => {
+    spelling?.abort();
+    let dictionarySuggestions = params.dictionarySuggestions;
+    if (process.platform === "darwin" && params.misspelledWord && !dictionarySuggestions.length) {
+      const pending = (spelling = new AbortController());
+      dictionarySuggestions = await spellings(params.misspelledWord, pending.signal);
+      if (pending.signal.aborted || win.isDestroyed()) return;
+      spelling = undefined;
+    }
+    showContextMenu(
+      win,
+      contextMenuItems({ ...params, dictionarySuggestions }, {
+        t: say,
+        replace: (word) => win.webContents.replaceMisspelling(word),
+        learn: (word) => win.webContents.session.addWordToSpellCheckerDictionary(word),
+        copy: (text) => clipboard.writeText(text),
+      }),
+      { x: params.x, y: params.y, ...(params.frame ? { frame: params.frame } : {}) },
+    );
+  });
   win.webContents.session.setPermissionRequestHandler(
     (_web, permission, callback) =>
       callback(permission === "clipboard-sanitized-write"),
@@ -2081,6 +2124,23 @@ function createWindow() {
     }
   });
   return win;
+}
+/** Opens a right-click menu at the place clicked; nothing for no items.
+ * End-to-end tests read each menu from `haarnessContextMenus` instead of a
+ * native menu they could not close. */
+function showContextMenu(
+  win: BrowserWindow,
+  items: Electron.MenuItemConstructorOptions[],
+  place: Omit<Electron.PopupOptions, "window"> = {},
+) {
+  if (!items.length || win.isDestroyed()) return;
+  const menu = Menu.buildFromTemplate(items);
+  if (process.env.HAARNESS_DESKTOP_TEST === "1") {
+    const record = globalThis as { haarnessContextMenus?: Menu[] };
+    (record.haarnessContextMenus ??= []).push(menu);
+    return;
+  }
+  menu.popup({ window: win, ...place });
 }
 function menu() {
   const t = (key: string) => translate(data().preferences.language, key);

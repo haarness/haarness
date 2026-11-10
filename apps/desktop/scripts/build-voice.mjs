@@ -38,6 +38,8 @@ if (process.platform === "darwin") {
         "-o",
         `${output}-${architecture}`,
         "-framework",
+        "AppKit",
+        "-framework",
         "AVFoundation",
         "-framework",
         "Speech",

@@ -3163,5 +3163,7 @@
   "↑ parent": "↑ nadređeni",
   "← previous": "← prethodni",
   "next →": "sljedeći →",
-  "Child agent view — ↑ parent · ←/→ siblings": "Prikaz podagenta — ↑ nadređeni · ←/→ ostali podagenti"
+  "Child agent view — ↑ parent · ←/→ siblings": "Prikaz podagenta — ↑ nadređeni · ←/→ ostali podagenti",
+  "Add to dictionary": "Dodaj u rječnik",
+  "Copy email address": "Kopiraj adresu e-pošte"
 }
