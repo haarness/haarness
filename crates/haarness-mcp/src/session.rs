@@ -131,13 +131,16 @@ fn request_id(message: &ClientJsonRpcMessage) -> Option<RequestId> {
 
 /// The server's `answer` to the request `request` (none for a notification
 /// or a response), sent with a session id when `named`. A refusal that is
-/// about the session or about the server not being initialized, as JSON that
-/// names no request or as a 400's text, means the server forgot the session:
-/// it turned the request away before running it, so rmcp may open a new
-/// session and send it again. Without a session id the request was the
-/// first of one, and such a refusal stays what it is. Any other error that
-/// names no request is this request's: a server that cannot read a
-/// request's id answers it without one.
+/// about the session or about the server not being initialized means the
+/// server forgot the session, when its transport turned the request away
+/// before running it: JSON that names no request with one of the codes the
+/// SDKs' transports refuse a session with ([`TRANSPORT_REFUSALS`]; the HTTP
+/// status does not reach this far), or a 400's text. rmcp may then open a new
+/// session and send the request again. Without a session id the request was
+/// the first of one, and such a refusal stays what it is. Any other error
+/// that names no request is this request's, a tool's own failure that
+/// mentions a session included: a server that cannot read a request's id
+/// answers it without one.
 fn read<E: std::error::Error + Send + Sync + 'static>(
     answer: Result<StreamableHttpPostResponse, StreamableHttpError<E>>,
     request: Option<RequestId>,
@@ -147,7 +150,10 @@ fn read<E: std::error::Error + Send + Sync + 'static>(
         Ok(StreamableHttpPostResponse::Json(ServerJsonRpcMessage::Error(mut error), session))
             if error.id.is_none() =>
         {
-            if named && forgotten(&error.error.message) {
+            if named
+                && TRANSPORT_REFUSALS.contains(&error.error.code.0)
+                && forgotten(&error.error.message)
+            {
                 return Err(StreamableHttpError::SessionExpired);
             }
             error.id = request;
@@ -165,6 +171,11 @@ fn read<E: std::error::Error + Send + Sync + 'static>(
     }
 }
 
+/// The JSON-RPC codes of a refusal by the server's transport, before the
+/// request reached the server: -32000 for a request it cannot serve (no
+/// valid session, not initialized), -32001 for a session it does not know.
+const TRANSPORT_REFUSALS: [i32; 2] = [-32000, -32001];
+
 /// Whether a refusal says the server does not know the session or was
 /// never initialized for it.
 fn forgotten(message: &str) -> bool {
@@ -180,11 +191,19 @@ mod tests {
     type Answer = Result<StreamableHttpPostResponse, StreamableHttpError<std::io::Error>>;
 
     fn refusal(message: &'static str, id: Option<RequestId>) -> StreamableHttpPostResponse {
+        failure(-32000, message, id)
+    }
+
+    fn failure(
+        code: i32,
+        message: &'static str,
+        id: Option<RequestId>,
+    ) -> StreamableHttpPostResponse {
         StreamableHttpPostResponse::Json(
             ServerJsonRpcMessage::Error(JsonRpcError {
                 jsonrpc: JsonRpcVersion2_0,
                 id,
-                error: ErrorData::new(ErrorCode(-32000), message, None),
+                error: ErrorData::new(ErrorCode(code), message, None),
             }),
             None,
         )
@@ -230,6 +249,24 @@ mod tests {
             "HTTP 500 Internal Server Error: session store unavailable".into(),
         ));
         assert!(!expired(&read(failed, Some(id.clone()), true)));
+        // A tool's own failure that mentions a session is no refusal of
+        // the session: it answers this request, which is not sent again.
+        let answer = read(
+            Ok(failure(-32603, "database session timed out", None)),
+            Some(id.clone()),
+            true,
+        );
+        assert_eq!(answering(&answer), Some(id.clone()));
+        assert!(!expired(&read(
+            Ok(failure(-32001, "Session not found", None)),
+            Some(id.clone()),
+            false
+        )));
+        assert!(expired(&read(
+            Ok(failure(-32001, "Session not found", None)),
+            Some(id.clone()),
+            true
+        )));
         // Any other refusal that names no request answers this one.
         assert_eq!(
             answering(&read(

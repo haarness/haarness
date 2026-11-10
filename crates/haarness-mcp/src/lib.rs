@@ -4954,13 +4954,15 @@ mod tests {
 
     /// How [`run_forgetful_fixture`] refuses a request: a session it does not
     /// know, as servers built on the TypeScript SDK's examples do, as JSON
-    /// that names no request or as text; or every tool call, for bad
-    /// parameters, as JSON that names no request.
+    /// that names no request or as text; or every tool call, as JSON that
+    /// names no request: with a 400 for bad parameters, or with a 500 whose
+    /// message mentions a session, after the tool ran.
     #[derive(Clone, Copy, PartialEq)]
     enum Refusal {
         JsonSession,
         TextSession,
         Params,
+        ToolSession,
     }
 
     /// A Streamable HTTP server that gives each `initialize` a session and
@@ -4969,9 +4971,18 @@ mod tests {
         refusal: Refusal,
         sessions: parking_lot::Mutex<std::collections::HashSet<String>>,
         initialized: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
     }
 
     impl Forgetful {
+        fn new(refusal: Refusal) -> Arc<Self> {
+            Arc::new(Self {
+                refusal,
+                sessions: parking_lot::Mutex::default(),
+                initialized: std::sync::atomic::AtomicUsize::new(0),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
         fn restart(&self) {
             self.sessions.lock().clear();
         }
@@ -5027,7 +5038,7 @@ mod tests {
                 "text/plain",
                 b"Bad Request: Server not initialized".to_vec(),
             )),
-            Refusal::Params => None,
+            Refusal::Params | Refusal::ToolSession => None,
         }
     }
 
@@ -5084,15 +5095,31 @@ mod tests {
                     Some("tools/list") => json!({
                         "tools": [{ "name": "echo", "inputSchema": { "type": "object" } }]
                     }),
-                    Some("tools/call") if state.refusal == Refusal::Params => {
+                    Some("tools/call")
+                        if matches!(state.refusal, Refusal::Params | Refusal::ToolSession) =>
+                    {
+                        state.calls.fetch_add(1, Ordering::SeqCst);
+                        let (status, code, message) = if state.refusal == Refusal::Params {
+                            (
+                                "400 Bad Request",
+                                -32602,
+                                "Invalid params: city is required",
+                            )
+                        } else {
+                            (
+                                "500 Internal Server Error",
+                                -32603,
+                                "database session timed out",
+                            )
+                        };
                         let refusal = json!({
                             "jsonrpc": "2.0",
-                            "error": {"code": -32602, "message": "Invalid params: city is required"},
+                            "error": {"code": code, "message": message},
                             "id": null
                         });
                         write_response(
                             &mut stream,
-                            "400 Bad Request",
+                            status,
                             &[("Content-Type", "application/json")],
                             &serde_json::to_vec(&refusal).unwrap(),
                         )
@@ -5126,11 +5153,7 @@ mod tests {
         for refusal in [Refusal::JsonSession, Refusal::TextSession] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            let state = Arc::new(Forgetful {
-                refusal,
-                sessions: parking_lot::Mutex::default(),
-                initialized: std::sync::atomic::AtomicUsize::new(0),
-            });
+            let state = Forgetful::new(refusal);
             let server = tokio::spawn(run_forgetful_fixture(listener, state.clone()));
             let registry = NativeMcpRegistry::default();
             let info = registry
@@ -5152,39 +5175,38 @@ mod tests {
         }
     }
 
-    /// Any other 400 is the request's own answer, even one that names no
-    /// request: it fails the call at once, and the session is kept.
+    /// Any other refusal is the request's own answer, even one that names no
+    /// request: it fails the call at once, sent once, and the session is
+    /// kept. So is a tool's own failure that mentions a session, which a
+    /// status-blind reading sent again on a new session after it had run.
     #[tokio::test]
     async fn a_refusal_that_is_not_about_the_session_fails_the_call_on_the_same_session() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let state = Arc::new(Forgetful {
-            refusal: Refusal::Params,
-            sessions: parking_lot::Mutex::default(),
-            initialized: std::sync::atomic::AtomicUsize::new(0),
-        });
-        let server = tokio::spawn(run_forgetful_fixture(listener, state.clone()));
-        let registry = NativeMcpRegistry::default();
-        registry
-            .configure("strict", streamable_config(address, 2_000))
+        for (refusal, said) in [
+            (Refusal::Params, "Invalid params: city is required"),
+            (Refusal::ToolSession, "database session timed out"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let state = Forgetful::new(refusal);
+            let server = tokio::spawn(run_forgetful_fixture(listener, state.clone()));
+            let registry = NativeMcpRegistry::default();
+            registry
+                .configure("strict", streamable_config(address, 2_000))
+                .await
+                .unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(5),
+                registry.call("strict", "mcp__strict__echo", json!({})),
+            )
             .await
-            .unwrap();
-        let error = tokio::time::timeout(
-            Duration::from_secs(5),
-            registry.call("strict", "mcp__strict__echo", json!({})),
-        )
-        .await
-        .expect("the refused call waited")
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Invalid params: city is required"),
-            "{error}"
-        );
-        assert_eq!(state.initialized(), 1);
-        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
-        server.abort();
+            .expect("the refused call waited")
+            .unwrap_err();
+            assert!(error.to_string().contains(said), "{error}");
+            assert_eq!(state.initialized(), 1);
+            assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+            server.abort();
+        }
     }
 
     /// A server that offers prompts and never answers a prompt request, but
