@@ -685,9 +685,10 @@ fn shown(entry: &Entry) -> String {
 /// whole.
 fn action(request: &ReviewRequest, workspace: &Path) -> Option<String> {
     let mut arguments = request.detail.as_object().cloned().unwrap_or_default();
-    // Internal fields: a browser lease, the card's read-limit note.
+    // Internal fields: a browser lease, the card's read-limit note, and what
+    // a computer use request resolved its target to, shown apart below.
     arguments.remove("__browser");
-    arguments.remove("__mac");
+    let mac = arguments.remove("__mac");
     arguments.remove("__readLimit");
     let claims = arguments
         .remove("description")
@@ -709,12 +710,45 @@ fn action(request: &ReviewRequest, workspace: &Path) -> Option<String> {
     if let Some((name, _)) = &request.tool {
         shown.insert("tool".into(), json!(name));
     }
+    if let Some(computer) = mac.as_ref().and_then(computer_view) {
+        shown.insert("computer".into(), computer);
+    }
     shown.insert("arguments".into(), Value::Object(arguments));
     if let Some(claims) = claims {
         shown.insert("agent_claims".into(), json!({ "description": claims }));
     }
     let text = inert(&serde_json::to_string_pretty(&Value::Object(shown)).ok()?);
     (text.chars().count() <= WHOLE).then_some(text)
+}
+
+/// What a computer use request (`__mac`, see the computer crate's tools)
+/// would do, in words: the kind of request, the action, the app and the
+/// element it resolved to, the text or keys, a scroll's direction and a
+/// drop's app. Never the picture of the spot, which is for a person, nor the
+/// spot's pixels: only text fields are kept, by name.
+fn computer_view(mac: &Value) -> Option<Value> {
+    let mac = mac.as_object()?;
+    let view: serde_json::Map<String, Value> = [
+        ("kind", "kind"),
+        ("action", "action"),
+        ("app", "app"),
+        ("bundle", "bundle"),
+        ("element", "target"),
+        ("label", "label"),
+        ("text", "text"),
+        ("keys", "keys"),
+        ("direction", "direction"),
+        ("drop_app", "endApp"),
+        ("drop_bundle", "endBundle"),
+        ("summary", "summary"),
+    ]
+    .into_iter()
+    .filter_map(|(name, key)| {
+        let value = mac.get(key)?.as_str()?;
+        (!value.is_empty()).then(|| (name.to_owned(), json!(value)))
+    })
+    .collect();
+    (!view.is_empty()).then_some(Value::Object(view))
 }
 
 /// `path` relative to `base`, with `..` where it leaves it.
@@ -1877,6 +1911,82 @@ mod tests {
             pathdiff(Path::new("/cache/x"), Path::new("/project")).as_deref(),
             Some("../cache/x")
         );
+    }
+
+    #[test]
+    fn a_computer_use_request_shows_its_app_element_and_text_but_never_its_picture() {
+        let thread = ThreadId::new();
+        let request = ReviewRequest {
+            permission: "computer".into(),
+            patterns: vec![format!("act:{thread}:com.apple.TextEdit")],
+            detail: json!({
+                "ref": "e2",
+                "text": "Quarterly notes",
+                "__mac": {
+                    "kind": "act",
+                    "action": "type",
+                    "bundle": "com.apple.TextEdit",
+                    "app": "TextEdit",
+                    "target": "text field \"Name\"",
+                    "label": "Name",
+                    "direction": null,
+                    "endBundle": null,
+                    "point": {"x": 20, "y": 15},
+                    "preview": "data:image/jpeg;base64,/9j/PICTUREPICTURE",
+                    "text": "Quarterly notes",
+                    "keys": null,
+                    "everyTime": false,
+                    "asks": [format!("act:{thread}:com.apple.TextEdit")],
+                    "summary": "Type into text field \"Name\" in TextEdit",
+                },
+            }),
+            tool: Some(("mac_type".into(), "c1".into())),
+            thread_id: thread,
+            root_thread_id: thread,
+            turn_id: None,
+        };
+        let shown = action(&request, Path::new("/project")).unwrap();
+        let value: Value = serde_json::from_str(&shown).unwrap();
+        assert_eq!(
+            value["computer"],
+            json!({
+                "kind": "act",
+                "action": "type",
+                "app": "TextEdit",
+                "bundle": "com.apple.TextEdit",
+                "element": "text field \"Name\"",
+                "label": "Name",
+                "text": "Quarterly notes",
+                "summary": "Type into text field \"Name\" in TextEdit",
+            })
+        );
+        assert_eq!(value["arguments"]["text"], "Quarterly notes");
+        for hidden in [
+            "PICTURE",
+            "base64",
+            "data:image",
+            "preview",
+            "__mac",
+            "\"point\"",
+        ] {
+            assert!(!shown.contains(hidden), "{hidden} in {shown}");
+        }
+        // A drag names the app it drops into, and other requests show no computer entry.
+        let drag = ReviewRequest {
+            detail: json!({"__mac": {"kind": "act", "action": "drag", "app": "TextEdit", "endApp": "Notes", "endBundle": "com.apple.Notes"}}),
+            ..request.clone()
+        };
+        let shown: Value =
+            serde_json::from_str(&action(&drag, Path::new("/project")).unwrap()).unwrap();
+        assert_eq!(shown["computer"]["drop_app"], "Notes");
+        assert_eq!(shown["computer"]["drop_bundle"], "com.apple.Notes");
+        let plain = ReviewRequest {
+            detail: json!({"command": "ls"}),
+            ..request
+        };
+        let shown: Value =
+            serde_json::from_str(&action(&plain, Path::new("/project")).unwrap()).unwrap();
+        assert!(shown.get("computer").is_none(), "{shown}");
     }
 
     #[test]

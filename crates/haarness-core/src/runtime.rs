@@ -6773,8 +6773,18 @@ impl AgentRuntime {
             let reviewable = !asked
                 .iter()
                 .any(|pattern| personal.contains(&plan.operation(pattern)));
+            // What only a person answers stays theirs, apart from what
+            // Auto's reviewer may answer while it is on (computer use, see
+            // `Tool::reviewer_may_answer`).
+            let person_answers_only = forced
+                || (explicit
+                    && !(review_on
+                        && agent_work
+                        && explicit_operations
+                            .iter()
+                            .all(|operation| tool.reviewer_may_answer(&arguments, operation))));
             let reviewer =
-                (agent_work && !forced && !explicit && reviewable && review_on).then(|| {
+                (agent_work && !person_answers_only && reviewable && review_on).then(|| {
                     Arc::new(crate::auto_review::Reviewer {
                         request: crate::auto_review::ReviewRequest {
                             permission: plan.permission.clone(),
@@ -6818,8 +6828,7 @@ impl AgentRuntime {
                     }
                 }
             };
-            let card_follows = forced
-                || explicit
+            let card_follows = person_answers_only
                 || (review_on && agent_work && reviewer.is_none())
                 || !matches!(
                     self.approval_modes.mode(thread_id).await,
@@ -6835,7 +6844,7 @@ impl AgentRuntime {
             let chat_mode = self.approval_modes.mode(thread_id).await;
             // What only a person answers stays with them, apart from computer
             // use in a chat in Yolo.
-            let mode = if (forced || explicit) && !(yolo_answers && chat_mode == ApprovalMode::Yolo)
+            let mode = if person_answers_only && !(yolo_answers && chat_mode == ApprovalMode::Yolo)
             {
                 ApprovalMode::Review
             } else {
@@ -13906,8 +13915,18 @@ impl RunnerTask {
             }
         };
         let review_on = self.config.auto_review.enabled;
-        let card_follows = forced
-            || explicit
+        // What only a person answers stays theirs, apart from what Auto's
+        // reviewer may answer while it is on (computer use, see
+        // `Tool::reviewer_may_answer`).
+        let person_answers_only = forced
+            || (explicit
+                && !(review_on
+                    && self.tools.get(tool.0).is_some_and(|asking| {
+                        explicit_operations
+                            .iter()
+                            .all(|operation| asking.reviewer_may_answer(detail, operation))
+                    })));
+        let card_follows = person_answers_only
             || (review_on && !reviewable)
             || !matches!(
                 self.approval_modes.mode(self.thread.id).await,
@@ -13925,10 +13944,10 @@ impl RunnerTask {
         // it off, are approved once). The gate orders this with a mode
         // change: either Auto is visible here, or the change sees the
         // registered prompt and reviews or releases it.
-        let reviewer = (!forced && !explicit && reviewable && review_on)
+        let reviewer = (!person_answers_only && reviewable && review_on)
             .then(|| Arc::new(self.reviewer(plan, detail, tool)));
         let approval_gate = self.approval_modes.gate.lock().await;
-        let mode = if forced || explicit {
+        let mode = if person_answers_only {
             ApprovalMode::Review
         } else {
             self.approval_modes.mode(self.thread.id).await
