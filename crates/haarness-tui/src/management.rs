@@ -447,6 +447,6 @@ pub(crate) fn computer_bar_words(language: crate::locale::Language) -> Value {
         "pause": language.text("Pause"),
         "resume": language.text("Resume"),
         "stop": language.text("Stop"),
-        "stopHint": language.text("Esc stops it too, while it works in the app in front"),
+        "stopHint": language.text("Esc stops it too, while it acts in the frontmost app"),
     })
 }

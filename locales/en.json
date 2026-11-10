@@ -3156,6 +3156,6 @@
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.",
   "You agreed to an earlier version of these terms.": "You agreed to an earlier version of these terms.",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.",
-  "Esc stops it too, while it works in the app in front": "Esc stops it too, while it works in the app in front"
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.",
+  "Esc stops it too, while it acts in the frontmost app": "Esc stops it too, while it acts in the frontmost app"
 }

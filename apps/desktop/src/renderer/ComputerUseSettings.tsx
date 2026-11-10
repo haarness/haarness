@@ -154,7 +154,7 @@ export function ComputerUseSettings() {
               <Show when={current().terms.accepted} fallback={<Agreement status={current()} busy={busy()} agreed={agreed()} setAgreed={setAgreed} agree={() => void request({ action: "accept", version: current().terms.version })} />}>
                 <Row
                   title="Agents may use this Mac"
-                  description="While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front."
+                  description="While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app."
                 >
                   <input
                     type="checkbox"

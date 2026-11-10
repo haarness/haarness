@@ -51,7 +51,7 @@ export const barKeys = {
   pause: "Pause",
   resume: "Resume",
   stop: "Stop",
-  stopHint: "Esc stops it too, while it works in the app in front",
+  stopHint: "Esc stops it too, while it acts in the frontmost app",
 } as const;
 
 /** The bar's words in the interface language, `%@` where the app's name goes. */

@@ -3156,6 +3156,6 @@
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "قد يحتوي نص الطرفية أو المحرر على طلب لشخص ما، لذا تحتاج كل نقرة عليه إلى موافقتك.",
   "You agreed to an earlier version of these terms.": "لقد وافقت على إصدار سابق من هذه الشروط.",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "السؤال أولًا يعني إذنًا واحدًا لكل تطبيق في كل محادثة، ويمنحه مراجِع الوضع التلقائي في الوضع التلقائي عندما يكون مفعّلًا.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "أثناء عمل الوكيل، يعرض شريط أعلى الشاشة التطبيق المستخدم، مع إيقاف مؤقت وإيقاف. مفتاح Esc يوقفه أيضًا ما دام يعمل في التطبيق الأمامي.",
-  "Esc stops it too, while it works in the app in front": "مفتاح Esc يوقفه أيضًا ما دام يعمل في التطبيق الأمامي"
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "أثناء عمل الوكيل، يعرض شريط أعلى الشاشة التطبيق المستخدم، مع إيقاف مؤقت وإيقاف. مفتاح Esc يوقفه أيضًا ما دام يتصرف في التطبيق الأمامي.",
+  "Esc stops it too, while it acts in the frontmost app": "مفتاح Esc يوقفه أيضًا ما دام يتصرف في التطبيق الأمامي"
 }

@@ -1631,10 +1631,12 @@ async fn a_look_can_filter_its_elements_and_show_an_area_up_close() {
     );
 }
 
-/// Terminals and script runners stay with the person in Auto: a click on Paste or Run there runs code the reviewer
-/// never sees. So does a drag that touches an app set to ask every time.
+/// Terminals, script runners and code editors stay with the person in Auto: a click on Paste or Run there runs code
+/// the reviewer never sees. So does System Settings when the helper cannot name the open pane, and a drag that touches
+/// an app set to ask every time.
 #[tokio::test]
-async fn auto_s_reviewer_never_answers_for_terminals_or_a_drag_into_an_app_set_to_ask() {
+async fn auto_s_reviewer_never_answers_for_terminals_editors_unnamed_settings_or_an_app_set_to_ask()
+{
     let lab = Lab::new(Lab::with(json!({"apps": {"com.apple.Notes": "ask"}})));
     let thread = lab.thread().await;
     set_mode(&lab, thread, haarness_protocol::ApprovalModeSetting::Auto).await;
@@ -1650,6 +1652,8 @@ async fn auto_s_reviewer_never_answers_for_terminals_or_a_drag_into_an_app_set_t
             "mac_drag",
             json!({"from": {"ref": "e1"}, "to": {"ref": "e4"}}),
         ),
+        ("editor", "mac_click", json!({"ref": "e10"})),
+        ("settings", "mac_click", json!({"ref": "e13"})),
     ] {
         lab.start(thread, vec![vec![call(id, name, arguments)]])
             .await;
@@ -1667,6 +1671,52 @@ async fn auto_s_reviewer_never_answers_for_terminals_or_a_drag_into_an_app_set_t
         review_prompts(&lab).is_empty(),
         "the reviewer was never asked"
     );
+    // A pane the helper can name, and that is not Privacy & Security, is the reviewer's to answer.
+    let items = lab
+        .run(
+            thread,
+            vec![vec![call("displays", "mac_click", json!({"ref": "e17"}))]],
+        )
+        .await;
+    assert!(
+        !result(&items, "displays").1,
+        "{}",
+        result(&items, "displays").0
+    );
+    assert_eq!(review_prompts(&lab).len(), 1);
+}
+
+/// Paste in a terminal runs the clipboard as a command: a click on it is refused before anyone is asked, and every
+/// click there tells the helper to refuse Paste if that is where it lands. The Privacy & Security pane's own process is
+/// look-only too.
+#[tokio::test]
+async fn paste_in_a_terminal_and_privacy_settings_are_refused_before_anyone_is_asked() {
+    let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));
+    let thread = lab.thread().await;
+    let items = lab
+        .run(
+            thread,
+            vec![vec![
+                call("paste", "mac_click", json!({"ref": "e16"})),
+                call("privacy", "mac_click", json!({"ref": "e18"})),
+                call("tab", "mac_click", json!({"ref": "e5"})),
+                call("save", "mac_click", json!({"ref": "e1"})),
+            ]],
+        )
+        .await;
+    let (paste, error, _) = result(&items, "paste");
+    assert!(error && paste.contains("never paste there"), "{paste}");
+    let (privacy, error, _) = result(&items, "privacy");
+    assert!(error && privacy.contains("Privacy & Security"), "{privacy}");
+    let clicks: Vec<Value> = lab
+        .log()
+        .into_iter()
+        .filter(|request| request["op"] == "click")
+        .collect();
+    assert_eq!(clicks.len(), 2, "{clicks:?}");
+    assert_eq!(clicks[0]["expect"], "com.apple.Terminal");
+    assert_eq!(clicks[0]["refusePaste"], true);
+    assert!(clicks[1].get("refusePaste").is_none(), "{}", clicks[1]);
 }
 
 /// What the reviewer reads of a computer use request includes the window, the part of it around the element and the
@@ -1802,50 +1852,57 @@ async fn a_workflow_s_computer_use_in_auto_follows_the_reviewer_switch() {
     assert!(off.provider.reviews.lock().unwrap().is_empty());
 }
 
-/// A schedule's run approves computer use once, as a run that approves its own requests does, also in a chat in Auto
-/// with the reviewer on: nobody is there to answer, and the reviewer is not asked either.
+/// A scheduled run starts at its time without anyone in front of the screen, so it may act on the Mac only in a chat the
+/// person set to Yolo: elsewhere a request for an app the person has not allowed fails at once, and the reviewer is not
+/// asked.
 #[tokio::test]
-async fn a_schedule_s_run_approves_computer_use_once_without_the_reviewer() {
+async fn a_schedule_s_run_uses_the_screen_only_in_a_chat_set_to_yolo() {
     let lab = Lab::new(Lab::on());
-    let thread = lab
-        .runtime
-        .create_thread(CreateThreadRequest {
-            title: Some("Nightly".into()),
-            provider: Some("fixture".into()),
-            model: Some("fixture".into()),
-            schedule: Some(haarness_protocol::ScheduleOrigin {
-                id: uuid::Uuid::now_v7(),
-                name: "Nightly".into(),
-            }),
-            ..Default::default()
-        })
-        .await
-        .unwrap()
-        .id;
-    set_mode(&lab, thread, haarness_protocol::ApprovalModeSetting::Auto).await;
-    lab.provider.rounds.lock().unwrap().push_back(vec![call(
-        "nightly",
-        "mac_click",
-        json!({"ref": "e1"}),
-    )]);
-    lab.runtime
-        .start_turn(
-            thread,
-            StartTurnRequest {
-                request_id: RequestId::new(),
-                text: "Save the report".into(),
-                auto_approve: true,
+    for (mode, allowed) in [
+        (haarness_protocol::ApprovalModeSetting::Auto, false),
+        (haarness_protocol::ApprovalModeSetting::Yolo, true),
+    ] {
+        let thread = lab
+            .runtime
+            .create_thread(CreateThreadRequest {
+                title: Some("Nightly".into()),
+                provider: Some("fixture".into()),
+                model: Some("fixture".into()),
+                schedule: Some(haarness_protocol::ScheduleOrigin {
+                    id: uuid::Uuid::now_v7(),
+                    name: "Nightly".into(),
+                }),
                 ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let items = lab.finish(thread).await;
-    assert!(
-        !result(&items, "nightly").1,
-        "{}",
-        result(&items, "nightly").0
-    );
+            })
+            .await
+            .unwrap()
+            .id;
+        set_mode(&lab, thread, mode).await;
+        lab.provider.rounds.lock().unwrap().push_back(vec![call(
+            "nightly",
+            "mac_click",
+            json!({"ref": "e1"}),
+        )]);
+        lab.runtime
+            .start_turn(
+                thread,
+                StartTurnRequest {
+                    request_id: RequestId::new(),
+                    text: "Save the report".into(),
+                    auto_approve: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let items = lab.finish(thread).await;
+        let (output, error, _) = result(&items, "nightly");
+        assert_eq!(!error, allowed, "{output}");
+        if !allowed {
+            assert!(output.contains("this run cannot ask"), "{output}");
+        }
+    }
+    assert_eq!(lab.ops().iter().filter(|op| *op == "click").count(), 1);
     assert!(review_prompts(&lab).is_empty());
 }
 

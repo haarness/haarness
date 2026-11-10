@@ -3156,6 +3156,6 @@
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "В тексте терминала или редактора может оказаться чужой запрос, поэтому каждый щелчок по нему требует вашего одобрения.",
   "You agreed to an earlier version of these terms.": "Вы согласились с более ранней версией этих условий.",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "«Сначала спрашивать» — это одно одобрение на приложение в каждом чате; в режиме Авто его даёт проверяющий, когда он включён.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "Пока агент работает, полоса вверху экрана показывает используемое приложение и кнопки «Пауза» и «Остановить». Esc тоже останавливает его, пока он работает в приложении на переднем плане.",
-  "Esc stops it too, while it works in the app in front": "Esc тоже останавливает, пока он работает в приложении на переднем плане"
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Пока агент работает, полоса вверху экрана показывает используемое приложение и кнопки «Пауза» и «Остановить». Esc тоже останавливает его, пока он действует в самом переднем приложении.",
+  "Esc stops it too, while it acts in the frontmost app": "Esc тоже останавливает, пока он действует в самом переднем приложении"
 }

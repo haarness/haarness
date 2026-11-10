@@ -3156,6 +3156,6 @@
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Tekst u terminalu ili uređivaču može sadržavati nečiji upit, pa svaki klik na njega traži vaše odobrenje.",
   "You agreed to an earlier version of these terms.": "Prihvatili ste raniju verziju ovih uslova.",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Prvo pitaj znači jedno odobrenje po aplikaciji u svakom razgovoru, koje na Auto daje recenzent za Auto kada je uključen.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "Dok agent radi, traka na vrhu ekrana prikazuje aplikaciju koja se koristi, s opcijama Pauziraj i Zaustavi. Esc ga također zaustavlja dok radi u aplikaciji u prvom planu.",
-  "Esc stops it too, while it works in the app in front": "Esc ga također zaustavlja dok radi u aplikaciji u prvom planu"
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Dok agent radi, traka na vrhu ekrana prikazuje aplikaciju koja se koristi, s opcijama Pauziraj i Zaustavi. Esc ga također zaustavlja dok djeluje u aplikaciji u prvom planu.",
+  "Esc stops it too, while it acts in the frontmost app": "Esc ga također zaustavlja dok djeluje u aplikaciji u prvom planu"
 }

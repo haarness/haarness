@@ -3156,6 +3156,6 @@
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "ข้อความในเทอร์มินัลและโปรแกรมแก้ไขอาจมีคำขอของใครบางคนอยู่ การคลิกที่ข้อความนั้นทุกครั้งจึงต้องได้รับการอนุมัติจากคุณ",
   "You agreed to an earlier version of these terms.": "คุณได้ยอมรับข้อกำหนดเหล่านี้ฉบับก่อนหน้า",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "ถามก่อนหมายถึงการอนุมัติหนึ่งครั้งต่อแอปในแต่ละแชท ซึ่งในโหมดอัตโนมัติ ผู้ตรวจจะเป็นผู้อนุมัติเมื่อเปิดใช้อยู่",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "ขณะที่เอเจนต์ทำงาน แถบด้านบนของหน้าจอจะแสดงแอปที่ใช้อยู่ พร้อมปุ่มหยุดชั่วคราวและหยุด กด Esc ก็หยุดได้เช่นกันขณะที่เอเจนต์ทำงานในแอปที่อยู่ด้านหน้า",
-  "Esc stops it too, while it works in the app in front": "กด Esc เพื่อหยุดได้เช่นกันขณะทำงานในแอปที่อยู่ด้านหน้า"
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "ขณะที่เอเจนต์ทำงาน แถบด้านบนของหน้าจอจะแสดงแอปที่ใช้อยู่ พร้อมปุ่มหยุดชั่วคราวและหยุด กด Esc ก็หยุดได้เช่นกันขณะที่เอเจนต์ดำเนินการในแอปที่อยู่หน้าสุด",
+  "Esc stops it too, while it acts in the frontmost app": "กด Esc เพื่อหยุดได้เช่นกันขณะดำเนินการในแอปที่อยู่หน้าสุด"
 }

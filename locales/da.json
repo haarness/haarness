@@ -3156,6 +3156,6 @@
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Tekst i terminaler og editorer kan indeholde en forespørgsel, så hvert klik på den kræver din godkendelse.",
   "You agreed to an earlier version of these terms.": "Du accepterede en tidligere version af disse vilkår.",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Spørg først betyder én godkendelse pr. app i hver chat, som Auto-bedømmeren giver i Auto, når den er slået til.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "Mens en agent arbejder, viser en bjælke øverst på skærmen den app, der bruges, med Pause og Stop. Esc stopper den også, mens den arbejder i appen forrest.",
-  "Esc stops it too, while it works in the app in front": "Esc stopper det også, mens det arbejder i appen forrest"
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Mens en agent arbejder, viser en bjælke øverst på skærmen den app, der bruges, med Pause og Stop. Esc stopper den også, mens den handler i den forreste app.",
+  "Esc stops it too, while it acts in the frontmost app": "Esc stopper det også, mens det handler i den forreste app"
 }

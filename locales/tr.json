@@ -3156,6 +3156,6 @@
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Terminal ve düzenleyici metni birinin istemini içerebilir, bu yüzden üzerine her tıklama onayınızı gerektirir.",
   "You agreed to an earlier version of these terms.": "Bu koşulların önceki bir sürümünü kabul etmiştiniz.",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Önce sor, her sohbette uygulama başına bir onay demektir; Otomatik'te denetleyici açıksa onayı o verir.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "Bir ajan çalışırken ekranın üstündeki şerit kullanılan uygulamayı Duraklat ve Durdur ile birlikte gösterir. Öndeki uygulamada çalışırken Esc de durdurur.",
-  "Esc stops it too, while it works in the app in front": "Öndeki uygulamada çalışırken Esc de durdurur"
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Bir ajan çalışırken ekranın üstündeki şerit kullanılan uygulamayı Duraklat ve Durdur ile birlikte gösterir. En öndeki uygulamada işlem yaparken Esc de durdurur.",
+  "Esc stops it too, while it acts in the frontmost app": "En öndeki uygulamada işlem yaparken Esc de durdurur"
 }

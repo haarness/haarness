@@ -3156,6 +3156,6 @@
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "ターミナルやエディタのテキストには誰かへの確認が含まれていることがあるため、そこをクリックするたびに承認が必要です。",
   "You agreed to an earlier version of these terms.": "これらの規約の以前の版に同意しています。",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "「先に確認」では、各チャットでアプリごとに1回承認します。自動では、審査役がオンのときは審査役が承認します。",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "エージェントが作業している間、画面上部の帯に使用中のアプリと「一時停止」「停止」が表示されます。最前面のアプリで作業している間は Esc キーでも停止します。",
-  "Esc stops it too, while it works in the app in front": "最前面のアプリで作業中は Esc キーでも停止できます"
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "エージェントが作業している間、画面上部の帯に使用中のアプリと「一時停止」「停止」が表示されます。最前面のアプリを操作している間は Esc キーでも停止します。",
+  "Esc stops it too, while it acts in the frontmost app": "最前面のアプリを操作中は Esc キーでも停止できます"
 }

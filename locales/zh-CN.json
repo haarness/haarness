@@ -3156,6 +3156,6 @@
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "终端和编辑器中的文本可能包含他人的提示，因此每次点击都需要你的批准。",
   "You agreed to an earlier version of these terms.": "你同意的是这些条款的早期版本。",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "“先询问”是指每个对话中每个应用需批准一次；在自动模式下，审核模型开启时由它批准。",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "智能体工作时，屏幕顶部的条带会显示正在使用的应用，并提供“暂停”和“停止”。它在最前面的应用中工作时，按 Esc 也可停止。",
-  "Esc stops it too, while it works in the app in front": "在最前面的应用中工作时，按 Esc 也可停止"
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "智能体工作时，屏幕顶部的条带会显示正在使用的应用，并提供“暂停”和“停止”。它在最前端的应用中操作时，按 Esc 也可停止。",
+  "Esc stops it too, while it acts in the frontmost app": "在最前端的应用中操作时，按 Esc 也可停止"
 }

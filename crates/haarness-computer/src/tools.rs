@@ -319,6 +319,8 @@ struct Target {
     password: bool,
     /// The element is a terminal inside another app (an editor's terminal panel), as the helper judged it.
     terminal: bool,
+    /// The element is a Paste menu item.
+    paste: bool,
     /// The window's title, the nearest labelled part around the element, the menu item a ⌘ shortcut maps to, and
     /// System Settings' open pane: words from the app, for the approval and Auto's reviewer.
     window: Option<String>,
@@ -340,6 +342,7 @@ impl Target {
             detail: text("description"),
             password: value["password"].as_bool().unwrap_or(false),
             terminal: value["terminal"].as_bool().unwrap_or(false),
+            paste: value["paste"].as_bool().unwrap_or(false),
             window: words(&value["window"]),
             context: words(&value["context"]),
             menu: words(&value["menu"]),
@@ -632,6 +635,10 @@ impl MacTool {
         // anyone is asked, as in a terminal app.
         if target.terminal && gesture == Gesture::Input {
             return Err(tool_error(policy::terminal_refusal(target.app_name())));
+        }
+        // Paste in a terminal or script runner runs the clipboard as a command: refused as typing there is.
+        if target.paste && policy::group(&target.bundle, None) == Group::Runner {
+            return Err(tool_error(policy::paste_refusal(target.app_name())));
         }
         if let Some(refusal) = policy::pane_refusal(&target.bundle, target.pane.as_deref(), gesture)
         {
@@ -1467,10 +1474,10 @@ impl Tool for MacTool {
         operation.starts_with("computer:")
     }
 
-    fn reviewer_may_answer(&self, _arguments: &Value, operation: &str) -> bool {
+    fn reviewer_may_answer(&self, arguments: &Value, operation: &str) -> bool {
         // Acting in an app, opening or quitting one, and looking at every app at once. An app set to ask every time
-        // (`each:`) is the person's own choice to be asked, so it stays theirs. So do terminals and script runners:
-        // a click on Paste or Run there runs code the reviewer never sees.
+        // (`each:`) is the person's own choice to be asked, so it stays theirs, and so do the apps where a click can
+        // run code the reviewer never sees, or change what agents may do (`policy::reviewable`).
         let Some(rest) = ["computer:act:", "computer:launch:", "computer:screen:"]
             .iter()
             .find_map(|prefix| operation.strip_prefix(prefix))
@@ -1479,7 +1486,12 @@ impl Tool for MacTool {
         };
         // `<chat>:<bundle id>`, or `<chat>` alone for the whole screen.
         let bundle = rest.split(':').nth(1).unwrap_or_default();
-        bundle.is_empty() || policy::group(bundle, None) != Group::Runner
+        // The pane the helper named belongs to the action's own target, not to a drag's drop.
+        let mac = &arguments[PREPARED];
+        let pane = mac["pane"]
+            .as_str()
+            .filter(|_| mac["bundle"].as_str() == Some(bundle));
+        bundle.is_empty() || policy::reviewable(bundle, pane)
     }
 
     fn yolo_answers(&self, _arguments: &Value, operation: &str) -> bool {
@@ -1635,6 +1647,13 @@ impl Tool for MacTool {
                 input["count"] = json!(args["count"].as_u64().unwrap_or(1));
                 input["held"] = args["modifiers"].clone();
                 input["expect"] = Self::expect(&args);
+                // The helper turns away a click that lands on Paste there, as the target may have moved.
+                if prepared["bundle"]
+                    .as_str()
+                    .is_some_and(|bundle| policy::group(bundle, None) == Group::Runner)
+                {
+                    input["refusePaste"] = json!(true);
+                }
                 let reply = self
                     .act(&context, "click", input, Duration::from_secs(20))
                     .await?;

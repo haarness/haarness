@@ -3156,6 +3156,6 @@
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "O texto de um terminal ou editor pode conter um pedido de alguém, então cada clique nele precisa da sua aprovação.",
   "You agreed to an earlier version of these terms.": "Você concordou com uma versão anterior destes termos.",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Perguntar antes significa uma aprovação por app em cada conversa, dada pelo revisor do Auto no modo Auto quando ele está ativado.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "Enquanto um agente trabalha, uma faixa no topo da tela mostra o app em uso, com Pausar e Parar. Esc também interrompe enquanto ele trabalha no app em primeiro plano.",
-  "Esc stops it too, while it works in the app in front": "Esc também interrompe enquanto ele trabalha no app em primeiro plano"
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Enquanto um agente trabalha, uma faixa no topo da tela mostra o app em uso, com Pausar e Parar. Esc também interrompe enquanto ele age no app mais à frente.",
+  "Esc stops it too, while it acts in the frontmost app": "Esc também interrompe enquanto ele age no app mais à frente"
 }

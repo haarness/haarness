@@ -268,7 +268,7 @@ test("agreeing takes the checkbox, then turns computer use on", async () => {
   expect(calls.at(-1)?.bar?.usingMac).toBe("Haarness is working on this Mac");
   await expect(pane.getByText(/You agreed on November 7, 2026\./)).toBeVisible();
   await expect(
-    pane.getByText("While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.", { exact: true }),
+    pane.getByText("While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.", { exact: true }),
   ).toBeVisible();
   await noHorizontalOverflow();
   expect(errors).toEqual([]);
