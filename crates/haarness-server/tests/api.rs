@@ -3532,6 +3532,7 @@ async fn semantic_fork_remaps_consumed_queue_and_excludes_selected_prompt() {
                 queued: true,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         )
         .await
@@ -3564,6 +3565,7 @@ async fn semantic_fork_remaps_consumed_queue_and_excludes_selected_prompt() {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         )
         .await
@@ -5401,6 +5403,7 @@ async fn automatic_compaction_uses_each_models_context_and_output_limits() {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             )
             .await
@@ -14896,6 +14899,9 @@ mod turn_panic;
 
 #[path = "cases/session_start.rs"]
 mod session_start;
+
+#[path = "cases/stop_hook.rs"]
+mod stop_hook;
 
 #[path = "cases/inherited_ceilings.rs"]
 mod inherited_ceilings;

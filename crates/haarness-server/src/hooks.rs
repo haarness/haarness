@@ -19,7 +19,9 @@
 //! `PermissionRequest` hook answers with `hookSpecificOutput.decision`
 //! (`{"behavior": "allow", "always": true}` answers Always). From a
 //! `PostToolUse` or `PostToolUseFailure` hook, which runs once the tool ran, a
-//! block is feedback, which the model reads after the result.
+//! block is feedback, which the model reads after the result. From a `Stop`
+//! hook, which runs when a turn would end, it is feedback too: the turn goes
+//! on, and the model answers it.
 //!
 //! Events: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
 //! `UserPromptSubmit`, `PermissionRequest`, `Stop`, `SessionStart`,
@@ -300,12 +302,12 @@ impl ConfiguredHooks {
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut outcome = HookOutcome::default();
-        let after_tool = is_after_tool(&entry.event);
+        let feedback_only = gives_feedback(&entry.event);
         // Exit code 2 is the Claude "block" convention; stderr is the reason.
         if output.status.code() == Some(2) {
             let reason = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            // After a tool ran, a hook that says nothing gives no feedback.
-            if reason.is_empty() && after_tool {
+            // A hook that says nothing gives no feedback.
+            if reason.is_empty() && feedback_only {
                 return outcome;
             }
             let reason = if reason.is_empty() {
@@ -333,9 +335,8 @@ impl ConfiguredHooks {
                     .filter(|reason| !reason.is_empty())
                     .map(str::to_owned);
             }
-            if parsed.get("decision").and_then(Value::as_str) == Some("block")
-                || parsed.get("continue").and_then(Value::as_bool) == Some(false)
-            {
+            outcome.halt = parsed.get("continue").and_then(Value::as_bool) == Some(false);
+            if parsed.get("decision").and_then(Value::as_str) == Some("block") || outcome.halt {
                 outcome.block = Some(
                     parsed
                         .get("reason")
@@ -411,11 +412,15 @@ impl ConfiguredHooks {
             outcome.context = None;
             outcome.always = false;
         }
-        // After a tool ran, only what is meant for the model is its feedback:
+        // Where a block is feedback, only what is meant for the model counts:
         // a successful hook's block `reason`, never `continue: false`'s
         // `stopReason` (that is for the person) nor a failed hook's answer.
-        if after_tool {
+        if feedback_only {
             outcome.block = feedback.filter(|_| output.status.success());
+        }
+        // A Stop hook that also says `continue: false` lets the turn end.
+        if entry.event == "Stop" && outcome.halt {
+            outcome.block = None;
         }
         // A permission deny stops the action only where the runtime reads it.
         let denied = outcome.permission == Some(PermissionDecision::Deny)
@@ -454,11 +459,12 @@ impl ConfiguredHooks {
         let mut always = None;
         for entry in self.matching(event, values) {
             let outcome = self.run(entry, payload, folders).await;
-            // The first block stops an action; after a tool ran, every
-            // hook's feedback reaches the model.
+            // The first block stops an action; where a block is feedback,
+            // every hook's reaches the model.
+            combined.halt |= outcome.halt;
             if let Some(block) = outcome.block {
                 match &mut combined.block {
-                    Some(existing) if is_after_tool(event) => {
+                    Some(existing) if gives_feedback(event) => {
                         existing.push('\n');
                         existing.push_str(&block);
                     }
@@ -703,6 +709,13 @@ fn is_after_tool(event: &str) -> bool {
     matches!(event, "PostToolUse" | "PostToolUseFailure")
 }
 
+/// Whether a block from a hook for `event` is feedback for the model, read
+/// by the rules of [`is_after_tool`]'s events: after a tool ran, and when a
+/// turn would end (`Stop`), which the feedback keeps going.
+fn gives_feedback(event: &str) -> bool {
+    is_after_tool(event) || event == "Stop"
+}
+
 /// Where a hook runs (its `cwd`), and the project folder it is told about.
 #[derive(Clone, Copy)]
 struct Folders<'a> {
@@ -719,6 +732,8 @@ struct HookOutcome {
     permission: Option<PermissionDecision>,
     updated_input: Option<Value>,
     always: bool,
+    /// A hook answered `continue: false`.
+    halt: bool,
 }
 
 impl From<HookOutcome> for HookDecision {
@@ -879,6 +894,15 @@ impl HookLabel {
                 code,
                 reason = %reason,
                 "hook feedback added to the tool result"
+            );
+        } else if self.event == "Stop" {
+            tracing::info!(
+                event = %self.event,
+                session = self.session.as_deref(),
+                program = %self.program,
+                code,
+                reason = %reason,
+                "hook blocked the end of the turn"
             );
         } else {
             tracing::debug!(
@@ -1447,8 +1471,8 @@ impl HookPort for ConfiguredHooks {
             .await;
     }
 
-    async fn stop(&self, call: &HookCall) {
-        let _ = self
+    async fn stop(&self, call: &HookCall, active: bool) -> Option<String> {
+        let outcome = self
             .run_event(
                 "Stop",
                 None,
@@ -1456,10 +1480,18 @@ impl HookPort for ConfiguredHooks {
                     "hook_event_name": "Stop",
                     "session_id": call.thread,
                     "cwd": self.folders(Some(call)).cwd,
+                    "stop_hook_active": active,
                 }),
                 self.folders(Some(call)),
             )
             .await;
+        // As in Claude Code, `continue: false` from any hook ends the turn,
+        // whatever feedback another gave.
+        if outcome.halt && outcome.block.is_some() {
+            tracing::info!(session = %call.thread, "a Stop hook answered continue: false, so the turn ends");
+            return None;
+        }
+        outcome.block
     }
 
     async fn session_start(&self, call: &HookCall) {
@@ -2599,21 +2631,27 @@ mod tests {
             .post_tool_use(&chat, "write", &write, "Wrote notes.md", false)
             .await;
         hooks
-            .stop(&HookCall {
-                agent: None,
-                ..chat.clone()
-            })
+            .stop(
+                &HookCall {
+                    agent: None,
+                    ..chat.clone()
+                },
+                false,
+            )
             .await;
         // On the chat home the chat's folder is its project too.
         hooks
-            .stop(&HookCall {
-                agent: None,
-                folder_is_project: true,
-                ..chat.clone()
-            })
+            .stop(
+                &HookCall {
+                    agent: None,
+                    folder_is_project: true,
+                    ..chat.clone()
+                },
+                false,
+            )
             .await;
         // A chat of the project folder runs its hooks there, as before.
-        hooks.stop(&HookCall::new(thread)).await;
+        hooks.stop(&HookCall::new(thread), false).await;
         let written = std::fs::read_to_string(&log).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
         let runs: Vec<(String, String, String, Value)> = written
@@ -2733,6 +2771,89 @@ mod tests {
             capture
                 .matching("hook block ignored: this event cannot be blocked")
                 .is_empty()
+        );
+    }
+
+    /// A `Stop` hook that blocks keeps the turn going with its feedback, by
+    /// the rules of feedback after a tool ran: every blocking hook's reason
+    /// (an exit 2's stderr or a JSON block's `reason`), one per line. It is
+    /// told whether hooks already kept the turn going.
+    #[tokio::test]
+    async fn a_stop_hook_that_blocks_gives_its_feedback_and_hears_it_kept_the_turn_going() {
+        let (capture, _guard) = Capture::install();
+        let log =
+            std::env::temp_dir().join(format!("haarness-stop-{}.jsonl", uuid::Uuid::now_v7()));
+        let record = format!("cat >> '{}'; echo >> '{}'", log.display(), log.display());
+        let hooks = hooks_for(
+            "Stop",
+            json!([
+                {"command": record},
+                {"command": "echo 'run the tests' >&2; exit 2"},
+                {"command": r#"echo '{"additionalContext":"not feedback"}'"#},
+                {"command": r#"echo '{"decision":"block","reason":"and lint"}'"#},
+            ]),
+        );
+        let call = HookCall::new(ThreadId::new());
+        assert_eq!(
+            hooks.stop(&call, false).await.as_deref(),
+            Some("run the tests\nand lint")
+        );
+        assert_eq!(
+            hooks.stop(&call, true).await.as_deref(),
+            Some("run the tests\nand lint")
+        );
+        let payloads: Vec<Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        std::fs::remove_file(&log).unwrap();
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0]["hook_event_name"], "Stop");
+        assert_eq!(payloads[0]["session_id"], json!(call.thread));
+        assert_eq!(payloads[0]["stop_hook_active"], false);
+        assert_eq!(payloads[1]["stop_hook_active"], true);
+        let blocked = capture.matching("hook blocked the end of the turn");
+        assert_eq!(blocked.len(), 4, "{:?}", capture.lines());
+        assert!(blocked.iter().all(|line| line.starts_with("INFO ")));
+        assert!(
+            blocked[0].contains("reason=run the tests"),
+            "{}",
+            blocked[0]
+        );
+        assert!(
+            capture
+                .matching("hook block ignored: this event cannot be blocked")
+                .is_empty()
+        );
+    }
+
+    /// The turn ends when no hook meant feedback for the model: an exit 2
+    /// with nothing on stderr, a block without a reason, a failed hook's
+    /// answer, `continue: false` (even beside another hook's feedback, as in
+    /// Claude Code), or nothing at all.
+    #[tokio::test]
+    async fn a_stop_hook_without_feedback_for_the_model_lets_the_turn_end() {
+        let feedback = r#"echo '{"decision":"block","reason":"run the tests"}'"#;
+        for hooks in [
+            json!([{"command": "exit 2"}]),
+            json!([{"command": r#"echo '{"decision":"block"}'"#}]),
+            json!([{"command": r#"echo '{"decision":"block","reason":"crashed"}'; exit 1"#}]),
+            json!([{"command": r#"echo '{"continue":false,"stopReason":"for the person"}'"#}]),
+            json!([{"command": r#"echo '{"decision":"block","reason":"x","continue":false}'"#}]),
+            json!([{"command": feedback}, {"command": r#"echo '{"continue":false}'"#}]),
+            json!([{"command": "echo done"}]),
+        ] {
+            let answer = hooks_for("Stop", hooks.clone())
+                .stop(&HookCall::new(ThreadId::new()), false)
+                .await;
+            assert!(answer.is_none(), "{hooks}: {answer:?}");
+        }
+        assert!(
+            ConfiguredHooks::new(Vec::new(), std::env::temp_dir())
+                .stop(&HookCall::new(ThreadId::new()), false)
+                .await
+                .is_none()
         );
     }
 
@@ -3247,7 +3368,7 @@ mod tests {
         #[cfg(unix)]
         {
             hooks_for("Stop", json!([{"command": "kill -9 $$"}]))
-                .stop(&HookCall::new(ThreadId::new()))
+                .stop(&HookCall::new(ThreadId::new()), false)
                 .await;
             let killed = capture.matching("hook command failed");
             assert_eq!(killed.len(), 3, "{:?}", capture.lines());
@@ -3413,8 +3534,12 @@ mod tests {
         assert_eq!(capture.matching("hook command failed").len(), 1);
 
         // Observational events cannot be blocked, so they never claim one at INFO.
-        hooks_for("Stop", json!([{"command": "echo stop >&2; exit 2"}]))
-            .stop(&HookCall::new(thread))
+        hooks_for("TurnEnd", json!([{"command": "echo stop >&2; exit 2"}]))
+            .turn_end(
+                &HookCall::new(thread),
+                haarness_protocol::TurnId::new(),
+                &json!({}),
+            )
             .await;
         assert_eq!(capture.matching("hook blocked").len(), 3);
         assert_eq!(

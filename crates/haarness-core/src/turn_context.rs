@@ -189,6 +189,7 @@ mod tests {
                 queued: false,
                 synthetic,
                 command_line: None,
+                hook: None,
             },
             created_at: Utc::now(),
         }

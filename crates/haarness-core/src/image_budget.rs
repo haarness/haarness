@@ -1217,6 +1217,7 @@ mod tests {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
             created_at: chrono::Utc::now(),
         };

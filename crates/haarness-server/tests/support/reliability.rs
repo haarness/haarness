@@ -78,7 +78,6 @@ impl HookPort for Hooks {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
     async fn post_compact(&self, _: &HookCall, trigger: &str, _: &Item) {
         self.compacted.lock().unwrap().push(trigger.into());
     }
@@ -854,6 +853,7 @@ async fn reliability_automatic_and_overflow_compaction_emit_hooks_after_commit()
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             )
             .await
@@ -1539,7 +1539,6 @@ impl HookPort for BlockingHooks {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 #[tokio::test]

@@ -672,7 +672,6 @@ impl haarness_core::HookPort for BlockPrompt {
     ) -> haarness_core::HookDecision {
         haarness_core::HookDecision::default()
     }
-    async fn stop(&self, _: &haarness_core::HookCall) {}
 }
 
 #[tokio::test]

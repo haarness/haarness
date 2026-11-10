@@ -282,6 +282,7 @@ pub(super) fn promote(
             queued: true,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
         created_at: now,
     };
@@ -523,6 +524,7 @@ mod tests {
             queued: true,
             synthetic: false,
             command_line: None,
+            hook: None,
         };
         // Recorded with its item; the same request again appends nothing.
         assert!(

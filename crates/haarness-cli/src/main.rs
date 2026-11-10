@@ -18066,6 +18066,7 @@ request_timeout = 0
                         synthetic: false,
                         command_line: None,
                         queued: false,
+                        hook: None,
                     },
                 ),
                 item(
@@ -20774,6 +20775,7 @@ request_timeout = 0
             queued: false,
             synthetic,
             command_line: None,
+            hook: None,
         };
         let call = |call_id: &str, description: &str| ItemData::ToolCall {
             call_id: call_id.into(),
@@ -21034,6 +21036,7 @@ request_timeout = 0
             queued,
             synthetic: false,
             command_line: None,
+            hook: None,
         };
         let task = |call_id: &str, description: &str| ItemData::ToolCall {
             call_id: call_id.into(),
@@ -21135,6 +21138,7 @@ request_timeout = 0
             queued,
             synthetic: true,
             command_line: None,
+            hook: None,
         };
         let task = |call_id: &str, description: &str| ItemData::ToolCall {
             call_id: call_id.into(),
@@ -21166,6 +21170,7 @@ request_timeout = 0
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(first, task("a", "Index the docs")),

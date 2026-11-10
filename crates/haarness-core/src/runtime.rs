@@ -259,6 +259,16 @@ belonged to has ended, and that work was stopped before you read the message the
 while it went on. Answer that message now; take the stopped work up again only if it asks \
 for that.\n</system-reminder>";
 
+/// What the model reads before the feedback of a Stop hook that kept its
+/// turn going, which follows in a `<hook-feedback>` block.
+const STOP_HOOK_FEEDBACK: &str = "Your turn has not ended: a Stop hook asked for more, in the \
+block below. The hook wrote it, not the person you are working with. Take care of it, then end \
+your turn.";
+
+/// How often in a row Stop hooks may keep one turn going: a hook that
+/// always blocks cannot hold a turn forever.
+const STOP_HOOK_CONTINUATIONS: u32 = 8;
+
 /// The transcript line for a turn the runtime had to stop.
 fn stopped_turn_message(reason: &str) -> String {
     format!(
@@ -4304,6 +4314,7 @@ impl AgentRuntime {
             queued: true,
             synthetic: request.synthetic,
             command_line: None,
+            hook: None,
         };
         // A person's steer is recorded by its request with the item, under
         // the turn's gate, so a retry (even one racing it) is not delivered
@@ -5346,6 +5357,7 @@ impl AgentRuntime {
                                 queued: false,
                                 synthetic: true,
                                 command_line: None,
+                                hook: None,
                             },
                             ItemData::Error {
                                 message: notice,
@@ -10250,6 +10262,49 @@ impl RunnerTask {
         result
     }
 
+    /// Write the hidden message that carries the Stop hooks' feedback, which
+    /// the next round answers. The caller holds the turn's acceptance gate,
+    /// so no message of the person's lands meanwhile. A stop that comes
+    /// while it is written ends the turn, and the message goes with it,
+    /// never announced, so no later turn answers it either.
+    async fn add_stop_hook_message(&self, feedback: &str) -> CoreResult<()> {
+        if self.cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        let item = self
+            .repository
+            .append_item(
+                self.thread.id,
+                Some(self.turn.id),
+                ItemData::UserMessage {
+                    text: format!(
+                        "{STOP_HOOK_FEEDBACK}\n\n<hook-feedback>\n{feedback}\n</hook-feedback>"
+                    ),
+                    attachments: Vec::new(),
+                    queued: false,
+                    synthetic: true,
+                    command_line: None,
+                    hook: Some("Stop".into()),
+                },
+            )
+            .await?;
+        if self.cancel.is_cancelled() {
+            if let Err(error) = self.repository.discard_item(self.thread.id, item.id).await {
+                tracing::warn!(%error, thread = %self.thread.id, "could not take back a Stop hook's message after a stop");
+            }
+            return Err(CoreError::Cancelled);
+        }
+        self.events.publish_scoped(
+            "item.created",
+            Some(self.thread.id),
+            Some(self.root_thread_id),
+            Some(self.turn.id),
+            Some(item.id),
+            json!(item),
+        );
+        Ok(())
+    }
+
     async fn has_unconsumed_queued(&self) -> bool {
         self.repository
             .list_items(self.thread.id, None)
@@ -10755,6 +10810,9 @@ impl RunnerTask {
             let mut refused_calls = 0_u8;
             // Whether this turn asked again for the summary at its step limit.
             let mut asked_for_summary = false;
+            // How often in a row Stop hooks kept this turn going; a message
+            // of the person's in between starts the count again.
+            let mut stop_continuations = 0_u32;
             // Whether any round of this turn wrote text or called a tool.
             let mut answered = false;
             // UserPromptSubmit hooks may block the turn or inject context.
@@ -10907,6 +10965,7 @@ impl RunnerTask {
                     queued: false,
                     synthetic: true,
                     command_line: None,
+                    hook: None,
                 })
                 .await?;
             }
@@ -11879,6 +11938,7 @@ impl RunnerTask {
                             queued: false,
                             synthetic: true,
                             command_line: None,
+                            hook: None,
                         })
                         .await?;
                         continue 'provider_round;
@@ -12051,7 +12111,7 @@ impl RunnerTask {
                     };
                     let mut accepting = active.accepting.lock().await;
                     let items = self.repository.list_items(self.thread.id, None).await?;
-                    let queued = !unconsumed_queued(&items, self.turn.id).is_empty();
+                    let mut queued = !unconsumed_queued(&items, self.turn.id).is_empty();
                     let mut goal_continues = false;
                     if self.depth == 0 && self.output_schema.is_none() {
                         let goal_lock = goal_mutation_lock(&self.goal_mutations, self.thread.id);
@@ -12147,11 +12207,39 @@ impl RunnerTask {
                             }
                         }
                     }
+                    // The turn would end here, so Stop hooks run, and may keep it
+                    // going with their feedback. The gate stays open while they
+                    // do: a message the person sends meanwhile steers this turn
+                    // and is answered before their feedback, and the hooks run
+                    // again when the turn would end after it.
+                    let mut stop_feedback = None;
+                    if self.depth == 0
+                        && !queued
+                        && !goal_continues
+                        && let Some(hooks) = &self.hooks
+                    {
+                        drop(accepting);
+                        self.set_status("done", None);
+                        let call = self.hook_call(None);
+                        stop_feedback = tokio::select! {
+                            biased;
+                            () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                            feedback = hooks.stop(&call, stop_continuations > 0) => feedback,
+                        };
+                        accepting = active.accepting.lock().await;
+                        let seen = items.last().map(|item| item.sequence);
+                        let newer = self.repository.list_items(self.thread.id, seen).await?;
+                        queued = !unconsumed_queued(&newer, self.turn.id).is_empty();
+                        if queued && stop_feedback.is_some() {
+                            tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "a Stop hook blocked while a message of the person's came in, so that message is answered instead");
+                        }
+                    }
                     // Queued prompts are not delivered here: each starts as its own
                     // turn once this one closes (see `AgentRuntime::follow_turn`).
                     if queued || goal_continues {
                         if queued {
                             tool_rounds = 0;
+                            stop_continuations = 0;
                         }
                         start_goal_logical_turn = goal_continues;
                         goal_logical_turn_is_continuation = !queued;
@@ -12175,6 +12263,26 @@ impl RunnerTask {
                         }
                         continue;
                     }
+                    // A Stop hook's feedback goes to the model, which answers
+                    // it in this turn, unless the agent is at its step limit,
+                    // hooks already kept the turn going too often in a row, or
+                    // a message the person queued waits for a turn of its own.
+                    if let Some(feedback) = stop_feedback {
+                        let (thread, turn) = (self.thread.id, self.turn.id);
+                        if tool_round_limit_reached {
+                            tracing::info!(%thread, %turn, "a Stop hook blocked at the agent's step limit, so the turn ends");
+                        } else if stop_continuations >= STOP_HOOK_CONTINUATIONS {
+                            tracing::info!(%thread, %turn, "Stop hooks kept the turn going {STOP_HOOK_CONTINUATIONS} times in a row, so it ends");
+                        } else if !self.repository.input_queue(thread).await?.items.is_empty() {
+                            tracing::info!(%thread, %turn, "a Stop hook blocked while a queued message waits, so the turn ends and that message starts its own");
+                        } else {
+                            self.add_stop_hook_message(&feedback).await?;
+                            stop_continuations += 1;
+                            drop(accepting);
+                            tracing::info!(%thread, %turn, times = stop_continuations, "a Stop hook kept the turn going");
+                            continue 'provider_round;
+                        }
+                    }
                     // Close acceptance while holding the same gate used by
                     // queue_input. A concurrent message now either appears in
                     // the snapshot above or observes `false` and starts a new
@@ -12185,11 +12293,6 @@ impl RunnerTask {
                     if self.depth == 0 {
                         if let Some(hooks) = &self.hooks {
                             let call = self.hook_call(None);
-                            tokio::select! {
-                                biased;
-                                () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
-                                () = hooks.stop(&call) => {}
-                            }
                             let detail = json!({
                                 "turnId": self.turn.id,
                                 "agent": self.turn.agent,
@@ -15307,6 +15410,7 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
             queued: false,
             synthetic: true,
             command_line: None,
+            hook: None,
         },
         ItemData::Error {
             message: notice,
@@ -20938,6 +21042,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
         ]);
@@ -20961,6 +21066,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(
@@ -20989,6 +21095,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
         ]);
@@ -21013,6 +21120,7 @@ mod tests {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         };
         let messages = provider_messages(vec![
             item(1, user("read the file")),
@@ -21078,6 +21186,7 @@ mod tests {
             queued,
             synthetic: false,
             command_line: None,
+            hook: None,
         }
     }
 
@@ -21238,6 +21347,7 @@ mod tests {
                     queued: true,
                     synthetic: true,
                     command_line: None,
+                    hook: None,
                 },
             ),
         ];
@@ -21280,6 +21390,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(
@@ -21296,6 +21407,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(
@@ -21330,6 +21442,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
         ]);
@@ -21362,6 +21475,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(
@@ -21384,6 +21498,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(
@@ -21828,6 +21943,7 @@ mod tests {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         )]);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -21853,6 +21969,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(
@@ -21899,6 +22016,7 @@ mod tests {
             queued: false,
             synthetic,
             command_line: None,
+            hook: None,
         }
     }
 
@@ -22418,6 +22536,7 @@ mod tests {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         )];
         items.extend(tool_round("call-image", shot).into_iter().map(|mut item| {
@@ -22551,6 +22670,7 @@ mod tests {
                         queued: false,
                         synthetic: false,
                         command_line: None,
+                        hook: None,
                     },
                 ),
                 at(
@@ -22563,6 +22683,7 @@ mod tests {
                         queued: false,
                         synthetic: true,
                         command_line: None,
+                        hook: None,
                     },
                 ),
             ];
@@ -22612,6 +22733,7 @@ mod tests {
             queued,
             synthetic,
             command_line: None,
+            hook: None,
         };
         let steer = at(4, user("also the footer", true, false));
         let messages = vec![
@@ -22623,6 +22745,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             at(
@@ -22897,6 +23020,7 @@ mod tests {
                     queued: true,
                     synthetic: true,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(
@@ -22907,6 +23031,7 @@ mod tests {
                     queued: true,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
         ]);
@@ -22935,6 +23060,7 @@ mod tests {
                 queued: true,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         );
         let messages = provider_messages(vec![
@@ -22979,6 +23105,7 @@ mod tests {
                 queued: true,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         );
         let text_queued_id = text_queued.id;
@@ -22991,6 +23118,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             text_queued,
@@ -23037,6 +23165,7 @@ mod tests {
                 queued: true,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         );
         let tool_queued_id = tool_queued.id;
@@ -23102,6 +23231,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(
@@ -23127,6 +23257,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
         ];
@@ -23148,6 +23279,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(
@@ -23174,6 +23306,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             ),
         ];
@@ -23665,7 +23798,6 @@ mod tests {
                     ..crate::HookDecision::default()
                 }
             }
-            async fn stop(&self, _: &crate::HookCall) {}
         }
         let root =
             std::env::temp_dir().join(format!("haarness-hook-home-{}", uuid::Uuid::now_v7()));

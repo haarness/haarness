@@ -122,7 +122,6 @@ impl HookPort for ApproveAll {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 struct Chrome {

@@ -477,6 +477,7 @@ mod tests {
                     queued,
                     synthetic,
                     command_line: None,
+                    hook: None,
                 },
             )
         }

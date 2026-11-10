@@ -186,6 +186,7 @@ fn prompt(thread: ThreadId, synthetic: bool) -> haarness_protocol::EventEnvelope
             queued: false,
             synthetic,
             command_line: None,
+            hook: None,
         },
         created_at: chrono::Utc::now(),
     };

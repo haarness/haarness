@@ -174,7 +174,25 @@ impl HookPort for Objects {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
+    async fn stop(&self, _: &HookCall, active: bool) -> Option<String> {
+        (!active).then(|| "STOP_FEEDBACK".into())
+    }
+}
+
+/// A command `Stop` hook's feedback keeps the turn going through the
+/// extensions, which only observe the end.
+#[tokio::test]
+async fn command_stop_hook_feedback_passes_extensions() {
+    let (root, config) = fixture(GOOD);
+    let extensions = Extensions::load(&config, root.path()).await.unwrap();
+    let call = HookCall::new(ThreadId::new());
+    let hooks = extensions.wrap_hooks(Some(Arc::new(Objects)));
+    assert_eq!(
+        hooks.stop(&call, false).await.as_deref(),
+        Some("STOP_FEEDBACK")
+    );
+    assert_eq!(hooks.stop(&call, true).await, None);
+    assert_eq!(extensions.wrap_hooks(None).stop(&call, false).await, None);
 }
 
 #[tokio::test]

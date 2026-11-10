@@ -918,15 +918,18 @@ impl HookPort for CombinedHooks {
             HookDecision::default()
         }
     }
-    async fn stop(&self, call: &HookCall) {
-        if let Some(inner) = &self.inner {
-            inner.stop(call).await;
-        }
+    async fn stop(&self, call: &HookCall, active: bool) -> Option<String> {
+        let feedback = match &self.inner {
+            Some(inner) => inner.stop(call, active).await,
+            None => None,
+        };
+        // Extensions only observe it: their answer never keeps a turn going.
         for host in &self.extensions.hosts {
             if let Err(error) = host.hook("stop", json!({"threadId":call.thread})).await {
                 tracing::warn!(%error, "extension stop hook failed");
             }
         }
+        feedback
     }
     async fn prepare_request(
         &self,
