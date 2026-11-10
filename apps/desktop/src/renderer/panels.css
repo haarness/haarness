@@ -488,9 +488,17 @@
 .empty button {
   margin-top: var(--s3);
 }
+/* The error page stands in for the whole window, title bar included, so on
+   macOS (where the window draws no frame of its own) the page itself moves
+   the window; what can be clicked or typed in on it stays clickable. */
 .fatal {
+  height: 100%;
+  overflow: auto;
   padding: var(--s9);
-  max-width: 640px;
+  -webkit-app-region: drag;
+}
+.fatal > * {
+  max-width: calc(640px - 2 * var(--s9));
 }
 .fatal pre {
   margin: var(--s4) 0;
@@ -499,6 +507,9 @@
 .fatal button {
   margin-block: var(--s3) 0;
   margin-inline: 0 var(--s2);
+}
+.fatal :is(a, button, input, select, textarea, [tabindex]) {
+  -webkit-app-region: no-drag;
 }
 
 @container (max-width: 460px) {

@@ -6,6 +6,7 @@ import { Markdown } from "./Markdown";
 import { Shimmer } from "./Shimmer";
 import { useApp } from "./state";
 import { cancelled } from "./error-text";
+import { composing } from "./text-entry";
 import { registerCyclePanel, tabButton } from "./tab-cycle";
 import { shortcutLabel } from "./search";
 import {
@@ -524,7 +525,7 @@ function SideThreadView(props: { chat: string; id: string; onEscape: () => void 
             resize();
           }}
           onKeyDown={(event) => {
-            if (event.isComposing || event.keyCode === 229) return;
+            if (composing(event)) return;
             if (event.key === "Escape") {
               // Esc stops an answer being written, and otherwise goes back to the chat.
               event.preventDefault();

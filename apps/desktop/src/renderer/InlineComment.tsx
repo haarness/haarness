@@ -1,5 +1,6 @@
 import { t } from "./i18n";
 import { createSignal, onCleanup, onMount } from "solid-js";
+import { composing } from "./text-entry";
 
 /**
  * A comment typed under what it is about: a diff line in Review, or lines of a
@@ -12,6 +13,8 @@ export function InlineComment(props: {
   /** The text box's name and placeholder; a diff line's by default. */
   inputLabel?: string;
   placeholder?: string;
+  /** Whether the text box takes the keyboard when it is drawn (it does by default). */
+  autofocus?: boolean;
   value: string;
   onInput: (value: string) => void;
   onCancel: () => void;
@@ -30,6 +33,7 @@ export function InlineComment(props: {
     }
   }
   onMount(() => {
+    if (props.autofocus === false) return;
     const frame = requestAnimationFrame(() => {
       input.focus({ preventScroll: true });
       input.closest(".diff-comment")?.scrollIntoView({ block: "nearest" });
@@ -46,7 +50,7 @@ export function InlineComment(props: {
         void submit();
       }}
       onKeyDown={(event) => {
-        if (event.isComposing) return;
+        if (composing(event)) return;
         if (event.key === "Escape") {
           event.preventDefault();
           event.stopPropagation();
@@ -67,7 +71,7 @@ export function InlineComment(props: {
           disabled={busy()}
           onInput={(event) => props.onInput(event.currentTarget.value)}
           onKeyDown={(event) => {
-            if (event.isComposing || event.key !== "Enter" || event.shiftKey)
+            if (composing(event) || event.key !== "Enter" || event.shiftKey)
               return;
             event.preventDefault();
             event.stopPropagation();

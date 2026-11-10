@@ -122,6 +122,7 @@ import { tabOrderScope } from "./chat-tabs";
 import { revealInStrip } from "./reveal";
 import { chatRowSelector, rovingRows, rowAfter } from "./roving-rows";
 import { terminalKeyboard } from "./terminal-focus";
+import { composing } from "./text-entry";
 const TerminalPanel = lazy(() =>
   import("./Terminal").then((module) => ({ default: module.TerminalPanel })),
 );
@@ -1184,7 +1185,9 @@ export function App() {
         toggleSide();
         return;
       }
-      if (event.key === "Escape") {
+      // Escape that cancels what an input method is composing (in Search's
+      // field, say) is the input method's.
+      if (event.key === "Escape" && !composing(event)) {
         if (palette()) {
           setPalette(false);
           return;

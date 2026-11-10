@@ -545,6 +545,11 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
 .code-copy:focus-visible {
   opacity: 1;
 }
+/* The app's own buttons in a reply (a code block's Copy, an image's Load)
+   are not its text: a selection copied or quoted from it leaves them out. */
+.markdown button {
+  user-select: none;
+}
 .code-copy.done {
   color: var(--green);
 }

@@ -8,6 +8,7 @@ import {
 } from "./reconnect-wait";
 import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
+import { wakeClock } from "./clock";
 import { applyLanguage, t, errorLine } from "./i18n";
 import { cancelled } from "./error-text";
 import {
@@ -2663,6 +2664,7 @@ function createApp(saved?: Preferences) {
       }
       if (isWake(event)) {
         hint(true);
+        wakeClock();
         return;
       }
       if (event.id && event.id !== subscription) return;

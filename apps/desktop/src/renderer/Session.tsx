@@ -105,10 +105,12 @@ import { barWords, computerApproval, isComputerPermission, pausedChatIn, pausedH
 import "./computer-use.css";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import type { FileContent } from "../shared";
-import { isTextEntry } from "./text-entry";
+import { composing, isTextEntry } from "./text-entry";
 import { selection as chatSelection } from "./sidebar-selection";
 import { Markdown } from "./Markdown";
 import { createReplySelection } from "./reply-selection";
+import { createReplyComment } from "./ReplyComment";
+import { withNote } from "./reply-comment";
 import { createTranscriptPress, listenForPress } from "./transcript-press";
 import { ConversationOutline } from "./ConversationOutline";
 import { promptTitle, readingMark } from "./outline-layout";
@@ -642,6 +644,39 @@ export function Session() {
     read: draft,
     write: (text) => change(text, true),
   });
+  // Words selected in a finished reply can be commented on; the comment
+  // goes into this chat's message box (see ReplyComment.tsx). While its box
+  // is open the transcript holds still, as under a held press, until the
+  // reader asks for the newest output (`resumeFollowing`); a box closing
+  // while following is still on takes the view on to the newest output.
+  const replyComment = createReplyComment({
+    transcript: () => scrolling,
+    chat: () => state.selected,
+    enabled: () => !!project() && editable() && !!composer?.isConnected && !composer.disabled,
+    add: (note) => {
+      change(withNote(draft(), note));
+      composer.focus({ preventScroll: true });
+      composer.setSelectionRange(composer.value.length, composer.value.length);
+    },
+    writing: (open) => {
+      if (open) return false;
+      setHeldBehind(false);
+      if (!follow()) return false;
+      const behind = scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight > 4;
+      followLatest();
+      return behind;
+    },
+    reveal: (item) => {
+      const index = rows().findIndex((row) => row.id === item);
+      if (index < 0) return false;
+      pauseFollowing(true);
+      virtual.scrollToIndex(index, { align: "center" });
+      return true;
+    },
+  });
+  /** Output arrived below while a reply comment's box held the view: Jump
+   * to latest offers it, as it does when following is off. */
+  const [heldBehind, setHeldBehind] = createSignal(false);
   let scrollFrame = 0;
   let revealFrame = 0;
   let revealTarget: string | undefined;
@@ -697,6 +732,8 @@ export function Session() {
     toggled = undefined;
     quietUntil = undefined;
     pausedByToggle = undefined;
+    replyComment.release();
+    setHeldBehind(false);
     setFollow(true);
   }
   function holdToggled(event: MouseEvent) {
@@ -799,8 +836,13 @@ export function Session() {
    * shows the list short of its end, or past it and pulled back. */
   function keepLatest() {
     // User input can arrive after a stream delta scheduled this frame. A
-    // press held in the transcript keeps the view where it is.
+    // press held in the transcript, or a reply comment's open box, keeps the
+    // view where it is.
     if (!follow() || !scrolling || toggled || press.held()) return;
+    if (replyComment.holding()) {
+      setHeldBehind(scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight > 4);
+      return;
+    }
     // A running step just opened holds the view until more is written.
     if (quietUntil) {
       if (
@@ -825,11 +867,19 @@ export function Session() {
     // scrolling; one that leaves it at the end is the list growing shorter.
     if (press.held() && follow() && top < lastTop && remaining > 4) pauseFollowing();
     if (!follow() && top > lastTop && remaining <= 4) setFollow(true);
+    // Scrolled down to the end by the reader, a reply comment's box no
+    // longer holds the view: the chat follows its newest output again.
+    if (top > lastTop && remaining <= 4 && replyComment.holding()) {
+      replyComment.release();
+      setHeldBehind(false);
+    }
     lastTop = top;
   }
   function onHistoryFocus(event: FocusEvent) {
     const target = event.target;
     if (!(target instanceof HTMLElement) || target === scrolling) return;
+    // A reply comment's box holds the view itself while it is open.
+    if (target.closest(".reply-comment-card")) return;
     const view = scrolling.getBoundingClientRect();
     const box = target.getBoundingClientRect();
     // Chromium can scroll a control into view before focusin. Compare with
@@ -1159,7 +1209,7 @@ export function Session() {
       ) {
         event.preventDefault();
         openFind();
-      } else if (event.key === "Escape" && findOpen()) {
+      } else if (event.key === "Escape" && findOpen() && !composing(event)) {
         event.preventDefault();
         closeFind();
       }
@@ -2577,6 +2627,7 @@ export function Session() {
                   classList={{
                     "conversation-match": rows()[row.index]?.id === findMatch(),
                     "fork-source": !!sourceReply() && rows()[row.index]?.id === sourceReply(),
+                    "reply-commenting": replyComment.holds(rows()[row.index]?.id),
                   }}
                   style={{
                     position: "absolute",
@@ -2616,6 +2667,7 @@ export function Session() {
                     reply={reply(rows()[row.index])}
                     fork={() => app.run(() => fork(rows()[row.index]))}
                   />
+                  <replyComment.Spot item={rows()[row.index]?.id} />
                 </div>
               )}
             </For>
@@ -2710,9 +2762,9 @@ export function Session() {
           <ChatLoading label={t("Loading chat…")} />
         </Show>
       </div>
-      <Show when={editable() || pending() || !follow() || todos().length}>
+      <Show when={editable() || pending() || !follow() || heldBehind() || todos().length}>
         <div class="composer-area" ref={toastAnchor("composer")}>
-          <Show when={!follow()}>
+          <Show when={!follow() || heldBehind()}>
             <button
               class="jump-latest"
               aria-label={t("Jump to latest")}
@@ -4388,8 +4440,6 @@ function cardKeyboard(dock: () => HTMLElement | undefined) {
     });
   };
 }
-/** Enter that confirms an input method's composition belongs to the input method. */
-const composing = (event: KeyboardEvent) => event.isComposing || event.keyCode === 229;
 
 function Question(props: { question: T.PendingQuestionInfo }) {
   const app = useApp();

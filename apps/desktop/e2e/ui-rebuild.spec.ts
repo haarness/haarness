@@ -177,6 +177,22 @@ test("view recovery keeps raw module errors and local paths out of the user inte
   await expect(
     recovery.getByRole("button", { name: "Reload window", exact: true }),
   ).toBeVisible();
+  // The page stands in for the title bar too: it fills the window and moves
+  // it, while its buttons stay pressable.
+  const region = await recovery.evaluate((main) => ({
+    page: getComputedStyle(main).getPropertyValue("-webkit-app-region"),
+    buttons: [...main.querySelectorAll("button")].map((button) =>
+      getComputedStyle(button).getPropertyValue("-webkit-app-region"),
+    ),
+    covers:
+      main.getBoundingClientRect().width === window.innerWidth &&
+      main.getBoundingClientRect().height === window.innerHeight,
+  }));
+  expect(region).toEqual({
+    page: "drag",
+    buttons: ["no-drag", "no-drag"],
+    covers: true,
+  });
   expect(
     diagnostics.some((message) => message.includes("Desktop view failed")),
   ).toBe(true);
