@@ -1724,6 +1724,7 @@ dependencies = [
  "haarness-core",
  "haarness-protocol",
  "http",
+ "image",
  "keyring",
  "nix 0.31.3",
  "parking_lot",

@@ -2598,7 +2598,8 @@ fn spawn_worker(
 }
 
 /// Sends `request` now, after the requests before it, and answers `reply`
-/// from a task of its own once the server does, through `answer`. A request
+/// from a task of its own once the server does, through `answer`, which
+/// runs off the async executor (it may shrink a large image). A request
 /// nobody waits for any more is not sent. With `cancel`, the server is told
 /// to stop once nobody waits for the answer.
 async fn dispatch<T: Send + 'static>(
@@ -2647,7 +2648,12 @@ async fn dispatch<T: Send + 'static>(
         let Some(result) = connection.signed_in(sent, first, resend).await else {
             return;
         };
-        let result = result.and_then(answer);
+        let result = match result {
+            Ok(result) => tokio::task::spawn_blocking(move || answer(result))
+                .await
+                .unwrap_or_else(|error| Err(mcp_error(error))),
+            Err(error) => Err(error),
+        };
         let _ = reply.send(connection.settled(result));
     });
 }
@@ -3145,6 +3151,17 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
                     mime_type,
                     blob,
                     ..
+                } if image_type(mime_type.as_deref()) => {
+                    let mime = mcp_content::media_type(mime_type.as_deref().unwrap_or_default());
+                    let (attachment, line) = image_blob(uri, &mime, blob, &mut attachment_bytes);
+                    attachments.extend(attachment);
+                    text_parts.push(line);
+                }
+                rmcp::model::ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    ..
                 } => {
                     match mcp_content::blob(uri, mime_type.as_deref(), blob, &mut attachment_bytes)
                     {
@@ -3204,6 +3221,14 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
     }
 }
 
+/// Whether a blob declared as `mime` holds an image: an `image/` type that
+/// is not text (an SVG is).
+fn image_type(mime: Option<&str>) -> bool {
+    use haarness_core::mcp_content;
+    let mime = mcp_content::media_type(mime.unwrap_or_default());
+    mime.starts_with("image/") && !mcp_content::textual(&mime)
+}
+
 /// A resource's text as a tool result holds it: a line naming the
 /// resource (`[notes://today: text/markdown]`), then the text.
 fn resource_text(uri: &str, mime: Option<&str>, text: &str) -> String {
@@ -3217,11 +3242,15 @@ fn resource_text(uri: &str, mime: Option<&str>, text: &str) -> String {
 }
 
 /// An image or audio block as the model takes it: the attachment and the
-/// line that stands for it, or, for a type Haarness does not carry to
-/// providers (`audio/webm`), only a line that names it. An image whose
-/// type is mislabelled (`image/jpg`) is attached as what its bytes are, and
-/// one of a text type (an SVG) is attached as before, which the model reads
-/// as its text. Base64 broken over lines is read without the breaks.
+/// line that stands for it, or only a line that names it when it is left
+/// out. An image goes as Read sends one (see [`mcp_image`]); other media
+/// are attached while the result's media (`total`) stay within
+/// [`haarness_core::mcp_content::MAX_ATTACHMENT_BYTES`], so one past that is
+/// named rather than failing the call and losing its text. A type Haarness
+/// does not carry to providers (`audio/webm`) is named too, and one of a
+/// text type (an SVG) is attached as before, which the model reads as its
+/// text. Base64 broken over lines is read without the breaks; base64 that
+/// does not decode fails the call.
 fn media_block(
     declared: &str,
     data: &str,
@@ -3230,44 +3259,184 @@ fn media_block(
 ) -> CoreResult<(Option<String>, String)> {
     use haarness_core::{attachments::is_supported_media_mime, mcp_content};
     let data = mcp_content::base64_text(data);
-    let mut mime = mcp_content::media_type(declared);
-    if !is_supported_media_mime(&mime) && !mcp_content::textual(&mime) {
-        let sniffed = mime
-            .starts_with("image/")
-            .then(|| STANDARD.decode(data.as_bytes()).ok())
-            .flatten()
-            .and_then(|bytes| haarness_core::images::sniff(&bytes))
-            .filter(|sniffed| is_supported_media_mime(sniffed));
-        let Some(sniffed) = sniffed else {
-            let bytes = data.trim_end_matches('=').len() / 4 * 3;
-            return Ok((
+    let mime = mcp_content::media_type(declared);
+    let invalid =
+        |error: base64::DecodeError| CoreError::Tool(format!("invalid MCP media base64: {error}"));
+    if mime.starts_with("image/") && !mcp_content::textual(&mime) {
+        return Ok(match mcp_image(&data, total).map_err(invalid)? {
+            McpImage::Attached {
+                mime,
+                data_url,
+                shown,
+            } => (
+                Some(data_url),
+                match shown {
+                    Some((width, height)) => {
+                        format!("[{mime} {kind} attachment, shown to you as {width}×{height}]")
+                    }
+                    None => format!("[{mime} {kind} attachment]"),
+                },
+            ),
+            McpImage::LeftOut { bytes, reason } => (
+                None,
+                format!("[{mime} {kind}, {bytes} bytes, left out: {reason}]"),
+            ),
+            McpImage::Unknown(bytes) if is_supported_media_mime(&mime) => (
+                None,
+                format!("[{mime} {kind}, {bytes} bytes, left out: its bytes are not an image]"),
+            ),
+            McpImage::Unknown(bytes) => (
                 None,
                 format!(
                     "[{mime} {kind}, about {bytes} bytes, left out: Haarness does not attach this type]"
                 ),
-            ));
-        };
-        sniffed.clone_into(&mut mime);
+            ),
+        });
     }
-    count_mcp_attachment(&data, total)?;
+    if !is_supported_media_mime(&mime) && !mcp_content::textual(&mime) {
+        let bytes = data.trim_end_matches('=').len() / 4 * 3;
+        return Ok((
+            None,
+            format!(
+                "[{mime} {kind}, about {bytes} bytes, left out: Haarness does not attach this type]"
+            ),
+        ));
+    }
+    let bytes = STANDARD.decode(data.as_bytes()).map_err(invalid)?.len();
+    if total.saturating_add(bytes) > haarness_core::mcp_content::MAX_ATTACHMENT_BYTES {
+        return Ok((
+            None,
+            format!("[{mime} {kind}, {bytes} bytes, left out: {MEDIA_PAST_LIMIT}]"),
+        ));
+    }
+    *total += bytes;
     Ok((
         Some(format!("data:{mime};base64,{data}")),
         format!("[{mime} {kind} attachment]"),
     ))
 }
 
-fn count_mcp_attachment(encoded: &str, total: &mut usize) -> CoreResult<()> {
-    let decoded = STANDARD
-        .decode(encoded)
-        .map_err(|error| CoreError::Tool(format!("invalid MCP media base64: {error}")))?;
-    *total = total.saturating_add(decoded.len());
-    if *total > haarness_core::mcp_content::MAX_ATTACHMENT_BYTES {
-        return Err(CoreError::Tool(
-            "MCP media attachments exceed the 10 MiB request limit".into(),
-        ));
-    }
-    Ok(())
+/// Why a result's medium past [`haarness_core::mcp_content::MAX_ATTACHMENT_BYTES`]
+/// is left out.
+const MEDIA_PAST_LIMIT: &str = "a result attaches at most 10 MiB of media";
+
+/// How an image an MCP server sends reaches the model.
+enum McpImage {
+    /// Attached as `data_url`, of type `mime`; `shown` is the size it was
+    /// shrunk or converted to, when it was.
+    Attached {
+        mime: &'static str,
+        data_url: String,
+        shown: Option<(u32, u32)>,
+    },
+    /// Left out, `bytes` long, for `reason`.
+    LeftOut { bytes: usize, reason: String },
+    /// `bytes` long, and no image type Haarness knows.
+    Unknown(usize),
 }
+
+/// The image `data` (base64 without line breaks) as Read sends one: made
+/// into an image every provider reads, shrunk to fit and converted from a
+/// type providers do not take, then counted into `total`, the media the
+/// result attaches. An image is judged against the ceiling a file has
+/// ([`haarness_core::attachments::MAX_IMAGE_SOURCE_BYTES`]) before it is
+/// decoded, and against the result's media limit once prepared, so a large
+/// screenshot reaches the model shrunk. Decoding is CPU work; the worker runs
+/// this off the async executor.
+fn mcp_image(data: &str, total: &mut usize) -> Result<McpImage, base64::DecodeError> {
+    use haarness_core::{attachments::MAX_IMAGE_SOURCE_BYTES, images, mcp_content};
+    let estimate = data.trim_end_matches('=').len() / 4 * 3;
+    if u64::try_from(estimate).unwrap_or(u64::MAX) > MAX_IMAGE_SOURCE_BYTES {
+        return Ok(McpImage::LeftOut {
+            bytes: estimate,
+            reason: format!(
+                "larger than the {} MiB image limit",
+                MAX_IMAGE_SOURCE_BYTES / 1024 / 1024
+            ),
+        });
+    }
+    let bytes = STANDARD.decode(data.as_bytes())?;
+    let size = bytes.len();
+    if images::sniff(&bytes).is_none() {
+        return Ok(McpImage::Unknown(size));
+    }
+    let prepared = match images::prepare(bytes) {
+        Ok(prepared) => prepared,
+        Err(refusal) => {
+            return Ok(McpImage::LeftOut {
+                bytes: size,
+                reason: match refusal {
+                    images::Refusal::Unreadable(detail) => {
+                        format!("it cannot be read as an image ({detail})")
+                    }
+                    images::Refusal::Unsupported("HEIC") => {
+                        "a HEIC image, which Haarness converts only on macOS".into()
+                    }
+                    images::Refusal::Unsupported(kind) => {
+                        format!("a {kind} image, which models do not read")
+                    }
+                    images::Refusal::TooLarge => "too large to send even after shrinking".into(),
+                    images::Refusal::NotAnImage => "its bytes are not an image".into(),
+                },
+            });
+        }
+    };
+    if total.saturating_add(prepared.bytes.len()) > mcp_content::MAX_ATTACHMENT_BYTES {
+        return Ok(McpImage::LeftOut {
+            bytes: size,
+            reason: MEDIA_PAST_LIMIT.into(),
+        });
+    }
+    *total += prepared.bytes.len();
+    let data_url = if prepared.changed {
+        format!(
+            "data:{};base64,{}",
+            prepared.mime_type,
+            STANDARD.encode(&prepared.bytes)
+        )
+    } else {
+        format!("data:{};base64,{data}", prepared.mime_type)
+    };
+    Ok(McpImage::Attached {
+        mime: prepared.mime_type,
+        data_url,
+        shown: prepared
+            .changed
+            .then_some((prepared.width, prepared.height)),
+    })
+}
+
+/// An image a tool's result embeds as a resource blob, as [`mcp_image`]
+/// gives it: the attachment and the line naming it, written as the other
+/// blobs' are (see [`haarness_core::mcp_content::blob`]).
+fn image_blob(uri: &str, mime: &str, blob: &str, total: &mut usize) -> (Option<String>, String) {
+    let blob = haarness_core::mcp_content::base64_text(blob);
+    match mcp_image(&blob, total) {
+        Ok(McpImage::Attached {
+            mime,
+            data_url,
+            shown,
+        }) => (
+            Some(data_url),
+            match shown {
+                Some((width, height)) => {
+                    format!("[{mime} attachment: {uri}, shown to you as {width}×{height}]")
+                }
+                None => format!("[{mime} attachment: {uri}]"),
+            },
+        ),
+        Ok(McpImage::LeftOut { bytes, reason }) => (
+            None,
+            format!("[{uri}: {mime}, {bytes} bytes, left out: {reason}]"),
+        ),
+        Ok(McpImage::Unknown(bytes)) => (None, format!("[{uri}: {mime}, {bytes} bytes]")),
+        Err(_) => (
+            None,
+            format!("[{uri}: {mime} content that is not valid base64]"),
+        ),
+    }
+}
+
 /// A server that could not be reached reads as that, with the innermost
 /// reason ("Connection refused"), not as rmcp's transport type names.
 fn initialize_error(error: &(dyn std::error::Error + 'static), url: &str) -> CoreError {
@@ -5692,11 +5861,55 @@ mod tests {
         )));
     }
 
+    /// A 1×1 PNG every provider reads as it is.
+    const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    /// An image of `width`×`height` in `format`, a gradient, so a PNG of it
+    /// shrunk stays small; uncompressed when `stored`.
+    fn picture(width: u32, height: u32, format: image::ImageFormat, stored: bool) -> Vec<u8> {
+        use image::ImageEncoder as _;
+        let image = image::RgbaImage::from_fn(width, height, |x, y| {
+            image::Rgba([
+                u8::try_from(x % 256).unwrap(),
+                u8::try_from(y % 256).unwrap(),
+                128,
+                255,
+            ])
+        });
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        if stored {
+            image::codecs::png::PngEncoder::new_with_quality(
+                &mut bytes,
+                image::codecs::png::CompressionType::Uncompressed,
+                image::codecs::png::FilterType::NoFilter,
+            )
+            .write_image(&image, width, height, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        } else if format == image::ImageFormat::Jpeg {
+            image::DynamicImage::ImageRgba8(image)
+                .to_rgb8()
+                .write_to(&mut bytes, format)
+                .unwrap();
+        } else {
+            image.write_to(&mut bytes, format).unwrap();
+        }
+        bytes.into_inner()
+    }
+
+    /// The width and height of the image a data URL holds.
+    fn shown(data_url: &str) -> (u32, u32) {
+        use image::GenericImageView as _;
+        let data = data_url.split_once(";base64,").unwrap().1;
+        image::load_from_memory(&STANDARD.decode(data).unwrap())
+            .unwrap()
+            .dimensions()
+    }
+
     #[test]
     fn rich_mcp_image_and_audio_outputs_remain_provider_visible() {
         let result = rmcp::model::CallToolResult::success(vec![
             rmcp::model::ContentBlock::text("generated media"),
-            rmcp::model::ContentBlock::image("iVBORw0KGgo=", "image/png"),
+            rmcp::model::ContentBlock::image(PIXEL, "image/png"),
             rmcp::model::ContentBlock::audio("SUQz", "audio/mpeg"),
         ]);
         let output = to_output(result, "media").unwrap();
@@ -5704,9 +5917,91 @@ mod tests {
         assert_eq!(
             output.metadata["attachments"],
             serde_json::json!([
-                "data:image/png;base64,iVBORw0KGgo=",
+                format!("data:image/png;base64,{PIXEL}"),
                 "data:audio/mpeg;base64,SUQz"
             ])
+        );
+    }
+
+    /// A full-page screenshot went to the model as the server sent it, which
+    /// a provider refuses past its side or size limit, so the model never saw
+    /// it; past 10 MiB it failed the whole call, its text with it.
+    #[test]
+    fn a_large_screenshot_reaches_the_model_shrunk_as_read_sends_one() {
+        use rmcp::model::{ContentBlock, ResourceContents};
+        let png = STANDARD.encode(picture(2400, 1400, image::ImageFormat::Png, true));
+        assert!(png.len() / 4 * 3 > 12 * 1024 * 1024, "{}", png.len());
+        let result = rmcp::model::CallToolResult::success(vec![
+            ContentBlock::text("The whole page."),
+            ContentBlock::image(&png, "image/png"),
+            ContentBlock::resource(
+                ResourceContents::blob(&png, "ui://page.png").with_mime_type("image/png"),
+            ),
+        ]);
+        let output = to_output(result, "screenshot").unwrap();
+        let attachments: Vec<String> =
+            serde_json::from_value(output.metadata["attachments"].clone()).unwrap();
+        assert_eq!(attachments.len(), 2, "{}", output.text);
+        for attachment in &attachments {
+            assert!(attachment.starts_with("data:image/png;base64,"));
+            assert_eq!(shown(attachment), (2000, 1167));
+        }
+        assert_eq!(
+            output.text,
+            "The whole page.\n\
+             [image/png image attachment, shown to you as 2000×1167]\n\
+             [image/png attachment: ui://page.png, shown to you as 2000×1167]"
+        );
+    }
+
+    /// Media past 10 MiB failed the whole call, its text with it.
+    #[test]
+    fn media_past_a_limit_is_named_and_the_rest_of_the_result_kept() {
+        use rmcp::model::{ContentBlock, ResourceContents};
+        let large = STANDARD.encode(vec![0_u8; 11 * 1024 * 1024]);
+        // Past the 64 MiB an image may be: named before it is decoded.
+        let huge = "A".repeat(90 * 1024 * 1024);
+        let result = rmcp::model::CallToolResult::success(vec![
+            ContentBlock::text("Three files."),
+            ContentBlock::resource(
+                ResourceContents::blob(&large, "files://report.pdf")
+                    .with_mime_type("application/pdf"),
+            ),
+            ContentBlock::audio(&large, "audio/mpeg"),
+            ContentBlock::image(&huge, "image/png"),
+            ContentBlock::image(PIXEL, "image/png"),
+        ]);
+        let output = to_output(result, "files").unwrap();
+        assert_eq!(
+            output.metadata["attachments"],
+            json!([format!("data:image/png;base64,{PIXEL}")])
+        );
+        assert_eq!(
+            output.text,
+            "Three files.\n\
+             [files://report.pdf: application/pdf, 11534334 bytes, left out: the images and PDFs attached with it already come to 10 MiB]\n\
+             [audio/mpeg audio, 11534336 bytes, left out: a result attaches at most 10 MiB of media]\n\
+             [image/png image, 70778880 bytes, left out: larger than the 64 MiB image limit]\n\
+             [image/png image attachment]"
+        );
+        // An image whose bytes cannot be read is named too.
+        let cut = STANDARD.encode(&picture(64, 64, image::ImageFormat::Png, false)[..60]);
+        let output = to_output(
+            rmcp::model::CallToolResult::success(vec![ContentBlock::image(&cut, "image/png")]),
+            "cut",
+        )
+        .unwrap();
+        assert!(
+            output.metadata.get("attachments").is_none(),
+            "{}",
+            output.metadata
+        );
+        assert!(
+            output.text.starts_with(
+                "[image/png image, 60 bytes, left out: it cannot be read as an image ("
+            ),
+            "{}",
+            output.text
         );
     }
 
@@ -5715,7 +6010,7 @@ mod tests {
     #[test]
     fn embedded_blobs_reach_the_model_as_what_they_hold() {
         use rmcp::model::{ContentBlock, ResourceContents};
-        let png = STANDARD.encode(b"\x89PNG\r\n\x1a\nfixture");
+        let png = PIXEL.to_owned();
         let blob = |uri: &str, mime: &str, data: &str| {
             ContentBlock::resource(ResourceContents::blob(data, uri).with_mime_type(mime))
         };
@@ -5784,7 +6079,7 @@ mod tests {
     /// later request of the chat failed to load it.
     #[test]
     fn mcp_media_of_a_type_haarness_does_not_carry_is_named_not_attached() {
-        let jpeg = STANDARD.encode(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00fixture");
+        let jpeg = STANDARD.encode(picture(4, 3, image::ImageFormat::Jpeg, false));
         let result = rmcp::model::CallToolResult::success(vec![
             rmcp::model::ContentBlock::audio("GkXfo0AAAA==", "audio/webm"),
             rmcp::model::ContentBlock::audio("SUQz", "Audio/MPEG"),
@@ -5990,7 +6285,8 @@ mod tests {
         };
         // An image that alone is over the limit is left out of the page's copy;
         // the model still gets it as an attachment.
-        let image = STANDARD.encode(vec![0u8; MCP_APP_RESULT_LIMIT]);
+        let image = STANDARD.encode(picture(400, 400, image::ImageFormat::Png, true));
+        assert!(image.len() > MCP_APP_RESULT_LIMIT);
         let mut result = rmcp::model::CallToolResult::success(vec![
             rmcp::model::ContentBlock::text("chart"),
             rmcp::model::ContentBlock::image(image, "image/png"),
@@ -6036,10 +6332,7 @@ mod tests {
         assert_eq!(output.metadata, structured);
         // Only an image beside it.
         let mut result = rmcp::model::CallToolResult::structured(structured.clone());
-        result.content = vec![rmcp::model::ContentBlock::image(
-            "iVBORw0KGgo=",
-            "image/png",
-        )];
+        result.content = vec![rmcp::model::ContentBlock::image(PIXEL, "image/png")];
         let output = to_output(result, "chart").unwrap();
         assert!(output.text.contains("[image/png image attachment]"));
         assert!(
@@ -6050,7 +6343,7 @@ mod tests {
         assert_eq!(output.metadata["temperature"], 21);
         assert_eq!(
             output.metadata["attachments"],
-            serde_json::json!(["data:image/png;base64,iVBORw0KGgo="])
+            serde_json::json!([format!("data:image/png;base64,{PIXEL}")])
         );
         // Text beside it is the answer, as before.
         let mut result =

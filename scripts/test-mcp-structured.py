@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Real server, echo provider: MCP results carried only as structured content reach the model and workflows;
 resources embedded as base64 reach the model as what they hold (an image as an attachment, text as text, anything
-else named), never as base64; audio of a type Haarness does not carry is named rather than attached; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
+else named), never as base64; audio of a type Haarness does not carry is named rather than attached; screenshots
+larger than providers take (a 24 MB 4K one, a full page 9,000 pixels tall) reach the model shrunk as Read shrinks
+an image, with the result's text; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
 all of it. One-line JSON is laid out a value a line, whole when it then fits, and within a few times its length however deep
 it nests; what a Code Mode script returns is cut too, a string as its own lines, a list whole on one line when only that
 fits. A script gets the server's metadata for its own call, never an earlier call's with the same text.
@@ -9,7 +11,7 @@ fits. A script gets the server's metadata for its own call, never an earlier cal
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
-import json, os, pathlib, subprocess, sys, tempfile, time, urllib.request, uuid
+import base64, json, os, pathlib, subprocess, sys, tempfile, time, urllib.request, uuid
 import e2e_scratch
 from e2e_env import clean_env
 
@@ -39,10 +41,10 @@ def until(predicate, label, seconds=30):
         time.sleep(.1)
     raise AssertionError(label)
 def results(thread): return [item['data'] for item in api(f'/threads/{thread}/items') if item['data']['type'] == 'tool_result']
-def call(thread, tool):
+def call(thread, tool, seconds=30):
     before = len(results(thread))
     api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': f'!tool mcp__structured__{tool} {{}}'})
-    result = until(lambda: (values[before] if len(values := results(thread)) > before else None), f'{tool}: no result')
+    result = until(lambda: (values[before] if len(values := results(thread)) > before else None), f'{tool}: no result', seconds)
     until(lambda: not api('/turns/active'), 'turn still active')
     return result
 def execute(thread, code):
@@ -102,6 +104,24 @@ try:
     again = call(thread, 'weather')
     assert not again['is_error'], again
     check('audio of a type Haarness does not carry is named, not attached, beside an image it does attach, and the chat goes on')
+
+    def shown(data_url):
+        """The width and height of the PNG a data URL holds, from its header."""
+        assert data_url.startswith('data:image/png;base64,'), data_url[:60]
+        header = base64.b64decode(data_url.split(',', 1)[1][:44])
+        return int.from_bytes(header[16:20], 'big'), int.from_bytes(header[20:24], 'big')
+    for tool, size in [('screenshot', (2000, 1125)), ('full_page', (320, 2000))]:
+        started = time.monotonic()
+        # Shrinking takes a debug build far longer than a release one.
+        result = call(thread, tool, 240)
+        print(f'{tool}: answered in {time.monotonic() - started:.1f} s', flush=True)
+        assert not result['is_error'], result['output'][:400]
+        assert result['output'] == f'The whole page.\n[image/png image attachment, shown to you as {size[0]}×{size[1]}]', result['output']
+        attachments = result['metadata']['attachments']
+        assert len(attachments) == 1 and shown(attachments[0]) == size, (len(attachments), attachments[0][:80])
+    again = call(thread, 'weather')
+    assert not again['is_error'], again
+    check('a 24 MB 4K screenshot and a full page 9,000 pixels tall reach the model shrunk to 2000 pixels on their longest side, with the result\'s text, and the chat goes on')
 
     WIDE = ''.join('row %05d %s\n' % (n, 'w' * 90) for n in range(2000))
     result = call(thread, 'wide')
