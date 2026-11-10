@@ -250,17 +250,20 @@ const screenshotListings = createScreenshotListings<{ path: string; identity: Fi
 /** Each window's presses and Attach menu: the screenshots folder is listed for that menu's choice. */
 const screenshotIntents = createScreenshotIntents();
 const worktreeOperations = new Set<string>();
+/** Desktop's native macOS helper: dictation, and spellings for the right-click menu. */
+const nativeHelper = app.isPackaged
+  ? join(process.resourcesPath, "bin/haarness-voice")
+  : resolve(here, "../../resources/haarness-voice");
 const voice = createVoiceInput((locale) =>
   launchVoice(
     process.env.HAARNESS_DESKTOP_TEST === "1" &&
       process.env.HAARNESS_VOICE_TEST_HELPER
       ? process.env.HAARNESS_VOICE_TEST_HELPER
-      : app.isPackaged
-        ? join(process.resourcesPath, "bin/haarness-voice")
-        : resolve(here, "../../resources/haarness-voice"),
+      : nativeHelper,
     locale,
   ),
 );
+const spellings = systemSpellings(process.platform === "darwin" ? nativeHelper : undefined);
 // Windows and Linux start the app with a clicked haarness:// link as an
 // argument (macOS sends open-url instead); hold it until a window can open it.
 let pendingLink: string | undefined =
@@ -1964,14 +1967,20 @@ function createWindow() {
   // The right-click menu (see context-menu.ts), for the window's own page and
   // its frames (previews, app frames). A page in the Browser panel is a view
   // of its own, which this does not reach.
-  let menuRequest = 0;
+  // A menu waiting for the system's spellings (macOS) is called off by the
+  // next press or key, as by the next right-click.
+  let spelling: AbortController | undefined;
+  win.webContents.on("input-event", (_event, input) => {
+    if (input.type === "mouseDown" || input.type === "rawKeyDown" || input.type === "keyDown") spelling?.abort();
+  });
   win.webContents.on("context-menu", async (_event, params) => {
-    const request = ++menuRequest;
+    spelling?.abort();
     let dictionarySuggestions = params.dictionarySuggestions;
     if (process.platform === "darwin" && params.misspelledWord && !dictionarySuggestions.length) {
-      dictionarySuggestions = await systemSpellings(params.misspelledWord);
-      // Closed, or right-clicked again, meanwhile.
-      if (request !== menuRequest || win.isDestroyed()) return;
+      const pending = (spelling = new AbortController());
+      dictionarySuggestions = await spellings(params.misspelledWord, pending.signal);
+      if (pending.signal.aborted || win.isDestroyed()) return;
+      spelling = undefined;
     }
     showContextMenu(
       win,
@@ -1981,7 +1990,7 @@ function createWindow() {
         learn: (word) => win.webContents.session.addWordToSpellCheckerDictionary(word),
         copy: (text) => clipboard.writeText(text),
       }),
-      params.frame ? { frame: params.frame } : {},
+      { x: params.x, y: params.y, ...(params.frame ? { frame: params.frame } : {}) },
     );
   });
   win.webContents.session.setPermissionRequestHandler(

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import AVFoundation
 import Speech
 import Darwin
@@ -10,6 +11,40 @@ func emit(_ value: [String: Any]) {
     FileHandle.standardOutput.write(data + Data([10]))
 }
 let args = CommandLine.arguments
+
+// The right-click menu's spellings for a misspelled word, one per line:
+// `--spelling -- <word>`. Pages leave spelling to the system on macOS and get
+// no guesses from it, so Desktop asks here. Each of the person's spelling
+// languages that marks the word wrong gives its guesses in turn, the first
+// language first, up to five in all.
+if args.count == 4 && args[1] == "--spelling" && args[2] == "--" {
+    let word = args[3]
+    let checker = NSSpellChecker.shared
+    let range = NSRange(location: 0, length: (word as NSString).length)
+    var languages = checker.userPreferredLanguages
+    if languages.isEmpty { languages = [checker.language()] }
+    let guesses = { (language: String) in
+        checker.guesses(forWordRange: range, in: word, language: language, inSpellDocumentWithTag: 0) ?? []
+    }
+    var lists = languages.prefix(3).compactMap { language -> [String]? in
+        let wrong = checker.checkSpelling(of: word, startingAt: 0, language: language, wrap: false,
+                                          inSpellDocumentWithTag: 0, wordCount: nil)
+        return wrong.location == NSNotFound ? nil : guesses(language)
+    }
+    // None of them marks it (the page read it as another language): the
+    // checker's own language guesses.
+    if lists.isEmpty { lists = [guesses(checker.language())] }
+    var spellings: [String] = []
+    var index = 0
+    while spellings.count < 5 && lists.contains(where: { index < $0.count }) {
+        for list in lists where index < list.count && spellings.count < 5 && !spellings.contains(list[index]) {
+            spellings.append(list[index])
+        }
+        index += 1
+    }
+    FileHandle.standardOutput.write(Data((spellings.map { $0 + "\n" }.joined()).utf8))
+    exit(0)
+}
 func argument(_ name: String) -> String? {
     guard let index = args.firstIndex(of: name), index + 1 < args.count else { return nil }
     return args[index + 1]

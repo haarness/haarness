@@ -98,45 +98,45 @@ function webLink(url: string, page: string) {
   return url;
 }
 
+/** How many words' spellings a window's menus remember. */
+const REMEMBERED_SPELLINGS = 64;
+
 /**
- * Asks the system spelling checker of macOS for the spellings of `word` it
- * would suggest, in its own language. There, a page names the misspelled word
- * it was right-clicked on but suggests nothing (the system checks spelling
- * outside the page, and Electron does not ask it for guesses), so main asks:
- * JavaScript for Automation, run with the word as its argument. Nothing when
- * it does not answer within a second; the menu then offers Add to dictionary
- * alone.
+ * The system's spellings for misspelled words, on macOS. There a page names
+ * the misspelled word it was right-clicked on but suggests nothing (the system
+ * checks spelling outside the page, and Electron does not ask it for guesses),
+ * so main asks Desktop's native helper (`haarness-voice --spelling -- <word>`,
+ * see native/voice.swift). A word's answer is remembered. With no helper, no
+ * answer within a second, or the lookup called off by `signal`, there are none
+ * and the menu offers Add to dictionary alone.
  */
-export function systemSpellings(
-  word: string,
-  run: typeof execFile = execFile,
-): Promise<string[]> {
-  // An argument that looked like an option would not reach the script.
-  if (!word || word.startsWith("-")) return Promise.resolve([]);
-  return new Promise((resolve) => {
-    run(
-      "/usr/bin/osascript",
-      ["-l", "JavaScript", "-e", GUESSES, word],
-      { timeout: 1000, encoding: "utf8" },
-      (error, stdout) => {
-        if (error) return resolve([]);
-        resolve(
-          String(stdout)
+export function systemSpellings(helper: string | undefined, run: typeof execFile = execFile) {
+  const known = new Map<string, string[]>();
+  return (word: string, signal?: AbortSignal): Promise<string[]> => {
+    const remembered = known.get(word);
+    if (remembered) {
+      known.delete(word);
+      known.set(word, remembered);
+      return Promise.resolve(remembered);
+    }
+    if (!helper || !word || signal?.aborted) return Promise.resolve([]);
+    return new Promise((resolve) => {
+      run(
+        helper,
+        ["--spelling", "--", word],
+        { timeout: 1000, encoding: "utf8", ...(signal ? { signal } : {}) },
+        (error, stdout) => {
+          if (error) return resolve([]);
+          const spellings = String(stdout)
             .split("\n")
             .map((line) => line.trim())
             .filter(Boolean)
-            .slice(0, MAX_SUGGESTIONS),
-        );
-      },
-    );
-  });
+            .slice(0, MAX_SUGGESTIONS);
+          known.set(word, spellings);
+          if (known.size > REMEMBERED_SPELLINGS) known.delete(known.keys().next().value!);
+          resolve(spellings);
+        },
+      );
+    });
+  };
 }
-
-const GUESSES = `ObjC.import("AppKit");
-function run(argv) {
-  const word = argv[0] || "";
-  const checker = $.NSSpellChecker.sharedSpellChecker;
-  const guesses = checker.guessesForWordRangeInStringLanguageInSpellDocumentWithTag(
-    $.NSMakeRange(0, word.length), word, checker.language, 0);
-  return (ObjC.deepUnwrap(guesses) || []).join("\\n");
-}`;
