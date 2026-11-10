@@ -4630,19 +4630,21 @@ impl App {
 
     /// The child agents ← and → step through, in the order the conversation
     /// started them (its calls' ids are random), each once however many
-    /// calls continued it. A child that another child started (where agents
-    /// may start their own) is not one of them.
+    /// calls continued it. A child that another of them started (where
+    /// agents may start their own) is not one of them; the agents of a
+    /// forked chat, copied and new alike, all are.
     pub(crate) fn sibling_children(&self) -> Vec<haarness_protocol::ThreadId> {
-        let parents = [
-            self.thread.parent_id,
-            self.parent_stack.last().map(|parent| parent.id),
-        ];
+        let listed = self
+            .children
+            .values()
+            .map(|task| task.child_thread_id)
+            .collect::<std::collections::HashSet<_>>();
         let sibling = |child: haarness_protocol::ThreadId| {
             self.threads
                 .iter()
                 .find(|thread| thread.id == child)
                 .and_then(|thread| thread.parent_id)
-                .is_none_or(|parent| parents.contains(&Some(parent)))
+                .is_none_or(|parent| !listed.contains(&parent))
         };
         let mut first = std::collections::HashMap::new();
         for (row, task) in &self.children {

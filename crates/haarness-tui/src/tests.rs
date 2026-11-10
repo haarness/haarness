@@ -16465,6 +16465,36 @@ fn a_childs_own_agents_are_not_its_siblings() {
     assert!(app.lines((100, 30))[0].text().contains("1 of 3"));
 }
 
+/// A forked chat's child agents step together, those its history brought
+/// along (started by the chat it was forked from) and those started since.
+#[test]
+fn a_forked_chats_copied_and_new_agents_are_siblings_alike() {
+    let (mut app, children) = three_children_fixture();
+    let source = app.parent_stack[0].clone();
+    let fork = Thread {
+        id: ThreadId::new(),
+        title: "Survey, again".into(),
+        parent_id: Some(source.id),
+        ..source.clone()
+    };
+    let mut started_since = children[2].clone();
+    started_since.parent_id = Some(fork.id);
+    for thread in &mut app.threads {
+        if thread.id == started_since.id {
+            thread.parent_id = Some(fork.id);
+        }
+    }
+    app.threads.push(fork.clone());
+    app.parent_stack = vec![fork];
+    let all = children.iter().map(|child| child.id).collect::<Vec<_>>();
+    for (open, place) in [(started_since, "3 of 3"), (children[0].clone(), "1 of 3")] {
+        app.thread = open;
+        assert_eq!(app.sibling_children(), all);
+        let header = app.lines((100, 30))[0].text();
+        assert!(header.contains(place), "{header}");
+    }
+}
+
 #[test]
 fn a_lone_child_keeps_its_short_id_and_its_agent_reads_in_the_language() {
     let (mut app, children) = three_children_fixture();
