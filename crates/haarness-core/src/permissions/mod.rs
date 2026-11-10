@@ -702,21 +702,25 @@ impl PermissionEngine {
     /// Whether `matched`, the rule an evaluation names, is an allow someone
     /// gave for something narrower than everything: an "always" answer, a
     /// repository grant, or a configured rule rather than one of Haarness's
-    /// defaults. A blanket `bash:*` says nothing about any one command.
+    /// defaults. A blanket `bash:*` says nothing about any one command, and
+    /// neither does a remembered answer that ends in `*` (`bash:cat *`, what
+    /// Always saves for `cat .env`): it was given for one command and covers
+    /// its program's other arguments only by being generalized.
     #[must_use]
     pub fn allowed_by_choice(&self, matched: Option<&str>) -> bool {
         let Some(matched) = matched else {
             return false;
         };
+        let chosen = |rule: &PermissionRule| {
+            rule.decision == PermissionDecision::Allow
+                && rule.pattern == matched
+                && !catch_all(rule)
+        };
         self.session_rules
             .iter()
             .chain(&self.repository_grants)
-            .chain(self.rules.iter().skip(self.builtin))
-            .any(|rule| {
-                rule.decision == PermissionDecision::Allow
-                    && rule.pattern == matched
-                    && !catch_all(rule)
-            })
+            .any(|rule| chosen(rule) && !rule.pattern.ends_with('*'))
+            || self.rules.iter().skip(self.builtin).any(chosen)
     }
 
     /// The verdict on a pattern read from inside a written shell command

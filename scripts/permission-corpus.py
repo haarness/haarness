@@ -134,6 +134,9 @@ CORPUS = [
     'cp .env.example .env', 'mv build dist', 'chmod +x run.sh && ./run.sh', 'bash run.sh', 'sudo rm -rf /tmp/x',
     'xargs -n1 echo < files.txt', "find . -name '*.tmp' -delete", 'git clean -fdx', 'kill -9 1234',
     'open http://localhost:3000', 'ln -s ../deep link', 'touch ~/x', 'rm -rf victim',
+    # Secret-named files read through the shell
+    'cat .env', 'cat .env.example', 'source .env && npm test', 'grep -c KEY .env.local', 'cat src/.env.production',
+    'head -1 .env && cat README.md', 'cat ../outside/.env', 'ls -la .env', 'echo X=1 >> .env',
     # Text a trap runs later
     "trap 'rm -rf build' EXIT", "trap 'rm -rf ~/x' EXIT; true", 'trap \'rm -rf "$tmp"\' EXIT',
     'tmp=$(mktemp -d) && trap \'rm -rf "$tmp"\' EXIT && cp README.md "$tmp"/', 'trap - EXIT', 'trap -p',
