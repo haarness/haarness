@@ -1028,7 +1028,8 @@ fn pixels(value: &Value) -> String {
 }
 
 /// Refuses the combinations that log out, lock the screen or open Force Quit, in any spelling. The helper refuses
-/// them again from the keys it would really press.
+/// them again from the keys it would really press. As there, a letter's case says nothing about Shift: `Meta+Q` is
+/// Command-Q, and only a Shift that is written out is held.
 fn check_keys(keys: &str) -> CoreResult<()> {
     let raw: String = keys.chars().filter(|char| !char.is_whitespace()).collect();
     let mut parts: Vec<String> = if raw.ends_with("++") {
@@ -1039,7 +1040,7 @@ fn check_keys(keys: &str) -> CoreResult<()> {
         raw.split('+').map(str::to_owned).collect()
     };
     let key = parts.pop().unwrap_or_default();
-    let mut held: Vec<&'static str> = parts
+    let held: Vec<&'static str> = parts
         .iter()
         .map(|part| match part.to_lowercase().as_str() {
             "meta" | "command" | "cmd" | "super" | "⌘" => "command",
@@ -1049,9 +1050,6 @@ fn check_keys(keys: &str) -> CoreResult<()> {
             _ => "other",
         })
         .collect();
-    if key.chars().count() == 1 && key != key.to_lowercase() {
-        held.push("shift");
-    }
     let has = |name: &str| held.contains(&name);
     let name = key.to_lowercase();
     let quits = name == "q" && has("command") && (has("shift") || has("control"));
@@ -1409,10 +1407,18 @@ impl MacTool {
                 metadata: json!({"mac": prepared, "title": done}),
             });
         }
+        // The very copy acted on, when the app runs more than once; the bundle stands in for a helper that looks up
+        // apps by bundle alone.
         let at = reply["target"]["bundle"]
             .as_str()
             .filter(|bundle| !bundle.is_empty())
-            .map_or_else(|| json!({}), |bundle| json!({"bundle": bundle}));
+            .map_or_else(
+                || json!({}),
+                |bundle| match reply["target"]["pid"].as_i64() {
+                    Some(pid) => json!({"bundle": bundle, "pid": pid}),
+                    None => json!({"bundle": bundle}),
+                },
+            );
         let seen = self.look(context, at).await?;
         let mut metadata = seen.metadata;
         metadata["attachments"] = json!(seen.attachments);
@@ -1817,7 +1823,6 @@ mod tests {
         for keys in [
             "Meta+Shift+Q",
             "cmd+shift+q",
-            "Meta+Q",
             "Control+Meta+Q",
             "ctrl+cmd+q",
             "Meta+Alt+Escape",
@@ -1827,7 +1832,9 @@ mod tests {
         ] {
             assert!(check_keys(keys).is_err(), "{keys}");
         }
+        // Command-Q quits an app; an upper-case Q holds no Shift of its own.
         for keys in [
+            "Meta+Q",
             "Meta+S",
             "Meta+q",
             "Escape",

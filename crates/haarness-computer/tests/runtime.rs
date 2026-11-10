@@ -1586,6 +1586,7 @@ async fn an_action_behind_the_person_s_window_says_so_and_looks_at_that_app() {
         .filter(|request| request["op"] == "snapshot")
         .collect();
     assert_eq!(looks[0]["bundle"], "com.apple.Notes");
+    assert_eq!(looks[0]["pid"], 4, "the very copy acted on");
     assert_eq!(looks[1]["bundle"], "com.apple.Notes");
     // An action whose reply says nothing of the kind reads as before, and its look is at the app in front.
     let items = lab
