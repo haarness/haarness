@@ -136,6 +136,23 @@ impl Group {
     pub fn finished(mut self) {
         self.0 = None;
     }
+
+    /// The command's process ended, and was reaped, before what it started
+    /// did: what is left in its group is stopped, but no tree is walked from
+    /// a pid that may be another process's by now.
+    pub fn leader_ended(mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.take().filter(|pid| *pid > 1) {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            self.0 = None;
+        }
+    }
 }
 
 impl Drop for Group {

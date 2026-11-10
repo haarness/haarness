@@ -744,9 +744,11 @@ provider carry names in the characters providers accept (see
 discovery as one deadline, plus a `headersHelper` run. On macOS and Linux the
 helper runs in a process group of its own, so one that outlasts it (or whose
 start is stopped) is stopped with every process it started, a pipeline's
-steps included; a helper that ends on its own leaves what it started.
-A local (stdio) server without it has 2 minutes for that start (spawning it, initializing it and
-listing its tools), as `npx -y` and `uvx` fetch the server on its first run;
+steps included; a helper that ends on its own leaves what it started. One
+that writes more than 64 KiB fails at once, and is stopped the same way.
+A local (stdio) server without it has 2 minutes for that start (spawning it,
+initializing it and listing its tools), as `npx -y` and `uvx` fetch the server
+on its first run;
 its other requests keep 30 s. In a JSON file a
 `timeout` key counts too, in its ecosystem's unit: milliseconds in an opencode
 entry (`type: "local"` or `"remote"`), seconds in a Claude Code or plugin

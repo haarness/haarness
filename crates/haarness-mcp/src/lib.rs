@@ -3722,35 +3722,42 @@ async fn resolve_headers(
     let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(not_run());
     };
+    // Both pipes are read at once, so a helper that fills one never waits
+    // on the other; one that writes past the limit ends the wait at once.
     let finished = async {
-        use tokio::io::AsyncReadExt as _;
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        let (read, written, status) = tokio::join!(
-            out.read_to_end(&mut stdout),
-            err.read_to_end(&mut stderr),
-            child.wait()
-        );
-        read?;
-        written?;
-        Ok::<_, std::io::Error>((status?, stdout, stderr))
+        let (stdout, stderr) = tokio::try_join!(helper_output(&mut out), helper_output(&mut err))?;
+        Ok::<_, std::io::Error>((child.wait().await?, stdout, stderr))
     };
     let timeout = connection_timeout(config);
-    let (status, stdout, stderr) = match tokio::time::timeout(timeout, finished).await {
+    let ended = tokio::time::timeout(timeout, finished).await;
+    let too_much = || {
+        CoreError::Tool(format!(
+            "headersHelper for MCP server \"{name}\" produced more than 64 KiB of output"
+        ))
+    };
+    let (status, stdout, stderr) = match ended {
         Ok(Ok(finished)) => finished,
-        Ok(Err(_)) => return Err(not_run()),
-        Err(_) => {
-            // Stopped while its shell still runs (see above).
-            drop(group);
-            return Err(CoreError::Tool(format!(
-                "headersHelper for MCP server \"{name}\" timed out"
-            )));
+        unfinished => {
+            // Stopped while its shell still runs (see above). A shell that
+            // ended already, leaving a child that holds its output open,
+            // leaves no tree to walk: its pid may be another process's now.
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                group.leader_ended();
+            } else {
+                drop(group);
+            }
+            return Err(match unfinished {
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::FileTooLarge => too_much(),
+                Ok(_) => not_run(),
+                Err(_) => {
+                    CoreError::Tool(format!("headersHelper for MCP server \"{name}\" timed out"))
+                }
+            });
         }
     };
     group.finished();
     if stdout.len().saturating_add(stderr.len()) > HEADERS_HELPER_OUTPUT_LIMIT {
-        return Err(CoreError::Tool(format!(
-            "headersHelper for MCP server \"{name}\" produced more than 64 KiB of output"
-        )));
+        return Err(too_much());
     }
     if !status.success() {
         return Err(CoreError::Tool(format!(
@@ -3775,6 +3782,21 @@ async fn resolve_headers(
         headers.insert(name, value);
     }
     Ok(headers)
+}
+
+/// What a headers helper wrote to `pipe`, read to its end; past
+/// [`HEADERS_HELPER_OUTPUT_LIMIT`] the read ends there, failing, rather than
+/// holding all a runaway helper writes until its timeout.
+async fn helper_output(pipe: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+    let mut output = Vec::new();
+    pipe.take(HEADERS_HELPER_OUTPUT_LIMIT as u64 + 1)
+        .read_to_end(&mut output)
+        .await?;
+    if output.len() > HEADERS_HELPER_OUTPUT_LIMIT {
+        return Err(std::io::ErrorKind::FileTooLarge.into());
+    }
+    Ok(output)
 }
 
 /// A headers helper as `cmd.exe` runs it: each `${NAME}` or
@@ -6126,6 +6148,58 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
         assert!(!survived, "the helper's `sleep` outlived its timeout");
+    }
+
+    /// A helper that writes without end was read in full until its timeout,
+    /// holding all of it; past 64 KiB it now fails at once, and is stopped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_headers_helper_that_writes_past_its_limit_fails_at_once() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-mcp-helper-output-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let config: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http",
+            "url": "http://127.0.0.1:9/mcp",
+            // Its pid written before it writes anything.
+            "headersHelper": format!(
+                "sh -c 'echo $$ > \"$0\"; exec yes' '{}' & wait",
+                pid_file.display()
+            ),
+            "timeoutMs": 20000,
+            "enabled": true
+        }))
+        .unwrap();
+        let started = std::time::Instant::now();
+        let error = resolve_headers("chatty", &config).await.unwrap_err();
+        assert!(error.to_string().contains("more than 64 KiB"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while alive() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let survived = alive();
+        if survived {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(!survived, "the helper's `yes` went on");
     }
 
     /// A helper's child that left its group (`setsid`, a shell with job
