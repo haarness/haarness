@@ -8367,6 +8367,26 @@ async fn esc_on_a_card_closes_it_only_when_the_reject_lands_or_was_settled() {
         assert_eq!(app.pending_permissions.is_empty(), closes, "{reply}");
         assert!(app.notice.starts_with(notice), "{reply}: {}", app.notice);
     }
+    // The band shows a notice as it was set while a card waits, so it is
+    // set in the interface's language.
+    for (reply, notice) in [
+        ("ok", "Berechtigung abgelehnt"),
+        (
+            "proxy",
+            "Berechtigungsanfrage konnte nicht beantwortet werden: ",
+        ),
+    ] {
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        app.language = crate::locale::Language::German;
+        app.pending_permissions
+            .push(pending_permission_fixture(&thread, "perm-esc"));
+        app.permission_focus = true;
+        let (client, _) = answering_server(thread.id, reply).await;
+        crate::input::handle_key(&mut app, esc, &client)
+            .await
+            .unwrap();
+        assert!(app.notice.starts_with(notice), "{reply}: {}", app.notice);
+    }
 }
 
 #[tokio::test]
@@ -16231,7 +16251,12 @@ async fn left_and_right_step_through_child_agents_in_the_order_they_started() {
 fn a_lone_child_keeps_its_short_id_and_its_agent_reads_in_the_language() {
     let (mut app, children) = three_children_fixture();
     app.language = crate::locale::Language::German;
-    assert!(app.lines((100, 30))[0].text().contains("explore · 1 von 3"));
+    let header = app.lines((140, 30))[0].text();
+    assert!(header.contains("explore · 1 von 3"), "{header}");
+    assert!(
+        header.contains("↑ übergeordnet  ← vorheriger  nächster →"),
+        "{header}"
+    );
     app.children
         .retain(|_, task| task.child_thread_id == children[0].id);
     let header = app.lines((100, 30))[0].text();

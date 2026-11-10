@@ -212,7 +212,10 @@ async fn reply_to_permission(
             PermissionReplied::Settled
         }
         Err(error) => {
-            app.notice = format!("Could not answer permission: {error}");
+            app.notice = app.language.format(
+                "Could not answer permission: {error}",
+                &[("error", &error.to_string())],
+            );
             PermissionReplied::Failed
         }
     }
@@ -830,7 +833,7 @@ pub async fn handle_key_at(
                             let decision = PermissionReplyDecision::Reject;
                             let reply = reply_to_permission(app, client, &id, decision).await;
                             if reply == PermissionReplied::Sent {
-                                app.notice = "Permission rejected".into();
+                                app.notice = app.language.text("Permission rejected").into();
                             }
                         }
                         return Ok(AppAction::Continue);
@@ -954,7 +957,7 @@ pub async fn handle_key_at(
                     reply_to_question(app, client, &id, "Cancelled by user".into()).await?;
                 app.composer.clear();
                 if cancelled {
-                    app.notice = "Question cancelled".into();
+                    app.notice = app.language.text("Question cancelled").into();
                 }
                 return Ok(AppAction::Continue);
             }

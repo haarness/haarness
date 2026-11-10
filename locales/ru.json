@@ -3155,5 +3155,12 @@
   "add credits or choose a plan": "пополните кредиты или выберите тариф",
   "add credits with /billing topup": "пополните кредиты через /billing topup",
   "turn on overage so your purchased credits pay": "включите перерасход, чтобы платить купленными кредитами",
-  "add credits and turn on overage to keep working": "пополните кредиты и включите перерасход, чтобы продолжить"
+  "add credits and turn on overage to keep working": "пополните кредиты и включите перерасход, чтобы продолжить",
+  "Permission rejected": "Разрешение отклонено",
+  "Question cancelled": "Вопрос отменён",
+  "Could not answer permission: {error}": "Не удалось ответить на запрос разрешения: {error}",
+  "↑ parent": "↑ родитель",
+  "← previous": "← предыдущий",
+  "next →": "следующий →",
+  "Child agent view — ↑ parent · ←/→ siblings": "Вид субагента — ↑ родитель · ←/→ другие субагенты"
 }

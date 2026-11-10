@@ -3155,5 +3155,12 @@
   "add credits or choose a plan": "添加额度或选择套餐",
   "add credits with /billing topup": "使用 /billing topup 添加额度",
   "turn on overage so your purchased credits pay": "开启超额使用，让已购额度可以支付",
-  "add credits and turn on overage to keep working": "添加额度并开启超额使用以继续工作"
+  "add credits and turn on overage to keep working": "添加额度并开启超额使用以继续工作",
+  "Permission rejected": "已拒绝权限请求",
+  "Question cancelled": "问题已取消",
+  "Could not answer permission: {error}": "无法答复权限请求：{error}",
+  "↑ parent": "↑ 上级",
+  "← previous": "← 上一个",
+  "next →": "下一个 →",
+  "Child agent view — ↑ parent · ←/→ siblings": "子代理视图 — ↑ 上级 · ←/→ 同级代理"
 }

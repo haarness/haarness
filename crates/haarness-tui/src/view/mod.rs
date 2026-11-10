@@ -116,11 +116,12 @@ fn header_rows(app: &App, width: usize) -> (Vec<Line>, Vec<frame::HitRegion>) {
     };
     let theme = &app.theme;
     let position = sibling_position(app);
-    let mut controls = vec![(" ↑ parent ", frame::HitTarget::ChildParent)];
+    let control = |label: &str| format!(" {} ", app.language.text(label));
+    let mut controls = vec![(control("↑ parent"), frame::HitTarget::ChildParent)];
     if position.is_some() {
         controls.extend([
-            (" ← previous ", frame::HitTarget::ChildPrevious),
-            (" next → ", frame::HitTarget::ChildNext),
+            (control("← previous"), frame::HitTarget::ChildPrevious),
+            (control("next →"), frame::HitTarget::ChildNext),
         ]);
     }
     let controls_width = controls

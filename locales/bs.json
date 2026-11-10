@@ -3155,5 +3155,12 @@
   "add credits or choose a plan": "dodajte kredite ili odaberite plan",
   "add credits with /billing topup": "dodajte kredite pomoću /billing topup",
   "turn on overage so your purchased credits pay": "uključite prekoračenje da kupljeni krediti plaćaju",
-  "add credits and turn on overage to keep working": "dodajte kredite i uključite prekoračenje da nastavite raditi"
+  "add credits and turn on overage to keep working": "dodajte kredite i uključite prekoračenje da nastavite raditi",
+  "Permission rejected": "Dozvola odbijena",
+  "Question cancelled": "Pitanje otkazano",
+  "Could not answer permission: {error}": "Nije moguće odgovoriti na zahtjev za dozvolu: {error}",
+  "↑ parent": "↑ nadređeni",
+  "← previous": "← prethodni",
+  "next →": "sljedeći →",
+  "Child agent view — ↑ parent · ←/→ siblings": "Prikaz podagenta — ↑ nadređeni · ←/→ ostali podagenti"
 }

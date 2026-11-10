@@ -1222,7 +1222,10 @@ async fn run_with_client(
                 // the answer after it.
                 let input_waiting = input.input_waiting();
                 if let Err(error) = crate::input::settle_answer(&mut app, &client, input_waiting).await {
-                    app.notice = format!("Could not answer permission: {error}");
+                    app.notice = app.language.format(
+                        "Could not answer permission: {error}",
+                        &[("error", &error.to_string())],
+                    );
                 }
                 if input_waiting {
                     settle_armed = None;

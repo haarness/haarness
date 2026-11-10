@@ -3155,5 +3155,12 @@
   "add credits or choose a plan": "Credits hinzufügen oder einen Tarif wählen",
   "add credits with /billing topup": "Credits mit /billing topup hinzufügen",
   "turn on overage so your purchased credits pay": "Mehrverbrauch einschalten, damit deine gekauften Credits zahlen",
-  "add credits and turn on overage to keep working": "Credits hinzufügen und Mehrverbrauch einschalten, um weiterzuarbeiten"
+  "add credits and turn on overage to keep working": "Credits hinzufügen und Mehrverbrauch einschalten, um weiterzuarbeiten",
+  "Permission rejected": "Berechtigung abgelehnt",
+  "Question cancelled": "Frage abgebrochen",
+  "Could not answer permission: {error}": "Berechtigungsanfrage konnte nicht beantwortet werden: {error}",
+  "↑ parent": "↑ übergeordnet",
+  "← previous": "← vorheriger",
+  "next →": "nächster →",
+  "Child agent view — ↑ parent · ←/→ siblings": "Unteragent-Ansicht — ↑ übergeordnet · ←/→ andere Unteragenten"
 }

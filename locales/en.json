@@ -3155,5 +3155,12 @@
   "add credits or choose a plan": "add credits or choose a plan",
   "add credits with /billing topup": "add credits with /billing topup",
   "turn on overage so your purchased credits pay": "turn on overage so your purchased credits pay",
-  "add credits and turn on overage to keep working": "add credits and turn on overage to keep working"
+  "add credits and turn on overage to keep working": "add credits and turn on overage to keep working",
+  "Permission rejected": "Permission rejected",
+  "Question cancelled": "Question cancelled",
+  "Could not answer permission: {error}": "Could not answer permission: {error}",
+  "↑ parent": "↑ parent",
+  "← previous": "← previous",
+  "next →": "next →",
+  "Child agent view — ↑ parent · ←/→ siblings": "Child agent view — ↑ parent · ←/→ siblings"
 }

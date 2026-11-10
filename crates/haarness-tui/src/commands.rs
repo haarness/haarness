@@ -4515,7 +4515,10 @@ impl App {
                 self.turn_started = Some(std::time::Instant::now());
             }
         }
-        self.notice = "Child agent view — ↑ parent · ←/→ siblings".into();
+        self.notice = self
+            .language
+            .text("Child agent view — ↑ parent · ←/→ siblings")
+            .into();
         Ok(())
     }
 
@@ -4685,7 +4688,10 @@ impl App {
         let result = self.switch_thread(thread, client).await;
         self.parent_stack = stack;
         result?;
-        self.notice = "Child agent view — ↑ parent · ←/→ siblings".into();
+        self.notice = self
+            .language
+            .text("Child agent view — ↑ parent · ←/→ siblings")
+            .into();
         Ok(())
     }
 
