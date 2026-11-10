@@ -137,6 +137,8 @@ CORPUS = [
     # Secret-named files read through the shell
     'cat .env', 'cat .env.example', 'source .env && npm test', 'grep -c KEY .env.local', 'cat src/.env.production',
     'head -1 .env && cat README.md', 'cat ../outside/.env', 'ls -la .env', 'echo X=1 >> .env',
+    'cp .env.sample .env.local', 'mv .env.example .env', 'cat .env.template', 'cp .env /tmp/x', 'mv .env old.env',
+    'cp -t /tmp .env', 'cp .env{,.bak}',
     # Text a trap runs later
     "trap 'rm -rf build' EXIT", "trap 'rm -rf ~/x' EXIT; true", 'trap \'rm -rf "$tmp"\' EXIT',
     'tmp=$(mktemp -d) && trap \'rm -rf "$tmp"\' EXIT && cp README.md "$tmp"/', 'trap - EXIT', 'trap -p',

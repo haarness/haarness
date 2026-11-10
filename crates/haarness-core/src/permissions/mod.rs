@@ -476,14 +476,19 @@ pub struct PermissionEngine {
 const PATH_PERMISSIONS: [&str; 3] = ["read", "edit", "list"];
 
 /// The built-in `read` rules for environment secrets, in order (last match
-/// wins). Packages ship `.env` files, often as test fixtures, so a file
-/// inside a `node_modules` folder is read without asking; `*` crosses `/`,
-/// so the two allows cover such a folder at any depth, in relative and
-/// absolute paths alike.
-const SECRET_READ_RULES: [(&str, PermissionDecision); 5] = [
+/// wins). A template of the settings (`.env.example`, `.env.sample`,
+/// `.env.template`, `.env.dist`, as [`crate::instructions::is_template`]
+/// names them) holds no secret. Packages ship `.env` files, often as test
+/// fixtures, so a file inside a `node_modules` folder is read without
+/// asking; `*` crosses `/`, so the two allows cover such a folder at any
+/// depth, in relative and absolute paths alike.
+const SECRET_READ_RULES: [(&str, PermissionDecision); 8] = [
     ("*.env", PermissionDecision::Ask),
     ("*.env.*", PermissionDecision::Ask),
     ("*.env.example", PermissionDecision::Allow),
+    ("*.env.sample", PermissionDecision::Allow),
+    ("*.env.template", PermissionDecision::Allow),
+    ("*.env.dist", PermissionDecision::Allow),
     ("node_modules/*", PermissionDecision::Allow),
     ("*/node_modules/*", PermissionDecision::Allow),
 ];
@@ -1788,6 +1793,14 @@ mod tests {
             engine.evaluate("read:app/.env.example"),
             PermissionDecision::Allow
         );
+        // So are the other templates of the settings.
+        for path in [".env.sample", "app/.env.template", "/project/.env.dist"] {
+            assert_eq!(
+                engine.evaluate(&format!("read:{path}")),
+                PermissionDecision::Allow,
+                "{path}"
+            );
+        }
         // Packages ship `.env` fixtures: a file inside a node_modules folder
         // is read without asking, at any depth; look-alike folders still ask.
         for path in [
@@ -1847,6 +1860,10 @@ mod tests {
             "conf.env.d/notes.txt",
             "/project/.env.production",
             "c.env.example",
+            ".env.sample",
+            ".env.template",
+            ".env.dist",
+            ".env.sample.local",
             "d.txt",
             "README.md",
             ".env/bin/activate",

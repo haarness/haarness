@@ -729,7 +729,7 @@ fn expand_references(
                 })
             })
             // A template of settings a skill names (`.env.sample`) reads as
-            // before; only `.env.example` is no secret to the read rules.
+            // before.
             .filter(|reason| {
                 *reason != crate::instructions::SECRET_FILE
                     || !crate::instructions::is_template(&real)

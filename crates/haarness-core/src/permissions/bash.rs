@@ -2376,6 +2376,20 @@ impl Reader<'_> {
     /// parent, though followed it is the project itself. `pushd` enters its
     /// folder the same way.
     fn check_folder(&mut self, name: &str, raw: &str, value: &str, complete: bool) {
+        self.check_folder_as(name, raw, value, complete, false);
+    }
+
+    /// [`Self::check_folder`], told whether the path is where a copy or a
+    /// move writes (`written`, see [`copy_destination`]): that carries off
+    /// nothing already there, so it is no read of a secret file.
+    fn check_folder_as(
+        &mut self,
+        name: &str,
+        raw: &str,
+        value: &str,
+        complete: bool,
+        written: bool,
+    ) {
         // cmd.exe takes the word as written: a `/x` word is a switch, `~` a
         // name, `%NAME%` a variable.
         let as_written;
@@ -2392,12 +2406,13 @@ impl Reader<'_> {
         // Of these, only `cat`, `cp` and `mv` (in cmd.exe `type`, `more`,
         // `copy`, `xcopy`, `robocopy` and `move`) read or carry off what a
         // file holds.
-        let reads = matches!(name, "cat" | "cp" | "mv")
-            || (self.reading == Reading::Cmd
-                && matches!(
-                    name,
-                    "type" | "more" | "copy" | "xcopy" | "robocopy" | "move"
-                ));
+        let reads = !written
+            && (matches!(name, "cat" | "cp" | "mv")
+                || (self.reading == Reading::Cmd
+                    && matches!(
+                        name,
+                        "type" | "more" | "copy" | "xcopy" | "robocopy" | "move"
+                    )));
         self.name_path(raw, value, complete, outside.as_deref(), reads);
         if let Some(dir) = outside {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
@@ -3024,14 +3039,16 @@ impl Reader<'_> {
         }
         // After a literal `--`, a word that starts with `-` is a path too.
         let mut ended = false;
-        for word in arguments {
+        let destination = copy_destination(&name, arguments);
+        for (index, word) in arguments.iter().enumerate() {
             let ends = !ended && ends_options(word);
             // Each path of a brace list (`cat {,~/.ssh/id_rsa}`) on its own.
             for path in expanded(word, source) {
                 if ends || (!ended && names_no_path(&name, &path.value)) {
                     continue;
                 }
-                self.check_folder(&name, &path.raw, &path.value, path.complete);
+                let written = destination == Some(index);
+                self.check_folder_as(&name, &path.raw, &path.value, path.complete, written);
                 if matches!(name.as_str(), "cd" | "pushd") {
                     self.check_cdpath(&name, &path);
                 }
@@ -3077,6 +3094,38 @@ impl Reader<'_> {
             self.check_folder(name, &candidate, &candidate, true);
         }
     }
+}
+
+/// Which of `cp`'s or `mv`'s `arguments` is where it writes: the last of
+/// two operands or more (`cp .env.example .env`), unless an option names the
+/// target folder (`-t`, `--target-directory`), which makes every operand a
+/// source. Only when every word is plain text: an expansion, a glob or a
+/// brace list could add a `-t` when it runs.
+fn copy_destination(name: &str, arguments: &[Word<'_>]) -> Option<usize> {
+    if !matches!(name, "cp" | "mv") {
+        return None;
+    }
+    let mut operands = Vec::new();
+    let mut ended = false;
+    for (index, word) in arguments.iter().enumerate() {
+        if !word.literal || word.raw.contains(['*', '?', '[', '{']) {
+            return None;
+        }
+        if !ended && ends_options(word) {
+            ended = true;
+        } else if !ended && word.value.starts_with('-') && word.value != "-" {
+            let target = match word.value.strip_prefix("--") {
+                Some(long) => long.starts_with('t'),
+                None => word.value[1..].contains('t'),
+            };
+            if target {
+                return None;
+            }
+        } else {
+            operands.push(index);
+        }
+    }
+    operands.get(1).and(operands.last().copied())
 }
 
 /// Whether `word` is a literal `--`, which ends a program's options.

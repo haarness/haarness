@@ -19073,6 +19073,17 @@ mod shell_reading_tests {
             "wc -l < .env",
             "cp .env /tmp/copy",
             "git status && head -1 config/.env.production",
+            // Copied or moved away, it is carried off: also with a target
+            // folder option, a brace list or a word only known when it runs,
+            // where nobody can say which operand is written.
+            "mv .env old.env",
+            "cp .env .env.bak",
+            "cp -- .env /tmp/copy",
+            "cp -t /tmp .env",
+            "cp -rt /tmp .env",
+            "mv --target-directory=/tmp .env",
+            "cp .env{,.bak}",
+            "cp $FLAGS .env.example .env",
         ] {
             assert_eq!(verdict(&defaults, command), Ask, "{command}");
         }
@@ -19085,6 +19096,14 @@ mod shell_reading_tests {
             "cat node_modules/pkg/.env",
             "echo X=1 >> .env",
             "cat README.md",
+            // A template is no secret, and a copy or move onto a secret
+            // file writes it.
+            "cat .env.sample",
+            "cp .env.example .env",
+            "cp .env.sample .env.local",
+            "cp -n .env.template .env",
+            "mv .env.example .env",
+            "cp README.md -- .env",
         ] {
             assert_eq!(verdict(&defaults, command), Allow, "{command}");
         }

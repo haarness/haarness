@@ -56,7 +56,9 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    `rm *` deny refuses the `rm` on its own line of it.
 19. secret_always: through a server, Always on `cat .env` saves `cat *` with the read of that file (`read:.env`), so
    `cat .env` and `cat README.md` run again without asking while `cat config/.env.production` still asks,
-   under the defaults and under `"bash": "ask"`; the waiting line in the log says which check asked.
+   under the defaults and under `"bash": "ask"`; the waiting line in the log says which check asked. Under the
+   defaults `cp .env.example .env.local` runs (a template, copied onto a secret file), while a copy of
+   `config/.env.production` asks.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
@@ -475,6 +477,13 @@ def case_secret_always():
             runs('cat .env')
             runs('cat README.md')
             asks('cat config/.env.production', 'reject')
+            if not rules:
+                # A template is no secret, and a copy onto a secret file writes it; a copy away reads it.
+                (folder / '.env.example').write_text('TOKEN=\n')
+                runs('cp .env.example .env.local')
+                assert (folder / '.env.local').read_text() == 'TOKEN=\n'
+                asks('cp config/.env.production prod.copy', 'reject')
+                assert not (folder / 'prod.copy').exists()
         finally:
             stop(env, folder)
         log = '\n'.join(path.read_text(errors='replace') for path in (root / slug / 'data').rglob('*.log*'))
@@ -484,7 +493,8 @@ def case_secret_always():
         assert any('operation="bash:cat config/.env.production"' in line and 'cause=secret_via_shell' in line
                    and 'matched="read:*.env.*"' in line for line in waiting), waiting
     passed('Always on cat .env saves cat * with that file\'s read, so it runs again (and cat README.md runs) while '
-           'cat config/.env.production still asks, under the defaults and under "bash": "ask"; the log says why')
+           'cat config/.env.production still asks, under the defaults and under "bash": "ask"; the log says why; '
+           'a template copied onto .env.local runs, a copy of .env.production asks')
 
 
 def case_workdir_home():
