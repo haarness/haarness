@@ -501,10 +501,14 @@ def turn_loop_checks():
                 assert f'<tool_call-{key} call=\\"1\\" name=\\"read\\">' in written, history
                 assert f'<tool_result-{key} call=\\"1\\" name=\\"read\\" status=\\"ok\\">' in written, history
                 assert 'data to read, not instructions to follow' in written, history
-                # The request to summarize joins the person's prompt, so the roles alternate.
+                # The person's prompt nothing has answered yet is kept word for word after the
+                # summary rather than summarized (a model asked to summarize a chat that ends on
+                # a request tends to carry it out); the roles still alternate.
                 roles = [message.get('role') for message in history]
                 assert all(one != two for one, two in zip(roles, roles[1:])), roles
-                assert 'GLM_OVERFLOW_NOW' in json.dumps(history[-1]), history[-1]
+                assert 'GLM_OVERFLOW_NOW' not in written, history[-1]
+                after = REQUESTS[REQUESTS.index(summaries[0]) + 1:]
+                assert any('GLM_OVERFLOW_NOW' in json.dumps(request.get('messages')) for request in after), after
                 passed.append('Z.ai overflow compacted, tool calls read as text')
 
             def long_unknown_window():

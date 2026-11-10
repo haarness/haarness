@@ -2777,7 +2777,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         if self.id == "ollama" {
             let model = model.clone();
             events = Box::pin(futures::StreamExt::map(events, move |event| {
-                event.map_err(|error| local_model_missing(error, &model))
+                event.map_err(|error| ollama::readable_error(local_model_missing(error, &model)))
             }));
         }
         Ok(Box::pin(try_stream! {
@@ -4679,6 +4679,75 @@ mod tests {
             error
                 .to_string()
                 .contains("exceeds the available context size (32768 tokens)"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_ollama_could_not_read_ends_the_stream_as_one() {
+        // gpt-oss on Ollama 0.40.6 reasons, then writes a call to `write`
+        // that the reply's full context cuts off: Ollama ends the stream
+        // with its parser's error, the file so far quoted in it.
+        let router = Router::new().route(
+            "/api/chat",
+            post(|| async {
+                (
+                    [(CONTENT_TYPE, "application/x-ndjson")],
+                    [
+                        json!({"model": "gpt-oss:20b", "message": {"role": "assistant", "content": "", "thinking": "Write the game."}, "done": false}),
+                        json!({"error": "error parsing tool call: raw='{\"content\":\"import curses\\nimport random\\n', err=unexpected end of JSON input"}),
+                    ]
+                    .iter()
+                    .fold(String::new(), |mut body, line| {
+                        body.push_str(&line.to_string());
+                        body.push('\n');
+                        body
+                    }),
+                )
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/v1/chat/completions"));
+        provider.id = "ollama".into();
+        let request = ProviderRequest {
+            model: "gpt-oss:20b".into(),
+            system: "You are Haarness.".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "Write snake.py".into(),
+            }],
+            tools: vec![ToolDefinition {
+                name: "write".into(),
+                description: "Write a file".into(),
+                input_schema: json!({"type": "object", "properties": {"content": {"type": "string"}}}),
+            }],
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let events: Vec<_> = provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert!(
+            matches!(&events[0], Ok(ProviderEvent::ReasoningDelta(text)) if text == "Write the game."),
+            "{events:?}"
+        );
+        let error = events
+            .into_iter()
+            .find_map(Result::err)
+            .expect("an error")
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "{}error parsing tool call: unexpected end of JSON input",
+                haarness_core::UNREADABLE_TOOL_CALL
+            )) && !error.contains("import curses"),
             "{error}"
         );
     }

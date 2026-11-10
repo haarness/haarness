@@ -16,6 +16,13 @@ unless the request asks for more. Checked:
 - A model that answers with nothing says to choose a larger one.
 - A new chat on Ollama alone gets a model that can do the work, not the first Ollama lists.
 
+A second stand-in serves gpt-oss as Ollama 0.40.6 does:
+
+- A call to `write` cut off where the reply filled the context ends the stream with Ollama's parser error; the model
+  is asked to write it again, in smaller calls when long, and the turn goes on.
+- A chat's second message, past the compaction threshold, compacts: asked to summarize, gpt-oss calls a tool it was
+  never offered, is asked again, and its summary is used; the new message isn't summarized but kept as it is.
+
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-ollama-local.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
@@ -119,8 +126,59 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
 
+oss_chats = []
+WRITE_CUT = "error parsing tool call: raw='{\"content\":\"import curses\\nimport random\\n', err=unexpected end of JSON input"
+
+
+class GptOss(Ollama):
+    """Ollama with gpt-oss:20b alone, which calls the tools it was trained with when asked to summarize a chat that
+    ends on a request, and whose long `write` runs out of context."""
+
+    def do_GET(self):
+        if self.path == '/api/tags':
+            return self.reply(200, {'models': [{'name': 'gpt-oss:20b', 'model': 'gpt-oss:20b'}]})
+        if self.path == '/v1/models':
+            return self.reply(200, {'object': 'list', 'data': [{'id': 'gpt-oss:20b', 'object': 'model'}]})
+        return super().do_GET()
+
+    def stream(self, lines):
+        self.reply(200, ''.join(json.dumps(line) + '\n' for line in lines).encode(), 'application/x-ndjson')
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
+        if self.path == '/api/show':
+            return self.reply(200, {'capabilities': ['completion', 'tools', 'thinking'], 'details': {'parameter_size': '20.9B'},
+                                    'model_info': {'general.architecture': 'gptoss', 'gptoss.context_length': 131_072}})
+        if self.path != '/api/chat':
+            return self.reply(404, {'error': 'not found'})
+        text = json.dumps(body.get('messages'))
+        if 'Name this conversation' in text:
+            return self.stream([{'message': {'role': 'assistant', 'content': 'Snake game'}, 'done': False},
+                                {'message': {'role': 'assistant', 'content': ''}, 'done': True, 'done_reason': 'stop'}])
+        oss_chats.append(body)
+        done = lambda prompt=6_000: {'message': {'role': 'assistant', 'content': ''}, 'done': True, 'done_reason': 'stop',
+                                     'prompt_eval_count': prompt, 'eval_count': 40}
+        say = lambda words: {'message': {'role': 'assistant', 'content': words}, 'done': False}
+        if not body.get('tools'):
+            if 'called a tool instead of giving the summary' in text:
+                return self.stream([say('The person had the project looked over; calc.py has an add() bug.'), done()])
+            # As gpt-oss did 5 times in 5 with Ollama 0.40.6: a call to its own tool, though none was offered.
+            call = {'id': 'call_1', 'function': {'index': 0, 'name': 'repo_browser.open_file', 'arguments': {'path': 'calc.py'}}}
+            return self.stream([{'message': {'role': 'assistant', 'content': '', 'thinking': 'Open it.'}, 'done': False},
+                                {'message': {'role': 'assistant', 'content': '', 'tool_calls': [call]}, 'done': False}, done()])
+        if 'ended partway through a tool call' in text:
+            return self.stream([say('I will write snake.py in parts.'), done()])
+        if 'Write snake.py' in text:
+            return self.stream([{'message': {'role': 'assistant', 'content': '', 'thinking': 'Write it all.'}, 'done': False},
+                                {'error': WRITE_CUT}])
+        # The first message of the long chat leaves it past its threshold (24K of a 32K window).
+        return self.stream([say('I looked over the project.'), done(30_000)])
+
+
 ollama = Server(('127.0.0.1', 0), Ollama)
 threading.Thread(target=ollama.serve_forever, daemon=True).start()
+oss = Server(('127.0.0.1', 0), GptOss)
+threading.Thread(target=oss.serve_forever, daemon=True).start()
 env = clean_env('OLLAMA_')
 env.update(HAARNESS_DATA_DIR=str(root/'state'), HAARNESS_HOME=str(root/'home'), HAARNESS_NO_CONNECT_PROMPT='1',
            OLLAMA_HOST=f'127.0.0.1:{ollama.server_address[1]}')
@@ -200,6 +258,31 @@ try:
     assert code != 0, out
     assert 'smollm2:135m sent back an empty reply.' in out and 'such as qwen2.5-coder:7b' in out, out
     print('PASS a model that answers with nothing says to choose a larger one')
+
+    # gpt-oss, on an Ollama of its own and a profile of its own.
+    env.update(HAARNESS_DATA_DIR=str(root/'oss-state'), OLLAMA_HOST=f'127.0.0.1:{oss.server_address[1]}')
+    code, out = run('gpt-oss:20b', 'Write snake.py')
+    assert code == 0, out
+    assert 'I will write snake.py in parts.' in out and 'import curses' not in out, out
+    assert len(oss_chats) == 2, len(oss_chats)
+    assert 'ended partway through a tool call' in json.dumps(oss_chats[1]['messages']), oss_chats[1]['messages'][-1]
+    print('PASS a tool call cut off where the context filled up is asked for again, in smaller parts')
+
+    before = len(oss_chats)
+    code, out = run('gpt-oss:20b', 'Look over the project.')
+    assert code == 0, out
+    result = haarness('run', '--yolo', '--continue', 'Now read calc.py and explain add().')
+    code, out = result.returncode, (result.stdout + result.stderr).strip()
+    assert code == 0, out
+    summaries = [chat for chat in oss_chats[before:] if not chat.get('tools')]
+    assert len(summaries) == 2, [json.dumps(chat['messages'])[-300:] for chat in summaries]
+    assert 'called a tool instead of giving the summary' in json.dumps(summaries[1]['messages'])
+    assert all('Now read calc.py' not in json.dumps(chat['messages']) for chat in summaries)
+    last = oss_chats[-1]
+    assert last.get('tools') and 'calc.py has an add() bug' in json.dumps(last['messages']), last['messages']
+    assert 'Now read calc.py' in json.dumps(last['messages'])
+    print("PASS a summary gpt-oss answers with a tool call is asked for again, and the chat's new message is kept")
 finally:
     ollama.shutdown()
+    oss.shutdown()
     e2e_scratch.settle(root)

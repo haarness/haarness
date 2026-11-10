@@ -55,6 +55,29 @@ const MAX_COMPACTIONS_UNANSWERED: u8 = 4;
 /// more than the rounds it makes room for.
 const COMPACTION_REGROWTH_DIVISOR: u64 = 4;
 
+/// How a refusal of a request as longer than the model's window begins when
+/// the turn had already compacted the chat as often as it may: the turn
+/// outgrew the window while it ran (a model reading one large file after
+/// another), not its instructions and the person's message. The provider's
+/// words follow.
+const OUTGREW_WINDOW: &str = "the turn outgrew the model's context after compacting the chat: ";
+
+/// `error` as [`OUTGREW_WINDOW`] says it, when it refuses the request as too
+/// long once the turn has compacted `compactions` times in a row without the
+/// provider taking a request, as often as it may.
+fn outgrew_window(error: CoreError, compactions: u8) -> CoreError {
+    match error {
+        CoreError::Provider(message)
+            if compactions >= MAX_COMPACTIONS_UNANSWERED
+                && !message.starts_with(OUTGREW_WINDOW)
+                && is_provider_context_overflow(&CoreError::Provider(message.clone())) =>
+        {
+            CoreError::Provider(format!("{OUTGREW_WINDOW}{message}"))
+        }
+        other => other,
+    }
+}
+
 fn latest_todos(items: &[Item], through: Option<u64>) -> Vec<TodoEntry> {
     items
         .iter()
@@ -1110,16 +1133,34 @@ const STEP_LIMIT_CALL: &str =
 /// says, before the provider's reason.
 const REFUSED_CALL: &str = "The provider refused your last reply before it reached Haarness, because a tool call in it did not match the tool's definition. Call the tool again with arguments that match its schema, or answer without it. The provider said: ";
 
+/// What the request after a reply whose tool call the provider could not
+/// read says, before the provider's reason.
+const UNREADABLE_CALL: &str = "Your last reply ended in a tool call that couldn't be read, so it didn't run. Write the call again with its arguments complete and well formed, or answer without it. The reason given: ";
+
+/// What the request after a reply that ended partway through a tool call
+/// says: the model broke the call off (gpt-oss wrote `{"path":"src","}`), or
+/// the reply filled the room left in its context, where Ollama ends it and
+/// the same call would end there again.
+const CUT_CALL: &str = "Your last reply ended partway through a tool call, so the call didn't run. Write the call again in full. If it is long, such as a whole file, make smaller calls instead: create the file with its first part, then add the rest with edits.";
+
 /// How often a turn asks the model to correct a tool call the provider
 /// refused, before the turn fails.
 const REFUSED_CALL_RETRIES: u8 = 2;
 
-/// The provider's reason when it refused the model's own reply for a tool
-/// call that does not match its tool (Groq's `tool_use_failed`: "Tool call
-/// validation failed: parameters for tool apply_patch did not match
-/// schema…", or a call of a tool it was not sent). The request was fine; a
-/// model asked again usually gets the call right.
+/// What the model is told when the provider refused its own reply for a
+/// tool call that does not match its tool (Groq's `tool_use_failed`: "Tool
+/// call validation failed: parameters for tool apply_patch did not match
+/// schema…", or a call of a tool it was not sent), or could not read the
+/// call at all (see [`unreadable_tool_call`]). The request was fine; a model
+/// asked again usually gets the call right.
 fn refused_tool_call(error: &CoreError) -> Option<String> {
+    if let Some((reason, cut)) = unreadable_tool_call(error) {
+        return Some(if cut {
+            CUT_CALL.to_owned()
+        } else {
+            format!("{UNREADABLE_CALL}{reason}")
+        });
+    }
     let CoreError::Provider(message) = error else {
         return None;
     };
@@ -1132,7 +1173,27 @@ fn refused_tool_call(error: &CoreError) -> Option<String> {
         .map_or(message.as_str(), |at| {
             &message[at + "tool call validation failed: ".len()..]
         });
-    Some(clean_error_text(reason, 600))
+    Some(format!("{REFUSED_CALL}{}", clean_error_text(reason, 600)))
+}
+
+/// The provider's reason when it could not read a tool call the model wrote
+/// ([`crate::UNREADABLE_TOOL_CALL`]), and whether the call was cut off
+/// before it ended rather than written wrong.
+fn unreadable_tool_call(error: &CoreError) -> Option<(String, bool)> {
+    let CoreError::Provider(message) = error else {
+        return None;
+    };
+    let (_, reason) = message.split_once(crate::UNREADABLE_TOOL_CALL)?;
+    let lower = reason.to_ascii_lowercase();
+    let cut = [
+        "unexpected end of json input",
+        "unexpected eof",
+        "incomplete",
+        "unterminated",
+    ]
+    .iter()
+    .any(|words| lower.contains(words));
+    Some((clean_error_text(reason, 300), cut))
 }
 
 /// What the request after an empty reply says, when a call before it failed.
@@ -2210,6 +2271,10 @@ fn describe_local_model_failure(
     let CoreError::Provider(raw) = error else {
         return None;
     };
+    // Said by `describe_error`, whatever the parser's words name.
+    if unreadable_tool_call(error).is_some() {
+        return None;
+    }
     if info.id == "lmstudio" && raw.starts_with(EMPTY_LOCAL_REPLY) {
         let name = haarness_protocol::model_display_name(
             model,
@@ -2338,6 +2403,22 @@ fn describe_local_model_failure(
                     ),
                 }
             ),
+        )
+    } else if let Some(window) = ollama_window_refused(&lower)
+        && raw.starts_with(OUTGREW_WINDOW)
+    {
+        (
+            format!(
+                "{name} reads at most {} tokens at once here, and this turn outgrew that while it ran, though the chat was compacted {MAX_COMPACTIONS_UNANSWERED} times to make room.",
+                grouped_number(window)
+            ),
+            match instead(window.saturating_add(1)).as_slice() {
+                [] => "Ask for less in one message, such as fewer or smaller files at a time, or start a new chat.".to_owned(),
+                names => format!(
+                    "Ask for less in one message, such as fewer or smaller files at a time, or choose a model with a longer context for this chat, such as {}.",
+                    spoken_list(names, "or")
+                ),
+            },
         )
     } else if let Some(window) = ollama_window_refused(&lower) {
         (
@@ -2549,6 +2630,28 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             "{} is not available in your country or region. Choose a model from another provider.",
             provider.unwrap_or("This provider")
         );
+    }
+    // Other providers' refusals read as they did; Ollama's are said by
+    // `describe_local_model_failure`.
+    if let Some(words) = raw.strip_prefix(OUTGREW_WINDOW) {
+        return describe_error(&CoreError::Provider(words.to_owned()), provider);
+    }
+    // Asked twice, the model wrote no summary of the chat (it called a tool,
+    // or only reasoned).
+    if raw == EMPTY_SUMMARY {
+        return "The model didn't write a summary of this chat, though Haarness asked twice, so the chat wasn't compacted. Try again, or start a new chat to go on.".into();
+    }
+    // The model's tool calls kept coming out unreadable, or cut off where
+    // its context filled up, though it was asked to write them again.
+    if let Some((_, cut)) = unreadable_tool_call(error) {
+        return if cut {
+            "The model's tool calls kept breaking off before they ended, though it was asked to write them again, in smaller parts if long. Send the message again, start a new chat, or choose another model.".into()
+        } else {
+            format!(
+                "{} couldn't read the model's tool calls, even after the model was asked to write them again. Send the message again, or choose another model.",
+                provider.unwrap_or("The provider")
+            )
+        };
     }
     if let Some((message, code, kind)) = provider_error_fields(raw) {
         let label = code.or_else(|| {
@@ -10955,6 +11058,11 @@ impl RunnerTask {
             // size of the context right after this turn's latest compaction.
             let mut compactions_unanswered = 0_u8;
             let mut compacted_at: Option<u64> = None;
+            // An automatic compaction whose summary the model did not write
+            // (or that failed) is not tried again this turn: the request
+            // still fits below the threshold's reserve, and one the provider
+            // then refuses as too long compacts on that refusal instead.
+            let mut summary_failed = false;
             // A refusal of the request's bytes compacts once until the
             // provider takes a request again: when the summary leaves the
             // request too large, more summaries would only summarize the
@@ -10978,9 +11086,10 @@ impl RunnerTask {
             let mut failure_beside_text = false;
             let mut explain_failure = false;
             let mut asked_to_explain = false;
-            // Why the provider refused the model's last reply for a tool call
-            // that did not match its tool, for the next request to say, and
-            // how often this turn has asked the model to correct one.
+            // What the next request tells the model when the provider refused
+            // its last reply for a tool call that did not match its tool, or
+            // could not read the call, and how often this turn has asked the
+            // model to correct one.
             let mut refused_call: Option<String> = None;
             let mut refused_calls = 0_u8;
             // Whether this turn asked again for the summary at its step limit.
@@ -11207,7 +11316,7 @@ impl RunnerTask {
                     Some(ItemData::Compaction { .. })
                 );
                 // A subagent's turn compacts its own chat as a person's does.
-                if self.config.compaction.enabled && !has_unconsumed_queued {
+                if self.config.compaction.enabled && !has_unconsumed_queued && !summary_failed {
                     let provider_models = self.providers.models(provider_id);
                     let model_info = model_metadata(&provider_models, &model);
                     let context_window = self
@@ -11239,7 +11348,7 @@ impl RunnerTask {
                             1.0,
                         )?;
                         self.set_status("compacting", None);
-                        let summary = summarize_context(
+                        let summary = match summarize_context(
                             &provider,
                             &model,
                             self.config.prompts.text(crate::PromptName::Compaction),
@@ -11247,7 +11356,23 @@ impl RunnerTask {
                             self.cancel.clone(),
                             Some(budget),
                         )
-                        .await?;
+                        .await
+                        {
+                            Ok(summary) => Some(summary),
+                            Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+                            // The chat is near its threshold, not over the
+                            // window: the turn goes on as it is rather than
+                            // failing for want of a summary.
+                            Err(error) => {
+                                tracing::warn!(thread = %self.thread.id, turn = %self.turn.id, %error, "no summary for an automatic compaction; going on without compacting");
+                                summary_failed = true;
+                                None
+                            }
+                        };
+                        let Some(summary) = summary else {
+                            self.set_status("thinking", None);
+                            continue 'provider_round;
+                        };
                         // Summarization is intentionally outside the queue gate:
                         // it may take seconds and queued steering must persist
                         // immediately. Re-enter the gate only for the commit,
@@ -11371,10 +11496,10 @@ impl RunnerTask {
                         "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
                     recovering = false;
                 }
-                if let Some(reason) = refused_call.take() {
+                if let Some(note) = refused_call.take() {
                     messages.push(ProviderMessage::Text {
                         role: "user".into(),
-                        content: format!("{REFUSED_CALL}{reason}"),
+                        content: note,
                     });
                 }
                 // Asked in every request until a reply to it shows words, a
@@ -11712,6 +11837,7 @@ impl RunnerTask {
                             compacted_for_size |= oversized;
                             continue 'provider_round;
                         }
+                        let error_value = outgrew_window(error_value, compactions_unanswered);
                         if let Some(reason) = refused_tool_call(&error_value)
                             && refused_calls < REFUSED_CALL_RETRIES
                         {
@@ -11817,6 +11943,11 @@ impl RunnerTask {
                                 compacted_for_size |= oversized;
                                 continue 'provider_round;
                             }
+                            let error_value = if saw_provider_event {
+                                error_value
+                            } else {
+                                outgrew_window(error_value, compactions_unanswered)
+                            };
                             // A provider that checks the model's tool calls
                             // itself (Groq) refuses a reply whose call does
                             // not match its tool, before anything streamed:
@@ -17189,6 +17320,7 @@ async fn summarize_once(
     // potentially huge or now-missing binary payload. This also makes overflow
     // recovery safe after an attachment pushed the provider over its limit.
     let (mut messages, mut origins) = provider_messages_with_origins(items);
+    leave_out_unanswered(&mut messages, &mut origins);
     if let Some(room) = room {
         let tokenizer = Tokenizer::for_model(model);
         let room = room.saturating_sub(tokenizer.text(&system));
@@ -17203,9 +17335,9 @@ async fn summarize_once(
         }
     }
     let messages = summary_messages(messages, &origins, &summary_key());
-    let request = ProviderRequest {
+    let ask = |messages: Vec<ProviderMessage>| ProviderRequest {
         model: model.to_owned(),
-        system,
+        system: system.clone(),
         messages,
         tools: Vec::new(),
         reasoning_effort: None,
@@ -17218,12 +17350,96 @@ async fn summarize_once(
         },
         output_schema: None,
     };
+    let missing = match summary_reply(provider, ask(messages.clone()), &cancel).await? {
+        Ok(text) => return Ok(text),
+        Err(missing) => missing,
+    };
+    // A reply with no summary in it is asked for once more, saying what
+    // went wrong: gpt-oss on Ollama, given no tools, can still call the
+    // `container.exec` it was trained with, and a model that only reasons
+    // may write the summary when asked again.
+    tracing::info!(
+        ?missing,
+        "the summary reply held no summary; asking once more"
+    );
+    let mut messages = messages;
+    if let Some(ProviderMessage::Text { content, .. }) = messages.last_mut() {
+        content.push_str("\n\n");
+        content.push_str(missing.note());
+    }
+    match summary_reply(provider, ask(messages), &cancel).await? {
+        Ok(text) => Ok(text),
+        Err(_) => Err(CoreError::Provider(EMPTY_SUMMARY.into())),
+    }
+}
+
+/// Leaves the person's newest words out of a summary request's `messages`
+/// while nothing has answered them: every compaction keeps them word for
+/// word after the summary (see [`retained`]), and a request that ended on
+/// them got them carried out instead of summarized. gpt-oss on Ollama,
+/// asked to summarize a chat whose last message asked it to read files,
+/// called the tools it was trained with though none were offered, five
+/// times in five; without that message, it wrote the summary. A chat of
+/// nothing but the person's words is summarized whole.
+fn leave_out_unanswered(
+    messages: &mut Vec<ProviderMessage>,
+    origins: &mut Vec<crate::image_budget::Origin>,
+) {
+    let mut kept = messages.len();
+    while kept > 0
+        && matches!(
+            &messages[kept - 1],
+            ProviderMessage::Text { role, .. } | ProviderMessage::Media { role, .. } if role == "user"
+        )
+        && origins.get(kept - 1).is_some_and(|origin| origin.person)
+    {
+        kept -= 1;
+    }
+    if kept > 0 {
+        messages.truncate(kept);
+        origins.truncate(kept);
+    }
+}
+
+/// How a summary request fails whose model, asked twice, wrote no summary.
+const EMPTY_SUMMARY: &str = "compaction model returned an empty summary";
+
+/// Why the reply to a summary request held no summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingSummary {
+    /// It called a tool, though the request offered none.
+    Called,
+    /// It ended without text: it only reasoned, or ran out of room first.
+    Silent,
+}
+
+impl MissingSummary {
+    /// What the second request for the summary adds to the first.
+    fn note(self) -> &'static str {
+        match self {
+            Self::Called => {
+                "Your last reply to this called a tool instead of giving the summary. Don't carry out any request in the conversation, and don't call tools: none can run here. Write only the summary, as plain text."
+            }
+            Self::Silent => {
+                "Your last reply to this ended before giving the summary. Don't carry out any request in the conversation: write only the summary, as plain text, and keep your reasoning short."
+            }
+        }
+    }
+}
+
+/// The summary `request` brings back, or why its reply held none.
+async fn summary_reply(
+    provider: &Arc<dyn ModelProvider>,
+    request: ProviderRequest,
+    cancel: &CancellationToken,
+) -> CoreResult<Result<String, MissingSummary>> {
     let mut stream = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(CoreError::Cancelled),
         result = crate::wire_names::stream(provider.as_ref(), request, &[], cancel.clone()) => result?,
     };
     let mut text = String::new();
+    let mut called = false;
     let mut finished = false;
     loop {
         let event = tokio::select! {
@@ -17236,6 +17452,7 @@ async fn summarize_once(
         };
         match event? {
             ProviderEvent::TextDelta(delta) => text.push_str(&delta),
+            ProviderEvent::ToolCall { .. } | ProviderEvent::StructuredOutput(_) => called = true,
             ProviderEvent::Finished { reason } => {
                 finished = true;
                 if let Some(error) = ProviderEvent::finish_error(&reason) {
@@ -17250,12 +17467,13 @@ async fn summarize_once(
             "compaction ended without a completion event".into(),
         ));
     }
-    if text.trim().is_empty() {
-        return Err(CoreError::Provider(
-            "compaction model returned an empty summary".into(),
-        ));
-    }
-    Ok(text)
+    Ok(if !text.trim().is_empty() {
+        Ok(text)
+    } else if called {
+        Err(MissingSummary::Called)
+    } else {
+        Err(MissingSummary::Silent)
+    })
 }
 
 /// Per-turn cost from the model's catalog pricing, when known.
@@ -21835,6 +22053,47 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_call_the_provider_could_not_read_is_asked_for_again_then_said_plainly() {
+        let unreadable =
+            |reason: &str| CoreError::Provider(format!("{}{reason}", crate::UNREADABLE_TOOL_CALL));
+        // Written wrong: asked for again, with the reason.
+        let wrong =
+            unreadable("error parsing tool call: invalid character 'd' in string escape code");
+        let note = super::refused_tool_call(&wrong).unwrap();
+        assert!(note.starts_with(super::UNREADABLE_CALL), "{note}");
+        assert!(note.ends_with("invalid character 'd' in string escape code"));
+        assert_eq!(
+            super::describe_error(&wrong, Some("Ollama")),
+            "Ollama couldn't read the model's tool calls, even after the model was asked to write them again. Send the message again, or choose another model."
+        );
+        // Broken off before it ended (or where the reply filled the
+        // context): in full, or in smaller calls.
+        for reason in [
+            "error parsing tool call: unexpected end of JSON input",
+            "XML syntax error on line 9: unexpected EOF",
+            "incomplete GLM tool call: missing </tool_call>",
+        ] {
+            let cut = unreadable(reason);
+            assert_eq!(
+                super::refused_tool_call(&cut).as_deref(),
+                Some(super::CUT_CALL)
+            );
+            assert!(
+                super::describe_error(&cut, Some("Ollama"))
+                    .starts_with("The model's tool calls kept breaking off"),
+            );
+        }
+        // Groq's refusal reads as it did.
+        let groq = CoreError::Provider("HTTP 400 Bad Request: [tool_use_failed] Tool call validation failed: parameters for tool read did not match schema".into());
+        assert!(
+            super::refused_tool_call(&groq)
+                .unwrap()
+                .starts_with(super::REFUSED_CALL)
+        );
+        assert!(super::unreadable_tool_call(&groq).is_none());
+    }
+
+    #[test]
     fn a_picture_refused_for_a_model_without_vision_reads_as_advice() {
         // Every refusal the provider adapters write (haarness-providers
         // `media::Unreadable::stand_in` and the Chat Completions audio one).
@@ -22435,6 +22694,58 @@ mod tests {
             ask.push(super::summary_data_note(KEY));
         }
         ask.join(" ")
+    }
+
+    #[test]
+    fn a_summary_leaves_out_the_persons_words_nothing_answered_yet() {
+        let summarized = |items: Vec<ItemData>| {
+            let items = (1..)
+                .zip(items)
+                .map(|(sequence, data)| item(sequence, data))
+                .collect::<Vec<_>>();
+            let (mut messages, mut origins) = super::provider_messages_with_origins(items);
+            super::leave_out_unanswered(&mut messages, &mut origins);
+            assert_eq!(messages.len(), origins.len());
+            messages
+                .into_iter()
+                .map(|message| match message {
+                    ProviderMessage::Text { content, .. } => content,
+                    message => panic!("not text: {message:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        // The compaction keeps the new request word for word after the
+        // summary: the summary is asked of what came before it.
+        assert_eq!(
+            summarized(vec![
+                summary_user("Read the parser", false),
+                summary_reply("It parses JSON."),
+                summary_user("Now read the lexer and explain it", false),
+            ]),
+            ["Read the parser", "It parses JSON."]
+        );
+        // Words Haarness wrote last stay, and so does a chat of nothing but
+        // the person's words.
+        let notice = summarized(vec![
+            summary_user("Read the parser", false),
+            summary_reply("It parses JSON."),
+            summary_user("<task-result>done</task-result>", true),
+        ]);
+        assert!(
+            notice
+                .last()
+                .is_some_and(|text| text.contains("<task-result>"))
+        );
+        let words = summarized(vec![
+            summary_user("history", false),
+            summary_user("more", false),
+        ]);
+        assert!(words.last().is_some_and(|text| text.contains("more")));
+        // A summary the model never wrote, though asked twice.
+        assert_eq!(
+            super::describe_error(&CoreError::Provider(super::EMPTY_SUMMARY.into()), None),
+            "The model didn't write a summary of this chat, though Haarness asked twice, so the chat wasn't compacted. Try again, or start a new chat to go on."
+        );
     }
 
     #[test]
@@ -25503,6 +25814,33 @@ mod tests {
             words("HTTP 400 Bad Request: request (14112 tokens) exceeds the available context size (8192 tokens), try increasing it", "llama3:8b").as_deref(),
             Some("llama3:8b reads at most 8,192 tokens at once here, fewer than Haarness's instructions, tools and this message take. Choose one with a longer context for this chat, such as qwen3:8b or gpt-oss:20b.")
         );
+        // A turn that read one large file after another outgrew the window
+        // though the chat was compacted as often as a turn may: not the
+        // instructions and the message. gpt-oss on Ollama, 2026-11-10.
+        let refused = "HTTP 400 Bad Request: request (40069 tokens) exceeds the available context size (32768 tokens), try increasing it";
+        let outgrown = super::outgrew_window(
+            CoreError::Provider(refused.into()),
+            super::MAX_COMPACTIONS_UNANSWERED,
+        );
+        assert!(matches!(
+            super::outgrew_window(CoreError::Provider(refused.into()), super::MAX_COMPACTIONS_UNANSWERED - 1),
+            CoreError::Provider(words) if words == refused
+        ));
+        assert_eq!(
+            super::describe_local_model_failure(&outgrown, &ollama, "gpt-oss:20b", true).as_deref(),
+            Some(
+                "gpt-oss:20b reads at most 32,768 tokens at once here, and this turn outgrew that while it ran, though the chat was compacted 4 times to make room. Ask for less in one message, such as fewer or smaller files at a time, or start a new chat."
+            )
+        );
+        // Any other provider's refusal reads as it did.
+        let claude = super::outgrew_window(
+            CoreError::Provider(
+                "HTTP 400 Bad Request: prompt is too long: 210000 tokens > 200000 maximum".into(),
+            ),
+            super::MAX_COMPACTIONS_UNANSWERED,
+        );
+        assert!(super::describe_error(&claude, Some("Anthropic")).contains("prompt is too long"));
+        assert!(!super::describe_error(&claude, Some("Anthropic")).contains("outgrew"));
         // With nothing here that could, one to download.
         let alone = haarness_protocol::ProviderInfo {
             models: vec![gemma, cloud],
