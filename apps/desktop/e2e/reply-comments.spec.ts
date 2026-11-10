@@ -571,3 +571,66 @@ test("the button follows the words when the window's width moves them", async ()
   await expect(comment()).toHaveCount(0);
   expect(errors).toEqual([]);
 });
+
+test("a box left with words while a message is sent stays reachable, and new words still get the button", async () => {
+  await wheelTo("top");
+  const first = reply("Restart the daemon");
+  await select(first, "check the log");
+  await comment().click();
+  const field = page.getByRole("textbox", { name: "Comment on the reply", exact: true });
+  await expect(field).toBeFocused();
+  await field.fill("Waiting while I ask something else.");
+  // Sending from the message box follows the chat to its newest output.
+  await send("A question in between", "Echo: A question in between");
+  await expect.poll(async () => (await view()).below).toBeLessThanOrEqual(4);
+  const latest = reply("Echo: A question in between");
+  await select(latest, "A question in between");
+  await expect(comment()).toBeVisible();
+  // Commenting on them first takes the reader back to the box still holding words.
+  await comment().click();
+  await expect(field).toBeFocused();
+  await expect(field).toHaveValue("Waiting while I ask something else.");
+  await expect(field).toBeInViewport();
+  await expect(page.locator(".reply-comment-card")).toHaveCount(1);
+  // (Its row was drawn anew on the way back, so no selection comes back with Cancel.)
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(field).toHaveCount(0);
+  await expect(comment()).toHaveCount(0);
+  // With nothing waiting, the new words get a box of their own.
+  await wheelTo("end");
+  await select(latest, "A question in between");
+  await comment().click();
+  await expect(field).toBeFocused();
+  await expect(page.locator(".reply-comment-card")).toContainText("“A question in between”");
+  await field.press("Escape");
+  await expect(field).toHaveCount(0);
+  await expect(comment()).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(comment()).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("in a column too narrow for the button beside Copy and Fork, it goes just under them", async ({}, info) => {
+  await page.evaluate(() => window.haarness.preferences({ language: "de" }));
+  await page.setViewportSize({ width: 480, height: 900 });
+  await wheelTo("top");
+  const text = reply("Restart the daemon");
+  const tools = text.locator("xpath=..").locator(".message-tools");
+  // The last line of the wrapped paragraph, just over the footer.
+  await select(text, "the reply.");
+  const button = page.locator(".reply-comment-button");
+  await expect(button).toBeVisible();
+  await expect.poll(async () => {
+    const [box, actions] = [(await button.boundingBox())!, (await tools.boundingBox())!];
+    return [box.y >= actions.y + actions.height, box.x + box.width <= (await text.boundingBox())!.x + (await text.boundingBox())!.width + 1];
+  }).toEqual([true, true]);
+  for (const value of ["light", "dark"] as const) {
+    await theme(value);
+    await page.locator(".transcript").screenshot({ path: info.outputPath(`reply-comment-narrow-de-${value}.png`) });
+  }
+  await text.locator("p").first().click();
+  await expect(button).toHaveCount(0);
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  expect(errors).toEqual([]);
+});

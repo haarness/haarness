@@ -89,13 +89,15 @@ test("on the reply's last line the button moves into its footer, centred on it, 
     top: 127,
     from: 118,
     backward: false,
+    after: 118,
+    below: 158,
   });
   // They end further along: the button starts where they end.
   const far = { ...last, right: 600 };
   assert.deepEqual(
     commentSpot({ ...base, last: far, first: far, caret: { left: 600, right: 600, top: 1101, bottom: 1119 }, rtl: false })
       .footer,
-    { top: 127, from: 480, backward: false },
+    { top: 127, from: 480, backward: false, after: 118, below: 158 },
   );
   // Right to left the footer's actions start at the right, and the button follows them leftward.
   const mirrored = { left: 710, right: 790, top: 1126, bottom: 1154 };
@@ -103,7 +105,7 @@ test("on the reply's last line the button moves into its footer, centred on it, 
   assert.deepEqual(
     commentSpot({ ...base, first: rtlLast, last: rtlLast, actions: mirrored, caret: { left: 760, right: 760, top: 1101, bottom: 1119 }, rtl: true })
       .footer,
-    { top: 127, from: 118, backward: true },
+    { top: 127, from: 118, backward: true, after: 118, below: 158 },
   );
   // A selection ending higher up leaves the footer alone.
   const higher = { ...last, top: 1040, bottom: 1060 };

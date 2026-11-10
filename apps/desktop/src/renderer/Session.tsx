@@ -645,9 +645,9 @@ export function Session() {
   });
   // Words selected in a finished reply can be commented on; the comment
   // goes into this chat's message box (see ReplyComment.tsx). While its box
-  // is being typed in the transcript holds still, as under a held press, and
-  // following the newest output, if it was on, comes back when it closes.
-  let followAtComment = false;
+  // is open the transcript holds still, as under a held press, until the
+  // reader asks for the newest output (`resumeFollowing`); a box closing
+  // while following is still on takes the view on to the newest output.
   const replyComment = createReplyComment({
     transcript: () => scrolling,
     chat: () => state.selected,
@@ -658,16 +658,16 @@ export function Session() {
       composer.setSelectionRange(composer.value.length, composer.value.length);
     },
     writing: (open) => {
-      if (open) {
-        followAtComment = follow();
-        return false;
-      }
-      if (!followAtComment) return false;
-      followAtComment = false;
+      if (open || !follow()) return false;
       const behind = scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight > 4;
-      resumeFollowing();
       followLatest();
       return behind;
+    },
+    reveal: (item) => {
+      const index = rows().findIndex((row) => row.id === item);
+      if (index < 0) return;
+      pauseFollowing(true);
+      virtual.scrollToIndex(index, { align: "center" });
     },
   });
   let scrollFrame = 0;
@@ -684,8 +684,6 @@ export function Session() {
     settleAtEnd = false;
     quietUntil = undefined;
     if (!focus) pausedByToggle = undefined;
-    // The reader scrolled away while commenting: closing the box leaves the view.
-    if (!focus) followAtComment = false;
     revealTarget = undefined;
     cancelAnimationFrame(revealFrame);
     if (scrolling.scrollHeight <= scrolling.clientHeight + 4) return;
@@ -727,6 +725,7 @@ export function Session() {
     toggled = undefined;
     quietUntil = undefined;
     pausedByToggle = undefined;
+    replyComment.release();
     setFollow(true);
   }
   function holdToggled(event: MouseEvent) {
@@ -861,6 +860,8 @@ export function Session() {
   function onHistoryFocus(event: FocusEvent) {
     const target = event.target;
     if (!(target instanceof HTMLElement) || target === scrolling) return;
+    // A reply comment's box holds the view itself while it is open.
+    if (target.closest(".reply-comment-card")) return;
     const view = scrolling.getBoundingClientRect();
     const box = target.getBoundingClientRect();
     // Chromium can scroll a control into view before focusin. Compare with

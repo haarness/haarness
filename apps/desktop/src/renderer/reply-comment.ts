@@ -86,7 +86,10 @@ export interface Box {
  * is the line's right end in left-to-right text and its left end in
  * right-to-left text. `footer` is where the button goes instead when under
  * the last line it would sit on the reply's own row of actions (its time,
- * Copy, Fork): in that row, centred on it, after the actions.
+ * Copy, Fork): in that row, centred on it, after the actions. `after` is
+ * how far along the strip the actions and the space after them reach, and
+ * `below` the top of a place just under the row, for a column too narrow to
+ * hold the button beside the actions.
  */
 export interface CommentSpot {
   left: number;
@@ -95,7 +98,7 @@ export interface CommentSpot {
   over: number;
   from: number;
   backward: boolean;
-  footer?: { top: number; from: number; backward: boolean };
+  footer?: { top: number; from: number; backward: boolean; after: number; below: number };
 }
 
 /** What `commentSpot` measures from. */
@@ -154,6 +157,8 @@ export function commentSpot(input: SpotInput): CommentSpot {
       top: Math.round(footer.top - row.top + (footer.bottom - footer.top - input.button) / 2),
       from: Math.round(Math.max(lead, after)),
       backward: rtl,
+      after: Math.round(after),
+      below: Math.round(footer.bottom - row.top + input.gap),
     };
   }
   return spot;

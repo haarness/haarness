@@ -154,6 +154,8 @@ export function createReplyComment(options: {
   /** A box opened (true) or closed (false). On closing, says whether the
    * transcript is about to move on to newer output. */
   writing?: (open: boolean) => boolean | void;
+  /** Scrolls the row of reply `item` into the middle of the view. */
+  reveal?: (item: string) => void;
 }) {
   const [offer, setOffer] = createSignal<Passage>();
   const [writing, setWriting] = createSignal<Passage & { text: string }>();
@@ -163,6 +165,9 @@ export function createReplyComment(options: {
   let pressed = false;
   /** The open box was already drawn once, and took the keyboard then. */
   let drawn = false;
+  /** The open box holds the transcript's view: from when it opens, or is
+   * gone back to, until the reader asks for the newest output (`release`). */
+  let held = false;
   let frame = 0;
 
   /** The selection, when it is words of one finished reply. */
@@ -179,7 +184,6 @@ export function createReplyComment(options: {
   }
   function track() {
     frame = 0;
-    if (writing()) return;
     // During a press the selection is still changing: a press that clears it
     // takes the button away at once, and the button for what it selects
     // comes when the press ends.
@@ -219,10 +223,33 @@ export function createReplyComment(options: {
   function open() {
     const passage = offer();
     if (!passage) return;
+    const pending = writing();
+    // A box with words in it is never dropped for another: the reader is
+    // taken back to it instead, and comments on the new words after.
+    if (pending?.text.trim()) return revisit(pending.item);
+    if (pending) close();
     drawn = false;
+    held = true;
     setWriting({ ...passage, text: "" });
     setOffer(undefined);
     options.writing?.(true);
+  }
+  /** Brings the open box back into view, with the keyboard in it. */
+  function revisit(item: string) {
+    setOffer(undefined);
+    document.getSelection()?.removeAllRanges();
+    held = true;
+    options.reveal?.(item);
+    const field = card?.querySelector("textarea");
+    if (!field) {
+      // Drawn again as its row comes into view, it takes the keyboard then.
+      drawn = false;
+      return;
+    }
+    requestAnimationFrame(() => {
+      field.focus({ preventScroll: true });
+      field.closest(".diff-comment")?.scrollIntoView({ block: "nearest" });
+    });
   }
   /** Closes the box; whether the transcript moves on to newer output now. */
   function close() {
@@ -281,7 +308,7 @@ export function createReplyComment(options: {
   // Tab typed in a text field is left to the field.
   const tab = (event: KeyboardEvent) => {
     if (event.key !== "Tab" || event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return;
-    if (!offer() || writing() || !button?.isConnected) return;
+    if (!offer() || !button?.isConnected) return;
     const focused = document.activeElement;
     const transcript = options.transcript();
     if (focused === button || isTextEntry(focused)) return;
@@ -333,7 +360,9 @@ export function createReplyComment(options: {
       const height = box.height + token("--s0");
       const below = view.bottom - (row.top + props.passage.spot.under);
       const above = row.top + props.passage.spot.over - view.top;
-      if (height > below && above > below) setOver(true);
+      // Over the words only when the whole box fits there: above the top of
+      // the chat it could not be scrolled to. Under, it always can.
+      if (height > below && above >= height) setOver(true);
     });
     return (
       <Strip
@@ -345,6 +374,8 @@ export function createReplyComment(options: {
       >
         <div
           class="reply-comment-card"
+          // Gone back to, the box holds the view again.
+          onFocusIn={() => (held = true)}
           ref={(value) => {
             element = value;
             card = value;
@@ -368,48 +399,69 @@ export function createReplyComment(options: {
     );
   }
 
+  /**
+   * The Comment button. In the footer's row it needs the room after the
+   * actions; in a column too narrow for that it goes just under the row
+   * instead, never over Copy and Fork. Its width is read once it is drawn
+   * (and when its words change with the language), before the frame paints.
+   */
+  function Offer(props: { passage: Passage }) {
+    const [width, setWidth] = createSignal(0);
+    const spot = () => props.passage.spot;
+    const footer = () => spot().footer;
+    const cramped = () => {
+      const row = footer();
+      return !!row && row.after + width() > spot().width;
+    };
+    return (
+      <Strip
+        spot={spot()}
+        side={footer() ? "at" : "under"}
+        top={footer() ? (cramped() ? footer()!.below : footer()!.top) : spot().under}
+        from={footer()?.from ?? spot().from}
+        backward={footer()?.backward ?? spot().backward}
+      >
+        <button
+          ref={(element) => {
+            button = element;
+            const sized = new ResizeObserver(() => setWidth(element.offsetWidth));
+            sized.observe(element);
+            onMount(() => setWidth(element.offsetWidth));
+            onCleanup(() => {
+              sized.disconnect();
+              if (button === element) button = undefined;
+            });
+          }}
+          type="button"
+          class="reply-comment-button"
+          aria-label={t("Comment on the selected words")}
+          // A press here must not clear the selected words or move the keyboard.
+          onPointerDown={(event) => event.preventDefault()}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={open}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            setOffer(undefined);
+            document.getSelection()?.removeAllRanges();
+            options.transcript()?.focus({ preventScroll: true });
+          }}
+          onBlur={() => queueMicrotask(schedule)}
+        >
+          <Icon name="chat" size="sm" />
+          {t("Comment")}
+        </button>
+      </Strip>
+    );
+  }
+
   /** The button or the box, in the row of reply `item`. */
   function Spot(props: { item: string | undefined }) {
     return (
       <>
         <Show when={props.item && offer()?.item === props.item ? offer() : undefined}>
-          {(passage) => (
-            <Strip
-              spot={passage().spot}
-              side={passage().spot.footer ? "at" : "under"}
-              top={passage().spot.footer?.top ?? passage().spot.under}
-              from={passage().spot.footer?.from ?? passage().spot.from}
-              backward={passage().spot.footer?.backward ?? passage().spot.backward}
-            >
-              <button
-                ref={(element) => {
-                  button = element;
-                  onCleanup(() => {
-                    if (button === element) button = undefined;
-                  });
-                }}
-                type="button"
-                class="reply-comment-button"
-                aria-label={t("Comment on the selected words")}
-                // A press here must not clear the selected words or move the keyboard.
-                onPointerDown={(event) => event.preventDefault()}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={open}
-                onKeyDown={(event) => {
-                  if (event.key !== "Escape") return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setOffer(undefined);
-                  document.getSelection()?.removeAllRanges();
-                  options.transcript()?.focus({ preventScroll: true });
-                }}
-                onBlur={() => queueMicrotask(schedule)}
-              >
-                <Icon name="chat" size="sm" />
-                {t("Comment")}
-              </button>
-            </Strip>
-          )}
+          {(passage) => <Offer passage={passage()} />}
         </Show>
         <Show when={props.item && writing()?.item === props.item ? writing() : undefined}>
           {(passage) => {
@@ -428,10 +480,14 @@ export function createReplyComment(options: {
     /** Whether the row of reply `item` holds the button or the box, which
      * then come over the rows after it. */
     holds: (item: string | undefined) => !!item && (offer()?.item === item || writing()?.item === item),
-    /** A box is open and has the keyboard: the transcript holds its view
-     * meanwhile, as it does under a held press. Once the keyboard is
-     * elsewhere (a message sent from the message box), it follows again. */
-    holding: () => !!writing() && !!card?.contains(document.activeElement),
+    /** A box is open: the transcript holds its view meanwhile, as it does
+     * under a held press, until `release`. */
+    holding: () => !!writing() && held,
+    /** The reader asked for the newest output (sent a message, Jump to
+     * latest): an open box stops holding the view, and stays as it is. */
+    release: () => {
+      held = false;
+    },
     Spot,
   };
 }
