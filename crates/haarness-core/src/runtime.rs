@@ -1430,9 +1430,10 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         return false;
     }
     // Z.ai words a limit on how many images a request may carry as a prompt
-    // too long ("prompt too long; exceeded max image count"): leaving images
-    // out answers it (see `is_provider_image_rejection`), compacting cannot.
-    if message.contains("image count") {
+    // too long ("prompt too long; exceeded max image count", or 图片数 for
+    // "image count" in Chinese): leaving images out answers it (see
+    // `is_provider_image_rejection`), compacting cannot.
+    if message.contains("image count") || message.contains("图片数") {
         return false;
     }
     // Phrasings collected across providers and local servers (after
@@ -1524,6 +1525,7 @@ fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> b
         "too many images",
         "maximum number of images",
         "image count",
+        "图片数",
     ]
     .iter()
     .any(|marker| message.contains(marker))
@@ -1761,7 +1763,12 @@ const OVERSIZED_REQUEST: [&str; 8] = [
 fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
     let message = message.to_ascii_lowercase();
     let says = |markers: &[&str]| markers.iter().any(|marker| message.contains(marker));
-    if says(&["too many images", "maximum number of images", "image count"]) {
+    if says(&[
+        "too many images",
+        "maximum number of images",
+        "image count",
+        "图片数",
+    ]) {
         Some(ImageVolume::Count)
     } else if says(&OVERSIZED_REQUEST) {
         Some(ImageVolume::Bytes)
@@ -21645,6 +21652,7 @@ mod tests {
             // A limit on images, not on the context: compacting cannot help.
             "Image too large for model with 20 maximum images",
             "HTTP 400 Bad Request: prompt too long; exceeded max image count",
+            "HTTP 400 Bad Request: Prompt too long; 图片数超出限制",
             "Rate limit reached for gpt-5.5: too many tokens per minute",
             "[upstream_429] RESOURCE_EXHAUSTED: quota exceeded",
             // A plan's tokens a minute: a shorter chat would not get through.
@@ -22494,6 +22502,7 @@ mod tests {
             r#"HTTP 400 Bad Request: {"error":{"code":400,"message":"Request payload size exceeds the limit: 20971520 bytes.","status":"INVALID_ARGUMENT"}}"#,
             // Z.ai, for how many images the request carries.
             "HTTP 400 Bad Request: prompt too long; exceeded max image count",
+            "HTTP 400 Bad Request: Prompt too long; 图片数超出限制",
         ] {
             assert!(refused(message), "{message}");
         }
@@ -22752,17 +22761,18 @@ mod tests {
             .map(|index| format!("old-{index:02}.png"))
             .collect::<Vec<_>>();
         assert_eq!(names, expected);
-        // Z.ai says the same as a prompt too long.
-        let (names, choice) = left_out(
+        // Z.ai says the same as a prompt too long, in English or Chinese.
+        for refusal in [
             "HTTP 400 Bad Request: prompt too long; exceeded max image count",
-            &messages,
-            &[],
-        );
-        assert_eq!(
-            choice,
-            super::RefusedImages::Oldest(super::ImageVolume::Count)
-        );
-        assert_eq!(names, expected);
+            "HTTP 400 Bad Request: Prompt too long; 图片数超出限制",
+        ] {
+            let (names, choice) = left_out(refusal, &messages, &[]);
+            assert_eq!(
+                choice,
+                super::RefusedImages::Oldest(super::ImageVolume::Count)
+            );
+            assert_eq!(names, expected);
+        }
 
         // A request too large in bytes loses its large old image first.
         let mut messages = vec![shot_result(sized_image("big.png", 5 * MIB))];

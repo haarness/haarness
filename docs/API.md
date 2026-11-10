@@ -892,8 +892,8 @@ stable for caching; the original attachments stay in their messages. When the
 provider names the image by its place in the request (Anthropic's
 `messages.N.content.M`) only that image is left out. A refusal of the request
 for how many images it carries ("too many images", or Z.ai's "prompt too
-long; exceeded max image count", which never compacts the chat; recorded with
-`too_many: true`) or how large they make it (HTTP 413, Gemini's "Request
+long; exceeded max image count", also in Chinese, which never compacts the
+chat; recorded with `too_many: true`) or how large they make it (HTTP 413, Gemini's "Request
 payload size exceeds the limit", recorded with `too_large: true` whichever
 images it leaves out) leaves out the oldest half of them by that measure
 (`oldest: true`), so the newest images then reach the model. The turn's own
