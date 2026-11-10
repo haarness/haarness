@@ -2715,6 +2715,7 @@
   "“{quote}”": "„{quote}”",
   "Comment on the reply": "Komentarz do odpowiedzi",
   "Comment on these words…": "Skomentuj te słowa…",
+  "Comment on the selected words": "Skomentuj zaznaczone słowa",
   "{count} failed": "nieudane: {count}",
   "+{count} more": "jeszcze {count}",
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Ta aplikacja próbowała otworzyć link, którego Haarness nie otwiera. Aplikacje mogą otwierać tylko linki http, https i mailto.",

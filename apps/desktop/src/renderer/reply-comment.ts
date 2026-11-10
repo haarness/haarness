@@ -1,6 +1,6 @@
-/** A quote up to this long goes into the message whole. */
+/** Quotes no longer than this many characters are copied in full. */
 const WHOLE = 1200;
-/** What a longer quote keeps of each of its ends. */
+/** Past that, this many characters survive from the start and from the end. */
 const END = 480;
 
 /** `text` cut to its first `size` characters, never inside a character
@@ -39,9 +39,16 @@ export function replyQuote(text: string) {
   return start.trimEnd() + "\n…\n" + end.trimStart();
 }
 
-/** The quote on one line, for the comment box's label. */
+/** The longest a quote reads in the comment box's heading, and in its name
+ * for a screen reader. */
+const LABEL = 80;
+
+/** The quote on one line, for the comment box's heading: at most 80
+ * characters, ending in "…" when there was more. */
 export function quoteLine(quote: string) {
-  return quote.replace(/\s+/g, " ").trim();
+  const line = quote.replace(/\s+/g, " ").trim();
+  if (line.length <= LABEL) return line;
+  return head(line, LABEL - 1).trimEnd() + "…";
 }
 
 /**
@@ -71,46 +78,83 @@ export interface Box {
 }
 
 /**
- * Where the Comment button, and then its box, go in the reply's row (in the
- * row's pixels): just under the line where the selection ends (`top`), in a
- * band across the reply (`left`, `width`), starting `from` the band's left
- * edge at the selection's end, or from its right edge when the text there
- * runs right to left (`backward`). What does not fit slides back to stay
- * inside the reply.
+ * Where the Comment button and its box go, in the pixels of the reply's row.
+ * Both sit in a strip as wide as the reply (`left`, `width`), either just
+ * under the selection's last line (`under`) or, for a box that has no room
+ * there, just over its first (`over`). Along the strip they start `from` its
+ * left edge, or its right edge when `backward`: at the selection's end, which
+ * is the line's right end in left-to-right text and its left end in
+ * right-to-left text. `footer` is where the button goes instead when under
+ * the last line it would sit on the reply's own row of actions (its time,
+ * Copy, Fork): in that row, centred on it, after the actions.
  */
 export interface CommentSpot {
-  top: number;
   left: number;
   width: number;
+  under: number;
+  over: number;
   from: number;
   backward: boolean;
+  footer?: { top: number; from: number; backward: boolean };
+}
+
+/** What `commentSpot` measures from. */
+export interface SpotInput {
+  /** The selection's first and last line boxes. */
+  first: Box;
+  last: Box;
+  /** The caret where the selection ends, when the page can place one. */
+  caret?: Box;
+  /** The reply's text, and the transcript row holding it. */
+  reply: Box;
+  row: Box;
+  /** The reply's row of actions under its text, and those actions. */
+  footer?: Box;
+  actions?: Box;
+  /** The interface reads right to left. */
+  rtl: boolean;
+  /** The gap left under a line, the button's height and the space kept
+   * after the actions, in pixels. */
+  gap: number;
+  button: number;
+  space: number;
 }
 
 /**
- * `line` is the selection's last line box and `caret` where the selection
- * ends, when the page can say (a caret on that line): its side of the line
- * gives the text's direction there, so a Hebrew passage in an English
- * window ends on its left. Without one, the interface's direction (`rtl`)
- * stands in.
+ * The caret's side of the last line gives the text's direction where the
+ * selection ends, so a Hebrew passage in an English window ends on its left.
+ * Without a caret on that line, the interface's direction stands in.
  */
-export function commentSpot(
-  line: Box,
-  caret: Box | undefined,
-  reply: Box,
-  row: Box,
-  rtl: boolean,
-): CommentSpot {
-  const onLine = !!caret && caret.bottom > line.top && caret.top < line.bottom;
+export function commentSpot(input: SpotInput): CommentSpot {
+  const { first, last, caret, reply, row, rtl } = input;
+  const onLine = !!caret && caret.bottom > last.top && caret.top < last.bottom;
   const backward = onLine
-    ? Math.abs(caret.left - line.left) < Math.abs(caret.left - line.right)
+    ? Math.abs(caret.left - last.left) < Math.abs(caret.left - last.right)
     : rtl;
-  const at = onLine ? caret.left : backward ? line.left : line.right;
+  const at = onLine ? caret.left : backward ? last.left : last.right;
   const end = Math.min(Math.max(at, reply.left), reply.right);
-  return {
-    top: Math.round(line.bottom - row.top),
+  const spot: CommentSpot = {
     left: Math.round(reply.left - row.left),
     width: Math.round(reply.right - reply.left),
+    under: Math.round(last.bottom - row.top),
+    over: Math.round(first.top - row.top),
     from: Math.round(backward ? reply.right - end : end - reply.left),
     backward,
   };
+  const top = last.bottom + input.gap;
+  const footer = input.footer;
+  if (footer && top < footer.bottom && top + input.button > footer.top) {
+    // Measured from the interface's leading edge, as the row's actions are.
+    const lead = rtl ? reply.right - end : end - reply.left;
+    const actions = input.actions;
+    const after = actions
+      ? (rtl ? reply.right - actions.left : actions.right - reply.left) + input.space
+      : 0;
+    spot.footer = {
+      top: Math.round(footer.top - row.top + (footer.bottom - footer.top - input.button) / 2),
+      from: Math.round(Math.max(lead, after)),
+      backward: rtl,
+    };
+  }
+  return spot;
 }

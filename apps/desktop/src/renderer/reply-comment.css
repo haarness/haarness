@@ -5,21 +5,27 @@
 .transcript-body > .reply-commenting {
   z-index: 1;
 }
-/* Across the reply, just under the line where the selection ends. Only what
-   it holds takes the pointer, so the text around stays selectable. */
-.reply-comment-place {
+/* A strip across the reply, under or over the selected words. It takes no
+   clicks itself, so the text beside what it holds can still be selected. */
+.reply-comment-strip {
   position: absolute;
   display: flex;
-  /* Laid out on the screen's sides, as the selection's end was measured; what
-     it holds reads in the interface's own direction. */
+  /* Placed by the screen's left and right, as the selection was measured;
+     what it holds reads in the interface's own direction. */
   direction: ltr;
-  margin-top: var(--s0);
   pointer-events: none;
 }
-.reply-comment-place.backward {
+.reply-comment-strip.under {
+  margin-top: var(--s0);
+}
+.reply-comment-strip.over {
+  margin-top: calc(-1 * var(--s0));
+  transform: translateY(-100%);
+}
+.reply-comment-strip.backward {
   flex-direction: row-reverse;
 }
-:root[dir="rtl"] .reply-comment-place > * {
+:root[dir="rtl"] .reply-comment-strip > * {
   direction: rtl;
 }
 .reply-comment-gap {
@@ -27,7 +33,7 @@
   flex-shrink: 1;
   min-width: 0;
 }
-.reply-comment-place > :not(.reply-comment-gap) {
+.reply-comment-strip > :not(.reply-comment-gap) {
   flex: none;
   pointer-events: auto;
 }
@@ -45,7 +51,7 @@
   box-shadow: var(--shadow-1);
 }
 .reply-comment-button:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--text) 6%, var(--raised));
+  background: color-mix(in srgb, var(--raised) 88%, var(--text));
   border-color: var(--line);
 }
 .reply-comment-button .icon {
@@ -55,12 +61,4 @@
   width: min(100%, 400px);
   border-radius: var(--r-md);
   box-shadow: var(--shadow-2);
-}
-/* Scrolled into view as it opens, the box keeps a gap above the message box;
-   the band's padding gives the transcript room to scroll that far. */
-.reply-comment-place:has(.reply-comment-card) {
-  padding-bottom: var(--s4);
-}
-.reply-comment-card .diff-comment {
-  scroll-margin-bottom: var(--s4);
 }

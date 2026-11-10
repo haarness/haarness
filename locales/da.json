@@ -2715,6 +2715,7 @@
   "“{quote}”": "“{quote}”",
   "Comment on the reply": "Kommentar til svaret",
   "Comment on these words…": "Kommentér disse ord …",
+  "Comment on the selected words": "Kommentér de markerede ord",
   "{count} failed": "{count} mislykkedes",
   "+{count} more": "{count} mere",
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Denne app forsøgte at åbne et link, som Haarness ikke åbner. Apps kan kun åbne http-, https- og mailto-links.",

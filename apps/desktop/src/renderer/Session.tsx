@@ -643,6 +643,33 @@ export function Session() {
     read: draft,
     write: (text) => change(text, true),
   });
+  // Words selected in a finished reply can be commented on; the comment
+  // goes into this chat's message box (see ReplyComment.tsx). While its box
+  // is being typed in the transcript holds still, as under a held press, and
+  // following the newest output, if it was on, comes back when it closes.
+  let followAtComment = false;
+  const replyComment = createReplyComment({
+    transcript: () => scrolling,
+    chat: () => state.selected,
+    enabled: () => !!project() && editable() && !!composer?.isConnected && !composer.disabled,
+    add: (note) => {
+      change(withNote(draft(), note));
+      composer.focus({ preventScroll: true });
+      composer.setSelectionRange(composer.value.length, composer.value.length);
+    },
+    writing: (open) => {
+      if (open) {
+        followAtComment = follow();
+        return false;
+      }
+      if (!followAtComment) return false;
+      followAtComment = false;
+      const behind = scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight > 4;
+      resumeFollowing();
+      followLatest();
+      return behind;
+    },
+  });
   let scrollFrame = 0;
   let revealFrame = 0;
   let revealTarget: string | undefined;
@@ -657,6 +684,8 @@ export function Session() {
     settleAtEnd = false;
     quietUntil = undefined;
     if (!focus) pausedByToggle = undefined;
+    // The reader scrolled away while commenting: closing the box leaves the view.
+    if (!focus) followAtComment = false;
     revealTarget = undefined;
     cancelAnimationFrame(revealFrame);
     if (scrolling.scrollHeight <= scrolling.clientHeight + 4) return;
@@ -800,8 +829,9 @@ export function Session() {
    * shows the list short of its end, or past it and pulled back. */
   function keepLatest() {
     // User input can arrive after a stream delta scheduled this frame. A
-    // press held in the transcript keeps the view where it is.
-    if (!follow() || !scrolling || toggled || press.held()) return;
+    // press held in the transcript, or a reply comment being written, keeps
+    // the view where it is.
+    if (!follow() || !scrolling || toggled || press.held() || replyComment.holding()) return;
     // A running step just opened holds the view until more is written.
     if (quietUntil) {
       if (
@@ -1619,18 +1649,6 @@ export function Session() {
       scrolling.removeEventListener("markdown-ready", replyDrawn);
       cancelAnimationFrame(revealFrame);
     });
-  });
-  // Words selected in a finished reply can be commented on; the comment
-  // goes into this chat's message box (see ReplyComment.tsx).
-  const replyComment = createReplyComment({
-    transcript: () => scrolling,
-    chat: () => state.selected,
-    enabled: () => !!project() && editable() && !!composer?.isConnected && !composer.disabled,
-    add: (note) => {
-      change(withNote(draft(), note));
-      composer.focus({ preventScroll: true });
-      composer.setSelectionRange(composer.value.length, composer.value.length);
-    },
   });
   /* One footer per assistant turn, under its last text: when the reply
      ended, Copy for all of it and Fork. Earlier text of the turn keeps the
