@@ -1966,9 +1966,10 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 let label = app
                     .language
                     .format("{event} hook", &[("event", event.as_str())]);
-                let feedback = haarness_protocol::hook_feedback(text);
+                let feedback =
+                    haarness_protocol::without_escapes(haarness_protocol::hook_feedback(text));
                 block.push(Line::new(vec![
-                    Span::new("  ◇ ", theme.muted),
+                    Span::new("  ↩ ", theme.muted),
                     Span::new(
                         single_line(&format!("{label} · {feedback}"), width.saturating_sub(4)),
                         theme.muted,

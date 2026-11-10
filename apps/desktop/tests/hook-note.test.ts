@@ -14,6 +14,15 @@ test("a hook's message reads as its event and the feedback in its block", () => 
   assert.equal(hookNote({ type: "assistant_message", text }), undefined);
 });
 
+test("a coloured hook output shows without its escape sequences, even one cut short", () => {
+  const text = "<hook-feedback>\n\u001b[31mFAIL\u001b[0m src/parse.test.ts\n\u001b]0;title\u0007two\u001b[3\n</hook-feedback>";
+  assert.deepEqual(hookNote({ type: "user_message", text, synthetic: true, hook: "Stop" }), {
+    event: "Stop",
+    // A sequence cut short loses its escape byte, so what is left is text.
+    text: "FAIL src/parse.test.ts\ntwo[3",
+  });
+});
+
 test("feedback that writes the closing tag itself keeps it, and text without a block is all feedback", () => {
   assert.equal(hookFeedback('<hook-feedback event="Stop">\na </hook-feedback> b\n</hook-feedback>'), "a </hook-feedback> b");
   assert.equal(hookFeedback(" plain words "), "plain words");

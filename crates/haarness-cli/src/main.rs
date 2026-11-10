@@ -8790,7 +8790,8 @@ fn output_for_turn(items: Vec<haarness_protocol::Item>, turn_id: TurnId) -> Vec<
 
 /// The line a run writes to stderr for a hook's message that sent the agent
 /// back to work: the event and its feedback on one line, cut at 200
-/// characters.
+/// characters, without the escape sequences a coloured hook output carries
+/// and with any other control or direction character spelled out.
 fn hook_line(data: &ItemData) -> Option<String> {
     let ItemData::UserMessage {
         text,
@@ -8800,7 +8801,7 @@ fn hook_line(data: &ItemData) -> Option<String> {
     else {
         return None;
     };
-    let feedback = haarness_protocol::hook_feedback(text)
+    let feedback = haarness_protocol::without_escapes(haarness_protocol::hook_feedback(text))
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
@@ -8810,7 +8811,7 @@ fn hook_line(data: &ItemData) -> Option<String> {
     } else {
         ""
     };
-    Some(format!("{event} hook: {shown}{cut}"))
+    Some(terminal_safe(&format!("{event} hook: {shown}{cut}"), false))
 }
 
 struct ComposedRuntimeSources {
@@ -18179,6 +18180,21 @@ request_timeout = 0
         assert_eq!(
             hook_line(&long),
             Some(format!("Stop hook: {}…", "x".repeat(200)))
+        );
+        // A coloured output, cut in the middle of a sequence, leaves nothing
+        // that could colour or redraw the terminal: the cut sequence loses
+        // its escape byte, and what is left of it is text.
+        let coloured = ItemData::UserMessage {
+            text: "<hook-feedback>\n\u{1b}[31mFAIL\u{1b}[0m parse\n\u{1b}]0;title\u{7}two \u{202e}x\u{1b}[3\n</hook-feedback>".into(),
+            attachments: Vec::new(),
+            synthetic: true,
+            command_line: None,
+            queued: false,
+            hook: Some("Stop".into()),
+        };
+        assert_eq!(
+            hook_line(&coloured),
+            Some("Stop hook: FAIL parse two \\u{202e}x[3".into())
         );
     }
 

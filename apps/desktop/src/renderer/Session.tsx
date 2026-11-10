@@ -3465,7 +3465,7 @@ function Message(props: {
           <Match when={note()}>
             {(hook) => (
               <div class="activity-note hook-note" title={hook().text}>
-                <Icon name="refresh" size="xs" />
+                <Icon name="undo" size="xs" />
                 <span>{t("{event} hook", { event: hook().event })}</span>
                 <span aria-hidden="true">·</span>
                 <span class="hook-note-text">{hook().text}</span>

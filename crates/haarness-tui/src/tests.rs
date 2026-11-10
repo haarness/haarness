@@ -2595,7 +2595,7 @@ fn a_stop_hooks_message_shows_as_a_quiet_line_with_its_feedback() {
             3,
             &thread,
             user(
-                "MODEL_ONLY_WORDS\n\n<hook-feedback>\nrun the tests\nthen lint\n</hook-feedback>",
+                "MODEL_ONLY_WORDS\n\n<hook-feedback>\n\u{1b}[31mrun the tests\u{1b}[0m\nthen lint\u{1b}[3\n</hook-feedback>",
                 Some("Stop"),
             ),
         ),
@@ -2615,8 +2615,13 @@ fn a_stop_hooks_message_shows_as_a_quiet_line_with_its_feedback() {
         .collect();
     assert_eq!(note.len(), 1, "{text:#?}");
     assert!(
-        note[0].starts_with("  ◇ Stop hook · run the tests then lint"),
+        note[0].starts_with("  ↩ Stop hook · run the tests then lint"),
         "{text:#?}"
+    );
+    // Its colours are gone, the one cut short too.
+    assert!(
+        !note[0].contains('\u{1b}') && !note[0].contains("[31m"),
+        "{note:?}"
     );
     let joined = text.join("\n");
     assert!(!joined.contains("MODEL_ONLY_WORDS"), "{joined}");

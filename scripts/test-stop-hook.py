@@ -178,11 +178,11 @@ model="echo-1"
     until(lambda: 'Stop hook' in capture() and 'run the tests before you finish' in capture(), 'TUI shows the note')
     (root / 'tui-stop-hook-note.txt').write_text(capture())
     (root / 'tui-stop-hook-note.ansi').write_text(tmux('capture-pane', '-p', '-e', '-t', session + ':0.0'))
-    note = next(line for line in capture().splitlines() if '◇ Stop hook' in line)
+    note = next(line for line in capture().splitlines() if '↩ Stop hook' in line)
     # The echo model repeats the hook's message in its reply; no prompt row shows it.
     prompts = [line for line in capture().splitlines() if line.lstrip().startswith('▎')]
     check('the TUI shows one quiet line for the hook, not the message the model read',
-          'run the tests before you finish' in note and note.lstrip().startswith('◇ Stop hook · ')
+          'run the tests before you finish' in note and note.lstrip().startswith('↩ Stop hook · ')
           and not any('Stop hook output follows' in line for line in prompts), capture())
     tmux('send-keys', '-t', session, '/language ar', 'Enter')
     until(lambda: 'خطاف Stop' in capture(), 'the TUI note in Arabic')
