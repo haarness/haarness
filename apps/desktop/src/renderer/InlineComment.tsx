@@ -13,6 +13,8 @@ export function InlineComment(props: {
   /** The text box's name and placeholder; a diff line's by default. */
   inputLabel?: string;
   placeholder?: string;
+  /** Whether the text box takes the keyboard when it is drawn (it does by default). */
+  autofocus?: boolean;
   value: string;
   onInput: (value: string) => void;
   onCancel: () => void;
@@ -31,6 +33,7 @@ export function InlineComment(props: {
     }
   }
   onMount(() => {
+    if (props.autofocus === false) return;
     const frame = requestAnimationFrame(() => {
       input.focus({ preventScroll: true });
       input.closest(".diff-comment")?.scrollIntoView({ block: "nearest" });

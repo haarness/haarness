@@ -1,0 +1,66 @@
+/* A comment on words of a finished reply (ReplyComment.tsx). */
+
+/* The row holding the Comment button or its box comes over the rows after
+   it, which it may reach into. */
+.transcript-body > .reply-commenting {
+  z-index: 1;
+}
+/* Across the reply, just under the line where the selection ends. Only what
+   it holds takes the pointer, so the text around stays selectable. */
+.reply-comment-place {
+  position: absolute;
+  display: flex;
+  /* Laid out on the screen's sides, as the selection's end was measured; what
+     it holds reads in the interface's own direction. */
+  direction: ltr;
+  margin-top: var(--s0);
+  pointer-events: none;
+}
+.reply-comment-place.backward {
+  flex-direction: row-reverse;
+}
+:root[dir="rtl"] .reply-comment-place > * {
+  direction: rtl;
+}
+.reply-comment-gap {
+  flex-grow: 0;
+  flex-shrink: 1;
+  min-width: 0;
+}
+.reply-comment-place > :not(.reply-comment-gap) {
+  flex: none;
+  pointer-events: auto;
+}
+/* Small and raised, like a code block's Copy, and opaque, since it lies over
+   the reply's text. */
+.reply-comment-button {
+  min-height: var(--control-sm);
+  padding: 0 var(--s2);
+  gap: var(--s1);
+  font-size: var(--ui-sm);
+  color: var(--text);
+  background: var(--raised);
+  border-color: var(--hairline);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-1);
+}
+.reply-comment-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 6%, var(--raised));
+  border-color: var(--line);
+}
+.reply-comment-button .icon {
+  color: var(--muted);
+}
+.reply-comment-card {
+  width: min(100%, 400px);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+}
+/* Scrolled into view as it opens, the box keeps a gap above the message box;
+   the band's padding gives the transcript room to scroll that far. */
+.reply-comment-place:has(.reply-comment-card) {
+  padding-bottom: var(--s4);
+}
+.reply-comment-card .diff-comment {
+  scroll-margin-bottom: var(--s4);
+}

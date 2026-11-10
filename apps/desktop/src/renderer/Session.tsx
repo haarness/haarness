@@ -108,6 +108,8 @@ import { composing, isTextEntry } from "./text-entry";
 import { selection as chatSelection } from "./sidebar-selection";
 import { Markdown } from "./Markdown";
 import { createReplySelection } from "./reply-selection";
+import { createReplyComment } from "./ReplyComment";
+import { withNote } from "./reply-comment";
 import { createTranscriptPress, listenForPress } from "./transcript-press";
 import { ConversationOutline } from "./ConversationOutline";
 import { promptTitle, readingMark } from "./outline-layout";
@@ -1618,6 +1620,18 @@ export function Session() {
       cancelAnimationFrame(revealFrame);
     });
   });
+  // Words selected in a finished reply can be commented on; the comment
+  // goes into this chat's message box (see ReplyComment.tsx).
+  const replyComment = createReplyComment({
+    transcript: () => scrolling,
+    chat: () => state.selected,
+    enabled: () => !!project() && editable() && !!composer?.isConnected && !composer.disabled,
+    add: (note) => {
+      change(withNote(draft(), note));
+      composer.focus({ preventScroll: true });
+      composer.setSelectionRange(composer.value.length, composer.value.length);
+    },
+  });
   /* One footer per assistant turn, under its last text: when the reply
      ended, Copy for all of it and Fork. Earlier text of the turn keeps the
      footer's height with nothing in it, so the footer moving on to newer
@@ -2574,6 +2588,7 @@ export function Session() {
                   classList={{
                     "conversation-match": rows()[row.index]?.id === findMatch(),
                     "fork-source": !!sourceReply() && rows()[row.index]?.id === sourceReply(),
+                    "reply-commenting": replyComment.holds(rows()[row.index]?.id),
                   }}
                   style={{
                     position: "absolute",
@@ -2613,6 +2628,7 @@ export function Session() {
                     reply={reply(rows()[row.index])}
                     fork={() => app.run(() => fork(rows()[row.index]))}
                   />
+                  <replyComment.Spot item={rows()[row.index]?.id} />
                 </div>
               )}
             </For>
