@@ -26,7 +26,7 @@ version 1.
 | Direction | Messages |
 | --- | --- |
 | Editor → Haarness | `initialize`, `session/new`, `session/load`, `session/prompt`, `session/cancel` |
-| Haarness → editor | `session/update` (text, reasoning, tool calls and results, plans), `session/request_permission`, `$/cancel_request` |
+| Haarness → editor | `session/update` (text, reasoning, tool calls and results, plans, usage), `session/request_permission`, `$/cancel_request` |
 
 `initialize` advertises `loadSession`, image, audio and embedded-context prompts, and MCP over HTTP and SSE
 (stdio is always supported).
@@ -56,7 +56,27 @@ version 1.
 - **Tool kinds** map from Haarness tools: `read`/`list` → read, `write`/`edit`/`multiedit`/
   `apply_patch` → edit, `glob`/`grep` → search, `bash` and `bash_stop` → execute, `bash_output` →
   read, `webfetch` → fetch, `todowrite`/`task`/`goal` → think, anything else → other. A todo list is
-  sent as a plan.
+  sent as a plan. An `apply_patch` call is titled after the first file its patch names (`Edit
+  src/lib.rs and 2 more`).
+- **Locations.** A call and its result carry `locations`, as absolute paths the editor can open and
+  follow: the `path` of `read`, `write`, `edit` and `multiedit`, and the `filePath` of `lsp`; every
+  file an `apply_patch` patch names, both ends of a move included; the folder `glob`, `grep` and
+  `list` look in (the chat's folder when the call gives no `path`); and for a `batch`, those of its
+  steps. As the tools do, the bridge reads a relative path from the chat's folder and a leading `~`
+  as the home folder. A path in the workspace is spelled from the `cwd` the editor opened the session
+  with, even when that reaches the folder through a link or a mapped drive, so the editor finds it
+  in its own project. Other tools name no location.
+- **Diffs.** The result of a call that changed files carries, after its text, one `diff` per file
+  from the before and after texts the server recorded (`metadata.diffs`, and each step's for a
+  `batch`), spelled as its locations are: `oldText` is absent for a new file and `newText` is empty
+  for a deleted one. A binary file, or one whose text the server cut at 32 KiB, gets no diff, and a
+  prompt's diffs carry at most 1 MB of text in all; the text result still names every file. A load
+  replays the diffs as well, with the same limit; when the chat holds more, the latest are the ones
+  sent.
+- **Usage.** After each prompt, and after `session/load`, a `usage_update` says how many tokens the
+  chat's context holds (`used`, the number the Haarness apps show) out of the model's window (`size`),
+  and what the chat and its subagents have cost so far in USD when the turns are priced. It is sent
+  only when the model states its window; the prompt's response carries no usage.
 - **Commands in the background.** The bridge does not follow background work up, so an agent's
   foreground command never moves to the background by itself; one the agent starts there with
   `run_in_background` stops after `execution.shell_timeout_ms` (or the agent's own `timeout`, when it is not 0), and
@@ -75,4 +95,6 @@ cargo test -p haarness-cli --test acp_e2e         # a real bridge and server wit
 
 `acp_e2e` drives `haarness acp` over stdio: session creation, tools, permissions and durable reload;
 subagent requests named after the subagent; requests withdrawn when settled elsewhere; requests raised
-between prompts; and Auto review blocks, live and on reload.
+between prompts; Auto review blocks, live and on reload; locations and diffs of edits, live and on
+reload; and the usage update after a prompt and a load, against a local endpoint whose model states
+its window.

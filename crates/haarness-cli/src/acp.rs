@@ -7,7 +7,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write as _,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -18,21 +18,23 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk,
+        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, Diff,
         EmbeddedResourceResource, Implementation, InitializeRequest, InitializeResponse,
         LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest,
         NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry,
         PlanEntryPriority, PlanEntryStatus, PromptCapabilities, PromptRequest, PromptResponse,
         RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, SessionId,
-        SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
+        ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        UsageUpdate,
     },
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Stdio};
 use anyhow::{Context as _, Result};
 use haarness_protocol::{
     CreateThreadRequest, Item, ItemData, McpConfigureRequest, PermissionReply,
-    PermissionReplyDecision, RequestId, StartTurnRequest, ThreadId, Turn, TurnId, TurnStatus,
+    PermissionReplyDecision, RequestId, StartTurnRequest, Thread, ThreadId, Turn, TurnId,
+    TurnStatus,
 };
 use haarness_tui::api::{ApiClient, SubscriptionEvent};
 use serde_json::{Value, json};
@@ -45,6 +47,14 @@ type SessionServer = (String, String);
 /// before leaving the rest of that start to the server (see
 /// `Service::start_mcp`).
 const MCP_START_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a prompt's answer, or a load's, waits for the chat's usage
+/// before going without its usage update.
+const USAGE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Most bytes of file text, before and after together, the diffs of one
+/// prompt or one load carry. The text result goes with each call regardless.
+const DIFF_TEXT_LIMIT: usize = 1_000_000;
 
 pub struct Config {
     pub client: ApiClient,
@@ -74,6 +84,9 @@ struct Service {
     /// Held by a session's prompt until its turn has ended (see
     /// `Service::prompt`).
     gates: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// The folder each session was last opened in (`cwd` of its
+    /// `session/new` or `session/load`), as the editor spells it.
+    cwds: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 impl Service {
@@ -91,6 +104,7 @@ impl Service {
             starting: Arc::new(Mutex::new(HashMap::new())),
             waits: Arc::new(Mutex::new(HashMap::new())),
             gates: Arc::new(Mutex::new(HashMap::new())),
+            cwds: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -217,6 +231,10 @@ impl Service {
             .map_err(internal)?;
         self.configure_mcp(thread.id, request.mcp_servers, &request.cwd)
             .await?;
+        self.cwds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(thread.id.to_string(), request.cwd);
         Ok(NewSessionResponse::new(thread.id.to_string()))
     }
 
@@ -227,12 +245,30 @@ impl Service {
     ) -> AcpResult<LoadSessionResponse> {
         self.validate_scope(&request.cwd, &request.additional_directories)?;
         let thread = thread_id(&request.session_id)?;
-        self.client.thread(thread).await.map_err(not_found)?;
+        let chat = self.client.thread(thread).await.map_err(not_found)?;
         self.configure_mcp(thread, request.mcp_servers, &request.cwd)
             .await?;
-        for item in self.client.items(thread).await.map_err(internal)? {
-            Self::replay(&request.session_id, item, connection)?;
+        self.cwds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(request.session_id.to_string(), request.cwd);
+        let items = self.client.items(thread).await.map_err(internal)?;
+        let mut files = self.files(&chat, &request.session_id);
+        let mut diffs = files.replayed_diffs(&items);
+        let mut calls = HashMap::new();
+        for (index, item) in items.into_iter().enumerate() {
+            let diffs = diffs.remove(&index).unwrap_or_default();
+            Self::replay(
+                &request.session_id,
+                item,
+                &files,
+                &mut calls,
+                diffs,
+                connection,
+            )?;
         }
+        self.report_usage(thread, &request.session_id, connection)
+            .await;
         Ok(LoadSessionResponse::new())
     }
 
@@ -267,7 +303,7 @@ impl Service {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key.clone(), stop.clone());
         let begun: AcpResult<Option<_>> = async {
-            self.client.thread(thread).await.map_err(not_found)?;
+            let chat = self.client.thread(thread).await.map_err(not_found)?;
             if self
                 .await_mcp(&request.session_id, &stop, connection)
                 .await?
@@ -291,14 +327,19 @@ impl Service {
             if stop.is_cancelled() {
                 let _ = self.client.interrupt(turn.id).await;
             }
-            Ok(Some((turn, events, event_task)))
+            Ok(Some((
+                turn,
+                events,
+                event_task,
+                self.files(&chat, &request.session_id),
+            )))
         }
         .await;
         self.waits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
-        let Some((turn, mut events, event_task)) = begun? else {
+        let Some((turn, mut events, event_task, mut files)) = begun? else {
             return Ok(PromptResponse::new(StopReason::Cancelled));
         };
 
@@ -410,6 +451,7 @@ impl Service {
                             &child,
                             connection,
                             &mut calls,
+                            &mut files,
                         )?;
                     }
                     SubscriptionEvent::Event(event)
@@ -442,7 +484,13 @@ impl Service {
                         if event.event_type == "item.created" {
                             let item = serde_json::from_value::<Item>(event.payload.clone())
                                 .map_err(internal)?;
-                            Self::live_item(&request.session_id, item, connection, &mut calls)?;
+                            Self::live_item(
+                                &request.session_id,
+                                item,
+                                connection,
+                                &mut calls,
+                                &mut files,
+                            )?;
                             continue;
                         }
                         if event.event_type == "turn.finished" {
@@ -481,6 +529,9 @@ impl Service {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&request.session_id.to_string());
+        // Before the answer, and before the session's next prompt starts.
+        self.report_usage(thread, &request.session_id, connection)
+            .await;
         drop(held);
         result
     }
@@ -525,6 +576,45 @@ impl Service {
             )));
         }
         Ok(())
+    }
+
+    /// What a prompt or a load of `session` tells the editor about files:
+    /// paths are read from the folder `chat`'s tools work in (its own, or
+    /// the workspace), and those in the workspace are spelled from the
+    /// folder the editor opened the session in, which names the same folder
+    /// (see `validate_scope`) but may reach it another way (a link, a
+    /// mapped drive).
+    fn files(&self, chat: &Thread, session: &SessionId) -> Files {
+        let folder = chat
+            .directory
+            .as_deref()
+            .map_or_else(|| self.workspace.clone(), PathBuf::from);
+        let opened = self
+            .cwds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session.to_string())
+            .map(|cwd| fold(cwd));
+        Files::new(folder, opened.map(|cwd| (self.workspace.clone(), cwd)))
+    }
+
+    /// Tells the editor how full the chat's context is and what it has cost
+    /// (see [`usage_update`]). A server that does not answer in time leaves
+    /// the editor's last numbers as they are.
+    async fn report_usage(
+        &self,
+        thread: ThreadId,
+        session: &SessionId,
+        connection: &ConnectionTo<Client>,
+    ) {
+        let Ok(Ok(usage)) =
+            tokio::time::timeout(USAGE_WAIT, self.client.thread_usage(thread)).await
+        else {
+            return;
+        };
+        if let Some(update) = usage_update(&usage) {
+            let _ = notify(connection, session, SessionUpdate::UsageUpdate(update));
+        }
     }
 
     async fn configure_mcp(
@@ -900,6 +990,7 @@ impl Service {
         child: &Child,
         connection: &ConnectionTo<Client>,
         calls: &mut Calls,
+        files: &mut Files,
     ) -> AcpResult<()> {
         match item.data {
             ItemData::ToolCall {
@@ -917,6 +1008,7 @@ impl Service {
                         ToolCall::new(call_id, child.titled(&title(&name, &arguments)))
                             .kind(tool_kind(&name))
                             .status(ToolCallStatus::InProgress)
+                            .locations(files.locations(&name, &arguments))
                             .raw_input(arguments)
                             .meta(child.meta()),
                     ),
@@ -924,28 +1016,23 @@ impl Service {
             }
             ItemData::ToolResult {
                 call_id,
+                name,
                 output,
                 is_error,
                 metadata,
-                ..
             } => {
-                let (shown, raw) = shown_result(&output, &metadata);
+                let call_id = child.call(&call_id);
+                let locations = calls
+                    .get(&call_id)
+                    .map(|(_, arguments)| files.locations(&name, arguments))
+                    .unwrap_or_default();
+                let diffs = files.diffs(&name, &metadata);
                 notify(
                     connection,
                     session,
                     SessionUpdate::ToolCallUpdate(
-                        ToolCallUpdate::new(
-                            child.call(&call_id),
-                            ToolCallUpdateFields::new()
-                                .status(if is_error {
-                                    ToolCallStatus::Failed
-                                } else {
-                                    ToolCallStatus::Completed
-                                })
-                                .content(vec![ContentBlock::Text(TextContent::new(shown)).into()])
-                                .raw_output(raw),
-                        )
-                        .meta(child.meta()),
+                        result_update(call_id, &output, is_error, &metadata, locations, diffs)
+                            .meta(child.meta()),
                     ),
                 )
             }
@@ -958,6 +1045,7 @@ impl Service {
         item: Item,
         connection: &ConnectionTo<Client>,
         calls: &mut Calls,
+        files: &mut Files,
     ) -> AcpResult<()> {
         match item.data {
             ItemData::ToolCall {
@@ -974,21 +1062,31 @@ impl Service {
                         ToolCall::new(call_id.clone(), title(&name, &arguments))
                             .kind(tool_kind(&name))
                             .status(ToolCallStatus::InProgress)
+                            .locations(files.locations(&name, &arguments))
                             .raw_input(arguments),
                     ),
                 )
             }
             ItemData::ToolResult {
                 call_id,
+                name,
                 output,
                 is_error,
                 metadata,
-                ..
-            } => notify(
-                connection,
-                session,
-                SessionUpdate::ToolCallUpdate(result_update(call_id, &output, is_error, &metadata)),
-            ),
+            } => {
+                let locations = calls
+                    .get(&call_id)
+                    .map(|(_, arguments)| files.locations(&name, arguments))
+                    .unwrap_or_default();
+                let diffs = files.diffs(&name, &metadata);
+                notify(
+                    connection,
+                    session,
+                    SessionUpdate::ToolCallUpdate(result_update(
+                        call_id, &output, is_error, &metadata, locations, diffs,
+                    )),
+                )
+            }
             ItemData::Todo { items } => notify(
                 connection,
                 session,
@@ -1024,7 +1122,17 @@ impl Service {
         }
     }
 
-    fn replay(session: &SessionId, item: Item, connection: &ConnectionTo<Client>) -> AcpResult<()> {
+    /// One stored item of the session's chat, as it was shown live. `calls`
+    /// holds the locations of the calls replayed whose results have not
+    /// come yet; `diffs` are the result's (see [`Files::replayed_diffs`]).
+    fn replay(
+        session: &SessionId,
+        item: Item,
+        files: &Files,
+        calls: &mut HashMap<String, Vec<ToolCallLocation>>,
+        diffs: Vec<ToolCallContent>,
+        connection: &ConnectionTo<Client>,
+    ) -> AcpResult<()> {
         let update = match item.data {
             ItemData::UserMessage {
                 text,
@@ -1044,21 +1152,29 @@ impl Service {
                 name,
                 arguments,
                 ..
-            } => Some(SessionUpdate::ToolCall(
-                ToolCall::new(call_id, title(&name, &arguments))
-                    .kind(tool_kind(&name))
-                    .status(ToolCallStatus::InProgress)
-                    .raw_input(arguments),
-            )),
+            } => {
+                let locations = files.locations(&name, &arguments);
+                calls.insert(call_id.clone(), locations.clone());
+                Some(SessionUpdate::ToolCall(
+                    ToolCall::new(call_id, title(&name, &arguments))
+                        .kind(tool_kind(&name))
+                        .status(ToolCallStatus::InProgress)
+                        .locations(locations)
+                        .raw_input(arguments),
+                ))
+            }
             ItemData::ToolResult {
                 call_id,
                 output,
                 is_error,
                 metadata,
                 ..
-            } => Some(SessionUpdate::ToolCallUpdate(result_update(
-                call_id, &output, is_error, &metadata,
-            ))),
+            } => {
+                let locations = calls.remove(&call_id).unwrap_or_default();
+                Some(SessionUpdate::ToolCallUpdate(result_update(
+                    call_id, &output, is_error, &metadata, locations, diffs,
+                )))
+            }
             _ => None,
         };
         if let Some(update) = update {
@@ -1540,9 +1656,23 @@ fn title(name: &str, arguments: &Value) -> String {
         "read" => arguments["path"]
             .as_str()
             .map_or_else(|| "Read file".into(), |path| format!("Read {path}")),
-        "write" | "edit" | "multiedit" | "apply_patch" => arguments["path"]
+        "write" | "edit" | "multiedit" => arguments["path"]
             .as_str()
             .map_or_else(|| format!("Use {name}"), |path| format!("Edit {path}")),
+        // The patch names its files; the first is shown, and how many more.
+        "apply_patch" => {
+            let mut files = Vec::new();
+            for (file, _) in patch_files(arguments) {
+                if !files.contains(&file) {
+                    files.push(file);
+                }
+            }
+            match files.as_slice() {
+                [] => format!("Use {name}"),
+                [file] => format!("Edit {file}"),
+                [file, rest @ ..] => format!("Edit {file} and {} more", rest.len()),
+            }
+        }
         _ => format!("Use {name}"),
     }
 }
@@ -1578,25 +1708,250 @@ fn shown_result(output: &str, metadata: &Value) -> (String, Value) {
     }
 }
 
-/// The session's own tool result, live or replayed.
+/// A tool result, live or replayed: its text, then the diffs of the files
+/// it changed, and the files it worked on. A call with none keeps the
+/// locations it was shown with.
 fn result_update(
     call_id: String,
     output: &str,
     is_error: bool,
     metadata: &Value,
+    locations: Vec<ToolCallLocation>,
+    diffs: Vec<ToolCallContent>,
 ) -> ToolCallUpdate {
     let (shown, raw) = shown_result(output, metadata);
-    ToolCallUpdate::new(
-        call_id,
-        ToolCallUpdateFields::new()
-            .status(if is_error {
-                ToolCallStatus::Failed
-            } else {
-                ToolCallStatus::Completed
+    let mut content = vec![ContentBlock::Text(TextContent::new(shown)).into()];
+    content.extend(diffs);
+    let mut fields = ToolCallUpdateFields::new()
+        .status(if is_error {
+            ToolCallStatus::Failed
+        } else {
+            ToolCallStatus::Completed
+        })
+        .content(content)
+        .raw_output(raw);
+    if !locations.is_empty() {
+        fields = fields.locations(locations);
+    }
+    ToolCallUpdate::new(call_id, fields)
+}
+
+/// What a prompt or a load tells the editor about the files its calls work
+/// on: the chat's folder, which relative paths are read from, how the
+/// editor spells the workspace, and how much file text its diffs may still
+/// carry (`DIFF_TEXT_LIMIT` in all).
+struct Files {
+    folder: PathBuf,
+    /// The workspace as Haarness names it and as the editor opened it: a
+    /// path in it is given the editor's spelling, so the editor finds it in
+    /// its own project.
+    spelling: Option<(PathBuf, PathBuf)>,
+    left: usize,
+}
+
+impl Files {
+    fn new(folder: PathBuf, spelling: Option<(PathBuf, PathBuf)>) -> Self {
+        Self {
+            folder,
+            spelling,
+            left: DIFF_TEXT_LIMIT,
+        }
+    }
+
+    /// `path` as the file tools read it (see [`absolute`]), spelled as the
+    /// editor spells the workspace when it lies in it.
+    fn path(&self, path: &str) -> PathBuf {
+        let path = absolute(&self.folder, path);
+        let Some((workspace, opened)) = &self.spelling else {
+            return path;
+        };
+        match path.strip_prefix(workspace) {
+            Ok(rest) if rest.as_os_str().is_empty() => opened.clone(),
+            Ok(rest) => opened.join(rest),
+            Err(_) => path,
+        }
+    }
+
+    /// The files and folders a call works on, for the editor to open and to
+    /// follow (see [`named_paths`]), each once.
+    fn locations(&self, name: &str, arguments: &Value) -> Vec<ToolCallLocation> {
+        let mut seen = HashSet::new();
+        named_paths(name, arguments)
+            .iter()
+            .map(|path| self.path(path))
+            .filter(|path| seen.insert(path.clone()))
+            .map(ToolCallLocation::new)
+            .collect()
+    }
+
+    /// The diffs of a result whose `metadata.diffs` holds the before and
+    /// after texts of the files it changed (`write`, `edit`, `multiedit`,
+    /// `apply_patch`, and a `batch` for each of its steps), at absolute
+    /// paths: a new file has no old text and a deleted one an empty new
+    /// text. A binary file or a text the server cut short has none, nor has
+    /// a diff larger than what is left to send; the result's text names
+    /// those files still.
+    fn diffs(&mut self, name: &str, metadata: &Value) -> Vec<ToolCallContent> {
+        let steps = if name == "batch" {
+            metadata.get("results").and_then(Value::as_array)
+        } else {
+            None
+        };
+        let recorded = std::iter::once(metadata)
+            .chain(steps.into_iter().flatten().map(|step| &step["metadata"]))
+            .filter_map(|metadata| metadata.get("diffs").and_then(Value::as_array))
+            .flatten();
+        let mut diffs = Vec::new();
+        for entry in recorded {
+            if self.left == 0 {
+                break;
+            }
+            if let Some(diff) = self.diff(entry) {
+                diffs.push(diff.into());
+            }
+        }
+        diffs
+    }
+
+    /// One recorded change (a `FileDiff`) as a diff, when it holds its whole
+    /// texts and they fit in what is left. Its size is known before any text
+    /// is copied.
+    fn diff(&mut self, entry: &Value) -> Option<Diff> {
+        if entry["binary"] == true || entry["truncated"] == true {
+            return None;
+        }
+        let file = entry["file"].as_str()?;
+        let (before, after) = (entry["before"].as_str(), entry["after"].as_str());
+        let (old, new) = match (entry["status"].as_str()?, before, after) {
+            ("added", _, Some(after)) => (None, after),
+            ("modified", Some(before), Some(after)) => (Some(before), after),
+            ("deleted", Some(before), _) => (Some(before), ""),
+            _ => return None,
+        };
+        let size = old.map_or(0, str::len) + new.len();
+        if size > self.left {
+            return None;
+        }
+        self.left -= size;
+        Some(Diff::new(self.path(file), new).old_text(old.map(str::to_owned)))
+    }
+
+    /// The diffs of each tool result of a replayed chat, by its index in
+    /// `items`. They are taken from the newest result back, so when the
+    /// chat holds more than one load sends, its latest changes show.
+    fn replayed_diffs(&mut self, items: &[Item]) -> HashMap<usize, Vec<ToolCallContent>> {
+        let mut diffs = HashMap::new();
+        for (index, item) in items.iter().enumerate().rev() {
+            if self.left == 0 {
+                break;
+            }
+            if let ItemData::ToolResult { name, metadata, .. } = &item.data {
+                let found = self.diffs(name, metadata);
+                if !found.is_empty() {
+                    diffs.insert(index, found);
+                }
+            }
+        }
+        diffs
+    }
+}
+
+/// The paths a call names as it wrote them: the file a file tool reads or
+/// changes, or `lsp` asks about; every file a patch names (both ends of a
+/// move); the folder a search or a listing looks in (`.` when it names
+/// none); and those of each step of a `batch`. Other tools name none.
+fn named_paths(name: &str, arguments: &Value) -> Vec<String> {
+    let named = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+    };
+    match name {
+        "read" | "write" | "edit" | "multiedit" => {
+            named("path").into_iter().map(str::to_owned).collect()
+        }
+        "lsp" => named("filePath").into_iter().map(str::to_owned).collect(),
+        "apply_patch" => patch_files(arguments)
+            .into_iter()
+            .flat_map(|(file, target)| std::iter::once(file).chain(target))
+            .collect(),
+        "glob" | "grep" | "list" => vec![named("path").unwrap_or(".").to_owned()],
+        "batch" => arguments
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|step| Some((step.get("tool")?.as_str()?, step.get("parameters")?)))
+            // A step's tool is named as the server reads it: a `functions.`
+            // prefix and a different case still name the tool.
+            .map(|(tool, parameters)| {
+                let tool = tool.strip_prefix("functions.").unwrap_or(tool);
+                (tool.to_ascii_lowercase(), parameters)
             })
-            .content(vec![ContentBlock::Text(TextContent::new(shown)).into()])
-            .raw_output(raw),
-    )
+            // A batch cannot run a batch.
+            .filter(|(tool, _)| tool != "batch")
+            .flat_map(|(tool, parameters)| named_paths(&tool, parameters))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The files an `apply_patch` call's patch works on, in its order: each
+/// operation's file and, for a move, the file it becomes. None when the
+/// patch does not parse.
+fn patch_files(arguments: &Value) -> Vec<(String, Option<String>)> {
+    let Some(Ok(operations)) = arguments
+        .get("input")
+        .and_then(Value::as_str)
+        .map(haarness_core::patch::parse_patch)
+    else {
+        return Vec::new();
+    };
+    operations
+        .into_iter()
+        .map(|operation| match operation {
+            haarness_core::patch::FileOp::Update { path, move_to, .. } => (path, move_to),
+            operation => (operation.path().to_owned(), None),
+        })
+        .collect()
+}
+
+/// `path` as the file tools read it: a leading `~` is the home folder and
+/// a relative path is under `folder`, with `.` and `..` folded away.
+fn absolute(folder: &Path, path: &str) -> PathBuf {
+    fold(&folder.join(haarness_core::expand_home(path).as_ref()))
+}
+
+/// `path` with `.` and `..` folded away, as written: links are not followed.
+fn fold(path: &Path) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                folded.pop();
+            }
+            component => folded.push(component.as_os_str()),
+        }
+    }
+    folded
+}
+
+/// The chat's usage as the editor's meter shows it: the context number
+/// every Haarness client shows, out of the model's window, and what the
+/// chat and the subagents under it have cost (the priced part, when some
+/// turns have no price). None when the model states no window, as the
+/// apps show no meter then either.
+fn usage_update(usage: &Value) -> Option<UsageUpdate> {
+    let context = &usage["context"];
+    let size = context["window"].as_u64().filter(|window| *window > 0)?;
+    let used = context["tokens"].as_u64()?;
+    let cost = [&usage["costUsd"], &usage["descendants"]["costUsd"]]
+        .into_iter()
+        .filter_map(Value::as_f64)
+        .reduce(|total, cost| total + cost);
+    Some(UsageUpdate::new(used, size).cost(cost.map(|amount| Cost::new(amount, "USD"))))
 }
 
 fn parse_output(output: &str) -> Value {
@@ -1952,6 +2307,402 @@ mod tests {
             title("read", &json!({"path":"src/main.rs"})),
             "Read src/main.rs"
         );
+    }
+
+    /// A patch call is titled after the file it changes, as an edit is,
+    /// rather than `Use apply_patch`.
+    #[test]
+    fn a_patch_call_is_titled_after_its_files() {
+        let patch =
+            |body: &str| json!({"input": format!("*** Begin Patch\n{body}*** End Patch\n")});
+        assert_eq!(
+            title(
+                "apply_patch",
+                &patch("*** Update File: src/lib.rs\n@@\n-old\n+new\n")
+            ),
+            "Edit src/lib.rs"
+        );
+        assert_eq!(
+            title(
+                "apply_patch",
+                &patch("*** Update File: src/old.rs\n*** Move to: src/new.rs\n@@\n-a\n+b\n")
+            ),
+            "Edit src/old.rs"
+        );
+        assert_eq!(
+            title(
+                "apply_patch",
+                &patch(
+                    "*** Add File: notes.md\n+hi\n*** Update File: notes.md\n@@\n-hi\n+ho\n*** Delete File: gone.txt\n*** Add File: b.txt\n+b\n"
+                )
+            ),
+            "Edit notes.md and 2 more"
+        );
+        assert_eq!(
+            title("apply_patch", &json!({"input": "not a patch"})),
+            "Use apply_patch"
+        );
+        assert_eq!(title("apply_patch", &json!({})), "Use apply_patch");
+        assert_eq!(title("edit", &json!({"path":"a.rs"})), "Edit a.rs");
+    }
+
+    /// The locations of a call in a chat working in `/work/app`.
+    fn located(name: &str, arguments: &Value) -> Vec<PathBuf> {
+        Files::new(PathBuf::from("/work/app"), None)
+            .locations(name, arguments)
+            .into_iter()
+            .map(|location| location.path)
+            .collect()
+    }
+
+    #[test]
+    fn calls_name_the_files_they_work_on_as_absolute_paths() {
+        let paths = |name: &str, arguments: Value| located(name, &arguments);
+        let path = PathBuf::from;
+        assert_eq!(
+            paths("read", json!({"path":"src/main.rs", "offset": 10})),
+            [path("/work/app/src/main.rs")]
+        );
+        assert_eq!(
+            paths("write", json!({"path":"/tmp/out.txt", "content":"x"})),
+            [path("/tmp/out.txt")]
+        );
+        assert_eq!(
+            paths("edit", json!({"path":"./docs/../README.md"})),
+            [path("/work/app/README.md")]
+        );
+        assert_eq!(
+            paths("multiedit", json!({"path":"a.rs", "edits": []})),
+            [path("/work/app/a.rs")]
+        );
+        assert_eq!(
+            paths(
+                "lsp",
+                json!({"operation":"hover", "filePath":"src/lib.rs", "line":3, "character":1})
+            ),
+            [path("/work/app/src/lib.rs")]
+        );
+        // `~` is the home folder, as the file tools read it.
+        let home = haarness_core::expand_home("~");
+        if home != "~" {
+            assert_eq!(
+                paths("read", json!({"path":"~/notes.md"})),
+                [Path::new(home.as_ref()).join("notes.md")]
+            );
+        }
+        // Both ends of a move, each file once.
+        let moved = "*** Begin Patch\n*** Add File: new.md\n+x\n*** Update File: src/old.rs\n*** Move to: src/new.rs\n@@\n-a\n+b\n*** Update File: new.md\n@@\n-x\n+y\n*** Delete File: /work/other/gone.txt\n*** End Patch\n";
+        assert_eq!(
+            paths("apply_patch", json!({"input": moved})),
+            [
+                path("/work/app/new.md"),
+                path("/work/app/src/old.rs"),
+                path("/work/app/src/new.rs"),
+                path("/work/other/gone.txt"),
+            ]
+        );
+        assert!(paths("apply_patch", json!({"input": "garbage"})).is_empty());
+        // A search or a listing with no path looks in the chat's folder.
+        assert_eq!(
+            paths("glob", json!({"pattern":"*.rs"})),
+            [path("/work/app")]
+        );
+        assert_eq!(
+            paths("glob", json!({"pattern":"*.rs", "path": ""})),
+            [path("/work/app")]
+        );
+        assert_eq!(
+            paths("grep", json!({"pattern":"fn", "path":"src"})),
+            [path("/work/app/src")]
+        );
+        assert_eq!(paths("list", json!({"path":"/etc"})), [path("/etc")]);
+        assert!(paths("read", json!({"path": ""})).is_empty());
+        assert!(paths("read", json!({})).is_empty());
+        assert!(paths("bash", json!({"command":"ls", "workdir":"src"})).is_empty());
+        assert!(paths("webfetch", json!({"url":"https://example.com"})).is_empty());
+    }
+
+    /// A batch works on the files its steps name.
+    #[test]
+    fn a_batch_names_the_files_of_its_steps() {
+        let batch = json!({"tool_calls": [
+            {"tool":"edit", "parameters":{"path":"a.rs", "old":"x", "new":"y"}},
+            {"tool":"read", "parameters":{"path":"b.rs"}},
+            {"tool":"edit", "parameters":{"path":"./a.rs", "old":"y", "new":"z"}},
+            {"tool":"bash", "parameters":{"command":"ls"}},
+            {"tool":"batch", "parameters":{"tool_calls":[{"tool":"read", "parameters":{"path":"c.rs"}}]}},
+            {"tool":"functions.Batch", "parameters":{"tool_calls":[{"tool":"read", "parameters":{"path":"d.rs"}}]}},
+            {"tool":"write"},
+            // Named as a model may name it: the server still runs the tool.
+            {"tool":"functions.edit", "parameters":{"path":"e.rs", "old":"x", "new":"y"}},
+            {"tool":"Write", "parameters":{"path":"f.rs", "content":"x"}},
+            {"tool":"functions.GLOB", "parameters":{"pattern":"*.rs", "path":"src"}},
+        ]});
+        assert_eq!(
+            located("batch", &batch),
+            [
+                PathBuf::from("/work/app/a.rs"),
+                PathBuf::from("/work/app/b.rs"),
+                PathBuf::from("/work/app/e.rs"),
+                PathBuf::from("/work/app/f.rs"),
+                PathBuf::from("/work/app/src"),
+            ]
+        );
+        assert!(located("batch", &json!({})).is_empty());
+    }
+
+    /// Paths in the workspace are spelled as the editor opened it (through
+    /// a link, here), so it finds them in its own project; others stay as
+    /// they are.
+    #[test]
+    fn paths_in_the_workspace_take_the_editor_s_spelling() {
+        let mut files = Files::new(
+            PathBuf::from("/private/var/work/app/sub"),
+            Some((
+                PathBuf::from("/private/var/work/app"),
+                PathBuf::from("/var/work/app"),
+            )),
+        );
+        let paths = |files: &Files, name: &str, arguments: Value| {
+            files
+                .locations(name, &arguments)
+                .into_iter()
+                .map(|location| location.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths(&files, "read", json!({"path":"src/main.rs"})),
+            [PathBuf::from("/var/work/app/sub/src/main.rs")]
+        );
+        assert_eq!(
+            paths(&files, "read", json!({"path":"/private/var/work/app/x.rs"})),
+            [PathBuf::from("/var/work/app/x.rs")]
+        );
+        assert_eq!(
+            paths(&files, "list", json!({"path":".."})),
+            [PathBuf::from("/var/work/app")]
+        );
+        assert_eq!(
+            paths(
+                &files,
+                "read",
+                json!({"path":"/private/var/work/application"})
+            ),
+            [PathBuf::from("/private/var/work/application")]
+        );
+        assert_eq!(
+            paths(&files, "write", json!({"path":"/tmp/out.txt"})),
+            [PathBuf::from("/tmp/out.txt")]
+        );
+        let diffs = files.diffs(
+            "write",
+            &json!({"diffs":[{"file":"new.txt", "status":"added", "additions":1, "deletions":0, "after":"x"}]}),
+        );
+        assert_eq!(
+            diff_parts(&diffs[0]).0,
+            PathBuf::from("/var/work/app/sub/new.txt")
+        );
+    }
+
+    fn diff_parts(content: &ToolCallContent) -> (PathBuf, Option<&str>, &str) {
+        match content {
+            ToolCallContent::Diff(diff) => (
+                diff.path.clone(),
+                diff.old_text.as_deref(),
+                diff.new_text.as_str(),
+            ),
+            other => panic!("not a diff: {other:?}"),
+        }
+    }
+
+    /// A change as the server records it in `metadata.diffs`.
+    fn recorded(
+        file: &str,
+        status: haarness_protocol::FileDiffStatus,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> Value {
+        serde_json::to_value(haarness_protocol::FileDiff {
+            file: file.into(),
+            status,
+            additions: 1,
+            deletions: 1,
+            patch: None,
+            before: before.map(str::to_owned),
+            after: after.map(str::to_owned),
+            binary: false,
+            truncated: false,
+        })
+        .unwrap()
+    }
+
+    /// An edit's result carries the before and after texts the server
+    /// recorded, as the editor's diffs.
+    #[test]
+    fn a_result_s_recorded_changes_become_diffs() {
+        use haarness_protocol::FileDiffStatus::{Added, Deleted, Modified};
+        let mut files = Files::new(PathBuf::from("/work/app"), None);
+        let mut binary = recorded("logo.png", Modified, None, Some(""));
+        binary["binary"] = json!(true);
+        binary["truncated"] = json!(true);
+        let mut cut = recorded("big.txt", Modified, Some("cut"), Some("cut"));
+        cut["truncated"] = json!(true);
+        let metadata = json!({"diffs": [
+            recorded("new.txt", Added, None, Some("hello\n")),
+            recorded("src/lib.rs", Modified, Some("fn a() {}\n"), Some("fn b() {}\n")),
+            recorded("/work/app/gone.txt", Deleted, Some("bye\n"), None),
+            binary,
+            cut,
+            recorded("odd.txt", Modified, None, None),
+            {"not":"a diff"},
+        ], "diffsTruncated": false});
+        let diffs = files.diffs("multiedit", &metadata);
+        let parts = diffs.iter().map(diff_parts).collect::<Vec<_>>();
+        assert_eq!(
+            parts,
+            [
+                (PathBuf::from("/work/app/new.txt"), None, "hello\n"),
+                (
+                    PathBuf::from("/work/app/src/lib.rs"),
+                    Some("fn a() {}\n"),
+                    "fn b() {}\n"
+                ),
+                (PathBuf::from("/work/app/gone.txt"), Some("bye\n"), ""),
+            ]
+        );
+        assert_eq!(
+            files.left,
+            DIFF_TEXT_LIMIT - "hello\n".len() - 2 * "fn a() {}\n".len() - "bye\n".len()
+        );
+        assert!(files.diffs("write", &json!({"truncated": true})).is_empty());
+        assert!(files.diffs("write", &Value::Null).is_empty());
+    }
+
+    /// A batch's steps record their changes in its result, each in its own
+    /// metadata; only a batch's result is read that way.
+    #[test]
+    fn a_batch_s_steps_changes_become_diffs() {
+        use haarness_protocol::FileDiffStatus::{Added, Modified};
+        let metadata = json!({"failures": 1, "results": [
+            {"tool":"edit", "output":"edited a.rs", "metadata": {"diffs": [
+                recorded("a.rs", Modified, Some("x\n"), Some("y\n")),
+            ]}},
+            {"tool":"read", "output":"…", "metadata": null},
+            {"tool":"edit", "error":"no match"},
+            {"tool":"write", "output":"wrote b.rs", "metadata": {"diffs": [
+                recorded("b.rs", Added, None, Some("new\n")),
+            ]}},
+        ]});
+        let mut files = Files::new(PathBuf::from("/work/app"), None);
+        let parts = files
+            .diffs("batch", &metadata)
+            .iter()
+            .map(|diff| diff_parts(diff).0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parts,
+            [
+                PathBuf::from("/work/app/a.rs"),
+                PathBuf::from("/work/app/b.rs")
+            ]
+        );
+        assert!(files.diffs("other", &metadata).is_empty());
+    }
+
+    /// The diffs of one prompt carry a bounded amount of text: one that no
+    /// longer fits is left out, and a smaller one after it still goes.
+    #[test]
+    fn diffs_stop_at_the_prompt_s_text_limit() {
+        let mut files = Files::new(PathBuf::from("/work/app"), None);
+        let big = "x".repeat(DIFF_TEXT_LIMIT / 2);
+        let added = |file: &str, text: &str| json!({"diffs": [{"file": file, "status":"added", "additions":1, "deletions":0, "after": text}]});
+        assert_eq!(files.diffs("write", &added("one.txt", &big)).len(), 1);
+        assert_eq!(files.diffs("write", &added("two.txt", &big)).len(), 1);
+        assert_eq!(files.left, 0);
+        assert!(files.diffs("write", &added("three.txt", "")).is_empty());
+
+        let mut files = Files::new(PathBuf::from("/work/app"), None);
+        let most = "x".repeat(DIFF_TEXT_LIMIT - 10);
+        assert_eq!(files.diffs("write", &added("one.txt", &most)).len(), 1);
+        assert!(
+            files
+                .diffs("write", &added("two.txt", &"y".repeat(11)))
+                .is_empty()
+        );
+        assert_eq!(files.diffs("write", &added("three.txt", "small")).len(), 1);
+    }
+
+    /// A load that cannot send every diff of the chat sends its latest ones.
+    #[test]
+    fn a_load_keeps_the_latest_diffs_within_the_limit() {
+        let thread = ThreadId::new();
+        let result = |sequence: u64, file: &str, size: usize| Item {
+            id: haarness_protocol::ItemId::new(),
+            thread_id: thread,
+            turn_id: None,
+            sequence,
+            created_at: chrono::Utc::now(),
+            data: ItemData::ToolResult {
+                call_id: format!("call-{sequence}"),
+                name: "write".into(),
+                output: format!("wrote {file}"),
+                is_error: false,
+                metadata: json!({"diffs": [{
+                    "file": file, "status": "added", "additions": 1, "deletions": 0,
+                    "after": "x".repeat(size),
+                }]}),
+            },
+        };
+        let items = vec![
+            result(1, "old.txt", DIFF_TEXT_LIMIT / 2),
+            result(2, "middle.txt", DIFF_TEXT_LIMIT / 2),
+            result(3, "new.txt", DIFF_TEXT_LIMIT / 2),
+        ];
+        let diffs = Files::new(PathBuf::from("/work/app"), None).replayed_diffs(&items);
+        let mut kept = diffs.keys().copied().collect::<Vec<_>>();
+        kept.sort_unstable();
+        assert_eq!(kept, [1, 2]);
+        assert_eq!(
+            diff_parts(&diffs[&2][0]).0,
+            PathBuf::from("/work/app/new.txt")
+        );
+    }
+
+    #[test]
+    fn the_chat_s_usage_becomes_the_editor_s_meter() {
+        let usage = json!({
+            "inputTokens": 5000, "outputTokens": 300, "costUsd": 0.25, "costIncomplete": false,
+            "descendants": {"count": 1, "costUsd": 0.05},
+            "context": {"tokens": 53_000, "window": 200_000, "compactAt": 160_000},
+        });
+        let update = usage_update(&usage).expect("a usage update");
+        assert_eq!((update.used, update.size), (53_000, 200_000));
+        let cost = update.cost.clone().expect("its cost");
+        assert!((cost.amount - 0.30).abs() < 1e-9, "{}", cost.amount);
+        assert_eq!(cost.currency, "USD");
+        assert_eq!(
+            serde_json::to_value(SessionUpdate::UsageUpdate(update)).unwrap()["sessionUpdate"],
+            "usage_update"
+        );
+
+        // Nothing priced: no cost; only a subagent priced: its cost.
+        let unpriced = json!({"costUsd": null, "descendants": {"count": 0, "costUsd": null},
+            "context": {"tokens": 10, "window": 8192}});
+        assert_eq!(usage_update(&unpriced).unwrap().cost, None);
+        let child = json!({"costUsd": null, "descendants": {"costUsd": 0.5},
+            "context": {"tokens": 10, "window": 8192}});
+        let amount = usage_update(&child).unwrap().cost.unwrap().amount;
+        assert!((amount - 0.5).abs() < 1e-9, "{amount}");
+
+        // A model that states no window gets no meter.
+        for context in [
+            json!({"tokens": 10, "window": null}),
+            json!({"tokens": 10, "window": 0}),
+            json!({"tokens": 10}),
+        ] {
+            assert!(usage_update(&json!({"context": context})).is_none());
+        }
+        assert!(usage_update(&json!({})).is_none());
     }
 
     #[test]

@@ -500,6 +500,26 @@ async fn subagent_requests_and_tool_calls_reach_the_client_named_after_the_subag
         }),
         "the subagent's result did not reach the client: {messages:?}"
     );
+    // The subagent's call names its file, as the session was opened, and its
+    // result shows what it wrote.
+    let proof = workspace
+        .join("child-proof.txt")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        call["params"]["update"]["locations"],
+        json!([{"path": proof}])
+    );
+    let result = call_update(
+        &messages,
+        "tool_call_update",
+        &call["params"]["update"]["toolCallId"],
+    );
+    assert_eq!(result["locations"], call["params"]["update"]["locations"]);
+    assert_eq!(
+        diffs(result),
+        [json!({"type":"diff", "path": proof, "newText":"CHILD_OK"})]
+    );
     assert!(
         !messages.iter().any(|message| {
             message["params"]["update"]["sessionUpdate"].as_str() == Some("agent_message_chunk")
@@ -1373,4 +1393,316 @@ async fn a_model_named_with_its_provider_runs_on_that_provider() {
     drop(stdin);
     let _ = child.wait().await;
     server.stop().await;
+}
+
+/// The session update of `kind` about `call` in `messages`.
+fn call_update<'a>(messages: &'a [Value], kind: &str, call: &Value) -> &'a Value {
+    messages
+        .iter()
+        .map(|message| &message["params"]["update"])
+        .find(|update| {
+            update["sessionUpdate"].as_str() == Some(kind)
+                && &update["toolCallId"] == call
+                && (kind == "tool_call" || update["status"].as_str() == Some("completed"))
+        })
+        .unwrap_or_else(|| panic!("no {kind} for {call}: {messages:?}"))
+}
+
+/// The diffs among a tool result's content.
+fn diffs(update: &Value) -> Vec<Value> {
+    update["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|content| content["type"] == "diff")
+        .cloned()
+        .collect()
+}
+
+/// An editor is told which files a call works on, at absolute paths it can
+/// open and follow, spelled from the folder it opened the session in, and
+/// sees what an edit changed as a diff beside the call's text result, live
+/// and when the session is loaded again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn edits_reach_the_editor_as_diffs_at_the_files_they_change() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, _data, session) =
+        acp_session(&directory).await;
+    std::fs::write(workspace.join("notes.txt"), "one\ntwo\n").expect("write the edited file");
+    std::fs::write(workspace.join("gone.txt"), "bye\n").expect("write the deleted file");
+    // As the session was opened: on macOS the temporary folder is reached
+    // through a link (`/var` is `/private/var`), and on Windows through a
+    // short name, which the server's own name for the workspace resolves.
+    let at = |file: &str| workspace.join(file).to_string_lossy().into_owned();
+
+    let edit = json!({"path":"notes.txt", "old":"two", "new":"TWO"});
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool edit {edit}")}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 3, &mut messages).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{messages:?}");
+    let call = messages
+        .iter()
+        .map(|message| &message["params"]["update"])
+        .find(|update| update["sessionUpdate"] == "tool_call")
+        .unwrap_or_else(|| panic!("no tool call: {messages:?}"));
+    assert_eq!(call["title"], "Edit notes.txt");
+    assert_eq!(call["locations"], json!([{"path": at("notes.txt")}]));
+    let result = call_update(&messages, "tool_call_update", &call["toolCallId"]);
+    assert_eq!(result["locations"], call["locations"]);
+    assert_eq!(
+        result["content"][0]["type"], "content",
+        "the text result stays: {result}"
+    );
+    assert_eq!(
+        diffs(result),
+        [json!({"type":"diff", "path": at("notes.txt"),
+                "oldText":"one\ntwo\n", "newText":"one\nTWO\n"})]
+    );
+
+    // A patch names its files: one it adds (no old text) and one it deletes
+    // (empty new text).
+    let patch = json!({"input": "*** Begin Patch\n*** Add File: added.txt\n+fresh\n*** Delete File: gone.txt\n*** End Patch\n"});
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":4, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool apply_patch {patch}")}]}}),
+    )
+    .await;
+    let mut patched = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 4, &mut patched).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{patched:?}");
+    assert!(!workspace.join("gone.txt").exists(), "{patched:?}");
+    let call = patched
+        .iter()
+        .map(|message| &message["params"]["update"])
+        .find(|update| update["sessionUpdate"] == "tool_call")
+        .unwrap_or_else(|| panic!("no tool call: {patched:?}"));
+    assert_eq!(call["title"], "Edit added.txt and 1 more");
+    assert_eq!(call["kind"], "edit");
+    assert_eq!(
+        call["locations"],
+        json!([{"path": at("added.txt")}, {"path": at("gone.txt")}])
+    );
+    let result = call_update(&patched, "tool_call_update", &call["toolCallId"]);
+    assert_eq!(
+        diffs(result),
+        [
+            json!({"type":"diff", "path": at("added.txt"), "newText":"fresh\n"}),
+            json!({"type":"diff", "path": at("gone.txt"), "oldText":"bye\n", "newText":""}),
+        ]
+    );
+
+    // A batch names the files of its steps and shows what each changed.
+    let batch = json!({"tool_calls": [
+        {"tool":"edit", "parameters":{"path":"notes.txt", "old":"one", "new":"ONE"}},
+        {"tool":"write", "parameters":{"path":"batched.txt", "content":"step\n"}},
+    ]});
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":5, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool batch {batch}")}]}}),
+    )
+    .await;
+    let mut batched = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 5, &mut batched).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{batched:?}");
+    let call = batched
+        .iter()
+        .map(|message| &message["params"]["update"])
+        .find(|update| update["sessionUpdate"] == "tool_call")
+        .unwrap_or_else(|| panic!("no tool call: {batched:?}"));
+    assert_eq!(
+        call["locations"],
+        json!([{"path": at("notes.txt")}, {"path": at("batched.txt")}])
+    );
+    let result = call_update(&batched, "tool_call_update", &call["toolCallId"]);
+    assert_eq!(
+        diffs(result),
+        [
+            json!({"type":"diff", "path": at("notes.txt"),
+                   "oldText":"one\nTWO\n", "newText":"ONE\nTWO\n"}),
+            json!({"type":"diff", "path": at("batched.txt"), "newText":"step\n"}),
+        ],
+        "{result}"
+    );
+
+    // A load shows the same, from the stored chat.
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":6, "method":"session/load",
+               "params":{"sessionId":session, "cwd":workspace, "mcpServers":[]}}),
+    )
+    .await;
+    let mut replayed = Vec::new();
+    let loaded = receive_response(&mut lines, &mut stdin, 6, &mut replayed).await;
+    assert_eq!(loaded["result"], json!({}), "{replayed:?}");
+    let updates = replayed
+        .iter()
+        .map(|message| &message["params"]["update"])
+        .collect::<Vec<_>>();
+    assert!(
+        updates
+            .iter()
+            .any(|update| update["sessionUpdate"] == "tool_call"
+                && update["title"] == "Edit notes.txt"
+                && update["locations"] == json!([{"path": at("notes.txt")}])),
+        "{replayed:?}"
+    );
+    let replayed_diffs = updates
+        .iter()
+        .filter(|update| update["sessionUpdate"] == "tool_call_update")
+        .flat_map(|update| diffs(update))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replayed_diffs,
+        [
+            json!({"type":"diff", "path": at("notes.txt"),
+                   "oldText":"one\ntwo\n", "newText":"one\nTWO\n"}),
+            json!({"type":"diff", "path": at("added.txt"), "newText":"fresh\n"}),
+            json!({"type":"diff", "path": at("gone.txt"), "oldText":"bye\n", "newText":""}),
+            json!({"type":"diff", "path": at("notes.txt"),
+                   "oldText":"one\nTWO\n", "newText":"ONE\nTWO\n"}),
+            json!({"type":"diff", "path": at("batched.txt"), "newText":"step\n"}),
+        ]
+    );
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}
+
+/// After each prompt, and after a load, the editor is told how much of the
+/// model's context window the chat fills.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_prompt_and_a_load_report_how_full_the_context_is() {
+    // An OpenAI-compatible endpoint, configured with its model's window.
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async {
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"choices\":[{\"delta\":{\"content\":\"metered\"}}]}\n\n\
+                 data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\
+                 \"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":3}}\n\n\
+                 data: [DONE]\n\n",
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the model endpoint");
+    let port = listener.local_addr().expect("endpoint address").port();
+    let endpoint = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness")).expect("create ACP workspace config");
+    std::fs::write(
+        workspace.join(".haarness/config.toml"),
+        format!(
+            "[providers.meter]\nprotocol = \"openai-chat-completions\"\nname = \"Meter\"\n\
+             base_url = \"http://127.0.0.1:{port}/v1\"\nrequires_auth = false\n\
+             models = [\"meter-1\"]\ncontext_window = 200000\n"
+        ),
+    )
+    .expect("configure the metered provider");
+    std::fs::create_dir_all(&home).expect("create isolated ACP home");
+    let mut server = DaemonGuard::new(workspace.clone(), data.clone(), home.clone());
+    let mut command = base_command(&workspace, &data, &home);
+    command
+        .arg("acp")
+        .arg("-m")
+        .arg("meter/meter-1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn().expect("launch Haarness ACP agent");
+    let mut stdin = child.stdin.take().expect("ACP stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("ACP stdout")).lines();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":1, "method":"initialize",
+               "params":{"protocolVersion":1, "clientCapabilities":{}}}),
+    )
+    .await;
+    assert_eq!(receive(&mut lines).await["id"], 1);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":2, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[]}}),
+    )
+    .await;
+    let created = receive(&mut lines).await;
+    let session = created["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("ACP session id: {created}"))
+        .to_owned();
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":"How full is it?"}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 3, &mut messages).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{messages:?}");
+    let answer = messages
+        .iter()
+        .position(|message| update_text(message, "agent_message_chunk") == Some("metered"))
+        .unwrap_or_else(|| panic!("no answer: {messages:?}"));
+    let usage = messages
+        .iter()
+        .position(|message| message["params"]["update"]["sessionUpdate"] == "usage_update")
+        .unwrap_or_else(|| panic!("no usage update: {messages:?}"));
+    assert!(usage > answer, "the usage follows the turn: {messages:?}");
+    let update = &messages[usage]["params"]["update"];
+    assert_eq!(update["size"], 200_000, "{update}");
+    assert!(
+        update["used"].as_u64().is_some_and(|used| used >= 1200),
+        "the context holds what the endpoint counted: {update}"
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":4, "method":"session/load",
+               "params":{"sessionId":session, "cwd":workspace, "mcpServers":[]}}),
+    )
+    .await;
+    let mut replayed = Vec::new();
+    let loaded = receive_response(&mut lines, &mut stdin, 4, &mut replayed).await;
+    assert_eq!(loaded["result"], json!({}), "{replayed:?}");
+    let last = replayed.last().map(|message| &message["params"]["update"]);
+    assert_eq!(
+        last.map(|update| &update["sessionUpdate"]),
+        Some(&json!("usage_update")),
+        "a load ends with the chat's usage: {replayed:?}"
+    );
+    let last = last.unwrap();
+    assert!(
+        last["used"].as_u64().is_some_and(|used| used >= 1200),
+        "{last}"
+    );
+    assert_eq!(last["size"], 200_000);
+
+    drop(stdin);
+    let _ = child.wait().await;
+    server.stop().await;
+    endpoint.abort();
 }
