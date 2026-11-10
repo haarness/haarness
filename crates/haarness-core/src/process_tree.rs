@@ -155,7 +155,7 @@ static RECORDS: std::sync::LazyLock<Mutex<Option<std::path::PathBuf>>> =
 /// Notes `cache`, the folder where each server of this process's Haarness leaves its runtime record (`runtime.json`,
 /// there or in a project's folder in `workspaces`), which names the server's process and address. A Haarness program
 /// of a person's is taken for a server ([`Peer::Server`]) only when a record names it and the port it listens on.
-pub fn note_server_records(cache: &Path) {
+pub fn note_server_records(cache: &std::path::Path) {
     #[cfg(unix)]
     {
         *RECORDS.lock() = Some(cache.to_path_buf());
