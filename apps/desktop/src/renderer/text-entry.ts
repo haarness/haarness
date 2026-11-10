@@ -32,9 +32,10 @@ export function isTextEntry(element: unknown): boolean {
 }
 
 /** Whether a key belongs to an input method's composition rather than to the
- * page: Escape that cancels a candidate, Enter that confirms one. Chromium
- * reports the key that ends a composition with keyCode 229, sometimes after
- * `isComposing` has already gone false. */
+ * page: Escape that cancels a candidate, Enter that confirms one. A key the
+ * input method handles also reports keyCode 229. WebKit sends the key that
+ * ends a composition that way after `isComposing` has gone false; Chromium
+ * marks that key as composing too, so there the keyCode is only a backstop. */
 export function composing(event: Pick<KeyboardEvent, "isComposing" | "keyCode">) {
   return event.isComposing || event.keyCode === 229;
 }

@@ -12278,6 +12278,16 @@ test("conversation find reaches virtual history, cycles matches, and respects ke
   await expect(find).toHaveCount(0);
   // The keyboard goes back to where Find was opened from, the message box.
   await expect(page.getByRole("textbox", { name: "Message", exact: true })).toBeFocused();
+  // Search, too, leaves Escape to an input method composing in its field.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const search = page.getByRole("dialog", { name: "Universal search", exact: true });
+  const query = search.getByRole("combobox", { name: "Search Haarness", exact: true });
+  await query.fill("find");
+  await composingKey(query, "Escape", { isComposing: true });
+  await expect(search).toBeVisible();
+  await expect(query).toHaveValue("find");
+  await query.press("Escape");
+  await expect(search).toHaveCount(0);
   await page.getByRole("button", { name: "Chat actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Find in chat", exact: true }).click();
   await expect(find).toBeFocused();
