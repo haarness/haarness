@@ -3041,7 +3041,6 @@
   "Apps without a rule": "Apps without a rule",
   "Mark each click on screen": "Mark each click on screen",
   "App rules": "App rules",
-  "Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.": "Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.",
   "Rule for {app}": "Rule for {app}",
   "Remove the rule for {app}": "Remove the rule for {app}",
   "App bundle identifier": "App bundle identifier",
@@ -3056,7 +3055,6 @@
   "I have read and agree to these terms": "I have read and agree to these terms",
   "Agree and turn on": "Agree and turn on",
   "Required for screenshots. Agents can still read apps without it, just not see them.": "Required for screenshots. Agents can still read apps without it, just not see them.",
-  "Terminals and code editors still ask before a click on their text.": "Terminals and code editors still ask before a click on their text.",
   "A ring marks the spot for a moment before each click.": "A ring marks the spot for a moment before each click.",
   "You agree to these before agents use this Mac.": "You agree to these before agents use this Mac.",
   "The spot the agent aims at": "The spot the agent aims at",
@@ -3099,7 +3097,6 @@
   "Tried to point at": "Tried to point at",
   "Using this Mac": "Using this Mac",
   "Terms for computer use": "Terms for computer use",
-  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.",
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.",
   "Use a bundle identifier like com.apple.TextEdit.": "Use a bundle identifier like com.apple.TextEdit.",
@@ -3155,5 +3152,7 @@
   "add credits or choose a plan": "add credits or choose a plan",
   "add credits with /billing topup": "add credits with /billing topup",
   "turn on overage so your purchased credits pay": "turn on overage so your purchased credits pay",
-  "add credits and turn on overage to keep working": "add credits and turn on overage to keep working"
+  "add credits and turn on overage to keep working": "add credits and turn on overage to keep working",
+  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.",
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you."
 }

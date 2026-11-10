@@ -3041,7 +3041,6 @@
   "Apps without a rule": "Приложения без правила",
   "Mark each click on screen": "Отмечать каждый щелчок на экране",
   "App rules": "Правила приложений",
-  "Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.": "Менеджеры паролей и сам Haarness никогда не используются, браузеры — только через инструменты браузера, а Системные настройки только читаются.",
   "Rule for {app}": "Правило для {app}",
   "Remove the rule for {app}": "Удалить правило для {app}",
   "App bundle identifier": "Идентификатор пакета приложения",
@@ -3056,7 +3055,6 @@
   "I have read and agree to these terms": "Я прочитал(а) эти условия и согласен(на) с ними",
   "Agree and turn on": "Согласиться и включить",
   "Required for screenshots. Agents can still read apps without it, just not see them.": "Нужно для снимков экрана. Без этого агенты по-прежнему читают приложения, но не видят их.",
-  "Terminals and code editors still ask before a click on their text.": "Терминалы и редакторы кода по-прежнему спрашивают перед щелчком по их тексту.",
   "A ring marks the spot for a moment before each click.": "Перед каждым щелчком кольцо на миг отмечает место.",
   "You agree to these before agents use this Mac.": "Вы соглашаетесь с ними, прежде чем агенты начнут пользоваться этим Mac.",
   "The spot the agent aims at": "Место, куда целится агент",
@@ -3099,7 +3097,6 @@
   "Tried to point at": "Не удалось навести на",
   "Using this Mac": "Использует этот Mac",
   "Terms for computer use": "Условия управления компьютером",
-  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "В тексте терминала или редактора может оказаться чужой запрос, поэтому каждый щелчок по нему требует вашего одобрения.",
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Агенты могут видеть экран этого Mac и работать с его приложениями. Они смотрят на одно приложение за раз и спрашивают вас, прежде чем действовать в приложении, которое вы не разрешили.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "На экране этого Mac вошёл другой пользователь, поэтому агенты не могут пользоваться им из этой учётной записи.",
   "Use a bundle identifier like com.apple.TextEdit.": "Укажите идентификатор пакета, например com.apple.TextEdit.",
@@ -3155,5 +3152,7 @@
   "add credits or choose a plan": "пополните кредиты или выберите тариф",
   "add credits with /billing topup": "пополните кредиты через /billing topup",
   "turn on overage so your purchased credits pay": "включите перерасход, чтобы платить купленными кредитами",
-  "add credits and turn on overage to keep working": "пополните кредиты и включите перерасход, чтобы продолжить"
+  "add credits and turn on overage to keep working": "пополните кредиты и включите перерасход, чтобы продолжить",
+  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "«Сначала спрашивать» — это одно одобрение на приложение в каждом чате; в чатах в режиме Авто его даёт проверяющий.",
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Менеджеры паролей и сам Haarness никогда не используются, а агенты никогда не вводят текст в терминалах. В режиме Авто приложения с запросом каждый раз по-прежнему спрашивают вас."
 }

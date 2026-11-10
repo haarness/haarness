@@ -343,13 +343,7 @@ fn computer_subject(
                 .replace("{text}", &format!("{}{more}", show(&cut))),
         );
     }
-    if mac["everyTime"] == true && mac["console"] == true {
-        lines.push(
-            language
-                .text("Terminal and editor text can hold someone's prompt, so every click on it needs your approval.")
-                .to_owned(),
-        );
-    } else if mac["everyTime"] == true {
+    if mac["everyTime"] == true {
         lines.push(
             language
                 .text("You set this app to ask every time.")

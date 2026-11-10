@@ -3041,7 +3041,6 @@
   "Apps without a rule": "규칙이 없는 앱",
   "Mark each click on screen": "화면에 클릭 위치 표시",
   "App rules": "앱 규칙",
-  "Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.": "비밀번호 관리자와 Haarness 자체는 절대 사용되지 않고, 브라우저는 브라우저 도구로만 사용되며, 시스템 설정은 읽기만 합니다.",
   "Rule for {app}": "{app} 규칙",
   "Remove the rule for {app}": "{app} 규칙 삭제",
   "App bundle identifier": "앱 번들 식별자",
@@ -3056,7 +3055,6 @@
   "I have read and agree to these terms": "이 약관을 읽었으며 이에 동의합니다",
   "Agree and turn on": "동의하고 켜기",
   "Required for screenshots. Agents can still read apps without it, just not see them.": "스크린샷에 필요합니다. 없어도 에이전트는 앱을 읽을 수 있지만 화면을 볼 수는 없습니다.",
-  "Terminals and code editors still ask before a click on their text.": "터미널과 코드 편집기는 텍스트를 클릭하기 전에 여전히 묻습니다.",
   "A ring marks the spot for a moment before each click.": "클릭하기 직전에 링이 잠시 위치를 표시합니다.",
   "You agree to these before agents use this Mac.": "에이전트가 이 Mac을 사용하기 전에 이 약관에 동의합니다.",
   "The spot the agent aims at": "에이전트가 겨냥하는 위치",
@@ -3099,7 +3097,6 @@
   "Tried to point at": "가리키기 시도",
   "Using this Mac": "이 Mac 사용 중",
   "Terms for computer use": "컴퓨터 사용 약관",
-  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "터미널과 편집기의 텍스트에는 누군가의 확인 요청이 있을 수 있으므로, 그 텍스트를 클릭할 때마다 승인이 필요합니다.",
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "에이전트가 이 Mac의 화면을 보고 앱을 조작할 수 있습니다. 한 번에 한 앱만 보며, 허용하지 않은 앱에서 작업하기 전에는 먼저 확인합니다.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "다른 사용자가 이 Mac 화면에 로그인되어 있어 에이전트가 이 계정에서 사용할 수 없습니다.",
   "Use a bundle identifier like com.apple.TextEdit.": "com.apple.TextEdit 같은 번들 식별자를 사용하세요.",
@@ -3155,5 +3152,7 @@
   "add credits or choose a plan": "크레딧을 추가하거나 플랜을 선택하세요",
   "add credits with /billing topup": "/billing topup으로 크레딧 추가",
   "turn on overage so your purchased credits pay": "구매한 크레딧이 사용되도록 초과 사용을 켜세요",
-  "add credits and turn on overage to keep working": "계속하려면 크레딧을 추가하고 초과 사용을 켜세요"
+  "add credits and turn on overage to keep working": "계속하려면 크레딧을 추가하고 초과 사용을 켜세요",
+  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "먼저 묻기는 각 채팅에서 앱마다 한 번 승인하는 것이며, 자동 채팅에서는 검토자에게 맡깁니다.",
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "비밀번호 관리자와 Haarness 자체는 절대 사용되지 않으며, 에이전트는 터미널에 입력하지 않습니다. 자동에서도 매번 묻도록 설정한 앱은 계속 사용자에게 묻습니다."
 }

@@ -45,9 +45,8 @@ pub enum PermissionChoice {
     App,
 }
 
-/// The app a computer use request may allow in every chat (see [`PermissionChoice::App`]): an action in an ordinary
-/// app. Opening an app, looking at the whole screen, and anything that asks every time (terminals and editors, apps
-/// set to ask) offer nothing lasting.
+/// The app a computer use request may allow in every chat (see [`PermissionChoice::App`]): an action in an app.
+/// Opening an app, looking at the whole screen, and anything in an app set to ask every time offer nothing lasting.
 #[must_use]
 pub fn lasting_app(pending: &haarness_protocol::PendingPermissionInfo) -> Option<&str> {
     let mac = &pending.detail["__mac"];
@@ -56,8 +55,7 @@ pub fn lasting_app(pending: &haarness_protocol::PendingPermissionInfo) -> Option
     (computer
         && pending.allow_always != Some(false)
         && mac["kind"] == "act"
-        && mac["everyTime"] != true
-        && mac["console"] != true)
+        && mac["everyTime"] != true)
         .then(|| allowed_app(pending))
         .flatten()
         .map(|(bundle, _)| bundle)

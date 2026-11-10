@@ -3041,7 +3041,6 @@
   "Apps without a rule": "Apps ohne Regel",
   "Mark each click on screen": "Jeden Klick auf dem Bildschirm markieren",
   "App rules": "App-Regeln",
-  "Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.": "Passwortmanager und Haarness selbst werden nie verwendet, Browser nur über die Browser-Werkzeuge, und die Systemeinstellungen werden nur gelesen.",
   "Rule for {app}": "Regel für {app}",
   "Remove the rule for {app}": "Regel für {app} entfernen",
   "App bundle identifier": "Bundle-ID der App",
@@ -3056,7 +3055,6 @@
   "I have read and agree to these terms": "Ich habe diese Bedingungen gelesen und stimme ihnen zu",
   "Agree and turn on": "Zustimmen und einschalten",
   "Required for screenshots. Agents can still read apps without it, just not see them.": "Nötig für Screenshots. Ohne sie können Agenten Apps weiterhin lesen, sie aber nicht sehen.",
-  "Terminals and code editors still ask before a click on their text.": "Terminals und Code-Editoren fragen weiterhin vor einem Klick auf ihren Text.",
   "A ring marks the spot for a moment before each click.": "Ein Ring markiert die Stelle kurz vor jedem Klick.",
   "You agree to these before agents use this Mac.": "Diesen stimmst du zu, bevor Agenten diesen Mac verwenden.",
   "The spot the agent aims at": "Die Stelle, auf die der Agent zielt",
@@ -3099,7 +3097,6 @@
   "Tried to point at": "Zeigen fehlgeschlagen",
   "Using this Mac": "Verwendet diesen Mac",
   "Terms for computer use": "Bedingungen für die Computersteuerung",
-  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Text in Terminals und Editoren kann eine Rückfrage enthalten, deshalb braucht jeder Klick darauf deine Zustimmung.",
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Agenten können den Bildschirm dieses Macs sehen und seine Apps bedienen. Sie sehen sich jeweils eine App an und fragen dich, bevor sie in einer App handeln, die du nicht erlaubt hast.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "An diesem Mac ist ein anderer Benutzer am Bildschirm angemeldet, daher können Agenten ihn von diesem Konto aus nicht verwenden.",
   "Use a bundle identifier like com.apple.TextEdit.": "Verwende eine Bundle-ID wie com.apple.TextEdit.",
@@ -3155,5 +3152,7 @@
   "add credits or choose a plan": "Credits hinzufügen oder einen Tarif wählen",
   "add credits with /billing topup": "Credits mit /billing topup hinzufügen",
   "turn on overage so your purchased credits pay": "Mehrverbrauch einschalten, damit deine gekauften Credits zahlen",
-  "add credits and turn on overage to keep working": "Credits hinzufügen und Mehrverbrauch einschalten, um weiterzuarbeiten"
+  "add credits and turn on overage to keep working": "Credits hinzufügen und Mehrverbrauch einschalten, um weiterzuarbeiten",
+  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "„Zuerst fragen“ heißt eine Freigabe pro App in jedem Chat; Chats auf Auto überlassen sie dem Prüfer.",
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Passwortmanager und Haarness selbst werden nie verwendet, und Agenten tippen nie in Terminals. Auf Auto fragen Apps, die jedes Mal fragen sollen, weiterhin dich."
 }

@@ -201,7 +201,7 @@ export function ComputerUseSettings() {
                 <h3>{t("Apps")}</h3>
                 <Row
                   title="Apps without a rule"
-                  description="Terminals and code editors still ask before a click on their text."
+                  description="Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer."
                 >
                   <Select
                     aria-label={t("Apps without a rule")}
@@ -228,7 +228,7 @@ export function ComputerUseSettings() {
                   <div class="computer-apps-head">
                     <strong>{t("App rules")}</strong>
                     <p>
-                      {t("Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.")}
+                      {t("Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.")}
                     </p>
                   </div>
                   <Show when={current().settings.apps.length}>

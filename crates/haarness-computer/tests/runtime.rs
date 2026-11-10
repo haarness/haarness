@@ -6,8 +6,9 @@ use async_trait::async_trait;
 use futures::stream;
 use haarness_computer::{Computer, Config};
 use haarness_core::{
-    AgentRuntime, CoreResult, EventBus, ModelProvider, ProviderEvent, ProviderRequest,
-    ProviderStream, RuntimeConfig, StaticProviderRegistry, ToolRegistry,
+    AgentRuntime, CoreResult, EventBus, HookCall, HookDecision, HookPort, ModelProvider,
+    PermissionDecision, PermissionRule, ProviderEvent, ProviderRequest, ProviderStream,
+    RuntimeConfig, StaticProviderRegistry, ToolRegistry,
 };
 use haarness_protocol::{
     ApprovalMode, CreateThreadRequest, Item, ItemData, PendingPermissionInfo, PermissionReply,
@@ -24,10 +25,14 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// The chat's model, and Auto's reviewer when a request carries the verdict schema: each review takes the next of
+/// `verdicts` (allow when there is none left) and is kept in `reviews`.
 #[derive(Default)]
 struct Scripted {
     rounds: Mutex<VecDeque<Vec<ProviderEvent>>>,
     requests: Mutex<Vec<ProviderRequest>>,
+    verdicts: Mutex<VecDeque<Value>>,
+    reviews: Mutex<Vec<ProviderRequest>>,
 }
 
 #[async_trait]
@@ -48,6 +53,27 @@ impl ModelProvider for Scripted {
         request: ProviderRequest,
         _: CancellationToken,
     ) -> CoreResult<ProviderStream> {
+        let review = request
+            .output_schema
+            .as_ref()
+            .and_then(|schema| schema["description"].as_str())
+            == Some(haarness_core::auto_review::VERDICT_SCHEMA_DESCRIPTION);
+        if review {
+            self.reviews.lock().unwrap().push(request);
+            let verdict = self.verdicts.lock().unwrap().pop_front().unwrap_or_else(
+                || json!({"risk": "low", "authorization": "high", "outcome": "allow"}),
+            );
+            return Ok(Box::pin(stream::iter(
+                [
+                    ProviderEvent::StructuredOutput(verdict),
+                    ProviderEvent::Finished {
+                        reason: "done".into(),
+                    },
+                ]
+                .into_iter()
+                .map(Ok),
+            )));
+        }
         self.requests.lock().unwrap().push(request);
         let mut events = self
             .rounds
@@ -84,6 +110,15 @@ struct Lab {
 
 impl Lab {
     fn new(settings: Value) -> Self {
+        Self::with_runtime(settings, |_| {}, None)
+    }
+
+    /// A lab whose runtime configuration `configure` changes, with `hooks` answering its requests.
+    fn with_runtime(
+        settings: Value,
+        configure: impl FnOnce(&mut RuntimeConfig),
+        hooks: Option<Arc<dyn HookPort>>,
+    ) -> Self {
         let root = std::env::temp_dir().join(format!("haarness-computer-{}", uuid::Uuid::now_v7()));
         for folder in ["workspace", "config", "data", "cache"] {
             std::fs::create_dir_all(root.join(folder)).unwrap();
@@ -119,7 +154,12 @@ impl Lab {
         computer.watch(&events);
         let tools =
             Arc::new(NativeToolRegistry::new(root.join("workspace")).with_tools(computer.tools()));
-        let runtime = Arc::new(AgentRuntime::with_config(
+        let mut config = RuntimeConfig {
+            approval_mode: ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        };
+        configure(&mut config);
+        let runtime = AgentRuntime::with_config(
             Arc::new(SqliteStore::in_memory().unwrap()),
             Arc::new(StaticProviderRegistry::new(vec![
                 provider.clone() as Arc<dyn ModelProvider>
@@ -128,11 +168,12 @@ impl Lab {
             events.clone(),
             root.join("workspace"),
             String::new(),
-            RuntimeConfig {
-                approval_mode: ApprovalMode::Review,
-                ..RuntimeConfig::default()
-            },
-        ));
+            config,
+        );
+        let runtime = Arc::new(match hooks {
+            Some(hooks) => runtime.with_hooks(hooks),
+            None => runtime,
+        });
         Self {
             root,
             runtime,
@@ -144,7 +185,7 @@ impl Lab {
     }
 
     fn on() -> Value {
-        json!({"enabled": true, "terms": {"version": "1", "acceptedAt": "2026-11-07T00:00:00Z"}})
+        json!({"enabled": true, "terms": {"version": haarness_computer::terms::VERSION, "acceptedAt": "2026-11-07T00:00:00Z"}})
     }
 
     fn with(extra: Value) -> Value {
@@ -491,13 +532,15 @@ async fn set_mode(lab: &Lab, thread: ThreadId, mode: haarness_protocol::Approval
 }
 
 /// Yolo is yes to everything: in a chat in Yolo computer use asks nothing,
-/// not even where it would ask every time (an app set to ask, a terminal's
-/// text). Never still refuses, and Auto still leaves it to a person.
+/// not even where it would ask every time (an app set to ask). Never still
+/// refuses. Auto with its reviewer off leaves it to a person.
 #[tokio::test]
-async fn yolo_answers_computer_use_and_auto_leaves_it_to_a_person() {
-    let lab = Lab::new(Lab::with(
-        json!({"apps": {"com.apple.TextEdit": "ask", "com.apple.Notes": "deny"}}),
-    ));
+async fn yolo_answers_computer_use_and_auto_without_its_reviewer_leaves_it_to_a_person() {
+    let lab = Lab::with_runtime(
+        Lab::with(json!({"apps": {"com.apple.TextEdit": "ask", "com.apple.Notes": "deny"}})),
+        |config| config.auto_review.enabled = false,
+        None,
+    );
     let thread = lab.thread().await;
     set_mode(&lab, thread, haarness_protocol::ApprovalModeSetting::Yolo).await;
     for (id, element) in [("ruled", "e1"), ("terminal", "e6"), ("button", "e5")] {
@@ -537,9 +580,246 @@ async fn yolo_answers_computer_use_and_auto_leaves_it_to_a_person() {
     .await;
     let pending = lab.permission().await;
     assert_eq!(pending.permission, "computer");
+    assert!(pending.review.is_none(), "{:?}", pending.review);
     lab.answer(&pending, PermissionReplyDecision::Reject).await;
     let items = lab.finish(auto).await;
     assert!(result(&items, "auto").1);
+    assert!(lab.provider.reviews.lock().unwrap().is_empty());
+}
+
+/// The reviewer's prompts so far, as one text each.
+fn review_prompts(lab: &Lab) -> Vec<String> {
+    lab.provider
+        .reviews
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| {
+            request
+                .messages
+                .iter()
+                .filter_map(|message| match message {
+                    haarness_core::ProviderMessage::Text { content, .. } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect()
+}
+
+/// In a chat in Auto, Auto's reviewer answers computer use as it answers other requests: what it allows runs with no
+/// card, what it leaves to the person shows its note, and what it blocks never runs. It reads the app, the element and
+/// the text, never the picture of the spot. An app the person set to ask every time goes to them, unreviewed.
+#[tokio::test]
+async fn auto_s_reviewer_answers_computer_use_and_apps_set_to_ask_stay_with_the_person() {
+    let lab = Lab::new(Lab::with(json!({"apps": {"com.apple.Notes": "ask"}})));
+    let thread = lab.thread().await;
+    set_mode(&lab, thread, haarness_protocol::ApprovalModeSetting::Auto).await;
+
+    // Allowed: no card, and the click runs.
+    let items = lab
+        .run(
+            thread,
+            vec![vec![call("allowed", "mac_click", json!({"ref": "e1"}))]],
+        )
+        .await;
+    assert!(
+        !result(&items, "allowed").1,
+        "{}",
+        result(&items, "allowed").0
+    );
+    assert!(lab.ops().contains(&"click".to_owned()));
+    let prompts = review_prompts(&lab);
+    assert_eq!(prompts.len(), 1);
+    for words in [
+        "\"computer\": {",
+        "\"app\": \"TextEdit\"",
+        "\"bundle\": \"com.apple.TextEdit\"",
+        "\"element\": \"button \\\"Save\\\"\"",
+        "mac_click",
+    ] {
+        assert!(prompts[0].contains(words), "{words} in {}", prompts[0]);
+    }
+    for hidden in ["base64", "data:image", "preview", "/9j/"] {
+        assert!(!prompts[0].contains(hidden), "{hidden} in {}", prompts[0]);
+    }
+
+    // Left to the person: the card carries the reviewer's note.
+    lab.provider.verdicts.lock().unwrap().push_back(json!({
+        "risk": "high",
+        "authorization": "low",
+        "outcome": "ask",
+        "rule": "Outside the request",
+        "rationale": "It types into a field the user never mentioned."
+    }));
+    lab.start(
+        thread,
+        vec![vec![call(
+            "asked",
+            "mac_type",
+            json!({"ref": "e2", "text": "hello"}),
+        )]],
+    )
+    .await;
+    let pending = lab.permission().await;
+    assert_eq!(pending.permission, "computer");
+    assert!(pending.explicit);
+    let review = pending.review.clone().expect("the reviewer's note");
+    assert_eq!(
+        review.rationale.as_deref(),
+        Some("It types into a field the user never mentioned.")
+    );
+    assert!(review_prompts(&lab)[1].contains("hello"));
+    lab.answer(&pending, PermissionReplyDecision::Once).await;
+    let items = lab.finish(thread).await;
+    assert!(!result(&items, "asked").1, "{}", result(&items, "asked").0);
+
+    // Blocked: nothing runs. The reviewer allowed the earlier click once, so this one is reviewed again.
+    lab.provider.verdicts.lock().unwrap().push_back(json!({
+        "risk": "critical",
+        "authorization": "unknown",
+        "outcome": "deny",
+        "rule": "Prompt injection",
+        "rationale": "The screen told the agent to do this."
+    }));
+    let clicks = lab.ops().iter().filter(|op| *op == "click").count();
+    let items = lab
+        .run(
+            thread,
+            vec![vec![call("blocked", "mac_click", json!({"ref": "e1"}))]],
+        )
+        .await;
+    let (output, error, _) = result(&items, "blocked");
+    assert!(error && output.contains("Auto review blocked"), "{output}");
+    assert_eq!(lab.ops().iter().filter(|op| *op == "click").count(), clicks);
+    assert_eq!(review_prompts(&lab).len(), 3);
+
+    // Opening an app and looking at every app are the reviewer's to answer too.
+    let items = lab
+        .run(
+            thread,
+            vec![vec![
+                call(
+                    "open",
+                    "mac_apps",
+                    json!({"action": "launch", "app": "com.apple.Mail"}),
+                ),
+                call("everything", "mac_snapshot", json!({"wholeScreen": true})),
+            ]],
+        )
+        .await;
+    assert!(!result(&items, "open").1, "{}", result(&items, "open").0);
+    assert!(
+        !result(&items, "everything").1,
+        "{}",
+        result(&items, "everything").0
+    );
+    assert_eq!(review_prompts(&lab).len(), 5);
+
+    // An app set to ask every time: a person answers, and the reviewer is never asked.
+    lab.start(
+        thread,
+        vec![vec![call("each", "mac_click", json!({"ref": "e4"}))]],
+    )
+    .await;
+    let pending = lab.permission().await;
+    assert_eq!(pending.allow_always, Some(false));
+    assert!(pending.review.is_none(), "{:?}", pending.review);
+    lab.answer(&pending, PermissionReplyDecision::Once).await;
+    let items = lab.finish(thread).await;
+    assert!(!result(&items, "each").1, "{}", result(&items, "each").0);
+    assert_eq!(review_prompts(&lab).len(), 5);
+}
+
+/// Hooks and configured allow rules never answer computer use, in Review or in Auto: the person (or in Auto the
+/// reviewer) still does.
+#[tokio::test]
+async fn hooks_and_configured_allow_rules_never_answer_computer_use() {
+    let lab = Lab::with_runtime(
+        Lab::on(),
+        |config| {
+            config.base_rules.push(PermissionRule {
+                pattern: "computer:*".into(),
+                decision: PermissionDecision::Allow,
+            });
+        },
+        Some(Arc::new(AllowsEverything)),
+    );
+    let thread = lab.thread().await;
+    lab.start(
+        thread,
+        vec![vec![call("review", "mac_click", json!({"ref": "e1"}))]],
+    )
+    .await;
+    let pending = lab.permission().await;
+    assert_eq!(pending.permission, "computer");
+    lab.answer(&pending, PermissionReplyDecision::Once).await;
+    lab.finish(thread).await;
+    assert!(review_prompts(&lab).is_empty());
+
+    let auto = lab.thread().await;
+    set_mode(&lab, auto, haarness_protocol::ApprovalModeSetting::Auto).await;
+    lab.provider.verdicts.lock().unwrap().push_back(json!({
+        "risk": "medium",
+        "authorization": "unknown",
+        "outcome": "ask",
+        "rule": "Outside the request",
+        "rationale": "Nothing the user said asks for this."
+    }));
+    lab.start(
+        auto,
+        vec![vec![call("auto", "mac_click", json!({"ref": "e1"}))]],
+    )
+    .await;
+    let pending = lab.permission().await;
+    assert!(
+        pending.review.is_some(),
+        "the reviewer, not the hook, answered"
+    );
+    lab.answer(&pending, PermissionReplyDecision::Once).await;
+    lab.finish(auto).await;
+    assert_eq!(review_prompts(&lab).len(), 1);
+}
+
+/// Allows every tool call and every request it is shown.
+struct AllowsEverything;
+
+#[async_trait]
+impl HookPort for AllowsEverything {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
+        HookDecision {
+            permission: Some(PermissionDecision::Allow),
+            ..HookDecision::default()
+        }
+    }
+    async fn post_tool_use(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision {
+            permission: Some(PermissionDecision::Allow),
+            ..HookDecision::default()
+        }
+    }
+    async fn stop(&self, _: &HookCall) {}
 }
 
 #[tokio::test]
@@ -599,7 +879,6 @@ async fn fixed_groups_and_password_fields_are_refused_before_anyone_is_asked() {
         .run(
             thread,
             vec![vec![
-                call("browser", "mac_click", json!({"ref": "e9"})),
                 call("haarness", "mac_click", json!({"ref": "e7"})),
                 call(
                     "password",
@@ -615,7 +894,12 @@ async fn fixed_groups_and_password_fields_are_refused_before_anyone_is_asked() {
                 call(
                     "dock",
                     "mac_drag",
-                    json!({"from": {"ref": "e1"}, "to": {"ref": "e9"}}),
+                    json!({"from": {"ref": "e1"}, "to": {"ref": "e3"}}),
+                ),
+                call(
+                    "drop",
+                    "mac_drag",
+                    json!({"from": {"ref": "e1"}, "to": {"ref": "e6"}}),
                 ),
                 call(
                     "hidden",
@@ -626,12 +910,12 @@ async fn fixed_groups_and_password_fields_are_refused_before_anyone_is_asked() {
         )
         .await;
     for (id, words) in [
-        ("browser", "browser_* tools"),
         ("haarness", "belongs to Haarness"),
         ("password", "Password fields are refused"),
         ("terminal", "never type"),
         ("logout", "is blocked"),
-        ("dock", "browser_* tools"),
+        ("dock", "Drops onto the Dock are refused"),
+        ("drop", "never type"),
         ("hidden", "invisible to computer use"),
     ] {
         let (output, error, _) = result(&items, id);
@@ -645,45 +929,136 @@ async fn fixed_groups_and_password_fields_are_refused_before_anyone_is_asked() {
     );
 }
 
+/// Browsers, System Settings, code editors and terminals have no fixed lock beyond typing into a terminal: they
+/// follow the app rules like any other app, quitting included.
 #[tokio::test]
-async fn a_click_on_terminal_text_asks_every_time_and_its_buttons_once_per_chat() {
+async fn browsers_settings_editors_and_terminals_follow_the_app_rules() {
     let lab = Lab::new(Lab::with(
-        json!({"defaultAct": "allow", "apps": {"com.apple.Terminal": "allow"}}),
+        json!({"defaultAct": "allow", "apps": {"com.apple.Safari": "ask"}}),
     ));
     let thread = lab.thread().await;
-    for round in ["text-one", "text-two"] {
-        lab.start(
-            thread,
-            vec![vec![call(round, "mac_click", json!({"ref": "e6"}))]],
-        )
-        .await;
-        let pending = lab.permission().await;
-        assert_eq!(pending.allow_always, Some(false));
-        assert_eq!(pending.detail["__mac"]["console"], true);
-        lab.answer(&pending, PermissionReplyDecision::Always).await;
-        lab.finish(thread).await;
-    }
-    // Its own buttons follow the app rule, but no rule allows a terminal for good: it asks once in the chat.
-    lab.start(
-        thread,
-        vec![vec![call("button", "mac_click", json!({"ref": "e5"}))]],
-    )
-    .await;
-    let pending = lab.permission().await;
-    assert!(pending.allow_always != Some(false));
-    lab.answer(&pending, PermissionReplyDecision::Always).await;
-    lab.finish(thread).await;
     let items = lab
         .run(
             thread,
+            vec![vec![
+                call("settings", "mac_click", json!({"ref": "e13"})),
+                call(
+                    "editor",
+                    "mac_type",
+                    json!({"ref": "e10", "text": "fn main() {}"}),
+                ),
+                call("terminal", "mac_click", json!({"ref": "e6"})),
+                call("tab", "mac_click", json!({"ref": "e5"})),
+                call(
+                    "quit",
+                    "mac_apps",
+                    json!({"action": "quit", "app": "com.apple.Terminal"}),
+                ),
+            ]],
+        )
+        .await;
+    for id in ["settings", "editor", "terminal", "tab", "quit"] {
+        let (output, error, _) = result(&items, id);
+        assert!(!error, "{id}: {output}");
+    }
+    let ops = lab.ops();
+    assert_eq!(ops.iter().filter(|op| *op == "click").count(), 3, "{ops:?}");
+    assert!(
+        ops.contains(&"type".to_owned()) && ops.contains(&"quit".to_owned()),
+        "{ops:?}"
+    );
+    // A browser set to ask every time asks, as any app with that rule does; the answer reaches its address field.
+    lab.start(
+        thread,
+        vec![vec![call(
+            "browser",
+            "mac_type",
+            json!({"ref": "e11", "text": "haarness.ai"}),
+        )]],
+    )
+    .await;
+    let pending = lab.permission().await;
+    assert_eq!(pending.detail["__mac"]["bundle"], "com.apple.Safari");
+    assert_eq!(pending.detail["__mac"]["everyTime"], true);
+    assert!(pending.detail["__mac"].get("console").is_none());
+    lab.answer(&pending, PermissionReplyDecision::Once).await;
+    let items = lab.finish(thread).await;
+    assert!(
+        !result(&items, "browser").1,
+        "{}",
+        result(&items, "browser").0
+    );
+}
+
+/// While an approval waits for a person, a terminal or an editor may be showing it in Haarness's terminal UI, so a
+/// click, typing or a key there is turned away until it is answered.
+#[tokio::test]
+async fn input_into_a_terminal_or_editor_waits_while_an_approval_is_open() {
+    let lab = Lab::with_runtime(
+        Lab::with(json!({"apps": {
+            "com.microsoft.VSCode": "allow",
+            "com.apple.Terminal": "allow",
+            "com.apple.Notes": "allow"
+        }})),
+        |config| {
+            config.base_rules.push(PermissionRule {
+                pattern: "bash:*".into(),
+                decision: PermissionDecision::Ask,
+            });
+        },
+        None,
+    );
+    // Another chat's command waits for the person.
+    let asking = lab.thread().await;
+    lab.start(
+        asking,
+        vec![vec![call(
+            "asks",
+            "bash",
+            json!({"command": "echo waiting"}),
+        )]],
+    )
+    .await;
+    let pending = lab.permission().await;
+    let other = lab.thread().await;
+    lab.start(
+        other,
+        vec![vec![
+            call("editor", "mac_type", json!({"ref": "e10", "text": "y"})),
+            call("terminal", "mac_click", json!({"ref": "e6"})),
+            call("notes", "mac_click", json!({"ref": "e4"})),
+        ]],
+    )
+    .await;
+    let items = tokio::time::timeout(Duration::from_secs(15), async {
+        while lab.runtime.active_turn(other).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        lab.runtime.items(other, None).await.unwrap()
+    })
+    .await
+    .expect("the other chat's turn finishes");
+    for id in ["editor", "terminal"] {
+        let (output, error, _) = result(&items, id);
+        assert!(
+            error && output.contains("still has to answer an approval"),
+            "{id}: {output}"
+        );
+    }
+    assert!(!result(&items, "notes").1, "{}", result(&items, "notes").0);
+    lab.answer(&pending, PermissionReplyDecision::Once).await;
+    lab.finish(asking).await;
+    let items = lab
+        .run(
+            other,
             vec![vec![call(
-                "button-again",
-                "mac_click",
-                json!({"ref": "e5"}),
+                "later",
+                "mac_type",
+                json!({"ref": "e10", "text": "y"}),
             )]],
         )
         .await;
-    assert!(!result(&items, "button-again").1);
+    assert!(!result(&items, "later").1, "{}", result(&items, "later").0);
 }
 
 #[tokio::test]
@@ -1103,6 +1478,184 @@ async fn escape_ends_the_turn_using_the_screen_and_the_action_under_way() {
         )
         .await;
     lab.finish(thread).await;
+    let turn = lab.runtime.turn(turn.id).await.unwrap();
+    assert_eq!(turn.status, TurnStatus::Interrupted, "{:?}", turn.error);
+}
+
+/// A helper that works behind the person's window says so, and the result passes it on: that the action went in behind,
+/// whether the app showed the change, what it opened and closed, and why it came to the front when it had to. The
+/// fresh look is at the app acted on.
+#[tokio::test]
+async fn an_action_behind_the_person_s_window_says_so_and_looks_at_that_app() {
+    let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));
+    let thread = lab.thread().await;
+    let items = lab
+        .run(
+            thread,
+            vec![vec![
+                call("click", "mac_click", json!({"ref": "e12"})),
+                call(
+                    "scroll",
+                    "mac_scroll",
+                    json!({"ref": "e12", "direction": "down"}),
+                ),
+                call(
+                    "drag",
+                    "mac_drag",
+                    json!({"from": {"ref": "e12"}, "to": {"ref": "e4"}, "snapshot": false}),
+                ),
+                call(
+                    "hover",
+                    "mac_hover",
+                    json!({"ref": "e12", "snapshot": false}),
+                ),
+                call(
+                    "open",
+                    "mac_apps",
+                    json!({"action": "launch", "app": "com.apple.Mail"}),
+                ),
+            ]],
+        )
+        .await;
+    let (click, error, metadata) = result(&items, "click");
+    assert!(!error, "{click}");
+    for words in [
+        "Clicked button \"Share\" in Notes. This happened behind the person's window",
+        "Notes showed the change.",
+        "Opened: sheet \"Share Note\" of Notes; menu of Finder.",
+        "Closed: popover of Notes.",
+        "Notes is behind the person's window.",
+    ] {
+        assert!(click.contains(words), "{words} in {click}");
+    }
+    assert_eq!(metadata["app"], "Notes", "the look is at the app acted on");
+    let (scroll, _, _) = result(&items, "scroll");
+    assert!(
+        scroll.contains("Notes showed no change") && scroll.contains("mac_apps activate"),
+        "{scroll}"
+    );
+    let (drag, _, _) = result(&items, "drag");
+    assert!(
+        drag.contains("Notes came to the front for it, since drags use the real pointer.")
+            && drag.contains("No snapshot was taken"),
+        "{drag}"
+    );
+    let (hover, _, _) = result(&items, "hover");
+    assert!(
+        hover.contains("since hovering uses the real pointer"),
+        "{hover}"
+    );
+    let (open, _, _) = result(&items, "open");
+    assert!(
+        open.starts_with("Opened Mail. This happened behind the person's window")
+            && open.contains("they are all minimized"),
+        "{open}"
+    );
+    let looks: Vec<Value> = lab
+        .log()
+        .into_iter()
+        .filter(|request| request["op"] == "snapshot")
+        .collect();
+    assert_eq!(looks[0]["bundle"], "com.apple.Notes");
+    assert_eq!(looks[1]["bundle"], "com.apple.Notes");
+    // An action whose reply says nothing of the kind reads as before, and its look is at the app in front.
+    let items = lab
+        .run(
+            thread,
+            vec![vec![call("plain", "mac_click", json!({"ref": "e1"}))]],
+        )
+        .await;
+    let (plain, _, _) = result(&items, "plain");
+    assert!(
+        plain.starts_with("Clicked button \"Save\" in TextEdit.\n\nImage size"),
+        "{plain}"
+    );
+    let last = lab
+        .log()
+        .into_iter()
+        .rfind(|request| request["op"] == "snapshot")
+        .unwrap();
+    assert!(last.get("bundle").is_none(), "{last}");
+}
+
+/// A look can keep only the elements that match a text, and show an area up close; both reach the helper, and the
+/// result says what the model is looking at.
+#[tokio::test]
+async fn a_look_can_filter_its_elements_and_show_an_area_up_close() {
+    let lab = Lab::new(Lab::on());
+    let thread = lab.thread().await;
+    let zoom = json!({"x": 10, "y": 5, "width": 40, "height": 20});
+    let items = lab
+        .run(
+            thread,
+            vec![vec![call(
+                "look",
+                "mac_snapshot",
+                json!({"find": "Save", "zoom": zoom}),
+            )]],
+        )
+        .await;
+    let (output, error, _) = result(&items, "look");
+    assert!(!error, "{output}");
+    assert!(
+        output.starts_with("A close-up at full resolution of the area at x=10, y=5, 40x20 of the latest screenshot.")
+            && output.contains("Showing only elements matching \"Save\""),
+        "{output}"
+    );
+    let look = lab
+        .log()
+        .into_iter()
+        .find(|request| request["op"] == "snapshot")
+        .unwrap();
+    assert_eq!(look["find"], "Save");
+    assert_eq!(look["zoom"], zoom);
+    // A zoom must name a whole area.
+    let tool = lab.tools.get("mac_snapshot").unwrap();
+    assert!(
+        tool.validate_arguments(&json!({"zoom": {"x": 1, "y": 1}}))
+            .is_err()
+    );
+}
+
+/// Escape stops an agent that works in the app in front. Once its latest action went in behind the person's window,
+/// the person keeps working in their own app and Escape is theirs: the strip's Stop is the way to stop it then.
+#[tokio::test]
+async fn escape_is_the_person_s_own_key_after_an_action_behind_their_window() {
+    let lab = Lab::new(Lab::with(json!({"defaultAct": "allow"})));
+    let behind = lab.thread().await;
+    let turn = lab
+        .start(
+            behind,
+            vec![
+                vec![call(
+                    "click",
+                    "mac_click",
+                    json!({"ref": "e12", "snapshot": false}),
+                )],
+                vec![call("look", "mac_snapshot", json!({"find": "ESCAPE"}))],
+            ],
+        )
+        .await;
+    let items = lab.finish(behind).await;
+    assert!(!result(&items, "look").1, "{}", result(&items, "look").0);
+    let turn = lab.runtime.turn(turn.id).await.unwrap();
+    assert_eq!(turn.status, TurnStatus::Completed, "{:?}", turn.error);
+
+    let front = lab.thread().await;
+    let turn = lab
+        .start(
+            front,
+            vec![
+                vec![call(
+                    "click",
+                    "mac_click",
+                    json!({"ref": "e1", "snapshot": false}),
+                )],
+                vec![call("look", "mac_snapshot", json!({"find": "ESCAPE"}))],
+            ],
+        )
+        .await;
+    lab.finish(front).await;
     let turn = lab.runtime.turn(turn.id).await.unwrap();
     assert_eq!(turn.status, TurnStatus::Interrupted, "{:?}", turn.error);
 }

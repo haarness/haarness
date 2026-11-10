@@ -1,6 +1,6 @@
 //! App policy for computer use. A few groups of apps are locked whatever the settings say (password managers,
-//! Haarness, browsers, terminals and editors, System Settings); every other app follows the person's app rules and
-//! the approvals they give.
+//! Haarness and its host app, typing into terminals and script runners); every other app follows the person's app
+//! rules and the approvals they give.
 
 use serde::{Deserialize, Serialize};
 
@@ -75,33 +75,10 @@ pub const HAARNESS: &[&str] = &[
     "com.apple.screencaptureui",
 ];
 
-/// Web browsers. Screenshots of them are fine; page actions go through the browser tools, which work on the page
-/// itself and honour site permissions.
-pub const BROWSERS: &[&str] = &[
-    "com.apple.Safari",
-    "com.apple.SafariTechnologyPreview",
-    "com.google.Chrome",
-    "com.google.Chrome.*",
-    "org.chromium.Chromium",
-    "com.microsoft.edgemac",
-    "com.microsoft.edgemac.*",
-    "org.mozilla.firefox",
-    "org.mozilla.firefoxdeveloperedition",
-    "org.mozilla.nightly",
-    "company.thebrowser.Browser",
-    "company.thebrowser.dia",
-    "com.brave.Browser",
-    "com.brave.Browser.*",
-    "com.operasoftware.Opera",
-    "com.vivaldi.Vivaldi",
-    "com.kagi.kagimacOS",
-    "app.zen-browser.zen",
-    "org.torproject.torbrowser",
-];
-
-/// Terminals, code editors and script runners. Keyboard input there would run commands or edit code behind the
-/// shell and file tools' approvals, so agents get clicks and scrolling only; the shell and file tools do the rest.
-pub const CONSOLES: &[&str] = &[
+/// Terminals. Whatever is typed there runs as a command, outside the shell tool's approvals and outside the check that
+/// only a person gives agents more reach (`haarness mac allow …` typed into a terminal is not a program Haarness
+/// started), so agents click and scroll there but never type. A terminal can also show Haarness's terminal UI.
+pub const TERMINALS: &[&str] = &[
     "com.apple.Terminal",
     "com.googlecode.iterm2",
     "com.mitchellh.ghostty",
@@ -114,6 +91,18 @@ pub const CONSOLES: &[&str] = &[
     "co.zeit.hyper",
     "org.tabby",
     "com.raphaelamorim.rio",
+];
+
+/// Script runners: typing there writes a script they run, so they are treated as terminals for typing.
+pub const SCRIPT_RUNNERS: &[&str] = &[
+    "com.apple.ScriptEditor2",
+    "com.apple.Automator",
+    "com.apple.shortcuts",
+];
+
+/// Code editors. Agents work in them like in any other app, but their built-in terminal, like a terminal app, can show
+/// Haarness's terminal UI with an approval card that takes keys and clicks.
+pub const EDITORS: &[&str] = &[
     "com.microsoft.VSCode",
     "com.microsoft.VSCodeInsiders",
     "com.vscodium",
@@ -130,13 +119,7 @@ pub const CONSOLES: &[&str] = &[
     "com.barebones.bbedit",
     "org.vim.MacVim",
     "org.gnu.Emacs",
-    "com.apple.ScriptEditor2",
-    "com.apple.Automator",
-    "com.apple.shortcuts",
 ];
-
-/// System Settings: readable, but changing the Mac's configuration stays with the person.
-pub const SYSTEM_SETTINGS: &[&str] = &["com.apple.systempreferences", "com.apple.Settings"];
 
 /// The Dock: a drop onto an app's icon opens the dropped item in that app.
 pub const DOCK: &str = "com.apple.dock";
@@ -148,9 +131,8 @@ pub enum Group {
     Haarness,
     /// The app this Haarness server runs in (the terminal app of a terminal session).
     Host,
-    Browser,
-    Console,
-    SystemSettings,
+    /// Terminals and script runners: no typing.
+    Runner,
     Open,
 }
 
@@ -231,15 +213,18 @@ pub fn group(bundle: &str, host: Option<&str>) -> Group {
         Group::Haarness
     } else if host == Some(bundle) {
         Group::Host
-    } else if listed(bundle, BROWSERS) {
-        Group::Browser
-    } else if listed(bundle, CONSOLES) {
-        Group::Console
-    } else if listed(bundle, SYSTEM_SETTINGS) {
-        Group::SystemSettings
+    } else if listed(bundle, TERMINALS) || listed(bundle, SCRIPT_RUNNERS) {
+        Group::Runner
     } else {
         Group::Open
     }
+}
+
+/// Whether `bundle` may be showing Haarness's terminal UI, and with it an approval card that a click or a key would
+/// answer: a terminal, or a code editor with its built-in terminal.
+#[must_use]
+pub fn may_show_cards(bundle: &str) -> bool {
+    listed(bundle, TERMINALS) || listed(bundle, EDITORS)
 }
 
 /// The refusal for a locked group, written as advice for the agent, or `None` when the app rules decide.
@@ -256,19 +241,8 @@ pub fn refusal(bundle: &str, name: &str, gesture: Gesture, host: Option<&str>) -
         Group::Host => Some(format!(
             "{name} shows this very chat and its approval prompts, so agents only look at it. The person has to do this step."
         )),
-        Group::Browser => Some(format!(
-            "Web pages in {name} are handled by the browser_* tools; computer use only looks at browsers."
-        )),
-        Group::SystemSettings if !matches!(gesture, Gesture::Scroll | Gesture::Hover) => {
-            Some(format!(
-                "{name} is read-only for computer use, because it changes how this Mac is configured. Tell the person what to change."
-            ))
-        }
-        Group::Console if gesture == Gesture::Quit => Some(format!(
-            "{name} is a terminal, editor or script runner, and closing it might end this chat. Leave quitting it to the person."
-        )),
-        Group::Console if gesture == Gesture::Input => Some(format!(
-            "{name} is a terminal, editor or script runner: agents may click and scroll there but never type. Commands and code go through the shell and file tools; for options it stores as text, edit its preferences with those tools (`defaults read {bundle}` lists many), under their usual approvals."
+        Group::Runner if gesture == Gesture::Input => Some(format!(
+            "{name} runs whatever is typed into it, outside Haarness's approvals, so agents may click and scroll there but never type or press keys. Run commands with the shell tool instead, under its usual approvals; for options it stores as text, `defaults read {bundle}` lists many."
         )),
         _ => None,
     }
@@ -319,39 +293,44 @@ mod tests {
             .is_some()
         );
         assert!(refusal("com.googlecode.iterm2", "iTerm", Gesture::Click, host).is_some());
+        assert!(refusal("com.googlecode.iterm2", "iTerm", Gesture::Quit, host).is_some());
         assert!(refusal("com.googlecode.iterm2", "iTerm", Gesture::Launch, host).is_none());
-        assert!(refusal("com.apple.Safari", "Safari", Gesture::Click, None).is_some());
-        assert!(
-            refusal(
-                "com.apple.systempreferences",
-                "System Settings",
-                Gesture::Click,
-                None
-            )
-            .is_some()
-        );
-        assert!(
-            refusal(
-                "com.apple.systempreferences",
-                "System Settings",
-                Gesture::Scroll,
-                None
-            )
-            .is_none()
-        );
+        // Typing into a terminal or a script runner runs it: refused. Everything else there is the app rules' to say.
         assert!(refusal("com.apple.Terminal", "Terminal", Gesture::Click, None).is_none());
+        assert!(refusal("com.apple.Terminal", "Terminal", Gesture::Quit, None).is_none());
         assert!(refusal("com.apple.Terminal", "Terminal", Gesture::Input, None).is_some());
-        assert!(refusal("com.apple.Terminal", "Terminal", Gesture::Quit, None).is_some());
         assert!(
             refusal(
-                "com.jetbrains.intellij",
-                "IntelliJ IDEA",
+                "com.apple.ScriptEditor2",
+                "Script Editor",
                 Gesture::Input,
                 None
             )
             .is_some()
         );
+        // Browsers, System Settings and code editors have no fixed lock any more.
+        for (bundle, name) in [
+            ("com.apple.Safari", "Safari"),
+            ("com.google.Chrome", "Chrome"),
+            ("com.apple.systempreferences", "System Settings"),
+            ("com.jetbrains.intellij", "IntelliJ IDEA"),
+            ("com.microsoft.VSCode", "Visual Studio Code"),
+        ] {
+            for gesture in [Gesture::Click, Gesture::Input, Gesture::Quit] {
+                assert!(refusal(bundle, name, gesture, None).is_none(), "{name}");
+            }
+        }
         assert!(refusal("com.apple.TextEdit", "TextEdit", Gesture::Input, None).is_none());
+    }
+
+    #[test]
+    fn terminals_and_editors_may_show_an_approval_card() {
+        assert!(may_show_cards("com.googlecode.iterm2"));
+        assert!(may_show_cards("com.jetbrains.intellij"));
+        assert!(may_show_cards("com.microsoft.VSCode"));
+        assert!(!may_show_cards("com.apple.TextEdit"));
+        assert!(!may_show_cards("com.apple.ScriptEditor2"));
+        assert!(!may_show_cards("com.apple.Safari"));
     }
 
     #[test]

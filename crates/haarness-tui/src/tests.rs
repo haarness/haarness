@@ -26628,26 +26628,43 @@ async fn a_computer_use_drag_into_another_app_allows_in_every_chat_only_the_app_
     assert!(text.contains("Allow in this chat"), "{text}");
 }
 
-/// A click on a terminal's text asks every time: the card says why and
-/// offers no answer that lasts.
+/// An app set to ask every time: the card says so and offers no answer that
+/// lasts. A terminal is an app like any other now, with Always on offer.
 #[tokio::test]
-async fn a_terminal_text_click_card_says_it_asks_every_time() {
+async fn an_every_time_card_says_why_and_a_terminal_card_offers_always() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
-    let mac = serde_json::json!({"kind": "act", "action": "click", "app": "Terminal", "bundle": "com.apple.Terminal",
-        "summary": "Click text area in Terminal", "everyTime": true, "console": true});
+    let mac = serde_json::json!({"kind": "act", "action": "click", "app": "Mail", "bundle": "com.apple.mail",
+        "summary": "Click button \"Send\" in Mail", "everyTime": true});
     app.reduce(
-        computer_event(&thread, "perm-term", mac, false),
+        computer_event(&thread, "perm-each", mac, false),
         &offline_client(),
     )
     .await
     .unwrap();
     let text = frame_text(&app, (130, 40));
-    assert!(text.contains("Click text area in Terminal"), "{text}");
-    assert!(text.contains("needs your approval"), "{text}");
+    assert!(
+        text.contains("You set this app to ask every time."),
+        "{text}"
+    );
     assert!(!text.contains("Allow in this chat"), "{text}");
-    assert!(!text.contains("Always allow this app"), "{text}");
     assert!(crate::state::lasting_app(app.first_pending_permission().unwrap()).is_none());
+
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mac = serde_json::json!({"kind": "act", "action": "click", "app": "Terminal", "bundle": "com.apple.Terminal",
+        "summary": "Click text area in Terminal", "everyTime": false});
+    app.reduce(
+        computer_event(&thread, "perm-term", mac, true),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    let text = frame_text(&app, (130, 40));
+    assert!(!text.contains("ask every time"), "{text}");
+    assert_eq!(
+        crate::state::lasting_app(app.first_pending_permission().unwrap()),
+        Some("com.apple.Terminal")
+    );
 }
 
 /// A worktree whose link to its repository broke is only forgotten by the

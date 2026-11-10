@@ -3041,7 +3041,6 @@
   "Apps without a rule": "没有规则的应用",
   "Mark each click on screen": "在屏幕上标出每次点击",
   "App rules": "应用规则",
-  "Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.": "密码管理器和 Haarness 本身永远不会被使用，浏览器只能通过浏览器工具使用，“系统设置”只会被读取。",
   "Rule for {app}": "{app}的规则",
   "Remove the rule for {app}": "移除{app}的规则",
   "App bundle identifier": "应用 Bundle ID",
@@ -3056,7 +3055,6 @@
   "I have read and agree to these terms": "我已阅读并同意这些条款",
   "Agree and turn on": "同意并开启",
   "Required for screenshots. Agents can still read apps without it, just not see them.": "截图需要此权限。没有它，智能体仍能读取应用，只是看不到画面。",
-  "Terminals and code editors still ask before a click on their text.": "终端和代码编辑器在点击其中文本前仍会询问。",
   "A ring marks the spot for a moment before each click.": "每次点击前，一个圆环会短暂标出位置。",
   "You agree to these before agents use this Mac.": "在智能体使用这台 Mac 之前，你需要同意这些条款。",
   "The spot the agent aims at": "智能体瞄准的位置",
@@ -3099,7 +3097,6 @@
   "Tried to point at": "未能指向",
   "Using this Mac": "正在使用这台 Mac",
   "Terms for computer use": "电脑操控条款",
-  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "终端和编辑器中的文本可能包含他人的提示，因此每次点击都需要你的批准。",
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "智能体可以查看这台 Mac 的屏幕并操作其中的应用。它们一次只查看一个应用，在你未允许的应用中操作前会先征求你的同意。",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "另一位用户正在这台 Mac 的屏幕上登录，因此智能体无法从此账户使用它。",
   "Use a bundle identifier like com.apple.TextEdit.": "请使用 Bundle ID，例如 com.apple.TextEdit。",
@@ -3155,5 +3152,7 @@
   "add credits or choose a plan": "添加额度或选择套餐",
   "add credits with /billing topup": "使用 /billing topup 添加额度",
   "turn on overage so your purchased credits pay": "开启超额使用，让已购额度可以支付",
-  "add credits and turn on overage to keep working": "添加额度并开启超额使用以继续工作"
+  "add credits and turn on overage to keep working": "添加额度并开启超额使用以继续工作",
+  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "“先询问”是指每个对话中每个应用需批准一次；自动模式的对话交给审核模型处理。",
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "密码管理器和 Haarness 本身永远不会被使用，智能体也绝不会在终端中输入。在自动模式下，设为每次都询问的应用仍会询问你。"
 }

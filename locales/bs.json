@@ -3041,7 +3041,6 @@
   "Apps without a rule": "Aplikacije bez pravila",
   "Mark each click on screen": "Označi svaki klik na ekranu",
   "App rules": "Pravila aplikacija",
-  "Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.": "Upravitelji lozinki i sam Haarness nikad se ne koriste, preglednici samo kroz alate preglednika, a Postavke sistema se samo čitaju.",
   "Rule for {app}": "Pravilo za {app}",
   "Remove the rule for {app}": "Ukloni pravilo za {app}",
   "App bundle identifier": "Identifikator paketa aplikacije",
@@ -3056,7 +3055,6 @@
   "I have read and agree to these terms": "Pročitao/la sam ove uslove i slažem se s njima",
   "Agree and turn on": "Prihvati i uključi",
   "Required for screenshots. Agents can still read apps without it, just not see them.": "Potrebno za snimke ekrana. Bez toga agenti i dalje mogu čitati aplikacije, samo ih ne vide.",
-  "Terminals and code editors still ask before a click on their text.": "Terminali i uređivači koda i dalje pitaju prije klika na njihov tekst.",
   "A ring marks the spot for a moment before each click.": "Prsten na trenutak označi mjesto prije svakog klika.",
   "You agree to these before agents use this Mac.": "S ovim se slažete prije nego što agenti koriste ovaj Mac.",
   "The spot the agent aims at": "Mjesto u koje agent cilja",
@@ -3099,7 +3097,6 @@
   "Tried to point at": "Pokušaj pokazivanja",
   "Using this Mac": "Koristi ovaj Mac",
   "Terms for computer use": "Uslovi korištenja računara",
-  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Tekst u terminalu ili uređivaču može sadržavati nečiji upit, pa svaki klik na njega traži vaše odobrenje.",
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Agenti mogu vidjeti ekran ovog Maca i upravljati njegovim aplikacijama. Gledaju jednu po jednu aplikaciju i pitaju vas prije nego što djeluju u aplikaciji koju niste dozvolili.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "Drugi korisnik je prijavljen na ekranu ovog Maca, pa ga agenti ne mogu koristiti s ovog računa.",
   "Use a bundle identifier like com.apple.TextEdit.": "Koristite identifikator paketa poput com.apple.TextEdit.",
@@ -3155,5 +3152,7 @@
   "add credits or choose a plan": "dodajte kredite ili odaberite plan",
   "add credits with /billing topup": "dodajte kredite pomoću /billing topup",
   "turn on overage so your purchased credits pay": "uključite prekoračenje da kupljeni krediti plaćaju",
-  "add credits and turn on overage to keep working": "dodajte kredite i uključite prekoračenje da nastavite raditi"
+  "add credits and turn on overage to keep working": "dodajte kredite i uključite prekoračenje da nastavite raditi",
+  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Prvo pitaj znači jedno odobrenje po aplikaciji u svakom razgovoru; razgovori na Auto to prepuštaju recenzentu.",
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Upravitelji lozinki i sam Haarness nikad se ne koriste, a agenti nikad ne kucaju u terminale. Na Auto, aplikacije postavljene da pitaju svaki put i dalje pitaju vas."
 }

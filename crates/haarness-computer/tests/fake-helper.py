@@ -3,12 +3,19 @@
 request to $FAKE_HELPER_LOG, and never touches the screen.
 
 Refs name fixed elements: e1 a Save button and e2 a Name field in TextEdit, e8 a password field in TextEdit, e9 a
-Reload button in Safari, e7 a button in Haarness itself, e6 text in Terminal, e5 Terminal's New Tab button, e4 a
-button in Notes. Typing "PAUSE" pauses the agent the way the bar would (and resumes half a second later); typing
-"HOLD" pauses it the same way until the server sends "resume", as Resume pressed in a client does; typing "STOP" pauses
-it and then presses the bar's Stop; typing "CRASH" pauses it and then quits, as a helper killed during a pause would;
-typing "ESCAPE" presses Escape and then hangs, as an action still under way would. A look at pixel 13,13 is followed by
-Pause and then Stop on the bar, as pressed while the approval for that spot waits.
+Reload button and e11 the address field in Safari, e7 a button in Haarness itself, e6 text in Terminal, e5 Terminal's
+New Tab button, e4 a button in Notes, e3 Notes' icon in the Dock, e10 the editor of Visual Studio Code, e13 a switch in
+System Settings, and e12 a Share button in Notes, which sits behind the person's window. Typing "PAUSE" pauses the
+agent the way the bar would (and resumes half a second later); typing "HOLD" pauses it the same way until the server
+sends "resume", as Resume pressed in a client does; typing "STOP" pauses it and then presses the bar's Stop; typing
+"CRASH" pauses it and then quits, as a helper killed during a pause would; typing "ESCAPE" presses Escape and then
+hangs, as an action still under way would. A look at pixel 13,13 is followed by Pause and then Stop on the bar, as
+pressed while the approval for that spot waits; a look that filters on "ESCAPE" has Escape pressed while it is taken.
+
+Actions on e12 answer the way a helper that works behind the person's window does: a click went in behind, was
+confirmed and opened and closed things; a scroll went in behind and showed no change; a drag and a hover came to the
+front, saying why. Opening Mail starts it behind. Every other action answers as an older helper does, with none of
+those fields. A look at Notes says it is behind, and one at Mail that its windows are minimized.
 """
 import json
 import os
@@ -48,6 +55,30 @@ ELEMENTS = {
     6: {"bundle": "com.apple.Terminal", "app": "Terminal", "role": "AXTextArea", "content": True},
     5: {"bundle": "com.apple.Terminal", "app": "Terminal", "role": "AXButton", "name": "New Tab", "content": False},
     4: {"bundle": "com.apple.Notes", "app": "Notes", "role": "AXButton", "name": "New Note", "content": False},
+    3: {"bundle": "com.apple.dock", "app": "Dock", "role": "AXDockItem", "name": "Notes", "content": False},
+    10: {"bundle": "com.microsoft.VSCode", "app": "Code", "role": "AXTextArea", "description": "Editor", "content": True},
+    11: {"bundle": "com.apple.Safari", "app": "Safari", "role": "AXTextField", "description": "Address", "content": False},
+    12: {"bundle": "com.apple.Notes", "app": "Notes", "role": "AXButton", "name": "Share", "content": False},
+    13: {"bundle": "com.apple.systempreferences", "app": "System Settings", "role": "AXCheckBox", "name": "Bluetooth", "content": False},
+}
+
+APPS = {"com.apple.TextEdit": "TextEdit", "com.apple.Notes": "Notes", "com.apple.Mail": "Mail"}
+
+NOTES = {"bundle": "com.apple.Notes", "pid": 4, "name": "Notes"}
+
+# How a helper that works behind the person's window answers an action on e12.
+BEHIND = {
+    "click": {
+        "via": "ax",
+        "background": True,
+        "confirmed": True,
+        "target": NOTES,
+        "opened": [{"app": "Notes", "role": "sheet", "title": "Share\nNote"}, {"app": "Finder", "role": "menu"}],
+        "closed": [{"app": "Notes", "role": "popover"}],
+    },
+    "scroll": {"via": "process", "background": True, "confirmed": False, "target": NOTES},
+    "drag": {"via": "pointer", "background": False, "fallback": "drag", "target": NOTES},
+    "hover": {"via": "pointer", "background": False, "fallback": "hover", "target": NOTES},
 }
 
 
@@ -63,22 +94,31 @@ def answer(op, request):
         ]}
     if op == "identify":
         bundle = request.get("bundle") or {"TextEdit": "com.apple.TextEdit", "Notes": "com.apple.Notes"}.get(request.get("name"), "")
-        names = {"com.apple.TextEdit": "TextEdit", "com.apple.Notes": "Notes", "com.apple.Terminal": "Terminal"}
+        names = {"com.apple.TextEdit": "TextEdit", "com.apple.Notes": "Notes", "com.apple.Terminal": "Terminal", "com.apple.Mail": "Mail"}
         if not bundle:
             return {"__error": ("not_found", "That app is not running.")}
         return {"bundle": bundle, "name": names.get(bundle, bundle), "running": bundle == "com.apple.TextEdit"}
     if op == "snapshot":
-        return {
+        if request.get("find") == "ESCAPE":
+            send({"event": "escape"})
+            time.sleep(0.3)
+        bundle = request.get("bundle") if request.get("bundle") in APPS else "com.apple.TextEdit"
+        reply = {
             "size": {"width": 100, "height": 50, "factor": 1},
             "windows": [{"id": 1, "pid": 2, "app": "TextEdit", "bundle": "com.apple.TextEdit", "layer": 0, "title": "Untitled", "frame": {"x": 0, "y": 0, "width": 100, "height": 50}}],
             "frontmost": {"pid": 2, "bundle": "com.apple.TextEdit", "name": "TextEdit"},
-            "app": {"pid": 2, "bundle": "com.apple.TextEdit", "name": "TextEdit"},
+            "app": {"pid": 2, "bundle": bundle, "name": APPS[bundle]},
             "focused": {"bundle": "com.apple.TextEdit", "app": "TextEdit", "role": "AXTextField", "description": "Name"},
             "outline": '@e1 [button] "Save" at=10,10 size=20x10\n@e2 [text-field] "" description="Name" at=40,10 size=40x10',
             "image": JPEG,
             "accessibility": True,
             "whole": bool(request.get("whole")),
         }
+        if bundle == "com.apple.Notes":
+            reply["behind"] = True
+        if bundle == "com.apple.Mail":
+            reply["offscreen"] = "minimized"
+        return reply
     if op == "inspect":
         if "ref" in request:
             element = dict(ELEMENTS.get(int(request["ref"]), ELEMENTS[1]))
@@ -110,6 +150,10 @@ def answer(op, request):
         send({"event": "escape"})
         time.sleep(30)
         return {}
+    if op == "launch" and request.get("bundle") == "com.apple.Mail":
+        return {"via": "process", "background": True, "target": {"bundle": "com.apple.Mail", "pid": 5, "name": "Mail"}}
+    if op in BEHIND and 12 in (request.get("ref"), (request.get("from") or {}).get("ref")):
+        return BEHIND[op]
     return {"via": "test"}
 
 

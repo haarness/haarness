@@ -3041,7 +3041,6 @@
   "Apps without a rule": "Apper uten regel",
   "Mark each click on screen": "Marker hvert klikk på skjermen",
   "App rules": "App-regler",
-  "Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.": "Passordbehandlere og Haarness selv brukes aldri, nettlesere bare gjennom nettleserverktøyene, og Systeminnstillinger leses bare.",
   "Rule for {app}": "Regel for {app}",
   "Remove the rule for {app}": "Fjern regelen for {app}",
   "App bundle identifier": "Appens pakke-ID",
@@ -3056,7 +3055,6 @@
   "I have read and agree to these terms": "Jeg har lest og godtar disse vilkårene",
   "Agree and turn on": "Godta og slå på",
   "Required for screenshots. Agents can still read apps without it, just not see them.": "Kreves for skjermbilder. Uten det kan agenter fortsatt lese apper, bare ikke se dem.",
-  "Terminals and code editors still ask before a click on their text.": "Terminaler og kodeprogrammer spør fortsatt før et klikk på teksten deres.",
   "A ring marks the spot for a moment before each click.": "En ring markerer stedet et øyeblikk før hvert klikk.",
   "You agree to these before agents use this Mac.": "Du godtar disse før agenter bruker denne Mac-en.",
   "The spot the agent aims at": "Stedet agenten sikter mot",
@@ -3099,7 +3097,6 @@
   "Tried to point at": "Prøvde å peke på",
   "Using this Mac": "Bruker denne Mac-en",
   "Terms for computer use": "Vilkår for datamaskinbruk",
-  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Tekst i terminaler og redigeringsprogrammer kan inneholde en forespørsel, så hvert klikk på den trenger din godkjenning.",
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Agenter kan se skjermen på denne Mac-en og betjene appene. De ser på én app om gangen og spør deg før de handler i en app du ikke har tillatt.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "En annen bruker er logget på skjermen til denne Mac-en, så agenter kan ikke bruke den fra denne kontoen.",
   "Use a bundle identifier like com.apple.TextEdit.": "Bruk en pakke-ID som com.apple.TextEdit.",
@@ -3155,5 +3152,7 @@
   "add credits or choose a plan": "legg til kreditter eller velg et abonnement",
   "add credits with /billing topup": "legg til kreditter med /billing topup",
   "turn on overage so your purchased credits pay": "slå på overforbruk så kjøpte kreditter betaler",
-  "add credits and turn on overage to keep working": "legg til kreditter og slå på overforbruk for å jobbe videre"
+  "add credits and turn on overage to keep working": "legg til kreditter og slå på overforbruk for å jobbe videre",
+  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Spør først betyr én godkjenning per app i hver chat; chatter i Auto overlater den til kontrolløren.",
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Passordbehandlere og Haarness selv brukes aldri, og agenter skriver aldri i terminaler. I Auto spør apper som er satt til å spørre hver gang, fortsatt deg."
 }

@@ -3041,7 +3041,6 @@
   "Apps without a rule": "التطبيقات بلا قاعدة",
   "Mark each click on screen": "تمييز كل نقرة على الشاشة",
   "App rules": "قواعد التطبيقات",
-  "Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.": "لا تُستخدم مديرات كلمات المرور ولا Haarness نفسه أبدًا، وتُستخدم المتصفحات عبر أدوات المتصفح فقط، وتُقرأ إعدادات النظام فقط.",
   "Rule for {app}": "قاعدة {app}",
   "Remove the rule for {app}": "إزالة قاعدة {app}",
   "App bundle identifier": "معرّف حزمة التطبيق",
@@ -3056,7 +3055,6 @@
   "I have read and agree to these terms": "لقد قرأت هذه الشروط وأوافق عليها",
   "Agree and turn on": "الموافقة والتشغيل",
   "Required for screenshots. Agents can still read apps without it, just not see them.": "مطلوب للقطات الشاشة. بدونه يظل بإمكان الوكلاء قراءة التطبيقات دون رؤيتها.",
-  "Terminals and code editors still ask before a click on their text.": "تظل الطرفيات ومحررات الشيفرة تطلب الإذن قبل النقر على نصها.",
   "A ring marks the spot for a moment before each click.": "تحدد حلقة الموضع للحظة قبل كل نقرة.",
   "You agree to these before agents use this Mac.": "توافق على هذه قبل أن يستخدم الوكلاء جهاز Mac هذا.",
   "The spot the agent aims at": "الموضع الذي يستهدفه الوكيل",
@@ -3099,7 +3097,6 @@
   "Tried to point at": "حاول الإشارة إلى",
   "Using this Mac": "يستخدم جهاز Mac هذا",
   "Terms for computer use": "شروط استخدام الكمبيوتر",
-  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "قد يحتوي نص الطرفية أو المحرر على طلب لشخص ما، لذا تحتاج كل نقرة عليه إلى موافقتك.",
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "يستطيع الوكلاء رؤية شاشة جهاز Mac هذا وتشغيل تطبيقاته. ينظرون إلى تطبيق واحد في كل مرة ويستشيرونك قبل التصرف في تطبيق لم تسمح به.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "مستخدم آخر مسجّل الدخول على شاشة جهاز Mac هذا، لذا لا يمكن للوكلاء استخدامه من هذا الحساب.",
   "Use a bundle identifier like com.apple.TextEdit.": "استخدم معرّف حزمة مثل com.apple.TextEdit.",
@@ -3155,5 +3152,7 @@
   "add credits or choose a plan": "أضف رصيدًا أو اختر خطة",
   "add credits with /billing topup": "أضف رصيدًا عبر /billing topup",
   "turn on overage so your purchased credits pay": "فعّل الاستخدام الإضافي ليُنفق رصيدك المشترى",
-  "add credits and turn on overage to keep working": "أضف رصيدًا وفعّل الاستخدام الإضافي لمتابعة العمل"
+  "add credits and turn on overage to keep working": "أضف رصيدًا وفعّل الاستخدام الإضافي لمتابعة العمل",
+  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "السؤال أولًا يعني إذنًا واحدًا لكل تطبيق في كل محادثة؛ وفي المحادثات المضبوطة على الوضع التلقائي يتولاه المراجِع.",
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "لا تُستخدم مديرات كلمات المرور ولا Haarness نفسه أبدًا، ولا يكتب الوكلاء في الطرفيات أبدًا. في الوضع التلقائي، تظل التطبيقات المضبوطة على السؤال في كل مرة تطلب إذنك."
 }

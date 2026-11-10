@@ -326,7 +326,7 @@ test("keys translated through a variable are in the catalog", () => {
     "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.",
     "Accessibility", "Needed to read app contents and to click, type and press keys.",
     "Screen Recording", "Required for screenshots. Agents can still read apps without it, just not see them.",
-    "Apps without a rule", "Terminals and code editors still ask before a click on their text.",
+    "Apps without a rule", "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.",
     "Mark each click on screen", "A ring marks the spot for a moment before each click.",
     "Terms for computer use", "You agree to these before agents use this Mac.",
     // Settings navigation and search titles.

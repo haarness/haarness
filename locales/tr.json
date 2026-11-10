@@ -3041,7 +3041,6 @@
   "Apps without a rule": "Kuralı olmayan uygulamalar",
   "Mark each click on screen": "Her tıklamayı ekranda işaretle",
   "App rules": "Uygulama kuralları",
-  "Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.": "Parola yöneticileri ve Haarness'ın kendisi hiç kullanılmaz, tarayıcılar yalnızca tarayıcı araçlarıyla kullanılır ve Sistem Ayarları yalnızca okunur.",
   "Rule for {app}": "{app} için kural",
   "Remove the rule for {app}": "{app} kuralını kaldır",
   "App bundle identifier": "Uygulama paket kimliği",
@@ -3056,7 +3055,6 @@
   "I have read and agree to these terms": "Bu koşulları okudum ve kabul ediyorum",
   "Agree and turn on": "Kabul et ve aç",
   "Required for screenshots. Agents can still read apps without it, just not see them.": "Ekran görüntüleri için gerekir. Bu olmadan ajanlar uygulamaları okuyabilir ama göremez.",
-  "Terminals and code editors still ask before a click on their text.": "Terminaller ve kod düzenleyiciler metinlerine tıklamadan önce yine sorar.",
   "A ring marks the spot for a moment before each click.": "Her tıklamadan önce bir halka bir anlığına yeri işaretler.",
   "You agree to these before agents use this Mac.": "Ajanlar bu Mac'i kullanmadan önce bunları kabul edersiniz.",
   "The spot the agent aims at": "Ajanın hedeflediği yer",
@@ -3099,7 +3097,6 @@
   "Tried to point at": "Üzerine gelinemedi",
   "Using this Mac": "Bu Mac kullanılıyor",
   "Terms for computer use": "Bilgisayar kullanımı koşulları",
-  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Terminal ve düzenleyici metni birinin istemini içerebilir, bu yüzden üzerine her tıklama onayınızı gerektirir.",
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Ajanlar bu Mac'in ekranını görebilir ve uygulamalarını kullanabilir. Bir seferde bir uygulamaya bakar, izin vermediğiniz bir uygulamada işlem yapmadan önce size danışırlar.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "Bu Mac'in ekranında başka bir kullanıcı oturum açmış, bu yüzden ajanlar onu bu hesaptan kullanamaz.",
   "Use a bundle identifier like com.apple.TextEdit.": "com.apple.TextEdit gibi bir paket kimliği kullanın.",
@@ -3155,5 +3152,7 @@
   "add credits or choose a plan": "kredi ekleyin veya bir plan seçin",
   "add credits with /billing topup": "/billing topup ile kredi ekleyin",
   "turn on overage so your purchased credits pay": "satın alınan kredilerinizin ödemesi için aşımı açın",
-  "add credits and turn on overage to keep working": "çalışmaya devam etmek için kredi ekleyin ve aşımı açın"
+  "add credits and turn on overage to keep working": "çalışmaya devam etmek için kredi ekleyin ve aşımı açın",
+  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Önce sor, her sohbette uygulama başına bir onay demektir; Otomatik'teki sohbetler bunu denetleyiciye bırakır.",
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Parola yöneticileri ve Haarness'ın kendisi hiç kullanılmaz ve ajanlar terminallere asla yazmaz. Otomatik'te, her seferinde soracak şekilde ayarlanan uygulamalar yine size sorar."
 }

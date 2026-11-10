@@ -3,11 +3,16 @@
 //! inside a running turn. A screen lease ([`Lease`]) keeps a second chat out while one is working.
 //!
 //! An action resolves its target first. [`prepare_arguments`] has the helper report what sits under the ref or
-//! pixel, turns away the app groups nothing can open (password managers, Haarness and its host app, browsers,
-//! System Settings, keyboard input to terminals) and apps set to Never, and stores what the approval card needs under
-//! `__mac`. The runtime then raises a `computer` approval: allowing one app in a chat covers later actions there,
-//! and an app set to "act without asking" needs none. Just before each event the helper re-checks that the app under
-//! the target is still the approved one. The helper's bar lets the person pause the agent; a paused call waits here.
+//! pixel, turns away the app groups nothing can open (password managers, Haarness and its host app, keyboard input to
+//! terminals and script runners) and apps set to Never, and stores what the approval card needs under `__mac`. The
+//! runtime then raises a `computer` approval, which a person answers, or in a chat in Auto Auto's reviewer: allowing
+//! one app in a chat covers later actions there, and an app set to "act without asking" needs none. Just before each
+//! event the helper re-checks that the app under the target is still the approved one. The helper's bar lets the
+//! person pause the agent; a paused call waits here.
+//!
+//! The helper may act in an app that sits behind the person's window. Its reply then says so, whether the app showed
+//! the change, and what the action opened or closed; the result passes that on, and its fresh look is at the app
+//! acted on rather than the one in front. A helper that says none of it is treated as before.
 //!
 //! [`Lease`]: crate::lease::Lease
 //! [`prepare_arguments`]: haarness_core::Tool::prepare_arguments
@@ -15,7 +20,7 @@
 use crate::{
     Computer,
     helper::{HelperError, IDLE},
-    policy::{self, Gesture, Group, Rule},
+    policy::{self, Gesture, Rule},
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -136,26 +141,26 @@ impl MacTool {
     fn description(&self) -> String {
         match self.kind {
             Kind::Snapshot => format!(
-                "Capture this Mac's screen for one app: a screenshot of its windows plus its Accessibility elements, each tagged with a ref such as @e12 that the other mac_* tools target. It defaults to the app in front; set app (a bundle id like com.apple.TextEdit, or the app's name) to choose another, window to narrow it to one window, menuBar to add the menus, or wholeScreen to include every app, which needs the person's approval. Call it before acting and again whenever things may have moved. {UNTRUSTED}"
+                "Capture one app on this Mac: a screenshot of its windows where they are, even behind other windows, plus its Accessibility elements, each tagged with a ref such as @e12 that the other mac_* tools target. It defaults to the app in front; set app (a bundle id like com.apple.TextEdit, or the app's name) to choose another, window to narrow it to one window, menuBar to add the menus, find to keep only elements matching a word or phrase, zoom for a full-resolution close-up of an area, or wholeScreen to include every app, which needs approval. Clicks, scrolling, typing and keys then go to the app you looked at, where it is, without bringing it forward. Call it before acting and again whenever things may have moved. {UNTRUSTED}"
             ),
-            Kind::Apps => "See which apps are running, or open, focus or quit an app named by its bundle id or display name. Opening and quitting need the person's approval unless that app is allowed.".into(),
+            Kind::Apps => "See which apps are running, or open, focus or quit an app named by its bundle id or display name. launch opens the app behind the person's window; activate brings it to the front. Opening and quitting need approval unless that app is allowed.".into(),
             Kind::Click => format!(
-                "Click a ref from the most recent mac_snapshot, or screenshot pixel coordinates when the target has no ref. The first action in each app needs the person's approval for this chat, unless the app is allowed. The result carries a fresh snapshot. {UNTRUSTED}"
+                "Click a ref from the most recent mac_snapshot, or screenshot pixel coordinates when the target has no ref. The click reaches the app where it is, behind other windows too. The first action in each app needs approval for this chat, unless the app is allowed. The result carries a fresh snapshot of that app. {UNTRUSTED}"
             ),
             Kind::Type => format!(
-                "Enter text into the field a ref names, or into whatever holds keyboard focus when no ref is given; replace swaps a field's entire contents in one step. A newline sends Return. Password fields are refused, because the person enters secrets themselves. If the person is typing, this waits, and any typing or clicking of theirs during it cuts it short. {UNTRUSTED}"
+                "Enter text into the field a ref names or, without a ref, into the focused field of the app you looked at last; replace swaps a field's entire contents in one step. A newline sends Return. Password fields are refused, because the person enters secrets themselves, and so is typing into terminals and script runners: use the shell tool for commands. If the person is typing, this waits, and any typing or clicking of theirs during it cuts it short. {UNTRUSTED}"
             ),
             Kind::Press => format!(
-                "Send a key or shortcut to the focused app, spelled as for browser_press: Enter, Escape, Tab, ArrowDown, Meta+S (Command-S), Meta+Shift+N, Control+Tab, F5. The first action in each app needs the person's approval for this chat, unless the app is allowed. {UNTRUSTED}"
+                "Send a key or shortcut to the app you looked at last, spelled as for browser_press: Enter, Escape, Tab, ArrowDown, Meta+S (Command-S), Meta+Shift+N, Control+Tab, F5. The first action in each app needs approval for this chat, unless the app is allowed. {UNTRUSTED}"
             ),
             Kind::Scroll => format!(
-                "Scroll a number of lines over a ref or a screenshot pixel. The first action in each app needs the person's approval for this chat, unless the app is allowed. {UNTRUSTED}"
+                "Scroll a number of lines over a ref or a screenshot pixel, in the app where it is. The first action in each app needs approval for this chat, unless the app is allowed. {UNTRUSTED}"
             ),
             Kind::Drag => format!(
-                "Press at one ref or pixel and release at another, for instance to move a slider or a file. The pickup and the drop are both checked, and every app involved needs approval unless it is allowed. {UNTRUSTED}"
+                "Press at one ref or pixel and release at another, for instance to move a slider or a file. A drag uses the real pointer, so its app comes to the front. The pickup and the drop are both checked, and every app involved needs approval unless it is allowed. {UNTRUSTED}"
             ),
             Kind::Hover => format!(
-                "Move the pointer over an element (ref) or a point (x, y) without clicking, to show a tooltip or a menu that opens on hover. {UNTRUSTED}"
+                "Move the pointer over an element (ref) or a point (x, y) without clicking, to show a tooltip or a menu that opens on hover. Hovering uses the real pointer, so the app comes to the front. {UNTRUSTED}"
             ),
         }
     }
@@ -186,8 +191,27 @@ impl MacTool {
                         json!({"type": "number", "minimum": 0, "maximum": 10, "description": "Pause this many seconds first, for instance while an app finishes loading."}),
                     ),
                     (
+                        "find".into(),
+                        json!({"type": "string", "minLength": 1, "maxLength": 200, "description": "Keep only elements whose words match this, plus the elements around them."}),
+                    ),
+                    (
+                        "zoom".into(),
+                        json!({
+                            "type": "object",
+                            "description": "An area of the latest screenshot, in its pixels, to see up close at full resolution. Positions in the result stay those of that screenshot.",
+                            "properties": {
+                                "x": {"type": "number", "minimum": 0},
+                                "y": {"type": "number", "minimum": 0},
+                                "width": {"type": "number", "minimum": 1},
+                                "height": {"type": "number", "minimum": 1},
+                            },
+                            "required": ["x", "y", "width", "height"],
+                            "additionalProperties": false,
+                        }),
+                    ),
+                    (
                         "wholeScreen".into(),
-                        json!({"type": "boolean", "description": "Include every app's windows. Needs the person's approval."}),
+                        json!({"type": "boolean", "description": "Include every app's windows. Needs approval."}),
                     ),
                 ]),
                 &[],
@@ -291,7 +315,6 @@ struct Target {
     name: String,
     detail: String,
     password: bool,
-    content: bool,
     point: Option<Value>,
     preview: Option<String>,
 }
@@ -306,7 +329,6 @@ impl Target {
             name: text("name"),
             detail: text("description"),
             password: value["password"].as_bool().unwrap_or(false),
-            content: value["content"].as_bool().unwrap_or(true),
             point: value
                 .get("point")
                 .filter(|point| point.is_object())
@@ -370,7 +392,6 @@ struct Prepared {
     end: Option<Target>,
     asks: Vec<String>,
     forced: bool,
-    console: bool,
     text: Option<String>,
     keys: Option<String>,
     /// For an app: whether it was running when the approval was asked.
@@ -398,7 +419,6 @@ impl Prepared {
             "preview": target.and_then(|target| target.preview.as_ref()).map(|preview| format!("data:image/jpeg;base64,{preview}")),
             "text": self.text.as_ref().map(|text| text.chars().take(500).collect::<String>()),
             "keys": self.keys,
-            "console": self.console,
             "everyTime": self.forced,
             "running": self.running,
             "asks": self.asks,
@@ -583,44 +603,22 @@ impl MacTool {
         Ok(target)
     }
 
-    /// The `computer` approval patterns an action in `target`'s app needs; none for an allowed app. Clicks on text
-    /// inside a terminal or editor, and every action in an app set to ask, get a pattern with a fresh id, so an
-    /// earlier answer never covers them.
-    fn asks(
-        &self,
-        thread: ThreadId,
-        scope: &str,
-        target: &Target,
-        gesture: Gesture,
-    ) -> (Vec<String>, bool, bool) {
+    /// The `computer` approval patterns an action in `target`'s app needs; none for an allowed app. Every action in
+    /// an app set to ask gets a pattern with a fresh id, so an earlier answer never covers it, and only a person
+    /// answers it.
+    fn asks(&self, thread: ThreadId, scope: &str, target: &Target) -> (Vec<String>, bool) {
         let settings = self.computer.settings();
         let rule = settings.rule(&target.bundle);
-        let console = policy::group(&target.bundle, self.computer.host()) == Group::Console;
-        // Text in a terminal or editor can be anything, including someone's approval prompt, so each click on it goes
-        // to a person regardless of app rules.
-        let every_time =
-            (console && gesture == Gesture::Click && target.content) || rule == Some(Rule::Ask);
-        if every_time {
+        if rule == Some(Rule::Ask) {
             let id = uuid::Uuid::now_v7().simple().to_string();
-            return (
-                vec![format!("each:{thread}:{}:{id}", target.bundle)],
-                true,
-                console,
-            );
+            return (vec![format!("each:{thread}:{}:{id}", target.bundle)], true);
         }
-        // Terminals and editors are never allowed outright, since what a click lands on depends on what they show.
-        // Their own buttons and menus need one approval per chat.
-        let allowed = !console
-            && (rule == Some(Rule::Allow)
-                || (rule.is_none() && settings.default_act == Rule::Allow));
+        let allowed =
+            rule == Some(Rule::Allow) || (rule.is_none() && settings.default_act == Rule::Allow);
         if allowed {
-            return (Vec::new(), false, console);
+            return (Vec::new(), false);
         }
-        (
-            vec![format!("{scope}:{thread}:{}", target.bundle)],
-            false,
-            console,
-        )
+        (vec![format!("{scope}:{thread}:{}", target.bundle)], false)
     }
 
     async fn prepare(
@@ -704,10 +702,10 @@ impl MacTool {
                 };
                 let running = found["running"].as_bool() == Some(true);
                 // Focusing an app that already runs leaves its contents alone, so only opening and quitting raise an approval.
-                let (asks, forced, _) = if action == "activate" && running {
-                    (Vec::new(), false, false)
+                let (asks, forced) = if action == "activate" && running {
+                    (Vec::new(), false)
                 } else {
-                    self.asks(thread, "launch", &target, Gesture::Launch)
+                    self.asks(thread, "launch", &target)
                 };
                 Prepared {
                     kind: "launch",
@@ -788,7 +786,7 @@ impl MacTool {
                     || (self.kind == Kind::Press
                         && types_text(args["key"].as_str().unwrap_or_default()));
                 let target = self.resolve(thread, &cancel, at, gesture, typing).await?;
-                let (asks, forced, console) = self.asks(thread, "act", &target, gesture);
+                let (asks, forced) = self.asks(thread, "act", &target);
                 let summary = match self.kind {
                     Kind::Type => {
                         format!("Type into {} in {}", target.describe(), target.app_name())
@@ -824,7 +822,6 @@ impl MacTool {
                     target: Some(target),
                     asks,
                     forced,
-                    console,
                     summary,
                     ..Prepared::default()
                 }
@@ -837,8 +834,8 @@ impl MacTool {
                 {
                     return Err(tool_error("Both ends of a drag need a ref or x and y."));
                 }
-                // Pickup and drop are resolved before any approval, so a drop into a browser, terminal or hidden app is
-                // turned away like other input there.
+                // Pickup and drop are resolved before any approval, so a drop into a terminal or a hidden app is turned
+                // away like other input there.
                 let start = self
                     .resolve(thread, &cancel, from, Gesture::Input, false)
                     .await?;
@@ -850,10 +847,9 @@ impl MacTool {
                         "Drops onto the Dock are refused, since the Dock would open the item in that app. The person has to do this step.",
                     ));
                 }
-                let (mut asks, mut forced, console) =
-                    self.asks(thread, "act", &start, Gesture::Input);
+                let (mut asks, mut forced) = self.asks(thread, "act", &start);
                 if end.bundle != start.bundle {
-                    let (more, also_forced, _) = self.asks(thread, "act", &end, Gesture::Input);
+                    let (more, also_forced) = self.asks(thread, "act", &end);
                     asks.extend(more);
                     forced |= also_forced;
                 }
@@ -874,7 +870,6 @@ impl MacTool {
                     end: Some(end),
                     asks,
                     forced,
-                    console,
                     ..Prepared::default()
                 }
             }
@@ -890,6 +885,72 @@ fn capitalized(text: &str) -> String {
         .next()
         .map(|first| first.to_uppercase().chain(chars).collect())
         .unwrap_or_default()
+}
+
+/// What the helper's reply says about how an action reached `app`, as sentences for the model: whether it went in
+/// behind the person's window or why it came forward, whether the app showed the change, and the windows, sheets and
+/// menus it opened or closed. A reply that says none of it (an older helper's) gives none. `pointer`: a click or
+/// scroll, which `mac_apps activate` may help when it changed nothing from behind.
+fn delivery(reply: &Value, app: &str, pointer: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    let behind = reply["background"] == true;
+    if behind {
+        lines.push(
+            "This happened behind the person's window, leaving their front app, pointer and typing alone.".into(),
+        );
+    } else if let Some(reason) = reply["fallback"]
+        .as_str()
+        .filter(|reason| !reason.is_empty())
+    {
+        lines.push(format!(
+            "{app} came to the front for it, since {}.",
+            match reason {
+                "no-key-window" => "its window could not take the input from behind",
+                "private-calls-missing" =>
+                    "this Mac cannot send input to an app behind other windows",
+                "drag" => "drags use the real pointer",
+                "hover" => "hovering uses the real pointer",
+                "forced" => "HAARNESS_MAC_FOREGROUND is set",
+                other => other,
+            }
+        ));
+    }
+    match reply["confirmed"].as_bool() {
+        Some(true) => lines.push(format!("{app} showed the change.")),
+        Some(false) if behind && pointer => lines.push(format!(
+            "{app} showed no change, so this may not have taken effect. If the new look agrees, bring {app} forward with mac_apps activate and try once more."
+        )),
+        Some(false) => lines.push(format!(
+            "{app} showed no change, so this may not have taken effect: check the new look before going on."
+        )),
+        None => {}
+    }
+    for (key, heading) in [("opened", "Opened"), ("closed", "Closed")] {
+        let items: Vec<String> = reply[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                // One line each, whatever an app puts in a title.
+                let flat = |key: &str| {
+                    item[key]
+                        .as_str()
+                        .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                        .filter(|text| !text.is_empty())
+                };
+                let role = flat("role").unwrap_or_else(|| "window".into());
+                let owner = flat("app")?;
+                Some(match flat("title") {
+                    Some(title) => format!("{role} \"{title}\" of {owner}"),
+                    None => format!("{role} of {owner}"),
+                })
+            })
+            .collect();
+        if !items.is_empty() {
+            lines.push(format!("{heading}: {}.", items.join("; ")));
+        }
+    }
+    lines
 }
 
 /// Refuses the combinations that log out, lock the screen or open Force Quit, in any spelling. The helper refuses
@@ -930,16 +991,20 @@ fn check_keys(keys: &str) -> CoreResult<()> {
     Ok(())
 }
 
-/// Turns away a click or drag into a terminal or editor while any approval waits for the person: such text can show
-/// a Haarness approval card that takes clicks, and the agent's click would answer it.
-fn quiet_console(prepared: &Value, context: &ToolContext) -> CoreResult<()> {
+/// Turns away a click, drag, typing or key press in a terminal or code editor while any approval waits for the person:
+/// such a window can show Haarness's terminal UI, whose approval card takes keys and clicks, and the agent's input
+/// would answer it.
+fn quiet_terminal(prepared: &Value, context: &ToolContext) -> CoreResult<()> {
     let waiting = context
         .invoker
         .as_ref()
         .map_or(0, |invoker| invoker.approvals_waiting());
-    if prepared["console"] == true && waiting > 0 {
+    let shows = ["bundle", "endBundle"]
+        .iter()
+        .any(|key| prepared[*key].as_str().is_some_and(policy::may_show_cards));
+    if shows && waiting > 0 {
         return Err(tool_error(
-            "Someone still has to answer an approval, and terminal or editor text may be showing it, so a click there now could answer it. Retry once it has been answered.",
+            "Someone still has to answer an approval, and a terminal or editor may be showing it, so input there now could answer it. Retry once it has been answered.",
         ));
     }
     Ok(())
@@ -1038,6 +1103,8 @@ impl MacTool {
     /// Captures a screenshot plus the element outline: the text handed to the model and the saved image.
     async fn look(&self, context: &ToolContext, mut input: Value) -> CoreResult<Look> {
         let settings = self.computer.settings();
+        let find = input["find"].as_str().map(str::to_owned);
+        let zoom = input.get("zoom").filter(|zoom| zoom.is_object()).cloned();
         input["hidden"] = json!(policy::hidden(settings.denied()));
         input["skip"] = json!(
             self.computer
@@ -1063,9 +1130,17 @@ impl MacTool {
         let app = data["app"]["name"].as_str().map(str::to_owned);
         let bundle = data["app"]["bundle"].as_str().map(str::to_owned);
         let whole = data["whole"].as_bool() == Some(true);
-        let mut lines = vec![format!(
-            "Image size {width}x{height} pixels; x and y always refer to this image."
-        )];
+        let mut lines = vec![match &zoom {
+            // The close-up's own pixels never become coordinates: the outline and the next actions keep the frame of
+            // the screenshot it was cut from.
+            Some(zoom) => format!(
+                "A close-up at full resolution of the area at x={}, y={}, {}x{} of the latest screenshot. x and y, here and in your next actions, still refer to that screenshot, not to this close-up's pixels.",
+                zoom["x"], zoom["y"], zoom["width"], zoom["height"]
+            ),
+            None => {
+                format!("Image size {width}x{height} pixels; x and y always refer to this image.")
+            }
+        }];
         lines.push(if whole {
             "Every app appears in the picture apart from those computer use always hides.".into()
         } else if let Some(app) = &app {
@@ -1073,6 +1148,19 @@ impl MacTool {
         } else {
             "No app window is available, so no screenshot was taken. Open an app or name one.".into()
         });
+        if let Some(app) = app.as_deref().filter(|_| !whole) {
+            match data["offscreen"].as_str() {
+                Some("minimized") => lines.push(format!("None of {app}'s windows is on screen: they are all minimized. mac_apps with activate brings {app} back to the front.")),
+                Some("other-space") => lines.push(format!("None of {app}'s windows is on screen: they are on another Space. mac_apps with activate brings {app} to the front.")),
+                _ if data["behind"] == true => lines.push(format!("{app} is behind the person's window. Clicks, scrolling, typing and keys reach it where it is, without bringing it forward; drags and hovering bring it to the front.")),
+                _ => {}
+            }
+        }
+        if let Some(find) = &find {
+            lines.push(format!(
+                "Showing only elements matching \"{find}\", plus the elements around them."
+            ));
+        }
         if let Some(front) = data["frontmost"].as_object() {
             lines.push(format!(
                 "In front: {} ({}).",
@@ -1157,20 +1245,21 @@ impl MacTool {
         })
     }
 
-    /// Sends one approved action to the helper. If the person paused after the agent's last look (while the approval
-    /// was open, for instance), the action is dropped, because its target may have moved.
+    /// Sends one approved action to the helper and returns its reply. If the person paused after the agent's last look
+    /// (while the approval was open, for instance), the action is dropped, because its target may have moved.
     async fn act(
         &self,
         context: &ToolContext,
         op: &str,
         mut input: Value,
         timeout: Duration,
-    ) -> CoreResult<()> {
+    ) -> CoreResult<Value> {
         if self.live(conversation(context), &context.cancel).await? {
             return Err(tool_error(RESUMED));
         }
         self.computer
             .hold(conversation(context), context.cancel.clone());
+        self.computer.behind(false);
         let settings = self.computer.settings();
         input["ring"] = json!(settings.ring);
         input["bar"] = self.computer.bar_words();
@@ -1193,7 +1282,10 @@ impl MacTool {
         // Escape stays armed from the action's end, however long it took.
         self.computer.touch();
         match result {
-            Ok(_) => Ok(()),
+            Ok(reply) => {
+                self.computer.behind(reply["background"] == true);
+                Ok(reply)
+            }
             Err(error) if error.code == "paused" => {
                 self.computer
                     .wait_after_refusal(conversation(context), &context.cancel)
@@ -1207,29 +1299,46 @@ impl MacTool {
         }
     }
 
+    /// The result of an action: what was done, what the helper said about it, and (unless `look` is off) a fresh look
+    /// at the app acted on, or at the app in front when the helper did not say which app that was.
     async fn finish(
         &self,
         context: &ToolContext,
         done: String,
         args: &Value,
         look: bool,
+        reply: &Value,
     ) -> CoreResult<ToolOutput> {
         let prepared = Self::plan(args);
+        let app = reply["target"]["name"]
+            .as_str()
+            .or_else(|| prepared["app"].as_str())
+            .unwrap_or("The app");
+        let pointer = matches!(self.kind, Kind::Click | Kind::Scroll);
+        let mut said = format!("{done}.");
+        for line in delivery(reply, app, pointer) {
+            said.push(' ');
+            said.push_str(&line);
+        }
         if !look {
             return Ok(ToolOutput {
                 text: format!(
-                    "{done}. No snapshot was taken; call mac_snapshot to check the result."
+                    "{said} No snapshot was taken; call mac_snapshot to check the result."
                 ),
                 metadata: json!({"mac": prepared, "title": done}),
             });
         }
-        let seen = self.look(context, json!({})).await?;
+        let at = reply["target"]["bundle"]
+            .as_str()
+            .filter(|bundle| !bundle.is_empty())
+            .map_or_else(|| json!({}), |bundle| json!({"bundle": bundle}));
+        let seen = self.look(context, at).await?;
         let mut metadata = seen.metadata;
         metadata["attachments"] = json!(seen.attachments);
         metadata["mac"] = prepared;
         metadata["title"] = json!(done);
         Ok(ToolOutput {
-            text: format!("{done}.\n\n{}", seen.text),
+            text: format!("{said}\n\n{}", seen.text),
             metadata,
         })
     }
@@ -1308,8 +1417,17 @@ impl Tool for MacTool {
     }
 
     fn explicit_approval(&self, _arguments: &Value, operation: &str) -> bool {
-        // A person answers these: never Auto's reviewer or a hook.
+        // A person answers these, never a hook or a configured allow rule; in a chat in Auto, Auto's reviewer may too
+        // (see `reviewer_may_answer`).
         operation.starts_with("computer:")
+    }
+
+    fn reviewer_may_answer(&self, _arguments: &Value, operation: &str) -> bool {
+        // Acting in an app, opening or quitting one, and looking at every app at once. An app set to ask every time
+        // (`each:`) is the person's own choice to be asked, so it stays theirs.
+        ["computer:act:", "computer:launch:", "computer:screen:"]
+            .iter()
+            .any(|prefix| operation.starts_with(prefix))
     }
 
     fn yolo_answers(&self, _arguments: &Value, operation: &str) -> bool {
@@ -1347,6 +1465,12 @@ impl Tool for MacTool {
                 }
                 if let Some(depth) = args["depth"].as_u64() {
                     input["depth"] = json!(depth);
+                }
+                if let Some(find) = args["find"].as_str().filter(|find| !find.trim().is_empty()) {
+                    input["find"] = json!(find);
+                }
+                if let Some(zoom) = args.get("zoom").filter(|zoom| zoom.is_object()) {
+                    input["zoom"] = zoom.clone();
                 }
                 let seen = self.look(&context, input).await?;
                 let mut metadata = seen.metadata;
@@ -1418,21 +1542,27 @@ impl Tool for MacTool {
                     "activate" if running => "activate",
                     _ => "launch",
                 };
-                self.act(
-                    &context,
-                    op,
-                    json!({"bundle": bundle}),
-                    Duration::from_secs(40),
-                )
-                .await?;
+                let reply = self
+                    .act(
+                        &context,
+                        op,
+                        json!({"bundle": bundle}),
+                        Duration::from_secs(40),
+                    )
+                    .await?;
                 let done = match action {
                     "quit" => format!("Quit {app}"),
                     "activate" => format!("Brought {app} to the front"),
                     _ => format!("Opened {app}"),
                 };
+                let mut said = format!("{done}.");
+                for line in delivery(&reply, &app, false) {
+                    said.push(' ');
+                    said.push_str(&line);
+                }
                 if action == "quit" {
                     return Ok(ToolOutput {
-                        text: format!("{done}."),
+                        text: said,
                         metadata: json!({"mac": Self::plan(&args), "title": done}),
                     });
                 }
@@ -1442,18 +1572,19 @@ impl Tool for MacTool {
                 metadata["mac"] = Self::plan(&args);
                 metadata["title"] = json!(done);
                 Ok(ToolOutput {
-                    text: format!("{done}.\n\n{}", seen.text),
+                    text: format!("{said}\n\n{}", seen.text),
                     metadata,
                 })
             }
             Kind::Click => {
-                quiet_console(prepared, &context)?;
+                quiet_terminal(prepared, &context)?;
                 let mut input = spot(&args)?;
                 input["button"] = json!(args["button"].as_str().unwrap_or("left"));
                 input["count"] = json!(args["count"].as_u64().unwrap_or(1));
                 input["held"] = args["modifiers"].clone();
                 input["expect"] = Self::expect(&args);
-                self.act(&context, "click", input, Duration::from_secs(20))
+                let reply = self
+                    .act(&context, "click", input, Duration::from_secs(20))
                     .await?;
                 // Every click verb ends in "click": its past is the verb and "ed".
                 let done = capitalized(&format!(
@@ -1462,21 +1593,23 @@ impl Tool for MacTool {
                     prepared["target"].as_str().unwrap_or("the spot"),
                     prepared["app"].as_str().unwrap_or("the app")
                 ));
-                self.finish(&context, done, &args, look).await
+                self.finish(&context, done, &args, look, &reply).await
             }
             Kind::Type => {
+                quiet_terminal(prepared, &context)?;
                 let mut input = spot(&args)?;
                 let replace = args["replace"].as_bool() == Some(true);
                 let text = args["text"].as_str().unwrap_or_default();
                 input[if replace { "value" } else { "text" }] = json!(text);
                 input["expect"] = Self::expect(&args);
-                self.act(
-                    &context,
-                    if replace { "fill" } else { "type" },
-                    input,
-                    Duration::from_secs(90),
-                )
-                .await?;
+                let reply = self
+                    .act(
+                        &context,
+                        if replace { "fill" } else { "type" },
+                        input,
+                        Duration::from_secs(90),
+                    )
+                    .await?;
                 let done = format!(
                     "{} {} in {}",
                     if replace {
@@ -1487,60 +1620,65 @@ impl Tool for MacTool {
                     prepared["target"].as_str().unwrap_or("the focused field"),
                     prepared["app"].as_str().unwrap_or("the app")
                 );
-                self.finish(&context, done, &args, look).await
+                self.finish(&context, done, &args, look, &reply).await
             }
             Kind::Press => {
+                quiet_terminal(prepared, &context)?;
                 let key = args["key"].as_str().unwrap_or_default();
                 let input = json!({"keys": key, "times": args["repeat"].as_u64().unwrap_or(1), "expect": Self::expect(&args)});
-                self.act(&context, "press", input, Duration::from_secs(30))
+                let reply = self
+                    .act(&context, "press", input, Duration::from_secs(30))
                     .await?;
                 let done = format!(
                     "Pressed {key} in {}",
                     prepared["app"].as_str().unwrap_or("the app")
                 );
-                self.finish(&context, done, &args, look).await
+                self.finish(&context, done, &args, look, &reply).await
             }
             Kind::Scroll => {
                 let mut input = spot(&args)?;
                 input["direction"] = json!(args["direction"].as_str().unwrap_or("down"));
                 input["amount"] = json!(args["amount"].as_u64().unwrap_or(3));
                 input["expect"] = Self::expect(&args);
-                self.act(&context, "scroll", input, Duration::from_secs(20))
+                let reply = self
+                    .act(&context, "scroll", input, Duration::from_secs(20))
                     .await?;
                 let done = format!(
                     "Scrolled {} in {}",
                     args["direction"].as_str().unwrap_or("down"),
                     prepared["app"].as_str().unwrap_or("the app")
                 );
-                self.finish(&context, done, &args, look).await
+                self.finish(&context, done, &args, look, &reply).await
             }
             Kind::Hover => {
                 let mut input = spot(&args)?;
                 input["expect"] = Self::expect(&args);
-                self.act(&context, "hover", input, Duration::from_secs(20))
+                let reply = self
+                    .act(&context, "hover", input, Duration::from_secs(20))
                     .await?;
                 let done = format!(
                     "Pointed at {} in {}",
                     prepared["target"].as_str().unwrap_or("the spot"),
                     prepared["app"].as_str().unwrap_or("the app")
                 );
-                self.finish(&context, done, &args, look).await
+                self.finish(&context, done, &args, look, &reply).await
             }
             Kind::Drag => {
-                quiet_console(prepared, &context)?;
+                quiet_terminal(prepared, &context)?;
                 let input = json!({
                     "from": spot(&args["from"])?,
                     "to": spot(&args["to"])?,
                     "expect": Self::expect(&args),
                     "expectEnd": prepared["endBundle"].as_str().unwrap_or_default(),
                 });
-                self.act(&context, "drag", input, Duration::from_secs(30))
+                let reply = self
+                    .act(&context, "drag", input, Duration::from_secs(30))
                     .await?;
                 let done = prepared["summary"]
                     .as_str()
                     .unwrap_or("Dragged")
                     .replacen("Drag ", "Dragged ", 1);
-                self.finish(&context, done, &args, look).await
+                self.finish(&context, done, &args, look, &reply).await
             }
         }
     }

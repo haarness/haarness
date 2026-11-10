@@ -326,6 +326,9 @@ test("app rules are added, changed and removed, and a bad identifier is refused 
   await input.fill("com.jetbrains.*");
   await rules.getByRole("button", { name: "Add app", exact: true }).click();
   await expect(rules.locator(".computer-app-list li")).toHaveCount(2);
+  await expect(rules.locator(".computer-apps-head p")).toHaveText(
+    "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.",
+  );
   await look("computer-use-settings", dialog);
   await openComputerUse();
   await rules.getByRole("button", { name: "Remove the rule for TextEdit", exact: true }).click();
@@ -441,7 +444,7 @@ test("Always allow saves a rule for the app, then allows this request once", asy
   expect(rule?.bar?.usingApp).toBeTruthy();
 });
 
-test("a click on a terminal's text asks every time and offers no chat-wide allow", async () => {
+test("an app set to ask every time asks each time and offers no chat-wide allow", async () => {
   const id = crypto.randomUUID();
   await showPermissions([
     request(
@@ -449,11 +452,11 @@ test("a click on a terminal's text asks every time and offers no chat-wide allow
       {
         kind: "act",
         action: "click",
-        bundle: "com.apple.Terminal",
-        app: "Terminal",
-        target: "text area",
-        summary: "Click text area in Terminal",
-        console: true,
+        bundle: "com.apple.mail",
+        app: "Mail",
+        target: 'button "Send"',
+        label: "Send",
+        summary: 'Click button "Send" in Mail',
         everyTime: true,
       },
       false,
@@ -464,13 +467,34 @@ test("a click on a terminal's text asks every time and offers no chat-wide allow
   await expect(dock.locator(".prompt-actions").getByRole("button")).toHaveText(["Deny", "Allow once"]);
   await expect(dock.getByRole("button", { name: "Allow once", exact: true })).toHaveClass(/primary/);
   await expect(dock.getByTestId("computer-always")).toHaveCount(0);
-  await expect(dock.locator(".computer-approval-note")).toHaveText(
-    "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.",
-  );
-  await expect(dock.locator(".computer-approval-preview")).toHaveCount(0);
+  await expect(dock.locator(".computer-approval-note")).toHaveText("You set this app to ask every time.");
   await snap("computer-use-approval-every-time.png", dock);
   await dock.getByRole("button", { name: "Allow once", exact: true }).click();
   await expect.poll(async () => (await fake()).replies.at(-1)).toEqual({ id, decision: "once" });
+});
+
+test("a computer use card Auto's reviewer left to the person carries its note", async () => {
+  const id = crypto.randomUUID();
+  const asked = {
+    ...request(id, {
+      kind: "act",
+      action: "click",
+      bundle: "com.apple.Notes",
+      app: "Notes",
+      target: 'button "Delete"',
+      label: "Delete",
+      summary: 'Click button "Delete" in Notes',
+    }),
+    review: { status: "asked", risk: "high", rule: "Destructive action", rationale: "It deletes a note the person never named." },
+  } as PendingPermissionInfo;
+  await showPermissions([asked]);
+  const dock = docked();
+  await expect(dock.locator(".computer-approval-summary")).toHaveText("Click “Delete” in Notes", { timeout: 10000 });
+  await expect(dock.locator(".approval-review")).toContainText("Destructive action");
+  await expect(dock.locator(".approval-review")).toContainText("It deletes a note the person never named.");
+  await look("computer-use-approval-reviewed", docked);
+  await docked().getByRole("button", { name: "Deny", exact: true }).click();
+  await expect.poll(async () => (await fake()).replies.at(-1)).toEqual({ id, decision: "reject" });
 });
 
 test("typing shows its text, and a whole-screen look says what goes to the model", async () => {

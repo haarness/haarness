@@ -324,7 +324,7 @@ pub fn view(status: Value) -> View {
         let allow_all = status["settings"]["defaultAct"] == "allow";
         entries.push(Entry {
             label: if allow_all { "Ask before acting in apps without a rule" } else { "Act in apps without a rule without asking" }.into(),
-            description: "Terminals, editors and apps set to ask still ask".into(),
+            description: "Apps set to ask every time still ask".into(),
             request: json!({"action": "configure", "defaultAct": if allow_all { "ask" } else { "allow" }}),
             confirm: None,
             icon: None,
