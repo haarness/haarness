@@ -20120,6 +20120,7 @@ mod shell_reading_tests {
 
     /// A request waiting for an answer about `plan`'s patterns, as a tool
     /// call registers it.
+    #[cfg(unix)]
     fn waiting(plan: &AskPlan) -> PendingPermission {
         let (sender, _) = oneshot::channel();
         let thread = ThreadId::new();

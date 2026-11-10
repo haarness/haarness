@@ -127,7 +127,13 @@ impl WorkflowRuntimeAdapter {
         let null_on_error = on_error_null(options)?;
         let script = crate::tools::ScriptCall::new();
         match script
-            .run(self.direct_tool(thread_id, name, arguments, timeout_ms, cancellation))
+            .run(Box::pin(self.direct_tool(
+                thread_id,
+                name,
+                arguments,
+                timeout_ms,
+                cancellation,
+            )))
             .await
         {
             // An MCP tool's whole text and its server's own metadata, where
