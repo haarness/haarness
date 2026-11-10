@@ -150,6 +150,9 @@ async fn invoke(config: &StatusLineConfig, context: &Context) -> Result<String, 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // In a process group of its own, like every program Haarness starts for someone else's code.
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command.spawn().map_err(|error| error.to_string())?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin

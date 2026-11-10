@@ -8351,6 +8351,8 @@ async fn parallel_child_questions_hydrate_and_resolve_independently_over_rest() 
         Some(pending[0].question_id.clone())
     );
 
+    // The server runs in this test's own process, which is its own client here.
+    haarness_server::request_origin::hear_this_process_as_a_person();
     client
         .post(format!("{base}/v1/questions/{}", pending[0].question_id))
         .json(&haarness_protocol::QuestionReply {

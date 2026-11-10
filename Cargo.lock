@@ -1888,6 +1888,7 @@ dependencies = [
  "haarness-workflow-catalog",
  "haarness-workflows",
  "haarness-workspaces",
+ "hex",
  "htmd",
  "http",
  "ignore",
@@ -1896,6 +1897,7 @@ dependencies = [
  "opentelemetry",
  "parking_lot",
  "process-wrap",
+ "rand 0.9.5",
  "regex",
  "reqwest",
  "rusqlite",
@@ -2804,6 +2806,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "micromap"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2881,6 +2892,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases 0.2.2",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

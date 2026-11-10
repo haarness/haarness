@@ -519,7 +519,9 @@ function createApp(saved?: Preferences) {
         );
       } catch (error) {
         await loadApprovalMode(connection, thread);
-        if (/409|another window/i.test(String(error)))
+        // Changed elsewhere; any other refusal (one the server could not
+        // tell the sender of, say) is said in the server's own words.
+        if (/another window/i.test(String(error)))
           notify(t("Approvals changed in another window. Try again."));
         else throw error;
       }

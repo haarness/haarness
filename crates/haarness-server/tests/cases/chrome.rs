@@ -742,6 +742,8 @@ async fn a_published_chat_cannot_answer_chrome_sites() {
         assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN, "{path}");
     }
     assert_eq!(runtime.pending_permissions().len(), 1);
+    // The server runs in this test's own process, which is its own client here.
+    haarness_server::request_origin::hear_this_process_as_a_person();
     let answered = client
         .post(&url)
         .bearer_auth("chrome-token")

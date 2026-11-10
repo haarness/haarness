@@ -109,7 +109,16 @@ def finish(started):
 
 
 def tool(thread, name, arguments):
-    finish(turn(thread, f'!tool {name} ' + json.dumps(arguments)))
+    started = turn(thread, f'!tool {name} ' + json.dumps(arguments))
+    if name == 'schedule' and arguments.get('action') in ('create', 'update', 'enable', 'run'):
+        # Setting a schedule up or starting a run is a person's to answer: this script answers as that person.
+        def answered():
+            for pending in api('GET', '/permissions'):
+                if pending['threadId'] == thread['id']:
+                    api('POST', f'/permissions/{pending["permissionId"]}', {'decision': 'once', 'feedback': None})
+            return api('GET', '/turns/' + started['id'])['status'] not in ('running', 'queued')
+        until(answered, 'the schedule approval')
+    finish(started)
 
 
 def last_result(thread, name):

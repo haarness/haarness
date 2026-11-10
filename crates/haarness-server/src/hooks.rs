@@ -249,6 +249,7 @@ impl ConfiguredHooks {
                 return HookOutcome::default();
             }
         };
+        let recorded = haarness_core::process_groups::recorded(child.id());
         if folders.chat_folder_gone {
             label.moved();
         }
@@ -261,6 +262,7 @@ impl ConfiguredHooks {
         let stdin = child.stdin.take();
         let input = payload.to_string().into_bytes();
         let finished = async move {
+            let _recorded = recorded;
             let feed = async move {
                 if let Some(mut stdin) = stdin {
                     let _ = stdin.write_all(&input).await;
@@ -538,6 +540,10 @@ fn hook_command(entry: &HookEntry, folders: Folders<'_>) -> tokio::process::Comm
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // In a process group of its own, noted as one Haarness started, as an
+    // agent's command is: what the hook leaves running is still known as such.
+    #[cfg(unix)]
+    command.process_group(0);
     if let Some(root) = &entry.plugin_root {
         command
             .env("HAARNESS_PLUGIN_ROOT", root)

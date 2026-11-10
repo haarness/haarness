@@ -95,7 +95,7 @@ pub fn serve(
         .with_state(front);
     let server_shutdown = shutdown.clone();
     let task = tokio::spawn(async move {
-        let app = app.into_make_service_with_connect_info::<SocketAddr>();
+        let app = app.into_make_service_with_connect_info::<crate::request_origin::Client>();
         axum::serve(listener, app)
             .with_graceful_shutdown(server_shutdown.cancelled_owned())
             .await
@@ -209,15 +209,25 @@ fn forwarded_headers(
 async fn forward(
     State(front): State<Front>,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-    request: Request,
+    connection: crate::request_origin::Connection,
+    mut request: Request,
 ) -> Response {
+    // The project's server sees this front as the sender: say who sent it the request, in place of whatever the
+    // sender said, vouched for with that server's key.
+    let sender = crate::request_origin::sender(&connection, request.headers()).await;
+    for name in [
+        crate::request_origin::SENDER_HEADER,
+        crate::request_origin::FORWARDER_HEADER,
+    ] {
+        request.headers_mut().remove(name);
+    }
     let admitted = protected(request.uri().path());
     let anonymous = request.extensions().get::<AnonymousAccess>().is_some();
     let path = request.uri().path_and_query().map_or_else(
         || request.uri().path().to_owned(),
         |value| value.as_str().to_owned(),
     );
-    let target = match front.upstream.current().await {
+    let mut target = match front.upstream.current().await {
         Ok(target) => target,
         Err(error) => return unavailable(&error, admitted),
     };
@@ -228,8 +238,8 @@ async fn forward(
             request.headers(),
             &path,
             target,
-            admitted,
-            anonymous,
+            (admitted, anonymous),
+            sender,
         )
         .await;
     }
@@ -237,33 +247,52 @@ async fn forward(
     let Ok(body) = to_bytes(body, BODY_LIMIT).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
-    let send = |target: &WorkspaceTarget, body: Bytes| {
+    let send = async |target: &WorkspaceTarget, body: Bytes| {
+        let key =
+            crate::request_origin::forwarding_key_of(&front.client, &target.url, &target.token)
+                .await;
+        let mut headers = forwarded_headers(&parts.headers, target, admitted, anonymous);
+        headers.extend(crate::request_origin::forwarded_headers(
+            sender,
+            key.as_deref(),
+        ));
         front
             .client
             .request(
                 parts.method.clone(),
                 format!("{}{path}", target.url.trim_end_matches('/')),
             )
-            .headers(forwarded_headers(
-                &parts.headers,
-                target,
-                admitted,
-                anonymous,
-            ))
+            .headers(headers)
             .body(body)
             .send()
+            .await
     };
-    let response = match send(&target, body.clone()).await {
-        // The server stopped or was replaced since its record was read.
-        Err(error) if error.is_connect() => match front.upstream.recover(&target).await {
-            Ok(target) => send(&target, body).await,
-            Err(error) => return unavailable(&error, admitted),
-        },
-        other => other,
-    };
-    let response = match response {
-        Ok(response) => response,
-        Err(error) => return unavailable(&error.into(), admitted),
+    // A server that could not tell who sent a request did nothing with it: ask for its key again and send it once more.
+    let mut asked_again = false;
+    let response = loop {
+        let response = match send(&target, body.clone()).await {
+            // The server stopped or was replaced since its record was read.
+            Err(error) if error.is_connect() => match front.upstream.recover(&target).await {
+                Ok(recovered) => {
+                    target = recovered;
+                    send(&target, body.clone()).await
+                }
+                Err(error) => return unavailable(&error, admitted),
+            },
+            other => other,
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => return unavailable(&error.into(), admitted),
+        };
+        if crate::request_origin::unknown_sender(response.headers()) {
+            crate::request_origin::forget_forwarding_key(&target.url, &target.token);
+            if !asked_again {
+                asked_again = true;
+                continue;
+            }
+        }
+        break response;
     };
     let status = response.status();
     let headers = response.headers().clone();
@@ -281,31 +310,56 @@ async fn forward(
     result
 }
 
+/// Forwards a WebSocket upgrade, as [`forward`] does a request, which was admitted or not, and anonymously or not.
 async fn forward_websocket(
     front: Front,
     ws: WebSocketUpgrade,
     headers: &HeaderMap,
     path: &str,
-    target: WorkspaceTarget,
-    admitted: bool,
-    anonymous: bool,
+    mut target: WorkspaceTarget,
+    (admitted, anonymous): (bool, bool),
+    sender: crate::request_origin::Sender,
 ) -> Response {
-    let connect = |target: &WorkspaceTarget| {
+    let connect = async |target: &WorkspaceTarget| {
+        let key =
+            crate::request_origin::forwarding_key_of(&front.client, &target.url, &target.token)
+                .await;
         let url = format!("{}{path}", target.url.trim_end_matches('/')).replacen("http", "ws", 1);
-        let handshake = url.into_client_request().map(|mut handshake| {
-            handshake
-                .headers_mut()
-                .extend(forwarded_headers(headers, target, admitted, anonymous));
-            handshake
-        });
-        async move { tokio_tungstenite::connect_async(handshake?).await }
+        let mut handshake = url.into_client_request()?;
+        handshake
+            .headers_mut()
+            .extend(forwarded_headers(headers, target, admitted, anonymous));
+        handshake
+            .headers_mut()
+            .extend(crate::request_origin::forwarded_headers(
+                sender,
+                key.as_deref(),
+            ));
+        tokio_tungstenite::connect_async(handshake).await
     };
-    let upstream = match connect(&target).await {
-        Err(tungstenite::Error::Io(_)) => match front.upstream.recover(&target).await {
-            Ok(target) => connect(&target).await,
-            Err(error) => return unavailable(&error, admitted),
-        },
-        other => other,
+    // A server that could not tell who sent a request did nothing with it: ask for its key again and send it once more.
+    let mut asked_again = false;
+    let upstream = loop {
+        let upstream = match connect(&target).await {
+            Err(tungstenite::Error::Io(_)) => match front.upstream.recover(&target).await {
+                Ok(recovered) => {
+                    target = recovered;
+                    connect(&target).await
+                }
+                Err(error) => return unavailable(&error, admitted),
+            },
+            other => other,
+        };
+        if let Err(tungstenite::Error::Http(refusal)) = &upstream
+            && crate::request_origin::unknown_sender(refusal.headers())
+        {
+            crate::request_origin::forget_forwarding_key(&target.url, &target.token);
+            if !asked_again {
+                asked_again = true;
+                continue;
+            }
+        }
+        break upstream;
     };
     match upstream {
         Ok((upstream, _)) => {
@@ -591,5 +645,135 @@ mod tests {
         drop(socket);
         handle.shutdown_signal().cancel();
         handle.wait().await.unwrap();
+    }
+
+    /// What a stand-in server that refuses the first `refusals` requests as from an unknown sender heard: how often it
+    /// was asked for its key, and the sender's word and key of each request.
+    #[derive(Default)]
+    struct Heard {
+        keys_asked: usize,
+        requests: Vec<(Option<String>, Option<String>)>,
+    }
+
+    /// A stand-in for a project's server that hands out a new key each time it is asked for one, and refuses the
+    /// first `refusals` requests and upgrades as from an unknown sender, as a server that started again does.
+    async fn refusing_server(refusals: usize) -> (String, Arc<Mutex<Heard>>, CancellationToken) {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let key = {
+            let heard = heard.clone();
+            move || {
+                let heard = heard.clone();
+                async move {
+                    let mut heard = heard.lock().unwrap();
+                    heard.keys_asked += 1;
+                    Json(serde_json::json!({"key": format!("key-{}", heard.keys_asked)}))
+                }
+            }
+        };
+        let answer = {
+            let heard = heard.clone();
+            move |upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+                  headers: HeaderMap| {
+                let heard = heard.clone();
+                async move {
+                    let pick = |name: &str| {
+                        headers
+                            .get(name)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned)
+                    };
+                    let count = {
+                        let mut heard = heard.lock().unwrap();
+                        heard.requests.push((
+                            pick(crate::request_origin::SENDER_HEADER),
+                            pick(crate::request_origin::FORWARDER_HEADER),
+                        ));
+                        heard.requests.len()
+                    };
+                    if count <= refusals {
+                        return (
+                            StatusCode::CONFLICT,
+                            [(crate::request_origin::UNKNOWN_SENDER_HEADER, "1")],
+                            "unknown sender",
+                        )
+                            .into_response();
+                    }
+                    match upgrade {
+                        Ok(upgrade) => upgrade.on_upgrade(|_| async {}),
+                        Err(_) => StatusCode::NO_CONTENT.into_response(),
+                    }
+                }
+            }
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let shutdown = CancellationToken::new();
+        let app = Router::new()
+            .route("/v1/host/forwarding", get(key))
+            .route("/v1/permissions/p", post(answer.clone()))
+            .route("/v1/socket", get(answer));
+        let stop = shutdown.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(stop.cancelled_owned())
+                .await
+        });
+        (url, heard, shutdown)
+    }
+
+    #[tokio::test]
+    async fn a_request_refused_for_its_unknown_sender_is_sent_once_more_with_a_fresh_key() {
+        let client = reqwest::Client::new();
+        let answer = async |url: &str| {
+            client
+                .post(format!("{url}/v1/permissions/p"))
+                .bearer_auth("front-token")
+                // A sender's own word and key are never passed on.
+                .header(crate::request_origin::SENDER_HEADER, "person")
+                .header(crate::request_origin::FORWARDER_HEADER, "guess")
+                .send()
+                .await
+                .unwrap()
+                .status()
+        };
+        // Refused once: the front asks for the key again and sends the request once more.
+        let (upstream, heard, _stop) = refusing_server(1).await;
+        let (url, handle, _) = front(&ServerAccess::Private, &upstream, &upstream).await;
+        assert_eq!(answer(&url).await, StatusCode::NO_CONTENT);
+        {
+            let heard = heard.lock().unwrap();
+            assert_eq!(heard.keys_asked, 2);
+            // The front's word for a sender whose key it did not have: unknown.
+            let word = Some("unknown".to_owned());
+            assert_eq!(
+                heard.requests,
+                [
+                    (word.clone(), Some("key-1".into())),
+                    (word, Some("key-2".into()))
+                ]
+            );
+        }
+        // An upgrade the same way.
+        let (upstream_ws, heard_ws, _stop_ws) = refusing_server(1).await;
+        let (url_ws, handle_ws, _) =
+            front(&ServerAccess::Private, &upstream_ws, &upstream_ws).await;
+        let mut request = format!("{}/v1/socket", url_ws.replacen("http", "ws", 1))
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(header::AUTHORIZATION, "Bearer front-token".parse().unwrap());
+        assert!(tokio_tungstenite::connect_async(request).await.is_ok());
+        assert_eq!(heard_ws.lock().unwrap().requests.len(), 2);
+        // Refused again: the refusal is the answer, after two tries.
+        let (upstream, heard, _stop) = refusing_server(usize::MAX).await;
+        let (url_refused, handle_refused, _) =
+            front(&ServerAccess::Private, &upstream, &upstream).await;
+        assert_eq!(answer(&url_refused).await, StatusCode::CONFLICT);
+        assert_eq!(heard.lock().unwrap().requests.len(), 2);
+        for handle in [handle, handle_ws, handle_refused] {
+            handle.shutdown_signal().cancel();
+            handle.wait().await.unwrap();
+        }
     }
 }

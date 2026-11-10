@@ -2059,6 +2059,7 @@ impl Tool for ScheduleTool {
                 "Create with either a structured trigger plus prompt, or request in one exact form: 'in N minutes to ...', 'every N minutes to ...', 'every day at 8am to ...', 'every Monday at 8am to ...', or 'on <RFC3339 timestamp> to ...'.",
                 "Structured triggers are {type:'interval',seconds:N}, {type:'cron',expression:'five fields'}, or {type:'once',at:'RFC3339'}.",
                 "Models must use provider/model form. Scheduled turns are non-interactive, auto-approve ordinary permission prompts, and cannot call the question tool.",
+                "Because a schedule's runs approve their own requests, create, update, enable and run wait for the user's own approval in this chat; only Yolo mode answers it for them.",
             ]
             .join(" "),
             input_schema: json!({
@@ -2091,6 +2092,19 @@ impl Tool for ScheduleTool {
         }
     }
 
+    /// A schedule's runs approve their own requests: only a person sets one up, changes it, switches it on or starts
+    /// a run, as on the command line and through the server.
+    fn explicit_approval(&self, arguments: &Value, _operation: &str) -> bool {
+        matches!(
+            arguments["action"].as_str(),
+            Some("create" | "update" | "enable" | "run")
+        )
+    }
+    /// Yolo is the person approving everything, schedules included, as it does computer use. Auto's reviewer and
+    /// hooks never answer them.
+    fn yolo_answers(&self, arguments: &Value, operation: &str) -> bool {
+        self.explicit_approval(arguments, operation)
+    }
     fn side_effectful(&self) -> bool {
         // Scheduler registration is external state, not a workspace mutation.
         false
@@ -7122,6 +7136,18 @@ mod tests {
             !tool.side_effectful(),
             "external scheduler state must not create workspace snapshots"
         );
+        // Setting a schedule up, changing it, switching it on and starting a run are a person's to answer, or Yolo's.
+        for action in ["create", "update", "enable", "run"] {
+            let arguments = json!({"action": action});
+            assert!(tool.explicit_approval(&arguments, "schedule"), "{action}");
+            assert!(tool.yolo_answers(&arguments, "schedule"), "{action}");
+        }
+        for action in ["list", "history", "disable", "delete"] {
+            assert!(
+                !tool.explicit_approval(&json!({"action": action}), "schedule"),
+                "{action}"
+            );
+        }
         let context = ToolContext {
             execution: haarness_core::ExecutionSettings::default(),
             thread_id: ThreadId::new(),

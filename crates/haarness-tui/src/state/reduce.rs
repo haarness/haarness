@@ -140,10 +140,10 @@ impl App {
                 .into();
             }
             Err(error) => {
-                let conflict = error
-                    .downcast_ref::<reqwest::Error>()
-                    .and_then(reqwest::Error::status)
-                    == Some(reqwest::StatusCode::CONFLICT);
+                // Changed elsewhere; not a refusal because the server could not tell who asked (which says so).
+                let conflict = crate::api::refusal_status(&error)
+                    == Some(reqwest::StatusCode::CONFLICT)
+                    && !crate::api::unknown_sender(&error);
                 self.refresh_approval_mode(client).await;
                 self.notice = if conflict {
                     "Approvals changed in another window · ctrl+y to switch".into()

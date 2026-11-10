@@ -193,6 +193,29 @@ pub struct SchedulerPaths {
     pub windows: PathBuf,
 }
 
+/// What is told a run's process id: when it starts, and when it has ended.
+type RunWatcher = (fn(u32), fn(u32));
+
+/// Who is told when this process starts a schedule's run for someone and when it ends (see [`watch_runs`]).
+static RUN_WATCHER: std::sync::OnceLock<RunWatcher> = std::sync::OnceLock::new();
+
+/// Tells `started` the process id of each run this process starts on request ("Run now", `schedule run`), and `ended`
+/// once it has ended: a server notes its runs so their turns, which approve their own requests, count as the person's
+/// who asked. Set once per process.
+pub fn watch_runs(started: fn(u32), ended: fn(u32)) {
+    let _ = RUN_WATCHER.set((started, ended));
+}
+
+fn notify_run(pid: u32, started: bool) {
+    if let Some((on_start, on_end)) = RUN_WATCHER.get() {
+        if started {
+            on_start(pid);
+        } else {
+            on_end(pid);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Scheduler {
     paths: SchedulerPaths,
@@ -670,9 +693,18 @@ impl Scheduler {
         // belongs in native-scheduler logs, while the caller owns the public
         // `schedule run` representation. Capture it here so an interactive run
         // does not print the same result twice.
-        let output = command
-            .output()
+        let child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .with_context(|| format!("failed to launch schedule {}", schedule.name))?;
+        let pid = child.id();
+        notify_run(pid, true);
+        let output = child.wait_with_output();
+        notify_run(pid, false);
+        let output =
+            output.with_context(|| format!("failed to launch schedule {}", schedule.name))?;
         let stderr = String::from_utf8_lossy(&output.stderr);
         let missing_run = if stderr.trim().is_empty() {
             "schedule runner did not record a result".to_string()
@@ -703,8 +735,10 @@ impl Scheduler {
             .spawn()
             .context("Could not start schedule runner")?;
         let pid = child.id();
+        notify_run(pid, true);
         std::thread::spawn(move || {
             let _ = child.wait();
+            notify_run(pid, false);
         });
         Ok(pid)
     }

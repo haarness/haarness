@@ -5,6 +5,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Routes between Haarness's own programs, which the SDKs leave out: a server's
+# key, which a front or another server's host gateway asks for to vouch for who
+# sent what it forwards.
+INTERNAL = {"forwarding_key"}
+
 
 def routes():
     result = []
@@ -29,6 +34,8 @@ def routes():
             for method, handler in re.findall(
                 r"\b(get|post|put|patch|delete)\((\w+)\)", text[pos:end]
             ):
+                if handler in INTERNAL:
+                    continue
                 path = m[1] if m[1].startswith("/v1/") or m[1] in ("/healthz", "/openapi.json") or filename == "sharing.rs" else "/v1" + m[1]
                 name = (
                     {

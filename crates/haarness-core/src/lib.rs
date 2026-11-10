@@ -108,6 +108,49 @@ pub const UNREADABLE_TOOL_CALL: &str = "the provider couldn't read a tool call t
 /// elsewhere.
 pub const CHAT_BUSY: &str = "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.";
 
+/// Why the server refuses to let a chat's agents do more without asking when
+/// the change comes from a program that runs for an agent (an agent's
+/// command, a hook; see [`process_tree::request_from_agent`]).
+pub const APPROVALS_RAISE_REFUSAL: &str = "Only you can let agents do more without asking. This change came from a program Haarness started, such as an agent's command or a hook, so the chat's approvals did not change. Switch them in the chat, or run haarness --approvals yourself.";
+
+/// Why the server refuses a turn that approves its own requests from a
+/// program that runs for an agent. A scheduled run's own runner may start one.
+pub const AUTO_APPROVE_REFUSAL: &str = "Only you can start a turn that approves its own requests. This request came from a program Haarness started, such as an agent's command or a hook, so no turn started. Run haarness --yolo yourself.";
+
+/// Why the server refuses an answer that allows what an agent asked for when
+/// it comes from a program that runs for an agent. A no is never refused.
+pub const PERMISSION_ANSWER_REFUSAL: &str = "Only you can allow what an agent asks for. This answer came from a program Haarness started, such as an agent's command or a hook, so the request is still waiting for you.";
+
+/// Why the server refuses an answer to an agent's question from a program
+/// that runs for an agent.
+pub const QUESTION_ANSWER_REFUSAL: &str = "Only you can answer an agent's question. This answer came from a program Haarness started, such as an agent's command or a hook, so the question is still waiting for you.";
+
+/// Why the server refuses to set up, change, switch on or start a schedule for
+/// a program that runs for an agent: a schedule's runs approve their own
+/// requests.
+pub const SCHEDULE_REFUSAL: &str = "Only you can set up or start a schedule: its runs approve their own requests. This request came from a program Haarness started, such as an agent's command or a hook, so nothing changed.";
+
+/// Why the server refuses a request that would let agents do more when the
+/// program on this computer that sent it cannot be found. A client may try
+/// again.
+pub const UNKNOWN_SENDER: &str = "Haarness could not tell which program on this computer sent this request, so nothing changed. Try again.";
+
+/// Why the server refuses its forwarding key to a program that runs for an
+/// agent: with it, a request could say whom it was forwarded for.
+pub const FORWARDING_REFUSAL: &str = "Only a program you run may forward requests to this server for others. This request came from a program Haarness started, such as an agent's command or a hook.";
+
+/// Why the server refuses to act as a browser for a program that runs for an
+/// agent: a browser host's traffic, and what it opens, count as a person's.
+pub const BROWSER_HOST_REFUSAL: &str = "Only you can connect a browser to Haarness. This request came from a program Haarness started, such as an agent's command or a hook.";
+
+/// Why a browser tunnel will not reach a Haarness server on this computer:
+/// what arrives through it would come from the server itself.
+pub const TUNNEL_REFUSAL: &str = "A browser here cannot open Haarness's own server.";
+
+/// Why the server refuses to open or connect a terminal for a program that
+/// runs for an agent: what runs in a terminal counts as a person's.
+pub const TERMINAL_REFUSAL: &str = "Only you can open or use a terminal here. This request came from a program Haarness started, such as an agent's command or a hook.";
+
 /// The variable that names the chat an agent's shell command runs for. The
 /// shell tool sets it for each command the agent runs (see
 /// [`ExecutionSettings::person_shell`]); the other processes the server
