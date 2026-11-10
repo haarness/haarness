@@ -441,6 +441,10 @@ test("a banner names the computer a project runs on, as the server list names it
     cloudApiUrl: "https://haarness.ai",
   };
   assert.equal(notificationPlace("Research", cloud, servers), "Research");
+  // Another computer's saved location names its host as a workspace too.
+  assert.equal(notificationPlace("api", { ...host, cloudWorkspace: "7d0c" }, servers), "api · Studio");
+  // A server an earlier version named after its first project is not named twice.
+  assert.equal(notificationPlace("Build box", added, servers), "Build box");
 
   const f = fixture();
   const pending = f.center.receive("project-b", notificationPlace("api", host, servers), 7, event(), async () =>

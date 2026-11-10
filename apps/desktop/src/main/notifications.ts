@@ -15,16 +15,20 @@ export function notificationPlace(
   location: Pick<Connection, "id" | "remote" | "url" | "remoteHost" | "cloudAccount" | "cloudApiUrl" | "cloudWorkspace">,
   servers: readonly SavedServer[],
 ) {
-  if (!location.remote || location.cloudAccount || location.cloudWorkspace) return project;
+  if (!location.remote) return project;
+  // Another computer's saved location also names its host as a workspace.
+  if (!location.remoteHost && (location.cloudAccount || location.cloudWorkspace)) return project;
   const key = serverKey(location);
   let computer = servers.find((server) => server.id === key)?.label;
   if (!computer && !location.remoteHost && location.url)
     try {
       computer = new URL(location.url).hostname;
     } catch {}
-  // One line, however the name was typed.
+  // One line, however the name was typed; and not said twice, as by a server
+  // an earlier version named after its first project.
   computer = computer?.replace(/\s+/g, " ").trim();
-  return computer ? `${project} · ${computer}` : project;
+  if (!computer || computer.toLocaleLowerCase() === project.trim().toLocaleLowerCase()) return project;
+  return `${project} · ${computer}`;
 }
 
 export interface NativeNotification {
