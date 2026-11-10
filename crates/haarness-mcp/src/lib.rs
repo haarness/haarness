@@ -3461,9 +3461,9 @@ enum McpImage {
 /// ([`haarness_core::attachments::MAX_IMAGE_SOURCE_BYTES`]) before it is
 /// decoded, and against the result's media limit once prepared, so a large
 /// screenshot reaches the model shrunk. Decoding is CPU work; the worker runs
-/// this off the async executor, and at most [`IMAGE_DECODES`] images are
-/// decoded at once. One that could not fit the result's media any more is
-/// not decoded at all.
+/// this off the async executor, and at most [`IMAGE_DECODES`] large images
+/// are decoded at once. One that could not fit the result's media any more
+/// is not decoded at all.
 fn mcp_image(data: &str, total: &mut usize) -> Result<McpImage, base64::DecodeError> {
     use haarness_core::{attachments::MAX_IMAGE_SOURCE_BYTES, images, mcp_content};
     let estimate = data.trim_end_matches('=').len() / 4 * 3;
@@ -3487,7 +3487,7 @@ fn mcp_image(data: &str, total: &mut usize) -> Result<McpImage, base64::DecodeEr
     if images::sniff(&bytes).is_none() {
         return Ok(McpImage::Unknown(size));
     }
-    let decoding = Decoding::start();
+    let decoding = (size > LARGE_IMAGE_BYTES).then(Decoding::start);
     let prepared = images::prepare(bytes);
     drop(decoding);
     let prepared = match prepared {
@@ -3536,16 +3536,20 @@ fn mcp_image(data: &str, total: &mut usize) -> Result<McpImage, base64::DecodeEr
     })
 }
 
-/// How many MCP images are decoded at once, across every call: each may hold
-/// hundreds of megabytes of pixels while it is.
+/// How many large MCP images (over [`LARGE_IMAGE_BYTES`]) are decoded at
+/// once, across every call: each may hold hundreds of megabytes of pixels
+/// while it is. Smaller ones (an icon, a chart) never wait behind them.
 const IMAGE_DECODES: usize = 2;
+
+/// The size from which an MCP image is a large one, as a screenshot is.
+const LARGE_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 
 /// The images being decoded, and the wait for one to end.
 static DECODING: (parking_lot::Mutex<usize>, parking_lot::Condvar) =
     (parking_lot::Mutex::new(0), parking_lot::Condvar::new());
 
-/// One of the [`IMAGE_DECODES`] images decoded at once, for as long as this
-/// is held. It is taken on a blocking thread, which waits for its turn.
+/// One of the [`IMAGE_DECODES`] large images decoded at once, for as long as
+/// this is held. It is taken on a blocking thread, which waits for its turn.
 struct Decoding;
 
 impl Decoding {
