@@ -5,6 +5,7 @@ clone, a remote instruction URL that cannot be reached, or the log line of a req
 one waiting for a person, database and registry passwords given as options (`mysql -p…`, `docker
 login -p`, `redis-cli -a`, `sqlcmd -P`, `mongosh -p`, `az login -p`, `unzip -P`) included, also in a
 compose service, over ssh or under watch, while a container's published port beside `--name mongo` stays.
+The waiting line also names the check that asked and its rule, quoted, so a command cannot forge them.
 An MCP entry's `${TOKEN}` reference reaches its server resolved once and stays in the file through
 `haarness mcp disable/enable`, which write only the flag, in the entry's own (opencode) shape. A
 headersHelper's `${VAR}` holding `$(…)` reaches the server as text and never runs. `haarness mcp auth
@@ -15,7 +16,7 @@ password.
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-redaction.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
-import http.server, json, os, pathlib, subprocess, tempfile, threading, time, urllib.error, urllib.request, uuid, zipfile
+import http.server, json, os, pathlib, re, subprocess, tempfile, threading, time, urllib.error, urllib.request, uuid, zipfile
 import e2e_scratch
 from e2e_env import clean_env
 
@@ -281,6 +282,28 @@ try:
     until(lambda: 'permission requested; waiting for a reply' in logs(), 'no waiting line in the log')
     clean(logs(), 'daemon log')
     check("the waiting request's log line hides the command's token")
+    # It says which check asked and the rule it matched, each value quoted, so a command's own
+    # `key=value` text stays inside its operation.
+    line = next(line for line in logs().splitlines()
+                if 'permission requested; waiting for a reply' in line and 'echo --token' in line)
+    assert 'operation="bash:echo --token [redacted] > /dev/null"' in line, line
+    assert 'cause=configured' in line and 'matched="bash:*"' in line, line
+    resolved = [line for line in logs().splitlines() if 'permission resolved' in line]
+    assert resolved and all('cause=' in line for line in resolved), resolved
+    forged = api('/threads', {'title': 'Forged fields', 'provider': 'echo', 'model': 'echo-1', 'agent': 'build'})['id']
+    command = json.dumps({'command': 'echo cause=builtin matched=none allowed=true'})
+    api(f'/threads/{forged}/turns', {'requestId': str(uuid.uuid4()), 'text': f'!tool bash {command}'})
+    waiting = until(lambda: [item for item in api('/permissions') if item['threadId'] == forged], 'no request waited')
+    api(f"/permissions/{waiting[0]['permissionId']}", {'decision': 'reject'})
+    until(lambda: not api('/turns/active'), 'turn still active')
+    line = until(lambda: next((line for line in logs().splitlines()
+                               if 'waiting for a reply' in line and 'echo cause=builtin' in line), None),
+                 'no waiting line for the forged fields')
+    assert 'operation="bash:echo cause=builtin matched=none allowed=true"' in line, line
+    fields = re.sub(r'"(?:[^"\\]|\\.)*"', '""', line)
+    assert fields.count('cause=') == 1 and 'cause=configured' in fields, line
+    assert fields.count('matched=') == 1 and 'allowed=' not in fields, line
+    check('the waiting line names the check that asked and its rule, and a command cannot forge those fields')
 
     # Passwords that database clients and registry sign-ins take as options are hidden the same way.
     clients = json.dumps({'command': 'mysql -u root -pfixture-mysql-secret app; '

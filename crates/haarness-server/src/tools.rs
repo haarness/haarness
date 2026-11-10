@@ -4967,8 +4967,9 @@ fn list_folder(
 }
 
 /// Which files `grep`, `glob` and `list` leave out: those the built-in read
-/// rules ask about (`*.env` and `*.env.*`, except `*.env.example` and files
-/// inside a `node_modules` folder). An explicit read of one still asks.
+/// rules ask about (`*.env` and `*.env.*`, except templates such as
+/// `*.env.example` and files inside a `node_modules` folder). An explicit
+/// read of one still asks.
 struct SecretFilter {
     /// The canonical and the configured workspace. A path inside it is judged
     /// workspace-relative, as search output and a follow-up read write it.

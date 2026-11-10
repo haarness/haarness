@@ -476,17 +476,57 @@ pub struct PermissionEngine {
 const PATH_PERMISSIONS: [&str; 3] = ["read", "edit", "list"];
 
 /// The built-in `read` rules for environment secrets, in order (last match
-/// wins). Packages ship `.env` files, often as test fixtures, so a file
-/// inside a `node_modules` folder is read without asking; `*` crosses `/`,
-/// so the two allows cover such a folder at any depth, in relative and
-/// absolute paths alike.
-const SECRET_READ_RULES: [(&str, PermissionDecision); 5] = [
+/// wins). A template of the settings (`.env.example`, `.env.sample`,
+/// `.env.template`, `.env.dist`, as [`crate::instructions::is_template`]
+/// names them) holds no secret. Packages ship `.env` files, often as test
+/// fixtures, so a file inside a `node_modules` folder is read without
+/// asking; `*` crosses `/`, so the two allows cover such a folder at any
+/// depth, in relative and absolute paths alike.
+const SECRET_READ_RULES: [(&str, PermissionDecision); 8] = [
     ("*.env", PermissionDecision::Ask),
     ("*.env.*", PermissionDecision::Ask),
     ("*.env.example", PermissionDecision::Allow),
+    ("*.env.sample", PermissionDecision::Allow),
+    ("*.env.template", PermissionDecision::Allow),
+    ("*.env.dist", PermissionDecision::Allow),
     ("node_modules/*", PermissionDecision::Allow),
     ("*/node_modules/*", PermissionDecision::Allow),
 ];
+
+/// How a remembered rule for one shell command exactly as written starts:
+/// see [`exact_rule`].
+const EXACT_RULE: &str = "bash:=";
+
+/// The remembered rule for exactly the shell command `operation`
+/// (`bash:cat .env`) reading exactly `files` (where they really are):
+/// [`EXACT_RULE`] and the SHA-256 of both, so the stores that keep Always
+/// answers never hold the command's text, which may carry a credential, and
+/// the same text reading another file (after a `cd`, from another folder or
+/// worktree, or a file a glob newly matches) is another command. It is
+/// compared by equality alone, never matched as a pattern (see
+/// [`PermissionEngine::allowed_by_choice`]).
+#[must_use]
+pub fn exact_rule(operation: &str, files: &[&Path]) -> String {
+    use sha2::Digest;
+    let mut files: Vec<std::borrow::Cow<'_, str>> =
+        files.iter().map(|file| file.to_string_lossy()).collect();
+    files.sort();
+    files.dedup();
+    let mut digest = sha2::Sha256::new();
+    digest.update(operation.as_bytes());
+    for file in files {
+        digest.update([0]);
+        digest.update(file.as_bytes());
+    }
+    format!("{EXACT_RULE}{}", hex::encode(digest.finalize()))
+}
+
+/// Whether `pattern` is an [`exact_rule`].
+fn is_exact_rule(pattern: &str) -> bool {
+    pattern.strip_prefix(EXACT_RULE).is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
 
 /// Whether the built-in read rules ask before reading this path, after `.`
 /// and `..` are resolved lexically. Search tools leave such a secret-named
@@ -699,24 +739,35 @@ impl PermissionEngine {
         self.evaluate_passing_over(operation, &|_| false, PermissionDecision::Ask)
     }
 
-    /// Whether `matched`, the rule an evaluation names, is an allow someone
-    /// gave for something narrower than everything: an "always" answer, a
-    /// repository grant, or a configured rule rather than one of Haarness's
-    /// defaults. A blanket `bash:*` says nothing about any one command.
+    /// Whether someone chose to allow one shell command itself rather than
+    /// everything: `matched`, the rule its evaluation names, is a configured
+    /// allow narrower than everything (a blanket `bash:*` says nothing about
+    /// any one command), or a remembered allow (an "always" answer or a
+    /// repository grant) is `exact`, the command's [`exact_rule`]. A
+    /// remembered allow that is a pattern (`bash:cat *`, what Always shows
+    /// for `cat .env`) was given for one command and reaches others only by
+    /// being generalized: when `generalized` says so, the remembered rule
+    /// `matched` names counts too, whatever its shape.
     #[must_use]
-    pub fn allowed_by_choice(&self, matched: Option<&str>) -> bool {
-        let Some(matched) = matched else {
-            return false;
-        };
-        self.session_rules
-            .iter()
-            .chain(&self.repository_grants)
-            .chain(self.rules.iter().skip(self.builtin))
-            .any(|rule| {
+    pub fn allowed_by_choice(&self, matched: Option<&str>, exact: &str, generalized: bool) -> bool {
+        let configured = matched.is_some_and(|matched| {
+            self.rules.iter().skip(self.builtin).any(|rule| {
                 rule.decision == PermissionDecision::Allow
                     && rule.pattern == matched
                     && !catch_all(rule)
             })
+        });
+        configured
+            || self
+                .session_rules
+                .iter()
+                .chain(&self.repository_grants)
+                .any(|rule| {
+                    rule.decision == PermissionDecision::Allow
+                        && !catch_all(rule)
+                        && (rule.pattern == exact
+                            || (generalized && matched == Some(rule.pattern.as_str())))
+                })
     }
 
     /// The verdict on a pattern read from inside a written shell command
@@ -1061,6 +1112,10 @@ fn rule_names(
     spellings: &[(String, bool)],
     real_folders: &std::collections::BTreeMap<String, String>,
 ) -> bool {
+    // A digest of one command is compared by equality alone, never matched.
+    if is_exact_rule(&rule.pattern) {
+        return false;
+    }
     if wildcard_match(&rule.pattern, operation) {
         return true;
     }
@@ -1784,6 +1839,14 @@ mod tests {
             engine.evaluate("read:app/.env.example"),
             PermissionDecision::Allow
         );
+        // So are the other templates of the settings.
+        for path in [".env.sample", "app/.env.template", "/project/.env.dist"] {
+            assert_eq!(
+                engine.evaluate(&format!("read:{path}")),
+                PermissionDecision::Allow,
+                "{path}"
+            );
+        }
         // Packages ship `.env` fixtures: a file inside a node_modules folder
         // is read without asking, at any depth; look-alike folders still ask.
         for path in [
@@ -1843,6 +1906,10 @@ mod tests {
             "conf.env.d/notes.txt",
             "/project/.env.production",
             "c.env.example",
+            ".env.sample",
+            ".env.template",
+            ".env.dist",
+            ".env.sample.local",
             "d.txt",
             "README.md",
             ".env/bin/activate",
