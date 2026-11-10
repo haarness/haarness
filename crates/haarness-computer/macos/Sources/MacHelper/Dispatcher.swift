@@ -12,16 +12,44 @@ final class Dispatcher {
     var viewport: Viewport?
     /// Time for the screen to settle after an action, before the server looks again.
     let settle = 0.25
+    /// The app the latest look at a single app showed; a look at the whole screen forgets it. Keys and text without a
+    /// ref go to its own focused element, and pixels inside its windows belong to it even where another app's window
+    /// covers them. Without one, the app in front is used.
+    var lookedAt: NSRunningApplication?
+    /// The app the agent's latest screen work was in, read when the person presses Escape.
+    let escapeLock = NSLock()
+    var workingPid: pid_t?
+    /// Set once macOS's Accessibility prompt was shown, so the next request for permissions asks for Screen Recording.
+    var askedForAccessibility = false
+    /// The apps computer use keeps invisible, from the latest request that listed them (a look, or the check before an
+    /// action). Replies never name their windows.
+    var hiddenApps: [String] = []
+    /// Per app, whether the last keyboard focus the helper saw outside a menu was a terminal. While a menu is open the
+    /// focus moves into it, yet Paste still lands where it was before.
+    var terminalFocus: [pid_t: Bool] = [:]
 
     /// Requests that use the screen: they put the bar up and are turned away during a pause.
     static let onScreen: Set<String> = ["snapshot", "inspect", "click", "type", "fill", "press", "scroll", "drag", "hover", "activate", "quit", "launch"]
 
+    /// Whether the person's Escape stops the agent now: only while the app it acts in is the frontmost one. While it
+    /// acts in an app behind their window, they keep typing in their own apps, Escape included, and the strip's Stop is
+    /// the control. Before the agent has acted anywhere, Escape stops it as always.
+    var escapeStops: Bool {
+        escapeLock.lock()
+        let pid = workingPid
+        escapeLock.unlock()
+        guard let pid, let front = WindowServer.frontPID() else { return true }
+        return front == pid
+    }
+
     func handle(_ op: String, _ input: [String: Any]) throws -> [String: Any] {
         Marker.shared.enabled = (input["ring"] as? Bool) ?? true
+        if let hidden = input["hidden"] as? [String] { hiddenApps = hidden }
         if let bar = input["bar"] as? [String: Any] { ControlBar.shared.use(BarText(bar)) }
         if Self.onScreen.contains(op) {
             try ControlBar.shared.refuseWhilePaused()
             ControlBar.shared.show(app: Self.appName(input))
+            KeepAwake.shared.hold()
         }
         switch op {
         case "hello": return ["protocol": protocolVersion, "build": helperBuild, "pid": Int(ProcessInfo.processInfo.processIdentifier)]
@@ -65,12 +93,16 @@ final class Dispatcher {
         ]
     }
 
-    /// Triggers macOS's own Accessibility and Screen Recording prompts for the app running Haarness. Granting is up to the person.
+    /// Triggers macOS's own prompt for the next permission the app running Haarness lacks: Accessibility first, then,
+    /// once that prompt was shown, Screen Recording, which also lists the app on that page. macOS can drop a second
+    /// prompt raised while the first is up, so they come one at a time. Granting is up to the person.
     func prompt() -> [String: Any] {
-        if !AXIsProcessTrusted() {
+        if !AXIsProcessTrusted() && !askedForAccessibility {
+            askedForAccessibility = true
             _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        } else if !CGPreflightScreenCaptureAccess() {
+            _ = CGRequestScreenCaptureAccess()
         }
-        if !CGPreflightScreenCaptureAccess() { _ = CGRequestScreenCaptureAccess() }
         return status()
     }
 
@@ -89,7 +121,7 @@ final class Dispatcher {
     /// App name for the bar, taken from the request.
     static func appName(_ input: [String: Any]) -> String? {
         let bundle = (input["expect"] as? String) ?? (input["bundle"] as? String)
-        if let bundle, let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first {
+        if let bundle, let app = pick(NSRunningApplication.runningApplications(withBundleIdentifier: bundle)) {
             return app.localizedName
         }
         return input["name"] as? String
@@ -108,12 +140,26 @@ final class Dispatcher {
             }
     }
 
+    /// When an app runs more than once: the newest copy showing a window, else the newest.
+    static func pick(_ copies: [NSRunningApplication]) -> NSRunningApplication? {
+        guard copies.count > 1 else { return copies.first }
+        let showing = Set(WindowList.entries().filter { $0.layer == 0 }.map(\.pid))
+        let newest = copies.sorted { ($0.launchDate ?? .distantPast) > ($1.launchDate ?? .distantPast) }
+        return newest.first { showing.contains($0.processIdentifier) } ?? newest.first
+    }
+
     func running(_ input: [String: Any]) throws -> NSRunningApplication {
-        if let bundle = input["bundle"] as? String, let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first {
+        // The copy an action reached (the server passes its pid back for the look that follows), while it still runs as
+        // the app named.
+        if let pid = double(input["pid"]), let app = NSRunningApplication(processIdentifier: pid_t(pid)), !app.isTerminated,
+           (input["bundle"] as? String).map({ $0 == app.bundleIdentifier }) ?? true {
+            return app
+        }
+        if let bundle = input["bundle"] as? String, let app = Self.pick(NSRunningApplication.runningApplications(withBundleIdentifier: bundle)) {
             return app
         }
         if let name = input["name"] as? String,
-           let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName?.compare(name, options: .caseInsensitive) == .orderedSame }) {
+           let app = Self.pick(NSWorkspace.shared.runningApplications.filter({ $0.localizedName?.compare(name, options: .caseInsensitive) == .orderedSame })) {
             return app
         }
         throw HelperFailure("not_found", "No running app matches. mac_apps with action list shows what is open.")
@@ -147,14 +193,29 @@ final class Dispatcher {
         return ["bundle": bundle?.bundleIdentifier ?? "", "name": name, "running": false]
     }
 
+    /// Whether `app` shows an ordinary window, waiting up to `seconds` for one.
+    func waitForWindow(_ app: NSRunningApplication, seconds: Double) -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        repeat {
+            if WindowList.entries().contains(where: { $0.pid == app.processIdentifier && $0.layer == 0 }) { return true }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < end && !app.isTerminated
+        return false
+    }
+
+    /// Starts an app behind the person's window and waits for its window. An app that only opens one once it is active
+    /// is brought forward; one that brings itself forward hands the front back.
     func launch(_ input: [String: Any]) throws -> [String: Any] {
         try ready(toAct: false)
         let url = try Self.installed(input)
+        let prior = frontApp()
+        let started = Date()
+        let before = windowFacts(nil)
         let signal = DispatchSemaphore(value: 0)
         var launched: NSRunningApplication?
         var problem: Error?
         let options = NSWorkspace.OpenConfiguration()
-        options.activates = true
+        options.activates = Behind.forced
         NSWorkspace.shared.openApplication(at: url, configuration: options) { app, error in
             launched = app
             problem = error
@@ -162,15 +223,30 @@ final class Dispatcher {
         }
         if signal.wait(timeout: .now() + 20) == .timedOut { throw HelperFailure("failed", "The app was still starting up after 20 seconds.") }
         guard let app = launched else { throw HelperFailure("failed", problem?.localizedDescription ?? "The app did not start.") }
-        Thread.sleep(forTimeInterval: 0.6)
+        var fallback: String? = Behind.forced ? "forced" : nil
+        if app.activationPolicy != .regular {
+            // Menu bar apps open no window to wait for.
+            Thread.sleep(forTimeInterval: 0.6)
+        } else if !waitForWindow(app, seconds: 4) && fallback == nil {
+            Self.bringForward(app)
+            fallback = "no-key-window"
+            _ = waitForWindow(app, seconds: 4)
+        }
+        let back = fallback == nil && handBack(from: app, to: prior, since: started)
         ControlBar.shared.show(app: app.localizedName)
-        return ["pid": Int(app.processIdentifier), "bundle": app.bundleIdentifier ?? "", "name": app.localizedName ?? ""]
+        var out = reply(app, via: "process", background: fallback == nil, before: before, fallback: fallback, handedBack: back)
+        out.removeValue(forKey: "via")
+        out["pid"] = Int(app.processIdentifier)
+        out["bundle"] = app.bundleIdentifier ?? ""
+        out["name"] = app.localizedName ?? ""
+        return out
     }
 
     func activate(_ input: [String: Any]) throws -> [String: Any] {
         try ready(toAct: false)
         let app = try running(input)
         Self.bringForward(app)
+        working(app)
         return ["pid": Int(app.processIdentifier), "bundle": app.bundleIdentifier ?? "", "active": app.isActive]
     }
 
@@ -182,9 +258,6 @@ final class Dispatcher {
     }
 
     // MARK: Looking
-
-    /// Processes whose windows count as part of the calling app, such as the file dialogs that sandboxed apps borrow.
-    static let helperProcesses = ["com.apple.appkit.xpc.openAndSavePanelService"]
 
     func snapshot(_ input: [String: Any]) throws -> [String: Any] {
         try ready(toAct: false)
@@ -199,7 +272,7 @@ final class Dispatcher {
         let windows = WindowList.current(viewport: view, hidden: hidden)
         let front = NSWorkspace.shared.frontmostApplication
         let app: NSRunningApplication? = try {
-            if input["bundle"] != nil || input["name"] != nil { return try running(input) }
+            if input["bundle"] != nil || input["name"] != nil || input["pid"] != nil { return try running(input) }
             if let id = double(input["window"]), let entry = windows.first(where: { double($0["id"]) == id }), let pid = entry["pid"] as? Int {
                 return NSRunningApplication(processIdentifier: pid_t(pid))
             }
@@ -209,10 +282,12 @@ final class Dispatcher {
             return (next?["pid"] as? Int).flatMap { NSRunningApplication(processIdentifier: pid_t($0)) }
         }()
         let bundle = app?.bundleIdentifier ?? ""
-        let own = [bundle] + Self.helperProcesses
+        // The app with its own file dialogs; another app's dialog is that app's business.
+        let own: Set<pid_t> = app.map { Behind.own($0.processIdentifier) } ?? []
+        lookedAt = whole || matches(bundle, hidden) ? nil : app
         // Window titles of other apps (mail subjects, document names) stay private unless the whole screen was approved.
         let listed = whole ? windows : windows.map { entry -> [String: Any] in
-            if matches((entry["bundle"] as? String) ?? "", own) { return entry }
+            if let pid = entry["pid"] as? Int, own.contains(pid_t(pid)) { return entry }
             var copy = entry
             copy.removeValue(forKey: "title")
             return copy
@@ -226,15 +301,42 @@ final class Dispatcher {
         if let front {
             out["frontmost"] = ["pid": Int(front.processIdentifier), "bundle": front.bundleIdentifier ?? "", "name": front.localizedName ?? ""]
         }
+        var behind = false
         if let app, !matches(bundle, hidden) {
             out["app"] = ["pid": Int(app.processIdentifier), "bundle": bundle, "name": app.localizedName ?? ""]
             ControlBar.shared.show(app: app.localizedName)
+            if !whole {
+                behind = WindowServer.frontPID() != app.processIdentifier || WindowList.covered(app.processIdentifier, besides: Behind.panels(of: app.processIdentifier))
+                out["behind"] = behind
+                out["offscreen"] = offscreen(app) ?? NSNull()
+            }
+            if let pane = Self.settingsPane(for: app) { out["pane"] = pane }
         }
+        working(app)
         var budget = OutlineBudget(limit: Int(double(input["budget"]) ?? 40_000))
         let depth = Int(double(input["depth"]) ?? 25)
+        let query = ((input["find"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // A search reads the whole outline first and then keeps the matches, so the budget applies to what is kept.
+        // A search reads at most 5,000 elements or 8 seconds' worth, so it ends well within the look's time limit.
+        var found: [OutlineEntry] = []
+        var cut = false
+        let searchEnds = Date().addingTimeInterval(8)
+        let take: (OutlineEntry) -> Bool = { entry in
+            if query.isEmpty {
+                budget.take(entry.line)
+                return !budget.exhausted
+            }
+            if found.count >= 5_000 || Date() > searchEnds {
+                cut = true
+                return false
+            }
+            found.append(entry)
+            return true
+        }
         if let app, matches(bundle, hidden) {
             budget.take("(\(app.localizedName ?? "The frontmost app") is hidden from agents; its outline is withheld.)")
         } else if let app, AXIsProcessTrusted() {
+            Engine.prepare(app)
             let root = AXTree.application(app.processIdentifier)
             let all = (AXTree.value(root, kAXWindowsAttribute) as? [AnyObject] ?? []).compactMap { AXTree.element($0) }
             let chosen: [AXUIElement] = {
@@ -248,27 +350,37 @@ final class Dispatcher {
             }()
             // Open menus and popovers hang off the app element rather than a window.
             let floating = AXTree.children(root).filter { AXTree.text($0, kAXRoleAttribute) == "AXMenu" }
+            let deadline = query.isEmpty ? nil : searchEnds
             for window in chosen + floating {
-                tree.walk(window, depthLimit: depth, viewport: view, into: &budget)
-                if budget.exhausted { break }
+                if !tree.walk(window, depthLimit: depth, viewport: view, until: deadline, take: take), !query.isEmpty { cut = true }
+                if budget.exhausted || cut { break }
             }
             if let bar = AXTree.element(AXTree.value(root, kAXMenuBarAttribute)) {
                 // Include any menu currently pulled down from the menu bar, so the agent can choose an item. Closed menus have a
                 // zero size.
                 for item in AXTree.children(bar) {
                     for menu in AXTree.children(item) where AXTree.text(menu, kAXRoleAttribute) == "AXMenu" {
-                        guard let box = AXTree.box(menu), box.width > 0, box.height > 0, !budget.exhausted else { continue }
-                        tree.walk(menu, depthLimit: depth, viewport: view, into: &budget)
+                        guard let box = AXTree.box(menu), box.width > 0, box.height > 0, !budget.exhausted, !cut else { continue }
+                        if !tree.walk(menu, depthLimit: depth, viewport: view, until: deadline, take: take), !query.isEmpty { cut = true }
                     }
                 }
                 if input["menuBar"] as? Bool == true {
-                    tree.walk(bar, depthLimit: 2, viewport: view, into: &budget)
+                    if !tree.walk(bar, depthLimit: 2, viewport: view, until: deadline, take: take), !query.isEmpty { cut = true }
+                }
+            }
+            if !query.isEmpty {
+                let kept = filterOutline(found, keeping: query)
+                for entry in kept where budget.take(entry.line) {}
+                if kept.isEmpty { budget.take("(Nothing in \(app.localizedName ?? "this app")'s outline matches \"\(shorten(query, 80))\".)") }
+                if cut {
+                    budget.take("(The search stopped part way through \(app.localizedName ?? "this app")'s elements. Search one window, or with less depth, to cover the rest.)")
                 }
             }
             if chosen.isEmpty && floating.isEmpty {
                 budget.take("(\(app.localizedName ?? "This app") exposes no Accessibility elements in any window, so only the screenshot can guide you.)")
             }
-            if let focused = AXTree.focused() {
+            _ = focusIsTerminal(app.processIdentifier)
+            if let focused = whole ? AXTree.focused() : AXTree.focused(in: app.processIdentifier) {
                 let info = AXTree.summary(focused)
                 let owner = (info["bundle"] as? String) ?? ""
                 // When looking at one app, keep other apps' focused elements (titles, contents) private.
@@ -281,11 +393,43 @@ final class Dispatcher {
                 out["screenRecording"] = false
             } else if whole || app != nil {
                 Thread.sleep(forTimeInterval: 0.05)
-                let picture = try Screenshot.capture(size: view.size, hidden: hidden, only: whole ? nil : own)
-                out["image"] = try Screenshot.jpeg(picture).base64EncodedString()
+                if let zoom = input["zoom"] as? [String: Any], let region = closeUpRegion(zoom, view) {
+                    // A close-up at full resolution; every coordinate in the reply stays in the snapshot's frame.
+                    let picture = try Screenshot.closeUp(region, longest: Int(double(input["longest"]) ?? 1456), hidden: hidden, only: whole ? nil : own)
+                    out["image"] = try Screenshot.jpeg(picture).base64EncodedString()
+                    let area = view.pixels(region)
+                    out["zoom"] = ["x": area.x.rounded(), "y": area.y.rounded(), "width": area.width.rounded(), "height": area.height.rounded(),
+                                   "scale": Double(picture.width) / max(1, area.width)]
+                } else {
+                    let picture = try Screenshot.capture(size: view.size, hidden: hidden, only: whole ? nil : own)
+                    out["image"] = try Screenshot.jpeg(picture).base64EncodedString()
+                }
             }
         }
         return out
+    }
+
+    /// A zoom request's area in screen points: pixels of the snapshot, kept on the display and at least 8 pixels wide.
+    func closeUpRegion(_ zoom: [String: Any], _ view: Viewport) -> Box? {
+        guard let x = double(zoom["x"]), let y = double(zoom["y"]), let width = double(zoom["width"]), let height = double(zoom["height"]),
+              width >= 8, height >= 8 else { return nil }
+        let size = view.size
+        let left = min(max(0, x), Double(size.width) - 8), top = min(max(0, y), Double(size.height) - 8)
+        let area = Box(x: left, y: top, width: min(width, Double(size.width) - left), height: min(height, Double(size.height) - top))
+        let start = view.points(area.x, area.y)
+        let end = view.points(area.x + area.width, area.y + area.height)
+        return Box(x: start.x, y: start.y, width: end.x - start.x, height: end.y - start.y)
+    }
+
+    /// Why none of `app`'s windows is on screen: `minimized`, `other-space` or `hidden`; nil when one is.
+    func offscreen(_ app: NSRunningApplication) -> String? {
+        let pid = app.processIdentifier
+        if WindowList.entries().contains(where: { $0.pid == pid && $0.layer == 0 }) { return nil }
+        if app.isHidden { return "hidden" }
+        let windows = (AXTree.value(AXTree.application(pid), kAXWindowsAttribute) as? [AnyObject] ?? []).compactMap { AXTree.element($0) }
+        if windows.contains(where: { AXTree.flag($0, kAXMinimizedAttribute) == true }) { return "minimized" }
+        if WindowList.entries(onScreenOnly: false).contains(where: { $0.pid == pid && $0.layer == 0 && !$0.onScreen }) { return "other-space" }
+        return nil
     }
 
     // MARK: Targets
@@ -320,42 +464,97 @@ final class Dispatcher {
 
     static func keyboardFocus() -> AXUIElement? { AXTree.focused() }
 
-    /// Reports the element and app an action would reach; with no ref or point, the focused element, which is where
-    /// keystrokes go.
+    /// The app keys and text without a ref go to: the looked-at app while it runs, else the app in front.
+    func workingApp() -> NSRunningApplication? {
+        if let app = lookedAt, !app.isTerminated { return app }
+        return frontApp()
+    }
+
+    /// Reports the element and app an action would reach. Without a ref or a point that is where keystrokes go: the
+    /// looked-at app's focused element, or the front app's.
     func inspect(_ input: [String: Any]) throws -> [String: Any] {
         // An action follows: a missing permission is reported now, before the person is asked to approve it.
         try ready(toAct: (input["acting"] as? Bool) ?? false)
         var out: [String: Any]
         var spot: (Double, Double)?
+        var owner: NSRunningApplication?
+        var target: AXUIElement?
+        var inFront = true
         if input["ref"] != nil || input["x"] != nil {
-            let (x, y, element) = try locate(input)
-            spot = (x, y)
-            if (input["acting"] as? Bool) == true { try refusePasswordMenu(x, y) }
-            out = (element ?? AXTree.hit(x, y)).map { AXTree.summary($0) } ?? [:]
+            let found = try reach(input)
+            spot = (found.x, found.y)
+            owner = found.app
+            inFront = found.inFront
+            if (input["acting"] as? Bool) == true { try refusePasswordMenu(found.x, found.y, app: inFront ? nil : found.app) }
+            target = found.element ?? AXTree.hit(found.x, found.y, in: found.app.processIdentifier)
+                ?? (inFront ? AXTree.hit(found.x, found.y) : nil)
+            out = target.map { AXTree.summary($0) } ?? [:]
             // A bare point names no native control: it counts as content.
-            if element == nil { out["content"] = true }
-            if out["bundle"] == nil, let app = WindowList.owner(x, y) {
-                out["bundle"] = app.bundleIdentifier ?? ""
-                out["app"] = app.localizedName ?? ""
-                out["pid"] = Int(app.processIdentifier)
-            }
+            if found.element == nil { out["content"] = true }
         } else {
-            out = Self.keyboardFocus().map { AXTree.summary($0) } ?? [:]
-            if out["bundle"] == nil, let front = NSWorkspace.shared.frontmostApplication {
-                out["bundle"] = front.bundleIdentifier ?? ""
-                out["app"] = front.localizedName ?? ""
-                out["pid"] = Int(front.processIdentifier)
-            }
+            owner = workingApp()
+            target = owner.flatMap { AXTree.focused(in: $0.processIdentifier) }
+            out = target.map { AXTree.summary($0) } ?? [:]
         }
+        if out["bundle"] == nil, let owner {
+            out["bundle"] = owner.bundleIdentifier ?? ""
+            out["app"] = owner.localizedName ?? ""
+            out["pid"] = Int(owner.processIdentifier)
+        }
+        if let owner { describe(into: &out, app: owner, element: target, spot: spot, input: input) }
         if let spot, let viewport {
             let pixel = (x: (spot.0 * viewport.factor).rounded(), y: (spot.1 * viewport.factor).rounded())
             out["point"] = ["x": pixel.x, "y": pixel.y]
+            // The picture of a covered app shows that app's own windows, not the person's window over it.
+            let only = inFront ? nil : owner.map { Behind.own($0.processIdentifier) }
             if input["preview"] as? Bool == true, CGPreflightScreenCaptureAccess(),
-               let picture = try? Screenshot.capture(size: viewport.size, hidden: (input["hidden"] as? [String]) ?? [], only: nil) {
+               let picture = try? Screenshot.capture(size: viewport.size, hidden: (input["hidden"] as? [String]) ?? [], only: only) {
                 out["preview"] = try? Screenshot.preview(picture, around: pixel).base64EncodedString()
             }
         }
         return out
+    }
+
+    /// What an approval or the reviewer should know about a target beyond the element itself: whether it is a terminal
+    /// (where typing runs commands) or a Paste menu item, the window and the labelled area around it, the menu item a
+    /// Command shortcut (`keys`) would press, and System Settings' open pane. Text read from the app is untrusted.
+    func describe(into out: inout [String: Any], app: NSRunningApplication, element: AXUIElement?, spot: (Double, Double)?, input: [String: Any]) {
+        let pid = app.processIdentifier
+        if let element {
+            if AXTree.isTerminal(element) { out["terminal"] = true }
+            if AXTree.isPasteItem(element) {
+                out["paste"] = true
+                // Paste lands where the keyboard focus is: a terminal there makes it one.
+                if focusIsTerminal(pid) { out["terminal"] = true }
+            } else {
+                _ = focusIsTerminal(pid)
+            }
+            if let context = AXTree.context(element) { out["context"] = context }
+        }
+        let window = element.flatMap(AXTree.window(of:))
+            ?? spot.flatMap { WindowList.topmost(of: [pid], at: $0.0, $0.1) }.flatMap { axWindow(pid, $0.id) }
+            ?? (element == nil && spot == nil ? AXTree.focusedWindow(in: pid) : nil)
+        if let title = window.flatMap({ AXTree.text($0, kAXTitleAttribute) }), !title.isEmpty { out["window"] = shorten(title, 120) }
+        if let keys = input["keys"] as? String, let combo = try? KeyCombo.read(keys), let found = menuItem(pid, for: combo), found.enabled {
+            out["menu"] = shorten(found.path.filter { !$0.isEmpty }.joined(separator: " ▸ "), 160)
+        }
+        if let pane = Self.settingsPane(for: app) { out["pane"] = pane }
+    }
+
+    static let systemSettings = "com.apple.systempreferences"
+
+    /// The System Settings pane a target in `app` belongs to: the selected sidebar entry of System Settings, read
+    /// for System Settings itself and for the extension processes that draw its panes. Such a process is otherwise
+    /// named by its own bundle identifier, which is the pane's.
+    static func settingsPane(for app: NSRunningApplication) -> String? {
+        let bundle = app.bundleIdentifier ?? ""
+        let extensionLike = bundle.hasPrefix("com.apple.") && (bundle.lowercased().contains("settings") || bundle.hasSuffix(".extension"))
+        guard bundle == systemSettings || extensionLike else { return nil }
+        if let settings = NSRunningApplication.runningApplications(withBundleIdentifier: systemSettings).first,
+           let pane = AXTree.settingsPane(settings.processIdentifier) {
+            return pane
+        }
+        return bundle == systemSettings ? nil : bundle
     }
 
     /// Bundle of the app whose window is topmost at a point, i.e. where a pointer event would land.
@@ -422,22 +621,76 @@ final class Dispatcher {
 
     func click(_ input: [String: Any]) throws -> [String: Any] {
         try ready(toAct: true)
-        // Hold the click until the person's typing pauses, so it cannot redirect their keystrokes.
-        try Presence.shared.waitForQuiet()
-        let (x, y, element) = try locate(input)
-        if let element { try confirm(input, element: element) } else { try confirm(input, point: (x, y)) }
         let button = (input["button"] as? String) ?? "left"
         let count = max(1, min(3, Int(double(input["count"]) ?? 1)))
         let modifiers = try held(input)
+        var found = try reach(input)
+        try confirm(input, "expect", found.app.bundleIdentifier)
+        try refusePaste(found, input)
+        var fallback: String?
+        // A click posted into the app the person has in front would make its window key there, under their typing:
+        // where another app's window covers the spot, it comes forward instead (and is refused if still covered).
+        let frontButCovered = !found.inFront && WindowServer.frontPID() == found.app.processIdentifier
+        switch frontButCovered ? .forward("no-key-window") : route(inFront: found.inFront) {
+        case .behind:
+            do {
+                return try clickBehind(found, button: button, count: count, held: modifiers)
+            } catch let forward as ComeForward {
+                fallback = forward.reason
+            }
+        case .forward(let reason): fallback = reason
+        case .front: break
+        }
+        // Hold the click until the person's typing pauses, so it cannot redirect their keystrokes.
+        try Presence.shared.waitForQuiet()
+        found = try reach(input)
+        try confirm(input, "expect", found.app.bundleIdentifier)
+        try refusePaste(found, input)
+        return try clickInFront(found, input, button: button, count: count, held: modifiers, fallback: fallback)
+    }
+
+    /// Whether `app`'s keyboard focus is in a terminal it hosts. While a menu is open, or when the focus cannot be read,
+    /// the answer is the one from before the menu opened.
+    func focusIsTerminal(_ pid: pid_t) -> Bool {
+        guard let focus = AXTree.focused(in: pid), !AXTree.isMenuPart(focus) else { return terminalFocus[pid] ?? false }
+        let terminal = AXTree.isTerminal(focus)
+        terminalFocus[pid] = terminal
+        return terminal
+    }
+
+    /// Refuses a click on a Paste menu item (in the menu bar or a context menu) where pasted text would run as a
+    /// command: with `refusePaste`, which the server sends for terminals and script runners, and whenever the app's
+    /// keyboard focus is in a terminal it hosts, such as a code editor's terminal panel.
+    func refusePaste(_ found: Reach, _ input: [String: Any]) throws {
+        let pid = found.app.processIdentifier
+        guard let element = found.element ?? AXTree.hit(found.x, found.y, in: pid), AXTree.isPasteItem(element) else { return }
+        let name = found.app.localizedName ?? "this app"
+        if input["refusePaste"] as? Bool == true {
+            throw HelperFailure("paste", "Pasting into \(name) runs the pasted text as a command, outside Haarness's approvals, so agents never use Paste there. Run commands with the shell tool instead.")
+        }
+        if focusIsTerminal(pid) {
+            throw HelperFailure("terminal", "The keyboard focus in \(name) is in its built-in terminal, which runs pasted text as a command outside Haarness's approvals, so agents never paste there. Run commands with the shell tool instead.")
+        }
+    }
+
+    /// A click through the system's pointer, on an app in front or brought forward (`fallback` says why).
+    func clickInFront(_ found: Reach, _ input: [String: Any], button: String, count: Int, held modifiers: [Held], fallback: String?) throws -> [String: Any] {
+        let (x, y) = (found.x, found.y)
+        let before = windowFacts(found.app)
         Marker.shared.flash(x, y)
         // A plain click on an element that can be pressed goes through Accessibility: the pointer stays where it is
-        // and the keyboard focus does not jump.
-        if let element, button == "left", count == 1, modifiers.isEmpty, AXTree.actions(element).contains(kAXPressAction),
-           AXUIElementPerformAction(element, kAXPressAction as CFString) == .success {
+        // and the keyboard focus does not jump. A press that reached the app counts as done, even when its answer
+        // timed out because a menu or sheet it opened held it up: clicking again would act a second time.
+        if let element = found.element, button == "left", count == 1, modifiers.isEmpty, AXTree.actions(element).contains(kAXPressAction) {
+            let root = AXTree.window(of: element)
+            let earlier = observe(found.app, root: root)
+            let arrived = Self.pressArrived(AXUIElementPerformAction(element, kAXPressAction as CFString))
             Thread.sleep(forTimeInterval: settle)
-            return ["via": "accessibility"]
+            if arrived == true || (arrived == nil && observe(found.app, root: root) != earlier) {
+                return reply(found.app, via: "ax", background: WindowServer.frontPID() != found.app.processIdentifier, before: before)
+            }
         }
-        if let element { Self.raise(element) }
+        if fallback != nil { comeForward(found) } else if let element = found.element { Self.raise(element) }
         try ControlBar.shared.outOfTheWay(x, y) {
             // Whatever is topmost receives the pointer event, so confirm it is the approved app.
             try confirm(input, point: (x, y))
@@ -447,15 +700,22 @@ final class Dispatcher {
             Synth.click(x, y, button: button, count: count, held: modifiers)
         }
         Thread.sleep(forTimeInterval: settle)
-        return ["via": "pointer"]
+        return reply(found.app, via: "pointer", background: false, before: before, fallback: fallback)
     }
 
     /// While a password field has the keyboard focus, macOS may open its password suggestions under it: a pop-up in
     /// the app's own process offering the Passwords app or a password manager. Pointer input landing on any pop-up
-    /// then is refused, so an agent never reaches saved passwords that way.
-    func refusePasswordMenu(_ x: Double, _ y: Double) throws {
+    /// then is refused, so an agent never reaches saved passwords that way. For an app behind the person's window
+    /// (`app`), its own pop-up at the spot counts, while it has a password field in use; the person's own password
+    /// field elsewhere does not.
+    func refusePasswordMenu(_ x: Double, _ y: Double, app: NSRunningApplication? = nil) throws {
+        let refusal = HelperFailure("password", "A password suggestion menu is open there, under a focused password field, and passwords stay with the person. Press Escape to close it, or click another field first.")
+        if let app {
+            if let own = WindowList.topmost(of: [app.processIdentifier], at: x, y), own.layer != 0, passwordInUse(app) { throw refusal }
+            return
+        }
         guard IsSecureEventInputEnabled(), let top = WindowList.top(x, y), top.layer != 0 else { return }
-        throw HelperFailure("password", "A password suggestion menu is open there, under a focused password field, and passwords stay with the person. Press Escape to close it, or click another field first.")
+        throw refusal
     }
 
     /// Refuses keystrokes bound for a password: `element`'s, or the focused element's when `element` is nil. Typing
@@ -475,79 +735,176 @@ final class Dispatcher {
         }
     }
 
+    /// Refuses keystrokes bound for a terminal inside another app, such as a code editor's built-in terminal: whatever
+    /// is typed there runs as a command, outside Haarness's approvals, as in a terminal app.
+    func refuseTerminal(_ element: AXUIElement?, in app: NSRunningApplication?) throws {
+        guard let element, AXTree.isTerminal(element) else { return }
+        throw HelperFailure("terminal", "\(app?.localizedName ?? "This app")'s built-in terminal runs whatever is typed into it, outside Haarness's approvals, so agents may click and scroll there but never type or press keys. Run commands with the shell tool instead, under its usual approvals.")
+    }
+
+    /// Puts the keyboard focus in `field` before typing, and makes sure it went there: setting focus can report success
+    /// while it stays in the field that had it (web content does this), and the text would go to that other field.
+    /// Where focus cannot be read at all, the click is trusted as before.
+    func focus(_ field: AXUIElement, in app: NSRunningApplication, at spot: (Double, Double), _ input: [String: Any]) throws {
+        let pid = app.processIdentifier
+        let lands = { AXTree.focused(in: pid).map { AXTree.serves($0, field) } }
+        if AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
+            Thread.sleep(forTimeInterval: 0.1)
+            if lands() != false { return }
+        }
+        try ControlBar.shared.outOfTheWay(spot.0, spot.1) {
+            try confirm(input, point: spot)
+            Marker.shared.flash(spot.0, spot.1)
+            Synth.click(spot.0, spot.1, button: "left", count: 1, held: [])
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        if lands() == false {
+            throw HelperFailure("focus_unknown", "The field did not take the keyboard focus, so nothing was typed: the text would have gone to another field. Click the field with mac_click, then type without a ref.")
+        }
+    }
+
     func type(_ input: [String: Any]) throws -> [String: Any] {
         try ready(toAct: true)
         guard let text = input["text"] as? String, !text.isEmpty else { throw HelperFailure("invalid", "There is nothing to type.") }
-        // Wait for the person's keyboard to go quiet; interleaved typing would garble both.
-        try Presence.shared.waitForQuiet()
+        let app: NSRunningApplication
+        var field: AXUIElement?
+        var spot: (Double, Double)?
         if input["ref"] != nil {
             let (x, y, found) = try locate(input)
             guard let found else { throw HelperFailure("invalid", "Typing needs a ref. Click the field first to type at a point.") }
             try confirm(input, element: found)
             try refusePassword(found, secureInput: false)
-            Self.raise(found)
-            if AXUIElementSetAttributeValue(found, kAXFocusedAttribute as CFString, kCFBooleanTrue) != .success {
-                try ControlBar.shared.outOfTheWay(x, y) {
-                    try confirm(input, point: (x, y))
-                    Marker.shared.flash(x, y)
-                    Synth.click(x, y, button: "left", count: 1, held: [])
-                }
+            guard let owner = AXTree.pid(found).flatMap({ NSRunningApplication(processIdentifier: $0) }) else {
+                throw HelperFailure("not_found", "The app holding that field is gone; call mac_snapshot again.")
             }
-            Thread.sleep(forTimeInterval: 0.1)
+            app = owner
+            field = found
+            spot = (x, y)
+        } else {
+            guard let owner = workingApp() else { throw HelperFailure("not_found", "No app is open to type into. Look at one with mac_snapshot first.") }
+            app = owner
+            try confirm(input, "expect", app.bundleIdentifier)
+        }
+        try refuseTerminal(field ?? AXTree.focused(in: app.processIdentifier), in: app)
+        var fallback: String?
+        switch route(inFront: WindowServer.frontPID() == app.processIdentifier) {
+        case .behind:
+            do {
+                return try typeBehind(app, field: field, spot: spot, text: text)
+            } catch let forward as ComeForward {
+                fallback = forward.reason
+            }
+        case .forward(let reason): fallback = reason
+        case .front: break
+        }
+        // Wait for the person's keyboard to go quiet; interleaved typing would garble both.
+        try Presence.shared.waitForQuiet()
+        let before = windowFacts(app)
+        if fallback != nil { Self.bringForward(app) }
+        if let field, let spot {
+            Self.raise(field)
+            try focus(field, in: app, at: spot, input)
         }
         // Keystrokes land in the focused element; it has to stay inside the approved app and may never be a password field,
         // both now and for every chunk.
         let check = {
             try self.confirm(input, "expect", Self.keyboardApp())
             try self.refusePassword(nil)
+            try self.refuseTerminal(Self.keyboardFocus(), in: app)
         }
         try check()
         try Synth.type(text, check: check)
         Thread.sleep(forTimeInterval: settle)
-        return [:]
+        return reply(app, via: "pointer", background: false, before: before, fallback: fallback)
     }
 
     func fill(_ input: [String: Any]) throws -> [String: Any] {
         try ready(toAct: true)
         guard let value = input["value"] as? String else { throw HelperFailure("invalid", "There is no value to set.") }
-        try Presence.shared.waitForQuiet()
         let (x, y, element) = try locate(input)
         guard let element else { throw HelperFailure("invalid", "Replacing a value needs a ref.") }
         try confirm(input, element: element)
+        guard let app = AXTree.pid(element).flatMap({ NSRunningApplication(processIdentifier: $0) }) else {
+            throw HelperFailure("not_found", "The app holding that field is gone; call mac_snapshot again.")
+        }
+        let inFront = WindowServer.frontPID() == app.processIdentifier
+        // Setting a value never touches the person's keyboard, so it waits for their typing only in the front app.
+        if inFront { try Presence.shared.waitForQuiet() }
         // The value is set on the element itself, whatever has the keyboard.
         try refusePassword(element, secureInput: false)
-        Marker.shared.flash(x, y)
+        try refuseTerminal(element, in: app)
+        let before = windowFacts(app)
+        if inFront { Marker.shared.flash(x, y) } else { AgentPointer.shared.show(at: x, y) }
         guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString) == .success else {
             throw HelperFailure("failed", "Setting this element's value directly failed; click into it and use mac_type.")
         }
         Thread.sleep(forTimeInterval: settle)
-        return [:]
+        let confirmed = AXTree.text(element, kAXValueAttribute).map { $0 == value }
+        return reply(app, via: "ax", background: !inFront, before: before, confirmed: confirmed)
     }
 
     func press(_ input: [String: Any]) throws -> [String: Any] {
         try ready(toAct: true)
         guard let keys = input["keys"] as? String else { throw HelperFailure("invalid", "Name the key to press.") }
         let combo = try KeyCombo.read(keys)
+        let times = max(1, min(50, Int(double(input["times"]) ?? 1)))
+        guard let app = workingApp() else { throw HelperFailure("not_found", "No app is open to press keys in. Look at one with mac_snapshot first.") }
+        try confirm(input, "expect", app.bundleIdentifier)
+        try refuseTerminal(AXTree.focused(in: app.processIdentifier), in: app)
+        var fallback: String?
+        switch route(inFront: WindowServer.frontPID() == app.processIdentifier) {
+        case .behind:
+            do {
+                return try pressBehind(app, combo: combo, times: times)
+            } catch let forward as ComeForward {
+                fallback = forward.reason
+            }
+        case .forward(let reason): fallback = reason
+        case .front: break
+        }
         try Presence.shared.waitForQuiet()
+        let before = windowFacts(app)
+        if fallback != nil { Self.bringForward(app) }
         try confirm(input, "expect", Self.keyboardApp())
         // A printable key sent to a password field would be part of a password.
         if combo.types { try refusePassword(nil) }
-        try Synth.press(combo, times: max(1, min(50, Int(double(input["times"]) ?? 1)))) {
+        try refuseTerminal(Self.keyboardFocus(), in: app)
+        try Synth.press(combo, times: times) {
             try self.confirm(input, "expect", Self.keyboardApp())
             if combo.types { try self.refusePassword(nil) }
+            try self.refuseTerminal(Self.keyboardFocus(), in: app)
         }
         Thread.sleep(forTimeInterval: settle)
-        return [:]
+        return reply(app, via: "pointer", background: false, before: before, fallback: fallback)
     }
 
     func scroll(_ input: [String: Any]) throws -> [String: Any] {
         try ready(toAct: true)
-        let (x, y, _) = try locate(input)
+        var found = try reach(input)
+        try confirm(input, "expect", found.app.bundleIdentifier)
+        let lines = Int32(max(1, min(50, double(input["amount"]) ?? 3)))
+        let direction = (input["direction"] as? String) ?? "down"
+        var fallback: String?
+        switch route(inFront: found.inFront) {
+        case .behind:
+            do {
+                return try scrollBehind(found, direction: direction, lines: lines)
+            } catch let forward as ComeForward {
+                fallback = forward.reason
+            }
+        case .forward(let reason): fallback = reason
+        case .front: break
+        }
+        let before = windowFacts(found.app)
+        if fallback != nil {
+            comeForward(found)
+            found = try reach(input)
+        }
+        let (x, y) = (found.x, found.y)
         // Scroll events go wherever the pointer is.
         try confirm(input, point: (x, y))
         try refusePasswordMenu(x, y)
-        let lines = Int32(max(1, min(50, double(input["amount"]) ?? 3)))
-        let (dx, dy): (Int32, Int32) = switch (input["direction"] as? String) ?? "down" {
+        let (dx, dy): (Int32, Int32) = switch direction {
         case "up": (0, lines)
         case "left": (lines, 0)
         case "right": (-lines, 0)
@@ -555,18 +912,22 @@ final class Dispatcher {
         }
         ControlBar.shared.outOfTheWay(x, y) { Synth.scroll(x, y, dx: dx, dy: dy) }
         Thread.sleep(forTimeInterval: settle)
-        return [:]
+        return reply(found.app, via: "pointer", background: false, before: before, fallback: fallback)
     }
 
+    /// Drags need the real pointer, which carries what is dragged: an app behind the person's window comes forward.
     func drag(_ input: [String: Any]) throws -> [String: Any] {
         try ready(toAct: true)
         guard let pickup = input["from"] as? [String: Any], let drop = input["to"] as? [String: Any] else {
             throw HelperFailure("invalid", "mac_drag needs both a from and a to.")
         }
         try Presence.shared.waitForQuiet()
+        let first = try reach(pickup)
+        let fallback: String? = first.inFront ? nil : "drag"
+        let before = windowFacts(first.app)
+        if fallback != nil { comeForward(first) } else if let element = first.element { Self.raise(element) }
         let start = try locate(pickup)
         let end = try locate(drop)
-        if let element = start.element { Self.raise(element) }
         try ControlBar.shared.outOfTheWay(start.x, start.y) {
             try ControlBar.shared.outOfTheWay(end.x, end.y) {
                 // Check both ends: the pickup and the drop must each be in an approved app.
@@ -579,18 +940,26 @@ final class Dispatcher {
             }
         }
         Thread.sleep(forTimeInterval: settle)
-        return [:]
+        return reply(first.app, via: "pointer", background: false, before: before, fallback: fallback)
     }
 
+    /// Hovering needs the real pointer too, so an app behind the person's window comes forward.
     func hover(_ input: [String: Any]) throws -> [String: Any] {
         try ready(toAct: true)
-        let (x, y, _) = try locate(input)
+        var found = try reach(input)
+        let fallback: String? = found.inFront ? nil : "hover"
+        let before = windowFacts(found.app)
+        if fallback != nil {
+            comeForward(found)
+            found = try reach(input)
+        }
+        let (x, y) = (found.x, found.y)
         try ControlBar.shared.outOfTheWay(x, y) {
             try confirm(input, point: (x, y))
             try refusePasswordMenu(x, y)
             Synth.hover(x, y)
         }
         Thread.sleep(forTimeInterval: settle)
-        return [:]
+        return reply(found.app, via: "pointer", background: false, before: before, fallback: fallback)
     }
 }

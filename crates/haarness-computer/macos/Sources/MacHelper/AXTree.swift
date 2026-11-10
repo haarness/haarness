@@ -99,7 +99,7 @@ final class AXTree {
     static func focused() -> AXUIElement? {
         if let found = element(value(systemWide(), kAXFocusedUIElementAttribute)) { return found }
         guard let front = NSWorkspace.shared.frontmostApplication else { return nil }
-        return element(value(application(front.processIdentifier), kAXFocusedUIElementAttribute))
+        return focused(in: front.processIdentifier)
     }
 
     /// Hit-tests a screen point. Hits on the helper's own bar are ignored, since it belongs to no app.
@@ -107,6 +107,182 @@ final class AXTree {
         var found: AXUIElement?
         guard AXUIElementCopyElementAtPosition(systemWide(), Float(x), Float(y), &found) == .success, let found else { return nil }
         return pid(found) == ProcessInfo.processInfo.processIdentifier ? nil : found
+    }
+
+    /// Hit-tests a screen point within one app's own windows, as if no other app's window lay over them.
+    static func hit(_ x: Double, _ y: Double, in app: pid_t) -> AXUIElement? {
+        var found: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(application(app), Float(x), Float(y), &found) == .success, let found,
+              pid(found) == app else { return nil }
+        return found
+    }
+
+    /// The element that has the keyboard focus inside one app, whether or not the app is in front.
+    static func focused(in app: pid_t) -> AXUIElement? {
+        element(value(application(app), kAXFocusedUIElementAttribute))
+    }
+
+    /// The window that has the keyboard focus inside one app.
+    static func focusedWindow(in app: pid_t) -> AXUIElement? {
+        element(value(application(app), kAXFocusedWindowAttribute))
+    }
+
+    /// The window holding `element`.
+    static func window(of element: AXUIElement) -> AXUIElement? {
+        if text(element, kAXRoleAttribute) == "AXWindow" { return element }
+        if let window = self.element(value(element, kAXWindowAttribute)) { return window }
+        var current = element
+        for _ in 0..<40 {
+            guard let up = parent(current) else { return nil }
+            if text(up, kAXRoleAttribute) == "AXWindow" { return up }
+            current = up
+        }
+        return nil
+    }
+
+    static func same(_ a: AXUIElement, _ b: AXUIElement) -> Bool {
+        CFEqual(a, b)
+    }
+
+    /// Whether `inner` lies within `outer` in the element tree (or is it).
+    static func contains(_ outer: AXUIElement, _ inner: AXUIElement) -> Bool {
+        var current = inner
+        for _ in 0..<12 {
+            if same(current, outer) { return true }
+            guard let up = parent(current) else { return false }
+            current = up
+        }
+        return false
+    }
+
+    /// Whether the keyboard focus at `focus` serves the field `field`: the field itself, something inside it (a web
+    /// field's editor), or what holds it.
+    static func serves(_ focus: AXUIElement, _ field: AXUIElement) -> Bool {
+        contains(field, focus) || contains(focus, field)
+    }
+
+    /// A text field of the app's own controls, which takes one line of text through Accessibility: not web content, not
+    /// a document's text view, not a password field.
+    static func isNativeTextField(_ element: AXUIElement) -> Bool {
+        guard ["AXTextField", "AXComboBox"].contains(text(element, kAXRoleAttribute) ?? ""), !isPassword(element) else { return false }
+        var current = element
+        for _ in 0..<40 {
+            guard let up = parent(current) else { return true }
+            switch text(up, kAXRoleAttribute) ?? "" {
+            case "AXWebArea", "AXTextArea": return false
+            case "AXWindow", "AXApplication": return true
+            default: current = up
+            }
+        }
+        return false
+    }
+
+    /// Whether `element` is the input of a terminal an app hosts in its window, such as a code editor's built-in
+    /// terminal panel (see `looksLikeTerminal`).
+    static func isTerminal(_ element: AXUIElement) -> Bool {
+        var current: AXUIElement? = element
+        for depth in 0..<16 {
+            guard let here = current else { return false }
+            let role = text(here, kAXRoleAttribute) ?? ""
+            if role == "AXWindow" || role == "AXApplication" { return false }
+            let label = [text(here, kAXDescriptionAttribute), text(here, kAXTitleAttribute)].compactMap { $0 }.first { !$0.isEmpty }
+            if looksLikeTerminal(classes: (value(here, "AXDOMClassList") as? [String]) ?? [], identifier: text(here, kAXIdentifierAttribute),
+                                 label: label, nearby: depth <= 1) {
+                return true
+            }
+            current = parent(here)
+        }
+        return false
+    }
+
+    /// The nearest labelled element around `element` inside its window (a group, list, sheet or pane title), one
+    /// short line, for an approval to say where a control sits.
+    static func context(_ element: AXUIElement) -> String? {
+        var current = parent(element)
+        for _ in 0..<12 {
+            guard let here = current else { return nil }
+            let role = text(here, kAXRoleAttribute) ?? ""
+            if role == "AXWindow" || role == "AXApplication" { return nil }
+            if let label = [text(here, kAXTitleAttribute), text(here, kAXDescriptionAttribute)].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
+                return shorten(label, 80)
+            }
+            current = parent(here)
+        }
+        return nil
+    }
+
+    /// Whether `element` is part of a menu: the menu bar, a menu or one of its items.
+    static func isMenuPart(_ element: AXUIElement) -> Bool {
+        ["AXMenuBar", "AXMenuBarItem", "AXMenu", "AXMenuItem"].contains(text(element, kAXRoleAttribute) ?? "")
+    }
+
+    /// Whether `element` is a menu item that pastes (see `isPasteMenuItem`).
+    static func isPasteItem(_ element: AXUIElement) -> Bool {
+        isPasteMenuItem(role: text(element, kAXRoleAttribute), character: text(element, kAXMenuItemCmdCharAttribute),
+                        modifiers: (value(element, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue ?? 0,
+                        title: text(element, kAXTitleAttribute))
+    }
+
+    /// The pane System Settings shows: the identifier of the selected sidebar entry (an extension identifier such as
+    /// com.apple.settings.PrivacySecurity.extension), which stays the same in every language. The sidebar sits near the
+    /// top of the window's tree, so it is searched breadth first, before a large pane's contents.
+    static func settingsPane(_ app: pid_t) -> String? {
+        var queue = (value(application(app), kAXWindowsAttribute) as? [AnyObject] ?? []).compactMap { element($0) }
+        var index = 0
+        while index < queue.count, index < 400 {
+            let next = queue[index]
+            index += 1
+            if text(next, kAXRoleAttribute) == "AXOutline" {
+                for row in (value(next, kAXSelectedRowsAttribute) as? [AnyObject] ?? []).compactMap({ element($0) }) {
+                    var inner = [row]
+                    var looked = 0
+                    while !inner.isEmpty, looked < 40 {
+                        let item = inner.removeFirst()
+                        looked += 1
+                        if let pane = settingsPaneIdentifier(text(item, kAXIdentifierAttribute)) { return pane }
+                        inner += children(item)
+                    }
+                }
+            }
+            queue += children(next)
+        }
+        return nil
+    }
+
+    /// A fingerprint of what `root` shows: roles, titles, values and selection of up to `limit` elements, read a few
+    /// attributes per call. Two equal fingerprints mean nothing visible to Accessibility changed.
+    static func digest(_ root: AXUIElement, limit: Int = 400) -> Int {
+        var hasher = Hasher()
+        var stack = [root]
+        var seen = 0
+        let names = [kAXRoleAttribute, kAXTitleAttribute, kAXValueAttribute, kAXSelectedAttribute, kAXChildrenAttribute] as CFArray
+        while let next = stack.popLast(), seen < limit {
+            seen += 1
+            var values: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(next, names, AXCopyMultipleAttributeOptions(rawValue: 0), &values) == .success,
+                  let list = values as? [AnyObject], list.count == 5 else { continue }
+            for value in list.prefix(4) {
+                switch value {
+                case let text as String: hasher.combine(text)
+                case let number as NSNumber: hasher.combine(number.doubleValue)
+                default: hasher.combine(0)
+                }
+            }
+            if let children = list[4] as? [AnyObject] {
+                hasher.combine(children.count)
+                stack += children.compactMap { element($0) }.reversed()
+            }
+        }
+        return hasher.finalize()
+    }
+
+    /// Asks a Chromium or Electron app to build its Accessibility tree, which it leaves off until an assistive app
+    /// asks. The newer switch has no side effects; the older one only stands in where the newer is unknown.
+    static func askForTree(_ app: pid_t) {
+        let root = application(app)
+        if AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue) == .attributeUnsupported {
+            AXUIElementSetAttributeValue(root, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        }
     }
 
     /// Roles that are not a native control: a terminal's text, web content, and what holds them. A click on one can
@@ -202,6 +378,16 @@ final class AXTree {
     /// visible part of each element; elements scrolled wholly out of their scroll area are left out with their
     /// contents and counted in one line for that area, so no position points at something drawn over them.
     func walk(_ root: AXUIElement, depthLimit: Int, viewport: Viewport, into budget: inout OutlineBudget) {
+        walk(root, depthLimit: depthLimit, viewport: viewport) { entry in
+            budget.take(entry.line)
+            return !budget.exhausted
+        }
+    }
+
+    /// The same walk handing each line to `take`, which returns false to stop it, and stopping at `deadline` too.
+    /// Returns false when it stopped before reading every element.
+    @discardableResult
+    func walk(_ root: AXUIElement, depthLimit: Int, viewport: Viewport, until deadline: Date? = nil, take: (OutlineEntry) -> Bool) -> Bool {
         // `element` nil marks the end of a scroll area's contents, where its count of hidden elements is reported.
         struct Step {
             var element: AXUIElement?
@@ -214,21 +400,24 @@ final class AXTree {
         var stack = [Step(element: root, level: 0, depth: 0, clip: nil, area: nil)]
         var seen = 0
         while let next = stack.popLast() {
-            if budget.exhausted { return }
             guard let element = next.element else {
-                if let area = next.area, hidden[area] > 0 { budget.take(hiddenLine(hidden[area], level: next.level)) }
+                if let area = next.area, hidden[area] > 0,
+                   !take(OutlineEntry(level: next.level, line: hiddenLine(hidden[area], level: next.level), words: "")) {
+                    return false
+                }
                 continue
             }
             seen += 1
             // A runaway tree (a huge table) stops here instead of taking the helper's whole time limit.
-            if seen > 20_000 { return }
+            if seen > 20_000 { return false }
+            if let deadline, seen % 50 == 0, Date() > deadline { return false }
             guard case .seen(let box) = sight(of: Self.box(element), within: next.clip) else {
                 if let area = next.area { hidden[area] += 1 }
                 continue
             }
             let item = item(element, level: next.level, box: box, viewport: viewport)
             let shown = worthShowing(item)
-            if shown { budget.take(outlineLine(item)) }
+            if shown, !take(OutlineEntry(level: next.level, line: outlineLine(item), words: outlineWords(item))) { return false }
             if next.depth >= depthLimit { continue }
             let level = shown ? next.level + 1 : next.level
             var clip = next.clip
@@ -245,5 +434,6 @@ final class AXTree {
                 stack.append(Step(element: child, level: level, depth: next.depth + 1, clip: clip, area: area))
             }
         }
+        return true
     }
 }

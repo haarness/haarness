@@ -3,13 +3,29 @@ import Carbon.HIToolbox
 import CoreGraphics
 import MacKit
 
-/// Pointer and keyboard events posted the way a real device posts them, each tagged as the helper's own.
+/// Pointer and keyboard events posted the way a real device posts them, each tagged as the helper's own. Keys and text
+/// go either through the system, to whatever has the keyboard, or straight to one app's process when it works behind
+/// the person's window.
 enum Synth {
     static let source = CGEventSource(stateID: .hidSystemState)
 
-    static func post(_ event: CGEvent?) {
-        event?.setIntegerValueField(.eventSourceUserData, value: syntheticTag)
-        event?.post(tap: .cghidEventTap)
+    /// Where keyboard events go.
+    enum Destination {
+        /// The system's input stream, which delivers them to the app in front.
+        case system
+        /// One app's process, which gets them although it is not in front.
+        case process(pid_t)
+    }
+
+    static func post(_ event: CGEvent?, to destination: Destination = .system, keyboard: Bool = false) {
+        guard let event else { return }
+        switch destination {
+        case .system:
+            event.setIntegerValueField(.eventSourceUserData, value: syntheticTag)
+            event.post(tap: .cghidEventTap)
+        case .process(let pid):
+            WindowServer.post(event, to: pid, keyboard: keyboard)
+        }
     }
 
     static func wait(_ seconds: Double) {
@@ -46,14 +62,18 @@ enum Synth {
         post(CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left))
     }
 
+    static func mouseTypes(_ button: String) -> (down: CGEventType, up: CGEventType, which: CGMouseButton, number: Int) {
+        switch button {
+        case "right": return (.rightMouseDown, .rightMouseUp, .right, 1)
+        case "middle": return (.otherMouseDown, .otherMouseUp, .center, 2)
+        default: return (.leftMouseDown, .leftMouseUp, .left, 0)
+        }
+    }
+
     /// Clicks at a screen point. The pointer arrives first, so controls that only appear on hover exist when it presses.
     static func click(_ x: Double, _ y: Double, button: String, count: Int, held: [Held]) {
         let point = CGPoint(x: x, y: y)
-        let (down, up, which): (CGEventType, CGEventType, CGMouseButton) = switch button {
-        case "right": (.rightMouseDown, .rightMouseUp, .right)
-        case "middle": (.otherMouseDown, .otherMouseUp, .center)
-        default: (.leftMouseDown, .leftMouseUp, .left)
-        }
+        let (down, up, which, _) = mouseTypes(button)
         hover(x - 2, y - 1)
         wait(0.05)
         hover(x, y)
@@ -71,6 +91,73 @@ enum Synth {
             wait(0.03)
             post(release)
             if number < count { wait(0.06) }
+        }
+    }
+
+    // The background click and scroll below derive from Cua Driver, https://github.com/trycua/cua, Copyright (c)
+    // 2025 Cua AI, Inc., under the MIT License; its text is in ../../THIRD-PARTY-NOTICES.md.
+
+    /// Presses at a screen spot within `window` of `pid` without the system's pointer: the events go to that process
+    /// alone, addressed to the window, and the person's pointer and front app stay as they are. Modifiers go down as
+    /// keys to the same process around the presses, since some views read those rather than the events' flags.
+    static func clickBehind(pid: pid_t, window: CGWindowID, origin: Point, at spot: Point, button: String, count: Int, held: [Held], outsidePress: Bool) {
+        let (down, up, which, number) = mouseTypes(button)
+        let plan = backgroundClickPlan(at: spot, origin: origin, button: number, count: count, outsidePress: outsidePress, windowLocal: Behind.windowLocal)
+        // One gesture number shared by every event, so the app takes them as one click.
+        let gesture = Int64(Date().timeIntervalSince1970 * 1000) & 0x7FFF_FFFF
+        let mask = flags(held)
+        holding(held, at: .process(pid)) {
+            for step in plan {
+                let type: CGEventType = switch step.kind {
+                case .move: .mouseMoved
+                case .down: step.button == number ? down : .leftMouseDown
+                case .up: step.button == number ? up : .leftMouseUp
+                }
+                guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: CGPoint(x: step.screen.x, y: step.screen.y), mouseButton: step.kind == .move ? .left : which) else { continue }
+                WindowServer.stamp(event, WindowServer.Field.mouseNumber, Int64(step.phase))
+                WindowServer.stamp(event, WindowServer.Field.clickState, Int64(step.clickState))
+                WindowServer.stamp(event, WindowServer.Field.buttonNumber, Int64(step.button))
+                // The touch subtype, as a trackpad press reports.
+                WindowServer.stamp(event, WindowServer.Field.subtype, 3)
+                WindowServer.stamp(event, WindowServer.Field.targetPid, Int64(pid))
+                for field in [WindowServer.Field.windowNumber, WindowServer.Field.windowUnderPointer, WindowServer.Field.windowThatCanHandle] {
+                    WindowServer.stamp(event, field, Int64(window))
+                }
+                WindowServer.stamp(event, WindowServer.Field.gesture, gesture)
+                WindowServer.stampLocation(event, CGPoint(x: step.stamped.x, y: step.stamped.y))
+                event.flags = mask
+                WindowServer.post(event, to: pid, keyboard: false)
+                if step.pause > 0 { wait(step.pause) }
+            }
+        }
+    }
+
+    /// Turns the wheel over `pid`'s `window` at a screen spot, one notch per line, without the system's pointer.
+    static func scrollBehind(pid: pid_t, window: CGWindowID, origin: Point, at spot: Point, dx: Int32, dy: Int32) {
+        // Unlike a press, a wheel event's window location is never derived from the screen point: it is the point in the
+        // window on every release.
+        let stamped = CGPoint(x: spot.x - origin.x, y: spot.y - origin.y)
+        let address = { (event: CGEvent) in
+            WindowServer.stamp(event, WindowServer.Field.targetPid, Int64(pid))
+            for field in [WindowServer.Field.windowNumber, WindowServer.Field.windowUnderPointer, WindowServer.Field.windowThatCanHandle] {
+                WindowServer.stamp(event, field, Int64(window))
+            }
+            WindowServer.stampLocation(event, stamped)
+            event.flags = []
+        }
+        if let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: spot.x, y: spot.y), mouseButton: .left) {
+            address(move)
+            WindowServer.post(move, to: pid, keyboard: false)
+        }
+        wait(0.03)
+        let notches = max(abs(dx), abs(dy))
+        for _ in 0..<notches {
+            let event = CGEvent(scrollWheelEvent2Source: source, units: .line, wheelCount: 2, wheel1: dy.signum(), wheel2: dx.signum(), wheel3: 0)
+            guard let event else { continue }
+            event.location = CGPoint(x: spot.x, y: spot.y)
+            address(event)
+            WindowServer.post(event, to: pid, keyboard: false)
+            wait(0.012)
         }
     }
 
@@ -119,20 +206,21 @@ enum Synth {
 
     // MARK: Keyboard
 
-    /// Sends text as Unicode key events, so the keyboard layout does not matter. Stops and reports progress when the
-    /// person types, clicks or pauses, since their input would interleave. `check` runs before every chunk and every
-    /// Return or Tab and throws once focus has left the approved app or landed on a password field, which the typing
-    /// itself can cause (a Return that opens a new window, say).
-    static func type(_ text: String, check: () throws -> Void) throws {
+    /// Sends text as Unicode key events, so the keyboard layout does not matter; line breaks press Return and tabs Tab.
+    /// Stops and reports progress when the person pauses, and also when they type or click while the text goes
+    /// through the system (`interruptible`), since their input would interleave; text sent to an app behind their
+    /// window cannot mix with theirs. `check` runs before every chunk and every Return or Tab and throws once focus has
+    /// left the approved field or app or landed on a password field, which the typing itself can cause (a Return that
+    /// opens a new window, say).
+    static func type(_ text: String, to destination: Destination = .system, interruptible: Bool = true, check: () throws -> Void) throws {
         let began = Date()
         let total = text.count
         var done = 0
-        var pending: [UniChar] = []
         func stillOk() throws {
             if ControlBar.shared.isPaused {
                 throw HelperFailure("paused", "Paused by the person after \(done) of \(total) characters.")
             }
-            if Presence.shared.happened(since: began, .key, .button) {
+            if interruptible && Presence.shared.happened(since: began, .key, .button) {
                 throw HelperFailure("person_active", "Interrupted after \(done) of \(total) characters: the person typed or clicked at the same time. Look again with mac_snapshot and carry on only if it still makes sense.")
             }
             do {
@@ -141,9 +229,10 @@ enum Synth {
                 throw HelperFailure(failure.code, "Interrupted after \(done) of \(total) characters. " + failure.message)
             }
         }
-        func flush() throws {
-            for piece in pieces(pending) {
-                try stillOk()
+        for step in typingSteps(text) {
+            try stillOk()
+            switch step {
+            case .text(let piece):
                 let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
                 let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
                 piece.withUnsafeBufferPointer { buffer in
@@ -153,105 +242,141 @@ enum Synth {
                 // Clear the flags, so a held modifier cannot turn letters into shortcuts.
                 down?.flags = []
                 up?.flags = []
-                post(down)
-                post(up)
+                post(down, to: destination, keyboard: true)
+                post(up, to: destination, keyboard: true)
                 done += String(utf16CodeUnits: piece, count: piece.count).count
                 wait(0.012)
-            }
-            pending.removeAll()
-        }
-        for char in text {
-            if char == "\n" || char == "\r\n" || char == "\t" {
-                try flush()
-                try stillOk()
-                tap(CGKeyCode(char == "\t" ? kVK_Tab : kVK_Return), held: [])
+            case .enter, .tab:
+                tap(CGKeyCode(step == .tab ? kVK_Tab : kVK_Return), held: [], to: destination)
                 done += 1
-            } else {
-                pending.append(contentsOf: Array(String(char).utf16))
+                wait(0.012)
             }
         }
-        try flush()
     }
 
-    /// Presses one key with modifiers. Modifiers go down first and come up last, also when posting stops part way,
-    /// so no modifier is left held.
-    static func tap(_ key: CGKeyCode, held: [Held]) {
-        let mask = flags(held)
-        var pressed: [Held] = []
+    /// Runs `body` with modifiers down, posted in order and released in reverse, also when `body` throws, so no
+    /// modifier is left held.
+    static func holding<T>(_ held: [Held], at destination: Destination, _ body: () throws -> T) rethrows -> T {
         var current = CGEventFlags()
+        var pressed: [Held] = []
         defer {
             for modifier in pressed.reversed() {
                 current.remove(flags([modifier]))
                 let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode(modifier), keyDown: false)
                 up?.flags = current
-                post(up)
+                post(up, to: destination, keyboard: true)
             }
         }
-        for modifier in held {
+        for modifier in held where !pressed.contains(modifier) {
             current.insert(flags([modifier]))
             let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode(modifier), keyDown: true)
             down?.flags = current
-            post(down)
+            post(down, to: destination, keyboard: true)
             pressed.append(modifier)
         }
-        let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true)
-        let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
-        down?.flags = mask
-        up?.flags = mask
-        post(down)
-        wait(0.02)
-        post(up)
+        return try body()
     }
 
-    static func press(_ combo: KeyCombo, times: Int, check: () throws -> Void) throws {
-        let (code, extra) = try locate(combo.key)
-        let held = combo.held + extra.filter { !combo.held.contains($0) }
-        // Checked on what is really pressed: an upper-case letter adds Shift, and the key's position counts too.
-        if KeyCombo.endsSession(held: held, key: combo.key) || KeyCombo.endsSession(held: held, code: UInt16(code)) {
+    /// Presses one key with modifiers. Modifiers go down first and come up last.
+    static func tap(_ key: CGKeyCode, held: [Held], to destination: Destination = .system) {
+        let mask = flags(held)
+        holding(held, at: destination) {
+            let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true)
+            let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
+            down?.flags = mask
+            up?.flags = mask
+            post(down, to: destination, keyboard: true)
+            wait(0.02)
+            post(up, to: destination, keyboard: true)
+        }
+    }
+
+    /// The key and modifiers `combo` really presses, refused when that combination can end the person's session.
+    static func resolve(_ combo: KeyCombo) throws -> (code: CGKeyCode, held: [Held]) {
+        guard let found = Keyboard.layout().resolve(combo) else {
+            throw HelperFailure("invalid", "The keyboard layout has no \(combo.key) key; send it with mac_type instead.")
+        }
+        // Checked on what is really pressed: the Shift a character needs, and the key's position, count too.
+        if KeyCombo.endsSession(held: found.held, key: combo.key) || KeyCombo.endsSession(held: found.held, code: found.code) {
             throw HelperFailure("blocked", "Blocked: this combination can sign the person out, lock the Mac or bring up Force Quit. Leave it to the person.")
         }
+        return (CGKeyCode(found.code), found.held)
+    }
+
+    static func press(_ combo: KeyCombo, times: Int, to destination: Destination = .system, check: () throws -> Void) throws {
+        let (code, held) = try resolve(combo)
         for index in 0..<max(1, times) {
             // Repeats can shift focus, so each press is checked against the approved app again.
             if index > 0 { try check() }
-            tap(code, held: held)
+            tap(code, held: held, to: destination)
             if index < times - 1 { wait(0.04) }
         }
     }
+}
 
-    /// Maps a key name, or a character on the active layout, to its key code, adding Shift where the layout needs it.
-    static func locate(_ key: String) throws -> (CGKeyCode, [Held]) {
-        if let named = KeyCombo.keyCodes[key] { return (CGKeyCode(named), []) }
-        let keys = layout()
-        if let found = keys[key] { return found }
-        if key != key.lowercased(), let found = keys[key.lowercased()] { return (found.0, found.1 + [.shift]) }
-        throw HelperFailure("invalid", "The active keyboard layout has no \(key) key; send it with mac_type instead.")
+/// Which key types what on the active layout. Text Input Sources is asked from the main thread only, since some macOS
+/// releases abort when another thread asks, and the answer is cached until the input source changes.
+enum Keyboard {
+    private static let lock = NSLock()
+    private static var cached: KeyLayout?
+    private static var watching = false
+
+    static func layout() -> KeyLayout {
+        lock.lock()
+        if let cached {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+        let read = { () -> KeyLayout in
+            if !watching {
+                watching = true
+                DistributedNotificationCenter.default().addObserver(
+                    forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil, queue: nil
+                ) { _ in
+                    lock.lock()
+                    cached = nil
+                    lock.unlock()
+                }
+            }
+            return current()
+        }
+        let layout = Thread.isMainThread ? read() : DispatchQueue.main.sync(execute: read)
+        lock.lock()
+        cached = layout
+        lock.unlock()
+        return layout
     }
 
-    /// What each key of the current layout types, without and with Shift.
-    static func layout() -> [String: (CGKeyCode, [Held])] {
-        var out: [String: (CGKeyCode, [Held])] = [:]
+    /// What each key of the current layout types without modifiers, with Shift and with Command. Empty when the
+    /// layout has no Unicode data, so every key comes from the US fallback.
+    private static func current() -> KeyLayout {
+        var layout = KeyLayout(plain: [:], shifted: [:], command: [:])
         guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
-              let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return out }
+              let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return layout }
         let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue() as Data
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self) else { return }
-            for shifted in [false, true] {
+            let layers: [(UInt32, WritableKeyPath<KeyLayout, [UInt16: String]>)] = [
+                (0, \.plain), (UInt32((shiftKey >> 8) & 0xFF), \.shifted), (UInt32((cmdKey >> 8) & 0xFF), \.command),
+            ]
+            for (state, layer) in layers {
                 // Keypad keys type digits and + - * / too; shortcuts mean the main keyboard's keys.
                 for code in 0..<128 where !(0x41...0x5C).contains(code) {
                     var dead: UInt32 = 0
                     var length = 0
                     var chars = [UniChar](repeating: 0, count: 4)
-                    let state = shifted ? UInt32((shiftKey >> 8) & 0xFF) : 0
                     let status = UCKeyTranslate(
-                        base, UInt16(code), UInt16(kUCKeyActionDown), state, UInt32(LMGetKbdType()),
+                        base, UInt16(code), UInt16(kUCKeyActionDisplay), state, UInt32(LMGetKbdType()),
                         OptionBits(kUCKeyTranslateNoDeadKeysBit), &dead, 4, &length, &chars
                     )
                     guard status == noErr, length > 0 else { continue }
                     let typed = String(utf16CodeUnits: chars, count: length)
-                    if out[typed] == nil { out[typed] = (CGKeyCode(code), shifted ? [.shift] : []) }
+                    guard typed.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else { continue }
+                    layout[keyPath: layer][UInt16(code)] = typed
                 }
             }
         }
-        return out
+        return layout
     }
 }
