@@ -56,8 +56,8 @@ enum MacCommand {
 }
 
 /// Whether this command runs inside a program Haarness started: an agent's shell command (which names its chat), or
-/// anything below a `haarness` process or in a process group Haarness started for a command, which catches a command
-/// that cleared that variable and one put in the background.
+/// anything below a Haarness program (this one's own file counts, whatever it is called) or in a process group Haarness
+/// started for a command, which catches a command that cleared that variable and one put in the background.
 fn inside_haarness() -> bool {
     std::env::var_os(haarness_core::SESSION_ID_ENV).is_some_and(|value| !value.is_empty())
         || haarness_core::process_tree::inside_haarness(std::process::id())

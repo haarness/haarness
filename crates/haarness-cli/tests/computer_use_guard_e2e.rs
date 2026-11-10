@@ -1,8 +1,8 @@
 //! Computer use gets more reach for agents, and a pause on the strip ends, only at a person's word. A request from an
 //! agent's command is refused, also from a program the command put in the background (`nohup … &` in a subshell, which
 //! the system hands to launchd, outside Haarness's process tree), while the command runs and after its own shell has
-//! ended; a person's own client is answered, and switching off always works. The server runs the stand-in helper, so
-//! nothing touches the screen.
+//! ended; a person's own client is answered, and switching off always works. The same holds for a Haarness run from a
+//! file under another name. The server runs the stand-in helper, so nothing touches the screen.
 #![cfg(target_os = "macos")]
 
 use haarness_computer::{INSIDE_REFUSAL, INSIDE_RESUME_REFUSAL, terms};
@@ -17,13 +17,32 @@ use uuid::Uuid;
 struct Fixture {
     root: PathBuf,
     workspace: PathBuf,
+    /// The Haarness program this fixture runs.
+    program: PathBuf,
     url: String,
     token: String,
 }
 
 impl Fixture {
     fn new() -> Self {
+        Self::running(None)
+    }
+
+    /// A fixture running Haarness from a file called `renamed` (the built program, linked or copied), or as built.
+    fn running(renamed: Option<&str>) -> Self {
         let root = std::env::temp_dir().join(format!("haarness-computer-guard-{}", Uuid::now_v7()));
+        let built = PathBuf::from(env!("CARGO_BIN_EXE_haarness"));
+        let program = renamed.map_or_else(
+            || built.clone(),
+            |name| {
+                let program = root.join("bin").join(name);
+                std::fs::create_dir_all(root.join("bin")).expect("create the program's folder");
+                std::fs::hard_link(&built, &program)
+                    .or_else(|_| std::fs::copy(&built, &program).map(drop))
+                    .expect("put the program under its new name");
+                program
+            },
+        );
         let workspace = root.join("workspace");
         std::fs::create_dir_all(workspace.join(".haarness")).expect("create the project");
         for folder in ["home", "data"] {
@@ -38,6 +57,7 @@ impl Fixture {
         let mut fixture = Self {
             root,
             workspace,
+            program,
             url: String::new(),
             token: String::new(),
         };
@@ -71,7 +91,7 @@ impl Fixture {
     }
 
     fn haarness(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_haarness"));
+        let mut command = Command::new(&self.program);
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("HAARNESS_") {
                 command.env_remove(name);
@@ -462,4 +482,96 @@ fn only_a_person_widens_computer_use_or_ends_a_pause_even_from_a_program_left_ru
         configured["data"]["settings"]["defaultAct"], "allow",
         "{configured}"
     );
+}
+
+/// A Haarness run from a file under another name refuses its agents all the same: the server checking a request knows
+/// every program below itself, `haarness mac` knows a server run from the same file as itself, and a copy kept under a
+/// longer name (`haarness-test`) is known to any `haarness`. The person's own `haarness mac` from that file still works.
+#[test]
+fn a_renamed_haarness_still_refuses_its_agents_and_answers_its_person() {
+    let built = PathBuf::from(env!("CARGO_BIN_EXE_haarness"));
+    for (renamed, from_built) in [("hn", false), ("haarness-test", true)] {
+        let fixture = Fixture::running(Some(renamed));
+        // The person agrees, then switches off, so that switching on would widen too.
+        let accepted = fixture.api(
+            "/manage/computer-use",
+            &json!({"action": "accept", "version": terms::VERSION}),
+        );
+        assert_eq!(accepted["data"]["enabled"], true, "{renamed}: {accepted}");
+        let off = fixture.api(
+            "/manage/computer-use",
+            &json!({"action": "enable", "enabled": false}),
+        );
+        assert_eq!(off["data"]["enabled"], false, "{renamed}: {off}");
+
+        // The agent's command asks the server, runs `haarness mac` without the chat's variable, and leaves a program
+        // in the background that switches on.
+        let program = if from_built { &built } else { &fixture.program };
+        let mac = |arguments: &str, answer: &str| {
+            format!(
+                "env -u HAARNESS_SESSION_ID '{}' --workspace '{}' mac {arguments} > '{}' 2>&1; echo \"exit $?\" >> '{}'",
+                program.display(),
+                fixture.workspace.display(),
+                fixture.root.join(answer).display(),
+                fixture.root.join(answer).display()
+            )
+        };
+        let root = &fixture.root;
+        let left = root.join("left.sh");
+        std::fs::write(
+            &left,
+            format!(
+                "sleep 1\n{}\ntouch '{}'\n",
+                mac("on", "left-cli.txt"),
+                root.join("left-done").display()
+            ),
+        )
+        .unwrap();
+        let script = root.join("widen.sh");
+        std::fs::write(
+            &script,
+            [
+                fixture.post_line(
+                    &json!({"action": "app", "bundle": "com.apple.Notes", "rule": "allow"}),
+                    &root.join("api.json"),
+                ),
+                format!("{}\n", mac("allow com.apple.Mail", "cli.txt")),
+                format!("( nohup sh '{}' > /dev/null 2>&1 & )\n", left.display()),
+                format!("{}\n", wait_for(&root.join("left-done"))),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let agent = fixture.chat("Agent");
+        fixture.agent_runs(&agent, &format!("sh '{}'", script.display()));
+        assert!(root.join("left-done").exists(), "{renamed}");
+        for name in ["api.json", "cli.txt", "left-cli.txt"] {
+            assert!(
+                fixture.read(name).contains(INSIDE_REFUSAL),
+                "{renamed} {name}: {}",
+                fixture.read(name)
+            );
+            assert!(!fixture.read(name).contains("exit 0"), "{renamed} {name}");
+        }
+        let status = fixture.status();
+        assert_eq!(status["enabled"], false, "{renamed}: {status}");
+        assert_eq!(rules(&status), Vec::new(), "{renamed}: {status}");
+
+        // The person, in a terminal of their own.
+        let person = fixture
+            .haarness()
+            .args(["mac", "allow", "com.apple.Mail"])
+            .output()
+            .expect("run haarness mac");
+        assert!(
+            person.status.success(),
+            "{renamed}: {}",
+            String::from_utf8_lossy(&person.stderr)
+        );
+        assert_eq!(
+            rules(&fixture.status()),
+            vec![("com.apple.Mail".to_owned(), "allow".to_owned())],
+            "{renamed}"
+        );
+    }
 }

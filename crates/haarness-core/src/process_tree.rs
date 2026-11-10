@@ -1,7 +1,13 @@
-//! Whether a process runs inside Haarness: started, directly or further down, by a `haarness` program (a server or
+//! Whether a process runs inside Haarness: started, directly or further down, by a Haarness program (a server or
 //! the terminal UI hosting one), the way an agent's shell command, a hook or a terminal pane is. Settings that give
 //! agents more reach refuse changes from such a process, so an agent cannot widen what the person allowed by running
 //! a command, whatever variables that command clears.
+//!
+//! A Haarness program is known by the name of the file the system ran for it, which neither a link nor the name it was
+//! started under changes: `haarness`, a copy kept under a longer name (`haarness-test`, `haarness-0.1.19`), or the
+//! program asking, whatever its file is called. So a server checking a request knows every program below itself, and
+//! `haarness mac` run from the same copy as the server above it knows that server. Not known: a server run from a file
+//! named otherwise, to a `haarness mac` run from yet another copy.
 //!
 //! Two marks tell: the process's ancestry, and the process group Haarness starts each command in. A command's shell
 //! starts without job control, so a program that left the tree (put in the background with `nohup` or `( … & )` and
@@ -26,6 +32,17 @@ use std::{net::SocketAddr, path::Path};
 #[cfg(unix)]
 const PROGRAM: &str = "haarness";
 
+/// Whether `program`, the name of the file the system ran for a process, is a Haarness program: `haarness`, a copy of
+/// it under a longer name (`haarness-test`, `haarness_old`, `haarness.new`), or `own`, the program of the process
+/// asking, which is Haarness whatever its file is called.
+#[cfg(unix)]
+fn is_haarness(program: &str, own: Option<&str>) -> bool {
+    program
+        .strip_prefix(PROGRAM)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '_', '.']))
+        || own.is_some_and(|own| own == program)
+}
+
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Process {
@@ -35,7 +52,7 @@ struct Process {
     program: String,
 }
 
-/// Whether `pid` runs inside Haarness: a `haarness` program is among its ancestors (`pid` itself does not count), or
+/// Whether `pid` runs inside Haarness: a Haarness program is among its ancestors (`pid` itself does not count), or
 /// it or one of its ancestors runs in a process group Haarness started for a command. An unreadable process table
 /// reads as no, and so does every process off Unix.
 #[must_use]
@@ -44,7 +61,12 @@ pub fn inside_haarness(pid: u32) -> bool {
     {
         table().is_some_and(|rows| {
             let started = STARTED.lock().clone();
-            below_program(&rows, pid) || in_haarness_group(&rows, pid, &started)
+            let own = std::process::id();
+            let own = rows
+                .iter()
+                .find(|row| row.pid == own)
+                .map(|row| row.program.as_str());
+            below_program(&rows, pid, own) || in_haarness_group(&rows, pid, &started, own)
         })
     }
     #[cfg(not(unix))]
@@ -92,10 +114,16 @@ fn group_runs(group: i32) -> bool {
 }
 
 /// Whether `pid`, or a process above it, runs in a process group Haarness started for a command: one whose leader
-/// runs below a `haarness` program, or one of `started` (this process's own) whose leader has ended. A leader that runs
-/// elsewhere leads a later group that happens to have the same id: an id is free again only once its group is gone.
+/// runs below a Haarness program (`own` as in [`is_haarness`]), or one of `started` (this process's own) whose leader
+/// has ended. A leader that runs elsewhere leads a later group that happens to have the same id: an id is free again
+/// only once its group is gone.
 #[cfg(unix)]
-fn in_haarness_group(rows: &[Process], pid: u32, started: &BTreeSet<i32>) -> bool {
+fn in_haarness_group(
+    rows: &[Process],
+    pid: u32,
+    started: &BTreeSet<i32>,
+    own: Option<&str>,
+) -> bool {
     let row = |pid: u32| rows.iter().find(|row| row.pid == pid);
     let mut current = row(pid);
     for _ in 0..128 {
@@ -108,7 +136,7 @@ fn in_haarness_group(rows: &[Process], pid: u32, started: &BTreeSet<i32>) -> boo
             .filter(|leader| *leader > 1)
             .and_then(|leader| row(leader).map(|_| leader));
         let ours = match leader {
-            Some(leader) => below_program(rows, leader),
+            Some(leader) => below_program(rows, leader, own),
             None => started.contains(&group),
         };
         if ours {
@@ -162,8 +190,9 @@ fn client_in_listing(listing: &str, peer: SocketAddr) -> Option<u32> {
     None
 }
 
+/// Whether a Haarness program (`own` as in [`is_haarness`]) is among the ancestors of `pid`.
 #[cfg(unix)]
-fn below_program(rows: &[Process], pid: u32) -> bool {
+fn below_program(rows: &[Process], pid: u32, own: Option<&str>) -> bool {
     let row = |pid: u32| rows.iter().find(|row| row.pid == pid);
     let mut current = row(pid).map(|row| row.parent);
     // A table read while processes come and go could hold a loop.
@@ -171,7 +200,7 @@ fn below_program(rows: &[Process], pid: u32) -> bool {
         let Some(parent) = current.filter(|pid| *pid > 1).and_then(row) else {
             return false;
         };
-        if parent.program == PROGRAM {
+        if is_haarness(&parent.program, own) {
             return true;
         }
         current = Some(parent.parent);
@@ -179,10 +208,12 @@ fn below_program(rows: &[Process], pid: u32) -> bool {
     false
 }
 
+/// The process table, each program named by the file the system ran for it (`ucomm`): `comm` on macOS is the name a
+/// process was started under, which a link or its parent chooses.
 #[cfg(unix)]
 fn table() -> Option<Vec<Process>> {
     let output = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,pgid=,comm="])
+        .args(["-A", "-o", "pid=,ppid=,pgid=,ucomm="])
         .env("LC_ALL", "C")
         .output()
         .ok()?;
@@ -192,7 +223,8 @@ fn table() -> Option<Vec<Process>> {
         .then(|| parse_table(&String::from_utf8_lossy(&output.stdout)))
 }
 
-/// `ps -o pid=,ppid=,pgid=,comm=` lines. macOS prints the program's path, which may hold spaces; Linux its name.
+/// `ps -o pid=,ppid=,pgid=,ucomm=` lines: the program's file name, cut to 16 bytes on macOS and 15 on Linux, which may
+/// hold spaces and is padded with them. A path, as `comm` gives on macOS, reads as its file name.
 #[cfg(unix)]
 fn parse_table(text: &str) -> Vec<Process> {
     text.lines()
@@ -221,42 +253,128 @@ mod tests {
     // Desktop's server (602) runs an agent's command (603) in a group of its own; 610 is a program that command put in
     // the background, which the system handed to launchd, and 611 one that program started in a group of its own. The
     // table, and every test reading one, is Unix's: Windows has no `ps` table, and nothing there reads as inside.
+    // Program names are as `ps` prints `ucomm`, cut to 16 bytes on macOS (where it pads them with spaces, too).
     #[cfg(unix)]
-    const TABLE: &str = "    1     0     1 /sbin/launchd
-  500     1   500 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
-  501   500   501 /bin/zsh
-  502   501   502 /Users/sam/.local/bin/haarness
-  503   502   503 /bin/zsh
-  504   503   503 /usr/bin/curl
-  600     1   600 /Applications/Haarness.app/Contents/MacOS/Haarness
-  601   600   600 /Applications/Haarness.app/Contents/Frameworks/Haarness Helper (Renderer).app/Contents/MacOS/Haarness Helper (Renderer)
-  602   600   602 /Applications/Haarness.app/Contents/Resources/bin/haarness
-  603   602   603 /bin/sh
+    const TABLE: &str = "    1     0     1 launchd
+  500     1   500 Terminal
+  501   500   501 zsh
+  502   501   502 haarness
+  503   502   503 zsh
+  504   503   503 curl
+  600     1   600 Haarness
+  601   600   600 Haarness Helper
+  602   600   602 haarness
+  603   602   603 sh
   604   603   603 python3
-  610     1   603 /usr/bin/curl
-  611   610   611 /bin/sh
-  620     1   620 /usr/bin/curl
+  610     1   603 curl
+  611   610   611 sh
+  620     1   620 curl
 ";
+
+    /// [`TABLE`] with each `haarness` program run from a file called `program` instead.
+    #[cfg(unix)]
+    fn renamed(program: &str) -> Vec<Process> {
+        parse_table(TABLE)
+            .into_iter()
+            .map(|mut row| {
+                if row.program == PROGRAM {
+                    program.clone_into(&mut row.program);
+                }
+                row
+            })
+            .collect()
+    }
 
     #[cfg(unix)]
     #[test]
     fn a_process_started_by_haarness_is_inside_it_and_others_are_not() {
         let rows = parse_table(TABLE);
         assert_eq!(rows.len(), 14);
+        assert_eq!(rows[3].program, "haarness");
         assert_eq!(rows[6].program, "Haarness");
-        assert_eq!(rows[7].program, "Haarness Helper (Renderer)");
+        assert_eq!(rows[7].program, "Haarness Helper");
         assert_eq!(rows[11].group, 603);
-        // An agent's command under the terminal UI, and one under the server Desktop runs.
-        assert!(below_program(&rows, 504));
-        assert!(below_program(&rows, 604));
-        // The terminal UI itself, the shell it runs in, and Desktop's own windows.
-        assert!(!below_program(&rows, 502));
-        assert!(!below_program(&rows, 501));
-        assert!(!below_program(&rows, 601));
-        // A process the table does not know.
-        assert!(!below_program(&rows, 999));
-        // A program that left the tree is not below Haarness any more.
-        assert!(!below_program(&rows, 610));
+        // Padding is not part of a name, and a path, as `comm` gives on macOS, names its file.
+        let padded =
+            parse_table("  602   600   602 haarness        \n  601   600   600 Haarness Helper \n");
+        assert_eq!(padded[0].program, "haarness");
+        assert_eq!(padded[1].program, "Haarness Helper");
+        let path = parse_table(
+            "  602   600   602 /Applications/Haarness.app/Contents/Resources/bin/haarness\n",
+        );
+        assert_eq!(path[0].program, "haarness");
+        for own in [None, Some("haarness")] {
+            // An agent's command under the terminal UI, and one under the server Desktop runs.
+            assert!(below_program(&rows, 504, own));
+            assert!(below_program(&rows, 604, own));
+            // The terminal UI itself, the shell it runs in, and Desktop's own windows.
+            assert!(!below_program(&rows, 502, own));
+            assert!(!below_program(&rows, 501, own));
+            assert!(!below_program(&rows, 601, own));
+            // A process the table does not know.
+            assert!(!below_program(&rows, 999, own));
+            // A program that left the tree is not below Haarness any more.
+            assert!(!below_program(&rows, 610, own));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_haarness_run_from_a_renamed_file_is_still_haarness() {
+        // A copy kept under a longer name, whoever asks.
+        for program in [
+            "haarness-test",
+            "haarness-0.1.19",
+            "haarness_old",
+            "haarness.new",
+        ] {
+            let rows = renamed(program);
+            assert!(below_program(&rows, 604, None), "{program}");
+            assert!(below_program(&rows, 504, Some("haarness")), "{program}");
+            assert!(
+                in_haarness_group(&rows, 610, &BTreeSet::new(), None),
+                "{program}"
+            );
+            assert!(!below_program(&rows, 501, None), "{program}");
+            assert!(
+                !in_haarness_group(&rows, 620, &BTreeSet::new(), None),
+                "{program}"
+            );
+        }
+        // Any other name, when the program asking runs from a file of that name: `haarness mac` run by a command of
+        // a server both started from the same copy, or that server about a request.
+        let rows = renamed("hn");
+        assert!(!below_program(&rows, 604, None));
+        assert!(!below_program(&rows, 604, Some("haarness")));
+        assert!(!in_haarness_group(
+            &rows,
+            610,
+            &BTreeSet::new(),
+            Some("haarness")
+        ));
+        assert!(below_program(&rows, 604, Some("hn")));
+        assert!(below_program(&rows, 504, Some("hn")));
+        assert!(in_haarness_group(&rows, 610, &BTreeSet::new(), Some("hn")));
+        assert!(in_haarness_group(&rows, 611, &BTreeSet::new(), Some("hn")));
+        // The person's own programs stay outside, Desktop's windows included.
+        for pid in [501, 502, 600, 601, 610, 620] {
+            assert!(!below_program(&rows, pid, Some("hn")), "{pid}");
+        }
+        for pid in [501, 502, 600, 601, 620] {
+            assert!(
+                !in_haarness_group(&rows, pid, &BTreeSet::new(), Some("hn")),
+                "{pid}"
+            );
+        }
+        // Names that only start like Haarness's, or differ in case, are other programs.
+        for program in ["haarnessd", "Haarness", "haarnes", "xhaarness"] {
+            let rows = renamed(program);
+            assert!(!below_program(&rows, 604, None), "{program}");
+            assert!(
+                !in_haarness_group(&rows, 610, &BTreeSet::new(), None),
+                "{program}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -265,16 +383,16 @@ mod tests {
         let rows = parse_table(TABLE);
         let none = BTreeSet::new();
         // Put in the background by the command while it runs, and a program it started in a group of its own.
-        assert!(in_haarness_group(&rows, 610, &none));
-        assert!(in_haarness_group(&rows, 611, &none));
+        assert!(in_haarness_group(&rows, 610, &none, None));
+        assert!(in_haarness_group(&rows, 611, &none, None));
         // Still attached: the group says so as well as the tree.
-        assert!(in_haarness_group(&rows, 604, &none));
+        assert!(in_haarness_group(&rows, 604, &none, None));
         // The person's own programs: Terminal's shells, the terminal UI, Desktop, another curl.
         for pid in [501, 502, 600, 601, 620] {
-            assert!(!in_haarness_group(&rows, pid, &none), "{pid}");
+            assert!(!in_haarness_group(&rows, pid, &none, None), "{pid}");
         }
         // A group of the same id led by a program outside Haarness is a later one.
-        assert!(!in_haarness_group(&rows, 620, &BTreeSet::from([620])));
+        assert!(!in_haarness_group(&rows, 620, &BTreeSet::from([620]), None));
     }
 
     #[cfg(unix)]
@@ -285,24 +403,25 @@ mod tests {
             .into_iter()
             .filter(|row| row.pid != 603 && row.pid != 604)
             .collect();
-        assert!(!in_haarness_group(&rows, 610, &BTreeSet::new()));
+        assert!(!in_haarness_group(&rows, 610, &BTreeSet::new(), None));
         let started = BTreeSet::from([603]);
-        assert!(in_haarness_group(&rows, 610, &started));
-        assert!(in_haarness_group(&rows, 611, &started));
-        assert!(!in_haarness_group(&rows, 620, &started));
+        assert!(in_haarness_group(&rows, 610, &started, None));
+        assert!(in_haarness_group(&rows, 611, &started, None));
+        assert!(!in_haarness_group(&rows, 620, &started, None));
     }
 
     #[cfg(unix)]
     #[test]
     fn a_loop_in_the_table_ends() {
-        let rows = parse_table("  10    11    10 /bin/a\n  11    10    11 /bin/b\n");
-        assert!(!below_program(&rows, 10));
-        assert!(!in_haarness_group(&rows, 10, &BTreeSet::from([99])));
+        let rows = parse_table("  10    11    10 a\n  11    10    11 b\n");
+        assert!(!below_program(&rows, 10, None));
+        assert!(!in_haarness_group(&rows, 10, &BTreeSet::from([99]), None));
     }
 
     /// The real thing: a command in a group of its own starts a program in the background and ends. Until its group is
     /// stopped the program runs under launchd (or init), outside this process's tree and with no leader, and is still
-    /// known by its group; a program this process started some other way is not.
+    /// known by its group; a program left the same way by a group this process did not note is not. A program this
+    /// process started itself is inside whatever this test program's file is called: the process asking is Haarness.
     #[cfg(unix)]
     #[test]
     fn a_program_a_command_left_running_is_still_inside() {
@@ -310,34 +429,47 @@ mod tests {
         let folder =
             std::env::temp_dir().join(format!("haarness-process-tree-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&folder).unwrap();
-        let pid_file = folder.join("left.pid");
-        let script = format!(
-            "( sleep 30 > /dev/null 2>&1 & echo $! > '{}' ) ; exit 0",
-            pid_file.display()
-        );
-        let mut command = std::process::Command::new("/bin/sh");
-        command.args(["-c", &script]).process_group(0);
-        let mut leader = command.spawn().unwrap();
-        mark_started(leader.id());
-        assert!(leader.wait().unwrap().success());
-        let left: u32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let mut other = std::process::Command::new("sleep")
+        // Runs a command in a group of its own that leaves a program running and ends; the program's pid.
+        let leave = |name: &str, note: bool| -> u32 {
+            let pid_file = folder.join(name);
+            let script = format!(
+                "( sleep 30 > /dev/null 2>&1 & echo $! > '{}' ) ; exit 0",
+                pid_file.display()
+            );
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", &script]).process_group(0);
+            let mut leader = command.spawn().unwrap();
+            if note {
+                mark_started(leader.id());
+            }
+            assert!(leader.wait().unwrap().success());
+            std::fs::read_to_string(&pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        let left = leave("left.pid", true);
+        let stray = leave("stray.pid", false);
+        let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .unwrap();
-        let checked = (inside_haarness(left), inside_haarness(other.id()));
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(i32::try_from(left).unwrap()),
-            nix::sys::signal::Signal::SIGKILL,
+        let checked = (
+            inside_haarness(left),
+            inside_haarness(stray),
+            inside_haarness(child.id()),
         );
-        let _ = other.kill();
-        let _ = other.wait();
+        for pid in [left, stray] {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let _ = child.kill();
+        let _ = child.wait();
         let _ = std::fs::remove_dir_all(&folder);
-        assert_eq!(checked, (true, false));
+        assert_eq!(checked, (true, false, true));
     }
 
     #[test]
