@@ -3177,7 +3177,7 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
                     &image.data,
                     "image",
                     &mut attachment_bytes,
-                )?;
+                );
                 attachments.extend(attachment);
                 text_parts.push(line);
             }
@@ -3187,7 +3187,7 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
                     &audio.data,
                     "audio",
                     &mut attachment_bytes,
-                )?;
+                );
                 attachments.extend(attachment);
                 text_parts.push(line);
             }
@@ -3309,20 +3309,27 @@ fn resource_text(uri: &str, mime: Option<&str>, text: &str) -> String {
 /// does not carry to providers (`audio/webm`) is named too, and one of a
 /// text type (an SVG) is attached as before, which the model reads as its
 /// text. Base64 broken over lines is read without the breaks; base64 that
-/// does not decode fails the call.
+/// does not decode is named too, never sent.
 fn media_block(
     declared: &str,
     data: &str,
     kind: &str,
     total: &mut usize,
-) -> CoreResult<(Option<String>, String)> {
+) -> (Option<String>, String) {
     use haarness_core::{attachments::is_supported_media_mime, mcp_content};
     let data = mcp_content::base64_text(data);
     let mime = mcp_content::media_type(declared);
-    let invalid =
-        |error: base64::DecodeError| CoreError::Tool(format!("invalid MCP media base64: {error}"));
+    let invalid = || {
+        (
+            None,
+            format!("[{mime} {kind}, left out: its data is not valid base64]"),
+        )
+    };
     if mime.starts_with("image/") && !mcp_content::textual(&mime) {
-        return Ok(match mcp_image(&data, total).map_err(invalid)? {
+        let Ok(image) = mcp_image(&data, total) else {
+            return invalid();
+        };
+        return match image {
             McpImage::Attached {
                 mime,
                 data_url,
@@ -3350,29 +3357,31 @@ fn media_block(
                     "[{mime} {kind}, about {bytes} bytes, left out: Haarness does not attach this type]"
                 ),
             ),
-        });
+        };
     }
     if !is_supported_media_mime(&mime) && !mcp_content::textual(&mime) {
         let bytes = data.trim_end_matches('=').len() / 4 * 3;
-        return Ok((
+        return (
             None,
             format!(
                 "[{mime} {kind}, about {bytes} bytes, left out: Haarness does not attach this type]"
             ),
-        ));
+        );
     }
-    let bytes = STANDARD.decode(data.as_bytes()).map_err(invalid)?.len();
+    let Ok(bytes) = STANDARD.decode(data.as_bytes()).map(|bytes| bytes.len()) else {
+        return invalid();
+    };
     if total.saturating_add(bytes) > haarness_core::mcp_content::MAX_ATTACHMENT_BYTES {
-        return Ok((
+        return (
             None,
             format!("[{mime} {kind}, {bytes} bytes, left out: {MEDIA_PAST_LIMIT}]"),
-        ));
+        );
     }
     *total += bytes;
-    Ok((
+    (
         Some(format!("data:{mime};base64,{data}")),
         format!("[{mime} {kind} attachment]"),
-    ))
+    )
 }
 
 /// Why a result's medium past [`haarness_core::mcp_content::MAX_ATTACHMENT_BYTES`]
@@ -3401,10 +3410,18 @@ enum McpImage {
 /// ([`haarness_core::attachments::MAX_IMAGE_SOURCE_BYTES`]) before it is
 /// decoded, and against the result's media limit once prepared, so a large
 /// screenshot reaches the model shrunk. Decoding is CPU work; the worker runs
-/// this off the async executor.
+/// this off the async executor, and at most [`IMAGE_DECODES`] images are
+/// decoded at once. One that could not fit the result's media any more is
+/// not decoded at all.
 fn mcp_image(data: &str, total: &mut usize) -> Result<McpImage, base64::DecodeError> {
     use haarness_core::{attachments::MAX_IMAGE_SOURCE_BYTES, images, mcp_content};
     let estimate = data.trim_end_matches('=').len() / 4 * 3;
+    if *total >= mcp_content::MAX_ATTACHMENT_BYTES {
+        return Ok(McpImage::LeftOut {
+            bytes: estimate,
+            reason: MEDIA_PAST_LIMIT.into(),
+        });
+    }
     if u64::try_from(estimate).unwrap_or(u64::MAX) > MAX_IMAGE_SOURCE_BYTES {
         return Ok(McpImage::LeftOut {
             bytes: estimate,
@@ -3419,7 +3436,10 @@ fn mcp_image(data: &str, total: &mut usize) -> Result<McpImage, base64::DecodeEr
     if images::sniff(&bytes).is_none() {
         return Ok(McpImage::Unknown(size));
     }
-    let prepared = match images::prepare(bytes) {
+    let decoding = Decoding::start();
+    let prepared = images::prepare(bytes);
+    drop(decoding);
+    let prepared = match prepared {
         Ok(prepared) => prepared,
         Err(refusal) => {
             return Ok(McpImage::LeftOut {
@@ -3463,6 +3483,38 @@ fn mcp_image(data: &str, total: &mut usize) -> Result<McpImage, base64::DecodeEr
             .changed
             .then_some((prepared.width, prepared.height)),
     })
+}
+
+/// How many MCP images are decoded at once, across every call: each may hold
+/// hundreds of megabytes of pixels while it is.
+const IMAGE_DECODES: usize = 2;
+
+/// The images being decoded, and the wait for one to end.
+static DECODING: (parking_lot::Mutex<usize>, parking_lot::Condvar) =
+    (parking_lot::Mutex::new(0), parking_lot::Condvar::new());
+
+/// One of the [`IMAGE_DECODES`] images decoded at once, for as long as this
+/// is held. It is taken on a blocking thread, which waits for its turn.
+struct Decoding;
+
+impl Decoding {
+    fn start() -> Self {
+        let (running, ended) = &DECODING;
+        let mut running = running.lock();
+        while *running >= IMAGE_DECODES {
+            ended.wait(&mut running);
+        }
+        *running += 1;
+        Self
+    }
+}
+
+impl Drop for Decoding {
+    fn drop(&mut self) {
+        let (running, ended) = &DECODING;
+        *running.lock() -= 1;
+        ended.notify_one();
+    }
 }
 
 /// An image a tool's result embeds as a resource blob, as [`mcp_image`]
@@ -6223,6 +6275,25 @@ mod tests {
         );
         // An image whose bytes cannot be read is named too.
         let cut = STANDARD.encode(&picture(64, 64, image::ImageFormat::Png, false)[..60]);
+        // Once the result's media come to 10 MiB, an image is not decoded:
+        // it could not be attached whatever it holds.
+        let full = STANDARD.encode(vec![0_u8; 10 * 1024 * 1024]);
+        let output = to_output(
+            rmcp::model::CallToolResult::success(vec![
+                ContentBlock::audio(&full, "audio/mpeg"),
+                ContentBlock::image(&cut, "image/png"),
+            ]),
+            "full",
+        )
+        .unwrap();
+        assert_eq!(output.metadata["attachments"].as_array().unwrap().len(), 1);
+        assert!(
+            output.text.ends_with(
+                "\n[image/png image, 60 bytes, left out: a result attaches at most 10 MiB of media]"
+            ),
+            "{}",
+            output.text
+        );
         let output = to_output(
             rmcp::model::CallToolResult::success(vec![ContentBlock::image(&cut, "image/png")]),
             "cut",
@@ -6346,17 +6417,26 @@ mod tests {
         );
     }
 
+    /// Media whose base64 does not decode never reaches the transcript; it
+    /// failed the whole call, the result's text with it.
     #[test]
-    fn invalid_mcp_media_is_rejected_before_it_reaches_the_transcript() {
-        let result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::image(
-            "not base64",
-            "image/png",
-        )]);
+    fn invalid_mcp_media_is_named_rather_than_attached_and_the_text_kept() {
+        let result = rmcp::model::CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text("Two clips."),
+            rmcp::model::ContentBlock::image("not base64", "image/png"),
+            rmcp::model::ContentBlock::audio("not base64", "audio/mpeg"),
+        ]);
+        let output = to_output(result, "media").unwrap();
         assert!(
-            to_output(result, "media")
-                .unwrap_err()
-                .to_string()
-                .contains("base64")
+            output.metadata.get("attachments").is_none(),
+            "{}",
+            output.metadata
+        );
+        assert_eq!(
+            output.text,
+            "Two clips.\n\
+             [image/png image, left out: its data is not valid base64]\n\
+             [audio/mpeg audio, left out: its data is not valid base64]"
         );
     }
 
