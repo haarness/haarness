@@ -49,6 +49,8 @@ struct Process {
     pid: u32,
     parent: u32,
     group: i32,
+    /// It leads its session, as a terminal's shell does (`s` in its state).
+    session_leader: bool,
     program: String,
 }
 
@@ -79,11 +81,32 @@ pub fn this_process_inside() -> bool {
     names_a_chat() || inside_haarness(std::process::id())
 }
 
-/// For a process a Haarness program started for itself, such as the server a launcher leaves running: whether the one
-/// that started it runs inside Haarness, as [`this_process_inside`] would tell there. A process whose parent is no
-/// Haarness program was not started that way, and counts as inside.
+/// Whether this very process runs for an agent: started for an agent's command, which names its chat, or inside
+/// Haarness ([`this_process_inside`]) other than in a terminal a person opened in Haarness (see
+/// [`request_from_agent`]).
 #[must_use]
-pub fn parent_inside() -> bool {
+pub fn this_process_for_agent() -> bool {
+    if names_a_chat() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        table().is_some_and(|rows| {
+            let started = STARTED.lock().clone();
+            for_agent(&rows, std::process::id(), &started, own_program(&rows), 0)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// For a process a Haarness program started for itself, such as the server a launcher leaves running: whether the one
+/// that started it runs for an agent, as [`this_process_for_agent`] would tell there. A process whose parent is no
+/// Haarness program was not started that way, and counts as an agent's.
+#[must_use]
+pub fn parent_for_agent() -> bool {
     if names_a_chat() {
         return true;
     }
@@ -92,11 +115,36 @@ pub fn parent_inside() -> bool {
         let parent = std::os::unix::process::parent_id();
         table().is_some_and(|rows| {
             let started = STARTED.lock().clone();
-            launcher_inside(&rows, parent, &started, own_program(&rows))
+            launcher_for_agent(&rows, parent, &started, own_program(&rows))
         })
     }
     #[cfg(not(unix))]
     {
+        false
+    }
+}
+
+/// Whether a request this process received from the local process `pid` comes from a program that runs for an agent:
+/// inside Haarness, as [`request_from_inside`] tells, except in a terminal a person opened in Haarness. Such a
+/// terminal is a session that a Haarness program running for a person started (as Desktop's terminal panel is): what
+/// runs below its shell is what the person typed. An agent's command, a hook, an MCP server or a server's own helper
+/// is no terminal, and neither is one an agent's own Haarness started. Nor can an agent type into a person's terminal:
+/// the server opens and connects terminals only for requests that do not run for an agent.
+#[must_use]
+pub fn request_from_agent(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        table().is_some_and(|rows| {
+            let started = STARTED.lock().clone();
+            let helpers = HELPERS.lock().clone();
+            let own = own_program(&rows);
+            !helper(&rows, pid, std::process::id(), &helpers, &started)
+                && for_agent(&rows, pid, &started, own, 0)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
         false
     }
 }
@@ -124,9 +172,9 @@ pub fn request_from_inside(pid: u32) -> bool {
 }
 
 /// Whether `parent`, which started a process for itself, is no Haarness program (`own` as in [`is_haarness`]) or runs
-/// inside Haarness.
+/// for an agent.
 #[cfg(unix)]
-fn launcher_inside(
+fn launcher_for_agent(
     rows: &[Process],
     parent: u32,
     started: &BTreeSet<i32>,
@@ -136,7 +184,59 @@ fn launcher_inside(
         .iter()
         .find(|row| row.pid == parent && parent > 1)
         .is_some_and(|row| is_haarness(&row.program, own));
-    !launcher || below_program(rows, parent, own) || in_haarness_group(rows, parent, started, own)
+    !launcher || for_agent(rows, parent, started, own, 0)
+}
+
+/// How many Haarness programs deep a terminal is judged: one opened in a server a person started in a terminal of
+/// another, and so on.
+#[cfg(unix)]
+const TERMINAL_DEPTH: usize = 8;
+
+/// Whether `pid` runs inside Haarness ([`inside_haarness`], `own` as in [`is_haarness`]) other than in a terminal a
+/// person opened ([`in_person_terminal`]).
+#[cfg(unix)]
+fn for_agent(
+    rows: &[Process],
+    pid: u32,
+    started: &BTreeSet<i32>,
+    own: Option<&str>,
+    depth: usize,
+) -> bool {
+    (below_program(rows, pid, own) || in_haarness_group(rows, pid, started, own))
+        && !in_person_terminal(rows, pid, started, own, depth)
+}
+
+/// Whether `pid` runs in a terminal a person opened in Haarness: the nearest process at or above it that a Haarness
+/// program started leads a session, as a terminal's shell does, and that Haarness program runs for a person itself.
+/// Whatever else a Haarness program starts directly (an agent's command, a hook, an MCP server, a helper) leads no
+/// session; a program that starts a session of its own below one of those is not started by a Haarness program, and
+/// one that leaves the tree is in no terminal.
+#[cfg(unix)]
+fn in_person_terminal(
+    rows: &[Process],
+    pid: u32,
+    started: &BTreeSet<i32>,
+    own: Option<&str>,
+    depth: usize,
+) -> bool {
+    let row = |pid: u32| rows.iter().find(|row| row.pid == pid);
+    let mut current = row(pid);
+    // A table read while processes come and go could hold a loop.
+    for _ in 0..128 {
+        let Some(process) = current.filter(|process| process.pid > 1) else {
+            return false;
+        };
+        let Some(parent) = row(process.parent).filter(|parent| parent.pid > 1) else {
+            return false;
+        };
+        if is_haarness(&parent.program, own) {
+            return process.session_leader
+                && depth < TERMINAL_DEPTH
+                && !for_agent(rows, parent.pid, started, own, depth + 1);
+        }
+        current = Some(parent);
+    }
+    false
 }
 
 /// Whether an agent's command runs here: the shell tool names the chat it runs for.
@@ -330,7 +430,7 @@ fn below_program(rows: &[Process], pid: u32, own: Option<&str>) -> bool {
 #[cfg(unix)]
 fn table() -> Option<Vec<Process>> {
     let output = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,pgid=,ucomm="])
+        .args(["-A", "-o", "pid=,ppid=,pgid=,stat=,ucomm="])
         .env("LC_ALL", "C")
         .output()
         .ok()?;
@@ -340,15 +440,17 @@ fn table() -> Option<Vec<Process>> {
         .then(|| parse_table(&String::from_utf8_lossy(&output.stdout)))
 }
 
-/// `ps -o pid=,ppid=,pgid=,ucomm=` lines: the program's file name, cut to 16 bytes on macOS and 15 on Linux, which may
-/// hold spaces and is padded with them. A path, as `comm` gives on macOS, reads as its file name.
+/// `ps -o pid=,ppid=,pgid=,stat=,ucomm=` lines: the state's letters, then the program's file name, cut to 16 bytes on
+/// macOS and 15 on Linux, which may hold spaces and is padded with them. A path, as `comm` gives on macOS, reads as its
+/// file name.
 #[cfg(unix)]
 fn parse_table(text: &str) -> Vec<Process> {
     text.lines()
         .filter_map(|line| {
             let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
             let (parent, rest) = rest.trim_start().split_once(char::is_whitespace)?;
-            let (group, command) = rest.trim_start().split_once(char::is_whitespace)?;
+            let (group, rest) = rest.trim_start().split_once(char::is_whitespace)?;
+            let (state, command) = rest.trim_start().split_once(char::is_whitespace)?;
             let program = Path::new(command.trim())
                 .file_name()?
                 .to_string_lossy()
@@ -357,6 +459,7 @@ fn parse_table(text: &str) -> Vec<Process> {
                 pid: pid.parse().ok()?,
                 parent: parent.parse().ok()?,
                 group: group.parse().ok()?,
+                session_leader: state.contains('s'),
                 program,
             })
         })
@@ -368,24 +471,29 @@ mod tests {
     use super::*;
 
     // Desktop's server (602) runs an agent's command (603) in a group of its own; 610 is a program that command put in
-    // the background, which the system handed to launchd, and 611 one that program started in a group of its own. The
-    // table, and every test reading one, is Unix's: Windows has no `ps` table, and nothing there reads as inside.
-    // Program names are as `ps` prints `ucomm`, cut to 16 bytes on macOS (where it pads them with spaces, too).
+    // the background, which the system handed to launchd, and 611 one that program started in a session of its own.
+    // Desktop's terminal panel (640) is a shell leading a session of its own, where the person runs the terminal UI
+    // (641) and curl (642). The table, and every test reading one, is Unix's: Windows has no `ps` table, and nothing
+    // there reads as inside. Program names are as `ps` prints `ucomm`, cut to 16 bytes on macOS (where it pads them
+    // with spaces, too); an `s` in the state marks a session's leader.
     #[cfg(unix)]
-    const TABLE: &str = "    1     0     1 launchd
-  500     1   500 Terminal
-  501   500   501 zsh
-  502   501   502 haarness
-  503   502   503 zsh
-  504   503   503 curl
-  600     1   600 Haarness
-  601   600   600 Haarness Helper
-  602   600   602 haarness
-  603   602   603 sh
-  604   603   603 python3
-  610     1   603 curl
-  611   610   611 sh
-  620     1   620 curl
+    const TABLE: &str = "    1     0     1 Ss   launchd
+  500     1   500 S    Terminal
+  501   500   501 Ss   zsh
+  502   501   502 S+   haarness
+  503   502   503 S    zsh
+  504   503   503 S    curl
+  600     1   600 S    Haarness
+  601   600   600 S    Haarness Helper
+  602   600   602 S    haarness
+  603   602   603 S    sh
+  604   603   603 S    python3
+  610     1   603 S    curl
+  611   610   611 Ss   sh
+  620     1   620 S    curl
+  640   602   640 Ss   zsh
+  641   640   641 S+   haarness
+  642   640   642 S+   curl
 ";
 
     /// [`TABLE`] with each `haarness` program run from a file called `program` instead.
@@ -406,18 +514,20 @@ mod tests {
     #[test]
     fn a_process_started_by_haarness_is_inside_it_and_others_are_not() {
         let rows = parse_table(TABLE);
-        assert_eq!(rows.len(), 14);
+        assert_eq!(rows.len(), 17);
+        assert!(rows[0].session_leader && !rows[1].session_leader);
         assert_eq!(rows[3].program, "haarness");
         assert_eq!(rows[6].program, "Haarness");
         assert_eq!(rows[7].program, "Haarness Helper");
         assert_eq!(rows[11].group, 603);
         // Padding is not part of a name, and a path, as `comm` gives on macOS, names its file.
-        let padded =
-            parse_table("  602   600   602 haarness        \n  601   600   600 Haarness Helper \n");
+        let padded = parse_table(
+            "  602   600   602 S    haarness        \n  601   600   600 S    Haarness Helper \n",
+        );
         assert_eq!(padded[0].program, "haarness");
         assert_eq!(padded[1].program, "Haarness Helper");
         let path = parse_table(
-            "  602   600   602 /Applications/Haarness.app/Contents/Resources/bin/haarness\n",
+            "  602   600   602 S    /Applications/Haarness.app/Contents/Resources/bin/haarness\n",
         );
         assert_eq!(path[0].program, "haarness");
         for own in [None, Some("haarness")] {
@@ -532,16 +642,56 @@ mod tests {
     fn a_launcher_is_judged_by_where_it_runs() {
         let rows = parse_table(TABLE);
         let none = BTreeSet::new();
-        // The terminal UI the person started, and Desktop's server, start their own servers.
-        assert!(!launcher_inside(&rows, 502, &none, None));
-        assert!(!launcher_inside(&rows, 602, &none, None));
+        // The terminal UI the person started, Desktop's server, and the terminal UI in Desktop's terminal panel start
+        // their own servers.
+        for parent in [502, 602, 641] {
+            assert!(!launcher_for_agent(&rows, parent, &none, None), "{parent}");
+        }
         // A command's shell or program is no Haarness program; neither is a process that is gone.
         for parent in [503, 603, 604, 999, 1] {
-            assert!(launcher_inside(&rows, parent, &none, None), "{parent}");
+            assert!(launcher_for_agent(&rows, parent, &none, None), "{parent}");
         }
-        // A Haarness program an agent's command runs is inside.
-        let rows = parse_table(&format!("{TABLE}  605   603   603 haarness\n"));
-        assert!(launcher_inside(&rows, 605, &none, None));
+        // A Haarness program an agent's command runs is the agent's.
+        let rows = parse_table(&format!("{TABLE}  605   603   603 S    haarness\n"));
+        assert!(launcher_for_agent(&rows, 605, &none, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_a_person_runs_in_a_terminal_haarness_hosts_is_theirs() {
+        let rows = parse_table(TABLE);
+        let none = BTreeSet::new();
+        // Desktop's terminal panel, and the terminal UI and curl the person runs there: inside Haarness, and theirs.
+        for pid in [640, 641, 642] {
+            assert!(below_program(&rows, pid, None), "{pid}");
+            assert!(in_person_terminal(&rows, pid, &none, None, 0), "{pid}");
+            assert!(!for_agent(&rows, pid, &none, None, 0), "{pid}");
+        }
+        // An agent's command and what it runs, under Desktop's server and under the terminal UI, and what it left
+        // running, in its group or in a session of its own.
+        for pid in [503, 504, 603, 604, 610, 611] {
+            assert!(!in_person_terminal(&rows, pid, &none, None, 0), "{pid}");
+            assert!(for_agent(&rows, pid, &none, None, 0), "{pid}");
+        }
+        // The person's own programs outside Haarness are not inside to begin with.
+        for pid in [501, 502, 600, 601, 620] {
+            assert!(!for_agent(&rows, pid, &none, None, 0), "{pid}");
+        }
+        // A session an agent's command starts is no terminal of the person's.
+        let rows = parse_table(&format!(
+            "{TABLE}  650   604   650 Ss   sh\n  651   650   650 S    curl\n"
+        ));
+        assert!(for_agent(&rows, 651, &none, None, 0));
+        // Nor is a terminal the Haarness an agent's command runs opened.
+        let rows = parse_table(&format!(
+            "{TABLE}  660   603   603 S    haarness\n  661   660   661 Ss   zsh\n  662   661   662 S    curl\n"
+        ));
+        assert!(for_agent(&rows, 662, &none, None, 0));
+        // A terminal of a server the person started in Desktop's terminal panel is theirs.
+        let rows = parse_table(&format!(
+            "{TABLE}  670   640   670 S+   haarness\n  671   670   671 Ss   zsh\n  672   671   672 S    curl\n"
+        ));
+        assert!(!for_agent(&rows, 672, &none, None, 0));
     }
 
     #[cfg(unix)]
@@ -549,7 +699,7 @@ mod tests {
     fn only_a_helper_this_process_started_outside_any_command_speaks_for_others() {
         // Desktop's server (602) started a connector (630) in a group of its own, and runs a command (603).
         let rows = parse_table(&format!(
-            "{TABLE}  630   602   630 haarness\n  631   603   603 haarness\n"
+            "{TABLE}  630   602   630 S    haarness\n  631   603   603 S    haarness\n"
         ));
         let helpers = BTreeSet::from([630, 631]);
         let none = BTreeSet::new();
@@ -589,11 +739,50 @@ mod tests {
         assert!(forgotten);
     }
 
+    /// The real thing: of two programs this process (a Haarness program, running for a person) started, the one that
+    /// leads a session of its own, as a terminal's shell does, runs for the person; the other is an agent's.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_this_process_started_runs_for_the_person_who_runs_it() {
+        let mut terminal = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import os; os.setsid(); os.execvp('sleep', ['sleep', '30'])",
+            ])
+            .spawn()
+            .unwrap();
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        // Until the session is set up the table may show the program as it started.
+        let mut checked = (true, false);
+        while started.elapsed() < std::time::Duration::from_secs(10) {
+            checked = (
+                request_from_agent(terminal.id()),
+                request_from_agent(other.id()),
+            );
+            if checked == (false, true) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let own_for_agent = this_process_for_agent();
+        for child in [&mut terminal, &mut other] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert_eq!(checked, (false, true));
+        assert!(!own_for_agent);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_loop_in_the_table_ends() {
-        let rows = parse_table("  10    11    10 a\n  11    10    11 b\n");
+        let rows = parse_table("  10    11    10 S    a\n  11    10    11 S    b\n");
         assert!(!below_program(&rows, 10, None));
+        assert!(!in_person_terminal(&rows, 10, &BTreeSet::new(), None, 0));
         assert!(!in_haarness_group(&rows, 10, &BTreeSet::from([99]), None));
     }
 

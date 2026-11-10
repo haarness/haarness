@@ -616,8 +616,13 @@ async fn list_ptys(axum::Extension(ptys): axum::Extension<Arc<PtyManager>>) -> J
 
 async fn create_pty(
     axum::Extension(ptys): axum::Extension<Arc<PtyManager>>,
+    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Json(request): Json<PtyCreateRequest>,
 ) -> ApiResult<(StatusCode, Json<PtyInfo>)> {
+    // What runs in a terminal counts as the person's, so an agent opens none.
+    if crate::request_origin::from_agent(peer(connection)).await {
+        return Err(refused(haarness_core::TERMINAL_REFUSAL));
+    }
     let info = ptys.create(request)?;
     Ok((StatusCode::CREATED, Json(info)))
 }
@@ -658,8 +663,13 @@ async fn connect_pty(
     axum::Extension(ptys): axum::Extension<Arc<PtyManager>>,
     Path(id): Path<PtyId>,
     Query(query): Query<PtyConnectQuery>,
+    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
+    // Nor types into one.
+    if crate::request_origin::from_agent(peer(connection)).await {
+        return Err(refused(haarness_core::TERMINAL_REFUSAL));
+    }
     // Resolve before upgrading so unknown sessions retain the normal JSON 404
     // contract instead of failing opaquely inside an accepted WebSocket.
     let subscription = ptys.subscribe(id, query.cursor)?;
@@ -1734,9 +1744,9 @@ async fn start_turn(
         )
         .into());
     }
-    // Nor can a program Haarness started, but for a scheduled run's own turn.
+    // Nor can a program that runs for an agent, but for a scheduled run's own turn.
     if request.auto_approve
-        && crate::request_origin::from_inside(peer(connection)).await
+        && crate::request_origin::from_agent(peer(connection)).await
         && !crate::request_origin::scheduled_run(&state.runtime, id, &request).await
     {
         return Err(refused(haarness_core::AUTO_APPROVE_REFUSAL));
@@ -1892,7 +1902,7 @@ async fn set_approval_mode(
     tokio::spawn(async move {
         // Only a person lets agents do more without asking; lowering works from anywhere.
         if crate::request_origin::raises(&state.runtime, id, request.mode).await?
-            && crate::request_origin::from_inside(peer).await
+            && crate::request_origin::from_agent(peer).await
         {
             return Err(refused(haarness_core::APPROVALS_RAISE_REFUSAL));
         }
@@ -3325,6 +3335,7 @@ async fn reply_permission(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Json(reply): Json<PermissionReply>,
 ) -> ApiResult<StatusCode> {
     // A published chat's viewers may not let agents into the owner's Chrome or onto the owner's Mac.
@@ -3345,16 +3356,42 @@ async fn reply_permission(
             Some(answer.into()),
         ));
     }
-    state.runtime.reply_permission(&id, reply).await?;
-    Ok(StatusCode::NO_CONTENT)
+    let peer = peer(connection);
+    // Carried through even when the client goes away meanwhile: telling who
+    // answers takes a moment.
+    tokio::spawn(async move {
+        // Only a person allows what an agent asked for; a no counts from anywhere.
+        let allows = !matches!(
+            reply.decision,
+            haarness_protocol::PermissionReplyDecision::Reject
+                | haarness_protocol::PermissionReplyDecision::Refuse
+        );
+        if allows && crate::request_origin::from_agent(peer).await {
+            return Err(refused(haarness_core::PERMISSION_ANSWER_REFUSAL));
+        }
+        state.runtime.reply_permission(&id, reply).await?;
+        Ok(StatusCode::NO_CONTENT)
+    })
+    .await
+    .map_err(|error| CoreError::Storage(format!("The answer stopped: {error}")))?
 }
 async fn reply_question(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Json(reply): Json<QuestionReply>,
 ) -> ApiResult<StatusCode> {
-    state.runtime.reply_question(&id, reply)?;
-    Ok(StatusCode::NO_CONTENT)
+    let peer = peer(connection);
+    tokio::spawn(async move {
+        // An agent's questions are for a person, approving a goal's criteria included.
+        if crate::request_origin::from_agent(peer).await {
+            return Err(refused(haarness_core::QUESTION_ANSWER_REFUSAL));
+        }
+        state.runtime.reply_question(&id, reply)?;
+        Ok(StatusCode::NO_CONTENT)
+    })
+    .await
+    .map_err(|error| CoreError::Storage(format!("The answer stopped: {error}")))?
 }
 #[derive(Deserialize)]
 struct WaitQuery {

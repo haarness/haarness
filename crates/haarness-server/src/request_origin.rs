@@ -1,7 +1,9 @@
-//! Who sent a request: a person, or a program Haarness started on this computer (an agent's command, a hook, a
-//! Haarness terminal). Only a person lets agents do more without asking, so the server asks this for the few requests
-//! that would: raising a chat's approvals, a turn that approves its own requests, more reach for computer use.
-//! Requests from another computer, and those the connector brings from phones and Haarness Cloud, come from people.
+//! Who sent a request: a person, or a program Haarness started on this computer for an agent (its command, a hook).
+//! Only a person lets agents do more without asking, so the server asks this for the few requests that would: raising
+//! a chat's approvals, a turn that approves its own requests, an answer to an agent's request or question, a terminal
+//! (what runs there counts as a person's), more reach for computer use. Requests from another computer, those the
+//! connector brings from phones and Haarness Cloud, and what a person runs in a terminal Haarness hosts come from
+//! people. Computer use also refuses those terminals (see [`from_inside`]).
 use haarness_core::AgentRuntime;
 use haarness_protocol::{ApprovalMode, ApprovalModeSetting, StartTurnRequest, ThreadId};
 use haarness_scheduler::Scheduler;
@@ -17,12 +19,24 @@ pub fn use_schedules(scheduler: Scheduler) {
     let _ = SCHEDULES.set(scheduler);
 }
 
-/// Whether the request reached this server from a local process Haarness started, read from the process table (a
-/// `ps`, and an `lsof` to find the process): callers ask only for the requests that would give agents more reach.
+/// Whether the request reached this server from a local process Haarness started, a terminal included, read from the
+/// process table (a `ps`, and an `lsof` to find the process): callers ask only for the requests that would give agents
+/// more reach.
 pub(crate) async fn from_inside(peer: Option<SocketAddr>) -> bool {
     tokio::task::spawn_blocking(move || {
         peer.and_then(haarness_core::process_tree::local_client)
             .is_some_and(haarness_core::process_tree::request_from_inside)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Whether the request reached this server from a local process that runs for an agent: Haarness started it, and not
+/// in a terminal a person opened ([`haarness_core::process_tree::request_from_agent`]).
+pub(crate) async fn from_agent(peer: Option<SocketAddr>) -> bool {
+    tokio::task::spawn_blocking(move || {
+        peer.and_then(haarness_core::process_tree::local_client)
+            .is_some_and(haarness_core::process_tree::request_from_agent)
     })
     .await
     .unwrap_or(false)

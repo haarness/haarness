@@ -186,10 +186,10 @@ impl From<ApprovalsArg> for haarness_protocol::ApprovalMode {
     }
 }
 
-/// Why `flag` is refused in a program Haarness started.
+/// Why `flag` is refused in a program that runs for an agent.
 fn approvals_refused(flag: &str) -> String {
     format!(
-        "Only you can let agents do more without asking, and this command runs in a program Haarness started (an agent's command, a hook or a Haarness terminal), so {flag} was refused. Run it in a terminal of your own, or switch approvals in the chat."
+        "Only you can let agents do more without asking, and this command runs for an agent (in its command, a hook or another program Haarness started), so {flag} was refused. Run it yourself, or switch approvals in the chat."
     )
 }
 
@@ -1521,8 +1521,9 @@ async fn cli_main() -> Result<()> {
         return upgrade::run(upgrade::UpgradeArgs::latest());
     }
     // Letting agents do more without asking is a person's call, never that of
-    // a program Haarness started. A server a launcher leaves running in the
-    // background is judged by that launcher, which was judged itself.
+    // a program that runs for an agent (a terminal a person opened in Haarness
+    // is theirs). A server a launcher leaves running in the background is
+    // judged by that launcher, which was judged itself.
     if let Some(flag) = cli.raised_approvals()
         && if matches!(
             &cli.command,
@@ -1531,9 +1532,9 @@ async fn cli_main() -> Result<()> {
                 ..
             }))
         ) {
-            haarness_core::process_tree::parent_inside()
+            haarness_core::process_tree::parent_for_agent()
         } else {
-            haarness_core::process_tree::this_process_inside()
+            haarness_core::process_tree::this_process_for_agent()
         }
     {
         anyhow::bail!(approvals_refused(flag));

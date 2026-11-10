@@ -1,8 +1,10 @@
 //! Only a person lets agents do more without asking. An agent's command (with the chat's variable cleared) cannot
 //! start a `--yolo` run, put a chat in a higher approval mode with `--approvals`, raise one through the server, start a
 //! turn that approves its own requests, or start a server that approves everything; it can still lower a chat's mode.
-//! The person's own client and terminal raise them as before, and a scheduled run's turn still approves its own
-//! requests, also when `haarness schedule run` starts it.
+//! Nor can it, or a program it leaves running, allow a waiting request, answer a question or open a terminal. The
+//! person's own client and terminal do all of that as before, and so do programs the person runs in a terminal the
+//! server opened, as in Desktop's terminal panel; a scheduled run's turn still approves its own requests, also when
+//! `haarness schedule run` starts it.
 #![cfg(target_os = "macos")]
 
 use serde_json::{Value, json};
@@ -203,6 +205,41 @@ impl Fixture {
         }
     }
 
+    /// Starts a turn in `chat` and returns its id, without waiting for it.
+    fn start(&self, chat: &str, text: &str) -> String {
+        self.api(
+            "POST",
+            &format!("/threads/{chat}/turns"),
+            Some(&json!({"requestId": Uuid::now_v7().to_string(), "text": text})),
+        )["id"]
+            .as_str()
+            .expect("a turn id")
+            .to_owned()
+    }
+
+    fn turn_status(&self, turn: &str) -> String {
+        self.api("GET", &format!("/turns/{turn}"), None)["status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// The ids of what waits for a person in `chat`: its requests, or its questions.
+    fn waiting(&self, kind: &str, chat: &str) -> Vec<String> {
+        let key = if kind == "permissions" {
+            "permissionId"
+        } else {
+            "questionId"
+        };
+        self.api("GET", &format!("/{kind}"), None)
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["threadId"] == chat)
+            .filter_map(|item| item[key].as_str().map(str::to_owned))
+            .collect()
+    }
+
     fn read(&self, name: &str) -> String {
         std::fs::read_to_string(self.workspace.join("out").join(name)).unwrap_or_default()
     }
@@ -342,4 +379,160 @@ fn only_a_person_raises_approvals_and_a_scheduled_run_still_approves_its_own() {
         "{record} {}",
         String::from_utf8_lossy(&ran.stderr)
     );
+}
+
+fn until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting: {what}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn only_a_person_answers_an_agent_and_what_they_run_in_a_haarness_terminal_is_theirs() {
+    let fixture = Fixture::new();
+    let outside = fixture.root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    // A request (a command outside the project) and a question wait for a person.
+    let asking = fixture.chat("Asking");
+    let asked = fixture.start(
+        &asking,
+        &format!(
+            "!tool bash {}",
+            json!({"command": format!("touch '{}'", outside.join("asked").display())})
+        ),
+    );
+    let questioning = fixture.chat("Questioning");
+    let questioned = fixture.start(
+        &questioning,
+        &format!(
+            "!tool question {}",
+            json!({"prompt": "Which one?", "choices": ["left", "right"]})
+        ),
+    );
+    until("the request and the question", || {
+        !fixture.waiting("permissions", &asking).is_empty()
+            && !fixture.waiting("questions", &questioning).is_empty()
+    });
+    let permission = fixture.waiting("permissions", &asking).remove(0);
+    let question = fixture.waiting("questions", &questioning).remove(0);
+
+    // An agent's command answers them itself, and so does a program it leaves running; it also opens a terminal to
+    // answer from there.
+    let answers = [
+        fixture.curl_line(
+            "POST",
+            &format!("/permissions/{permission}"),
+            &json!({"decision": "once"}),
+            "allow.json",
+        ),
+        fixture.curl_line(
+            "POST",
+            &format!("/questions/{question}"),
+            &json!({"answer": "left"}),
+            "question.json",
+        ),
+        fixture.curl_line(
+            "POST",
+            "/ptys",
+            &json!({"command": "/bin/sh", "args": ["-c", "touch out/agent-terminal"]}),
+            "terminal.json",
+        ),
+    ]
+    .concat();
+    let left = [
+        "sleep 1\n".to_owned(),
+        fixture.curl_line(
+            "POST",
+            &format!("/permissions/{permission}"),
+            &json!({"decision": "always"}),
+            "left-allow.json",
+        ),
+        "touch out/left-done\n".to_owned(),
+    ]
+    .concat();
+    std::fs::write(fixture.workspace.join("out/answers.sh"), answers).unwrap();
+    std::fs::write(fixture.workspace.join("out/left.sh"), left).unwrap();
+    let agent = fixture.chat("Agent");
+    fixture.agent_runs(
+        &agent,
+        "sh out/answers.sh; ( nohup sh out/left.sh > /dev/null 2>&1 & ) ; for _ in $(seq 300); do [ -e out/left-done ] && break; sleep 0.1; done",
+    );
+    for (name, refusal) in [
+        ("allow.json", haarness_core::PERMISSION_ANSWER_REFUSAL),
+        ("left-allow.json", haarness_core::PERMISSION_ANSWER_REFUSAL),
+        ("question.json", haarness_core::QUESTION_ANSWER_REFUSAL),
+        ("terminal.json", haarness_core::TERMINAL_REFUSAL),
+    ] {
+        let answer = fixture.read(name);
+        assert!(answer.contains(refusal), "{name}: {answer}");
+    }
+    assert_eq!(
+        fixture.waiting("permissions", &asking),
+        std::slice::from_ref(&permission)
+    );
+    assert_eq!(
+        fixture.waiting("questions", &questioning),
+        std::slice::from_ref(&question)
+    );
+    assert_eq!(fixture.turn_status(&asked), "running");
+    assert!(!outside.join("asked").exists());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!fixture.workspace.join("out/agent-terminal").exists());
+
+    // The person opens a terminal in the server, as Desktop's terminal panel does, and from there allows the request,
+    // answers the question and puts another chat in Yolo.
+    let other = fixture.chat("Other");
+    let typed = [
+        "ps -o stat= -p $$ > out/terminal-state.txt\n".to_owned(),
+        fixture.curl_line(
+            "POST",
+            &format!("/permissions/{permission}"),
+            &json!({"decision": "once"}),
+            "person-allow.json",
+        ),
+        fixture.curl_line(
+            "POST",
+            &format!("/questions/{question}"),
+            &json!({"answer": "right"}),
+            "person-question.json",
+        ),
+        fixture.agent_line(
+            &format!("--approvals yolo -s {other} run 'hello'"),
+            "person-run.txt",
+        ),
+        "touch out/person-done\n".to_owned(),
+    ]
+    .concat();
+    std::fs::write(fixture.workspace.join("out/person.sh"), typed).unwrap();
+    let terminal = fixture.api(
+        "POST",
+        "/ptys",
+        Some(&json!({
+            "command": "/bin/sh",
+            "args": [fixture.workspace.join("out/person.sh").display().to_string()],
+            "cwd": fixture.workspace.display().to_string(),
+        })),
+    );
+    assert!(terminal["id"].is_string(), "{terminal}");
+    until("the person's terminal", || {
+        fixture.workspace.join("out/person-done").exists()
+    });
+    assert!(
+        fixture.read("terminal-state.txt").contains('s'),
+        "the terminal's shell leads its session: {}",
+        fixture.read("terminal-state.txt")
+    );
+    for name in ["person-allow.json", "person-question.json"] {
+        assert_eq!(fixture.read(name), "", "{name}");
+    }
+    let run = fixture.read("person-run.txt");
+    assert!(run.contains("exit 0"), "{run}");
+    assert_eq!(fixture.mode(&other), "yolo");
+    until("the answered turns", || {
+        fixture.turn_status(&asked) == "completed"
+            && fixture.turn_status(&questioned) == "completed"
+    });
+    assert!(outside.join("asked").exists());
 }
