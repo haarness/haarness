@@ -700,7 +700,13 @@ estimate, and, for a request that finished cleanly after streaming something,
 a tool call counting from when it starts streaming, not when its arguments
 are whole), `stream_ms` (the span the output streamed across) and
 `stream_tokens` (the tokens that streamed). A stopped or failed request
-records none of the three, and a retry runs its own clock. Output speed is `stream_tokens /
+records none of the three, and a retry runs its own clock. When the provider
+had reported usage before a request was stopped or broke off mid-reply, the
+record keeps that report and adds Haarness's estimate of what streamed after
+it (Anthropic reports a single output token until the reply ends, Gemini
+counts with every chunk); `estimated` stays unset then, though part of the
+output is estimated. A request with no report by then is estimated whole.
+Output speed is `stream_tokens /
 stream_ms`, not `output_tokens`, which also counts reasoning that never
 streamed. Desktop's Context panel and the TUI's `/usage` and sidebar show
 them; records from before requests were timed have none.

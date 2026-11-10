@@ -11508,6 +11508,8 @@ impl RunnerTask {
                 // Everything the model streamed, for the local output estimate
                 // when the provider reports no usage.
                 let mut streamed = String::new();
+                // How much of it the provider's output count covers.
+                let mut reported_at = 0;
                 let mut calls = Vec::new();
                 let mut structured_output = None;
                 let mut blocked = None;
@@ -11529,6 +11531,7 @@ impl RunnerTask {
                                 self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text).await?;
                             }
                             // A stopped request has no finished stream to time.
+                            let usage = unfinished_round_usage(usage, &streamed[reported_at..], &model);
                             self.publish_round_usage(usage, charged, prompt_usage.clone(), &streamed, None, provider_id, &model).await?;
                             return Err(CoreError::Cancelled);
                         }
@@ -11784,6 +11787,12 @@ impl RunnerTask {
                                 "gen_ai.usage.cache_creation.input_tokens",
                                 count(cache_write_tokens),
                             );
+                            // Only a count of more output covers what
+                            // streamed before it; one of the prompt alone
+                            // covers none of it.
+                            if output_tokens > usage.map_or(0, |(_, output, _, _)| output) {
+                                reported_at = streamed.len();
+                            }
                             usage = Some((
                                 input_tokens,
                                 output_tokens,
@@ -11931,6 +11940,12 @@ impl RunnerTask {
                     self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
                         .await?;
                 }
+                // A reply that broke off is booked as a stopped one is.
+                let usage = if blocked.is_some() {
+                    unfinished_round_usage(usage, &streamed[reported_at..], &model)
+                } else {
+                    usage
+                };
                 let usage = self
                     .publish_round_usage(
                         usage,
@@ -16905,6 +16920,28 @@ async fn summarize_context(
         ));
     }
     Ok(text)
+}
+
+/// The usage to book for a round that ended before its reply did: stopped,
+/// or broken off mid-stream. A provider can report the prompt before the
+/// reply and count the output as it goes or only once it ends (Gemini counts
+/// with every chunk; Anthropic says 1 output token at the start), so the
+/// estimate of what streamed after it last counted more output
+/// (`unreported`) is added to the output it reported.
+fn unfinished_round_usage(
+    reported: Option<(u64, u64, u64, u64)>,
+    unreported: &str,
+    model: &str,
+) -> Option<(u64, u64, u64, u64)> {
+    reported.map(|(input, output, cache_read, cache_write)| {
+        let estimate = Tokenizer::for_model(model).text(unreported);
+        (
+            input,
+            output.saturating_add(estimate),
+            cache_read,
+            cache_write,
+        )
+    })
 }
 
 /// Per-turn cost from the model's catalog pricing, when known.

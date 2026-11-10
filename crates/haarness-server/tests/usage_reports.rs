@@ -10,8 +10,8 @@ use haarness_core::{
     ToolOutput,
 };
 use haarness_protocol::{
-    BtwResponse, CreateThreadRequest, McpConfigureRequest, McpServerInfo, ModelInfo, ProviderInfo,
-    SkillInfo, Thread,
+    BtwResponse, CreateThreadRequest, McpConfigureRequest, McpServerInfo, ModelInfo, ModelPricing,
+    ProviderInfo, SkillInfo, Thread, tokens::Tokenizer,
 };
 use haarness_server::{NativeToolRegistry, ServerState, serve};
 use haarness_store::SqliteStore;
@@ -30,6 +30,15 @@ use tokio_util::sync::CancellationToken;
 
 /// One request's events, each sent after its pause.
 type Script = Vec<(Duration, ProviderEvent)>;
+
+/// What the `priced-1` model costs, in USD per million tokens.
+const PRICING: ModelPricing = ModelPricing {
+    input: 3.0,
+    output: 15.0,
+    cache_read: 0.3,
+    cache_write: 3.75,
+    long_context: None,
+};
 
 /// Answers each request with the next scripted event list.
 #[derive(Clone, Default)]
@@ -64,18 +73,32 @@ impl ModelProvider for ScriptedProvider {
             id: "echo".into(),
             name: "Scripted usage".into(),
             authenticated: true,
-            models: vec![ModelInfo {
-                id: "echo-1".into(),
-                display_name: "Echo".into(),
-                reasoning: false,
-                reasoning_efforts: Vec::new(),
-                images: false,
-                video: false,
-                tools: true,
-                context_window: Some(200_000),
-                max_output_tokens: None,
-                pricing: None,
-            }],
+            models: vec![
+                ModelInfo {
+                    id: "echo-1".into(),
+                    display_name: "Echo".into(),
+                    reasoning: false,
+                    reasoning_efforts: Vec::new(),
+                    images: false,
+                    video: false,
+                    tools: true,
+                    context_window: Some(200_000),
+                    max_output_tokens: None,
+                    pricing: None,
+                },
+                ModelInfo {
+                    id: "priced-1".into(),
+                    display_name: "Priced".into(),
+                    reasoning: false,
+                    reasoning_efforts: Vec::new(),
+                    images: false,
+                    video: false,
+                    tools: true,
+                    context_window: Some(200_000),
+                    max_output_tokens: None,
+                    pricing: Some(PRICING),
+                },
+            ],
         }
     }
     async fn stream(&self, _: ProviderRequest, _: CancellationToken) -> CoreResult<ProviderStream> {
@@ -243,6 +266,26 @@ impl TestServer {
             .json(&CreateThreadRequest {
                 provider: Some("echo".into()),
                 model: Some("echo-1".into()),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    /// A titled chat on the priced model.
+    async fn priced_thread(&self) -> Thread {
+        self.client
+            .post(format!("{}/v1/threads", self.base))
+            .json(&CreateThreadRequest {
+                title: Some("Priced chat".into()),
+                provider: Some("echo".into()),
+                model: Some("priced-1".into()),
                 ..Default::default()
             })
             .send()
@@ -657,6 +700,120 @@ async fn a_stopped_request_is_not_timed() {
     assert_eq!(usages.len(), 1, "{usages:?}");
     assert_eq!(usages[0]["estimated"], true, "{usages:?}");
     assert!(usages[0].get("first_token_ms").is_none(), "{usages:?}");
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn a_stopped_request_books_what_streamed_after_the_last_report() {
+    let (server, provider, root) = server("stopped-placeholder").await;
+    let thread = server.priced_thread().await;
+    // Stops the turn once its reply has streamed, and returns the thread's
+    // usage items.
+    let stop_after_reply = async |script: Vec<(u64, ProviderEvent)>| {
+        provider.answered.store(false, Ordering::SeqCst);
+        provider.push_paced(script);
+        let id = server.start(&thread, "go").await;
+        for _ in 0..200 {
+            if provider.answered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        server
+            .client
+            .post(format!("{}/v1/turns/{id}/interrupt", server.base))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        server.wait(&thread, &id).await
+    };
+    let estimate = |text: &str| Tokenizer::for_model("priced-1").text(text);
+    // As Anthropic streams a reply: the prompt's count with 1 output token
+    // first, the reply, and the real output count only at its end.
+    let reply = "Each paragraph of this long answer adds a few more words. ".repeat(40);
+    let usages = stop_after_reply(vec![
+        (0, usage(1_000, 1)),
+        (0, ProviderEvent::TextDelta(reply.clone())),
+        (60_000, ProviderEvent::TextDelta("never sent".into())),
+        (0, usage(1_000, 700)),
+        (0, finished()),
+    ])
+    .await;
+    assert_eq!(usages.len(), 1, "{usages:?}");
+    let output = 1 + estimate(&reply);
+    assert!(output > 300, "{output}");
+    // The prompt is the provider's count; the output, what streamed.
+    assert_eq!(usages[0]["input_tokens"], 1_000, "{:?}", usages[0]);
+    assert_eq!(usages[0]["output_tokens"], output, "{:?}", usages[0]);
+    assert!(usages[0].get("estimated").is_none(), "{:?}", usages[0]);
+    #[allow(clippy::cast_precision_loss)]
+    let cost = 1_000.0 / 1e6 * PRICING.input + output as f64 / 1e6 * PRICING.output;
+    let booked = usages[0]["cost_usd"].as_f64().unwrap();
+    assert!((booked - cost).abs() < 1e-12, "{booked} != {cost}");
+    // As Gemini streams: a count with every chunk, of the chunks so far.
+    // Only what came after the last one is estimated.
+    let usages = stop_after_reply(vec![
+        (
+            0,
+            ProviderEvent::TextDelta("A first part of the answer. ".into()),
+        ),
+        (0, usage(1_200, 40)),
+        (0, ProviderEvent::TextDelta("And a second part. ".into())),
+        (60_000, ProviderEvent::TextDelta("never sent".into())),
+        (0, finished()),
+    ])
+    .await;
+    assert_eq!(usages.len(), 2, "{usages:?}");
+    let output = 40 + estimate("And a second part. ");
+    assert_eq!(usages[1]["output_tokens"], output, "{:?}", usages[1]);
+    // A stop after the last report, before the finish: its count stands.
+    let usages = stop_after_reply(vec![
+        (0, ProviderEvent::TextDelta("The whole answer.".into())),
+        (0, usage(1_300, 700)),
+        (60_000, finished()),
+    ])
+    .await;
+    assert_eq!(usages.len(), 3, "{usages:?}");
+    assert_eq!(usages[2]["output_tokens"], 700, "{:?}", usages[2]);
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn a_reply_that_breaks_off_books_what_streamed_after_the_last_report() {
+    let (server, provider, root) = server("broken-off").await;
+    let thread = server.priced_thread().await;
+    // The stream ends without its finish, after Anthropic's opening count;
+    // the reply is then picked up by a request of its own.
+    let reply = "Each paragraph of this long answer adds a few more words. ".repeat(40);
+    provider.push(vec![
+        usage(1_000, 1),
+        ProviderEvent::TextDelta(reply.clone()),
+    ]);
+    let usages = server.turn(&thread, "go").await;
+    assert!(usages.len() >= 2, "{usages:?}");
+    let output = 1 + Tokenizer::for_model("priced-1").text(&reply);
+    assert_eq!(usages[0]["input_tokens"], 1_000, "{:?}", usages[0]);
+    assert_eq!(usages[0]["output_tokens"], output, "{:?}", usages[0]);
+    // A report of the prompt alone midway counts none of the reply: all of
+    // it is estimated.
+    let (first, second) = ("The answer starts here. ", "And goes on a while. ");
+    provider.push(vec![
+        ProviderEvent::TextDelta(first.into()),
+        usage(1_200, 0),
+        ProviderEvent::TextDelta(second.into()),
+    ]);
+    let usages = server.turn(&thread, "again").await;
+    let broken = usages
+        .iter()
+        .find(|usage| usage["input_tokens"] == 1_200)
+        .unwrap_or_else(|| panic!("{usages:?}"));
+    let output = Tokenizer::for_model("priced-1").text(&format!("{first}{second}"));
+    assert_eq!(broken["output_tokens"], output, "{broken:?}");
     server.handle.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).ok();
 }
