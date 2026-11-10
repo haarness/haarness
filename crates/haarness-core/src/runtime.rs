@@ -19794,8 +19794,10 @@ mod shell_reading_tests {
                 }
                 let _ = plan.remembered_rules();
             }
+            // Well under a second on an idle machine; the bound only has to
+            // catch the minutes a superlinear walk takes, also on a busy one.
             let took = started.elapsed();
-            assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+            assert!(took < std::time::Duration::from_secs(60), "{took:?}");
         }
         std::fs::remove_dir_all(&project).unwrap();
     }
