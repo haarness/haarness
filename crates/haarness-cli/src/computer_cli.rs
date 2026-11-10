@@ -108,7 +108,7 @@ pub async fn run(computer: &Computer, args: &MacArgs) -> Result<()> {
             if computer.settings().accepted() {
                 computer.enable(true).map_err(anyhow::Error::msg)?;
             } else {
-                if !agree()? {
+                if !agree(computer.settings().terms_changed())? {
                     bail!("Nothing changed: computer use is still off.");
                 }
                 computer
@@ -165,10 +165,19 @@ fn set(computer: &Computer, app: &str, rule: Option<Rule>) -> Result<()> {
     Ok(())
 }
 
+/// What a person who agreed to earlier terms reads beside today's, where they agree.
+const TERMS_CHANGED: &str = "You agreed to an earlier version of these terms.";
+
+/// The same, as the description of `/mac`'s agree entry, which has room for a few words.
+const TERMS_CHANGED_ENTRY: &str = "You agreed to an earlier version";
+
 /// Prints the terms and waits for the person to type "I agree"; any other reply, or a non-interactive stdin,
-/// counts as no.
-fn agree() -> Result<bool> {
+/// counts as no. `changed`: the person agreed to earlier terms, which is said before the question.
+fn agree(changed: bool) -> Result<bool> {
     println!("{}\n", terms::text());
+    if changed {
+        println!("{TERMS_CHANGED}");
+    }
     if !std::io::stdin().is_terminal() {
         eprintln!(
             "Agreeing needs you at an interactive terminal: run haarness mac on in Terminal yourself."
@@ -286,7 +295,13 @@ pub fn view(status: Value) -> View {
         lines.extend(terms::text().lines().map(str::to_owned));
         entries.push(Entry {
             label: "Agree to the terms and turn on".into(),
-            description: "Agents get the mac_* tools from their next turn".into(),
+            // Said where the person agrees, when they agreed to earlier terms.
+            description: if status["terms"]["changed"] == true {
+                TERMS_CHANGED_ENTRY
+            } else {
+                "Agents get the mac_* tools from their next turn"
+            }
+            .into(),
             request: json!({"action": "accept", "version": terms::VERSION}),
             confirm: Some(
                 "Agree to the terms for computer use and let agents use this Mac?".into(),
@@ -324,7 +339,7 @@ pub fn view(status: Value) -> View {
         let allow_all = status["settings"]["defaultAct"] == "allow";
         entries.push(Entry {
             label: if allow_all { "Ask before acting in apps without a rule" } else { "Act in apps without a rule without asking" }.into(),
-            description: "Terminals, editors and apps set to ask still ask".into(),
+            description: "Apps set to ask every time still ask".into(),
             request: json!({"action": "configure", "defaultAct": if allow_all { "ask" } else { "allow" }}),
             confirm: None,
             icon: None,
@@ -396,9 +411,24 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Don't use it for"))
         );
+        assert_ne!(view.entries[0].description, TERMS_CHANGED_ENTRY);
         assert_eq!(view.entries.len(), 1);
         assert_eq!(view.entries[0].request["action"], "accept");
         assert!(view.entries[0].confirm.is_some());
+    }
+
+    #[test]
+    fn after_the_terms_changed_the_agree_entry_says_so_and_agreeing_is_one_step() {
+        let mut changed = status(false, true);
+        changed["terms"]["changed"] = json!(true);
+        let view = view(changed);
+        assert_eq!(view.lines[0], terms::TITLE);
+        assert_eq!(view.entries.len(), 1);
+        assert_eq!(view.entries[0].description, TERMS_CHANGED_ENTRY);
+        assert_eq!(
+            view.entries[0].request,
+            json!({"action": "accept", "version": terms::VERSION})
+        );
     }
 
     #[test]

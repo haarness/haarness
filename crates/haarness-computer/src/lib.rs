@@ -167,7 +167,7 @@ impl Computer {
                     // unpaused.
                     Event::Exit => {}
                     // The bar's Stop is only there while the agent works; Escape counts only shortly after its
-                    // latest action.
+                    // latest action. The helper reports it only while the agent acts in the front app.
                     Event::Stop => {
                         computer.resume();
                         computer.stop_active(None);
@@ -534,6 +534,7 @@ impl Computer {
                 "version": terms::VERSION,
                 "accepted": settings.accepted(),
                 "acceptedAt": settings.terms.as_ref().filter(|_| settings.accepted()).map(|terms| terms.accepted_at.clone()),
+                "changed": settings.terms_changed(),
                 "text": terms::json(),
             },
             "permissions": permissions.as_ref().map(|state| json!({

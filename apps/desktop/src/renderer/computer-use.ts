@@ -21,6 +21,8 @@ export interface ComputerUseStatus {
     version: string;
     accepted: boolean;
     acceptedAt?: string | null;
+    /** The person agreed to earlier terms, which changed since. Older servers leave it out. */
+    changed?: boolean;
     text?: { title: string; intro: string; sections: { heading: string; items: string[] }[] };
   };
   permissions?: { accessibility: boolean; screenRecording: boolean } | null;
@@ -49,7 +51,7 @@ export const barKeys = {
   pause: "Pause",
   resume: "Resume",
   stop: "Stop",
-  stopHint: "Esc stops it too",
+  stopHint: "Esc stops it too, while it acts in the frontmost app",
 } as const;
 
 /** The bar's words in the interface language, `%@` where the app's name goes. */
@@ -96,6 +98,10 @@ export interface MacDetail {
   direction?: string | null;
   /** Whether the server sent the parts above: an older one sends only `summary`. */
   parts?: boolean;
+  /**
+   * A terminal or editor, as servers before terms version 2 mark one: such a server asks every time for a click on its
+   * text and never keeps an answer for it.
+   */
   console?: boolean;
   everyTime?: boolean;
   summary?: string;

@@ -6493,6 +6493,15 @@ impl AgentRuntime {
         let thread = self
             .with_chat_folder(self.repository.get_thread(thread_id).await?)
             .await?;
+        // As in its turns: a published chat's viewers see its transcript, so
+        // this Mac's screen stays out of a workflow's or a client's calls too.
+        if name.starts_with("mac_")
+            && crate::shared_chats::contains(thread_id, self.resolve_root(&thread).await)
+        {
+            return Err(CoreError::PermissionDenied(format!(
+                "tool {name} is not available in a published chat: its viewers would see this Mac's screen."
+            )));
+        }
         let workspace = self.thread_workspace(&thread, FolderAccess::Write).await?;
         let snapshots = self.snapshots_at(&thread, &workspace).await?;
         if let Some(store) = &self.repository_approvals {
@@ -6777,8 +6786,13 @@ impl AgentRuntime {
             let operation = plan.describe(asked);
             let why = AskWhy::of(&plan, &causes);
             let yolo_answers = yolo_may_answer(Some(tool.as_ref()), &arguments, &plan, &protected);
-            // As for model calls, a `--yolo` run approves computer use once.
-            if yolo_answers && stance.auto_approve {
+            // As for model calls, a `--yolo` run approves computer use once;
+            // a schedule's run only in a chat set to Yolo.
+            let yolo_chat = stance.unattended && yolo_answers && {
+                let _gate = self.approval_modes.gate.lock().await;
+                self.approval_modes.mode(thread_id).await == ApprovalMode::Yolo
+            };
+            if yolo_answers && stance.auto_approve && (!stance.unattended || yolo_chat) {
                 tracing::info!(
                     thread = %thread_id,
                     operation = ?operation_for_log(&operation),
@@ -6822,8 +6836,20 @@ impl AgentRuntime {
             let reviewable = !asked
                 .iter()
                 .any(|pattern| personal.contains(&plan.operation(pattern)));
+            // What only a person answers stays theirs, apart from what
+            // Auto's reviewer may answer while it is on (computer use, see
+            // `Tool::reviewer_may_answer`), and never in a published chat,
+            // whose viewers could set its mode and write what it reads.
+            let person_answers_only = forced
+                || (explicit
+                    && !(review_on
+                        && agent_work
+                        && !crate::shared_chats::contains(thread_id, root)
+                        && explicit_operations
+                            .iter()
+                            .all(|operation| tool.reviewer_may_answer(&arguments, operation))));
             let reviewer =
-                (agent_work && !forced && !explicit && reviewable && review_on).then(|| {
+                (agent_work && !person_answers_only && reviewable && review_on).then(|| {
                     Arc::new(crate::auto_review::Reviewer {
                         request: crate::auto_review::ReviewRequest {
                             permission: plan.permission.clone(),
@@ -6867,8 +6893,7 @@ impl AgentRuntime {
                     }
                 }
             };
-            let card_follows = forced
-                || explicit
+            let card_follows = person_answers_only
                 || (review_on && agent_work && reviewer.is_none())
                 || !matches!(
                     self.approval_modes.mode(thread_id).await,
@@ -6884,7 +6909,7 @@ impl AgentRuntime {
             let chat_mode = self.approval_modes.mode(thread_id).await;
             // What only a person answers stays with them, apart from computer
             // use in a chat in Yolo.
-            let mode = if (forced || explicit) && !(yolo_answers && chat_mode == ApprovalMode::Yolo)
+            let mode = if person_answers_only && !(yolo_answers && chat_mode == ApprovalMode::Yolo)
             {
                 ApprovalMode::Review
             } else {
@@ -14018,10 +14043,13 @@ impl RunnerTask {
         let remembered = plan.remembered_rules();
         let explicit = !explicit_operations.is_empty();
         // Yolo is yes to everything: a `--yolo` turn or a chat in Yolo
-        // approves computer use once too, also where it asks every time or
-        // nobody watches. Read under the gate, as below.
+        // approves computer use once too, also where it asks every time. Read
+        // under the gate, as below.
         if yolo_answers {
-            let automatic = self.config.auto_approve || self.request.auto_approve;
+            // A run nobody watches (a schedule) approves it only in a chat
+            // set to Yolo: its own approval does not stretch that far.
+            let automatic =
+                (self.config.auto_approve || self.request.auto_approve) && !self.unattended;
             let gate = self.approval_modes.gate.lock().await;
             let yolo =
                 automatic || self.approval_modes.mode(self.thread.id).await == ApprovalMode::Yolo;
@@ -14146,8 +14174,20 @@ impl RunnerTask {
             }
         };
         let review_on = self.config.auto_review.enabled;
-        let card_follows = forced
-            || explicit
+        // What only a person answers stays theirs, apart from what Auto's
+        // reviewer may answer while it is on (computer use, see
+        // `Tool::reviewer_may_answer`), and never in a published chat, whose
+        // viewers could set its mode and write what it reads.
+        let person_answers_only = forced
+            || (explicit
+                && !(review_on
+                    && !crate::shared_chats::contains(self.thread.id, self.root_thread_id)
+                    && self.tools.get(tool.0).is_some_and(|asking| {
+                        explicit_operations
+                            .iter()
+                            .all(|operation| asking.reviewer_may_answer(detail, operation))
+                    })));
+        let card_follows = person_answers_only
             || (review_on && !reviewable)
             || !matches!(
                 self.approval_modes.mode(self.thread.id).await,
@@ -14165,10 +14205,10 @@ impl RunnerTask {
         // it off, are approved once). The gate orders this with a mode
         // change: either Auto is visible here, or the change sees the
         // registered prompt and reviews or releases it.
-        let reviewer = (!forced && !explicit && reviewable && review_on)
+        let reviewer = (!person_answers_only && reviewable && review_on)
             .then(|| Arc::new(self.reviewer(plan, detail, tool)));
         let approval_gate = self.approval_modes.gate.lock().await;
-        let mode = if forced || explicit {
+        let mode = if person_answers_only {
             ApprovalMode::Review
         } else {
             self.approval_modes.mode(self.thread.id).await

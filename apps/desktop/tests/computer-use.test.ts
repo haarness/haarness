@@ -113,14 +113,24 @@ test("an app's label cannot turn the card's line around", () => {
 });
 
 test("a request that asks every time offers nothing lasting and says why", () => {
-  const console = computerApproval(request({ kind: "act", app: "Terminal", console: true, everyTime: true }, false), english);
-  assert.equal(console.inChat, null);
-  assert.match(console.notes[0], /every click on it needs your approval/);
   const ruled = computerApproval(request({ kind: "act", app: "Mail", everyTime: true }, false), english);
   assert.equal(ruled.inChat, null);
   assert.deepEqual(ruled.notes, ["You set this app to ask every time."]);
   // Even with Always on offer, an every-time request keeps to once.
   assert.equal(computerApproval(request({ kind: "act", app: "Mail", everyTime: true }, true), english).inChat, null);
+  // A terminal or an editor is an app like any other now: its card offers to allow it in this chat and for good.
+  const terminal = computerApproval(request({ kind: "act", action: "click", bundle: "com.apple.Terminal", app: "Terminal" }), english);
+  assert.equal(terminal.inChat, "Allow in this chat");
+  assert.equal(terminal.always?.label, "Always allow Terminal");
+  assert.equal(terminal.always?.bundle, "com.apple.Terminal");
+  assert.deepEqual(terminal.notes, []);
+  // A server before terms version 2 marks terminals and editors: its cards say why they ask every time, and offer
+  // nothing for good.
+  const older = computerApproval(request({ kind: "act", app: "Terminal", console: true, everyTime: true }, false), english);
+  assert.equal(older.inChat, null);
+  assert.match(older.notes[0], /every click on it needs your approval/);
+  const olderButton = computerApproval(request({ kind: "act", action: "click", bundle: "com.apple.Terminal", app: "Terminal", console: true }), english);
+  assert.equal(olderButton.always, null);
 });
 
 /**
@@ -151,7 +161,6 @@ const dragIntoNotes = (alsoTextEdit = false): PendingPermissionInfo => {
         preview: "data:image/jpeg;base64,/9j/4AAQSkZJRgABA",
         text: null,
         keys: null,
-        console: false,
         everyTime: false,
         running: null,
         asks: patterns,

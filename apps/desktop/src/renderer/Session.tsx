@@ -4043,7 +4043,8 @@ function Permission(props: {
       <Show
         when={!explicit()}
         fallback={
-          <Show when={!computer()}>
+          // Computer use is the one request only a person answers that Auto's reviewer may leave to them.
+          <Show when={!computer()} fallback={<ReviewNote review={props.review} />}>
             <ul class="prompt-subject chrome-approval">
               <For each={chromeApprovalLines(props.permission.patterns ?? [])}>
                 {(line) => (
@@ -4080,29 +4081,7 @@ function Permission(props: {
         </Show>
         {/* Why Auto's reviewer left this to the person: one quiet line under
             the command, there from the card's first paint, above the script. */}
-        <Show when={reviewNoteParts(props.review, t)}>
-          {(note) => (
-            <p class="approval-review">
-              {note().lead}
-              <Show when={note().rule}>
-                {(rule) => (
-                  <>
-                    {" · "}
-                    <bdi>{rule()}</bdi>
-                  </>
-                )}
-              </Show>
-              <Show when={note().reason}>
-                {(reason) => (
-                  <>
-                    {": "}
-                    <bdi>{reason()}</bdi>
-                  </>
-                )}
-              </Show>
-            </p>
-          )}
-        </Show>
+        <ReviewNote review={props.review} />
         <Show when={script()?.withheld ? script() : undefined}>
           {(item) => (
             <p class="approval-script-note">
@@ -4439,6 +4418,35 @@ function cardKeyboard(dock: () => HTMLElement | undefined) {
       if (next instanceof Node && !element.contains(next)) holding = false;
     });
   };
+}
+
+/** Why Auto's reviewer left a request to the person, as one quiet line; nothing when it did not. */
+function ReviewNote(props: { review?: T.PermissionReview | null }) {
+  return (
+    <Show when={reviewNoteParts(props.review, t)}>
+      {(note) => (
+        <p class="approval-review">
+          {note().lead}
+          <Show when={note().rule}>
+            {(rule) => (
+              <>
+                {" · "}
+                <bdi>{rule()}</bdi>
+              </>
+            )}
+          </Show>
+          <Show when={note().reason}>
+            {(reason) => (
+              <>
+                {": "}
+                <bdi>{reason()}</bdi>
+              </>
+            )}
+          </Show>
+        </p>
+      )}
+    </Show>
+  );
 }
 
 function Question(props: { question: T.PendingQuestionInfo }) {

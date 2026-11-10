@@ -971,6 +971,15 @@ pub trait Tool: Send + Sync {
     fn explicit_approval(&self, _arguments: &Value, _operation: &str) -> bool {
         false
     }
+    /// An operation only a person may approve ([`Self::explicit_approval`])
+    /// that Auto's reviewer answers all the same, in a chat in Auto with the
+    /// reviewer on: computer use, apart from apps set to ask every time.
+    /// Configured allow rules and hooks still never answer it, a run nobody
+    /// watches still refuses it, and with the reviewer off it waits for a
+    /// person.
+    fn reviewer_may_answer(&self, _arguments: &Value, _operation: &str) -> bool {
+        false
+    }
     /// A request only a person answers, or one that asks every time, that
     /// Yolo answers all the same, as it does everything else: computer use,
     /// where choosing Yolo is the person handing over the Mac. Auto's

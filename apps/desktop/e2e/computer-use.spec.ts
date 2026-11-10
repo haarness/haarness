@@ -42,7 +42,7 @@ const status = (change: Partial<ComputerUseStatus> = {}): ComputerUseStatus => (
   console: true,
   enabled: false,
   switch: false,
-  terms: { version: "1", accepted: false, acceptedAt: null, text: terms },
+  terms: { version: "2", accepted: false, acceptedAt: null, text: terms },
   permissions: { accessibility: false, screenRecording: false },
   screen: { locked: false, asleep: false },
   host: { bundle: "com.apple.Terminal", name: "Terminal", haarness: false },
@@ -148,6 +148,7 @@ async function installStub() {
         const next = structuredClone(current.status);
         if (input.action === "accept") {
           next.terms.accepted = true;
+          next.terms.changed = false;
           next.terms.acceptedAt = "2026-11-07T09:30:00Z";
           next.enabled = next.switch = true;
         } else if (input.action === "enable") next.enabled = next.switch = !!input.enabled;
@@ -249,6 +250,8 @@ test("agreeing takes the checkbox, then turns computer use on", async () => {
   await expect(pane.getByText("Terms for computer use", { exact: true })).toBeVisible();
   await expect(pane.getByTestId("computer-terms")).toContainText("App contents can't be trusted");
   await expect(pane.getByTestId("computer-terms").getByText("Use it for", { exact: true })).toBeVisible();
+  // Agreeing for the first time: nothing changed since.
+  await expect(pane.getByTestId("computer-terms-changed")).toHaveCount(0);
   const agree = pane.getByRole("button", { name: "Agree and turn on", exact: true });
   await expect(agree).toBeDisabled();
   await look("computer-use-terms", dialog);
@@ -256,7 +259,7 @@ test("agreeing takes the checkbox, then turns computer use on", async () => {
   await pane.getByRole("checkbox", { name: "I have read and agree to these terms", exact: true }).check();
   await expect(agree).toBeEnabled();
   await agree.click();
-  await expect.poll(async () => (await fake()).calls.find((call) => call.action === "accept")).toMatchObject({ action: "accept", version: "1" });
+  await expect.poll(async () => (await fake()).calls.find((call) => call.action === "accept")).toMatchObject({ action: "accept", version: "2" });
   await expect(pane.getByRole("switch", { name: "Agents may use this Mac", exact: true })).toBeChecked();
   // Every request carries the bar's words in the language shown at the time (the screenshots above switch to
   // Arabic and back), so the server always has them.
@@ -264,6 +267,38 @@ test("agreeing takes the checkbox, then turns computer use on", async () => {
   for (const call of calls) expect(call.bar?.usingMac).toBeTruthy();
   expect(calls.at(-1)?.bar?.usingMac).toBe("Haarness is working on this Mac");
   await expect(pane.getByText(/You agreed on November 7, 2026\./)).toBeVisible();
+  await expect(
+    pane.getByText("While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.", { exact: true }),
+  ).toBeVisible();
+  await noHorizontalOverflow();
+  expect(errors).toEqual([]);
+  await look("computer-use-switch", dialog);
+  await openComputerUse();
+});
+
+test("after the terms changed, one quiet line says so where the person agrees, and agreeing is the same single step", async () => {
+  const before = (await fake()).status;
+  await stub({
+    status: { ...before, enabled: false, terms: { version: "2", accepted: false, acceptedAt: null, changed: true, text: terms } },
+    calls: [],
+  });
+  await openComputerUse();
+  const pane = settings().locator(".computer-use-settings");
+  const note = pane.getByTestId("computer-terms-changed");
+  await expect(note).toHaveText("You agreed to an earlier version of these terms.", { timeout: 8000 });
+  // The line sits after the terms, just above the box that agrees to them.
+  const [body, line, box] = await Promise.all(
+    [pane.getByTestId("computer-terms"), note, pane.locator(".computer-agree")].map((item) => item.boundingBox()),
+  );
+  expect(body!.y + body!.height).toBeLessThanOrEqual(line!.y);
+  expect(line!.y + line!.height).toBeLessThanOrEqual(box!.y);
+  await look("computer-use-terms-changed", dialog);
+  await openComputerUse();
+  await pane.getByRole("checkbox", { name: "I have read and agree to these terms", exact: true }).check();
+  await pane.getByRole("button", { name: "Agree and turn on", exact: true }).click();
+  await expect.poll(async () => (await fake()).calls.find((call) => call.action === "accept")).toMatchObject({ action: "accept", version: "2" });
+  await expect(pane.getByRole("switch", { name: "Agents may use this Mac", exact: true })).toBeChecked();
+  await expect(note).toHaveCount(0);
   await noHorizontalOverflow();
   expect(errors).toEqual([]);
 });
@@ -326,6 +361,9 @@ test("app rules are added, changed and removed, and a bad identifier is refused 
   await input.fill("com.jetbrains.*");
   await rules.getByRole("button", { name: "Add app", exact: true }).click();
   await expect(rules.locator(".computer-app-list li")).toHaveCount(2);
+  await expect(rules.locator(".computer-apps-head p")).toHaveText(
+    "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.",
+  );
   await look("computer-use-settings", dialog);
   await openComputerUse();
   await rules.getByRole("button", { name: "Remove the rule for TextEdit", exact: true }).click();
@@ -441,7 +479,7 @@ test("Always allow saves a rule for the app, then allows this request once", asy
   expect(rule?.bar?.usingApp).toBeTruthy();
 });
 
-test("a click on a terminal's text asks every time and offers no chat-wide allow", async () => {
+test("an app set to ask every time asks each time and offers no chat-wide allow", async () => {
   const id = crypto.randomUUID();
   await showPermissions([
     request(
@@ -449,11 +487,11 @@ test("a click on a terminal's text asks every time and offers no chat-wide allow
       {
         kind: "act",
         action: "click",
-        bundle: "com.apple.Terminal",
-        app: "Terminal",
-        target: "text area",
-        summary: "Click text area in Terminal",
-        console: true,
+        bundle: "com.apple.mail",
+        app: "Mail",
+        target: 'button "Send"',
+        label: "Send",
+        summary: 'Click button "Send" in Mail',
         everyTime: true,
       },
       false,
@@ -464,13 +502,34 @@ test("a click on a terminal's text asks every time and offers no chat-wide allow
   await expect(dock.locator(".prompt-actions").getByRole("button")).toHaveText(["Deny", "Allow once"]);
   await expect(dock.getByRole("button", { name: "Allow once", exact: true })).toHaveClass(/primary/);
   await expect(dock.getByTestId("computer-always")).toHaveCount(0);
-  await expect(dock.locator(".computer-approval-note")).toHaveText(
-    "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.",
-  );
-  await expect(dock.locator(".computer-approval-preview")).toHaveCount(0);
+  await expect(dock.locator(".computer-approval-note")).toHaveText("You set this app to ask every time.");
   await snap("computer-use-approval-every-time.png", dock);
   await dock.getByRole("button", { name: "Allow once", exact: true }).click();
   await expect.poll(async () => (await fake()).replies.at(-1)).toEqual({ id, decision: "once" });
+});
+
+test("a computer use card Auto's reviewer left to the person carries its note", async () => {
+  const id = crypto.randomUUID();
+  const asked = {
+    ...request(id, {
+      kind: "act",
+      action: "click",
+      bundle: "com.apple.Notes",
+      app: "Notes",
+      target: 'button "Delete"',
+      label: "Delete",
+      summary: 'Click button "Delete" in Notes',
+    }),
+    review: { status: "asked", risk: "high", rule: "Destructive action", rationale: "It deletes a note the person never named." },
+  } as PendingPermissionInfo;
+  await showPermissions([asked]);
+  const dock = docked();
+  await expect(dock.locator(".computer-approval-summary")).toHaveText("Click “Delete” in Notes", { timeout: 10000 });
+  await expect(dock.locator(".approval-review")).toContainText("Destructive action");
+  await expect(dock.locator(".approval-review")).toContainText("It deletes a note the person never named.");
+  await look("computer-use-approval-reviewed", docked);
+  await docked().getByRole("button", { name: "Deny", exact: true }).click();
+  await expect.poll(async () => (await fake()).replies.at(-1)).toEqual({ id, decision: "reject" });
 });
 
 test("typing shows its text, and a whole-screen look says what goes to the model", async () => {
@@ -501,7 +560,7 @@ async function computerUseOn(on: boolean) {
   await mkdir(folder, { recursive: true });
   await writeFile(
     join(folder, "computer-use.json"),
-    JSON.stringify(on ? { enabled: true, terms: { version: "1", acceptedAt: "2026-11-07T00:00:00Z" }, defaultAct: "allow" } : { enabled: false }),
+    JSON.stringify(on ? { enabled: true, terms: { version: "2", acceptedAt: "2026-11-07T00:00:00Z" }, defaultAct: "allow" } : { enabled: false }),
   );
 }
 
@@ -552,7 +611,7 @@ test("[live] a snapshot's row names the app and shows the screenshot it took", a
   await mkdir(join(env.HAARNESS_DATA_DIR, "config"), { recursive: true });
   await writeFile(
     settingsFile,
-    JSON.stringify({ enabled: true, terms: { version: "1", acceptedAt: "2026-11-07T00:00:00Z" } }),
+    JSON.stringify({ enabled: true, terms: { version: "2", acceptedAt: "2026-11-07T00:00:00Z" } }),
   );
   await page.reload();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");

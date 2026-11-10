@@ -57,6 +57,12 @@ impl Settings {
             .is_some_and(|terms| terms.version == crate::terms::VERSION)
     }
 
+    /// Whether the person agreed to earlier terms than today's, which changed since: clients say so above the terms.
+    #[must_use]
+    pub fn terms_changed(&self) -> bool {
+        self.terms.is_some() && !self.accepted()
+    }
+
     /// On with the current terms agreed.
     #[must_use]
     pub fn on(&self) -> bool {
@@ -208,15 +214,19 @@ mod tests {
         let store = Store::new(dir.path());
         let settings = store.update(|settings| settings.enabled = true).unwrap();
         assert!(!settings.on());
+        assert!(!settings.terms_changed(), "never agreed: nothing changed");
+        // Agreed to the first terms, before Auto's reviewer could answer: off until today's are agreed, and clients
+        // say the terms changed.
         let settings = store
             .update(|settings| {
                 settings.terms = Some(Agreement {
-                    version: "0".into(),
+                    version: "1".into(),
                     accepted_at: "2026-01-01T00:00:00Z".into(),
                 });
             })
             .unwrap();
         assert!(!settings.on());
+        assert!(settings.terms_changed());
         let settings = store
             .update(|settings| {
                 settings.terms = Some(Agreement {
@@ -226,6 +236,7 @@ mod tests {
             })
             .unwrap();
         assert!(settings.on());
+        assert!(!settings.terms_changed());
         // Another process changed the file: the next read sees it.
         let mut changed = settings.clone();
         changed.enabled = false;

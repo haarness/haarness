@@ -154,7 +154,7 @@ export function ComputerUseSettings() {
               <Show when={current().terms.accepted} fallback={<Agreement status={current()} busy={busy()} agreed={agreed()} setAgreed={setAgreed} agree={() => void request({ action: "accept", version: current().terms.version })} />}>
                 <Row
                   title="Agents may use this Mac"
-                  description="While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it."
+                  description="While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app."
                 >
                   <input
                     type="checkbox"
@@ -201,7 +201,7 @@ export function ComputerUseSettings() {
                 <h3>{t("Apps")}</h3>
                 <Row
                   title="Apps without a rule"
-                  description="Terminals and code editors still ask before a click on their text."
+                  description="Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on."
                 >
                   <Select
                     aria-label={t("Apps without a rule")}
@@ -228,7 +228,7 @@ export function ComputerUseSettings() {
                   <div class="computer-apps-head">
                     <strong>{t("App rules")}</strong>
                     <p>
-                      {t("Password managers and Haarness itself are never used, browsers only through the browser tools, and System Settings is only read.")}
+                      {t("Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.")}
                     </p>
                   </div>
                   <Show when={current().settings.apps.length}>
@@ -342,7 +342,10 @@ function Terms(props: { status: ComputerUseStatus }) {
   );
 }
 
-/** Before computer use is on for the first time: the terms, and one way to agree to them. */
+/**
+ * Before computer use is on for the first time, or again after the terms changed (said in one quiet line beside the
+ * agreement): the terms, and one way to agree to them.
+ */
 function Agreement(props: {
   status: ComputerUseStatus;
   busy: boolean;
@@ -354,6 +357,11 @@ function Agreement(props: {
     <div class="computer-agreement" data-setting="Terms for computer use">
       <strong class="computer-agreement-title">{t(props.status.terms.text?.title ?? "Terms for computer use")}</strong>
       <Terms status={props.status} />
+      <Show when={props.status.terms.changed}>
+        <p class="muted computer-terms-changed" data-testid="computer-terms-changed">
+          {t("You agreed to an earlier version of these terms.")}
+        </p>
+      </Show>
       <label class="computer-agree">
         <input
           type="checkbox"

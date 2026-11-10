@@ -162,6 +162,15 @@
   font-size: var(--ui-lg);
   font-weight: 600;
 }
+/* After the terms changed: one quiet line just above the agreement, which follows it closely. */
+.computer-terms-changed {
+  margin: var(--s5) 0 0;
+  font-size: var(--ui);
+  line-height: 1.5;
+}
+.computer-terms-changed + .computer-agree {
+  margin-top: var(--s2);
+}
 .computer-agree {
   display: flex;
   align-items: center;
@@ -230,6 +239,10 @@
 html[dir="rtl"] .computer-approval-summary {
   unicode-bidi: plaintext;
   text-align: right;
+}
+/* Auto's reviewer's note under a computer use card lines up with the card's own lines. */
+.computer-approval ~ .approval-review {
+  padding-inline: var(--s1);
 }
 .computer-approval-note kbd {
   font-family: var(--mono);
