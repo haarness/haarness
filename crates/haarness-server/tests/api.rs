@@ -5297,6 +5297,306 @@ async fn a_structured_turn_keeps_narration_ahead_of_its_call() {
     );
 }
 
+/// A server that refuses any request longer than `window` (its messages
+/// alone, about four characters a token) with vLLM's words, and otherwise
+/// answers each round with about 2,000 tokens of words and a tool call until
+/// `rounds` have been answered. Its model states the window only when
+/// `stated`. The first summary request can be answered with a bad gateway,
+/// and one summary request longer than `summary_room` refused as too long.
+#[derive(Clone)]
+struct GrowingTurn {
+    window: usize,
+    stated: bool,
+    rounds: usize,
+    summary_room: Option<usize>,
+    gateway_once: bool,
+    answered: Arc<std::sync::atomic::AtomicUsize>,
+    refused: Arc<std::sync::atomic::AtomicUsize>,
+    summaries: Arc<std::sync::atomic::AtomicUsize>,
+    summary_refusals: Arc<std::sync::atomic::AtomicUsize>,
+    /// Each request's size as the server counted it, a summary's marked.
+    sizes: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl GrowingTurn {
+    fn new(window: usize, stated: bool, rounds: usize) -> Self {
+        Self {
+            window,
+            stated,
+            rounds,
+            summary_room: None,
+            gateway_once: false,
+            answered: Arc::default(),
+            refused: Arc::default(),
+            summaries: Arc::default(),
+            summary_refusals: Arc::default(),
+            sizes: Arc::default(),
+        }
+    }
+
+    fn count(counter: &std::sync::atomic::AtomicUsize) -> usize {
+        counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn tokens(request: &ProviderRequest) -> usize {
+        request
+            .messages
+            .iter()
+            .map(|message| format!("{message:?}").len())
+            .sum::<usize>()
+            / 4
+    }
+}
+
+#[async_trait]
+impl ModelProvider for GrowingTurn {
+    fn id(&self) -> &str {
+        "selfhosted"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "selfhosted".into(),
+            name: "Self-hosted fixture".into(),
+            authenticated: true,
+            models: vec![ModelInfo {
+                id: "coder".into(),
+                display_name: "coder".into(),
+                reasoning: false,
+                reasoning_efforts: Vec::new(),
+                images: false,
+                video: false,
+                tools: true,
+                context_window: self.stated.then_some(self.window as u64),
+                max_output_tokens: None,
+                pricing: None,
+            }],
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if let Some(title) = title_fixture(&request) {
+            return title;
+        }
+        let tokens = Self::tokens(&request);
+        self.sizes.lock().unwrap().push(format!(
+            "{}{tokens}",
+            if is_compaction_request(&request) {
+                "S"
+            } else {
+                ""
+            }
+        ));
+        let refuse = |tokens: usize, window: usize| -> CoreResult<ProviderStream> {
+            Ok(Box::pin(stream::iter(vec![Err(CoreError::Provider(
+                format!(
+                    "HTTP 400 Bad Request: This model's maximum context length is {window} tokens. However, you requested {tokens} tokens in the messages, Please reduce the length of the messages."
+                ),
+            ))])))
+        };
+        if is_compaction_request(&request) {
+            let summary = self.summaries.fetch_add(1, SeqCst);
+            if self.gateway_once && summary == 0 {
+                return Ok(Box::pin(stream::iter(vec![Err(CoreError::Provider(
+                    "HTTP 502 Bad Gateway: upstream connect error".into(),
+                ))])));
+            }
+            if let Some(room) = self.summary_room
+                && tokens > room
+                && self.summary_refusals.load(SeqCst) == 0
+            {
+                self.summary_refusals.fetch_add(1, SeqCst);
+                return refuse(tokens, room);
+            }
+            if tokens > self.window {
+                return refuse(tokens, self.window);
+            }
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderEvent::TextDelta(
+                    "Summary: the assistant reads the notes round after round.".into(),
+                )),
+                Ok(ProviderEvent::Finished {
+                    reason: "stop".into(),
+                }),
+            ])));
+        }
+        if tokens > self.window {
+            self.refused.fetch_add(1, SeqCst);
+            return refuse(tokens, self.window);
+        }
+        let round = self.answered.fetch_add(1, SeqCst);
+        let usage = Ok(ProviderEvent::Usage {
+            input_tokens: tokens as u64,
+            output_tokens: 2_000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        });
+        if round >= self.rounds {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderEvent::TextDelta("All the notes are read.".into())),
+                usage,
+                Ok(ProviderEvent::Finished {
+                    reason: "stop".into(),
+                }),
+            ])));
+        }
+        let words = (0..1_000)
+            .map(|word| format!("note{round}w{word}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderEvent::TextDelta(words)),
+            Ok(ProviderEvent::ToolCall {
+                call_id: format!("growing-{round}"),
+                name: "get_goal".into(),
+                arguments: serde_json::json!({}),
+                provider_metadata: Value::Null,
+            }),
+            usage,
+            Ok(ProviderEvent::Finished {
+                reason: "tool_calls".into(),
+            }),
+        ])))
+    }
+}
+
+async fn run_growing_turn(provider: GrowingTurn) -> (Turn, Vec<haarness_protocol::Item>) {
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(1_024),
+        std::env::temp_dir(),
+        String::new(),
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            ..RuntimeConfig::default()
+        },
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("A long turn".into()),
+            provider: Some("selfhosted".into()),
+            model: Some("coder".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(thread.id, turn_request("read the notes one at a time"))
+        .await
+        .unwrap();
+    let mut finished = None;
+    for _ in 0..3_000 {
+        let current = runtime.turn(turn.id).await.unwrap();
+        if !matches!(current.status, TurnStatus::Queued | TurnStatus::Running) {
+            finished = Some(current);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let items = runtime.items(thread.id, None).await.unwrap();
+    (finished.expect("the turn finished"), items)
+}
+
+fn compactions(items: &[haarness_protocol::Item]) -> usize {
+    items
+        .iter()
+        .filter(|item| matches!(item.data, haarness_protocol::ItemData::Compaction { .. }))
+        .count()
+}
+
+fn turn_errors(items: &[haarness_protocol::Item]) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|item| match &item.data {
+            haarness_protocol::ItemData::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_long_turn_compacts_as_often_as_it_grows() {
+    // Forty rounds of 2,000 tokens each in a 20,000-token window: about
+    // eight compactions, where a turn used to stop compacting after four and
+    // then fail on the provider's refusal.
+    let provider = GrowingTurn::new(20_000, true, 40);
+    let refused = provider.refused.clone();
+    let (turn, items) = run_growing_turn(provider).await;
+    assert_eq!(
+        turn.status,
+        TurnStatus::Completed,
+        "{:?}",
+        turn_errors(&items)
+    );
+    assert!(compactions(&items) > 4, "{}", compactions(&items));
+    assert_eq!(GrowingTurn::count(&refused), 0);
+}
+
+#[tokio::test]
+async fn a_server_whose_window_haarness_does_not_know_is_compacted_below_its_refusal() {
+    // The window is not stated, so Haarness takes it as 128K; the server
+    // refuses past 20,000 tokens. Its first refusal teaches the window: the
+    // turn compacts below it, and later rounds compact before reaching it.
+    let provider = GrowingTurn::new(20_000, false, 40);
+    let refused = provider.refused.clone();
+    let sizes = provider.sizes.clone();
+    let (turn, items) = run_growing_turn(provider).await;
+    assert_eq!(
+        turn.status,
+        TurnStatus::Completed,
+        "{:?} {:?}",
+        turn_errors(&items),
+        sizes.lock().unwrap()
+    );
+    assert!(compactions(&items) > 4, "{}", compactions(&items));
+    assert!(
+        GrowingTurn::count(&refused) <= 2,
+        "{}",
+        GrowingTurn::count(&refused)
+    );
+}
+
+#[tokio::test]
+async fn a_summary_request_is_asked_again_after_a_bad_gateway_or_a_refusal_as_too_long() {
+    let mut provider = GrowingTurn::new(20_000, true, 12);
+    provider.gateway_once = true;
+    // Smaller than any summary request: the first after the bad gateway is
+    // refused as too long, once.
+    provider.summary_room = Some(2_000);
+    let summaries = provider.summaries.clone();
+    let summary_refusals = provider.summary_refusals.clone();
+    let sizes = provider.sizes.clone();
+    let (turn, items) = run_growing_turn(provider).await;
+    assert_eq!(
+        turn.status,
+        TurnStatus::Completed,
+        "{:?}",
+        turn_errors(&items)
+    );
+    assert!(compactions(&items) >= 1);
+    // The bad gateway, the refusal as too long, and the summaries that came.
+    assert!(
+        GrowingTurn::count(&summaries) >= 3,
+        "{}",
+        GrowingTurn::count(&summaries)
+    );
+    assert_eq!(
+        GrowingTurn::count(&summary_refusals),
+        1,
+        "{:?}",
+        sizes.lock().unwrap()
+    );
+}
+
 #[tokio::test]
 async fn context_overflow_compacts_once_and_the_retry_keeps_the_requests_image() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());

@@ -457,7 +457,7 @@ fn written_calls(text: &str, tools: &HashSet<String>) -> Option<Vec<(String, Val
 }
 
 /// An id for a call Ollama sent without one.
-fn call_id() -> String {
+pub(crate) fn call_id() -> String {
     use rand::RngCore as _;
     let mut bytes = [0_u8; 8];
     rand::rng().fill_bytes(&mut bytes);

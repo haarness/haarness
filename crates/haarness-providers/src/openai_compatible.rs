@@ -2948,7 +2948,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         if let Some(extra)=tool.get("extra_content").filter(|extra| extra.is_object()){call.extra_content = Some(extra.clone());}
                     }
                 }
-                if let Some(reason)=event["choices"][0]["finish_reason"].as_str(){finish_reason = Some(reason.to_owned());}
+                // Some gateways put an empty reason on every chunk, the last
+                // one after the real reason among them.
+                if let Some(reason)=event["choices"][0]["finish_reason"].as_str().filter(|reason| !reason.is_empty()){finish_reason = Some(reason.to_owned());}
                 if response_id.is_none() { response_id = event["id"].as_str().map(str::to_owned); }
             }
             let mut provider_metadata = json!({});
@@ -2973,12 +2975,26 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
             if !mistral_content.is_empty() { provider_metadata["mistral_content"] = json!(mistral_content); }
             if provider_metadata.as_object().is_some_and(serde_json::Map::is_empty) { provider_metadata = Value::Null; }
+            // A server that ends its stream as it means to, with no finish
+            // reason, after tool calls whose arguments all arrived whole made
+            // those calls: they run, rather than being closed unrun as a
+            // response cut short, which is all the turn could do with them.
+            // Words alone stay a response cut short, which is continued.
+            if finish_reason.is_none() && !calls.is_empty() && calls.iter().all(StreamedCall::whole) {
+                tracing::debug!(provider = %provider_id, "stream ended without a finish reason after whole tool calls");
+                finish_reason = Some("tool_calls".into());
+            }
             // Report usage before the tool calls, whose arguments may not parse.
             if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
                 yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }; if let Some(usd) = charged.take() { yield ProviderEvent::Cost { usd }; }
             }
             for StreamedCall { id: call_id, name, arguments, extra_content } in calls.drain(..) {
                 if !name.is_empty() {
+                    // Some servers give a call no ID (Text Generation
+                    // Inference, gateways before a model's own API): it gets
+                    // one, which its result answers to, instead of failing
+                    // the turn as a call nothing could answer.
+                    let call_id = if call_id.is_empty() { crate::ollama::call_id() } else { call_id };
                     // What the server attached to this call alone (Gemini's
                     // thought signature) goes back with it, to this server
                     // and model only.
@@ -3075,6 +3091,15 @@ struct StreamedCall {
     arguments: String,
     /// What the server attached to this call alone (`extra_content`).
     extra_content: Option<Value>,
+}
+
+impl StreamedCall {
+    /// Whether the call arrived whole: named, with its arguments one JSON
+    /// object.
+    fn whole(&self) -> bool {
+        !self.name.is_empty()
+            && serde_json::from_str::<Value>(&self.arguments).is_ok_and(|value| value.is_object())
+    }
 }
 
 /// Which call a tool-call fragment belongs to. A fragment names its call by
@@ -6110,6 +6135,63 @@ mod tests {
         ))
         .await;
         assert_eq!(reported(&events), [(300, 2, 0, 250)]);
+    }
+
+    #[tokio::test]
+    async fn whole_calls_in_a_stream_without_a_finish_reason_are_made() {
+        let finish = |events: &[Result<ProviderEvent, haarness_core::CoreError>]| {
+            events.iter().find_map(|event| match event {
+                Ok(ProviderEvent::Finished { reason }) => Some(reason.clone()),
+                _ => None,
+            })
+        };
+        let calls = |events: &[Result<ProviderEvent, haarness_core::CoreError>]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, Ok(ProviderEvent::ToolCall { .. })))
+                .count()
+        };
+        // A server that streams whole calls and ends without saying why.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"dir\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(calls(&events), 2, "{events:?}");
+        assert_eq!(finish(&events).as_deref(), Some("tool_calls"));
+        // A call without an ID gets one.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert!(
+            events.iter().any(|event| matches!(event, Ok(ProviderEvent::ToolCall { call_id, .. }) if call_id.starts_with("call_") && call_id.len() > 5)),
+            "{events:?}"
+        );
+        // An empty reason on a later chunk does not hide the real one.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"edit\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(finish(&events).as_deref(), Some("tool_calls"));
+        // A call whose arguments stop partway is a response cut short, and so
+        // are words alone with no reason.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"write\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\",\\\"content\\\":\\\"par\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(finish(&events).as_deref(), Some("incomplete"));
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Halfway thr\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(finish(&events).as_deref(), Some("incomplete"));
     }
 
     #[tokio::test]

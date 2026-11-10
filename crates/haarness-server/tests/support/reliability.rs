@@ -1092,17 +1092,18 @@ async fn reliability_cuts_spread_over_tool_rounds_each_get_their_own_recoveries(
 
 #[tokio::test]
 async fn reliability_a_turn_ends_once_its_rounds_together_spent_four_rounds_of_recoveries() {
-    // A cut in each of thirteen rounds: every round is within its own three
-    // recoveries, but the turn has twelve in all.
+    // A cut in each of fourteen rounds: every round is within its own three
+    // recoveries, but the turn has twelve in all, and the one its first
+    // eight finished responses gave back.
     let mut rounds = Vec::new();
-    for round in 0..12 {
+    for round in 0..13 {
         rounds.push(vec![Ok(text(&format!("part {round}"))), cut(CUTS[0])]);
         rounds.push(vec![
             Ok(read_notes(&format!("read-{round}"))),
             Ok(finish("tool_use")),
         ]);
     }
-    rounds.push(vec![Ok(text("part 12")), cut(CUTS[0])]);
+    rounds.push(vec![Ok(text("part 13")), cut(CUTS[0])]);
     rounds.push(vec![Ok(text("never asked")), Ok(finish("stop"))]);
     let (directory, runtime, provider, hooks) =
         setup_streams(rounds, RuntimeConfig::default(), true);
@@ -1121,7 +1122,7 @@ async fn reliability_a_turn_ends_once_its_rounds_together_spent_four_rounds_of_r
             "The connection to Echo kept breaking off mid-answer. Check the network connection, then send a message to continue."
         )
     );
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 25);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 27);
     assert_eq!(hooks.failures.lock().unwrap().len(), 1);
     std::fs::remove_dir_all(directory).unwrap();
 }
