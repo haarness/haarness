@@ -56,7 +56,7 @@ shows comes from that server over REST and SSE, and quitting it never stops the 
 
 In the global configuration folder (`~/.config/haarness/` unless `HAARNESS_HOME` or
 `XDG_CONFIG_HOME` says otherwise): `tui-state.toml` (thinking display, sidebar, theme, saved
-`/keybinds`), `tui-history.jsonl` (prompt history), `tui-stash.json` (stashed drafts),
+`/keybinds`), `tui-history-v2.json` (prompt history), `tui-stash.json` (stashed drafts),
 `tui-servers.json` and `tui-server-drafts.json` (saved servers), `tui-resource-picks.json` (MCP
 resources picked with `@`) and `themes/`. `[tui]` settings, including `[tui.keybinds]` and
 `[tui.statusline]`, are read from `config.toml` there; a binding saved in `/keybinds` wins. A theme

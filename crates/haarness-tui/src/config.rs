@@ -331,6 +331,26 @@ mod history_tests {
         );
         assert_eq!(super::history_order(&entries, "b", "first"), ["private"]);
     }
+
+    #[test]
+    fn the_history_file_keeps_two_hundred_prompts_a_project() {
+        let directory =
+            std::env::temp_dir().join(format!("haarness-history-cap-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&directory).unwrap();
+        super::THREAD_CONFIG_DIR.set(Some(directory.clone()));
+        for index in 0..250 {
+            super::save_scoped_history("a", "chat", &format!("prompt {index}")).unwrap();
+        }
+        super::save_scoped_history("b", "chat", "elsewhere").unwrap();
+        let kept = super::load_scoped_history("a", "chat");
+        let other = super::load_scoped_history("b", "chat");
+        super::THREAD_CONFIG_DIR.set(None);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(kept.len(), super::HISTORY_CAP);
+        assert_eq!(kept.first().map(String::as_str), Some("prompt 50"));
+        assert_eq!(kept.last().map(String::as_str), Some("prompt 249"));
+        assert_eq!(other, ["elsewhere"]);
+    }
 }
 
 /// The system configuration folder (`HAARNESS_SYSTEM_CONFIG_DIR`) this TUI
