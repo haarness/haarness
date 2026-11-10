@@ -301,6 +301,15 @@ pub fn paste_refusal(name: &str) -> String {
     )
 }
 
+/// The refusal for Paste in an app whose keyboard focus is in a terminal it hosts (an editor's terminal panel): the
+/// pasted text would land there and run as a command.
+#[must_use]
+pub fn terminal_paste_refusal(name: &str) -> String {
+    format!(
+        "{name} has a terminal in focus, and Paste would run whatever it pastes there as a command, outside Haarness's approvals, so agents never paste into it. Run commands with the shell tool instead."
+    )
+}
+
 /// The refusal for keys or typing aimed at a terminal inside another app (an editor's terminal panel), which runs
 /// what is typed just like a terminal app does.
 #[must_use]

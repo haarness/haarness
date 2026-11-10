@@ -7,7 +7,8 @@ Reload button and e11 the address field in Safari, e7 a button in Haarness itsel
 New Tab button, e4 a button in Notes, e3 Notes' icon in the Dock, e10 the editor of Visual Studio Code, e14 its
 terminal panel, e13 a switch in System Settings whose pane the helper cannot name, e15 a switch in its Privacy &
 Security pane, e17 a switch in its Displays pane, e18 a switch owned by the Privacy & Security pane's own process,
-e16 Terminal's Paste menu item, e19 another Paste item an older helper does not mark, and e12 a Share button in Notes, which sits behind the person's window. The Save button names its
+e16 Terminal's Paste menu item, e19 another Paste item an older helper does not mark, e20 Code's Paste item while its
+terminal panel has the focus, and e12 a Share button in Notes, which sits behind the person's window. The Save button names its
 window and the toolbar around it, and a look at the focus for Meta+S names the menu item it would choose. Typing "PAUSE" pauses the
 agent the way the bar would (and resumes half a second later); typing "HOLD" pauses it the same way until the server
 sends "resume", as Resume pressed in a client does; typing "STOP" pauses it and then presses the bar's Stop; typing
@@ -18,7 +19,7 @@ does; a look at another app ignores zoom, as an older helper would.
 
 Actions on e12 answer the way a helper that works behind the person's window does: a click went in behind, was
 confirmed and opened and closed things; a scroll went in behind and showed no change; a drag and a hover came to the
-front, saying why. A plain click on e4 answers like a press that changed nothing the helper could read back. Opening Mail
+front, saying why. Meta+C answers that its menu item is disabled. A plain click on e4 answers like a press that changed nothing the helper could read back. Opening Mail
 starts it behind; opening Music has to bring it forward. Every other action answers as an older helper does, with none of
 those fields. A look at Notes says it is behind, one at Mail that its windows are minimized, and one at Music that it
 is hidden.
@@ -72,6 +73,8 @@ ELEMENTS = {
          "pane": "com.apple.settings.PrivacySecurity.extension", "context": "Automation"},
     16: {"bundle": "com.apple.Terminal", "app": "Terminal", "role": "AXMenuItem", "name": "Paste", "content": False, "paste": True},
     19: {"bundle": "com.apple.Terminal", "app": "Terminal", "role": "AXMenuItem", "name": "Paste Escaped Text", "content": False},
+    20: {"bundle": "com.microsoft.VSCode", "app": "Code", "role": "AXMenuItem", "name": "Paste", "content": False, "paste": True,
+         "terminal": True},
     17: {"bundle": "com.apple.systempreferences", "app": "System Settings", "role": "AXCheckBox", "name": "Night Shift", "content": False,
          "pane": "com.apple.Displays-Settings.extension"},
     18: {"bundle": "com.apple.settings.PrivacySecurity.extension", "app": "Privacy & Security", "role": "AXCheckBox", "name": "Terminal",
@@ -188,6 +191,10 @@ def answer(op, request):
         return {"background": False, "target": music, "opened": [], "closed": [], "fallback": "no-key-window", **music}
     if op == "click" and request.get("ref") == 4:
         return PRESSED
+    if op == "press" and request.get("keys") == "Meta+C":
+        textedit = {"bundle": "com.apple.TextEdit", "pid": 2, "name": "TextEdit"}
+        return {"via": "menu", "background": True, "target": textedit, "opened": [], "closed": [], "confirmed": False,
+                "disabled": True, "menu": "Edit ▸ Copy"}
     if op in BEHIND and 12 in (request.get("ref"), (request.get("from") or {}).get("ref")):
         return BEHIND[op]
     return {"via": "test"}

@@ -643,6 +643,13 @@ impl MacTool {
         if paste && policy::group(&target.bundle, None) == Group::Runner {
             return Err(tool_error(policy::paste_refusal(target.app_name())));
         }
+        // The helper marks a Paste item `terminal` when the app's keyboard focus is in a terminal panel: it would
+        // refuse that click anyway, so nobody is asked to approve it.
+        if paste && target.terminal {
+            return Err(tool_error(policy::terminal_paste_refusal(
+                target.app_name(),
+            )));
+        }
         if let Some(refusal) = policy::pane_refusal(&target.bundle, target.pane.as_deref(), gesture)
         {
             return Err(tool_error(refusal));
@@ -950,6 +957,18 @@ fn capitalized(text: &str) -> String {
 /// scroll, which `mac_apps activate` may help when it changed nothing from behind.
 fn delivery(reply: &Value, app: &str, pointer: bool) -> Vec<String> {
     let mut lines = Vec::new();
+    // A shortcut whose menu item is switched off did nothing at all: say which item, rather than where it went.
+    if reply["disabled"] == true {
+        let item = reply["menu"]
+            .as_str()
+            .map(|menu| menu.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|menu| !menu.is_empty())
+            .map_or_else(|| "its menu item".to_owned(), |menu| format!("\"{menu}\""));
+        lines.push(format!(
+            "Nothing happened: {item} is switched off in {app} right now, so the shortcut did nothing. Check what it needs first, such as a selection or an open document."
+        ));
+        return lines;
+    }
     let behind = reply["background"] == true;
     if behind {
         lines.push(

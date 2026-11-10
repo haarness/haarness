@@ -1608,6 +1608,41 @@ async fn an_action_behind_the_person_s_window_says_so_and_looks_at_that_app() {
     assert!(last.get("bundle").is_none(), "{last}");
 }
 
+/// Paste while an editor's terminal panel has the focus would run the clipboard: refused before anyone is asked, even
+/// in an app that asks first. A shortcut whose menu item is switched off says which item, and that nothing happened.
+#[tokio::test]
+async fn paste_into_a_terminal_panel_is_never_put_to_anyone_and_a_disabled_shortcut_says_so() {
+    let lab = Lab::new(Lab::with(json!({"apps": {"com.apple.TextEdit": "allow"}})));
+    let thread = lab.thread().await;
+    let items = lab
+        .run(
+            thread,
+            vec![vec![
+                call("paste", "mac_click", json!({"ref": "e20"})),
+                call(
+                    "copy",
+                    "mac_press",
+                    json!({"key": "Meta+C", "snapshot": false}),
+                ),
+            ]],
+        )
+        .await;
+    let (paste, error, _) = result(&items, "paste");
+    assert!(
+        error && paste.contains("has a terminal in focus"),
+        "{paste}"
+    );
+    let (copy, error, _) = result(&items, "copy");
+    assert!(!error, "{copy}");
+    assert!(
+        copy.contains("Nothing happened: \"Edit ▸ Copy\" is switched off in TextEdit")
+            && !copy.contains("This happened behind")
+            && !copy.contains("showed no change"),
+        "{copy}"
+    );
+    assert!(!lab.ops().contains(&"click".to_owned()), "{:?}", lab.ops());
+}
+
 /// A look can keep only the elements that match a text, and show an area up close; both reach the helper, and the
 /// result says what the model is looking at.
 #[tokio::test]
