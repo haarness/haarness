@@ -28,3 +28,42 @@ test("a time from a clock ahead of this one reads as now", () => {
   assert.equal(relativeTime(now + 3 * 60_000, now, "en"), "now");
   assert.equal(relativeTime(now - 3 * 60_000, now, "en"), "3 minutes ago");
 });
+
+test("relative times move on at once when the window shows again or takes the focus, once for both", async () => {
+  const { startTicks } = await import("../src/renderer/clock");
+  const realNow = Date.now;
+  let time = Date.parse("2026-11-10T12:00:00Z");
+  Date.now = () => time;
+  try {
+    const page = Object.assign(new EventTarget(), { visibilityState: "hidden" as DocumentVisibilityState });
+    const view = new EventTarget();
+    const timers: (() => void)[] = [];
+    let ticks = 0;
+    startTicks(() => ticks++, {
+      document: page,
+      window: view,
+      setInterval: (run) => timers.push(run),
+    });
+    // A window hidden while its timers wait is not a reason to tick.
+    time += 5 * 60_000;
+    page.dispatchEvent(new Event("visibilitychange"));
+    assert.equal(ticks, 0);
+    // Shown again: the ages read now, not when the slowed timer comes round.
+    page.visibilityState = "visible";
+    page.dispatchEvent(new Event("visibilitychange"));
+    assert.equal(ticks, 1);
+    // The focus that comes with it changes nothing more.
+    view.dispatchEvent(new Event("focus"));
+    assert.equal(ticks, 1);
+    // A later focus, after the computer slept with the window in front, ticks.
+    time += 3 * 60_000;
+    view.dispatchEvent(new Event("focus"));
+    assert.equal(ticks, 2);
+    // And the regular tick still runs.
+    assert.equal(timers.length, 1);
+    timers[0]();
+    assert.equal(ticks, 3);
+  } finally {
+    Date.now = realNow;
+  }
+});
