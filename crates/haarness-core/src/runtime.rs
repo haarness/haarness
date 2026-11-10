@@ -198,12 +198,15 @@ struct RunStance {
     unattended: bool,
 }
 
-/// Chats a schedule created whose run has not started yet, and the stance
-/// each workflow thread took from the turn that started it.
+/// Chats a schedule created whose run has not started yet, the stance each
+/// workflow thread took from the turn that started it, and the threads a
+/// workflow's agents work in (every turn there, a result delivered after
+/// the agent's turn too, ends whatever Stop hooks say).
 #[derive(Default)]
 struct RunStances {
     scheduled: DashMap<ThreadId, ()>,
     started: DashMap<ThreadId, RunStance>,
+    workflow_agents: DashMap<ThreadId, ()>,
 }
 
 impl RunStances {
@@ -4067,7 +4070,6 @@ impl AgentRuntime {
                     None,
                     Some(queue.revision),
                     false,
-                    false,
                 )
                 .await;
             return match turn {
@@ -4276,7 +4278,6 @@ impl AgentRuntime {
                     None,
                     None,
                     unattended,
-                    false,
                 )
                 .await
             {
@@ -7869,7 +7870,7 @@ impl AgentRuntime {
         thread_id: ThreadId,
         request: StartTurnRequest,
     ) -> CoreResult<Turn> {
-        self.start_turn_with_ceilings(thread_id, request, Vec::new(), None, None, false, false)
+        self.start_turn_with_ceilings(thread_id, request, Vec::new(), None, None, false)
             .await
     }
 
@@ -7905,6 +7906,7 @@ impl AgentRuntime {
         let inherited_ceilings = self
             .permission_boundary_for_lineage(authority_thread_id)
             .await?;
+        self.run_stances.workflow_agents.insert(thread_id, ());
         self.start_turn_with_ceilings(
             thread_id,
             request,
@@ -7912,12 +7914,10 @@ impl AgentRuntime {
             output_schema,
             None,
             stance.unattended || kept.unattended,
-            true,
         )
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn start_turn_with_ceilings(
         &self,
         thread_id: ThreadId,
@@ -7926,7 +7926,6 @@ impl AgentRuntime {
         output_schema: Option<serde_json::Value>,
         queue_revision: Option<u64>,
         unattended: bool,
-        workflow_agent: bool,
     ) -> CoreResult<Turn> {
         // As `queue_input` refuses it: a blank message would stay in the
         // chat, and Claude refuses whitespace-only text on every later turn.
@@ -8293,7 +8292,7 @@ impl AgentRuntime {
             parent: None,
             inherited_ceilings,
             output_schema,
-            workflow_agent,
+            workflow_agent: self.run_stances.workflow_agents.contains_key(&thread_id),
             progress: Mutex::new(TaskProgress::default()),
             last_round: Mutex::new(None),
             status: Mutex::new(StatusState::default()),
@@ -8784,8 +8783,9 @@ struct RunnerTask {
     /// Schema-constrained final output requested by a workflow-owned turn.
     /// Normal user and nested task turns always leave this unset.
     output_schema: Option<serde_json::Value>,
-    /// A workflow's agent runs this turn, and the workflow takes its last
-    /// reply as the agent's answer: Stop hooks only observe its end.
+    /// A workflow's agent works in this thread, and the workflow takes its
+    /// last reply as the agent's answer: Stop hooks only observe the end of
+    /// this turn.
     workflow_agent: bool,
     /// Child-side liveness counters feeding `task.updated` events.
     progress: Mutex<TaskProgress>,

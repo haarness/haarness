@@ -285,6 +285,91 @@ async fn a_workflow_agents_turn_ends_whatever_its_stop_hooks_say() {
     assert_eq!(replies(&items), ["Echo: review the diff"]);
     assert_eq!(*hooks.runs.lock().unwrap(), [(agent.id, false)]);
     assert_eq!(hooks.turn_ends.load(Ordering::SeqCst), 1);
+    // A later turn in the agent's thread (a result delivered after its turn
+    // ended) is not sent back either.
+    let later = runtime
+        .start_turn(agent.id, turn_request("a result came back"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &later).await.status,
+        TurnStatus::Completed
+    );
+    wait_idle(&runtime, agent.id).await;
+    let items = runtime.items(agent.id, None).await.unwrap();
+    assert!(hook_messages(&items).is_empty());
+    assert_eq!(
+        replies(&items),
+        ["Echo: review the diff", "Echo: a result came back"]
+    );
+    remove_test_folder(directory).await;
+}
+
+/// A paused input queue starts no turn, so a message waiting there does not
+/// hold the Stop hook's feedback back.
+#[tokio::test]
+async fn a_message_waiting_in_a_paused_queue_lets_the_feedback_through() {
+    let hooks = Arc::new(StopHooks::held(&[None, Some("check the queue"), None]));
+    let (directory, runtime) = runtime(hooks.clone());
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("first"))
+        .await
+        .unwrap();
+    let (entered, release) = hooks.gate.as_ref().unwrap();
+    entered.notified().await;
+    // A message for later, then a Stop, which pauses the queue it waits in.
+    runtime
+        .queue_input(
+            thread.id,
+            QueueInputRequest {
+                request_id: RequestId::new(),
+                delivery: InputDelivery::Queue,
+                text: "for later".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    runtime.interrupt(turn.id).await.unwrap();
+    release.notify_one();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Interrupted
+    );
+    wait_idle(&runtime, thread.id).await;
+    // A result the runtime delivers starts a turn of its own and leaves the
+    // queue paused.
+    let delivered = runtime
+        .queue_input(
+            thread.id,
+            QueueInputRequest {
+                request_id: RequestId::new(),
+                text: "a result came back".into(),
+                synthetic: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .turn
+        .expect("the result starts a turn");
+    assert_eq!(
+        wait_done(&runtime, &delivered).await.status,
+        TurnStatus::Completed
+    );
+    wait_idle(&runtime, thread.id).await;
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert_eq!(hook_messages(&items), ["check the queue"]);
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item.turn_id == Some(delivered.id))
+            .filter(|item| matches!(item.data, ItemData::AssistantMessage { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(runtime.input_queue(thread.id).await.unwrap().items.len(), 1);
     remove_test_folder(directory).await;
 }
 
