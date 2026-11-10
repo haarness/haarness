@@ -765,13 +765,13 @@ try:
     # there is refused before anything reaches it, without asking. Nothing is toggled: the click aims at the pane's
     # own entry in the sidebar, which would only select it again.
     settings_running = subprocess.run(["pgrep", "-x", "System Settings"], capture_output=True).returncode == 0
-    earlier_pane = direct.ok("snapshot", bundle=SETTINGS).get("pane") if settings_running else None
-    subprocess.run(["open", "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"], check=True)
+    # Opening the old Security pane file takes System Settings to Privacy & Security.
+    subprocess.run(["open", "/System/Library/PreferencePanes/Security.prefPane"], check=True)
     until(lambda: (direct.ok("snapshot", bundle=SETTINGS).get("pane") or "").startswith("com.apple.settings.PrivacySecurity"),
           "the Privacy & Security pane is open and named", seconds=20)
     direct.close()
     look_only = Chat()
-    # A pane that has just opened can take a moment to show its elements.
+    # A pane opened a moment ago may not list its elements yet.
     entry = None
     for _ in range(10):
         output, error, _, _ = look_only.turn("mac_snapshot", {"app": SETTINGS}, expect_ask=False)
@@ -784,9 +784,8 @@ try:
     output, error, _, pending = look_only.turn("mac_click", {"ref": entry.group(1), "snapshot": False}, answer="reject")
     assert error and pending is None, (output, pending)
     direct = fresh_direct()
-    if earlier_pane:
-        subprocess.run(["open", "x-apple.systempreferences:" + earlier_pane], check=False)
-    elif not settings_running:
+    # System Settings stays on that pane when the person had it open; one the test opened is closed again.
+    if not settings_running:
         direct.call("quit", bundle=SETTINGS)
     check("a look names the Privacy & Security pane, and a click there is refused without asking")
 

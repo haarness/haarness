@@ -47,7 +47,7 @@ enum Screenshot {
             problem = error
             signal.signal()
         }
-        // The first answer in a fresh helper can take a while on a busy Mac.
+        // A fresh helper's first answer is slow on a busy Mac.
         if signal.wait(timeout: .now() + 20) == .timedOut { throw HelperFailure("failed", "ScreenCaptureKit gave no answer.") }
         guard let shareable else { throw refusal(problem) }
         let main = CGMainDisplayID()
