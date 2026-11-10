@@ -658,18 +658,24 @@ export function Session() {
       composer.setSelectionRange(composer.value.length, composer.value.length);
     },
     writing: (open) => {
-      if (open || !follow()) return false;
+      if (open) return false;
+      setHeldBehind(false);
+      if (!follow()) return false;
       const behind = scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight > 4;
       followLatest();
       return behind;
     },
     reveal: (item) => {
       const index = rows().findIndex((row) => row.id === item);
-      if (index < 0) return;
+      if (index < 0) return false;
       pauseFollowing(true);
       virtual.scrollToIndex(index, { align: "center" });
+      return true;
     },
   });
+  /** Output arrived below while a reply comment's box held the view: Jump
+   * to latest offers it, as it does when following is off. */
+  const [heldBehind, setHeldBehind] = createSignal(false);
   let scrollFrame = 0;
   let revealFrame = 0;
   let revealTarget: string | undefined;
@@ -726,6 +732,7 @@ export function Session() {
     quietUntil = undefined;
     pausedByToggle = undefined;
     replyComment.release();
+    setHeldBehind(false);
     setFollow(true);
   }
   function holdToggled(event: MouseEvent) {
@@ -828,9 +835,13 @@ export function Session() {
    * shows the list short of its end, or past it and pulled back. */
   function keepLatest() {
     // User input can arrive after a stream delta scheduled this frame. A
-    // press held in the transcript, or a reply comment being written, keeps
-    // the view where it is.
-    if (!follow() || !scrolling || toggled || press.held() || replyComment.holding()) return;
+    // press held in the transcript, or a reply comment's open box, keeps the
+    // view where it is.
+    if (!follow() || !scrolling || toggled || press.held()) return;
+    if (replyComment.holding()) {
+      setHeldBehind(scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight > 4);
+      return;
+    }
     // A running step just opened holds the view until more is written.
     if (quietUntil) {
       if (
@@ -855,6 +866,12 @@ export function Session() {
     // scrolling; one that leaves it at the end is the list growing shorter.
     if (press.held() && follow() && top < lastTop && remaining > 4) pauseFollowing();
     if (!follow() && top > lastTop && remaining <= 4) setFollow(true);
+    // Scrolled down to the end by the reader, a reply comment's box no
+    // longer holds the view: the chat follows its newest output again.
+    if (top > lastTop && remaining <= 4 && replyComment.holding()) {
+      replyComment.release();
+      setHeldBehind(false);
+    }
     lastTop = top;
   }
   function onHistoryFocus(event: FocusEvent) {
@@ -2742,9 +2759,9 @@ export function Session() {
           <ChatLoading label={t("Loading chat…")} />
         </Show>
       </div>
-      <Show when={editable() || pending() || !follow() || todos().length}>
+      <Show when={editable() || pending() || !follow() || heldBehind() || todos().length}>
         <div class="composer-area" ref={toastAnchor("composer")}>
-          <Show when={!follow()}>
+          <Show when={!follow() || heldBehind()}>
             <button
               class="jump-latest"
               aria-label={t("Jump to latest")}

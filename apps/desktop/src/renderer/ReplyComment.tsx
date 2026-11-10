@@ -154,8 +154,9 @@ export function createReplyComment(options: {
   /** A box opened (true) or closed (false). On closing, says whether the
    * transcript is about to move on to newer output. */
   writing?: (open: boolean) => boolean | void;
-  /** Scrolls the row of reply `item` into the middle of the view. */
-  reveal?: (item: string) => void;
+  /** Scrolls the row of reply `item` into the middle of the view; whether
+   * the chat still has that reply (an undone turn takes its replies away). */
+  reveal?: (item: string) => boolean;
 }) {
   const [offer, setOffer] = createSignal<Passage>();
   const [writing, setWriting] = createSignal<Passage & { text: string }>();
@@ -205,28 +206,55 @@ export function createReplyComment(options: {
   };
   /** The reply's text moved (an image came in, the window was resized). */
   function reflow() {
+    if (!writing()) return schedule();
+    refit();
+  }
+  /**
+   * Places the open box again for its reply as drawn now. Words still in the
+   * page are measured anew; a reply drawn again since (its row scrolled out
+   * and back) keeps the box where it was along it, held inside its width.
+   */
+  function refit() {
     const open = writing();
-    if (!open) return schedule();
-    const found = !open.range.collapsed && options.transcript() && replyOf(open.range, options.transcript()!);
-    const spot = found && place(found.range, found.host, found.article, found.row);
+    const transcript = options.transcript();
+    if (!open || !transcript) return;
+    observe(open.item);
+    const found = !open.range.collapsed && replyOf(open.range, transcript);
+    let spot = found ? place(found.range, found.host, found.article, found.row) : undefined;
+    if (!found) {
+      const host = observed;
+      const row = host?.closest("[data-item-id]");
+      if (!host || !row) return;
+      const box = host.getBoundingClientRect();
+      const left = Math.round(box.left - row.getBoundingClientRect().left);
+      const width = Math.round(box.width);
+      spot = { ...open.spot, left, width, from: Math.min(open.spot.from, width) };
+    }
     if (spot && !sameSpot(spot, open.spot)) setWriting({ ...open, spot });
   }
   const resized = new ResizeObserver(() => reflow());
-  const watched = createMemo(() => (writing() ?? offer())?.item);
-  createEffect(() => {
+  /** The reply text watched for changes of size. */
+  let observed: Element | undefined;
+  /** Watches the reply of `item` as it is drawn now, if it is. */
+  function observe(item: string | undefined) {
+    const host =
+      (item && options.transcript()?.querySelector(`[data-item-id="${CSS.escape(item)}"] .markdown`)) || undefined;
+    if (host === observed) return;
     resized.disconnect();
-    const item = watched();
-    const host = item && options.transcript()?.querySelector(`[data-item-id="${CSS.escape(item)}"] .markdown`);
+    observed = host;
     if (host) resized.observe(host);
-  });
+  }
+  const watched = createMemo(() => (writing() ?? offer())?.item);
+  createEffect(() => observe(watched()));
 
   function open() {
     const passage = offer();
     if (!passage) return;
     const pending = writing();
     // A box with words in it is never dropped for another: the reader is
-    // taken back to it instead, and comments on the new words after.
-    if (pending?.text.trim()) return revisit(pending.item);
+    // taken back to it instead, and comments on the new words after. Only
+    // a box whose reply has left the chat gives way.
+    if (pending?.text.trim() && revisit(pending.item)) return;
     if (pending) close();
     drawn = false;
     held = true;
@@ -234,22 +262,24 @@ export function createReplyComment(options: {
     setOffer(undefined);
     options.writing?.(true);
   }
-  /** Brings the open box back into view, with the keyboard in it. */
+  /** Brings the open box back into view, with the keyboard in it; whether
+   * its reply is still there to show it in. */
   function revisit(item: string) {
+    if (!options.reveal?.(item)) return false;
     setOffer(undefined);
     document.getSelection()?.removeAllRanges();
     held = true;
-    options.reveal?.(item);
     const field = card?.querySelector("textarea");
     if (!field) {
       // Drawn again as its row comes into view, it takes the keyboard then.
       drawn = false;
-      return;
+      return true;
     }
     requestAnimationFrame(() => {
       field.focus({ preventScroll: true });
       field.closest(".diff-comment")?.scrollIntoView({ block: "nearest" });
     });
+    return true;
   }
   /** Closes the box; whether the transcript moves on to newer output now. */
   function close() {
@@ -353,6 +383,9 @@ export function createReplyComment(options: {
     const [over, setOver] = createSignal(false);
     let element!: HTMLDivElement;
     onMount(() => {
+      // Drawn again after its row was scrolled out, the reply may have
+      // another width now (the window, the text size).
+      refit();
       const view = options.transcript()?.getBoundingClientRect();
       const row = element.closest("[data-item-id]")?.getBoundingClientRect();
       if (!view || !row) return;

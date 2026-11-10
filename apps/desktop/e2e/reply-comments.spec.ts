@@ -77,7 +77,11 @@ test.beforeAll(async () => {
   temporary = await realpath(await mkdtemp(join(process.env.HAARNESS_E2E_DIR ?? tmpdir(), "haarness-reply-comment-")));
   workspace = join(temporary, "workspace");
   await mkdir(join(workspace, ".haarness"), { recursive: true });
-  await writeFile(join(workspace, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
+  // Checkpoints on, so a turn can be undone in a folder outside Git.
+  await writeFile(
+    join(workspace, ".haarness/config.toml"),
+    '[defaults]\nprovider="echo"\nmodel="echo-1"\n\n[snapshots]\nenabled = true\n',
+  );
   binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
   env = {
     ...(process.env as Record<string, string>),
@@ -456,16 +460,63 @@ test("while a box is open, a reply arriving does not move the chat, and followin
   const held = await view();
   await expect(reply("marker-80")).toHaveCount(1, { timeout: 30_000 });
   await expect(page.locator(".composer")).not.toHaveClass(/running/);
-  // The box kept its place and the keyboard.
+  // The box kept its place and the keyboard, and Jump to latest says there is more.
   await expect(field).toBeFocused();
   await expect(field).toBeInViewport();
   expect(Math.abs((await view()).top - held.top)).toBeLessThanOrEqual(1);
+  await expect(page.locator(".jump-latest")).toBeVisible();
   // Closing it takes the view to the newest output, with nothing left to jump to.
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(field).toHaveCount(0);
   await expect.poll(async () => (await view()).below).toBeLessThanOrEqual(4);
   await expect(page.locator(".jump-latest")).toHaveCount(0);
   await expect(comment()).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("scrolled to the end while a box holds the view, the chat follows its newest output again", async () => {
+  await message().fill("!linger 4000 ::long 40");
+  await message().press("Enter");
+  await expect(page.locator(".composer")).toHaveClass(/running/);
+  await select(reply("marker-80"), "line 78 marker-78");
+  await comment().click();
+  const field = page.getByRole("textbox", { name: "Comment on the reply", exact: true });
+  await expect(field).toBeFocused();
+  await field.fill("Reading while it runs.");
+  await expect(page.locator(".composer")).not.toHaveClass(/running/, { timeout: 30_000 });
+  await expect(page.locator(".jump-latest")).toBeVisible();
+  // Reaching the end by scrolling there is the reader's own way back.
+  await wheelTo("end");
+  await expect(page.locator(".jump-latest")).toHaveCount(0);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(field).toHaveCount(0);
+  await expect(page.locator(".jump-latest")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("a waiting box whose reply was undone gives way to a new one", async () => {
+  await wheelTo("end");
+  // The newest reply, from the last turn, gets a box with words in it.
+  const newest = reply("marker-40").last();
+  const id = await page.locator("[data-item-id]", { has: reply("marker-40") }).last().getAttribute("data-item-id");
+  await select(newest, "line 40 marker-40");
+  await comment().click();
+  const field = page.getByRole("textbox", { name: "Comment on the reply", exact: true });
+  await expect(field).toBeFocused();
+  await field.fill("About a turn about to be undone.");
+  await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Undo last turn", exact: true }).click();
+  await expect(page.locator(`[data-item-id="${id}"]`)).toHaveCount(0);
+  // Words of another reply get their own box; nothing is left stuck.
+  await select(reply("marker-80"), "line 79 marker-79");
+  await comment().click();
+  await expect(field).toBeFocused();
+  await expect(page.locator(".reply-comment-card")).toHaveCount(1);
+  await expect(page.locator(".reply-comment-card")).toContainText("“line 79 marker-79”");
+  await expect(field).toHaveValue("");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(field).toHaveCount(0);
+  await message().fill("");
   expect(errors).toEqual([]);
 });
 
