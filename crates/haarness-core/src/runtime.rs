@@ -6657,6 +6657,8 @@ impl AgentRuntime {
         let mut personal = HashSet::new();
         // Why Auto's reviewer refused the call, when it did.
         let mut blocked = None;
+        // Why each asked operation asks, for the log.
+        let mut causes = HashMap::new();
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
@@ -6701,6 +6703,14 @@ impl AgentRuntime {
                         {
                             personal.insert(operation.clone());
                         }
+                        let cause = AskCause::of(
+                            &plan.permission,
+                            &evaluation,
+                            plan.read_limit(pattern).as_deref(),
+                            explicit,
+                            constraint == Some(PermissionDecision::Ask),
+                        );
+                        causes.insert(operation.clone(), (cause, evaluation.matched));
                         if evaluation.protected {
                             protected.insert(operation);
                         }
@@ -6731,12 +6741,15 @@ impl AgentRuntime {
                 .collect();
             let explicit = !explicit_operations.is_empty();
             let operation = plan.describe(asked);
+            let why = AskWhy::of(&plan, &causes);
             let yolo_answers = yolo_may_answer(Some(tool.as_ref()), &arguments, &plan, &protected);
             // As for model calls, a `--yolo` run approves computer use once.
             if yolo_answers && stance.auto_approve {
                 tracing::info!(
                     thread = %thread_id,
-                    operation = %operation_for_log(&operation),
+                    operation = ?operation_for_log(&operation),
+                    cause = %why.cause,
+                    matched = why.matched.as_deref().map(tracing::field::debug),
                     "approved once (unattended run)"
                 );
                 continue;
@@ -6757,7 +6770,9 @@ impl AgentRuntime {
             if !forced && !explicit && stance.auto_approve {
                 tracing::info!(
                     thread = %thread_id,
-                    operation = %operation_for_log(&operation),
+                    operation = ?operation_for_log(&operation),
+                    cause = %why.cause,
+                    matched = why.matched.as_deref().map(tracing::field::debug),
                     "approved once (unattended run)"
                 );
                 continue;
@@ -6845,7 +6860,9 @@ impl AgentRuntime {
             if auto && (!review_on || !agent_work) {
                 tracing::info!(
                     thread = %thread_id,
-                    operation = %operation_for_log(&operation),
+                    operation = ?operation_for_log(&operation),
+                    cause = %why.cause,
+                    matched = why.matched.as_deref().map(tracing::field::debug),
                     "approved once (Auto)"
                 );
                 continue;
@@ -6855,7 +6872,9 @@ impl AgentRuntime {
             if mode == ApprovalMode::Yolo {
                 tracing::info!(
                     thread = %thread_id,
-                    operation = %operation_for_log(&operation),
+                    operation = ?operation_for_log(&operation),
+                    cause = %why.cause,
+                    matched = why.matched.as_deref().map(tracing::field::debug),
                     "approved once (Yolo)"
                 );
                 continue;
@@ -13376,6 +13395,8 @@ impl RunnerTask {
         // Asks a person configured about something narrower than a whole
         // tool: in Auto they go to a person, not to the reviewer.
         let mut personal = HashSet::new();
+        // Why each asked operation asks, for the log.
+        let mut causes = HashMap::new();
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
@@ -13430,6 +13451,14 @@ impl RunnerTask {
                         {
                             personal.insert(plan.operation(pattern));
                         }
+                        let cause = AskCause::of(
+                            &plan.permission,
+                            &evaluation,
+                            plan.read_limit(pattern).as_deref(),
+                            explicit,
+                            constraint == Some(PermissionDecision::Ask),
+                        );
+                        causes.insert(plan.operation(pattern), (cause, evaluation.matched));
                         asked.push(pattern.clone());
                     }
                     PermissionDecision::Allow => {}
@@ -13469,6 +13498,7 @@ impl RunnerTask {
                     explicit,
                     reviewable,
                     (name, call_id),
+                    &AskWhy::of(&plan, &causes),
                 )
                 .await?;
             if let Some(review) = resolution.review {
@@ -13767,7 +13797,8 @@ impl RunnerTask {
     /// a person configured an ask for). `tool`: the tool and call that raise
     /// it.
     /// `asks`: whether the request asks every time, and whether Yolo answers
-    /// it all the same (see [`crate::Tool::yolo_answers`]).
+    /// it all the same (see [`crate::Tool::yolo_answers`]). `why`: why it
+    /// asks, for the log lines.
     #[allow(clippy::too_many_arguments)]
     async fn ask_permission(
         &self,
@@ -13778,6 +13809,7 @@ impl RunnerTask {
         explicit_operations: Vec<String>,
         reviewable: bool,
         tool: (&str, &str),
+        why: &AskWhy,
     ) -> CoreResult<PermissionResolution> {
         let (forced, yolo_answers) = asks;
         let operation = plan.describe(&plan.patterns);
@@ -13795,7 +13827,9 @@ impl RunnerTask {
             if yolo {
                 tracing::info!(
                     thread = %self.thread.id,
-                    operation = %operation_for_log(&operation),
+                    operation = ?operation_for_log(&operation),
+                    cause = %why.cause,
+                    matched = why.matched.as_deref().map(tracing::field::debug),
                     "approved once (Yolo)"
                 );
                 return Ok(PermissionResolution::allowed());
@@ -13828,7 +13862,9 @@ impl RunnerTask {
                 }
             }
             tracing::info!(
-                operation = %operation_for_log(&operation),
+                operation = ?operation_for_log(&operation),
+                cause = %why.cause,
+                matched = why.matched.as_deref().map(tracing::field::debug),
                 "auto-approved (--yolo)"
             );
             return Ok(PermissionResolution::allowed());
@@ -13843,7 +13879,9 @@ impl RunnerTask {
             if yolo {
                 tracing::info!(
                     thread = %self.thread.id,
-                    operation = %operation_for_log(&operation),
+                    operation = ?operation_for_log(&operation),
+                    cause = %why.cause,
+                    matched = why.matched.as_deref().map(tracing::field::debug),
                     "approved once (Yolo)"
                 );
                 return Ok(PermissionResolution::allowed());
@@ -13961,7 +13999,9 @@ impl RunnerTask {
             if auto && !review_on {
                 tracing::info!(
                     thread = %self.thread.id,
-                    operation = %operation_for_log(&operation),
+                    operation = ?operation_for_log(&operation),
+                    cause = %why.cause,
+                    matched = why.matched.as_deref().map(tracing::field::debug),
                     "approved once (Auto)"
                 );
                 return Ok(PermissionResolution::allowed());
@@ -13970,7 +14010,9 @@ impl RunnerTask {
             if mode == ApprovalMode::Yolo {
                 tracing::info!(
                     thread = %self.thread.id,
-                    operation = %operation_for_log(&operation),
+                    operation = ?operation_for_log(&operation),
+                    cause = %why.cause,
+                    matched = why.matched.as_deref().map(tracing::field::debug),
                     "approved once (Yolo)"
                 );
                 return Ok(PermissionResolution::allowed());
@@ -14040,7 +14082,9 @@ impl RunnerTask {
                     if resolution.allowed && resolution.review.is_none() {
                         tracing::info!(
                             thread = %self.thread.id,
-                            operation = %operation_for_log(&operation),
+                            operation = ?operation_for_log(&operation),
+                            cause = %why.cause,
+                            matched = why.matched.as_deref().map(tracing::field::debug),
                             "approved once (Auto review)"
                         );
                     }
@@ -14126,7 +14170,9 @@ impl RunnerTask {
             tracing::info!(
                 thread = %self.thread.id,
                 permission = id,
-                operation = %operation_for_log(&operation),
+                operation = ?operation_for_log(&operation),
+                cause = %why.cause,
+                matched = why.matched.as_deref().map(tracing::field::debug),
                 "permission requested; waiting for a reply"
             );
         }
@@ -14151,6 +14197,8 @@ impl RunnerTask {
             tracing::info!(
                 permission = id,
                 allowed = resolution.allowed,
+                cause = %why.cause,
+                matched = why.matched.as_deref().map(tracing::field::debug),
                 "permission resolved"
             );
             // Answered (by a person, or by Auto's reviewer once Auto turned
@@ -14191,7 +14239,7 @@ impl RunnerTask {
         release_covered_permissions(&self.permissions, &self.events, &rules);
         tracing::info!(
             thread = %self.thread.id,
-            operation = %operation_for_log(operation),
+            operation = ?operation_for_log(operation),
             rules = always_rules.len(),
             "approved always by a PermissionRequest hook"
         );
@@ -17688,6 +17736,110 @@ fn operation_for_log(operation: &str) -> String {
     crate::redact::log_text(operation, 300)
 }
 
+/// Which check made a request ask, for its log lines alone: it decides
+/// nothing and no client sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AskCause {
+    /// One of Haarness's own rules: a folder outside the project, a secret
+    /// file read, an agent switch, generated media, a repeated call.
+    Builtin,
+    /// A rule someone configured.
+    Configured,
+    /// What only a person answers: a file where sign-ins are kept, an edit
+    /// of a configuration file, a line too large to read.
+    PersonOnly,
+    /// A command a limit stopped reading, under a bash rule that may be
+    /// about what it runs.
+    Limit,
+    /// A shell command that reads a secret file (`cat .env`).
+    SecretViaShell,
+    /// The tool's own policy, where the rules allowed the call.
+    Tool,
+    /// Only an answer given in this chat settles it (a Chrome site).
+    Explicit,
+}
+
+impl AskCause {
+    /// Why `evaluation`, a pattern of a `permission` group, asks: `limit`
+    /// is the rule a command met because a limit stopped reading it (empty
+    /// for a line too large to read), `explicit` whether only an answer in
+    /// this chat settles it, and `tool_asks` whether the tool's own policy
+    /// asks.
+    fn of(
+        permission: &str,
+        evaluation: &crate::permissions::Evaluation,
+        limit: Option<&str>,
+        explicit: bool,
+        tool_asks: bool,
+    ) -> Self {
+        if explicit {
+            Self::Explicit
+        } else if limit.is_some_and(|rule| !rule.is_empty()) {
+            Self::Limit
+        } else if evaluation.protected {
+            Self::PersonOnly
+        } else if permission == "bash"
+            && evaluation
+                .matched
+                .as_deref()
+                .is_some_and(|rule| rule.starts_with("read:"))
+        {
+            Self::SecretViaShell
+        } else if tool_asks && evaluation.decision != PermissionDecision::Ask {
+            Self::Tool
+        } else if evaluation.configured {
+            Self::Configured
+        } else {
+            Self::Builtin
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Configured => "configured",
+            Self::PersonOnly => "person_only",
+            Self::Limit => "limit",
+            Self::SecretViaShell => "secret_via_shell",
+            Self::Tool => "tool",
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
+/// Why a request asks, as its log lines say it: the checks that raised it
+/// (`cause`, comma-separated) and the rules they matched, redacted and on
+/// one line (`matched`, `None` when no rule did). Written with `?`, so a
+/// rule's text cannot pose as another field of the line.
+#[derive(Debug, PartialEq, Eq)]
+struct AskWhy {
+    cause: String,
+    matched: Option<String>,
+}
+
+impl AskWhy {
+    /// For `plan`, from the cause and matched rule of each asked operation.
+    fn of(plan: &AskPlan, asked: &HashMap<String, (AskCause, Option<String>)>) -> Self {
+        let mut causes: Vec<&str> = Vec::new();
+        let mut rules: Vec<&str> = Vec::new();
+        for pattern in &plan.patterns {
+            let Some((cause, matched)) = asked.get(&plan.operation(pattern)) else {
+                continue;
+            };
+            if !causes.contains(&cause.name()) {
+                causes.push(cause.name());
+            }
+            if let Some(rule) = matched.as_deref().filter(|rule| !rules.contains(rule)) {
+                rules.push(rule);
+            }
+        }
+        Self {
+            cause: causes.join(","),
+            matched: (!rules.is_empty()).then(|| crate::redact::log_text(&rules.join(", "), 300)),
+        }
+    }
+}
+
 /// Text kept to 200 characters for logs and messages, with `…` when cut.
 fn clip(text: &str) -> String {
     match text.char_indices().nth(200) {
@@ -18903,6 +19055,144 @@ mod shell_reading_tests {
         // A blanket allow for every command is not one for this one.
         let blanket = engine(&[("bash:*", Allow)]);
         assert_eq!(verdict(&blanket, "cat .env"), Ask);
+        std::fs::remove_dir_all(&project).unwrap();
+    }
+
+    // POSIX shell text: Windows runs commands in cmd.exe.
+    #[cfg(unix)]
+    #[test]
+    fn the_log_says_which_check_made_a_request_ask() {
+        use crate::permissions::Evaluation;
+        use PermissionDecision::{Allow, Ask};
+        let project =
+            std::env::temp_dir().join(format!("haarness-ask-cause-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
+        crate::permissions::record_credential_store(project.join("sign-ins.json"), false);
+        // The first asking pattern of `command`, with why it asks.
+        let why = |engine: &PermissionEngine, name: &str, arguments: serde_json::Value| {
+            for plan in ask_plans(name, &arguments, &project) {
+                for pattern in &plan.patterns {
+                    let evaluation = plan.evaluate(engine, pattern);
+                    if evaluation.decision == Ask {
+                        let limit = plan.read_limit(pattern);
+                        let cause = AskCause::of(
+                            &plan.permission,
+                            &evaluation,
+                            limit.as_deref(),
+                            false,
+                            false,
+                        );
+                        return (cause.name(), evaluation.matched);
+                    }
+                }
+            }
+            panic!("{arguments} does not ask");
+        };
+        let shell = |command: &str| json!({ "command": command });
+        let defaults = engine(&[]);
+        assert_eq!(
+            why(&defaults, "bash", shell("cat /etc/hosts")),
+            ("builtin", Some("external_directory:*".into()))
+        );
+        assert_eq!(
+            why(
+                &engine(&[("bash:git push *", Ask)]),
+                "bash",
+                shell("git push origin main")
+            ),
+            ("configured", Some("bash:git push *".into()))
+        );
+        assert_eq!(
+            why(&defaults, "bash", shell("cat sign-ins.json")),
+            (
+                "person_only",
+                Some(crate::permissions::CREDENTIAL_READ_RULE.into())
+            )
+        );
+        assert_eq!(
+            why(&defaults, "bash", shell("cat .env")),
+            ("secret_via_shell", Some("read:*.env".into()))
+        );
+        // The read tool's own ask about the same file is a built-in one.
+        assert_eq!(
+            why(&defaults, "read", json!({ "path": ".env" })),
+            ("builtin", Some("read:*.env".into()))
+        );
+        // A command a limit stopped reading, under a narrower rule; a line
+        // too large to read, under none; a Chrome site; a tool's own policy
+        // where the rules allowed the call.
+        let asked = |matched: &str, protected: bool| Evaluation {
+            decision: Ask,
+            matched: Some(matched.into()),
+            protected,
+            configured: true,
+        };
+        let allowed = Evaluation {
+            decision: Allow,
+            matched: Some("*".into()),
+            protected: false,
+            configured: false,
+        };
+        let cause = |permission, evaluation: &Evaluation, limit, explicit, tool| {
+            AskCause::of(permission, evaluation, limit, explicit, tool).name()
+        };
+        let limited = asked("bash:rm *", true);
+        assert_eq!(
+            cause("bash", &limited, Some("bash:rm *"), false, false),
+            "limit"
+        );
+        assert_eq!(
+            cause("bash", &limited, Some(""), false, false),
+            "person_only"
+        );
+        assert_eq!(
+            cause("browser_site", &allowed, None, true, false),
+            "explicit"
+        );
+        assert_eq!(cause("cloud_deploy", &allowed, None, false, true), "tool");
+        assert_eq!(
+            cause("bash", &asked("bash:*", false), None, false, true),
+            "configured"
+        );
+        // A request's patterns are named once each, with their rules on one
+        // line.
+        let mut causes = HashMap::new();
+        let line = ask_plans("bash", &shell("cat .env && echo hi"), &project)
+            .into_iter()
+            .find(|plan| plan.permission == "bash")
+            .unwrap();
+        for pattern in &line.patterns {
+            let evaluation = line.evaluate(&defaults, pattern);
+            assert_eq!(evaluation.decision, Ask, "{pattern}");
+            let cause = AskCause::of("bash", &evaluation, None, false, false);
+            causes.insert(line.operation(pattern), (cause, evaluation.matched));
+        }
+        assert_eq!(
+            AskWhy::of(&line, &causes),
+            AskWhy {
+                cause: "secret_via_shell".into(),
+                matched: Some("read:*.env".into()),
+            }
+        );
+        causes.insert(
+            "bash:echo hi".into(),
+            (AskCause::Configured, Some("bash:echo\nhi *".into())),
+        );
+        assert_eq!(
+            AskWhy::of(&line, &causes),
+            AskWhy {
+                cause: "secret_via_shell,configured".into(),
+                matched: Some("read:*.env, bash:echo hi *".into()),
+            }
+        );
+        // Written with `?`, a command's own `key=value` text and line breaks
+        // stay inside one quoted value of the line.
+        let operation = operation_for_log("bash:echo a=b allowed=true\npermission=x \"q\"");
+        assert_eq!(
+            format!("operation={operation:?}"),
+            r#"operation="bash:echo a=b allowed=true permission=x \"q\"""#
+        );
         std::fs::remove_dir_all(&project).unwrap();
     }
 
