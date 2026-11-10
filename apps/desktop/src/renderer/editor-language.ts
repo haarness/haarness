@@ -17,6 +17,8 @@ export function editorLanguage(path: string, content = "") {
     name = "Shell";
   else if (/^jenkinsfile(?:\..+)?$/.test(lower)) name = "Groovy";
   else if (/\.(jsonc|jsonl)$/.test(lower)) name = "JSON";
+  // C++20 module units, which the catalog's C++ entry does not list.
+  else if (/\.(cppm|ccm|cxxm|c\+\+m|ixx)$/.test(lower)) name = "C++";
   const detected = name
     ? LanguageDescription.matchLanguageName(languages, name, false)
     : (LanguageDescription.matchFilename(languages, filename) ??
