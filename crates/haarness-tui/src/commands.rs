@@ -4424,7 +4424,7 @@ impl App {
             };
             return;
         }
-        tasks.sort_by_key(|(_, task)| task.sibling_order());
+        tasks.sort_by_key(|(row, task)| task.sibling_order(row));
         let mut entries = Vec::with_capacity(tasks.len());
         for (call_id, task) in tasks {
             let (title, agent) = self.child_task_identity(call_id, task);
@@ -4630,16 +4630,29 @@ impl App {
 
     /// The child agents ← and → step through, in the order the conversation
     /// started them (its calls' ids are random), each once however many
-    /// calls continued it.
+    /// calls continued it. A child that another child started (where agents
+    /// may start their own) is not one of them.
     pub(crate) fn sibling_children(&self) -> Vec<haarness_protocol::ThreadId> {
+        let parents = [
+            self.thread.parent_id,
+            self.parent_stack.last().map(|parent| parent.id),
+        ];
+        let sibling = |child: haarness_protocol::ThreadId| {
+            self.threads
+                .iter()
+                .find(|thread| thread.id == child)
+                .and_then(|thread| thread.parent_id)
+                .is_none_or(|parent| parents.contains(&Some(parent)))
+        };
         let mut first = std::collections::HashMap::new();
-        for task in self.children.values() {
-            let order = task.sibling_order();
+        for (row, task) in &self.children {
+            if !sibling(task.child_thread_id) {
+                continue;
+            }
+            let order = task.sibling_order(row);
             first
                 .entry(task.child_thread_id)
-                .and_modify(|known: &mut (bool, Option<u64>, uuid::Uuid)| {
-                    *known = (*known).min(order)
-                })
+                .and_modify(|known: &mut crate::state::SiblingOrder| *known = (*known).min(order))
                 .or_insert(order);
         }
         let mut siblings = first.into_iter().collect::<Vec<_>>();

@@ -233,6 +233,9 @@ pub struct SubjectFit {
     pub expandable: bool,
 }
 
+/// See [`ChildTask::sibling_order`].
+pub type SiblingOrder = (bool, Option<u64>, Option<usize>, uuid::Uuid);
+
 /// Live progress of one child-agent task, keyed by its `task` call id and fed
 /// by `task.updated` events from the server.
 #[derive(Clone)]
@@ -257,13 +260,15 @@ pub struct ChildTask {
 }
 
 impl ChildTask {
-    /// How this child sorts among its siblings: by the call that started it,
-    /// then (for children of one `batch` call, or a call not read yet) by
-    /// thread id, which follows creation.
-    pub fn sibling_order(&self) -> (bool, Option<u64>, uuid::Uuid) {
+    /// How this child, listed under its call id `row`, sorts among its
+    /// siblings: by the call that started it, then by its step in that call
+    /// (the children of one `batch` call share the call), then, for a call
+    /// not read yet, by thread id, which follows creation.
+    pub fn sibling_order(&self, row: &str) -> SiblingOrder {
         (
             self.call_sequence.is_none(),
             self.call_sequence,
+            batch_step(row),
             self.child_thread_id.0,
         )
     }
@@ -3996,6 +4001,12 @@ pub fn default_model_for(
 }
 
 /// The `batch` call a numbered child call id (`call_x:3`) belongs to.
+/// The step of a `batch` call that a child's call id names (`<batch>:2`).
+pub(crate) fn batch_step(call_id: &str) -> Option<usize> {
+    batch_parent_call(call_id)?;
+    call_id.rsplit_once(':')?.1.parse().ok()
+}
+
 pub(crate) fn batch_parent_call(call_id: &str) -> Option<&str> {
     call_id
         .rsplit_once(':')

@@ -16247,6 +16247,143 @@ async fn left_and_right_step_through_child_agents_in_the_order_they_started() {
     );
 }
 
+/// Agents of one reply arrive live in whatever order the server schedules
+/// them (task updates, task states and links, last call first, threads
+/// created that way too), and so do the steps of one `batch` call: they
+/// still line up as the calls and steps that started them.
+#[tokio::test]
+async fn live_children_line_up_as_their_calls_and_batch_steps() {
+    let root = fixture_thread();
+    let mut app = App::new(root.clone(), vec![root.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+    // c1..c4, then batch steps 0..2: thread ids sort the other way round.
+    let child = |index: u128| {
+        ThreadId(uuid::Uuid::from_u128(
+            0x0190_0000_0000_7000_8000_0000_0000_0010 - index,
+        ))
+    };
+    let item = |sequence: u64, data: ItemData| {
+        fixture_event(
+            "item.created",
+            root.id,
+            root.id,
+            serde_json::json!(message_item(sequence, &root, data)),
+        )
+    };
+    let call = |call_id: &str, name: &str| ItemData::ToolCall {
+        call_id: call_id.into(),
+        name: name.into(),
+        arguments: serde_json::json!({"prompt": call_id}),
+        provider_metadata: serde_json::Value::Null,
+    };
+    let update = |call_id: &str, thread: ThreadId| {
+        fixture_event(
+            "task.updated",
+            root.id,
+            root.id,
+            serde_json::json!({"callId": call_id, "childThreadId": thread, "state": "running"}),
+        )
+    };
+    let mut events = vec![
+        item(1, call("c1", "task")),
+        item(2, call("c2", "task")),
+        item(3, call("c3", "task")),
+        item(4, call("c4", "task")),
+        item(5, call("b", "batch")),
+        update("c3", child(2)),
+        update("c2", child(1)),
+        item(
+            6,
+            ItemData::TaskState {
+                call_id: "c4".into(),
+                child_thread_id: child(3),
+                child_turn_id: TurnId::new(),
+                state: "running".into(),
+            },
+        ),
+    ];
+    for (sequence, (call_id, index)) in (7..).zip([("c3", 2), ("c2", 1), ("c1", 0)]) {
+        events.push(item(
+            sequence,
+            ItemData::TaskLink {
+                call_id: call_id.into(),
+                child_thread_id: child(index),
+            },
+        ));
+    }
+    for (call_id, index) in [("b:2", 6), ("b:1", 5), ("b:0", 4)] {
+        events.push(update(call_id, child(index)));
+    }
+    for event in events {
+        app.reduce(event, &client).await.unwrap();
+    }
+    let expected = (0..7).map(child).collect::<Vec<_>>();
+    assert_eq!(app.sibling_children(), expected);
+
+    // A resumed chat reads the same order from its transcript.
+    let mut resumed = App::new(root.clone(), vec![root.clone()], vec![], vec![], vec![]);
+    resumed.items = [
+        call("c1", "task"),
+        call("c2", "task"),
+        call("c3", "task"),
+        call("c4", "task"),
+        call("b", "batch"),
+    ]
+    .into_iter()
+    .chain(
+        [
+            ("b:2", 6),
+            ("c4", 3),
+            ("b:0", 4),
+            ("c3", 2),
+            ("b:1", 5),
+            ("c2", 1),
+            ("c1", 0),
+        ]
+        .map(|(call_id, index)| ItemData::TaskLink {
+            call_id: call_id.into(),
+            child_thread_id: child(index),
+        }),
+    )
+    .zip(1..)
+    .map(|(data, sequence)| message_item(sequence, &root, data))
+    .collect();
+    resumed.hydrate_child_links();
+    assert_eq!(resumed.sibling_children(), expected);
+}
+
+/// With agents that start their own, a child's children are not its
+/// siblings.
+#[test]
+fn a_childs_own_agents_are_not_its_siblings() {
+    let (mut app, children) = three_children_fixture();
+    let grandchild = Thread {
+        id: ThreadId(uuid::Uuid::from_u128(1)),
+        title: "Nested".into(),
+        parent_id: Some(children[0].id),
+        ..children[0].clone()
+    };
+    app.threads.push(grandchild.clone());
+    app.children.insert(
+        "toolu_nested".into(),
+        crate::state::ChildTask {
+            child_thread_id: grandchild.id,
+            child_turn_id: None,
+            invoked_turn_id: None,
+            state: "running".into(),
+            tool_calls: 0,
+            last_tool: None,
+            started_at: None,
+            call_sequence: Some(1),
+        },
+    );
+    assert_eq!(
+        app.sibling_children(),
+        children.iter().map(|child| child.id).collect::<Vec<_>>()
+    );
+    assert!(app.lines((100, 30))[0].text().contains("1 of 3"));
+}
+
 #[test]
 fn a_lone_child_keeps_its_short_id_and_its_agent_reads_in_the_language() {
     let (mut app, children) = three_children_fixture();

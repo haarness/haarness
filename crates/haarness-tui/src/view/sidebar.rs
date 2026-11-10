@@ -124,7 +124,7 @@ pub fn sidebar_lines(app: &App, width: usize, height: usize) -> TaggedLines {
     if !visible_children.is_empty() {
         section(app, &mut out, SECTION_TASKS, "agents", |app, out| {
             let mut tasks = app.visible_children();
-            tasks.sort_by_key(|(_, task)| task.sibling_order());
+            tasks.sort_by_key(|(row, task)| task.sibling_order(row));
             for (call_id, task) in tasks {
                 let (marker, color) = task_state_style(&task.state, app.tick, theme);
                 let (title, agent) = app.child_task_identity(call_id, task);
