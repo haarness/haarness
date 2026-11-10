@@ -204,6 +204,7 @@ async fn forward(
     State(gateway): State<Gateway>,
     Path((id, path)): Path<(String, String)>,
     ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+    connection: crate::request_origin::Connection,
     request: Request,
 ) -> Response {
     // Route only the directory API, never another gateway or an arbitrary URL.
@@ -219,6 +220,10 @@ async fn forward(
         Ok(value) => value,
         Err(error) => return failure(error),
     };
+    // The project's server sees this server as the sender: say who sent it the request.
+    let sender = crate::request_origin::sender(&connection, request.headers())
+        .await
+        .header();
     let prefix = format!("/v1/host/workspaces/{id}/");
     let raw_path = request
         .uri()
@@ -250,6 +255,9 @@ async fn forward(
                 return unreachable("bad upstream address");
             };
             handshake.headers_mut().insert("authorization", auth);
+            handshake
+                .headers_mut()
+                .insert(crate::request_origin::SENDER_HEADER, sender.clone());
             match tokio_tungstenite::connect_async(handshake).await {
                 Ok((socket, _)) => break socket,
                 Err(_) if !retried => {
@@ -277,7 +285,8 @@ async fn forward(
         let mut upstream = gateway
             .client
             .request(parts.method.clone(), &url)
-            .bearer_auth(&target.token);
+            .bearer_auth(&target.token)
+            .header(crate::request_origin::SENDER_HEADER, sender.clone());
         for name in [
             "content-type",
             "accept",

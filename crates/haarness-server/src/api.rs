@@ -370,9 +370,13 @@ pub async fn serve_with_access(
     let server_shutdown = shutdown.clone();
     let task = tokio::spawn(async move {
         // Peer addresses let rejected-request log lines say who was turned away.
-        let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        // Each connection's program is found once, as it is accepted.
+        let app = app.into_make_service_with_connect_info::<crate::request_origin::Client>();
         axum::serve(
-            axum::serve::ListenerExt::tap_io(listener, keep_connections_alive),
+            crate::request_origin::Accepting {
+                listener,
+                tap: keep_connections_alive,
+            },
             app,
         )
         .with_graceful_shutdown(server_shutdown.cancelled_owned())
@@ -616,13 +620,15 @@ async fn list_ptys(axum::Extension(ptys): axum::Extension<Arc<PtyManager>>) -> J
 
 async fn create_pty(
     axum::Extension(ptys): axum::Extension<Arc<PtyManager>>,
-    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: HeaderMap,
+    connection: crate::request_origin::Connection,
     Json(request): Json<PtyCreateRequest>,
 ) -> ApiResult<(StatusCode, Json<PtyInfo>)> {
     // What runs in a terminal counts as the person's, so an agent opens none.
-    if crate::request_origin::from_agent(peer(connection)).await {
-        return Err(refused(haarness_core::TERMINAL_REFUSAL));
-    }
+    guard(
+        crate::request_origin::sender(&connection, &headers).await,
+        haarness_core::TERMINAL_REFUSAL,
+    )?;
     let info = ptys.create(request)?;
     Ok((StatusCode::CREATED, Json(info)))
 }
@@ -663,13 +669,15 @@ async fn connect_pty(
     axum::Extension(ptys): axum::Extension<Arc<PtyManager>>,
     Path(id): Path<PtyId>,
     Query(query): Query<PtyConnectQuery>,
-    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: HeaderMap,
+    connection: crate::request_origin::Connection,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
     // Nor types into one.
-    if crate::request_origin::from_agent(peer(connection)).await {
-        return Err(refused(haarness_core::TERMINAL_REFUSAL));
-    }
+    guard(
+        crate::request_origin::sender(&connection, &headers).await,
+        haarness_core::TERMINAL_REFUSAL,
+    )?;
     // Resolve before upgrading so unknown sessions retain the normal JSON 404
     // contract instead of failing opaquely inside an accepted WebSocket.
     let subscription = ptys.subscribe(id, query.cursor)?;
@@ -1733,7 +1741,7 @@ async fn start_turn(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
     headers: HeaderMap,
-    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    connection: crate::request_origin::Connection,
     Json(mut request): Json<StartTurnRequest>,
 ) -> ApiResult<(StatusCode, Json<Turn>)> {
     // A published chat follows its own Auto/Review setting; a remote client
@@ -1744,12 +1752,13 @@ async fn start_turn(
         )
         .into());
     }
-    // Nor can a program that runs for an agent, but for a scheduled run's own turn.
-    if request.auto_approve
-        && crate::request_origin::from_agent(peer(connection)).await
-        && !crate::request_origin::scheduled_run(&state.runtime, id, &request).await
-    {
-        return Err(refused(haarness_core::AUTO_APPROVE_REFUSAL));
+    // Nor can a program that runs for an agent. A scheduled run's runner that
+    // this server started, or that a person's own command started, may.
+    if request.auto_approve {
+        guard(
+            crate::request_origin::sender(&connection, &headers).await,
+            haarness_core::AUTO_APPROVE_REFUSAL,
+        )?;
     }
     // Levels are an open set: a provider can list one this release has never
     // seen, and the runtime fits any level to the levels the model lists.
@@ -1893,38 +1902,41 @@ async fn get_approval_mode(
 async fn set_approval_mode(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
-    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: HeaderMap,
+    connection: crate::request_origin::Connection,
     Json(request): Json<haarness_protocol::SetApprovalModeRequest>,
 ) -> ApiResult<Json<haarness_protocol::ApprovalModeInfo>> {
-    let peer = peer(connection);
+    // Only a person lets agents do more without asking; lowering works from anywhere.
+    if crate::request_origin::raises(&state.runtime, id, request.mode).await? {
+        guard(
+            crate::request_origin::sender(&connection, &headers).await,
+            haarness_core::APPROVALS_RAISE_REFUSAL,
+        )?;
+    }
     // Carried through even when the client goes away meanwhile (a window
-    // reloaded right after the pick): telling who asks takes a moment.
-    tokio::spawn(async move {
-        // Only a person lets agents do more without asking; lowering works from anywhere.
-        if crate::request_origin::raises(&state.runtime, id, request.mode).await?
-            && crate::request_origin::from_agent(peer).await
-        {
-            return Err(refused(haarness_core::APPROVALS_RAISE_REFUSAL));
-        }
-        Ok(Json(state.runtime.set_approval_mode(id, request).await?))
-    })
-    .await
-    .map_err(|error| CoreError::Storage(format!("The approval mode change stopped: {error}")))?
+    // reloaded right after the pick).
+    tokio::spawn(async move { state.runtime.set_approval_mode(id, request).await })
+        .await
+        .map_err(|error| CoreError::Storage(format!("The approval mode change stopped: {error}")))?
+        .map(Json)
+        .map_err(Into::into)
 }
 
-/// The address a request came from, when it came over the network.
-fn peer(
-    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
-) -> Option<std::net::SocketAddr> {
-    connection.map(|axum::Extension(axum::extract::ConnectInfo(peer))| peer)
-}
-
-/// A refusal said as its own sentence, without the category prefix.
-fn refused(message: &str) -> ApiFailure {
-    ApiFailure(
-        CoreError::PermissionDenied(message.into()),
-        Some(message.into()),
-    )
+/// Refuses what would let agents do more when its sender runs for an agent, saying `refusal`, or cannot be found, in
+/// an answer a client may try again.
+fn guard(sender: crate::request_origin::Sender, refusal: &str) -> Result<(), ApiFailure> {
+    use crate::request_origin::Sender;
+    match sender {
+        Sender::Person | Sender::Terminal => Ok(()),
+        Sender::Agent => Err(ApiFailure(
+            CoreError::PermissionDenied(refusal.into()),
+            Some(refusal.into()),
+        )),
+        Sender::Unknown => Err(ApiFailure(
+            CoreError::Conflict(haarness_core::UNKNOWN_SENDER.into()),
+            Some(haarness_core::UNKNOWN_SENDER.into()),
+        )),
+    }
 }
 async fn get_goal(
     State(state): State<ServerState>,
@@ -2873,7 +2885,8 @@ struct ManagementApi;
 async fn manage_resource(
     State(state): State<ServerState>,
     Path(resource): Path<String>,
-    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: HeaderMap,
+    connection: crate::request_origin::Connection,
     Json(mut input): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let registry = state.management.as_ref().ok_or_else(|| {
@@ -2889,8 +2902,23 @@ async fn manage_resource(
         )
         && let Some(object) = input.as_object_mut()
     {
-        let inside = crate::request_origin::from_inside(peer(connection)).await;
+        let inside = crate::request_origin::sender(&connection, &headers)
+            .await
+            .inside();
         object.insert("__insideHaarness".into(), Value::Bool(inside));
+    }
+    // A schedule's runs approve their own requests: only a person sets one up,
+    // changes it, switches it on or starts a run.
+    if resource == "schedules"
+        && matches!(
+            input["action"].as_str(),
+            Some("create" | "update" | "enable" | "run")
+        )
+    {
+        guard(
+            crate::request_origin::sender(&connection, &headers).await,
+            haarness_core::SCHEDULE_REFUSAL,
+        )?;
     }
     Ok(Json(
         registry
@@ -2908,6 +2936,7 @@ async fn cloud_agents(
     manage_resource(
         State(state),
         Path("cloud_agent_manage".into()),
+        HeaderMap::new(),
         None,
         Json(serde_json::to_value(input).expect("Cloud input serializes")),
     )
@@ -2922,6 +2951,7 @@ async fn cloud_workspaces(
     manage_resource(
         State(state),
         Path("cloud_workspace".into()),
+        HeaderMap::new(),
         None,
         Json(serde_json::to_value(input).expect("Cloud input serializes")),
     )
@@ -2936,6 +2966,7 @@ async fn cloud_chats(
     manage_resource(
         State(state),
         Path("cloud_chat".into()),
+        HeaderMap::new(),
         None,
         Json(serde_json::to_value(input).expect("Cloud input serializes")),
     )
@@ -2949,6 +2980,7 @@ async fn cloud_schedules(
     manage_resource(
         State(state),
         Path("cloud_schedule".into()),
+        HeaderMap::new(),
         None,
         Json(serde_json::to_value(input).expect("Cloud input serializes")),
     )
@@ -3335,7 +3367,7 @@ async fn reply_permission(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    connection: crate::request_origin::Connection,
     Json(reply): Json<PermissionReply>,
 ) -> ApiResult<StatusCode> {
     // A published chat's viewers may not let agents into the owner's Chrome or onto the owner's Mac.
@@ -3356,42 +3388,37 @@ async fn reply_permission(
             Some(answer.into()),
         ));
     }
-    let peer = peer(connection);
-    // Carried through even when the client goes away meanwhile: telling who
-    // answers takes a moment.
-    tokio::spawn(async move {
-        // Only a person allows what an agent asked for; a no counts from anywhere.
-        let allows = !matches!(
-            reply.decision,
-            haarness_protocol::PermissionReplyDecision::Reject
-                | haarness_protocol::PermissionReplyDecision::Refuse
-        );
-        if allows && crate::request_origin::from_agent(peer).await {
-            return Err(refused(haarness_core::PERMISSION_ANSWER_REFUSAL));
-        }
-        state.runtime.reply_permission(&id, reply).await?;
-        Ok(StatusCode::NO_CONTENT)
-    })
-    .await
-    .map_err(|error| CoreError::Storage(format!("The answer stopped: {error}")))?
+    // Only a person allows what an agent asked for; a no counts from anywhere.
+    if !matches!(
+        reply.decision,
+        haarness_protocol::PermissionReplyDecision::Reject
+            | haarness_protocol::PermissionReplyDecision::Refuse
+    ) {
+        guard(
+            crate::request_origin::sender(&connection, &headers).await,
+            haarness_core::PERMISSION_ANSWER_REFUSAL,
+        )?;
+    }
+    // Carried through even when the client goes away meanwhile.
+    tokio::spawn(async move { state.runtime.reply_permission(&id, reply).await })
+        .await
+        .map_err(|error| CoreError::Storage(format!("The answer stopped: {error}")))??;
+    Ok(StatusCode::NO_CONTENT)
 }
 async fn reply_question(
     State(state): State<ServerState>,
     Path(id): Path<String>,
-    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: HeaderMap,
+    connection: crate::request_origin::Connection,
     Json(reply): Json<QuestionReply>,
 ) -> ApiResult<StatusCode> {
-    let peer = peer(connection);
-    tokio::spawn(async move {
-        // An agent's questions are for a person, approving a goal's criteria included.
-        if crate::request_origin::from_agent(peer).await {
-            return Err(refused(haarness_core::QUESTION_ANSWER_REFUSAL));
-        }
-        state.runtime.reply_question(&id, reply)?;
-        Ok(StatusCode::NO_CONTENT)
-    })
-    .await
-    .map_err(|error| CoreError::Storage(format!("The answer stopped: {error}")))?
+    // An agent's questions are for a person, approving a goal's criteria included.
+    guard(
+        crate::request_origin::sender(&connection, &headers).await,
+        haarness_core::QUESTION_ANSWER_REFUSAL,
+    )?;
+    state.runtime.reply_question(&id, reply)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 #[derive(Deserialize)]
 struct WaitQuery {

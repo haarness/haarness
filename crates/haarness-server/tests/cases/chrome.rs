@@ -742,9 +742,11 @@ async fn a_published_chat_cannot_answer_chrome_sites() {
         assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN, "{path}");
     }
     assert_eq!(runtime.pending_permissions().len(), 1);
+    // The server runs in this test's own process, which it hears as a request it forwarded: say who sent it.
     let answered = client
         .post(&url)
         .bearer_auth("chrome-token")
+        .header("x-haarness-sender", "person")
         .json(&json!({"decision":"once"}))
         .send()
         .await

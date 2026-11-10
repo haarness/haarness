@@ -173,6 +173,10 @@ impl PtyManager {
         }
         let child = pair.slave.spawn_command(builder).map_err(pty_error)?;
         let pid = child.process_id();
+        // A terminal's shell is the person's: what runs below it is theirs.
+        if let Some(pid) = pid {
+            haarness_core::process_tree::mark_terminal(pid);
+        }
         let killer = child.clone_killer();
         let reader = pair.master.try_clone_reader().map_err(pty_error)?;
         let writer = pair.master.take_writer().map_err(pty_error)?;
@@ -435,6 +439,9 @@ fn spawn_waiter(
         .name(format!("haarness-pty-wait-{}", session.info.lock().id))
         .spawn(move || {
             let _ = child.wait();
+            if let Some(pid) = session.info.lock().pid {
+                haarness_core::process_tree::forget_terminal(pid);
+            }
             let info = {
                 let mut info = session.info.lock();
                 info.status = PtyStatus::Exited;

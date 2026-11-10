@@ -95,7 +95,7 @@ pub fn serve(
         .with_state(front);
     let server_shutdown = shutdown.clone();
     let task = tokio::spawn(async move {
-        let app = app.into_make_service_with_connect_info::<SocketAddr>();
+        let app = app.into_make_service_with_connect_info::<crate::request_origin::Client>();
         axum::serve(listener, app)
             .with_graceful_shutdown(server_shutdown.cancelled_owned())
             .await
@@ -209,8 +209,16 @@ fn forwarded_headers(
 async fn forward(
     State(front): State<Front>,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-    request: Request,
+    connection: crate::request_origin::Connection,
+    mut request: Request,
 ) -> Response {
+    // The project's server sees this front as the sender: say who sent it the request, in place of whatever the
+    // sender said.
+    let sender = crate::request_origin::sender(&connection, request.headers()).await;
+    request.headers_mut().insert(
+        HeaderName::from_static(crate::request_origin::SENDER_HEADER),
+        sender.header(),
+    );
     let admitted = protected(request.uri().path());
     let anonymous = request.extensions().get::<AnonymousAccess>().is_some();
     let path = request.uri().path_and_query().map_or_else(

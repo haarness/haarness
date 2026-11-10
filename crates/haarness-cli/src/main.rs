@@ -3792,6 +3792,17 @@ async fn schedule_command(
     project_config_override: Option<bool>,
     command: ScheduleCommand,
 ) -> Result<()> {
+    // A schedule's runs approve their own requests: only a person sets one
+    // up, changes it or switches it on.
+    if matches!(
+        command,
+        ScheduleCommand::Add(_) | ScheduleCommand::Update(_) | ScheduleCommand::Enable { .. }
+    ) && haarness_core::process_tree::this_process_for_agent()
+    {
+        anyhow::bail!(
+            "Only you can set up a schedule or switch one on: its runs approve their own requests, and this command runs for an agent (in its command, a hook or another program Haarness started). Run it yourself."
+        );
+    }
     let scheduler = Scheduler::discover(std::env::current_exe()?, paths.root.clone())?;
     match command {
         ScheduleCommand::List { json } => {
@@ -10010,9 +10021,12 @@ async fn application_at(
         file_config.formatter.clone().unwrap_or_default(),
     ));
     let scheduler = Scheduler::discover(std::env::current_exe()?, paths.root.clone())?;
-    // A scheduled run's turn approves its own requests; the server tells it
-    // from an agent's by its schedule.
-    haarness_server::request_origin::use_schedules(scheduler.clone());
+    // A run this server starts on request ("Run now") approves its own
+    // requests as the person who asked: note it while it runs.
+    haarness_scheduler::watch_runs(
+        haarness_core::process_tree::mark_helper,
+        haarness_core::process_tree::forget_helper,
+    );
     let browser_global = paths.config_dir().to_path_buf();
     let browser_workspace = workspace.to_path_buf();
     // Both browsers' settings, read live: `browser.policy` for the Haarness
@@ -15801,6 +15815,8 @@ mod tests {
         workspace: &std::path::Path,
     ) -> (haarness_tui::api::ApiClient, haarness_server::ServerHandle) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // The test is the server's own client.
+        haarness_server::request_origin::hear_this_process_as_a_person();
         let server = haarness_server::serve(
             listener,
             "run-test-token",
@@ -22346,6 +22362,8 @@ request_timeout = 0
             true,
         ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // The test is the server's own client.
+        haarness_server::request_origin::hear_this_process_as_a_person();
         let server = haarness_server::serve(
             listener,
             "run-test-token",

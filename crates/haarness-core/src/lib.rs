@@ -107,7 +107,7 @@ pub const CHAT_BUSY: &str = "This chat already has a turn running, started in an
 pub const APPROVALS_RAISE_REFUSAL: &str = "Only you can let agents do more without asking. This change came from a program Haarness started, such as an agent's command or a hook, so the chat's approvals did not change. Switch them in the chat, or run haarness --approvals yourself.";
 
 /// Why the server refuses a turn that approves its own requests from a
-/// program that runs for an agent. A scheduled run's own turn is not refused.
+/// program that runs for an agent. A scheduled run's own runner may start one.
 pub const AUTO_APPROVE_REFUSAL: &str = "Only you can start a turn that approves its own requests. This request came from a program Haarness started, such as an agent's command or a hook, so no turn started. Run haarness --yolo yourself.";
 
 /// Why the server refuses an answer that allows what an agent asked for when
@@ -117,6 +117,16 @@ pub const PERMISSION_ANSWER_REFUSAL: &str = "Only you can allow what an agent as
 /// Why the server refuses an answer to an agent's question from a program
 /// that runs for an agent.
 pub const QUESTION_ANSWER_REFUSAL: &str = "Only you can answer an agent's question. This answer came from a program Haarness started, such as an agent's command or a hook, so the question is still waiting for you.";
+
+/// Why the server refuses to set up, change, switch on or start a schedule for
+/// a program that runs for an agent: a schedule's runs approve their own
+/// requests.
+pub const SCHEDULE_REFUSAL: &str = "Only you can set up or start a schedule: its runs approve their own requests. This request came from a program Haarness started, such as an agent's command or a hook, so nothing changed.";
+
+/// Why the server refuses a request that would let agents do more when the
+/// program on this computer that sent it cannot be found. A client may try
+/// again.
+pub const UNKNOWN_SENDER: &str = "Haarness could not tell which program on this computer sent this request, so nothing changed. Try again.";
 
 /// Why the server refuses to open or connect a terminal for a program that
 /// runs for an agent: what runs in a terminal counts as a person's.

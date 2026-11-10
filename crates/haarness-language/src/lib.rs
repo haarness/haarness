@@ -796,11 +796,15 @@ impl LanguageService {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // In a process group of its own, noted as one Haarness started.
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.to_string()),
         };
+        let _recorded = haarness_core::process_groups::recorded(child.id());
         let stderr = child.stderr.take().map(|mut stderr| {
             tokio::spawn(async move {
                 let mut output = Vec::new();
@@ -985,6 +989,8 @@ struct Client {
     workspace: PathBuf,
     stdin: Mutex<ChildStdin>,
     child: Mutex<Child>,
+    /// The server's process group, noted as one Haarness started while it runs.
+    _recorded: haarness_core::process_groups::Recorded,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     diagnostics: RwLock<HashMap<String, Vec<Diagnostic>>>,
     diagnostic_generations: Mutex<HashMap<String, u64>>,
@@ -1015,6 +1021,9 @@ impl Client {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        // In a process group of its own, noted as one Haarness started.
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command.spawn().map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 format!("{} is not installed", config.command[0])
@@ -1022,6 +1031,7 @@ impl Client {
                 error.to_string()
             }
         })?;
+        let recorded = haarness_core::process_groups::recorded(child.id());
         let stdin = child.stdin.take().ok_or("language server has no stdin")?;
         let stdout = child.stdout.take().ok_or("language server has no stdout")?;
         let client = Arc::new(Self {
@@ -1032,6 +1042,7 @@ impl Client {
             workspace,
             stdin: Mutex::new(stdin),
             child: Mutex::new(child),
+            _recorded: recorded,
             pending: Mutex::new(HashMap::new()),
             diagnostics: RwLock::new(HashMap::new()),
             diagnostic_generations: Mutex::new(HashMap::new()),

@@ -1,5 +1,4 @@
 use std::collections::{HashMap, hash_map::Entry};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -152,8 +151,8 @@ impl AuthState {
             scheme = auth_scheme(headers.get(header::AUTHORIZATION)),
             remote = request
                 .extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|ConnectInfo(address)| tracing::field::display(address)),
+                .get::<ConnectInfo<crate::request_origin::Client>>()
+                .map(|ConnectInfo(client)| tracing::field::display(client.address)),
             user_agent = agent.as_deref(),
             origin = origin.as_deref(),
             fetch_site = site,
@@ -787,7 +786,10 @@ mod access_tests {
                 .uri(path)
                 .header(header::HOST, "127.0.0.1:4096")
                 .header(header::USER_AGENT, agent.as_bytes())
-                .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 50123))));
+                .extension(ConnectInfo(crate::request_origin::Client::known(
+                    std::net::SocketAddr::from(([127, 0, 0, 1], 50123)),
+                    haarness_core::process_tree::Peer::Elsewhere,
+                )));
             if let Some(value) = authorization {
                 request = request.header(header::AUTHORIZATION, value);
             }
