@@ -1429,6 +1429,12 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
     {
         return false;
     }
+    // Z.ai words a limit on how many images a request may carry as a prompt
+    // too long ("prompt too long; exceeded max image count"): leaving images
+    // out answers it (see `is_provider_image_rejection`), compacting cannot.
+    if message.contains("image count") {
+        return false;
+    }
     // Phrasings collected across providers and local servers (after
     // opencode's provider-error list).
     [
@@ -1459,9 +1465,13 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         "input is too long",
         // Ollama: "prompt too long; exceeded max context length by 1520
         // tokens"; Z.ai says it with no more words, or as code 1261,
-        // "Prompt exceeds max length".
+        // "Prompt exceeds max length", or in Chinese, "Prompt 超长".
         "prompt too long",
         "prompt exceeds max length",
+        "prompt 超长",
+        // Gateways that hold each model to an input limit of their own:
+        // "too large for the model's configured input limit".
+        "configured input limit",
         // Amazon Nova on Bedrock: "Input Tokens Exceeded: Number of input
         // tokens exceeds maximum length."
         "number of input tokens exceeds maximum length",
@@ -1513,6 +1523,7 @@ fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> b
         "many-image",
         "too many images",
         "maximum number of images",
+        "image count",
     ]
     .iter()
     .any(|marker| message.contains(marker))
@@ -1750,7 +1761,7 @@ const OVERSIZED_REQUEST: [&str; 8] = [
 fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
     let message = message.to_ascii_lowercase();
     let says = |markers: &[&str]| markers.iter().any(|marker| message.contains(marker));
-    if says(&["too many images", "maximum number of images"]) {
+    if says(&["too many images", "maximum number of images", "image count"]) {
         Some(ImageVolume::Count)
     } else if says(&OVERSIZED_REQUEST) {
         Some(ImageVolume::Bytes)
@@ -21614,9 +21625,13 @@ mod tests {
             "prompt too long; exceeded context length by 12 tokens",
             "Prompt contains 140000 tokens and 0 draft tokens, too large for model with 131072 maximum context length",
             r#"HTTP 400: {"error":{"message":"model_context_window_exceeded","type":"invalid_request_error"}}"#,
-            // Z.ai's code 1261, and the same words without the code.
+            // Z.ai's code 1261, and the same words without the code or in
+            // Chinese.
             "HTTP 400 Bad Request: [1261] Prompt exceeds max length",
             "Prompt too long",
+            "HTTP 400 Bad Request: [1261] Prompt 超长",
+            // A gateway's own input limit for the model.
+            "HTTP 400 Bad Request: this request (212000 tokens) is too large for the model's configured input limit",
             // Amazon Nova on Bedrock.
             "HTTP 400 Bad Request: [ValidationException] The model returned the following errors: Input Tokens Exceeded: Number of input tokens exceeds maximum length. Please update the input to try again.",
             // DeepInfra.
@@ -21629,6 +21644,7 @@ mod tests {
         for message in [
             // A limit on images, not on the context: compacting cannot help.
             "Image too large for model with 20 maximum images",
+            "HTTP 400 Bad Request: prompt too long; exceeded max image count",
             "Rate limit reached for gpt-5.5: too many tokens per minute",
             "[upstream_429] RESOURCE_EXHAUSTED: quota exceeded",
             // A plan's tokens a minute: a shorter chat would not get through.
@@ -22476,6 +22492,8 @@ mod tests {
             "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes.",
             r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.1.image.source.base64: image exceeds 5 MB maximum"}}"#,
             r#"HTTP 400 Bad Request: {"error":{"code":400,"message":"Request payload size exceeds the limit: 20971520 bytes.","status":"INVALID_ARGUMENT"}}"#,
+            // Z.ai, for how many images the request carries.
+            "HTTP 400 Bad Request: prompt too long; exceeded max image count",
         ] {
             assert!(refused(message), "{message}");
         }
@@ -22733,6 +22751,17 @@ mod tests {
         let expected = (1..=11)
             .map(|index| format!("old-{index:02}.png"))
             .collect::<Vec<_>>();
+        assert_eq!(names, expected);
+        // Z.ai says the same as a prompt too long.
+        let (names, choice) = left_out(
+            "HTTP 400 Bad Request: prompt too long; exceeded max image count",
+            &messages,
+            &[],
+        );
+        assert_eq!(
+            choice,
+            super::RefusedImages::Oldest(super::ImageVolume::Count)
+        );
         assert_eq!(names, expected);
 
         // A request too large in bytes loses its large old image first.
