@@ -110,7 +110,7 @@ import { fetchRemoteImage } from "./remote-image";
 import { createVoiceInput, launchVoice } from "./voice";
 import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
-import { createNotifications } from "./notifications";
+import { createNotifications, notificationPlace } from "./notifications";
 import { contextMenuItems } from "./context-menu";
 import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
 import { quietClosedSocketReads } from "./closed-socket-read";
@@ -412,10 +412,11 @@ function watchNotifications(id: string, owner: number) {
         }
         cursor = event.eventId;
         retry = 0;
+        const view = connections.get(id)?.view ?? item.view;
         void notifications
           .receive(
             id,
-            projectLabel(connections.get(id)?.view ?? item.view),
+            notificationPlace(projectLabel(view), view, data().servers),
             watch.owner,
             event,
             (thread) => client.getThread(thread),

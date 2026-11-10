@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import {
   COMPLETION_GRACE_MS,
   createNotifications,
+  notificationPlace,
 } from "../src/main/notifications";
 import type { EventEnvelope, Thread } from "@haarness/sdk";
 
@@ -406,4 +407,46 @@ test("titles and stand-in chat names speak the interface language", async () => 
   await tick();
   await missing;
   assert.equal(shown[1].body, "«Chat conversa» · Renamed project");
+});
+
+test("a banner names the computer a project runs on, as the server list names it, and nothing more on this computer", async () => {
+  const servers = [
+    { id: "host:7d0c", label: "Studio", host: "7d0c" },
+    { id: "remote:https://build.example.test:8443", label: "  Build\n box ", url: "https://build.example.test:8443" },
+  ];
+  const local = { id: "local:/Users/sam/api", remote: false };
+  assert.equal(notificationPlace("api", local, servers), "api");
+  // Another of your computers, through Haarness Cloud.
+  const host = { id: "host:7d0c:/Users/sam/api", remote: true, remoteHost: "7d0c", cloudApiUrl: "https://haarness.ai" };
+  assert.equal(notificationPlace("api", host, servers), "api · Studio");
+  // Renamed in Settings → Servers: the next banner says so.
+  assert.equal(notificationPlace("api", host, [{ ...servers[0], label: "Mac mini" }]), "api · Mac mini");
+  // A server added by its address, its name on one line.
+  const added = {
+    id: "remote:https://build.example.test:8443/workspaces/w1",
+    remote: true,
+    url: "https://build.example.test:8443",
+  };
+  assert.equal(notificationPlace("web", added, servers), "web · Build box");
+  // One the list no longer holds goes by its host name; a computer with no name, by none.
+  assert.equal(notificationPlace("web", added, []), "web · build.example.test");
+  assert.equal(notificationPlace("api", host, []), "api");
+  // A Haarness Cloud workspace is not a computer of yours.
+  const cloud = {
+    id: "cloud:w2",
+    remote: true,
+    url: "https://gateway.example.test",
+    cloudWorkspace: "w2",
+    cloudAccount: "a1",
+    cloudApiUrl: "https://haarness.ai",
+  };
+  assert.equal(notificationPlace("Research", cloud, servers), "Research");
+
+  const f = fixture();
+  const pending = f.center.receive("project-b", notificationPlace("api", host, servers), 7, event(), async () =>
+    ({ title: "Fix 日本", id: "conversation" }) as Thread,
+  );
+  await tick();
+  await pending;
+  assert.equal(f.shown[0].body, "Fix 日本 · api · Studio");
 });

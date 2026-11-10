@@ -1,6 +1,31 @@
 import type { EventEnvelope, Thread } from "@haarness/sdk";
-import type { NotificationTarget } from "../shared";
+import type { Connection, NotificationTarget, SavedServer } from "../shared";
 import { untitledKind } from "../chat-titles";
+import { serverKey } from "../servers";
+
+/**
+ * Where a banner says a chat runs: its project, joined by the computer's name
+ * when the project is on another computer, as the phones' alerts name it
+ * ("api · Studio"). That name is the one the server list gives it (renamed
+ * there, it follows). Projects on this computer and Haarness Cloud workspaces
+ * name the project alone.
+ */
+export function notificationPlace(
+  project: string,
+  location: Pick<Connection, "id" | "remote" | "url" | "remoteHost" | "cloudAccount" | "cloudApiUrl" | "cloudWorkspace">,
+  servers: readonly SavedServer[],
+) {
+  if (!location.remote || location.cloudAccount || location.cloudWorkspace) return project;
+  const key = serverKey(location);
+  let computer = servers.find((server) => server.id === key)?.label;
+  if (!computer && !location.remoteHost && location.url)
+    try {
+      computer = new URL(location.url).hostname;
+    } catch {}
+  // One line, however the name was typed.
+  computer = computer?.replace(/\s+/g, " ").trim();
+  return computer ? `${project} · ${computer}` : project;
+}
 
 export interface NativeNotification {
   on(event: "click" | "close" | "failed", callback: () => void): unknown;
