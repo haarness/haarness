@@ -342,6 +342,8 @@ On an approval card, `y` (Allow once) and `n` (Reject) light their chip at once 
 
 A terminal under 40 columns or 12 rows drops the masthead, the sidebar and the band's segments but keeps the newest of the conversation above the prompt (PgUp scrolls it); an approval card there shrinks to one line with its answers and keys.
 
+A child agent opened from its row shows its own conversation under a header naming the one it came from; **↑ parent** goes back. When that conversation started several agents, ← and → (or **← previous** and **next →**) step through them in the order the conversation started them, which is the order of their rows there, in the sidebar and in `/tasks`, wrapping at either end; the header names the agent and its place among them (`explore · 2 of 3`), and a lone agent shows its short id instead.
+
 Option (Alt) with an arrow, Home, End or Page Up/Down is one key in every terminal. macOS Terminal, and iTerm2's Terminal.app preset, send Option+Up as Escape followed by the arrow (`ESC ESC [ A`); tmux usually re-encodes that as `ESC [1;3A` but can pass it on as it is. The TUI reads it as Alt+Up whenever it arrives in one read, several in a row included, never as Escape (which would arm an interrupt or reject a focused approval) and typed text. So an Escape followed by an arrow within the same read is taken as Alt with that arrow.
 
 The numeric keypad types and sends as the main keys do, also when a program run before the TUI left the terminal's keypad in application mode: the TUI puts it back in numeric mode when it takes the screen. Inside tmux, which sends the keypad's Enter as a line feed, that Enter starts a new line, as Ctrl+J does.

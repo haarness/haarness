@@ -4424,7 +4424,7 @@ impl App {
             };
             return;
         }
-        tasks.sort_by(|a, b| a.0.cmp(b.0));
+        tasks.sort_by_key(|(_, task)| task.sibling_order());
         let mut entries = Vec::with_capacity(tasks.len());
         for (call_id, task) in tasks {
             let (title, agent) = self.child_task_identity(call_id, task);
@@ -4625,21 +4625,38 @@ impl App {
         Ok(())
     }
 
+    /// The child agents ← and → step through, in the order the conversation
+    /// started them (its calls' ids are random), each once however many
+    /// calls continued it.
+    pub(crate) fn sibling_children(&self) -> Vec<haarness_protocol::ThreadId> {
+        let mut first = std::collections::HashMap::new();
+        for task in self.children.values() {
+            let order = task.sibling_order();
+            first
+                .entry(task.child_thread_id)
+                .and_modify(|known: &mut (bool, Option<u64>, uuid::Uuid)| {
+                    *known = (*known).min(order)
+                })
+                .or_insert(order);
+        }
+        let mut siblings = first.into_iter().collect::<Vec<_>>();
+        siblings.sort_by_key(|(_, order)| *order);
+        siblings
+            .into_iter()
+            .map(|(thread_id, _)| thread_id)
+            .collect()
+    }
+
     /// Move between child-agent threads without growing or losing the parent
     /// breadcrumb stack.
     pub async fn cycle_child(&mut self, direction: isize, client: &ApiClient) -> Result<()> {
         if self.parent_stack.is_empty() || self.children.is_empty() {
             return Ok(());
         }
-        let mut siblings: Vec<_> = self
-            .children
-            .iter()
-            .map(|(call_id, task)| (call_id.clone(), task.child_thread_id))
-            .collect();
-        siblings.sort_by(|left, right| left.0.cmp(&right.0));
+        let siblings = self.sibling_children();
         let Some(current) = siblings
             .iter()
-            .position(|(_, thread_id)| *thread_id == self.thread.id)
+            .position(|thread_id| *thread_id == self.thread.id)
         else {
             return Ok(());
         };
@@ -4651,7 +4668,7 @@ impl App {
         if next == current {
             return Ok(());
         }
-        let thread_id = siblings[next].1;
+        let thread_id = siblings[next];
         if !self.threads.iter().any(|thread| thread.id == thread_id) {
             self.refresh_threads(client).await?;
         }

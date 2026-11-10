@@ -115,9 +115,9 @@ fn header_rows(app: &App, width: usize) -> (Vec<Line>, Vec<frame::HitRegion>) {
         return (Vec::new(), Vec::new());
     };
     let theme = &app.theme;
-    let sibling_navigation = has_navigable_siblings(app);
+    let position = sibling_position(app);
     let mut controls = vec![(" ↑ parent ", frame::HitTarget::ChildParent)];
-    if sibling_navigation {
+    if position.is_some() {
         controls.extend([
             (" ← previous ", frame::HitTarget::ChildPrevious),
             (" next → ", frame::HitTarget::ChildNext),
@@ -135,8 +135,27 @@ fn header_rows(app: &App, width: usize) -> (Vec<Line>, Vec<frame::HitRegion>) {
     };
     // Keep the child discriminator visible even when a long parent/task path
     // is truncated. Sibling agents commonly share the same generated title;
-    // hiding the id made a successful Previous/Next click look like a no-op.
-    let identity = format!("  #{}", short_id(&app.thread.id.to_string()));
+    // hiding it made a successful Previous/Next click look like a no-op.
+    // Among siblings that is the agent and its place in ← → order, else the
+    // short id.
+    let identity = match position {
+        Some((index, total)) => {
+            let agent = app
+                .agents
+                .iter()
+                .find(|agent| agent.id == app.thread.agent)
+                .map_or(app.thread.agent.as_str(), |agent| agent.name.as_str());
+            let place = app
+                .language
+                .text("{index} of {total}")
+                .replace("{index}", &index.to_string())
+                .replace("{total}", &total.to_string());
+            // A long custom agent name gives way before the chat's title.
+            let agent = title_line(agent, (breadcrumb_width / 4).min(24));
+            format!("  {agent} · {place}")
+        }
+        None => format!("  #{}", short_id(&app.thread.id.to_string())),
+    };
     let lead = "  ";
     let crumb = format!("{} › ", title_line(&parent.title, 24));
     let path_width = breadcrumb_width.saturating_sub(lead.width() + identity.width());
@@ -195,18 +214,14 @@ fn header_rows(app: &App, width: usize) -> (Vec<Line>, Vec<frame::HitRegion>) {
     (lines, hits)
 }
 
-/// Whether Left/Right currently have a real child-session destination. Both
-/// the clickable header and keyboard-hint footer use this so they never
-/// advertise sibling navigation for a lone or stale child thread.
-fn has_navigable_siblings(app: &App) -> bool {
-    let mut sibling_ids = app
-        .children
-        .values()
-        .map(|task| task.child_thread_id)
-        .collect::<Vec<_>>();
-    sibling_ids.sort_by_key(ToString::to_string);
-    sibling_ids.dedup();
-    sibling_ids.len() > 1 && sibling_ids.contains(&app.thread.id)
+/// The open child's place among its siblings and how many there are, in the
+/// order ← and → step through them, when Left/Right have a real destination:
+/// never for a lone or stale child thread, so the header does not advertise
+/// sibling navigation that goes nowhere.
+fn sibling_position(app: &App) -> Option<(usize, usize)> {
+    let siblings = app.sibling_children();
+    let index = siblings.iter().position(|id| *id == app.thread.id)?;
+    (siblings.len() > 1).then_some((index + 1, siblings.len()))
 }
 
 impl App {

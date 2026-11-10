@@ -7699,6 +7699,7 @@ fn completed_child_elapsed_time_stops_rendering() {
         tool_calls: 2,
         last_tool: Some("read".into()),
         started_at: Some(started_at),
+        call_sequence: None,
     };
     assert!(task.elapsed_seconds().is_some());
     task.state = "done".into();
@@ -13120,6 +13121,7 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
             tool_calls: 1,
             last_tool: Some("read".into()),
             started_at: Some(Utc::now()),
+            call_sequence: None,
         },
     );
     let client = offline_client();
@@ -13299,6 +13301,7 @@ fn sidebar_renders_on_wide_terminals_and_collapses_on_narrow() {
             tool_calls: 3,
             last_tool: Some("grep".into()),
             started_at: Some(Utc::now()),
+            call_sequence: None,
         },
     );
     let wide: String = app
@@ -15888,6 +15891,7 @@ fn child_navigation_fixture() -> (App, Thread, Thread, Thread) {
                 tool_calls: 1,
                 last_tool: Some("read".into()),
                 started_at: Some(Utc::now()),
+                call_sequence: None,
             },
         );
     }
@@ -15975,11 +15979,11 @@ async fn clicking_child_header_navigates_to_a_sibling_and_back_to_the_parent() {
 
     let lines = app.lines((100, 30));
     let first_header = lines[0].text();
-    let first_id = first.id.to_string();
     assert!(
-        first_header.contains(crate::view::span::short_id(&first_id)),
+        first_header.contains("build · 1 of 2"),
         "a truncated breadcrumb must retain the current child's discriminator: {first_header}"
     );
+    assert!(!first_header.contains(crate::view::span::short_id(&first.id.to_string())));
     let next = app
         .hit_rows
         .borrow()
@@ -16020,9 +16024,8 @@ async fn clicking_child_header_navigates_to_a_sibling_and_back_to_the_parent() {
 
     let lines = app.lines((100, 30));
     let second_header = lines[0].text();
-    let second_id = second.id.to_string();
     assert!(
-        second_header.contains(crate::view::span::short_id(&second_id)),
+        second_header.contains("build · 2 of 2"),
         "the sibling click must expose the new child's discriminator: {second_header}"
     );
     assert_ne!(
@@ -16063,6 +16066,199 @@ async fn clicking_child_header_navigates_to_a_sibling_and_back_to_the_parent() {
             .is_some_and(|request| request.contains(&format!("/{}/items", root.id))),
         "parent click loaded the wrong thread: {requests:?}"
     );
+}
+
+/// Three agents one reply started, read from the parent's transcript as a
+/// resumed chat reads it: their calls' random ids sort the other way round,
+/// the server created their threads last call first (as it does for calls
+/// that run together), and a later call continued the first agent.
+fn three_children_fixture() -> (App, Vec<Thread>) {
+    let (mut app, root, first, _) = child_navigation_fixture();
+    let mut children = Vec::new();
+    for (index, title) in ["Map the repo", "Read the tests", "Check the docs"]
+        .into_iter()
+        .enumerate()
+    {
+        children.push(Thread {
+            id: ThreadId(uuid::Uuid::from_u128(
+                0x0190_0000_0000_7000_8000_0000_0000_0003 - index as u128,
+            )),
+            title: title.into(),
+            agent: "explore".into(),
+            ..first.clone()
+        });
+    }
+    let mut items = Vec::new();
+    for (call_id, child) in [
+        ("toolu_zz", &children[0]),
+        ("toolu_mm", &children[1]),
+        ("toolu_aa", &children[2]),
+    ] {
+        items.push(ItemData::ToolCall {
+            call_id: call_id.into(),
+            name: "task".into(),
+            arguments: serde_json::json!({"prompt": child.title, "agent": "explore"}),
+            provider_metadata: serde_json::Value::Null,
+        });
+    }
+    for (call_id, child) in [
+        ("toolu_aa", &children[2]),
+        ("toolu_mm", &children[1]),
+        ("toolu_zz", &children[0]),
+    ] {
+        items.push(ItemData::TaskLink {
+            call_id: call_id.into(),
+            child_thread_id: child.id,
+        });
+    }
+    items.push(ItemData::ToolCall {
+        call_id: "toolu_ab".into(),
+        name: "task".into(),
+        arguments: serde_json::json!({"prompt": "And the benches", "task_id": children[0].id}),
+        provider_metadata: serde_json::Value::Null,
+    });
+    items.push(ItemData::TaskLink {
+        call_id: "toolu_ab".into(),
+        child_thread_id: children[0].id,
+    });
+    app.thread = root.clone();
+    app.parent_stack.clear();
+    app.children.clear();
+    app.items = items
+        .into_iter()
+        .zip(1..)
+        .map(|(data, sequence)| message_item(sequence, &root, data))
+        .collect();
+    app.hydrate_child_links();
+    app.threads = std::iter::once(root.clone())
+        .chain(children.iter().cloned())
+        .collect();
+    app.thread = children[0].clone();
+    app.items.clear();
+    app.parent_stack.push(root);
+    (app, children)
+}
+
+#[tokio::test]
+async fn left_and_right_step_through_child_agents_in_the_order_they_started() {
+    let (mut app, children) = three_children_fixture();
+    app.agents.push(haarness_protocol::AgentProfile {
+        id: "explore".into(),
+        name: "Explore".into(),
+        description: "Read-only search".into(),
+        hidden: false,
+        max_subagents: 0,
+        mode: Some("subagent".into()),
+        model: None,
+    });
+    let header = |app: &App| app.lines((100, 30))[0].text();
+    assert!(
+        header(&app).contains("Explore · 1 of 3"),
+        "{}",
+        header(&app)
+    );
+    // Each child once, the one continued by a second call included.
+    assert_eq!(
+        app.sibling_children(),
+        children.iter().map(|child| child.id).collect::<Vec<_>>()
+    );
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut visited = Vec::new();
+    for _ in 0..3 {
+        let (client, _) = navigation_client().await;
+        crate::input::handle_key(&mut app, key(KeyCode::Right), &client)
+            .await
+            .unwrap();
+        visited.push((app.thread.id, header(&app)));
+    }
+    assert_eq!(
+        visited.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [children[1].id, children[2].id, children[0].id]
+    );
+    assert!(
+        visited[0].1.contains("Explore · 2 of 3"),
+        "{}",
+        visited[0].1
+    );
+    assert!(
+        visited[1].1.contains("Explore · 3 of 3"),
+        "{}",
+        visited[1].1
+    );
+    assert!(
+        visited[2].1.contains("Explore · 1 of 3"),
+        "{}",
+        visited[2].1
+    );
+
+    // ← from the first wraps round to the last.
+    let (client, _) = navigation_client().await;
+    crate::input::handle_key(&mut app, key(KeyCode::Left), &client)
+        .await
+        .unwrap();
+    assert_eq!(app.thread.id, children[2].id);
+    assert_eq!(app.parent_stack.len(), 1);
+
+    // The sidebar and /tasks list them in that order too.
+    let sidebar = app
+        .lines((140, 30))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let agents = &sidebar[sidebar.find("agents").expect("agents section")..];
+    let rows = ["Map the repo", "Read the tests", "Check the docs"].map(|title| {
+        agents
+            .find(title)
+            .unwrap_or_else(|| panic!("{title}: {sidebar}"))
+    });
+    assert!(rows[0] < rows[1] && rows[1] < rows[2], "{sidebar}");
+    app.open_tasks_overlay();
+    let crate::state::Overlay::Options { entries, .. } = &app.overlay else {
+        panic!("tasks overlay");
+    };
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.label.as_str())
+            .collect::<Vec<_>>(),
+        ["Map the repo", "Read the tests", "Check the docs"]
+    );
+}
+
+#[test]
+fn a_lone_child_keeps_its_short_id_and_its_agent_reads_in_the_language() {
+    let (mut app, children) = three_children_fixture();
+    app.language = crate::locale::Language::German;
+    assert!(app.lines((100, 30))[0].text().contains("explore · 1 von 3"));
+    app.children
+        .retain(|_, task| task.child_thread_id == children[0].id);
+    let header = app.lines((100, 30))[0].text();
+    assert!(
+        header.contains(&format!(
+            "#{}",
+            crate::view::span::short_id(&children[0].id.to_string())
+        )),
+        "{header}"
+    );
+    assert!(!header.contains("1 von 1"), "{header}");
+}
+
+#[test]
+fn a_long_agent_name_leaves_the_childs_place_in_view() {
+    let (mut app, _) = three_children_fixture();
+    app.thread.agent = "documentation-and-release-notes-reviewer".into();
+    for width in [40_u32, 100] {
+        let lines = app.lines((width, 12));
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.width() <= usize::try_from(width).unwrap()),
+            "{width}"
+        );
+        assert!(lines[0].text().contains(" · 1 of 3"), "{}", lines[0].text());
+    }
 }
 
 #[test]
@@ -18065,6 +18261,7 @@ async fn opening_a_foreign_workflow_session_uses_its_launching_parent() {
             tool_calls: 1,
             last_tool: Some("grep".into()),
             started_at: Some(Utc::now()),
+            call_sequence: None,
         },
     );
     let (client, server) = navigation_client().await;
@@ -23864,6 +24061,7 @@ fn report_wording_is_precise() {
             tool_calls: 0,
             last_tool: None,
             started_at: None,
+            call_sequence: None,
         },
     );
     app.children.insert(call, task);
