@@ -19,6 +19,7 @@ import {
   historyCommands,
 } from "./conversation-controls";
 import { retainedItems, unrestoredFiles } from "./conversation-history";
+import { hookNote } from "./hook-note";
 import { UnrestoredFiles } from "./UnrestoredFiles";
 import { PromptContextControls, pasteLabel } from "./PromptContext";
 import {
@@ -1362,7 +1363,8 @@ export function Session() {
           // A command's checkpoints show on its call's row.
           "command_state",
         ].includes(item.data.type) &&
-        !(item.data.type === "user_message" && item.data.synthetic) &&
+        // A hook's message shows as its note; the runtime's others not at all.
+        !(item.data.type === "user_message" && item.data.synthetic && !item.data.hook) &&
         !(item.data.type === "reasoning" && state.preferences.thinking === "hide") &&
         item.data.type !== "tool_result" &&
         !(
@@ -3365,9 +3367,10 @@ function Message(props: {
 }) {
   const app = useApp();
   const content = () => props.item?.data;
+  const note = () => hookNote(content());
   const kind = () => {
     const type = content().type;
-    return type === "user_message"
+    return type === "user_message" && !note()
       ? "user"
       : type === "reasoning"
         ? // A compact thought is a step on the rail, like a tool.
@@ -3457,6 +3460,16 @@ function Message(props: {
         <Switch>
           <Match when={props.task}>
             <AgentTask task={props.task!} />
+          </Match>
+          <Match when={note()}>
+            {(hook) => (
+              <div class="activity-note hook-note" title={hook().text}>
+                <Icon name="refresh" size="xs" />
+                <span>{t("{event} hook", { event: hook().event })}</span>
+                <span aria-hidden="true">·</span>
+                <span class="hook-note-text">{hook().text}</span>
+              </div>
+            )}
           </Match>
           <Match when={content().type === "user_message"}>
             <div class="bubble">
