@@ -1,6 +1,7 @@
 // A small Mac app for the live computer use test (scripts/test-computer-use-live.py): a counter button, a name field,
-// a password field, a slider, a scrolling list, a canvas that counts clicks, a notes text view, a button that brings the
-// app forward and a Submit button that Return presses; its Lab menu has Bump (Command-B, adds ten). After every change
+// a password field, a slider, a scrolling list, a canvas that counts clicks, a notes text view, a field labelled like a
+// code editor's terminal panel, a button that brings the app forward and a Submit button that Return presses; its Lab
+// menu has Bump (Command-B, adds ten) and its Edit menu Paste, which in the terminal field only counts. After every change
 // it writes its state as JSON to the file named by its first argument, so the test checks what the agent's actions
 // did.
 //
@@ -159,13 +160,39 @@ final class Canvas: NSView {
     }
 }
 
-final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextViewDelegate {
+/// The editor of the field labelled as a terminal: Paste only counts, so a Paste that got through never reads the
+/// person's clipboard into the test.
+final class CountingEditor: NSTextView {
+    var pasted: () -> Void = {}
+
+    override func paste(_ sender: Any?) {
+        pasted()
+    }
+
+    override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.action == #selector(paste(_:)) ? true : super.validateMenuItem(item)
+    }
+}
+
+final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextViewDelegate, NSWindowDelegate {
     var window: NSWindow!
     var count = 0
     var submitted = false
     var forwardPresses = 0
     var keys: [String] = []
     var pointer: [String] = []
+    var pastes = 0
+    // A field labelled like a code editor's terminal panel, whose Paste must be refused.
+    let terminal = NSTextField(string: "")
+    lazy var terminalEditor: CountingEditor = {
+        let editor = CountingEditor()
+        editor.isFieldEditor = true
+        editor.pasted = { [weak self] in
+            self?.pastes += 1
+            self?.save()
+        }
+        return editor
+    }()
     let counter = NSTextField(labelWithString: "Count: 0")
     let name = NSTextField(string: "")
     let password = NSSecureTextField(string: "")
@@ -178,7 +205,7 @@ final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextVie
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 680), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Haarness Lab"
         window.isRestorable = false
         window.center()
@@ -217,12 +244,15 @@ final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextVie
         notesScroll.setAccessibilityLabel("Notes area")
         let row = NSStackView(views: [count, forward])
         row.orientation = .horizontal
-        let stack = NSStackView(views: [counter, row, name, password, slider, scroll, canvasLabel, canvas, notesScroll, submit])
+        terminal.setAccessibilityLabel("Terminal 1, zsh")
+        terminal.placeholderString = "Terminal"
+        window.delegate = self
+        let stack = NSStackView(views: [counter, row, name, password, slider, scroll, canvasLabel, canvas, notesScroll, terminal, submit])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        for view in [name, password, slider, scroll, canvas, notesScroll] as [NSView] {
+        for view in [name, password, slider, scroll, canvas, notesScroll, terminal] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             view.widthAnchor.constraint(equalToConstant: 300).isActive = true
         }
@@ -259,12 +289,21 @@ final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextVie
         let appMenu = NSMenu(title: "Haarness Lab")
         appItem.submenu = appMenu
         main.addItem(appItem)
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editItem.submenu = editMenu
+        main.addItem(editItem)
         let labItem = NSMenuItem()
         let labMenu = NSMenu(title: "Lab")
         labMenu.addItem(NSMenuItem(title: "Bump", action: #selector(bumpPressed), keyEquivalent: "b"))
         labItem.submenu = labMenu
         main.addItem(labItem)
         NSApp.mainMenu = main
+    }
+
+    func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
+        (client as AnyObject?) === terminal ? terminalEditor : nil
     }
 
     @objc func countPressed() {
@@ -313,6 +352,7 @@ final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextVie
             "forwardPresses": forwardPresses,
             "active": NSApp.isActive,
             "pointer": pointer,
+            "pastes": pastes,
             "keyWindow": window.isKeyWindow,
         ]
         if let data = try? JSONSerialization.data(withJSONObject: state) {

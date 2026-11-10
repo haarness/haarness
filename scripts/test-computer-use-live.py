@@ -771,8 +771,14 @@ try:
                                 text=True, timeout=60)
         return result.stdout.strip() if not select else result.returncode == 0
 
+    def settings_title():
+        """The title of System Settings' window, which names the pane it shows."""
+        windows = direct.ok("snapshot", bundle=SETTINGS, image=False).get("windows", [])
+        return next((window.get("title") for window in windows if window.get("bundle") == SETTINGS and window.get("title")), "")
+
     settings_running = subprocess.run(["pgrep", "-x", "System Settings"], capture_output=True).returncode == 0
     earlier_pane = settings_pane() if settings_running else ""
+    earlier_title = settings_title() if earlier_pane else ""
     if settings_running and not earlier_pane:
         print("SKIP a look names the Privacy & Security pane: System Settings is open on a pane this test could not "
               "read back, so it is left alone", flush=True)
@@ -798,7 +804,8 @@ try:
         direct = fresh_direct()
         if settings_running:
             assert settings_pane(earlier_pane), "could not select " + earlier_pane + " again"
-            until(lambda: settings_pane() == earlier_pane, "System Settings shows the person's pane again", seconds=10)
+            until(lambda: settings_pane() == earlier_pane and settings_title() == earlier_title,
+                  "System Settings shows the person's pane again", seconds=10)
         else:
             direct.call("quit", bundle=SETTINGS)
         direct.ok("activate", bundle=PERSON)
@@ -829,6 +836,35 @@ try:
     assert reply["via"] == "pointer" and reply["background"] is False, reply
     until(lambda: state().get("count") == count + 10, "Command-B reached the lab in front")
     check("a Command-letter shortcut works in the app in front")
+
+    # Paste into a terminal an app hosts (a field labelled as a code editor's terminal panel) is refused, from the Edit
+    # menu and from the field's own menu, also while the open menu holds the keyboard focus. The lab's Paste there only
+    # counts, so nothing is read from the clipboard.
+    direct.look()
+    terminal = re.search(r'@e(\d+) \[text-field\][^\n]*description="Terminal 1, zsh"', direct.look()["outline"])
+    assert terminal, "no terminal field"
+    direct.ok("click", ref=int(terminal.group(1)), expect=LAB)
+    bar = direct.ok("snapshot", bundle=LAB, menuBar=True)["outline"]
+    edit = re.search(r'@e(\d+) \[menu-bar-item\] "Edit"', bar)
+    assert edit, bar[-1500:]
+    direct.call("click", ref=int(edit.group(1)), expect=LAB, seconds=30)
+    opened = direct.ok("snapshot", bundle=LAB)["outline"]
+    paste = re.search(r'@e(\d+) \[menu-item\] "Paste"', opened)
+    assert paste, opened[-1500:]
+    refused = direct.call("click", ref=int(paste.group(1)), expect=LAB)
+    assert not refused["ok"] and refused["code"] == "terminal", refused
+    # The menu is closed as the person would close it: keys into a terminal's app are refused while its field has focus.
+    subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--press-escape"], check=True)
+    direct.ok("click", ref=int(terminal.group(1)), expect=LAB, button="right")
+    opened = direct.ok("snapshot", bundle=LAB)["outline"]
+    paste = re.search(r'@e(\d+) \[menu-item\] "Paste"', opened)
+    assert paste, opened[-1500:]
+    refused = direct.call("click", ref=int(paste.group(1)), expect=LAB)
+    assert not refused["ok"] and refused["code"] == "terminal", refused
+    # The menu is closed as the person would close it: keys into a terminal's app are refused while its field has focus.
+    subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--press-escape"], check=True)
+    assert state().get("pastes") == 0, state()
+    check("Paste into a terminal field is refused from the Edit menu and from the field's own menu")
     print(f"PASS {len(checks)} live computer use checks", flush=True)
 finally:
     if direct:
