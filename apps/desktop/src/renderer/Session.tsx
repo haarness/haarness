@@ -104,7 +104,7 @@ import { barWords, computerApproval, isComputerPermission, pausedChatIn, pausedH
 import "./computer-use.css";
 import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import type { FileContent } from "../shared";
-import { isTextEntry } from "./text-entry";
+import { composing, isTextEntry } from "./text-entry";
 import { selection as chatSelection } from "./sidebar-selection";
 import { Markdown } from "./Markdown";
 import { createReplySelection } from "./reply-selection";
@@ -1158,7 +1158,7 @@ export function Session() {
       ) {
         event.preventDefault();
         openFind();
-      } else if (event.key === "Escape" && findOpen()) {
+      } else if (event.key === "Escape" && findOpen() && !composing(event)) {
         event.preventDefault();
         closeFind();
       }
@@ -4374,8 +4374,6 @@ function cardKeyboard(dock: () => HTMLElement | undefined) {
     });
   };
 }
-/** Enter that confirms an input method's composition belongs to the input method. */
-const composing = (event: KeyboardEvent) => event.isComposing || event.keyCode === 229;
 
 function Question(props: { question: T.PendingQuestionInfo }) {
   const app = useApp();

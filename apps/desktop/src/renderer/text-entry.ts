@@ -30,3 +30,11 @@ export function isTextEntry(element: unknown): boolean {
   if (field.tagName === "TEXTAREA") return true;
   return field.tagName === "INPUT" && !notText.has(field.type ?? "text");
 }
+
+/** Whether a key belongs to an input method's composition rather than to the
+ * page: Escape that cancels a candidate, Enter that confirms one. Chromium
+ * reports the key that ends a composition with keyCode 229, sometimes after
+ * `isComposing` has already gone false. */
+export function composing(event: Pick<KeyboardEvent, "isComposing" | "keyCode">) {
+  return event.isComposing || event.keyCode === 229;
+}

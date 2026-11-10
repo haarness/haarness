@@ -6,6 +6,7 @@ import { chatTitle } from "./chat-title";
 import { dropWorktree } from "./worktrees";
 import { errorText } from "./error-text";
 import { overlayOpen } from "./keyboard-nav";
+import { composing } from "./text-entry";
 import { locationName } from "../projects";
 import {
   drawnChats,
@@ -176,7 +177,8 @@ export function SelectionBar() {
   }
   onMount(() => {
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented || !selection() || busy()) return;
+      if (event.key !== "Escape" || event.defaultPrevented || composing(event) || !selection() || busy())
+        return;
       if (overlayOpen(document)) return;
       event.preventDefault();
       stop();

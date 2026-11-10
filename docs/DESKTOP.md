@@ -138,7 +138,7 @@ Manual compaction asks the conversation's model to summarize its history. Histor
 
 `/btw <question>` asks a side question in the **Side chat**, a column of its own between the conversation and the side panel, without adding a turn to the conversation; follow-ups keep its thread going, and a bare `/btw` just opens the panel. **⇧⌘J** (Ctrl+Shift+J elsewhere), **Open side chat** and **New side chat** in **Search**, and the panel launcher open it too. See [Side questions](SIDE-QUESTIONS.md#desktop).
 
-Press **Cmd+F** on macOS or **Ctrl+F** elsewhere while in a conversation to search messages and tool output, including older messages outside the currently rendered viewport. Search is literal and case insensitive; the counter counts matching messages. Enter and Shift+Enter move between matches, and Escape closes search. File editor search keeps its own shortcut when the editor has focus.
+Press **Cmd+F** on macOS or **Ctrl+F** elsewhere while in a conversation to search messages and tool output, including older messages outside the currently rendered viewport. Search is literal and case insensitive; the counter counts matching messages. Enter and Shift+Enter move between matches, and Escape closes search; an Enter or Escape that an input method takes, to confirm or cancel what is being composed, does neither. File editor search keeps its own shortcut when the editor has focus.
 
 ## Hooks and memory
 

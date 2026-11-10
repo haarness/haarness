@@ -1,5 +1,6 @@
 import { t } from "./i18n";
 import { createSignal, onCleanup, onMount } from "solid-js";
+import { composing } from "./text-entry";
 
 /**
  * A comment typed under what it is about: a diff line in Review, or lines of a
@@ -46,7 +47,7 @@ export function InlineComment(props: {
         void submit();
       }}
       onKeyDown={(event) => {
-        if (event.isComposing) return;
+        if (composing(event)) return;
         if (event.key === "Escape") {
           event.preventDefault();
           event.stopPropagation();
@@ -67,7 +68,7 @@ export function InlineComment(props: {
           disabled={busy()}
           onInput={(event) => props.onInput(event.currentTarget.value)}
           onKeyDown={(event) => {
-            if (event.isComposing || event.key !== "Enter" || event.shiftKey)
+            if (composing(event) || event.key !== "Enter" || event.shiftKey)
               return;
             event.preventDefault();
             event.stopPropagation();

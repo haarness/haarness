@@ -1202,6 +1202,13 @@ test("sidebar Select chats archives several chats at once, notes a chat still wo
   await expect(row("Five")).toHaveCount(0);
   await expect(bar.getByRole("status")).toHaveText("0 selected");
   await expect(bar.getByRole("button", { name: "Archive", exact: true })).toBeDisabled();
+  // Escape that cancels what an input method is composing is not for the bar.
+  await page.evaluate(() => {
+    const target = document.activeElement ?? document.body;
+    target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", isComposing: true, bubbles: true, cancelable: true }));
+    target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", keyCode: 229, bubbles: true, cancelable: true }));
+  });
+  await expect(bar.getByRole("status")).toHaveText("0 selected");
   await page.keyboard.press("Escape");
   await expect(bar).toHaveCount(0);
   await expect(row("Six")).not.toHaveAttribute("aria-pressed", /.*/);

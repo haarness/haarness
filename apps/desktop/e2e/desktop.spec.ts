@@ -12245,6 +12245,19 @@ test("conversation find reaches virtual history, cycles matches, and respects ke
   await expect(page.locator(".conversation-find [role=status]")).toHaveText("1 of 2 messages");
   await expect(page.locator('[data-item-id="' + old.id + '"]')).toBeInViewport();
   await expect(page.locator(".conversation-match")).toContainText("FIND-TARGET");
+  // Escape and Enter that an input method takes, to cancel or confirm what is
+  // being composed, neither close Find nor move to another match: in Find, or
+  // in the message box under it.
+  const composingKey = (field: typeof find, key: string, init: { isComposing?: boolean; keyCode?: number }) =>
+    field.evaluate((element, event: { key: string; isComposing?: boolean; keyCode?: number }) => {
+      element.dispatchEvent(new KeyboardEvent("keydown", { ...event, bubbles: true, cancelable: true }));
+    }, { key, ...init });
+  await composingKey(find, "Escape", { isComposing: true });
+  await composingKey(find, "Enter", { isComposing: true });
+  await composingKey(find, "Enter", { keyCode: 229 });
+  await composingKey(page.getByRole("textbox", { name: "Message", exact: true }), "Escape", { isComposing: true });
+  await expect(find).toBeVisible();
+  await expect(page.locator(".conversation-find [role=status]")).toHaveText("1 of 2 messages");
   await find.press("Enter");
   await expect(page.locator(".conversation-find [role=status]")).toHaveText("2 of 2 messages");
   await expect(page.locator('[data-item-id="' + archive.threads[0].items[205].id + '"]')).toBeInViewport();

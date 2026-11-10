@@ -2,6 +2,7 @@ import { t } from "./i18n";
 import { createEffect, createMemo, createSignal, on, Show } from "solid-js";
 import type { Item } from "@haarness/sdk";
 import { findConversationMessages } from "./conversation-history";
+import { composing } from "./text-entry";
 import { Button } from "./ui";
 import "./conversation-controls.css";
 
@@ -50,6 +51,8 @@ export function ConversationFind(props: {
           value={query()}
           onInput={(event) => setQuery(event.currentTarget.value)}
           onKeyDown={(event) => {
+            // Escape and Enter that end a composition are the input method's.
+            if (composing(event)) return;
             if (event.key === "Escape") {
               event.preventDefault();
               event.stopPropagation();
