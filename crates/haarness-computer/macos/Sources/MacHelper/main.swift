@@ -45,6 +45,7 @@ Thread.detachNewThread {
             let wasPaused = ControlBar.shared.isPaused
             ControlBar.shared.hide()
             KeepAwake.shared.release()
+            dispatcher.working(nil, inFront: true)
             if wasPaused { emit(["event": "resume"]) }
             emit(["id": id, "ok": true, "data": [String: Any]()])
             continue

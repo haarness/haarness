@@ -505,7 +505,7 @@ try:
     check("Stop on the bar ends the turn")
     api("/manage/computer-use", {"action": "words", "bar": {
         "usingApp": "Haarness is working in %@", "usingMac": "Haarness is working on this Mac", "paused": "Haarness is waiting for you",
-        "pause": "Pause", "resume": "Resume", "stop": "Stop", "stopHint": "Esc stops it too"}})
+        "pause": "Pause", "resume": "Resume", "stop": "Stop", "stopHint": "Esc stops it too, while it works in the app in front"}})
 
     # Escape long after the agent's latest screen action belongs to the person: the turn goes on.
     look_started = time.monotonic()
