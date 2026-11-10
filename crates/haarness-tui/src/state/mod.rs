@@ -4000,13 +4000,13 @@ pub fn default_model_for(
         })
 }
 
-/// The `batch` call a numbered child call id (`call_x:3`) belongs to.
 /// The step of a `batch` call that a child's call id names (`<batch>:2`).
 pub(crate) fn batch_step(call_id: &str) -> Option<usize> {
     batch_parent_call(call_id)?;
     call_id.rsplit_once(':')?.1.parse().ok()
 }
 
+/// The `batch` call a numbered child call id (`call_x:3`) belongs to.
 pub(crate) fn batch_parent_call(call_id: &str) -> Option<&str> {
     call_id
         .rsplit_once(':')
