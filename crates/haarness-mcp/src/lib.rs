@@ -3140,11 +3140,16 @@ async fn resolve_headers(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // In a group of its own, stopped whole on a timeout or when the start
+    // that runs it stops (see `process::Group`).
+    #[cfg(unix)]
+    command.process_group(0);
     let child = command.spawn().map_err(|_| {
         CoreError::Tool(format!(
             "headersHelper for MCP server \"{name}\" could not be executed"
         ))
     })?;
+    let group = process::Group::led_by(child.id());
     let timeout = connection_timeout(config);
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
@@ -3154,6 +3159,7 @@ async fn resolve_headers(
                 "headersHelper for MCP server \"{name}\" could not be executed"
             ))
         })?;
+    group.finished();
     if output.stdout.len().saturating_add(output.stderr.len()) > HEADERS_HELPER_OUTPUT_LIMIT {
         return Err(CoreError::Tool(format!(
             "headersHelper for MCP server \"{name}\" produced more than 64 KiB of output"
@@ -4682,6 +4688,49 @@ mod tests {
             Some("https://example.test/mcp")
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A helper that ran past its limit lost only its shell: what the shell
+    /// started (a step of a pipeline, a command it waits for) went on, and
+    /// each reconnect left another one running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_headers_helper_past_its_limit_is_stopped_with_what_it_started() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-mcp-helper-group-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let config: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http",
+            "url": "http://127.0.0.1:9/mcp",
+            "headersHelper": format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+            "timeoutMs": 1500,
+            "enabled": true
+        }))
+        .unwrap();
+        let error = resolve_headers("slow", &config).await.unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while alive() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let survived = alive();
+        if survived {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(!survived, "the helper's `sleep` outlived its timeout");
     }
 
     /// The helper is shell text: a `${VAR}` value that holds shell syntax

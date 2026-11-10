@@ -719,8 +719,11 @@ with the server's and tool's names as written); only requests to a model
 provider carry names in the characters providers accept (see
 [Plugins, skills and tools](REFERENCE.md#plugins-skills-and-tools)).
 `timeoutMs` (default 30 s) bounds the socket connect, initialization, and tool
-discovery as one deadline, plus a `headersHelper` run. A local (stdio) server
-without it has 2 minutes for that start (spawning it, initializing it and
+discovery as one deadline, plus a `headersHelper` run. On macOS and Linux the
+helper runs in a process group of its own, so one that outlasts it (or whose
+start is stopped) is stopped with every process it started, a pipeline's
+steps included; a helper that ends on its own leaves what it started.
+A local (stdio) server without it has 2 minutes for that start (spawning it, initializing it and
 listing its tools), as `npx -y` and `uvx` fetch the server on its first run;
 its other requests keep 30 s. In a JSON file a
 `timeout` key counts too, in its ecosystem's unit: milliseconds in an opencode
