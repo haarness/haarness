@@ -115,52 +115,77 @@ pub fn tool_call_arguments(raw: &str) -> Value {
     serde_json::json!({ UNPARSED: raw, UNPARSED_REASON: reason })
 }
 
-/// `raw` with each backslash inside a JSON string that starts no escape
-/// JSON has (`\U`, `\s`, `\.`, or `\u` without four hex digits) written
-/// as an escaped backslash, or `None` when there is none.
+/// `raw` with each JSON string that holds a backslash starting no escape
+/// JSON has (`\U`, `\s`, `\.`, or `\u` without four hex digits) read as
+/// written raw, or `None` when no string does. A string written raw is a
+/// path or pattern whose every backslash stands for itself, `\n` and `\t`
+/// among them (`C:\Users\sam\new` is no line break), so only a backslash
+/// before a quote or another backslash keeps its JSON meaning there. Other
+/// strings keep their escapes.
 fn with_stray_backslashes_escaped(raw: &str) -> Option<String> {
     let mut repaired = String::with_capacity(raw.len() + 8);
     let mut changed = false;
-    let mut in_string = false;
-    let mut chars = raw.char_indices().peekable();
-    while let Some((at, c)) = chars.next() {
-        if !in_string {
-            in_string = c == '"';
-            repaired.push(c);
-            continue;
-        }
-        match c {
-            '"' => {
-                in_string = false;
-                repaired.push(c);
+    let mut rest = raw;
+    while let Some(open) = rest.find('"') {
+        repaired.push_str(&rest[..=open]);
+        let body = &rest[open + 1..];
+        // The string ends at the first quote no backslash escapes.
+        let mut end = None;
+        let mut stray = false;
+        let mut chars = body.char_indices();
+        while let Some((at, c)) = chars.next() {
+            match c {
+                '"' => {
+                    end = Some(at);
+                    break;
+                }
+                '\\' => {
+                    let next = body[at + 1..].chars().next();
+                    stray |= match next {
+                        Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't') => false,
+                        Some('u') => {
+                            body[at + 2..]
+                                .chars()
+                                .take(4)
+                                .filter(char::is_ascii_hexdigit)
+                                .count()
+                                != 4
+                        }
+                        _ => true,
+                    };
+                    if matches!(next, Some('"' | '\\')) {
+                        chars.next();
+                    }
+                }
+                _ => {}
             }
-            '\\' => {
-                let next = chars.peek().map(|(_, next)| *next);
-                let escape = match next {
-                    Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't') => true,
-                    Some('u') => {
-                        raw[at + 2..]
-                            .chars()
-                            .take(4)
-                            .filter(char::is_ascii_hexdigit)
-                            .count()
-                            == 4
-                    }
-                    _ => false,
-                };
-                if escape {
+        }
+        // A string left open is past repairing: JSON refuses it anyway.
+        let Some(end) = end else {
+            repaired.push_str(body);
+            return changed.then_some(repaired);
+        };
+        let text = &body[..end];
+        if stray {
+            let mut chars = text.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c != '\\' {
                     repaired.push(c);
-                    if let Some((_, next)) = chars.next() {
-                        repaired.push(next);
-                    }
+                } else if let Some(next) = chars.next_if(|next| matches!(next, '"' | '\\')) {
+                    repaired.push(c);
+                    repaired.push(next);
                 } else {
                     repaired.push_str("\\\\");
-                    changed = true;
                 }
             }
-            _ => repaired.push(c),
+            changed = true;
+        } else {
+            repaired.push_str(text);
         }
+        repaired.push('"');
+        rest = &body[end + 1..];
     }
+    repaired.push_str(rest);
     changed.then_some(repaired)
 }
 
@@ -599,10 +624,21 @@ mod tests {
             tool_call_arguments(r#"{"command":"grep -r \. src","workdir":"D:\users\x"}"#),
             json!({"command": r"grep -r \. src", "workdir": r"D:\users\x"})
         );
-        // Escapes JSON has keep their meaning, beside the repaired ones.
+        // Escapes JSON has keep their meaning in the other strings, beside
+        // the repaired one.
         assert_eq!(
             tool_call_arguments(r#"{"content":"a\nb \u00e9 \"q\" \\","path":"C:\Temp\a.txt"}"#),
             json!({"content": "a\nb \u{e9} \"q\" \\", "path": r"C:\Temp\a.txt"})
+        );
+        // A string written raw is raw throughout: `\n` and `\t` in a path
+        // are folders, not a line break that would split a command in two.
+        assert_eq!(
+            tool_call_arguments(r#"{"command":"dir C:\Users\sam\new\tests","path":"x\"y"}"#),
+            json!({"command": r"dir C:\Users\sam\new\tests", "path": "x\"y"})
+        );
+        assert_eq!(
+            tool_call_arguments(r#"{"path":"C:\\Users\sam\notes \"draft\".md"}"#),
+            json!({"path": r#"C:\Users\sam\notes "draft".md"#})
         );
         // Outside a string a backslash is no path: still refused.
         assert!(tool_call_arguments(r#"{"a":1}\x"#)[UNPARSED].is_string());
