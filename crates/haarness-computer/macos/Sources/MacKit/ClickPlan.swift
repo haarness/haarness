@@ -1,5 +1,5 @@
 // The order, fields and timing of the pointer events below follow the background click of Cua Driver
-// (https://github.com/trycua/cua, libs/cua-driver), Copyright (c) 2025-2026 Cua AI, Inc., used under the MIT License;
+// (https://github.com/trycua/cua, libs/cua-driver), Copyright (c) 2025 Cua AI, Inc., used under the MIT License;
 // its text is in ../../THIRD-PARTY-NOTICES.md.
 import Foundation
 

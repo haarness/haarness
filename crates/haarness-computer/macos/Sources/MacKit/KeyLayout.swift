@@ -36,11 +36,11 @@ public struct KeyLayout: Equatable {
 
     /// The key to press for `combo` and every modifier that goes down with it.
     ///
-    /// A shortcut (Command or Control held) looks for its character in the Command layer, ignoring case, and prefers
-    /// the key whose cap shows that character; it adds no Shift of its own, so `Meta+S` is Command-S and Command-Shift-S
-    /// has to name Shift. A shifted symbol (`Meta+?`) adds the Shift it needs. A plain key types its character exactly,
-    /// adding Shift where the layout needs it. Characters the layout lacks are taken from a US keyboard. Nil when
-    /// neither layout has the character.
+    /// A letter's case never adds Shift: `Meta+S` is Command-S, `A` is the A key, and Shift goes down only when it is
+    /// written out, as the server reads keys too. A shortcut (Command or Control held) looks for its character in the
+    /// Command layer and prefers the key whose cap shows it; a plain key looks in the layer without modifiers. A symbol
+    /// found only with Shift (`Meta+?`, `!`) adds the Shift it needs. Characters the layout lacks are taken from a US
+    /// keyboard. Nil when neither layout has the character.
     public func resolve(_ combo: KeyCombo) -> (code: UInt16, held: [Held])? {
         if combo.key.count > 1, let named = KeyCombo.keyCodes[combo.key.lowercased()] {
             return (named, combo.held)
@@ -67,6 +67,9 @@ public struct KeyLayout: Equatable {
             if let code = codes(plain, { $0.lowercased() == lower }).first { return (code, false) }
             if let code = codes(shifted, { $0 == character }).first { return (code, true) }
             return nil
+        }
+        if character.lowercased() != character.uppercased() {
+            return codes(plain, { $0.lowercased() == character.lowercased() }).first.map { ($0, false) }
         }
         if let code = codes(plain, { $0 == character }).first { return (code, false) }
         if let code = codes(shifted, { $0 == character }).first { return (code, true) }

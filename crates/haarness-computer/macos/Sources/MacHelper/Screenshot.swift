@@ -9,10 +9,10 @@ import UniformTypeIdentifiers
 enum Screenshot {
     static var display: CGRect { CGDisplayBounds(CGMainDisplayID()) }
 
-    /// Renders the main display into an image of `size`. When `only` is set the listed apps alone are drawn, where they
-    /// really are, over an empty background, so coordinates still match the display; otherwise all but the `hidden`
+    /// Renders the main display into an image of `size`. When `only` is set the listed processes alone are drawn, where
+    /// they really are, over an empty background, so coordinates still match the display; otherwise all but the `hidden`
     /// apps appear. The helper's bar and ring never do.
-    static func capture(size: (width: Int, height: Int), hidden: [String], only: [String]?) throws -> CGImage {
+    static func capture(size: (width: Int, height: Int), hidden: [String], only: Set<pid_t>?) throws -> CGImage {
         let picture: CGImage
         if #available(macOS 14.0, *) {
             picture = try withScreenCaptureKit(size: size, region: nil, hidden: hidden, only: only)
@@ -24,7 +24,7 @@ enum Screenshot {
 
     /// A close-up of `region` (screen points) at the display's full resolution, no more than `longest` pixels on its
     /// long side, drawn like `capture`.
-    static func closeUp(_ region: Box, longest: Int, hidden: [String], only: [String]?) throws -> CGImage {
+    static func closeUp(_ region: Box, longest: Int, hidden: [String], only: Set<pid_t>?) throws -> CGImage {
         let scale = Double(NSScreen.screens.first?.backingScaleFactor ?? 2)
         let shrink = min(1, Double(longest) / (max(region.width, region.height) * scale))
         let size = (width: max(1, Int((region.width * scale * shrink).rounded())), height: max(1, Int((region.height * scale * shrink).rounded())))
@@ -38,7 +38,7 @@ enum Screenshot {
     }
 
     @available(macOS 14.0, *)
-    private static func withScreenCaptureKit(size: (width: Int, height: Int), region: Box?, hidden: [String], only: [String]?) throws -> CGImage {
+    private static func withScreenCaptureKit(size: (width: Int, height: Int), region: Box?, hidden: [String], only: Set<pid_t>?) throws -> CGImage {
         let signal = DispatchSemaphore(value: 0)
         var shareable: SCShareableContent?
         var problem: Error?
@@ -60,7 +60,7 @@ enum Screenshot {
         let leftOut = shareable.applications.filter { app in
             if app.processID == me || matches(app.bundleIdentifier, hidden) { return true }
             guard let only else { return false }
-            return !matches(app.bundleIdentifier, only)
+            return !only.contains(app.processID)
         }
         let filter = SCContentFilter(display: screen, excludingApplications: leftOut, exceptingWindows: [])
         let settings = SCStreamConfiguration()
@@ -80,7 +80,7 @@ enum Screenshot {
     }
 
     /// Fallback for macOS 12 and 13: the window server composites the selected windows in screen order.
-    private static func withWindowList(hidden: [String], only: [String]?, bounds: CGRect = display) throws -> CGImage {
+    private static func withWindowList(hidden: [String], only: Set<pid_t>?, bounds: CGRect = display) throws -> CGImage {
         guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
             throw refusal(nil)
         }
@@ -90,7 +90,7 @@ enum Screenshot {
                   let number = window[kCGWindowNumber as String] as? Int else { return nil }
             let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? ""
             if matches(bundle, hidden) { return nil }
-            if let only, !matches(bundle, only) { return nil }
+            if let only, !only.contains(pid) { return nil }
             return CGWindowID(number)
         }
         let list = ids.map { NSNumber(value: $0) } as CFArray

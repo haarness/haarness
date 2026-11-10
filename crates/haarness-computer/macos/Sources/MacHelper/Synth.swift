@@ -95,7 +95,7 @@ enum Synth {
     }
 
     // The background click and scroll below derive from Cua Driver, https://github.com/trycua/cua, Copyright (c)
-    // 2025-2026 Cua AI, Inc., under the MIT License; its text is in ../../THIRD-PARTY-NOTICES.md.
+    // 2025 Cua AI, Inc., under the MIT License; its text is in ../../THIRD-PARTY-NOTICES.md.
 
     /// Presses at a screen spot within `window` of `pid` without the system's pointer: the events go to that process
     /// alone, addressed to the window, and the person's pointer and front app stay as they are. Modifiers go down as

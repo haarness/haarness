@@ -220,12 +220,13 @@ final class MacKitTests: XCTestCase {
         // No Latin q anywhere on this layout: the US position is used.
         XCTAssertEqual(Self.cyrillic.resolve(try KeyCombo.read("Meta+q"))?.code, 0x0C)
         XCTAssertEqual(Self.cyrillic.resolve(try KeyCombo.read("Control+z"))?.code, 0x06)
-        // Plain keys type the character exactly, with Shift where the layout needs it.
+        // A letter's case never adds Shift; a symbol that needs Shift gets it.
         let cyrillicEs = Self.cyrillic.resolve(try KeyCombo.read("С"))
         XCTAssertEqual(cyrillicEs?.code, 0x08)
-        XCTAssertEqual(cyrillicEs?.held, [.shift])
+        XCTAssertEqual(cyrillicEs?.held, [])
         XCTAssertEqual(Self.cyrillic.resolve(try KeyCombo.read("!"))?.held, [.shift])
-        XCTAssertEqual(KeyLayout.us.resolve(try KeyCombo.read("A"))?.held, [.shift])
+        XCTAssertEqual(KeyLayout.us.resolve(try KeyCombo.read("A"))?.held, [])
+        XCTAssertEqual(KeyLayout.us.resolve(try KeyCombo.read("Shift+A"))?.held, [.shift])
         XCTAssertEqual(KeyLayout.us.resolve(try KeyCombo.read("a"))?.held, [])
         XCTAssertEqual(KeyLayout.us.resolve(try KeyCombo.read("Enter"))?.code, 0x24)
         XCTAssertEqual(KeyLayout.us.resolve(try KeyCombo.read("Shift+Tab"))?.held, [.shift])
@@ -299,5 +300,44 @@ final class MacKitTests: XCTestCase {
         XCTAssertFalse(looksLikeTerminal(classes: [], identifier: nil, label: "Terminal 1, zsh", nearby: false))
         XCTAssertFalse(looksLikeTerminal(classes: ["terminal-status-badge"], identifier: nil, label: "Name", nearby: true))
         XCTAssertFalse(looksLikeTerminal(classes: [], identifier: nil, label: nil, nearby: true))
+    }
+
+    // MARK: Accessibility answers
+
+    func testAPressThatTimedOutCountsAsDone() {
+        XCTAssertEqual(pressArrived(code: AXCode.success), true)
+        // A press that opened a menu or a sheet can time out: clicking again would act a second time.
+        XCTAssertEqual(pressArrived(code: AXCode.cannotComplete), true)
+        XCTAssertNil(pressArrived(code: AXCode.failure))
+        // The element is gone, takes no press, or the argument was wrong: the press never got there.
+        for code: Int32 in [-25202, -25206, -25201, -25211, -25208] {
+            XCTAssertEqual(pressArrived(code: code), false, "\(code)")
+        }
+    }
+
+    func testPasteMenuItems() {
+        XCTAssertTrue(isPasteMenuItem(role: "AXMenuItem", character: "V", modifiers: 0, title: "Paste"))
+        XCTAssertTrue(isPasteMenuItem(role: "AXMenuItem", character: "V", modifiers: MenuModifier.option | MenuModifier.shift, title: "Paste and Match Style"))
+        XCTAssertTrue(isPasteMenuItem(role: "AXMenuItem", character: nil, modifiers: 0, title: "Paste Selection"))
+        XCTAssertFalse(isPasteMenuItem(role: "AXMenuItem", character: "C", modifiers: 0, title: "Copy"))
+        XCTAssertFalse(isPasteMenuItem(role: "AXMenuItem", character: "V", modifiers: MenuModifier.noCommand, title: "View"))
+        XCTAssertFalse(isPasteMenuItem(role: "AXButton", character: nil, modifiers: 0, title: "Paste"))
+    }
+
+    func testSettingsPaneIdentifiers() {
+        XCTAssertEqual(settingsPaneIdentifier("com.apple.settings.PrivacySecurity.extension"), "com.apple.settings.PrivacySecurity.extension")
+        XCTAssertEqual(settingsPaneIdentifier("com.apple.Battery-Settings.extension*BatteryPreferences"), "com.apple.Battery-Settings.extension")
+        XCTAssertEqual(settingsPaneIdentifier("com.apple.systempreferences.AppleIDSettings:icloud"), "com.apple.systempreferences.AppleIDSettings")
+        XCTAssertNil(settingsPaneIdentifier("ListColumn"))
+        XCTAssertNil(settingsPaneIdentifier(nil))
+    }
+
+    func testAFieldThatReformatsTheTextIsNotTypedAgain() {
+        XCTAssertEqual(insertOutcome(before: "", after: "behind", text: "behind"), .arrived)
+        XCTAssertEqual(insertOutcome(before: "a", after: "a behind", text: " behind"), .arrived)
+        // A number formatter turned 1000 into 1,000; a length limit cut the text: it went in all the same.
+        XCTAssertEqual(insertOutcome(before: "", after: "1,000", text: "1000"), .changed)
+        XCTAssertEqual(insertOutcome(before: "", after: "abc", text: "abcdef"), .changed)
+        XCTAssertEqual(insertOutcome(before: "same", after: "same", text: "x"), .unchanged)
     }
 }

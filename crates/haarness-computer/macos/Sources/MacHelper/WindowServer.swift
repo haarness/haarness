@@ -8,7 +8,7 @@
 // focus records that gives a window key status without raising it comes from yabai,
 // https://github.com/koekeishiya/yabai. Both are used under the MIT License:
 //
-//   Copyright (c) 2025-2026 Cua AI, Inc.
+//   Copyright (c) 2025 Cua AI, Inc.
 //   Copyright (c) 2019 Åsmund Vikane
 //
 //   Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated

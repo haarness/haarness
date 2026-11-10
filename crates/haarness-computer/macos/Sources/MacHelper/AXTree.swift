@@ -211,14 +211,11 @@ final class AXTree {
         return nil
     }
 
-    /// Whether `element` is a menu item that pastes: its key equivalent is Command-V (with or without more
-    /// modifiers), or its title starts with Paste.
+    /// Whether `element` is a menu item that pastes (see `isPasteMenuItem`).
     static func isPasteItem(_ element: AXUIElement) -> Bool {
-        guard text(element, kAXRoleAttribute) == "AXMenuItem" else { return false }
-        let character = (text(element, kAXMenuItemCmdCharAttribute) ?? "").uppercased()
-        let modifiers = (value(element, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue ?? 0
-        if character == "V" && modifiers & MenuModifier.noCommand == 0 { return true }
-        return (text(element, kAXTitleAttribute) ?? "").lowercased().hasPrefix("paste")
+        isPasteMenuItem(role: text(element, kAXRoleAttribute), character: text(element, kAXMenuItemCmdCharAttribute),
+                        modifiers: (value(element, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue ?? 0,
+                        title: text(element, kAXTitleAttribute))
     }
 
     /// The pane System Settings shows: the identifier of the selected sidebar entry (an extension identifier such as
@@ -237,9 +234,7 @@ final class AXTree {
                     while !inner.isEmpty, looked < 40 {
                         let item = inner.removeFirst()
                         looked += 1
-                        if let identifier = text(item, kAXIdentifierAttribute), identifier.contains(".") {
-                            return String(identifier.prefix { $0 != "*" && $0 != ":" })
-                        }
+                        if let pane = settingsPaneIdentifier(text(item, kAXIdentifierAttribute)) { return pane }
                         inner += children(item)
                     }
                 }

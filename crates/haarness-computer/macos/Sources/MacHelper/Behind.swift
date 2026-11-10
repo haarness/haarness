@@ -15,11 +15,30 @@ enum Behind {
     /// Whether the window location of a posted event is relative to the window (see `windowLocationIsLocal`).
     static let windowLocal = windowLocationIsLocal(macOSMajor: ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
 
-    /// Processes whose windows count as part of the calling app, such as the file dialogs that sandboxed apps borrow.
+    /// Processes whose windows count as part of the app they work for, such as the file dialogs sandboxed apps borrow.
     static let helperProcesses = ["com.apple.appkit.xpc.openAndSavePanelService"]
 
-    static func helperPids() -> Set<pid_t> {
-        Set(helperProcesses.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0) }.map(\.processIdentifier))
+    private typealias Responsible = @convention(c) (pid_t) -> pid_t
+    private static let responsible: Responsible? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_get_pid_responsible_for_pid")
+        .map { unsafeBitCast($0, to: Responsible.self) }
+
+    /// The file-dialog processes working for `app`. macOS runs one for each app that shows such a dialog, so only those
+    /// it holds `app` responsible for count; none when that cannot be told.
+    static func panels(of app: pid_t) -> Set<pid_t> {
+        guard let responsible else { return [] }
+        return Set(helperProcesses.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0) }
+            .map(\.processIdentifier).filter { responsible($0) == app })
+    }
+
+    /// The processes that ask for a password or a fingerprint on macOS's behalf: replies never mention their windows.
+    static let authorization: Set<String> = [
+        "SecurityAgent", "coreautha", "LocalAuthenticationRemoteService", "com.apple.SecurityAgent", "com.apple.coreautha",
+        "com.apple.LocalAuthentication.UIAgent", "com.apple.LocalAuthenticationRemoteService",
+    ]
+
+    /// `app` and its own file dialogs.
+    static func own(_ app: pid_t) -> Set<pid_t> {
+        Set([app]).union(panels(of: app))
     }
 
     /// The process that switched on secure keyboard input, which apps do while one of their password fields has focus.
@@ -91,7 +110,7 @@ enum Engine {
 
 /// Thrown by a background attempt that cannot go on behind the person's window: the action comes forward instead, and
 /// the reply's `fallback` gives the reason. Every case where the target's window cannot take the input from behind
-/// (no key window proven, no window on screen, a menu item kept disabled there) reports `no-key-window`.
+/// (no key window proven, no window on screen) reports `no-key-window`.
 struct ComeForward: Error {
     let reason: String
 
@@ -128,7 +147,7 @@ extension Dispatcher {
     /// of its windows (or a file dialog it borrows) lies under the point, whatever covers it.
     func lookedAtOwner(_ x: Double, _ y: Double) -> NSRunningApplication? {
         guard let app = lookedAt, !app.isTerminated else { return nil }
-        guard WindowList.topmost(of: Set([app.processIdentifier]).union(Behind.helperPids()), at: x, y) != nil else { return nil }
+        guard WindowList.topmost(of: Behind.own(app.processIdentifier), at: x, y) != nil else { return nil }
         return app
     }
 
@@ -143,7 +162,7 @@ extension Dispatcher {
         guard let app = owner else {
             throw HelperFailure("not_found", "Nothing at that position belongs to an app. Call mac_snapshot and use a ref.")
         }
-        let pids = Set([app.processIdentifier]).union(Behind.helperPids())
+        let pids = Behind.own(app.processIdentifier)
         let window = WindowList.topmost(of: pids, at: x, y)
         // The menu bar, status items and the Dock sit above every window, so the system's pointer reaches what an app
         // shows there whether or not the app is in front.
@@ -163,10 +182,9 @@ extension Dispatcher {
     }
 
     /// Notes where the agent works now, for Escape (see `escapeStops`).
-    func working(_ app: NSRunningApplication?, inFront: Bool) {
+    func working(_ app: NSRunningApplication?) {
         escapeLock.lock()
         workingPid = app?.processIdentifier
-        workingInFront = inFront
         escapeLock.unlock()
     }
 
@@ -189,7 +207,8 @@ extension Dispatcher {
         return Observed(windows: windows, focus: focus, digest: digest)
     }
 
-    /// Every window on screen, with roles read for the acted-on app's own.
+    /// Every window on screen, with roles read for the acted-on app's own, leaving out the apps computer use keeps
+    /// invisible and macOS's password and fingerprint prompts.
     func windowFacts(_ app: NSRunningApplication?) -> [WindowFacts] {
         var roles: [CGWindowID: (String?, String?)] = [:]
         let windows = app.map { AXTree.value(AXTree.application($0.processIdentifier), kAXWindowsAttribute) as? [AnyObject] ?? [] } ?? []
@@ -199,7 +218,11 @@ extension Dispatcher {
             }
         }
         return WindowList.entries()
-            .filter { !(20...25).contains($0.layer) }
+            .filter { entry in
+                guard !(20...25).contains(entry.layer), !Behind.authorization.contains(entry.app) else { return false }
+                let bundle = NSRunningApplication(processIdentifier: entry.pid)?.bundleIdentifier ?? ""
+                return !matches(bundle, hiddenApps) && !Behind.authorization.contains(bundle)
+            }
             .map { entry in
                 WindowFacts(id: Int(entry.id), pid: entry.pid, app: entry.app, layer: entry.layer, title: entry.title,
                             role: roles[entry.id]?.0, subrole: roles[entry.id]?.1)
@@ -221,7 +244,7 @@ extension Dispatcher {
         if let fallback { out["fallback"] = fallback }
         if let confirmed { out["confirmed"] = confirmed }
         if handedBack { out["handedBack"] = true }
-        working(app, inFront: !background)
+        working(app)
         return out
     }
 
@@ -282,15 +305,9 @@ extension Dispatcher {
         return AXTree.focused(in: app.processIdentifier).map(AXTree.isPassword) ?? false
     }
 
-    /// Whether an Accessibility press reached the app: done, or timed out while the app handled it (a menu or sheet it
-    /// opened can hold the answer back). Nil when the app reported a failure, which may or may not have come after it
-    /// acted.
+    /// Whether an Accessibility press reached the app (see `pressArrived(code:)`).
     static func pressArrived(_ result: AXError) -> Bool? {
-        switch result {
-        case .success, .cannotComplete: return true
-        case .failure: return nil
-        default: return false
-        }
+        MacKit.pressArrived(code: result.rawValue)
     }
 
     /// Brings a reach's app forward and raises its window, for an action that has to use the system's pointer.
@@ -334,8 +351,13 @@ extension Dispatcher {
         if window.layer != 0 && passwordInUse(app) {
             throw HelperFailure("password", "A password suggestion menu is open there, under a focused password field, and passwords stay with the person. Press Escape to close it, or click another field first.")
         }
+        // The events go to the app or to a file dialog working for it, never to another app's window.
+        guard Behind.own(app.processIdentifier).contains(window.pid) else {
+            throw HelperFailure("target_changed", "Something moved: the window there belongs to another app now. Look again with mac_snapshot and retry.")
+        }
         // An AppKit window that is not key spends a click on becoming key; made key first, it takes the click itself.
-        _ = prove(app, window: window.id, field: nil, spot: nil)
+        let owner = window.pid == app.processIdentifier ? app : (NSRunningApplication(processIdentifier: window.pid) ?? app)
+        _ = prove(owner, window: window.id, field: nil, spot: nil)
         if !shown { AgentPointer.shared.show(at: found.x, found.y) }
         // The window may have closed or moved since the spot was resolved.
         guard WindowList.topmost(of: [window.pid], at: found.x, found.y)?.id == window.id else {
@@ -426,6 +448,9 @@ extension Dispatcher {
         }
         if app.isHidden { throw Self.hiddenFailure(app) }
         guard let window = found.window else { throw ComeForward("no-key-window") }
+        guard Behind.own(app.processIdentifier).contains(window.pid) else {
+            throw HelperFailure("target_changed", "Something moved: the window there belongs to another app now. Look again with mac_snapshot and retry.")
+        }
         let position = area.map(scrollPosition)
         let (dx, dy): (Int32, Int32) = switch direction {
         case "up": (0, lines)
@@ -469,6 +494,8 @@ extension Dispatcher {
             }
             return true
         }
+        // The app the person has in front keeps its key window and focus as they are: they are typing there.
+        if WindowServer.frontPID() == pid { return keyed() && focused() }
         // The window is made key even when Accessibility already reports it focused: an app that is not active may have
         // no key window at all, and would drop the keys.
         let current = keyWindow(pid)
@@ -495,19 +522,20 @@ extension Dispatcher {
 
 
     /// Inserts a single line at the cursor of an app's own text field through Accessibility, then reads the field
-    /// back. Returns whether the text arrived.
-    func insertWithAccessibility(_ field: AXUIElement, _ text: String) -> Bool {
+    /// back (see `insertOutcome`). Nil when the field refused the insert, so the text can go in as keys instead.
+    func insertWithAccessibility(_ field: AXUIElement, _ text: String) -> InsertOutcome? {
         let before = AXTree.text(field, kAXValueAttribute) ?? ""
         if AXTree.flag(field, kAXFocusedAttribute) != true {
             AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         }
-        guard AXUIElementSetAttributeValue(field, kAXSelectedTextAttribute as CFString, text as CFString) == .success else { return false }
+        guard AXUIElementSetAttributeValue(field, kAXSelectedTextAttribute as CFString, text as CFString) == .success else { return nil }
+        var outcome = InsertOutcome.unchanged
         for _ in 0..<8 {
-            let now = AXTree.text(field, kAXValueAttribute) ?? ""
-            if now != before && now.contains(text) { return true }
+            outcome = insertOutcome(before: before, after: AXTree.text(field, kAXValueAttribute) ?? "", text: text)
+            if outcome == .arrived { break }
             Thread.sleep(forTimeInterval: 0.04)
         }
-        return false
+        return outcome
     }
 
     func typeBehind(_ app: NSRunningApplication, field: AXUIElement?, spot: (Double, Double)?, text: String) throws -> [String: Any] {
@@ -518,8 +546,10 @@ extension Dispatcher {
         let started = Date()
         let target = field ?? AXTree.focused(in: app.processIdentifier)
         let value = target.flatMap { AXTree.text($0, kAXValueAttribute) }
-        if let target, isOneLine(text), AXTree.isNativeTextField(target), insertWithAccessibility(target, text) {
-            return reply(app, via: "ax", background: true, before: before, confirmed: true, handedBack: handBack(from: app, to: prior, since: started))
+        if let target, isOneLine(text), AXTree.isNativeTextField(target), let outcome = insertWithAccessibility(target, text), outcome != .unchanged {
+            // A field that reformatted the text still took it: typing it again would enter it twice.
+            return reply(app, via: "ax", background: true, before: before, confirmed: outcome == .arrived ? true : nil,
+                         handedBack: handBack(from: app, to: prior, since: started))
         }
         if app.isHidden { throw Self.hiddenFailure(app) }
         guard let target, let window = AXTree.window(of: target).flatMap(WindowServer.windowNumber),
@@ -591,7 +621,13 @@ extension Dispatcher {
                 _ = prove(app, window: window, field: nil, spot: nil)
                 menu = menuItem(pid, for: combo) ?? menu
             }
-            guard menu.enabled else { throw ComeForward("no-key-window") }
+            // A disabled item (Copy with nothing selected) would do nothing in front either, so the app is left behind.
+            guard menu.enabled else {
+                var out = reply(app, via: "menu", background: true, before: before, confirmed: false)
+                out["disabled"] = true
+                out["menu"] = shorten(menu.path.filter { !$0.isEmpty }.joined(separator: " ▸ "), 160)
+                return out
+            }
             for index in 0..<max(1, times) {
                 if index > 0 { try ControlBar.shared.refuseWhilePaused() }
                 AXUIElementPerformAction(menu.item, kAXPressAction as CFString)

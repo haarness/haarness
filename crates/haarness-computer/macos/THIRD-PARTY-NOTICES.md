@@ -9,7 +9,7 @@ Both are distributed under the MIT License:
 
 MIT License
 
-Copyright (c) 2025-2026 Cua AI, Inc.
+Copyright (c) 2025 Cua AI, Inc.
 Copyright (c) 2019 Åsmund Vikane
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

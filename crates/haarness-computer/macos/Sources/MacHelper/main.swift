@@ -45,7 +45,9 @@ Thread.detachNewThread {
             let wasPaused = ControlBar.shared.isPaused
             ControlBar.shared.hide()
             KeepAwake.shared.release()
-            dispatcher.working(nil, inFront: true)
+            dispatcher.working(nil)
+            // The next turn starts from the app in front, not from what this one looked at.
+            worker.async { dispatcher.lookedAt = nil }
             if wasPaused { emit(["event": "resume"]) }
             emit(["id": id, "ok": true, "data": [String: Any]()])
             continue
