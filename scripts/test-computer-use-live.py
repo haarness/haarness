@@ -60,6 +60,7 @@ person_file = root / "person-state.json"
 LAB = "dev.haarness.test.lab"
 PERSON = "dev.haarness.test.person"
 LAB2 = "dev.haarness.test.lab2"
+SETTINGS = "com.apple.systempreferences"
 LSREGISTER = str(pathlib.Path("/System/Library/Frameworks/CoreServices.framework/Frameworks") / "LaunchServices.framework"
                  / "Support/lsregister")
 
@@ -505,7 +506,7 @@ try:
     check("Stop on the bar ends the turn")
     api("/manage/computer-use", {"action": "words", "bar": {
         "usingApp": "Haarness is working in %@", "usingMac": "Haarness is working on this Mac", "paused": "Haarness is waiting for you",
-        "pause": "Pause", "resume": "Resume", "stop": "Stop", "stopHint": "Esc stops it too, while it works in the app in front"}})
+        "pause": "Pause", "resume": "Resume", "stop": "Stop", "stopHint": "Esc stops it too, while it acts in the frontmost app"}})
 
     # Escape long after the agent's latest screen action belongs to the person: the turn goes on.
     look_started = time.monotonic()
@@ -737,6 +738,27 @@ try:
         reply = direct.ok("type", ref=int(field.group(1)), text="from behind", expect=optional)
         assert reply["background"] is True, reply
         check(f"an Electron app covered by the person's window takes one line ({reply['via']})")
+
+    # System Settings' Privacy & Security pane is look-only: a look names the pane by its identifier, and a click
+    # there is refused before anything reaches it, without asking. Nothing is toggled: the click aims at the pane's
+    # own entry in the sidebar, which would only select it again.
+    settings_running = subprocess.run(["pgrep", "-x", "System Settings"], capture_output=True).returncode == 0
+    earlier_pane = direct.ok("snapshot", bundle=SETTINGS).get("pane") if settings_running else None
+    subprocess.run(["open", "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"], check=True)
+    until(lambda: (direct.ok("snapshot", bundle=SETTINGS).get("pane") or "").startswith("com.apple.settings.PrivacySecurity"),
+          "the Privacy & Security pane is open and named", seconds=20)
+    look_only = Chat()
+    output, error, _, _ = look_only.turn("mac_snapshot", {"app": SETTINGS}, expect_ask=False)
+    assert not error, output
+    entry = re.search(r'@(e\d+) \[[^\]]+\] "Privacy & Security"', output)
+    assert entry, output[:2000]
+    output, error, _, pending = look_only.turn("mac_click", {"ref": entry.group(1), "snapshot": False}, answer="reject")
+    assert error and pending is None, (output, pending)
+    if earlier_pane:
+        subprocess.run(["open", "x-apple.systempreferences:" + earlier_pane], check=False)
+    elif not settings_running:
+        direct.call("quit", bundle=SETTINGS)
+    check("a look names the Privacy & Security pane, and a click there is refused without asking")
 
     # The display stays awake while requests flow, and the hold goes with the end of the turn.
     direct.look()

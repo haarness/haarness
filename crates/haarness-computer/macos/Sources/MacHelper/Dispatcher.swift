@@ -298,6 +298,7 @@ final class Dispatcher {
                 out["behind"] = behind
                 out["offscreen"] = offscreen(app) ?? NSNull()
             }
+            if let pane = Self.settingsPane(for: app) { out["pane"] = pane }
         }
         working(app, inFront: !behind)
         var budget = OutlineBudget(limit: Int(double(input["budget"]) ?? 40_000))
@@ -507,7 +508,23 @@ final class Dispatcher {
         if let keys = input["keys"] as? String, let combo = try? KeyCombo.read(keys), let found = menuItem(pid, for: combo), found.enabled {
             out["menu"] = shorten(found.path.filter { !$0.isEmpty }.joined(separator: " ▸ "), 160)
         }
-        if app.bundleIdentifier == "com.apple.systempreferences", let pane = AXTree.settingsPane(pid) { out["pane"] = pane }
+        if let pane = Self.settingsPane(for: app) { out["pane"] = pane }
+    }
+
+    static let systemSettings = "com.apple.systempreferences"
+
+    /// The System Settings pane a target in `app` belongs to: the selected sidebar entry of System Settings, read
+    /// for System Settings itself and for the extension processes that draw its panes. Such a process is otherwise
+    /// named by its own bundle identifier, which is the pane's.
+    static func settingsPane(for app: NSRunningApplication) -> String? {
+        let bundle = app.bundleIdentifier ?? ""
+        let extensionLike = bundle.hasPrefix("com.apple.") && (bundle.lowercased().contains("settings") || bundle.hasSuffix(".extension"))
+        guard bundle == systemSettings || extensionLike else { return nil }
+        if let settings = NSRunningApplication.runningApplications(withBundleIdentifier: systemSettings).first,
+           let pane = AXTree.settingsPane(settings.processIdentifier) {
+            return pane
+        }
+        return bundle == systemSettings ? nil : bundle
     }
 
     /// Bundle of the app whose window is topmost at a point, i.e. where a pointer event would land.

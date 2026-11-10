@@ -21,7 +21,7 @@ public struct BarText: Equatable {
         pause: "Pause",
         resume: "Resume",
         stop: "Stop",
-        stopHint: "Esc stops it too, while it works in the app in front"
+        stopHint: "Esc stops it too, while it acts in the frontmost app"
     )
 
     public init(usingApp: String, usingMac: String, paused: String, pause: String, resume: String, stop: String, stopHint: String) {
