@@ -224,8 +224,8 @@ in this chat), and Auto, `--yolo`, hooks and permission rules never answer for y
 **Use this Mac.** On macOS, agents can see the screen and work in native apps with computer use: turn it
 on with **Settings → Computer use** in Desktop, `/mac` in the TUI, or `haarness mac on`, after agreeing to
 its terms. The agent works in its app behind your window while you keep using yours. Each app asks once per chat
-(**Allow in this chat**, or Auto's reviewer in a chat in Auto) unless you allow it, and a strip along the top edge of
-the screen offers Pause and Stop. See [Computer use](docs/COMPUTER-USE.md).
+(**Allow in this chat**, or in a chat in Auto its reviewer when it is on) unless you allow it, and a strip along the top
+edge of the screen offers Pause and Stop. See [Computer use](docs/COMPUTER-USE.md).
 
 ## Usage statistics
 

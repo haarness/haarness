@@ -3021,7 +3021,6 @@
   "Haarness is working in {app}": "O Haarness está trabalhando em {app}",
   "Haarness is working on this Mac": "O Haarness está trabalhando neste Mac",
   "Haarness is waiting for you": "O Haarness está esperando você",
-  "Esc stops it too": "Esc também interrompe",
   "Allowed": "Permitido",
   "Not allowed": "Não permitido",
   "Allow {permission} in System Settings": "Permitir {permission} nos Ajustes do Sistema",
@@ -3100,7 +3099,6 @@
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Os agentes podem ver a tela deste Mac e operar os apps. Eles olham um app por vez e consultam você antes de agir em um app que você não permitiu.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "Outro usuário está conectado na tela deste Mac, então os agentes não podem usá-lo por esta conta.",
   "Use a bundle identifier like com.apple.TextEdit.": "Use um identificador de pacote como com.apple.TextEdit.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.": "Enquanto um agente trabalha, uma faixa no topo da tela mostra o app em uso, com Pausar e Parar. Esc também interrompe.",
   "Needed to read app contents and to click, type and press keys.": "Necessário para ler o conteúdo dos apps e para clicar, digitar e pressionar teclas.",
   "Use it for": "Use para",
   "Don't use it for": "Não use para",
@@ -3154,7 +3152,10 @@
   "turn on overage so your purchased credits pay": "ative o excedente para que seus créditos comprados paguem",
   "add credits and turn on overage to keep working": "adicione créditos e ative o excedente para continuar",
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "Um agente pergunta antes de agir em um app que você não permitiu. Em uma conversa no modo Auto, o revisor do Auto pode responder por você, exceto nos apps que você configurou para perguntar toda vez; uma conversa no modo Yolo aprova tudo. Depois que você permite um app, o agente age ali sem perguntar, e o que ele faz continua sendo sua responsabilidade.",
-  "These terms changed since you last agreed to them.": "Estes termos mudaram desde a última vez que você concordou com eles.",
-  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Perguntar antes significa uma aprovação por app em cada conversa; conversas no modo Auto deixam isso para o revisor.",
-  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Gerenciadores de senhas e o próprio Haarness nunca são usados, e agentes nunca digitam em terminais. No modo Auto, apps configurados para perguntar toda vez continuam perguntando a você."
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Gerenciadores de senhas e o próprio Haarness nunca são usados, e agentes nunca digitam em terminais. No modo Auto, apps configurados para perguntar toda vez continuam perguntando a você.",
+  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "O texto de um terminal ou editor pode conter um pedido de alguém, então cada clique nele precisa da sua aprovação.",
+  "You agreed to an earlier version of these terms.": "Você concordou com uma versão anterior destes termos.",
+  "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Perguntar antes significa uma aprovação por app em cada conversa, dada pelo revisor do Auto no modo Auto quando ele está ativado.",
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "Enquanto um agente trabalha, uma faixa no topo da tela mostra o app em uso, com Pausar e Parar. Esc também interrompe enquanto ele trabalha no app em primeiro plano.",
+  "Esc stops it too, while it works in the app in front": "Esc também interrompe enquanto ele trabalha no app em primeiro plano"
 }

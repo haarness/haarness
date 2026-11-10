@@ -91,6 +91,10 @@ pub const TERMINALS: &[&str] = &[
     "co.zeit.hyper",
     "org.tabby",
     "com.raphaelamorim.rio",
+    "dev.commandline.waveterm",
+    "com.termius-dmg.mac",
+    "com.panic.Prompt3",
+    "com.vandyke.SecureCRT",
 ];
 
 /// Script runners: typing there writes a script they run, so they are treated as terminals for typing.
@@ -99,6 +103,10 @@ pub const SCRIPT_RUNNERS: &[&str] = &[
     "com.apple.Automator",
     "com.apple.shortcuts",
 ];
+
+/// Editors whose ordinary typing runs shell commands (`:!` in Vim, `M-!` in Emacs) and which open terminals of their
+/// own: treated as script runners for typing, and as terminals while an approval waits.
+pub const SHELL_EDITORS: &[&str] = &["org.vim.MacVim", "com.qvacua.VimR", "org.gnu.Emacs"];
 
 /// Code editors. Agents work in them like in any other app, but their built-in terminal, like a terminal app, can show
 /// Haarness's terminal UI with an approval card that takes keys and clicks.
@@ -117,8 +125,16 @@ pub const EDITORS: &[&str] = &[
     "com.sublimetext.3",
     "com.panic.Nova",
     "com.barebones.bbedit",
-    "org.vim.MacVim",
-    "org.gnu.Emacs",
+];
+
+/// System Settings, which agents work in like any other app, apart from its Privacy & Security pane.
+pub const SYSTEM_SETTINGS: &[&str] = &["com.apple.systempreferences", "com.apple.Settings"];
+
+/// The Privacy & Security pane of System Settings, as the helper names an open pane: what agents may do on this Mac
+/// (Accessibility, Automation, Screen Recording, Full Disk Access) is set there, so it stays look-only.
+const PRIVACY_PANES: &[&str] = &[
+    "com.apple.settings.PrivacySecurity.extension.*",
+    "com.apple.preference.security",
 ];
 
 /// The Dock: a drop onto an app's icon opens the dropped item in that app.
@@ -213,7 +229,10 @@ pub fn group(bundle: &str, host: Option<&str>) -> Group {
         Group::Haarness
     } else if host == Some(bundle) {
         Group::Host
-    } else if listed(bundle, TERMINALS) || listed(bundle, SCRIPT_RUNNERS) {
+    } else if listed(bundle, TERMINALS)
+        || listed(bundle, SCRIPT_RUNNERS)
+        || listed(bundle, SHELL_EDITORS)
+    {
         Group::Runner
     } else {
         Group::Open
@@ -224,7 +243,29 @@ pub fn group(bundle: &str, host: Option<&str>) -> Group {
 /// answer: a terminal, or a code editor with its built-in terminal.
 #[must_use]
 pub fn may_show_cards(bundle: &str) -> bool {
-    listed(bundle, TERMINALS) || listed(bundle, EDITORS)
+    listed(bundle, TERMINALS) || listed(bundle, SHELL_EDITORS) || listed(bundle, EDITORS)
+}
+
+/// The refusal for an action in System Settings' Privacy & Security pane (`pane`, as the helper names the open pane),
+/// where only looking and scrolling are allowed. A helper that cannot tell the pane names none, and System Settings
+/// then follows the app rules and approvals as a whole.
+#[must_use]
+pub fn pane_refusal(bundle: &str, pane: Option<&str>, gesture: Gesture) -> Option<String> {
+    let private = listed(bundle, SYSTEM_SETTINGS)
+        && pane.is_some_and(|pane| listed(pane, PRIVACY_PANES))
+        && !matches!(gesture, Gesture::Scroll | Gesture::Hover);
+    private.then(|| {
+        "Privacy & Security in System Settings decides what apps and agents may do on this Mac, so agents only look there. Tell the person what to change.".to_owned()
+    })
+}
+
+/// The refusal for keys or typing aimed at a terminal inside another app (an editor's terminal panel), which runs
+/// what is typed just like a terminal app does.
+#[must_use]
+pub fn terminal_refusal(name: &str) -> String {
+    format!(
+        "That is a terminal inside {name}: what is typed there runs as a command outside Haarness's approvals, so agents never type or press keys in it. Run commands with the shell tool instead."
+    )
 }
 
 /// The refusal for a locked group, written as advice for the agent, or `None` when the app rules decide.
@@ -321,6 +362,38 @@ mod tests {
             }
         }
         assert!(refusal("com.apple.TextEdit", "TextEdit", Gesture::Input, None).is_none());
+    }
+
+    #[test]
+    fn editors_that_run_shell_commands_take_no_typing_and_privacy_settings_stay_look_only() {
+        for (bundle, name) in [("org.vim.MacVim", "MacVim"), ("org.gnu.Emacs", "Emacs")] {
+            assert!(
+                refusal(bundle, name, Gesture::Input, None).is_some(),
+                "{name}"
+            );
+            assert!(
+                refusal(bundle, name, Gesture::Click, None).is_none(),
+                "{name}"
+            );
+            assert!(may_show_cards(bundle), "{name}");
+        }
+        assert!(refusal("dev.commandline.waveterm", "Wave", Gesture::Input, None).is_some());
+        let privacy = Some("com.apple.settings.PrivacySecurity.extension");
+        let settings = "com.apple.systempreferences";
+        assert!(pane_refusal(settings, privacy, Gesture::Click).is_some());
+        assert!(pane_refusal(settings, privacy, Gesture::Input).is_some());
+        assert!(pane_refusal(settings, privacy, Gesture::Scroll).is_none());
+        assert!(
+            pane_refusal(
+                settings,
+                Some("com.apple.Displays-Settings.extension"),
+                Gesture::Click
+            )
+            .is_none()
+        );
+        // A helper that cannot tell the pane: System Settings follows the app rules.
+        assert!(pane_refusal(settings, None, Gesture::Click).is_none());
+        assert!(pane_refusal("com.apple.TextEdit", privacy, Gesture::Click).is_none());
     }
 
     #[test]

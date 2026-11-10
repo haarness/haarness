@@ -124,6 +124,13 @@ test("a request that asks every time offers nothing lasting and says why", () =>
   assert.equal(terminal.always?.label, "Always allow Terminal");
   assert.equal(terminal.always?.bundle, "com.apple.Terminal");
   assert.deepEqual(terminal.notes, []);
+  // A server before terms version 2 marks terminals and editors: its cards say why they ask every time, and offer
+  // nothing for good.
+  const older = computerApproval(request({ kind: "act", app: "Terminal", console: true, everyTime: true }, false), english);
+  assert.equal(older.inChat, null);
+  assert.match(older.notes[0], /every click on it needs your approval/);
+  const olderButton = computerApproval(request({ kind: "act", action: "click", bundle: "com.apple.Terminal", app: "Terminal", console: true }), english);
+  assert.equal(olderButton.always, null);
 });
 
 /**

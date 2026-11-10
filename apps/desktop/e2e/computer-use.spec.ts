@@ -267,11 +267,16 @@ test("agreeing takes the checkbox, then turns computer use on", async () => {
   for (const call of calls) expect(call.bar?.usingMac).toBeTruthy();
   expect(calls.at(-1)?.bar?.usingMac).toBe("Haarness is working on this Mac");
   await expect(pane.getByText(/You agreed on November 7, 2026\./)).toBeVisible();
+  await expect(
+    pane.getByText("While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.", { exact: true }),
+  ).toBeVisible();
   await noHorizontalOverflow();
   expect(errors).toEqual([]);
+  await look("computer-use-switch", dialog);
+  await openComputerUse();
 });
 
-test("after the terms changed, one quiet line says so above them and agreeing is the same single step", async () => {
+test("after the terms changed, one quiet line says so where the person agrees, and agreeing is the same single step", async () => {
   const before = (await fake()).status;
   await stub({
     status: { ...before, enabled: false, terms: { version: "2", accepted: false, acceptedAt: null, changed: true, text: terms } },
@@ -280,13 +285,13 @@ test("after the terms changed, one quiet line says so above them and agreeing is
   await openComputerUse();
   const pane = settings().locator(".computer-use-settings");
   const note = pane.getByTestId("computer-terms-changed");
-  await expect(note).toHaveText("These terms changed since you last agreed to them.", { timeout: 8000 });
-  // The line sits between the title and the terms, in the agreement's own block.
-  const [title, line, body] = await Promise.all(
-    [pane.locator(".computer-agreement-title"), note, pane.getByTestId("computer-terms")].map((item) => item.boundingBox()),
+  await expect(note).toHaveText("You agreed to an earlier version of these terms.", { timeout: 8000 });
+  // The line sits after the terms, just above the box that agrees to them.
+  const [body, line, box] = await Promise.all(
+    [pane.getByTestId("computer-terms"), note, pane.locator(".computer-agree")].map((item) => item.boundingBox()),
   );
-  expect(title!.y + title!.height).toBeLessThanOrEqual(line!.y);
-  expect(line!.y + line!.height).toBeLessThanOrEqual(body!.y);
+  expect(body!.y + body!.height).toBeLessThanOrEqual(line!.y);
+  expect(line!.y + line!.height).toBeLessThanOrEqual(box!.y);
   await look("computer-use-terms-changed", dialog);
   await openComputerUse();
   await pane.getByRole("checkbox", { name: "I have read and agree to these terms", exact: true }).check();

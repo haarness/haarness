@@ -51,7 +51,7 @@ export const barKeys = {
   pause: "Pause",
   resume: "Resume",
   stop: "Stop",
-  stopHint: "Esc stops it too",
+  stopHint: "Esc stops it too, while it works in the app in front",
 } as const;
 
 /** The bar's words in the interface language, `%@` where the app's name goes. */
@@ -98,6 +98,11 @@ export interface MacDetail {
   direction?: string | null;
   /** Whether the server sent the parts above: an older one sends only `summary`. */
   parts?: boolean;
+  /**
+   * A terminal or editor, as servers before terms version 2 mark one: such a server asks every time for a click on its
+   * text and never keeps an answer for it.
+   */
+  console?: boolean;
   everyTime?: boolean;
   summary?: string;
 }
@@ -129,6 +134,7 @@ export function macDetail(detail: unknown): MacDetail {
     direction: text("direction"),
     // A server that sends the line's parts always sends `label`, null for an element without words.
     parts: Object.prototype.hasOwnProperty.call(mac, "label"),
+    console: mac.console === true,
     everyTime: mac.everyTime === true,
     summary: text("summary") ?? undefined,
   };
@@ -209,6 +215,8 @@ export function computerApproval(
   const notes: string[] = [];
   if (mac.kind === "screen")
     notes.push(translate("Everything open on screen, apart from password managers and Haarness, goes to the model."));
+  else if (mac.everyTime && mac.console)
+    notes.push(translate("Terminal and editor text can hold someone's prompt, so every click on it needs your approval."));
   else if (mac.everyTime) notes.push(translate("You set this app to ask every time."));
   return {
     summary:
@@ -261,7 +269,7 @@ function allowedApp(request: Pick<PendingPermissionInfo, "detail" | "patterns">)
 /** Whether a computer use request may allow its app in every chat. */
 export function lastingApp(request: Pick<PendingPermissionInfo, "detail" | "allowAlways" | "patterns">) {
   const mac = macDetail(request.detail);
-  return request.allowAlways !== false && mac.kind === "act" && !mac.everyTime && !!allowedApp(request)?.bundle;
+  return request.allowAlways !== false && mac.kind === "act" && !mac.everyTime && !mac.console && !!allowedApp(request)?.bundle;
 }
 
 /** The chat a `computer-use` answer (its view's `data`) says the person paused, if any. */
@@ -328,5 +336,6 @@ export const computerUseKeys = [
   "Agents won't ask before using {app} again, in any chat. You can change this in Settings → Computer use.",
   "Look at every app's windows",
   "Everything open on screen, apart from password managers and Haarness, goes to the model.",
+  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.",
   "You set this app to ask every time.",
 ];

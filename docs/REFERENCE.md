@@ -25,9 +25,9 @@ publishing, platform validation and rollback.
 
 - [Computer use](COMPUTER-USE.md): on macOS, agents see the screen and work in native apps
   with the `mac_*` tools. It stays off until you accept its terms (Settings → Computer use, `/mac` or
-  `haarness mac on`); each app asks once per chat unless you allow it (in Auto, Auto's reviewer
-  answers), the agent works behind your window, a bar on the screen offers Pause and Stop, and a
-  paused chat offers Resume too.
+  `haarness mac on`); each app asks once per chat unless you allow it (in Auto with its reviewer on,
+  the reviewer answers, except for terminals and apps set to ask every time), the agent works behind
+  your window, a bar on the screen offers Pause and Stop, and a paused chat offers Resume too.
 
 - [Haarness Router integration](ROUTER.md): connect a self-hosted router by
   address in Desktop, TUI, or CLI. Access keys are optional, models refresh

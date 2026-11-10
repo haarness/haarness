@@ -4,13 +4,16 @@ request to $FAKE_HELPER_LOG, and never touches the screen.
 
 Refs name fixed elements: e1 a Save button and e2 a Name field in TextEdit, e8 a password field in TextEdit, e9 a
 Reload button and e11 the address field in Safari, e7 a button in Haarness itself, e6 text in Terminal, e5 Terminal's
-New Tab button, e4 a button in Notes, e3 Notes' icon in the Dock, e10 the editor of Visual Studio Code, e13 a switch in
-System Settings, and e12 a Share button in Notes, which sits behind the person's window. Typing "PAUSE" pauses the
+New Tab button, e4 a button in Notes, e3 Notes' icon in the Dock, e10 the editor of Visual Studio Code, e14 its
+terminal panel, e13 a switch in System Settings whose pane the helper cannot name, e15 a switch in its Privacy &
+Security pane, and e12 a Share button in Notes, which sits behind the person's window. The Save button names its
+window and the toolbar around it, and a look at the focus for Meta+S names the menu item it would choose. Typing "PAUSE" pauses the
 agent the way the bar would (and resumes half a second later); typing "HOLD" pauses it the same way until the server
 sends "resume", as Resume pressed in a client does; typing "STOP" pauses it and then presses the bar's Stop; typing
 "CRASH" pauses it and then quits, as a helper killed during a pause would; typing "ESCAPE" presses Escape and then
 hangs, as an action still under way would. A look at pixel 13,13 is followed by Pause and then Stop on the bar, as
-pressed while the approval for that spot waits; a look that filters on "ESCAPE" has Escape pressed while it is taken.
+pressed while the approval for that spot waits. A close-up of TextEdit is trimmed to the screenshot, as the helper
+does; a look at another app ignores zoom, as an older helper would.
 
 Actions on e12 answer the way a helper that works behind the person's window does: a click went in behind, was
 confirmed and opened and closed things; a scroll went in behind and showed no change; a drag and a hover came to the
@@ -47,7 +50,8 @@ def send(value):
 
 
 ELEMENTS = {
-    1: {"bundle": "com.apple.TextEdit", "app": "TextEdit", "role": "AXButton", "name": "Save", "content": False},
+    1: {"bundle": "com.apple.TextEdit", "app": "TextEdit", "role": "AXButton", "name": "Save", "content": False,
+        "window": "Quarterly notes.rtf", "context": "Toolbar"},
     2: {"bundle": "com.apple.TextEdit", "app": "TextEdit", "role": "AXTextField", "description": "Name", "content": False},
     8: {"bundle": "com.apple.TextEdit", "app": "TextEdit", "role": "AXTextField", "subrole": "AXSecureTextField", "password": True, "content": False},
     9: {"bundle": "com.apple.Safari", "app": "Safari", "role": "AXButton", "name": "Reload", "content": True},
@@ -60,6 +64,9 @@ ELEMENTS = {
     11: {"bundle": "com.apple.Safari", "app": "Safari", "role": "AXTextField", "description": "Address", "content": False},
     12: {"bundle": "com.apple.Notes", "app": "Notes", "role": "AXButton", "name": "Share", "content": False},
     13: {"bundle": "com.apple.systempreferences", "app": "System Settings", "role": "AXCheckBox", "name": "Bluetooth", "content": False},
+    14: {"bundle": "com.microsoft.VSCode", "app": "Code", "role": "AXTextArea", "description": "Terminal 1", "content": True, "terminal": True},
+    15: {"bundle": "com.apple.systempreferences", "app": "System Settings", "role": "AXCheckBox", "name": "Terminal", "content": False,
+         "pane": "com.apple.settings.PrivacySecurity.extension", "context": "Automation"},
 }
 
 APPS = {"com.apple.TextEdit": "TextEdit", "com.apple.Notes": "Notes", "com.apple.Mail": "Mail"}
@@ -99,9 +106,6 @@ def answer(op, request):
             return {"__error": ("not_found", "That app is not running.")}
         return {"bundle": bundle, "name": names.get(bundle, bundle), "running": bundle == "com.apple.TextEdit"}
     if op == "snapshot":
-        if request.get("find") == "ESCAPE":
-            send({"event": "escape"})
-            time.sleep(0.3)
         bundle = request.get("bundle") if request.get("bundle") in APPS else "com.apple.TextEdit"
         reply = {
             "size": {"width": 100, "height": 50, "factor": 1},
@@ -114,6 +118,11 @@ def answer(op, request):
             "accessibility": True,
             "whole": bool(request.get("whole")),
         }
+        if request.get("zoom") and bundle == "com.apple.TextEdit":
+            zoom = dict(request["zoom"])
+            zoom["width"] = min(zoom["width"], 100 - zoom["x"])
+            zoom["height"] = min(zoom["height"], 50 - zoom["y"])
+            reply["zoom"] = zoom
         if bundle == "com.apple.Notes":
             reply["behind"] = True
         if bundle == "com.apple.Mail":
@@ -132,7 +141,10 @@ def answer(op, request):
                 threading.Timer(0.3, lambda: send({"event": "pause"})).start()
                 threading.Timer(0.8, lambda: send({"event": "stop"})).start()
             return {"bundle": "com.apple.TextEdit", "app": "TextEdit", "role": "AXTextArea", "content": True, "point": {"x": request["x"], "y": request["y"]}}
-        return dict(ELEMENTS[2], password=False)
+        element = dict(ELEMENTS[2], password=False)
+        if "Meta+S" in str(request.get("keys", "")):
+            element["menu"] = "File ▸ Save…"
+        return element
     if op == "type" and request.get("text") == "PAUSE":
         send({"event": "pause"})
         threading.Timer(0.5, lambda: send({"event": "resume"})).start()

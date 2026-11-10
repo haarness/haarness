@@ -3021,7 +3021,6 @@
   "Haarness is working in {app}": "يعمل Haarness في {app}",
   "Haarness is working on this Mac": "يعمل Haarness على جهاز Mac هذا",
   "Haarness is waiting for you": "Haarness في انتظارك",
-  "Esc stops it too": "مفتاح Esc يوقفه أيضًا",
   "Allowed": "مسموح",
   "Not allowed": "غير مسموح",
   "Allow {permission} in System Settings": "السماح بـ{permission} في إعدادات النظام",
@@ -3100,7 +3099,6 @@
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "يستطيع الوكلاء رؤية شاشة جهاز Mac هذا وتشغيل تطبيقاته. ينظرون إلى تطبيق واحد في كل مرة ويستشيرونك قبل التصرف في تطبيق لم تسمح به.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "مستخدم آخر مسجّل الدخول على شاشة جهاز Mac هذا، لذا لا يمكن للوكلاء استخدامه من هذا الحساب.",
   "Use a bundle identifier like com.apple.TextEdit.": "استخدم معرّف حزمة مثل com.apple.TextEdit.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.": "أثناء عمل الوكيل، يعرض شريط أعلى الشاشة التطبيق المستخدم، مع إيقاف مؤقت وإيقاف. مفتاح Esc يوقفه أيضًا.",
   "Needed to read app contents and to click, type and press keys.": "مطلوب لقراءة محتوى التطبيقات وللنقر والكتابة والضغط على المفاتيح.",
   "Use it for": "استخدمه من أجل",
   "Don't use it for": "لا تستخدمه من أجل",
@@ -3154,7 +3152,10 @@
   "turn on overage so your purchased credits pay": "فعّل الاستخدام الإضافي ليُنفق رصيدك المشترى",
   "add credits and turn on overage to keep working": "أضف رصيدًا وفعّل الاستخدام الإضافي لمتابعة العمل",
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "يطلب الوكيل الإذن قبل العمل في تطبيق لم تسمح به. في محادثة مضبوطة على الوضع التلقائي، قد يجيب مراجِع الوضع التلقائي نيابةً عنك، إلا في التطبيقات التي ضبطتها لتطلب الإذن في كل مرة؛ أما المحادثة المضبوطة على Yolo فتوافق على كل شيء. وبعد أن تسمح بتطبيق يعمل فيه الوكيل دون سؤال، وتبقى أنت المسؤول عما يفعله.",
-  "These terms changed since you last agreed to them.": "تغيّرت هذه الشروط منذ آخر مرة وافقت فيها عليها.",
-  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "السؤال أولًا يعني إذنًا واحدًا لكل تطبيق في كل محادثة؛ وفي المحادثات المضبوطة على الوضع التلقائي يتولاه المراجِع.",
-  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "لا تُستخدم مديرات كلمات المرور ولا Haarness نفسه أبدًا، ولا يكتب الوكلاء في الطرفيات أبدًا. في الوضع التلقائي، تظل التطبيقات المضبوطة على السؤال في كل مرة تطلب إذنك."
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "لا تُستخدم مديرات كلمات المرور ولا Haarness نفسه أبدًا، ولا يكتب الوكلاء في الطرفيات أبدًا. في الوضع التلقائي، تظل التطبيقات المضبوطة على السؤال في كل مرة تطلب إذنك.",
+  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "قد يحتوي نص الطرفية أو المحرر على طلب لشخص ما، لذا تحتاج كل نقرة عليه إلى موافقتك.",
+  "You agreed to an earlier version of these terms.": "لقد وافقت على إصدار سابق من هذه الشروط.",
+  "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "السؤال أولًا يعني إذنًا واحدًا لكل تطبيق في كل محادثة، ويمنحه مراجِع الوضع التلقائي في الوضع التلقائي عندما يكون مفعّلًا.",
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "أثناء عمل الوكيل، يعرض شريط أعلى الشاشة التطبيق المستخدم، مع إيقاف مؤقت وإيقاف. مفتاح Esc يوقفه أيضًا ما دام يعمل في التطبيق الأمامي.",
+  "Esc stops it too, while it works in the app in front": "مفتاح Esc يوقفه أيضًا ما دام يعمل في التطبيق الأمامي"
 }

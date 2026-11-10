@@ -3021,7 +3021,6 @@
   "Haarness is working in {app}": "Haarness radi u {app}",
   "Haarness is working on this Mac": "Haarness radi na ovom Macu",
   "Haarness is waiting for you": "Haarness vas čeka",
-  "Esc stops it too": "Esc ga također zaustavlja",
   "Allowed": "Dozvoljeno",
   "Not allowed": "Nije dozvoljeno",
   "Allow {permission} in System Settings": "Dozvoli {permission} u Postavkama sistema",
@@ -3100,7 +3099,6 @@
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Agenti mogu vidjeti ekran ovog Maca i upravljati njegovim aplikacijama. Gledaju jednu po jednu aplikaciju i pitaju vas prije nego što djeluju u aplikaciji koju niste dozvolili.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "Drugi korisnik je prijavljen na ekranu ovog Maca, pa ga agenti ne mogu koristiti s ovog računa.",
   "Use a bundle identifier like com.apple.TextEdit.": "Koristite identifikator paketa poput com.apple.TextEdit.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.": "Dok agent radi, traka na vrhu ekrana prikazuje aplikaciju koja se koristi, s opcijama Pauziraj i Zaustavi. Esc ga također zaustavlja.",
   "Needed to read app contents and to click, type and press keys.": "Potrebno za čitanje sadržaja aplikacija te za klikanje, kucanje i pritiskanje tipki.",
   "Use it for": "Koristite ga za",
   "Don't use it for": "Ne koristite ga za",
@@ -3154,7 +3152,10 @@
   "turn on overage so your purchased credits pay": "uključite prekoračenje da kupljeni krediti plaćaju",
   "add credits and turn on overage to keep working": "dodajte kredite i uključite prekoračenje da nastavite raditi",
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "Agent pita prije nego što radi u aplikaciji koju niste dozvolili. U razgovoru postavljenom na Auto, recenzent za Auto može odgovoriti umjesto vas, osim u aplikacijama za koje ste postavili da pitaju svaki put; razgovor postavljen na Yolo odobrava sve. Kad dozvolite aplikaciju, agent radi u njoj bez pitanja, a za ono što uradi i dalje ste odgovorni vi.",
-  "These terms changed since you last agreed to them.": "Ovi uslovi su se promijenili otkad ste ih zadnji put prihvatili.",
-  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Prvo pitaj znači jedno odobrenje po aplikaciji u svakom razgovoru; razgovori na Auto to prepuštaju recenzentu.",
-  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Upravitelji lozinki i sam Haarness nikad se ne koriste, a agenti nikad ne kucaju u terminale. Na Auto, aplikacije postavljene da pitaju svaki put i dalje pitaju vas."
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Upravitelji lozinki i sam Haarness nikad se ne koriste, a agenti nikad ne kucaju u terminale. Na Auto, aplikacije postavljene da pitaju svaki put i dalje pitaju vas.",
+  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Tekst u terminalu ili uređivaču može sadržavati nečiji upit, pa svaki klik na njega traži vaše odobrenje.",
+  "You agreed to an earlier version of these terms.": "Prihvatili ste raniju verziju ovih uslova.",
+  "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Prvo pitaj znači jedno odobrenje po aplikaciji u svakom razgovoru, koje na Auto daje recenzent za Auto kada je uključen.",
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "Dok agent radi, traka na vrhu ekrana prikazuje aplikaciju koja se koristi, s opcijama Pauziraj i Zaustavi. Esc ga također zaustavlja dok radi u aplikaciji u prvom planu.",
+  "Esc stops it too, while it works in the app in front": "Esc ga također zaustavlja dok radi u aplikaciji u prvom planu"
 }

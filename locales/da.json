@@ -3021,7 +3021,6 @@
   "Haarness is working in {app}": "Haarness arbejder i {app}",
   "Haarness is working on this Mac": "Haarness arbejder på denne Mac",
   "Haarness is waiting for you": "Haarness venter på dig",
-  "Esc stops it too": "Esc stopper det også",
   "Allowed": "Tilladt",
   "Not allowed": "Ikke tilladt",
   "Allow {permission} in System Settings": "Tillad {permission} i Systemindstillinger",
@@ -3100,7 +3099,6 @@
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Agenter kan se denne Macs skærm og betjene dens apps. De ser på én app ad gangen og spørger dig, før de handler i en app, du ikke har tilladt.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "En anden bruger er logget ind på denne Macs skærm, så agenter kan ikke bruge den fra denne konto.",
   "Use a bundle identifier like com.apple.TextEdit.": "Brug et bundle-id som com.apple.TextEdit.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.": "Mens en agent arbejder, viser en bjælke øverst på skærmen den app, der bruges, med Pause og Stop. Esc stopper den også.",
   "Needed to read app contents and to click, type and press keys.": "Kræves for at læse indholdet i apps og for at klikke, skrive og trykke på taster.",
   "Use it for": "Brug det til",
   "Don't use it for": "Brug det ikke til",
@@ -3154,7 +3152,10 @@
   "turn on overage so your purchased credits pay": "slå overforbrug til, så dine købte kreditter betaler",
   "add credits and turn on overage to keep working": "tilføj kreditter og slå overforbrug til for at arbejde videre",
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "En agent spørger, før den handler i en app, du ikke har tilladt. I en chat sat til Auto kan Auto-bedømmeren svare for dig, undtagen i apps, du har sat til at spørge hver gang; en chat sat til Yolo godkender alt. Når du har tilladt en app, handler agenten der uden at spørge, og det, den gør, er stadig dit ansvar.",
-  "These terms changed since you last agreed to them.": "Disse vilkår er ændret, siden du sidst accepterede dem.",
-  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Spørg først betyder én godkendelse pr. app i hver chat; chats i Auto overlader den til bedømmeren.",
-  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Adgangskodeadministratorer og Haarness selv bruges aldrig, og agenter skriver aldrig i terminaler. I Auto spørger apps, der er sat til at spørge hver gang, stadig dig."
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Adgangskodeadministratorer og Haarness selv bruges aldrig, og agenter skriver aldrig i terminaler. I Auto spørger apps, der er sat til at spørge hver gang, stadig dig.",
+  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Tekst i terminaler og editorer kan indeholde en forespørgsel, så hvert klik på den kræver din godkendelse.",
+  "You agreed to an earlier version of these terms.": "Du accepterede en tidligere version af disse vilkår.",
+  "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Spørg først betyder én godkendelse pr. app i hver chat, som Auto-bedømmeren giver i Auto, når den er slået til.",
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "Mens en agent arbejder, viser en bjælke øverst på skærmen den app, der bruges, med Pause og Stop. Esc stopper den også, mens den arbejder i appen forrest.",
+  "Esc stops it too, while it works in the app in front": "Esc stopper det også, mens det arbejder i appen forrest"
 }

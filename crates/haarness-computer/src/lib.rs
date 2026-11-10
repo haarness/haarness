@@ -82,13 +82,11 @@ struct Pause {
 }
 
 /// The chat whose turn uses the screen now, what stops that turn, and when it last used the screen (`None` while it has
-/// only claimed it: an action waiting for its approval, say). `behind`: its latest action went in behind the person's
-/// window, so Escape is the person's own key until it acts in front again.
+/// only claimed it: an action waiting for its approval, say).
 struct Active {
     thread: ThreadId,
     stop: CancellationToken,
     used: Option<std::time::Instant>,
-    behind: bool,
 }
 
 pub struct Computer {
@@ -169,7 +167,7 @@ impl Computer {
                     // unpaused.
                     Event::Exit => {}
                     // The bar's Stop is only there while the agent works; Escape counts only shortly after its
-                    // latest action, and not when that action went in behind the person's window.
+                    // latest action. The helper reports it only while the agent acts in the front app.
                     Event::Stop => {
                         computer.resume();
                         computer.stop_active(None);
@@ -240,14 +238,13 @@ impl Computer {
     }
 
     /// Escape or the bar's Stop: the turn holding the screen is cancelled, the same as Stop in a client. With no turn
-    /// holding it, or (given `within`, for Escape) none that used the screen that recently or one whose latest action
-    /// went in behind the person's window, nothing happens. Reports whether a turn was stopped.
+    /// holding it, or (given `within`) none that used the screen that recently, nothing happens. Reports whether a
+    /// turn was stopped.
     fn stop_active(&self, within: Option<Duration>) -> bool {
         let mut slot = self.active.lock();
         if within.is_some_and(|limit| {
-            slot.as_ref().is_some_and(|active| {
-                active.behind || active.used.is_none_or(|used| used.elapsed() > limit)
-            })
+            slot.as_ref()
+                .is_some_and(|active| active.used.is_none_or(|used| used.elapsed() > limit))
         }) {
             return false;
         }
@@ -373,28 +370,13 @@ impl Computer {
         &self.lease
     }
 
-    /// Remembers which turn is driving the screen, so Stop and Escape can cancel it, and that it uses the screen now. A
-    /// look keeps what the turn's latest action said about where it went.
+    /// Remembers which turn is driving the screen, so Stop and Escape can cancel it, and that it uses the screen now.
     pub(crate) fn hold(&self, thread: ThreadId, stop: CancellationToken) {
-        let mut slot = self.active.lock();
-        let behind = slot
-            .as_ref()
-            .is_some_and(|active| active.thread == thread && active.behind);
-        *slot = Some(Active {
+        *self.active.lock() = Some(Active {
             thread,
             stop,
             used: Some(std::time::Instant::now()),
-            behind,
         });
-    }
-
-    /// Notes whether the latest action of the turn holding the screen went in behind the person's window: while it
-    /// did, the person keeps working in their own app, so Escape stays theirs and the strip's Stop is the way to stop
-    /// the agent.
-    pub(crate) fn behind(&self, behind: bool) {
-        if let Some(active) = self.active.lock().as_mut() {
-            active.behind = behind;
-        }
     }
 
     /// Remembers which turn claims the screen, before it uses it (an action whose approval is still open), so the bar's
@@ -408,7 +390,6 @@ impl Computer {
                     thread,
                     stop,
                     used: None,
-                    behind: false,
                 });
             }
         }

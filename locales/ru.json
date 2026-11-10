@@ -3021,7 +3021,6 @@
   "Haarness is working in {app}": "Haarness работает в {app}",
   "Haarness is working on this Mac": "Haarness работает на этом Mac",
   "Haarness is waiting for you": "Haarness ждёт вас",
-  "Esc stops it too": "Esc тоже останавливает",
   "Allowed": "Разрешено",
   "Not allowed": "Не разрешено",
   "Allow {permission} in System Settings": "Разрешить «{permission}» в Системных настройках",
@@ -3100,7 +3099,6 @@
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Агенты могут видеть экран этого Mac и работать с его приложениями. Они смотрят на одно приложение за раз и спрашивают вас, прежде чем действовать в приложении, которое вы не разрешили.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "На экране этого Mac вошёл другой пользователь, поэтому агенты не могут пользоваться им из этой учётной записи.",
   "Use a bundle identifier like com.apple.TextEdit.": "Укажите идентификатор пакета, например com.apple.TextEdit.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.": "Пока агент работает, полоса вверху экрана показывает используемое приложение и кнопки «Пауза» и «Остановить». Esc тоже останавливает его.",
   "Needed to read app contents and to click, type and press keys.": "Нужно, чтобы читать содержимое приложений, нажимать, вводить текст и клавиши.",
   "Use it for": "Для чего использовать",
   "Don't use it for": "Для чего не использовать",
@@ -3154,7 +3152,10 @@
   "turn on overage so your purchased credits pay": "включите перерасход, чтобы платить купленными кредитами",
   "add credits and turn on overage to keep working": "пополните кредиты и включите перерасход, чтобы продолжить",
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "Агент спрашивает, прежде чем действовать в приложении, которое вы не разрешили. В чате в режиме Авто проверяющий режима Авто может ответить за вас, кроме приложений, для которых вы выбрали запрос каждый раз; чат в режиме Yolo одобряет всё. Разрешённое приложение агент использует без вопросов, а ответственность за его действия остаётся на вас.",
-  "These terms changed since you last agreed to them.": "Эти условия изменились с тех пор, как вы в последний раз с ними согласились.",
-  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "«Сначала спрашивать» — это одно одобрение на приложение в каждом чате; в чатах в режиме Авто его даёт проверяющий.",
-  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Менеджеры паролей и сам Haarness никогда не используются, а агенты никогда не вводят текст в терминалах. В режиме Авто приложения с запросом каждый раз по-прежнему спрашивают вас."
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Менеджеры паролей и сам Haarness никогда не используются, а агенты никогда не вводят текст в терминалах. В режиме Авто приложения с запросом каждый раз по-прежнему спрашивают вас.",
+  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "В тексте терминала или редактора может оказаться чужой запрос, поэтому каждый щелчок по нему требует вашего одобрения.",
+  "You agreed to an earlier version of these terms.": "Вы согласились с более ранней версией этих условий.",
+  "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "«Сначала спрашивать» — это одно одобрение на приложение в каждом чате; в режиме Авто его даёт проверяющий, когда он включён.",
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "Пока агент работает, полоса вверху экрана показывает используемое приложение и кнопки «Пауза» и «Остановить». Esc тоже останавливает его, пока он работает в приложении на переднем плане.",
+  "Esc stops it too, while it works in the app in front": "Esc тоже останавливает, пока он работает в приложении на переднем плане"
 }

@@ -323,10 +323,10 @@ test("keys translated through a variable are in the catalog", () => {
     ...computerUseKeys,
     // Settings rows of Computer use, handed to SettingRow.
     "Agents may use this Mac",
-    "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.",
+    "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.",
     "Accessibility", "Needed to read app contents and to click, type and press keys.",
     "Screen Recording", "Required for screenshots. Agents can still read apps without it, just not see them.",
-    "Apps without a rule", "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.",
+    "Apps without a rule", "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.",
     "Mark each click on screen", "A ring marks the spot for a moment before each click.",
     "Terms for computer use", "You agree to these before agents use this Mac.",
     // Settings navigation and search titles.

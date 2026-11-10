@@ -3021,7 +3021,6 @@
   "Haarness is working in {app}": "Haarness 正在{app}中工作",
   "Haarness is working on this Mac": "Haarness 正在这台 Mac 上工作",
   "Haarness is waiting for you": "Haarness 正在等你",
-  "Esc stops it too": "按 Esc 也可停止",
   "Allowed": "已允许",
   "Not allowed": "未允许",
   "Allow {permission} in System Settings": "在“系统设置”中允许{permission}",
@@ -3100,7 +3099,6 @@
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "智能体可以查看这台 Mac 的屏幕并操作其中的应用。它们一次只查看一个应用，在你未允许的应用中操作前会先征求你的同意。",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "另一位用户正在这台 Mac 的屏幕上登录，因此智能体无法从此账户使用它。",
   "Use a bundle identifier like com.apple.TextEdit.": "请使用 Bundle ID，例如 com.apple.TextEdit。",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.": "智能体工作时，屏幕顶部的条带会显示正在使用的应用，并提供“暂停”和“停止”。按 Esc 也可停止。",
   "Needed to read app contents and to click, type and press keys.": "读取应用内容以及点击、输入和按键时需要。",
   "Use it for": "适用场景",
   "Don't use it for": "不得用于",
@@ -3154,7 +3152,10 @@
   "turn on overage so your purchased credits pay": "开启超额使用，让已购额度可以支付",
   "add credits and turn on overage to keep working": "添加额度并开启超额使用以继续工作",
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "智能体在你未允许的应用中操作前会先询问。在设为自动的对话中，自动模式的审核模型可能会代你回答，但你设为每次都询问的应用除外；设为 Yolo 的对话会批准一切。你允许某个应用后，智能体会在其中直接操作，其所作所为仍由你负责。",
-  "These terms changed since you last agreed to them.": "自你上次同意以来，这些条款已有更改。",
-  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "“先询问”是指每个对话中每个应用需批准一次；自动模式的对话交给审核模型处理。",
-  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "密码管理器和 Haarness 本身永远不会被使用，智能体也绝不会在终端中输入。在自动模式下，设为每次都询问的应用仍会询问你。"
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "密码管理器和 Haarness 本身永远不会被使用，智能体也绝不会在终端中输入。在自动模式下，设为每次都询问的应用仍会询问你。",
+  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "终端和编辑器中的文本可能包含他人的提示，因此每次点击都需要你的批准。",
+  "You agreed to an earlier version of these terms.": "你同意的是这些条款的早期版本。",
+  "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "“先询问”是指每个对话中每个应用需批准一次；在自动模式下，审核模型开启时由它批准。",
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "智能体工作时，屏幕顶部的条带会显示正在使用的应用，并提供“暂停”和“停止”。它在最前面的应用中工作时，按 Esc 也可停止。",
+  "Esc stops it too, while it works in the app in front": "在最前面的应用中工作时，按 Esc 也可停止"
 }

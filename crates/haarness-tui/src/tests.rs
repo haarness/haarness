@@ -26665,6 +26665,24 @@ async fn an_every_time_card_says_why_and_a_terminal_card_offers_always() {
         crate::state::lasting_app(app.first_pending_permission().unwrap()),
         Some("com.apple.Terminal")
     );
+
+    // A server before terms version 2 marks terminals and editors: a click on their text asks every time and says
+    // why, and nothing in them is offered for good.
+    for (every_time, note) in [(true, true), (false, false)] {
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        let mac = serde_json::json!({"kind": "act", "action": "click", "app": "Terminal", "bundle": "com.apple.Terminal",
+            "summary": "Click text area in Terminal", "everyTime": every_time, "console": true});
+        app.reduce(
+            computer_event(&thread, "perm-old", mac, !every_time),
+            &offline_client(),
+        )
+        .await
+        .unwrap();
+        let text = frame_text(&app, (130, 40));
+        assert_eq!(text.contains("needs your approval"), note, "{text}");
+        assert!(!text.contains("You set this app"), "{text}");
+        assert!(crate::state::lasting_app(app.first_pending_permission().unwrap()).is_none());
+    }
 }
 
 /// A worktree whose link to its repository broke is only forgotten by the

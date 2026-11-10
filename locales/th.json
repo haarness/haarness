@@ -3021,7 +3021,6 @@
   "Haarness is working in {app}": "Haarness กำลังทำงานใน {app}",
   "Haarness is working on this Mac": "Haarness กำลังทำงานบน Mac เครื่องนี้",
   "Haarness is waiting for you": "Haarness กำลังรอคุณ",
-  "Esc stops it too": "กด Esc เพื่อหยุดได้เช่นกัน",
   "Allowed": "อนุญาตแล้ว",
   "Not allowed": "ยังไม่อนุญาต",
   "Allow {permission} in System Settings": "อนุญาต {permission} ในการตั้งค่าระบบ",
@@ -3100,7 +3099,6 @@
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "เอเจนต์จะมองเห็นหน้าจอของ Mac เครื่องนี้และใช้งานแอปต่างๆ ได้ โดยดูทีละแอป และถามคุณก่อนทำงานในแอปที่คุณยังไม่ได้อนุญาต",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "มีผู้ใช้คนอื่นลงชื่อเข้าใช้หน้าจอของ Mac เครื่องนี้อยู่ เอเจนต์จึงใช้งานจากบัญชีนี้ไม่ได้",
   "Use a bundle identifier like com.apple.TextEdit.": "ใช้ตัวระบุบันเดิล เช่น com.apple.TextEdit",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.": "ขณะที่เอเจนต์ทำงาน แถบด้านบนของหน้าจอจะแสดงแอปที่ใช้อยู่ พร้อมปุ่มหยุดชั่วคราวและหยุด กด Esc ก็หยุดได้เช่นกัน",
   "Needed to read app contents and to click, type and press keys.": "จำเป็นสำหรับการอ่านเนื้อหาในแอป และการคลิก พิมพ์ และกดแป้น",
   "Use it for": "ใช้สำหรับ",
   "Don't use it for": "ห้ามใช้สำหรับ",
@@ -3154,7 +3152,10 @@
   "turn on overage so your purchased credits pay": "เปิดการใช้เกินเพื่อให้ใช้เครดิตที่ซื้อได้",
   "add credits and turn on overage to keep working": "เติมเครดิตและเปิดการใช้เกินเพื่อทำงานต่อ",
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "เอเจนต์จะถามก่อนทำงานในแอปที่คุณยังไม่อนุญาต ในแชทที่ตั้งเป็นอัตโนมัติ ผู้ตรวจของโหมดอัตโนมัติอาจตอบแทนคุณได้ ยกเว้นในแอปที่คุณตั้งให้ถามทุกครั้ง ส่วนแชทที่ตั้งเป็น Yolo จะอนุมัติทุกอย่าง เมื่อคุณอนุญาตแอปแล้ว เอเจนต์จะทำงานในแอปนั้นโดยไม่ถาม และสิ่งที่เอเจนต์ทำยังคงเป็นความรับผิดชอบของคุณ",
-  "These terms changed since you last agreed to them.": "ข้อกำหนดเหล่านี้เปลี่ยนไปตั้งแต่ครั้งล่าสุดที่คุณยอมรับ",
-  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "ถามก่อนหมายถึงการอนุมัติหนึ่งครั้งต่อแอปในแต่ละแชท แชทในโหมดอัตโนมัติจะให้ผู้ตรวจเป็นผู้ตอบ",
-  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "ตัวจัดการรหัสผ่านและ Haarness เองจะไม่ถูกใช้เลย และเอเจนต์จะไม่พิมพ์ลงในเทอร์มินัลเลย ในโหมดอัตโนมัติ แอปที่ตั้งให้ถามทุกครั้งจะยังคงถามคุณ"
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "ตัวจัดการรหัสผ่านและ Haarness เองจะไม่ถูกใช้เลย และเอเจนต์จะไม่พิมพ์ลงในเทอร์มินัลเลย ในโหมดอัตโนมัติ แอปที่ตั้งให้ถามทุกครั้งจะยังคงถามคุณ",
+  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "ข้อความในเทอร์มินัลและโปรแกรมแก้ไขอาจมีคำขอของใครบางคนอยู่ การคลิกที่ข้อความนั้นทุกครั้งจึงต้องได้รับการอนุมัติจากคุณ",
+  "You agreed to an earlier version of these terms.": "คุณได้ยอมรับข้อกำหนดเหล่านี้ฉบับก่อนหน้า",
+  "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "ถามก่อนหมายถึงการอนุมัติหนึ่งครั้งต่อแอปในแต่ละแชท ซึ่งในโหมดอัตโนมัติ ผู้ตรวจจะเป็นผู้อนุมัติเมื่อเปิดใช้อยู่",
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "ขณะที่เอเจนต์ทำงาน แถบด้านบนของหน้าจอจะแสดงแอปที่ใช้อยู่ พร้อมปุ่มหยุดชั่วคราวและหยุด กด Esc ก็หยุดได้เช่นกันขณะที่เอเจนต์ทำงานในแอปที่อยู่ด้านหน้า",
+  "Esc stops it too, while it works in the app in front": "กด Esc เพื่อหยุดได้เช่นกันขณะทำงานในแอปที่อยู่ด้านหน้า"
 }

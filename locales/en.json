@@ -3021,7 +3021,6 @@
   "Haarness is working in {app}": "Haarness is working in {app}",
   "Haarness is working on this Mac": "Haarness is working on this Mac",
   "Haarness is waiting for you": "Haarness is waiting for you",
-  "Esc stops it too": "Esc stops it too",
   "Allowed": "Allowed",
   "Not allowed": "Not allowed",
   "Allow {permission} in System Settings": "Allow {permission} in System Settings",
@@ -3100,7 +3099,6 @@
   "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.": "Agents get to view this Mac's screen and operate its apps. They look at one app at a time and check with you before acting in an app you haven't allowed.",
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.",
   "Use a bundle identifier like com.apple.TextEdit.": "Use a bundle identifier like com.apple.TextEdit.",
-  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.": "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it.",
   "Needed to read app contents and to click, type and press keys.": "Needed to read app contents and to click, type and press keys.",
   "Use it for": "Use it for",
   "Don't use it for": "Don't use it for",
@@ -3154,7 +3152,10 @@
   "turn on overage so your purchased credits pay": "turn on overage so your purchased credits pay",
   "add credits and turn on overage to keep working": "add credits and turn on overage to keep working",
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.",
-  "These terms changed since you last agreed to them.": "These terms changed since you last agreed to them.",
-  "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.": "Ask first means one approval per app in each chat; chats in Auto leave it to the reviewer.",
-  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you."
+  "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.",
+  "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.",
+  "You agreed to an earlier version of these terms.": "You agreed to an earlier version of these terms.",
+  "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.",
+  "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.": "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it works in the app in front.",
+  "Esc stops it too, while it works in the app in front": "Esc stops it too, while it works in the app in front"
 }
