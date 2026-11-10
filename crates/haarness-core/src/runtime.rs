@@ -13917,20 +13917,12 @@ impl RunnerTask {
             // offered and kept: not for a request only a person answers, not
             // in a run nobody watches (which records nothing), and not in a
             // chat in Auto, which approves once and records nothing either.
-            // It is told every pattern its Always keeps, the exact commands
-            // of a line that reads a secret file included.
-            let kept: Vec<String> = plan
-                .always
-                .iter()
-                .cloned()
-                .chain(plan.exact_patterns())
-                .collect();
             let always = (!forced
                 && !explicit
                 && !self.unattended
                 && hook_may_remember(plan)
                 && !self.approval_modes.is_auto(self.thread.id).await)
-                .then_some(kept.as_slice());
+                .then_some(plan.always.as_slice());
             let call = self.hook_call(Some(agent));
             match permission_hook_answer(hooks.as_ref(), &call, plan, always, detail).await {
                 HookAnswer::Refused(reason) => {
@@ -17189,7 +17181,7 @@ struct ShellReadings {
     /// a command is given, or a redirect): see [`AskPlan::evaluate`].
     credentials: bool,
     /// The secret files (`.env`) the line reads: see [`AskPlan::evaluate`].
-    secrets: Vec<std::path::PathBuf>,
+    secrets: Vec<crate::permissions::bash::NamedPath>,
 }
 
 impl ShellReadings {
@@ -17236,9 +17228,18 @@ impl ShellReadings {
                 .paths
                 .iter()
                 .filter(|named| named.secret)
-                .map(|named| named.path.clone())
+                .cloned()
                 .collect(),
         }
+    }
+
+    /// Whether the written command `index` must be chosen itself to read
+    /// the secret `named`: it names it (or nobody can tell which command
+    /// does), and it is a file that is there or a glob that may reach one.
+    /// Otherwise the command's own rule settles it as any rule did before,
+    /// a remembered `npm test *` in `source .env && npm test` too.
+    fn reads_exactly(named: &crate::permissions::bash::NamedPath, index: usize) -> bool {
+        named.written.is_none_or(|written| written == index) && (named.glob || named.path.is_file())
     }
 
     fn covers(&self, rule: &str, index: usize) -> bool {
@@ -17266,30 +17267,29 @@ impl AskPlan {
             .map(|pattern| self.operation(pattern))
             .collect()
     }
-    /// The commands as written of a line that reads a secret file that is
-    /// there (`cat .env`): Always also remembers each one exactly, since the
-    /// "always" rule it shows (`bash:cat *`) does not settle a read of a
-    /// secret file (see [`PermissionEngine::allowed_by_choice`]). They are
-    /// not shown: the card names its "always" rules as before, and its
-    /// Always opens `cat .env` again and nothing more.
-    fn exact_patterns(&self) -> Vec<String> {
+    /// The commands as written that read a secret file of their line that
+    /// is there (`cat .env`, see [`ShellReadings::reads_exactly`]): Always
+    /// also remembers each one exactly, since the "always" rule it shows
+    /// (`bash:cat *`) does not settle such a read (see
+    /// [`PermissionEngine::allowed_by_choice`]), as a digest of its text
+    /// ([`crate::permissions::exact_rule`]). They are not shown: the card
+    /// names its "always" rules as before, and its Always opens `cat .env`
+    /// again and nothing more.
+    fn exact_rules(&self) -> Vec<String> {
         let Some(shell) = &self.shell else {
             return Vec::new();
         };
-        if !shell.secrets.iter().any(|path| path.is_file()) {
-            return Vec::new();
-        }
         self.patterns
             .iter()
-            .filter(|pattern| shell.index.contains_key(*pattern) && !self.always.contains(pattern))
-            .cloned()
-            .collect()
-    }
-    /// [`Self::exact_patterns`] as rules.
-    fn exact_rules(&self) -> Vec<String> {
-        self.exact_patterns()
-            .iter()
-            .map(|pattern| self.operation(pattern))
+            .filter(|pattern| {
+                shell.index.get(*pattern).is_some_and(|&index| {
+                    shell
+                        .secrets
+                        .iter()
+                        .any(|named| ShellReadings::reads_exactly(named, index))
+                })
+            })
+            .map(|pattern| crate::permissions::exact_rule(&self.operation(pattern)))
             .collect()
     }
     /// Everything Always remembers: [`Self::always_rules`], then
@@ -17426,20 +17426,22 @@ impl AskPlan {
         // command itself: a shell command could otherwise print what the
         // read tool asks about first. A remembered `*` rule (`bash:cat *`)
         // settles a secret's name that is no file (`grep -rn "process.env"
-        // src`), as it always did, but never a file that is there.
+        // src`) and the other commands of a line that reads one, as it
+        // always did, but never a read of a file that is there by the
+        // command naming it, nor a glob that may reach one.
         if evaluation.decision == PermissionDecision::Allow
-            && shell.index.contains_key(pattern)
+            && let Some(&index) = shell.index.get(pattern)
             && let Some(read) = shell
                 .secrets
                 .iter()
-                .filter(|path| {
+                .filter(|named| {
                     !engine.allowed_by_choice(
                         evaluation.matched.as_deref(),
                         &operation,
-                        !path.is_file(),
+                        !ShellReadings::reads_exactly(named, index),
                     )
                 })
-                .map(|path| engine.evaluate_detailed(&format!("read:{}", path.display())))
+                .map(|named| engine.evaluate_detailed(&format!("read:{}", named.path.display())))
                 .find(|read| read.decision != PermissionDecision::Allow)
         {
             return read;
@@ -18309,6 +18311,8 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 literal: true,
                 outside: Some(pattern),
                 secret: false,
+                written: None,
+                glob: false,
             });
             external_paths.push(path);
         }
@@ -19149,6 +19153,8 @@ mod shell_reading_tests {
             "cat '.env*'",
             "ls -la notes.txt",
             "du -sh .*",
+            "echo .*",
+            "printf '%s\\n' .env*",
         ] {
             assert_eq!(verdict(&defaults, command), Allow, "{command}");
         }
@@ -19218,6 +19224,9 @@ mod shell_reading_tests {
         std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
         std::fs::write(project.join(".env.local"), "TOKEN=l").unwrap();
         std::fs::write(project.join("config/.env.production"), "TOKEN=y").unwrap();
+        std::fs::create_dir_all(project.join("apps/web")).unwrap();
+        std::fs::write(project.join("apps/web/.env.local"), "TOKEN=w").unwrap();
+        std::fs::write(project.join("prod.env"), "TOKEN=p").unwrap();
         std::fs::write(project.join("README.md"), "# x").unwrap();
         // As a chat's engine, which knows the project folder.
         let in_project = |rules: &[(&str, PermissionDecision)]| {
@@ -19260,10 +19269,18 @@ mod shell_reading_tests {
             [session, repository]
         };
         // The card shows `cat *` as before, and Always also keeps the exact
-        // command.
+        // command, as a digest that holds none of its text.
         let card = asks(&in_project(&[]), "cat .env").unwrap();
         assert_eq!(card.always_rules(), ["bash:cat *"]);
-        assert_eq!(card.remembered_rules(), ["bash:cat *", "bash:cat .env"]);
+        let exact = crate::permissions::exact_rule("bash:cat .env");
+        assert_eq!(
+            card.remembered_rules(),
+            ["bash:cat *".to_owned(), exact.clone()]
+        );
+        assert!(
+            exact.starts_with("bash:=") && !exact.contains(".env"),
+            "{exact}"
+        );
         // Under the defaults and under `"bash": "ask"`, Always opens that
         // command again and nothing more: not another program, not the read
         // tool, not another secret file through `cat`.
@@ -19271,11 +19288,38 @@ mod shell_reading_tests {
             for engine in answered(rules, "cat .env") {
                 assert!(asks(&engine, "cat .env").is_none(), "{rules:?}");
                 assert!(asks(&engine, "cat README.md").is_none(), "{rules:?}");
-                for command in ["head .env", "cat .env.local", "cat config/.env.production"] {
+                // Nor a glob: in a folder part, the command that is the
+                // remembered rule's own text, or one matching a file there.
+                for command in [
+                    "head .env",
+                    "cat .env.local",
+                    "cat config/.env.production",
+                    "cat */.env.production",
+                    "cat */.env.prod*",
+                    "cat apps/*/.env.local",
+                    "cat apps/*/.env.l*",
+                    "cat *",
+                    "cat *.env",
+                ] {
                     assert!(asks(&engine, command).is_some(), "{command} {rules:?}");
                 }
                 assert!(reads(&engine, ".env"), "{rules:?}");
             }
+        }
+        // An exact command holding a glob is kept by its text alone, never
+        // as a pattern: `cat *.env` opens `cat *.env`, not `cat config/x.env`.
+        for engine in answered(&[], "cat *.env") {
+            assert!(asks(&engine, "cat *.env").is_none());
+            assert!(asks(&engine, "cat config/../prod.env").is_some());
+            assert!(asks(&engine, "cat apps/web/.env.local").is_some());
+        }
+        // The other commands of a line that reads a secret keep their own
+        // rules: `npm test` does not need its exact text again, while a
+        // command nobody chose still asks beside the read.
+        for engine in answered(&[], "source .env && npm test") {
+            assert!(asks(&engine, "source .env && npm test").is_none());
+            assert!(asks(&engine, "source .env && npm test -- --watch=false").is_none());
+            assert!(asks(&engine, "source .env && echo $TOKEN").is_some());
         }
         // A line that only names a secret file opens nothing else either.
         for engine in answered(&[], "echo .env >> .gitignore") {

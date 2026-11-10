@@ -80,6 +80,7 @@ pub struct BashAnalysis {
 /// A path a command is given or a redirect names: see
 /// [`BashAnalysis::paths`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // independent facts about one word, not state flags
 pub struct NamedPath {
     /// Where it leads from the folder the shell is in (the project, or where
     /// a plain `cd` before it in the line's `&&` chain went: see
@@ -96,6 +97,13 @@ pub struct NamedPath {
     /// A command reads it, and it is a secret file a read asks about first
     /// (`.env`: see [`crate::permissions::is_secret_path`]).
     pub secret: bool,
+    /// The written command whose words name it, an index into
+    /// [`BashAnalysis::written`], when one does (a redirect's target names
+    /// none).
+    pub written: Option<usize>,
+    /// The word naming it is a glob the shell expands, in any part
+    /// (`*/.env`), so it may reach files its text does not name.
+    pub glob: bool,
 }
 
 /// A directory change in an `&&` chain: where it starts in the line, and
@@ -1435,7 +1443,9 @@ impl Reader<'_> {
                 // paths it names.
                 self.source = None;
                 self.write_clipped(node, parent, command);
+                let named_from = self.analysis.paths.len();
                 self.check_paths_cheaply(node, command);
+                self.name_source(named_from);
                 continue;
             }
             if depth.text > 0 {
@@ -1471,6 +1481,7 @@ impl Reader<'_> {
                 self.work_trees = work_tree_settings(node, command);
             }
             self.folder.clone_from(&here);
+            let named_from = self.analysis.paths.len();
             self.check_paths(&words, command);
             self.folder = None;
             if depth.text == 0 {
@@ -1487,6 +1498,7 @@ impl Reader<'_> {
                     }
                 }
             }
+            self.name_source(named_from);
             sources.push((node.start_byte(), self.source));
             let assigned = node
                 .named_children(&mut cursor)
@@ -1687,6 +1699,15 @@ impl Reader<'_> {
         self.work_trees = outer_work_trees;
         self.loops = outer_loops;
         true
+    }
+
+    /// The paths recorded from `from` on were named by the written command
+    /// being read (see [`NamedPath::written`]).
+    fn name_source(&mut self, from: usize) {
+        let source = self.source;
+        for named in self.analysis.paths.iter_mut().skip(from) {
+            named.written = named.written.or(source);
+        }
     }
 
     /// A command as written, which its readings come from.
@@ -2492,51 +2513,70 @@ impl Reader<'_> {
             secret,
             path,
             outside: outside.map(glob),
+            written: None,
+            glob: complete && unquoted_glob(raw),
         });
     }
 
     /// Record each secret file that a glob a command reads (`cat .env*`,
-    /// `cat .e*`) matches where the shell is, when the word is an unquoted
-    /// glob: only its last part may hold `*`, `?` or a `[…]` class, read as
-    /// any one character, and a name starting with `.` is matched only by a
-    /// part that starts with one, as the shell does. A folder holding many
-    /// entries is read up to [`MAX_GLOB_ENTRIES`].
+    /// `cat .e*`, `cat */.env`, `cat apps/*/.env.local`) matches where the
+    /// shell is, when the word is an unquoted glob: each part may hold `*`,
+    /// `?` or a `[…]` class, read as any one character, and a name starting
+    /// with `.` is matched only by a part that starts with one, as the shell
+    /// does. Up to [`MAX_GLOB_ENTRIES`] folder entries are read in all.
     fn name_glob_secrets(&mut self, raw: &str, value: &str) {
         if !unquoted_glob(raw) {
             return;
         }
-        let (folder, part) = value
-            .rsplit_once('/')
-            .map_or(("", value), |(folder, part)| (folder, part));
-        if part.is_empty() || unquoted_glob(folder) {
-            return;
+        let written = home_expansion(raw, value).unwrap_or_else(|| PathBuf::from(value));
+        let mut found = vec![self.from().to_path_buf()];
+        let mut budget = MAX_GLOB_ENTRIES;
+        for component in written.components() {
+            let part = match component {
+                Component::Prefix(_) | Component::RootDir => {
+                    found = vec![PathBuf::from(component.as_os_str())];
+                    continue;
+                }
+                Component::CurDir => continue,
+                Component::ParentDir => "..".into(),
+                Component::Normal(part) => part.to_string_lossy(),
+            };
+            let mut next = Vec::new();
+            for folder in &found {
+                if !part.contains(['*', '?', '[']) {
+                    next.push(folder.join(&*part));
+                    continue;
+                }
+                let Ok(entries) = std::fs::read_dir(folder) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    if budget == 0 {
+                        break;
+                    }
+                    budget -= 1;
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    // A leading `.` is matched only by a part that starts with one.
+                    let hidden = name.starts_with('.') && !part.starts_with('.');
+                    if !hidden && glob_part_matches(&part, &name) {
+                        next.push(folder.join(&*name));
+                    }
+                }
+            }
+            found = next;
+            if found.is_empty() {
+                return;
+            }
         }
-        let folder = if value.contains('/') {
-            let folder = if folder.is_empty() { "/" } else { folder };
-            match home_expansion(raw, folder) {
-                Some(expanded) => resolve(self.from(), &expanded),
-                None => resolve(self.from(), Path::new(folder)),
-            }
-        } else {
-            self.from().to_path_buf()
-        };
-        let Ok(entries) = std::fs::read_dir(&folder) else {
-            return;
-        };
-        for entry in entries.flatten().take(MAX_GLOB_ENTRIES) {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if (name.starts_with('.') && !part.starts_with('.')) || !glob_part_matches(part, &name)
-            {
-                continue;
-            }
+        for candidate in found {
             // Its name says it is a secret, or it is a link to one.
-            let named =
-                name.contains(".env") && crate::permissions::is_secret_path(&folder.join(&*name));
-            if !named && !entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+            let named = candidate.to_string_lossy().contains(".env")
+                && crate::permissions::is_secret_path(&candidate);
+            if !named && !candidate.is_symlink() {
                 continue;
             }
-            let path = resolve(&folder, &*name);
+            let path = resolve(Path::new("/"), &candidate);
             if path.is_file() && (named || crate::permissions::is_secret_path(&path)) {
                 self.analysis.paths.push(NamedPath {
                     file: true,
@@ -2544,6 +2584,8 @@ impl Reader<'_> {
                     secret: true,
                     path,
                     outside: None,
+                    written: None,
+                    glob: true,
                 });
             }
         }
@@ -3088,8 +3130,9 @@ impl Reader<'_> {
                     _ => value,
                 };
                 self.name_path(&word.raw, &value, complete, None, true);
-                // `du` only sums the sizes of what a glob matches.
-                if complete && name != "du" {
+                // `du` only sums the sizes of what a glob matches, and
+                // `echo` and `printf` print its names.
+                if complete && !matches!(name.as_str(), "du" | "echo" | "printf") {
                     self.name_glob_secrets(&word.raw, &value);
                 }
             }

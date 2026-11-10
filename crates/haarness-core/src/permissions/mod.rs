@@ -493,6 +493,31 @@ const SECRET_READ_RULES: [(&str, PermissionDecision); 8] = [
     ("*/node_modules/*", PermissionDecision::Allow),
 ];
 
+/// How a remembered rule for one shell command exactly as written starts:
+/// see [`exact_rule`].
+const EXACT_RULE: &str = "bash:=";
+
+/// The remembered rule for exactly the shell command `operation`
+/// (`bash:cat .env`): [`EXACT_RULE`] and the SHA-256 of the operation, so
+/// the stores that keep Always answers never hold the command's text, which
+/// may carry a credential. It is compared by equality alone, never matched
+/// as a pattern (see [`PermissionEngine::allowed_by_choice`]).
+#[must_use]
+pub fn exact_rule(operation: &str) -> String {
+    use sha2::Digest;
+    format!(
+        "{EXACT_RULE}{}",
+        hex::encode(sha2::Sha256::digest(operation.as_bytes()))
+    )
+}
+
+/// Whether `pattern` is an [`exact_rule`].
+fn is_exact_rule(pattern: &str) -> bool {
+    pattern.strip_prefix(EXACT_RULE).is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 /// Whether the built-in read rules ask before reading this path, after `.`
 /// and `..` are resolved lexically. Search tools leave such a secret-named
 /// file out and only say how many they left out; an explicit read of one
@@ -708,10 +733,12 @@ impl PermissionEngine {
     /// everything: `matched`, the rule its evaluation names, is a configured
     /// allow narrower than everything (a blanket `bash:*` says nothing about
     /// any one command), or a remembered allow (an "always" answer or a
-    /// repository grant) names it exactly. A remembered allow that ends in
-    /// `*` (`bash:cat *`, what Always shows for `cat .env`) was given for one
-    /// command and reaches its program's other arguments only by being
-    /// generalized: it counts too when `generalized` says so.
+    /// repository grant) is for exactly this command: its
+    /// [`exact_rule`], or its own text holding no `*` or `?`. A remembered
+    /// allow that is a pattern (`bash:cat *`, what Always shows for `cat
+    /// .env`) was given for one command and reaches others only by being
+    /// generalized: when `generalized` says so, the remembered rule
+    /// `matched` names counts too, whatever its shape.
     #[must_use]
     pub fn allowed_by_choice(
         &self,
@@ -726,6 +753,7 @@ impl PermissionEngine {
                     && !catch_all(rule)
             })
         });
+        let exact = exact_rule(operation);
         configured
             || self
                 .session_rules
@@ -734,9 +762,9 @@ impl PermissionEngine {
                 .any(|rule| {
                     rule.decision == PermissionDecision::Allow
                         && !catch_all(rule)
-                        && (rule.pattern == operation
-                            || (matched == Some(rule.pattern.as_str())
-                                && (generalized || !rule.pattern.ends_with('*'))))
+                        && (rule.pattern == exact
+                            || (rule.pattern == operation && !rule.pattern.contains(['*', '?']))
+                            || (generalized && matched == Some(rule.pattern.as_str())))
                 })
     }
 
@@ -1082,6 +1110,10 @@ fn rule_names(
     spellings: &[(String, bool)],
     real_folders: &std::collections::BTreeMap<String, String>,
 ) -> bool {
+    // A digest of one command is compared by equality alone, never matched.
+    if is_exact_rule(&rule.pattern) {
+        return false;
+    }
     if wildcard_match(&rule.pattern, operation) {
         return true;
     }
