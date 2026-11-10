@@ -471,6 +471,14 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       // A long paste goes in several writes; IPC keeps them in order.
       for (const chunk of writeChunks(new TextEncoder().encode(data))) send(chunk, answer);
     });
+    // Mouse reports in the original encoding (a program that turns on mouse
+    // reporting without asking for SGR) are bytes, one per character, not
+    // text: past column 95 a byte is over 127.
+    const binary = terminal.onBinary((data) => {
+      const answer = !typing();
+      if (answer && !stream.open()) return;
+      send(Uint8Array.from(data, (character) => character.charCodeAt(0) & 0xff), answer);
+    });
     // The PTY learns every size xterm takes: a panel resize, and a font size
     // change, which refits without the panel changing size. A push waits for
     // the size to settle and is skipped when the PTY already has that size.
@@ -628,6 +636,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       sizes.dispose();
       sized.dispose();
       input.dispose();
+      binary.dispose();
       resize.disconnect();
       unsubscribe();
       void window.haarness.terminal(connection, "detach", props.id, view);

@@ -1356,7 +1356,17 @@ test("a right-click offers what fits where it lands, nothing on the sidebar, and
     await expect.poll(async () => (await contextMenus(app)).at(-1) ?? []).toContain("Paste");
     await shell.focus();
     await page.keyboard.press("Control+C");
-    await page.keyboard.type("printf '\\033[?1006l\\033[?1000l'");
+    // Reports in the original encoding reach the program too, as the bytes
+    // they are: a click far right is past column 95, so its column is one
+    // byte over 127 (not that character's UTF-8).
+    await page.keyboard.type("printf '\\033[?1006l%s-%s\\n' original encoding; head -c 12 | od -An -tx1");
+    await page.keyboard.press("Enter");
+    await expect(rows).toContainText("original-encoding");
+    await page.mouse.click(blank.x, blank.y);
+    await shell.focus();
+    await page.keyboard.press("Enter");
+    await expect(rows).toContainText(/1b\s+5b\s+4d\s+20\s+[89a-f][0-9a-f]\s+[2-7][0-9a-f]\s+1b\s+5b\s+4d\s+23/);
+    await page.keyboard.type("printf '\\033[?1000l'");
     await page.keyboard.press("Enter");
     await expect(page.locator(".xterm.enable-mouse-events")).toHaveCount(0);
     await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
