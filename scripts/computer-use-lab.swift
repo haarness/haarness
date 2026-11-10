@@ -119,6 +119,7 @@ final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextVie
     var submitted = false
     var forwardPresses = 0
     var keys: [String] = []
+    var pointer: [String] = []
     let counter = NSTextField(labelWithString: "Count: 0")
     let name = NSTextField(string: "")
     let password = NSSecureTextField(string: "")
@@ -133,6 +134,7 @@ final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextVie
         buildMenu()
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Haarness Lab"
+        window.isRestorable = false
         window.center()
         let count = NSButton(title: "Count", target: self, action: #selector(countPressed))
         let submit = NSButton(title: "Submit", target: self, action: #selector(submitPressed))
@@ -184,6 +186,16 @@ final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextVie
         window.contentView = stack
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.keys.append(event.charactersIgnoringModifiers ?? "")
+            self?.save()
+            return event
+        }
+        // Pointer events as the app receives them, to tell an event that never arrived from one the app ignored.
+        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .rightMouseDown, .scrollWheel]) { [weak self] event in
+            // Records the window server sends to change key status arrive as presses without a usable location.
+            let at = event.locationInWindow
+            let spot = at.x.isFinite && at.y.isFinite ? "\(Int(at.x)),\(Int(at.y))" : "-"
+            self?.pointer.append("\(event.type.rawValue) w\(event.windowNumber) \(spot)")
+            self?.pointer = Array(self?.pointer.suffix(20) ?? [])
             self?.save()
             return event
         }
@@ -254,6 +266,8 @@ final class Lab: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextVie
             "notes": notes.string,
             "forwardPresses": forwardPresses,
             "active": NSApp.isActive,
+            "pointer": pointer,
+            "keyWindow": window.isKeyWindow,
         ]
         if let data = try? JSONSerialization.data(withJSONObject: state) {
             try? data.write(to: URL(fileURLWithPath: statePath), options: .atomic)
@@ -280,6 +294,7 @@ final class Person: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 780), styleMask: [.titled], backing: .buffered, defer: false)
         window.title = "Haarness Person"
+        window.isRestorable = false
         window.center()
         text.delegate = self
         text.font = .systemFont(ofSize: 15)
@@ -353,6 +368,8 @@ final class Person: NSObject, NSApplicationDelegate, NSTextViewDelegate {
     }
 }
 
+// Never offer to restore windows after a run that was cut short: that alert would stop the next run's launch.
+UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true, "NSQuitAlwaysKeepsWindows": false])
 let app = NSApplication.shared
 let lab = Lab()
 let personApp = Person()
