@@ -3156,5 +3156,6 @@
   "add credits with /billing topup": "/billing topup でクレジットを追加",
   "turn on overage so your purchased credits pay": "超過利用をオンにすると購入済みクレジットで支払えます",
   "add credits and turn on overage to keep working": "続けるにはクレジットを追加し、超過利用をオンにしてください",
-  "Add to dictionary": "辞書に追加"
+  "Add to dictionary": "辞書に追加",
+  "Copy email address": "メールアドレスをコピー"
 }

@@ -3156,5 +3156,6 @@
   "add credits with /billing topup": "使用 /billing topup 添加额度",
   "turn on overage so your purchased credits pay": "开启超额使用，让已购额度可以支付",
   "add credits and turn on overage to keep working": "添加额度并开启超额使用以继续工作",
-  "Add to dictionary": "添加到词典"
+  "Add to dictionary": "添加到词典",
+  "Copy email address": "复制电子邮件地址"
 }

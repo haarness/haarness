@@ -105,7 +105,11 @@ test("a web link offers Copy link, which copies its address", () => {
   assert.deepEqual(value.lines, ["Copy link"]);
   value.click("Copy link");
   assert.deepEqual(value.done, ["copy https://haarness.ai/docs?q=1"]);
-  assert.deepEqual(menu(place({ linkURL: "mailto:sam@example.com" })).lines, ["Copy link"]);
+  // A mail link: the address alone, as it goes in a To field.
+  const mail = menu(place({ linkURL: "mailto:sam%40example.com?subject=Hi&attach=/etc/passwd" }));
+  assert.deepEqual(mail.lines, ["Copy email address"]);
+  mail.click("Copy email address");
+  assert.deepEqual(mail.done, ["copy sam@example.com"]);
   // Selected words of a link: both.
   assert.deepEqual(
     menu(place({ linkURL: "https://haarness.ai/", selectionText: "Haarness", editFlags: { ...none, canCopy: true } })).lines,
@@ -119,6 +123,7 @@ test("a link to a project file, or an address the app refused, has no address to
     "file:///Applications/Haarness.app/Contents/Resources/app.asar/out/renderer/src/app.ts",
     "file:///Users/sam/project/src/app.ts",
     "unsupported:",
+    "mailto:",
     "not a url",
   ])
     assert.deepEqual(menu(place({ linkURL })).lines, [], linkURL);

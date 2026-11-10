@@ -23,11 +23,12 @@ const MAX_SUGGESTIONS = 5;
 /**
  * The window's right-click menu, built from what Electron says about the place
  * clicked: spellings and Add to dictionary on a misspelled word, the edit
- * commands a text field allows right now, Copy on selected text and Copy link
- * on a web link. Anywhere else it is empty, and no menu opens. (The terminal
- * keeps the page's right-click to itself and asks for `terminalMenuItems`.)
- * The edit commands keep Electron's roles, so they act as the Edit menu's do,
- * and they are named in the interface language as that menu names them.
+ * commands a text field allows right now, Copy on selected text, Copy link on
+ * a web link and Copy email address on a mail link. Anywhere else it is empty,
+ * and no menu opens. (The terminal keeps the page's right-click to itself and
+ * asks for `terminalMenuItems`.) The edit commands keep Electron's roles, so
+ * they act as the Edit menu's do, and they are named in the interface
+ * language as that menu names them.
  */
 export function contextMenuItems(
   place: ContextMenuPlace,
@@ -45,7 +46,9 @@ export function contextMenuItems(
       { label: t("Add to dictionary"), click: () => actions.learn(word) },
     ]);
   const link = webLink(place.linkURL, place.pageURL);
+  const mail = mailAddress(place.linkURL);
   if (link) groups.push([{ label: t("Copy link"), click: () => actions.copy(link) }]);
+  else if (mail) groups.push([{ label: t("Copy email address"), click: () => actions.copy(mail) }]);
   const flags = place.editFlags;
   if (place.isEditable) {
     const edits: MenuItemConstructorOptions[] = [];
@@ -78,9 +81,9 @@ export function terminalMenuItems(
 }
 
 /**
- * The address worth copying from a link: a web or mail address. A link inside
- * a reply that names a project file has no address of its own (Electron hands
- * it over resolved against the app's page), so it offers none.
+ * The address worth copying from a link: a web address. A link inside a reply
+ * that names a project file has no address of its own (Electron hands it over
+ * resolved against the app's page), so it offers none.
  */
 function webLink(url: string, page: string) {
   if (!url) return undefined;
@@ -90,12 +93,23 @@ function webLink(url: string, page: string) {
   } catch {
     return undefined;
   }
-  if (parsed.protocol === "mailto:") return url;
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
   try {
     if (parsed.origin === new URL(page).origin) return undefined;
   } catch {}
   return url;
+}
+
+/** A mail link's address, as it goes in a To field: without `mailto:` or the
+ * fields after `?`, and decoded (`sam%40example.com` is `sam@example.com`). */
+function mailAddress(url: string) {
+  if (!/^mailto:/i.test(url)) return undefined;
+  const address = url.slice("mailto:".length).split("?")[0];
+  try {
+    return decodeURIComponent(address).trim() || undefined;
+  } catch {
+    return address.trim() || undefined;
+  }
 }
 
 /** How many words' spellings a window's menus remember. */
