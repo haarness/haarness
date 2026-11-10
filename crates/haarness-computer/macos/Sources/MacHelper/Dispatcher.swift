@@ -453,6 +453,7 @@ final class Dispatcher {
         var out: [String: Any]
         var spot: (Double, Double)?
         var owner: NSRunningApplication?
+        var target: AXUIElement?
         var inFront = true
         if input["ref"] != nil || input["x"] != nil {
             let found = try reach(input)
@@ -460,20 +461,22 @@ final class Dispatcher {
             owner = found.app
             inFront = found.inFront
             if (input["acting"] as? Bool) == true { try refusePasswordMenu(found.x, found.y, app: inFront ? nil : found.app) }
-            let element = found.element ?? AXTree.hit(found.x, found.y, in: found.app.processIdentifier)
+            target = found.element ?? AXTree.hit(found.x, found.y, in: found.app.processIdentifier)
                 ?? (inFront ? AXTree.hit(found.x, found.y) : nil)
-            out = element.map { AXTree.summary($0) } ?? [:]
+            out = target.map { AXTree.summary($0) } ?? [:]
             // A bare point names no native control: it counts as content.
             if found.element == nil { out["content"] = true }
         } else {
             owner = workingApp()
-            out = owner.flatMap { AXTree.focused(in: $0.processIdentifier) }.map { AXTree.summary($0) } ?? [:]
+            target = owner.flatMap { AXTree.focused(in: $0.processIdentifier) }
+            out = target.map { AXTree.summary($0) } ?? [:]
         }
         if out["bundle"] == nil, let owner {
             out["bundle"] = owner.bundleIdentifier ?? ""
             out["app"] = owner.localizedName ?? ""
             out["pid"] = Int(owner.processIdentifier)
         }
+        if let owner { describe(into: &out, app: owner, element: target, spot: spot, input: input) }
         if let spot, let viewport {
             let pixel = (x: (spot.0 * viewport.factor).rounded(), y: (spot.1 * viewport.factor).rounded())
             out["point"] = ["x": pixel.x, "y": pixel.y]
@@ -485,6 +488,26 @@ final class Dispatcher {
             }
         }
         return out
+    }
+
+    /// What an approval or the reviewer should know about a target beyond the element itself: whether it is a terminal
+    /// (where typing runs commands) or a Paste menu item, the window and the labelled area around it, the menu item a
+    /// Command shortcut (`keys`) would press, and System Settings' open pane. Text read from the app is untrusted.
+    func describe(into out: inout [String: Any], app: NSRunningApplication, element: AXUIElement?, spot: (Double, Double)?, input: [String: Any]) {
+        let pid = app.processIdentifier
+        if let element {
+            if AXTree.isTerminal(element) { out["terminal"] = true }
+            if AXTree.isPasteItem(element) { out["paste"] = true }
+            if let context = AXTree.context(element) { out["context"] = context }
+        }
+        let window = element.flatMap(AXTree.window(of:))
+            ?? spot.flatMap { WindowList.topmost(of: [pid], at: $0.0, $0.1) }.flatMap { axWindow(pid, $0.id) }
+            ?? (element == nil && spot == nil ? AXTree.focusedWindow(in: pid) : nil)
+        if let title = window.flatMap({ AXTree.text($0, kAXTitleAttribute) }), !title.isEmpty { out["window"] = shorten(title, 120) }
+        if let keys = input["keys"] as? String, let combo = try? KeyCombo.read(keys), let found = menuItem(pid, for: combo), found.enabled {
+            out["menu"] = shorten(found.path.filter { !$0.isEmpty }.joined(separator: " ▸ "), 160)
+        }
+        if app.bundleIdentifier == "com.apple.systempreferences", let pane = AXTree.settingsPane(pid) { out["pane"] = pane }
     }
 
     /// Bundle of the app whose window is topmost at a point, i.e. where a pointer event would land.
@@ -556,6 +579,7 @@ final class Dispatcher {
         let modifiers = try held(input)
         var found = try reach(input)
         try confirm(input, "expect", found.app.bundleIdentifier)
+        try refusePaste(found, input)
         var fallback: String?
         switch route(inFront: found.inFront) {
         case .behind:
@@ -572,6 +596,15 @@ final class Dispatcher {
         found = try reach(input)
         try confirm(input, "expect", found.app.bundleIdentifier)
         return try clickInFront(found, input, button: button, count: count, held: modifiers, fallback: fallback)
+    }
+
+    /// With `refusePaste` (the server sends it for terminals and script runners), a click on a Paste menu item is
+    /// refused: what it pastes runs there as a command, and nobody saw it.
+    func refusePaste(_ found: Reach, _ input: [String: Any]) throws {
+        guard input["refusePaste"] as? Bool == true,
+              let element = found.element ?? AXTree.hit(found.x, found.y, in: found.app.processIdentifier),
+              AXTree.isPasteItem(element) else { return }
+        throw HelperFailure("paste", "Pasting into \(found.app.localizedName ?? "this app") runs the pasted text as a command, outside Haarness's approvals, so agents never use Paste there. Run commands with the shell tool instead.")
     }
 
     /// A click through the system's pointer, on an app in front or brought forward (`fallback` says why).

@@ -334,7 +334,8 @@ extension Dispatcher {
         if window.layer != 0 && passwordInUse(app) {
             throw HelperFailure("password", "A password suggestion menu is open there, under a focused password field, and passwords stay with the person. Press Escape to close it, or click another field first.")
         }
-        WindowServer.focusWithoutRaise(pid: app.processIdentifier, window: window.id)
+        // An AppKit window that is not key spends a click on becoming key; made key first, it takes the click itself.
+        _ = prove(app, window: window.id, field: nil, spot: nil)
         if !shown { AgentPointer.shared.show(at: found.x, found.y) }
         // The window may have closed or moved since the spot was resolved.
         guard WindowList.topmost(of: [window.pid], at: found.x, found.y)?.id == window.id else {
@@ -539,36 +540,37 @@ extension Dispatcher {
         return reply(app, via: "process", background: true, before: before, confirmed: confirmed, handedBack: handBack(from: app, to: prior, since: started))
     }
 
-    /// The menu item `combo` stands for in `app`'s menu bar, an enabled one first. The Apple menu is left alone: its
-    /// items belong to the system.
-    func menuItem(_ app: pid_t, for combo: KeyCombo) -> (item: AXUIElement, enabled: Bool)? {
+    /// The menu item `combo` stands for in `app`'s menu bar, an enabled one first, with the titles leading to it. The
+    /// Apple menu is left alone: its items belong to the system.
+    func menuItem(_ app: pid_t, for combo: KeyCombo) -> (item: AXUIElement, enabled: Bool, path: [String])? {
         guard combo.mayBeMenuShortcut, let bar = AXTree.element(AXTree.value(AXTree.application(app), kAXMenuBarAttribute)) else { return nil }
-        var found: (AXUIElement, Bool)?
+        var found: (item: AXUIElement, enabled: Bool, path: [String])?
         var budget = 2000
         func items(_ parent: AXUIElement) -> [AXUIElement] {
             AXTree.children(parent).flatMap { AXTree.text($0, kAXRoleAttribute) == "AXMenu" ? AXTree.children($0) : [$0] }
         }
-        func search(_ parent: AXUIElement, depth: Int) {
+        func search(_ parent: AXUIElement, path: [String], depth: Int) {
             for item in items(parent) {
-                if budget <= 0 || found?.1 == true { return }
+                if budget <= 0 || found?.enabled == true { return }
                 budget -= 1
+                let title = AXTree.text(item, kAXTitleAttribute) ?? ""
                 let character = AXTree.text(item, kAXMenuItemCmdCharAttribute) ?? ""
                 if !character.isEmpty {
                     let modifiers = (AXTree.value(item, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue ?? 0
                     if combo.matchesMenuItem(character: character, modifiers: modifiers) {
                         let enabled = AXTree.flag(item, kAXEnabledAttribute) ?? true
-                        if found == nil || enabled { found = (item, enabled) }
+                        if found == nil || enabled { found = (item, enabled, path + [title]) }
                     }
                 } else if depth < 3 {
-                    search(item, depth: depth + 1)
+                    search(item, path: path + [title], depth: depth + 1)
                 }
             }
         }
         for (index, top) in items(bar).enumerated() where index > 0 {
-            search(top, depth: 1)
-            if found?.1 == true { break }
+            search(top, path: [AXTree.text(top, kAXTitleAttribute) ?? ""], depth: 1)
+            if found?.enabled == true { break }
         }
-        return found.map { (item: $0.0, enabled: $0.1) }
+        return found
     }
 
     func pressBehind(_ app: NSRunningApplication, combo: KeyCombo, times: Int) throws -> [String: Any] {

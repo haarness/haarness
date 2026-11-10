@@ -195,6 +195,55 @@ final class AXTree {
         return false
     }
 
+    /// The nearest labelled element around `element` inside its window (a group, list, sheet or pane title), one
+    /// short line, for an approval to say where a control sits.
+    static func context(_ element: AXUIElement) -> String? {
+        var current = parent(element)
+        for _ in 0..<12 {
+            guard let here = current else { return nil }
+            let role = text(here, kAXRoleAttribute) ?? ""
+            if role == "AXWindow" || role == "AXApplication" { return nil }
+            if let label = [text(here, kAXTitleAttribute), text(here, kAXDescriptionAttribute)].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
+                return shorten(label, 80)
+            }
+            current = parent(here)
+        }
+        return nil
+    }
+
+    /// Whether `element` is a menu item that pastes: its key equivalent is Command-V (with or without more
+    /// modifiers), or its title starts with Paste.
+    static func isPasteItem(_ element: AXUIElement) -> Bool {
+        guard text(element, kAXRoleAttribute) == "AXMenuItem" else { return false }
+        let character = (text(element, kAXMenuItemCmdCharAttribute) ?? "").uppercased()
+        let modifiers = (value(element, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue ?? 0
+        if character == "V" && modifiers & MenuModifier.noCommand == 0 { return true }
+        return (text(element, kAXTitleAttribute) ?? "").lowercased().hasPrefix("paste")
+    }
+
+    /// The pane System Settings shows: the identifier of the selected sidebar entry (an extension identifier such as
+    /// com.apple.settings.PrivacySecurity.extension), which stays the same in every language.
+    static func settingsPane(_ app: pid_t) -> String? {
+        var stack = (value(application(app), kAXWindowsAttribute) as? [AnyObject] ?? []).compactMap { element($0) }
+        var seen = 0
+        while let next = stack.popLast(), seen < 1500 {
+            seen += 1
+            if text(next, kAXRoleAttribute) == "AXRow", flag(next, kAXSelectedAttribute) == true {
+                var inner = children(next)
+                var looked = 0
+                while let item = inner.popLast(), looked < 40 {
+                    looked += 1
+                    if let identifier = text(item, kAXIdentifierAttribute), identifier.contains(".") {
+                        return String(identifier.prefix { $0 != "*" && $0 != ":" })
+                    }
+                    inner += children(item)
+                }
+            }
+            stack += children(next)
+        }
+        return nil
+    }
+
     /// A fingerprint of what `root` shows: roles, titles, values and selection of up to `limit` elements, read a few
     /// attributes per call. Two equal fingerprints mean nothing visible to Accessibility changed.
     static func digest(_ root: AXUIElement, limit: Int = 400) -> Int {

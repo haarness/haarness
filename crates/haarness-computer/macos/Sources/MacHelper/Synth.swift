@@ -134,7 +134,9 @@ enum Synth {
 
     /// Turns the wheel over `pid`'s `window` at a screen spot, one notch per line, without the system's pointer.
     static func scrollBehind(pid: pid_t, window: CGWindowID, origin: Point, at spot: Point, dx: Int32, dy: Int32) {
-        let stamped = Behind.windowLocal ? CGPoint(x: spot.x - origin.x, y: spot.y - origin.y) : CGPoint(x: spot.x, y: spot.y)
+        // Unlike a press, a wheel event's window location is never derived from the screen point: it is the point in the
+        // window on every release.
+        let stamped = CGPoint(x: spot.x - origin.x, y: spot.y - origin.y)
         let address = { (event: CGEvent) in
             WindowServer.stamp(event, WindowServer.Field.targetPid, Int64(pid))
             for field in [WindowServer.Field.windowNumber, WindowServer.Field.windowUnderPointer, WindowServer.Field.windowThatCanHandle] {
