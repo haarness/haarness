@@ -12800,6 +12800,10 @@ impl RunnerTask {
     /// `"run_in_background": "false"`, and refused, sends them again the
     /// same way and then makes up what the command printed.
     ///
+    /// A call whose fields are named the way other coding agents' tools name
+    /// them (`file_path`, `old_string`, `new_string`), or that adds a
+    /// `description` of itself, gets the tool's names and loses the caption.
+    ///
     /// A call to a tool that changes nothing whose only other fault is fields
     /// the tool does not take runs without them (gpt-oss asks `read` for
     /// `line_start` and `line_end`), and the words returned, added to what
@@ -12824,6 +12828,11 @@ impl RunnerTask {
             return None;
         }
         let tool = tool?;
+        if let Some(aliased) = tool.aliased_arguments(arguments) {
+            tracing::info!(thread = %self.thread.id, tool = name, "reading fields a model named the way other agents' tools name them");
+            *arguments = aliased;
+            return None;
+        }
         let (kept, unknown) = tool.without_unknown_fields(arguments)?;
         tracing::info!(thread = %self.thread.id, tool = name, fields = ?unknown, "leaving out fields a tool that changes nothing does not take");
         *arguments = kept;

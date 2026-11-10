@@ -90,7 +90,18 @@ pub fn tool_call_arguments(raw: &str) -> Value {
     if raw.trim().is_empty() {
         return Value::Object(serde_json::Map::new());
     }
-    let reason = match serde_json::from_str::<Value>(raw) {
+    let parsed = serde_json::from_str::<Value>(raw);
+    // A Windows path written into the JSON with single backslashes
+    // (`"path": "C:\Users\sam\src"`) holds escapes JSON does not have:
+    // each such backslash stands for itself.
+    if parsed.is_err()
+        && let Some(value) = with_stray_backslashes_escaped(raw)
+            .and_then(|repaired| serde_json::from_str::<Value>(&repaired).ok())
+            .filter(Value::is_object)
+    {
+        return value;
+    }
+    let reason = match parsed {
         Ok(value) if value.is_object() => return value,
         // Some servers encode the arguments twice, as a JSON string that
         // holds the object.
@@ -102,6 +113,55 @@ pub fn tool_call_arguments(raw: &str) -> Value {
         Err(error) => format!("they are not valid JSON: {error}"),
     };
     serde_json::json!({ UNPARSED: raw, UNPARSED_REASON: reason })
+}
+
+/// `raw` with each backslash inside a JSON string that starts no escape
+/// JSON has (`\U`, `\s`, `\.`, or `\u` without four hex digits) written
+/// as an escaped backslash, or `None` when there is none.
+fn with_stray_backslashes_escaped(raw: &str) -> Option<String> {
+    let mut repaired = String::with_capacity(raw.len() + 8);
+    let mut changed = false;
+    let mut in_string = false;
+    let mut chars = raw.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        if !in_string {
+            in_string = c == '"';
+            repaired.push(c);
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = false;
+                repaired.push(c);
+            }
+            '\\' => {
+                let next = chars.peek().map(|(_, next)| *next);
+                let escape = match next {
+                    Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't') => true,
+                    Some('u') => {
+                        raw[at + 2..]
+                            .chars()
+                            .take(4)
+                            .filter(char::is_ascii_hexdigit)
+                            .count()
+                            == 4
+                    }
+                    _ => false,
+                };
+                if escape {
+                    repaired.push(c);
+                    if let Some((_, next)) = chars.next() {
+                        repaired.push(next);
+                    }
+                } else {
+                    repaired.push_str("\\\\");
+                    changed = true;
+                }
+            }
+            _ => repaired.push(c),
+        }
+    }
+    changed.then_some(repaired)
 }
 
 /// The error a call with arguments [`tool_call_arguments`] could not read
@@ -272,6 +332,71 @@ fn coerced_once(
     changed.then_some(coerced)
 }
 
+/// Field names other coding agents give their tools, and the name each has
+/// here: models trained on their transcripts call `edit` with `file_path`,
+/// `old_string` and `new_string`, and `bash` with a `cwd`.
+const FIELD_ALIASES: [(&str, &str); 11] = [
+    ("file_path", "path"),
+    ("filePath", "path"),
+    ("filepath", "path"),
+    ("old_string", "old"),
+    ("oldString", "old"),
+    ("old_str", "old"),
+    ("new_string", "new"),
+    ("newString", "new"),
+    ("new_str", "new"),
+    ("replace_all", "replaceAll"),
+    ("cwd", "workdir"),
+];
+
+/// Arguments that pass once the fields another coding agent's tools name
+/// their own way ([`FIELD_ALIASES`]) take the tool's names, and a
+/// `description` of the call that the tool does not take is left out (Claude
+/// Code's and OpenCode's shells ask for one; it describes the call and
+/// changes nothing), reading scalars written as strings as
+/// [`coerced_arguments`] does. `None` for valid arguments, any other fault, a
+/// name the tool takes itself, and arguments that could not be read at all.
+/// For every tool: a field renamed to its own name, or a caption left out,
+/// changes nothing the call does.
+pub(crate) fn with_field_aliases(tool: &ToolDefinition, arguments: &Value) -> Option<Value> {
+    if unparsed_arguments(&tool.name, arguments).is_some() {
+        return None;
+    }
+    let validator = jsonschema::validator_for(&tool.input_schema).ok()?;
+    if validator.is_valid(arguments) {
+        return None;
+    }
+    let properties = tool.input_schema.get("properties")?.as_object()?;
+    let mut renamed = arguments.as_object()?.clone();
+    let mut changed = false;
+    for (alias, name) in FIELD_ALIASES {
+        if properties.contains_key(alias)
+            || !properties.contains_key(name)
+            || renamed.contains_key(name)
+        {
+            continue;
+        }
+        if let Some(value) = renamed.remove(alias) {
+            renamed.insert(name.to_owned(), value);
+            changed = true;
+        }
+    }
+    if !properties.contains_key("description")
+        && renamed.get("description").is_some_and(Value::is_string)
+    {
+        renamed.remove("description");
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    let renamed = Value::Object(renamed);
+    if validator.is_valid(&renamed) {
+        return Some(renamed);
+    }
+    coerced_arguments(tool, &renamed)
+}
+
 /// Arguments with the top-level fields the tool does not take left out, and
 /// the names of those fields, when leaving them out (and reading scalars
 /// written as strings, as [`coerced_arguments`] does) is all the call needs
@@ -438,7 +563,7 @@ mod tests {
             tool_call_arguments(r#""{\"path\":\"d.txt\"}""#),
             json!({"path":"d.txt"})
         );
-        let broken = r#"{"command":"grep -r \. src"}"#;
+        let broken = r#"{"command":"grep -r src"#;
         let kept = tool_call_arguments(broken);
         // Replayed to any provider, the call is still a JSON object, and it
         // still says what the model wrote.
@@ -446,7 +571,10 @@ mod tests {
         let tool = definition(json!({"type":"object","properties":{"command":{"type":"string"}}}));
         let error = validate_arguments(&tool, &kept).unwrap_err().to_string();
         assert!(error.contains("fixture tool did not run"), "{error}");
-        assert!(error.contains("invalid escape at line 1 column"), "{error}");
+        assert!(
+            error.contains("not valid JSON: EOF while parsing"),
+            "{error}"
+        );
         assert!(
             !error.contains("grep"),
             "the rejected text is not echoed: {error}"
@@ -457,6 +585,102 @@ mod tests {
         assert!(error.contains("not a JSON object"), "{error}");
         // A real argument of that name is an ordinary argument.
         assert!(unparsed_arguments("fixture", &json!({UNPARSED: "x"})).is_none());
+    }
+
+    #[test]
+    fn backslashes_that_start_no_json_escape_stand_for_themselves() {
+        // Windows paths and regular expressions written with single
+        // backslashes.
+        assert_eq!(
+            tool_call_arguments(r#"{"path":"C:\Users\sam\src\main.py"}"#),
+            json!({"path": r"C:\Users\sam\src\main.py"})
+        );
+        assert_eq!(
+            tool_call_arguments(r#"{"command":"grep -r \. src","workdir":"D:\users\x"}"#),
+            json!({"command": r"grep -r \. src", "workdir": r"D:\users\x"})
+        );
+        // Escapes JSON has keep their meaning, beside the repaired ones.
+        assert_eq!(
+            tool_call_arguments(r#"{"content":"a\nb \u00e9 \"q\" \\","path":"C:\Temp\a.txt"}"#),
+            json!({"content": "a\nb \u{e9} \"q\" \\", "path": r"C:\Temp\a.txt"})
+        );
+        // Outside a string a backslash is no path: still refused.
+        assert!(tool_call_arguments(r#"{"a":1}\x"#)[UNPARSED].is_string());
+    }
+
+    fn edit_like() -> ToolDefinition {
+        definition(json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old": {"type": "string"},
+                "new": {"type": "string"},
+            },
+            "required": ["path", "old", "new"],
+            "additionalProperties": false,
+        }))
+    }
+
+    #[test]
+    fn fields_named_as_other_agents_name_them_take_the_tools_names() {
+        assert_eq!(
+            with_field_aliases(
+                &edit_like(),
+                &json!({"file_path": "a.txt", "old_string": "x", "new_string": "y"})
+            ),
+            Some(json!({"path": "a.txt", "old": "x", "new": "y"}))
+        );
+        assert_eq!(
+            with_field_aliases(
+                &edit_like(),
+                &json!({"filePath": "a.txt", "oldString": "x", "newString": "y"})
+            ),
+            Some(json!({"path": "a.txt", "old": "x", "new": "y"}))
+        );
+        // A shell call's caption is left out, its cwd is the workdir, and a
+        // timeout written as a string reads as a number.
+        assert_eq!(
+            with_field_aliases(
+                &bash_like(),
+                &json!({"command": "dir", "description": "List the folder", "cwd": "src", "timeout": "5000"})
+            ),
+            Some(json!({"command": "dir", "workdir": "src", "timeout": 5000}))
+        );
+        // Valid calls, a name the call also gives the tool's way, and any
+        // other fault change nothing.
+        assert_eq!(
+            with_field_aliases(&edit_like(), &json!({"path": "a", "old": "x", "new": "y"})),
+            None
+        );
+        assert_eq!(
+            with_field_aliases(
+                &edit_like(),
+                &json!({"path": "a", "file_path": "b", "old": "x", "new": "y"})
+            ),
+            None
+        );
+        assert_eq!(
+            with_field_aliases(&edit_like(), &json!({"file_path": "a", "old_string": "x"})),
+            None
+        );
+        assert_eq!(
+            with_field_aliases(
+                &edit_like(),
+                &json!({"file_path": "a", "old": "x", "new": "y", "force": true})
+            ),
+            None
+        );
+        // A tool that takes a description keeps it.
+        let described = definition(json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}, "description": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": false,
+        }));
+        assert_eq!(
+            with_field_aliases(&described, &json!({"name": "x", "description": "y"})),
+            None
+        );
     }
 
     fn definition(schema: Value) -> ToolDefinition {
