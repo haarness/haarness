@@ -57,6 +57,52 @@ if ["--windows", "--window-sizes"].contains(CommandLine.arguments.dropFirst().fi
     exit(0)
 }
 
+// `--settings-pane` prints the identifier of the pane System Settings shows (empty when it is not running or none is
+// selected); `--settings-pane <identifier>` selects that pane's sidebar entry again, as a person clicking it would, and
+// exits 1 when there is none. The test puts System Settings back the way it found it with these.
+if CommandLine.arguments.dropFirst().first == "--settings-pane" {
+    func value(_ element: AXUIElement, _ name: String) -> AnyObject? {
+        var out: AnyObject?
+        return AXUIElementCopyAttributeValue(element, name as CFString, &out) == .success ? out : nil
+    }
+    func children(_ element: AXUIElement) -> [AXUIElement] { (value(element, kAXChildrenAttribute) as? [AXUIElement]) ?? [] }
+    func pane(of row: AXUIElement) -> String? {
+        var queue = [row]
+        while !queue.isEmpty {
+            let item = queue.removeFirst()
+            if let identifier = value(item, kAXIdentifierAttribute) as? String, identifier.contains(".") {
+                return String(identifier.prefix { $0 != "*" && $0 != ":" })
+            }
+            queue += children(item)
+        }
+        return nil
+    }
+    let wanted = CommandLine.arguments.dropFirst(2).first
+    guard let settings = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.systempreferences").first else {
+        print("")
+        exit(wanted == nil ? 0 : 1)
+    }
+    var queue = (value(AXUIElementCreateApplication(settings.processIdentifier), kAXWindowsAttribute) as? [AXUIElement]) ?? []
+    var index = 0
+    while index < queue.count, index < 400 {
+        let next = queue[index]
+        index += 1
+        if (value(next, kAXRoleAttribute) as? String) == "AXOutline" {
+            guard let wanted else {
+                print(((value(next, kAXSelectedRowsAttribute) as? [AXUIElement]) ?? []).first.flatMap(pane) ?? "")
+                exit(0)
+            }
+            for row in (value(next, kAXRowsAttribute) as? [AXUIElement]) ?? [] where pane(of: row) == wanted {
+                exit(AXUIElementSetAttributeValue(next, kAXSelectedRowsAttribute as CFString, [row] as CFArray) == .success ? 0 : 1)
+            }
+            exit(1)
+        }
+        queue += children(next)
+    }
+    print("")
+    exit(wanted == nil ? 0 : 1)
+}
+
 // `--bar <pid>` prints {"texts": [...], "buttons": [...]} for the helper's bar; `--bar <pid> press <title>` presses
 // the button with that title and exits 1 when there is none. A press that takes the bar down (Stop) can report an
 // error although it happened, so the test judges by what followed.

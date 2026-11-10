@@ -763,31 +763,46 @@ try:
 
     # System Settings' Privacy & Security pane is look-only: a look names the pane by its identifier, and a click
     # there is refused before anything reaches it, without asking. Nothing is toggled: the click aims at the pane's
-    # own entry in the sidebar, which would only select it again.
+    # own entry in the sidebar, which would only select it again. System Settings is left as the test found it: a pane
+    # the person had open is selected again (and the check is skipped when that pane cannot be read back), and an app
+    # the test opened is quit.
+    def settings_pane(*select):
+        result = subprocess.run([str(lab / "Contents/MacOS/HaarnessLab"), "--settings-pane", *select], capture_output=True,
+                                text=True, timeout=60)
+        return result.stdout.strip() if not select else result.returncode == 0
+
     settings_running = subprocess.run(["pgrep", "-x", "System Settings"], capture_output=True).returncode == 0
-    # Opening the old Security pane file takes System Settings to Privacy & Security.
-    subprocess.run(["open", "/System/Library/PreferencePanes/Security.prefPane"], check=True)
-    until(lambda: (direct.ok("snapshot", bundle=SETTINGS).get("pane") or "").startswith("com.apple.settings.PrivacySecurity"),
-          "the Privacy & Security pane is open and named", seconds=20)
-    direct.close()
-    look_only = Chat()
-    # A pane opened a moment ago may not list its elements yet.
-    entry = None
-    for _ in range(10):
-        output, error, _, _ = look_only.turn("mac_snapshot", {"app": SETTINGS}, expect_ask=False)
-        assert not error, output
-        entry = re.search(r'@(e\d+) \[static-text\] "Privacy & Security"', output)
-        if entry:
-            break
-        time.sleep(1)
-    assert entry, output[:2000]
-    output, error, _, pending = look_only.turn("mac_click", {"ref": entry.group(1), "snapshot": False}, answer="reject")
-    assert error and pending is None, (output, pending)
-    direct = fresh_direct()
-    # System Settings stays on that pane when the person had it open; one the test opened is closed again.
-    if not settings_running:
-        direct.call("quit", bundle=SETTINGS)
-    check("a look names the Privacy & Security pane, and a click there is refused without asking")
+    earlier_pane = settings_pane() if settings_running else ""
+    if settings_running and not earlier_pane:
+        print("SKIP a look names the Privacy & Security pane: System Settings is open on a pane this test could not "
+              "read back, so it is left alone", flush=True)
+    else:
+        # Opening the old Security pane file takes System Settings to Privacy & Security.
+        subprocess.run(["open", "/System/Library/PreferencePanes/Security.prefPane"], check=True)
+        until(lambda: (direct.ok("snapshot", bundle=SETTINGS).get("pane") or "").startswith("com.apple.settings.PrivacySecurity"),
+              "the Privacy & Security pane is open and named", seconds=20)
+        direct.close()
+        look_only = Chat()
+        # A pane opened a moment ago may not list its elements yet.
+        entry = None
+        for _ in range(10):
+            output, error, _, _ = look_only.turn("mac_snapshot", {"app": SETTINGS}, expect_ask=False)
+            assert not error, output
+            entry = re.search(r'@(e\d+) \[static-text\] "Privacy & Security"', output)
+            if entry:
+                break
+            time.sleep(1)
+        assert entry, output[:2000]
+        output, error, _, pending = look_only.turn("mac_click", {"ref": entry.group(1), "snapshot": False}, answer="reject")
+        assert error and pending is None, (output, pending)
+        direct = fresh_direct()
+        if settings_running:
+            assert settings_pane(earlier_pane), "could not select " + earlier_pane + " again"
+            until(lambda: settings_pane() == earlier_pane, "System Settings shows the person's pane again", seconds=10)
+        else:
+            direct.call("quit", bundle=SETTINGS)
+        direct.ok("activate", bundle=PERSON)
+        check("a look names the Privacy & Security pane, and a click there is refused without asking")
 
     # The display stays awake while requests flow, and the hold goes with the end of the turn.
     direct.look()
