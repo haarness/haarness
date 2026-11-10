@@ -346,10 +346,13 @@ impl CatalogClient {
     /// there is none, it has no refresh token, or its access token has
     /// expired (or is within the 30 s before it, when rmcp renews it), which
     /// the refused request could not renew. One whose expiry is not known is
-    /// renewed now to tell: refused, it cannot be used; renewed, the request
-    /// may go again. A sign-in still current, one that failed to renew only
-    /// for now, or one whose store cannot be read, is not given up on.
-    async fn sign_in_state(&self) -> SignInState {
+    /// renewed now to tell, when `renew`: refused, it cannot be used;
+    /// renewed, the request may go again. Without `renew` (a request sent
+    /// again with a sign-in renewed for it, refused all the same) it counts
+    /// as current, so a server that keeps refusing costs no more renewals. A
+    /// sign-in still current, one that failed to renew only for now, or one
+    /// whose store cannot be read, is not given up on.
+    async fn sign_in_state(&self, renew: bool) -> SignInState {
         let Some(store) = &self.credential else {
             return SignInState::Current;
         };
@@ -379,7 +382,7 @@ impl CatalogClient {
                 SignInState::Current
             };
         }
-        let Some(renewer) = &self.renewer else {
+        let Some(renewer) = self.renewer.as_ref().filter(|_| renew) else {
             return SignInState::Current;
         };
         match renewer.lock().await.refresh_token().await {
@@ -2809,7 +2812,7 @@ impl Connection {
         let mut newer = sign_in.stored_since(sent).await;
         let mut known = None;
         if !newer {
-            match sign_in.sign_in_state().await {
+            match sign_in.sign_in_state(true).await {
                 SignInState::Unusable => {
                     tokio::time::sleep(SIGN_IN_SETTLES).await;
                     newer = sign_in.stored_since(sent).await;
@@ -2830,7 +2833,7 @@ impl Connection {
         }
         let state = match known {
             Some(state) => state,
-            None => sign_in.sign_in_state().await,
+            None => sign_in.sign_in_state(false).await,
         };
         if state != SignInState::Unusable {
             return Some(result.map_err(mcp_error));
@@ -4657,6 +4660,8 @@ mod tests {
         /// As [`Self::RotatedElsewhere`], the other process storing its
         /// newer sign-in a moment after the refusal.
         RotatedLater,
+        /// It renews the sign-in each time, with a new access token.
+        Granted,
     }
 
     /// An OAuth-protected Streamable HTTP server and its authorization
@@ -4742,6 +4747,21 @@ mod tests {
                                 "503 Service Unavailable",
                                 &[("Content-Type", "text/plain")],
                                 b"down for maintenance",
+                            )
+                            .await;
+                            return;
+                        }
+                        if renewal == Renewal::Granted {
+                            let renewed = state.refreshes.load(Ordering::SeqCst);
+                            write_json_response(
+                                &mut stream,
+                                "200 OK",
+                                &json!({
+                                    "access_token": format!("renewed-{renewed}"),
+                                    "refresh_token": format!("fixture-refresh-renewed-{renewed}"),
+                                    "token_type": "Bearer",
+                                    "scope": "mcp"
+                                }),
                             )
                             .await;
                             return;
@@ -5131,6 +5151,35 @@ mod tests {
         assert!(state.refreshes.load(Ordering::SeqCst) >= 1);
         assert_eq!(registry.list().await.unwrap()[0].status, "connected");
         assert_eq!(registry.tool_snapshot().len(), 1);
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// A server that keeps refusing a sign-in with no expiry, which the
+    /// authorization server keeps renewing: the request is sent again once
+    /// with a renewed sign-in, and refused once more it ends with its own
+    /// error, the sign-in renewed no further than that took. It was renewed
+    /// once more, only to be refused again.
+    #[tokio::test]
+    async fn a_renewed_sign_in_refused_again_is_not_renewed_once_more() {
+        let (registry, state, server, auth_dir) =
+            signed_in_for("secure", Renewal::Granted, false).await;
+        let told = announcements(&registry);
+        state.rejecting.store(true, Ordering::SeqCst);
+        let error = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            !error
+                .to_string()
+                .contains("needs the user to sign in to it"),
+            "{error}"
+        );
+        // rmcp renews the refused token of each of the two sends itself.
+        assert_eq!(state.refreshes.load(Ordering::SeqCst), 2);
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
         assert_eq!(told.load(Ordering::SeqCst), 0);
         server.abort();
         let _ = std::fs::remove_dir_all(auth_dir);
