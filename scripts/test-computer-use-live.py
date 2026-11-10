@@ -228,6 +228,22 @@ class Direct:
                 self.process.kill()
 
 
+def helpers_running():
+    """Helper processes started from this run's home: the server's and the test's own."""
+    found = subprocess.run(["pgrep", "-f", str(home / "cache")], capture_output=True, text=True).stdout.split()
+    return [int(pid) for pid in found]
+
+
+def fresh_direct():
+    """The test's own helper again, once the server's has gone: macOS's screen capture stops answering a second helper
+    process while another one that captured the screen still runs, so the two never capture side by side. Turning
+    computer use off and on makes the server's helper exit."""
+    cli("mac", "off")
+    until(lambda: not helpers_running(), "the server's helper exits", seconds=20)
+    switch_on()
+    return Direct()
+
+
 def person_undisturbed(label):
     """The person's app is still in front with its key window, and their pointer never moved."""
     now = person()
@@ -660,6 +676,8 @@ try:
     check("several lines go into the covered lab's text view as keys to its process")
 
     # Through the server: text without a ref lands in the lab the agent looked at, not in the person's app in front.
+    # The test's own helper leaves first, so that only one helper captures the screen (see fresh_direct).
+    direct.close()
     behind = Chat()
     output, error, _, _ = behind.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
     assert not error, output
@@ -671,9 +689,9 @@ try:
     check("typing without a ref goes to the looked-at lab, not to the person's app in front")
 
     # Return reaches the covered lab's default button, and the agent's own Escape does not stop its turn.
-    direct.look()
-    direct.ok("click", ref=direct.refs["name"], expect=LAB)
     behind.turn("mac_snapshot", {"app": LAB}, expect_ask=False)
+    output, error, _, _ = behind.turn("mac_click", {"ref": refs["name"], "snapshot": False}, expect_ask=False)
+    assert not error, output
     output, error, _, _ = behind.turn("mac_press", {"key": "Enter", "snapshot": False}, expect_ask=False)
     assert not error, output
     until(lambda: state().get("submitted"), "Return pressed Submit behind the person's window")
@@ -697,6 +715,7 @@ try:
                      "the lingering look ends", seconds=30)
     assert finished["status"] == "completed", finished
     check("the person's Escape in their own app does not stop an agent working behind them")
+    direct = fresh_direct()
 
     # A password field in the covered lab is refused; the person's own password field blocks nothing there.
     direct.look()
@@ -747,6 +766,7 @@ try:
     subprocess.run(["open", "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"], check=True)
     until(lambda: (direct.ok("snapshot", bundle=SETTINGS).get("pane") or "").startswith("com.apple.settings.PrivacySecurity"),
           "the Privacy & Security pane is open and named", seconds=20)
+    direct.close()
     look_only = Chat()
     output, error, _, _ = look_only.turn("mac_snapshot", {"app": SETTINGS}, expect_ask=False)
     assert not error, output
@@ -754,6 +774,7 @@ try:
     assert entry, output[:2000]
     output, error, _, pending = look_only.turn("mac_click", {"ref": entry.group(1), "snapshot": False}, answer="reject")
     assert error and pending is None, (output, pending)
+    direct = fresh_direct()
     if earlier_pane:
         subprocess.run(["open", "x-apple.systempreferences:" + earlier_pane], check=False)
     elif not settings_running:
