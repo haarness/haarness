@@ -41,7 +41,19 @@ use crate::{
     ToolRegistry,
 };
 
-const MAX_COMPACTIONS_PER_TURN: u8 = 4;
+/// Compactions in a row the provider has not answered yet: each one after
+/// a refusal aims lower ([`overflow_share`]), and more would only summarize
+/// the last summary. A request the provider takes starts the count again, so
+/// a long turn compacts as often as its growth needs, not a fixed number of
+/// times.
+const MAX_COMPACTIONS_UNANSWERED: u8 = 4;
+
+/// How much a turn's context must grow after a compaction before it compacts
+/// again by itself: a quarter of the size at which compaction starts. Where
+/// a summary and the part kept with it leave the context still large, each
+/// further summary then covers that much new work, so compacting never costs
+/// more than the rounds it makes room for.
+const COMPACTION_REGROWTH_DIVISOR: u64 = 4;
 
 fn latest_todos(items: &[Item], through: Option<u64>) -> Vec<TodoEntry> {
     items
@@ -177,8 +189,9 @@ fn compaction_input_limit(
 #[derive(Debug, Clone, Copy)]
 pub struct ContextUsage {
     pub estimate: tokens::ContextEstimate,
-    /// The model's context window, when its metadata states one; compaction
-    /// assumes 128k otherwise.
+    /// The model's context window, when its metadata states one or the
+    /// provider showed a smaller one by refusing a request as too long;
+    /// compaction assumes 128k otherwise.
     pub window: Option<u64>,
     /// Automatic compaction starts above this many tokens.
     pub compact_at: u64,
@@ -972,6 +985,14 @@ fn is_provider_transient(error: &CoreError) -> bool {
     if renewal_server_busy(&message) {
         return true;
     }
+    // Any server error but a method or HTTP version the server does not
+    // have: a proxy before a server set up here answers 520 to 524 (the
+    // origin was unreachable, or slow to answer), and 507 or 508 pass too.
+    if http_status(&message)
+        .is_some_and(|status| (500..600).contains(&status) && !matches!(status, 501 | 505))
+    {
+        return true;
+    }
     [
         "http 500",
         "http 502",
@@ -1132,27 +1153,37 @@ const TRANSIENT_RETRIES: u8 = 4;
 const RECOVERIES: u8 = 3;
 
 /// How many rounds' worth of retries after a failure, and of recoveries,
-/// one turn may spend in all, however its rounds share them. A provider or
+/// one turn may spend in all, however its rounds share them, beyond what its
+/// finished responses give back ([`RESPONSES_PER_REFUND`]). A provider or
 /// gateway that keeps failing round after round then ends the turn, instead
 /// of quietly multiplying what a long turn costs.
 const TURN_RETRY_ROUNDS: u8 = 4;
+
+/// Finished responses that give a turn back one retry after a failure and
+/// one recovery. A long turn against a server that fails now and then (a
+/// gateway's 502 every few dozen requests) goes on for as many rounds as it
+/// takes; one that fails more often than once in this many responses still
+/// ends the turn, so failures cost no more than about one round in this many.
+const RESPONSES_PER_REFUND: u16 = 8;
 
 /// What a turn has spent on retrying a busy or unreachable provider and on
 /// recovering responses cut short. Each round has its own budget, back once
 /// the provider takes a request (retries) or a response finishes
 /// (recoveries), so failures spread over a long turn of tool rounds do not
-/// add up to fail it; the turn's totals bound the failures. A provider at
-/// its rate limit (a 429, or a key or router already running as many
-/// requests at once as it allows) is waited out in each round but not
-/// counted for the turn: it refused the request, so nothing ran or was
-/// charged, and a fan-out of agents can wait on a free slot for a long time.
-/// An overloaded provider counts, as any server error does.
+/// add up to fail it; the turn's totals bound the failures, less what
+/// finished responses gave back. A provider at its rate limit (a 429, or a
+/// key or router already running as many requests at once as it allows) is
+/// waited out in each round but not counted for the turn: it refused the
+/// request, so nothing ran or was charged, and a fan-out of agents can wait
+/// on a free slot for a long time. An overloaded provider counts, as any
+/// server error does.
 #[derive(Debug, Default)]
 struct RetryBudget {
     retries: u8,
     recoveries: u8,
     turn_retries: u8,
     turn_recoveries: u8,
+    finished_responses: u16,
 }
 
 impl RetryBudget {
@@ -1191,9 +1222,16 @@ impl RetryBudget {
         self.retries = 0;
     }
 
-    /// A response finished: the next one may be recovered as often again.
+    /// A response finished: the next one may be recovered as often again,
+    /// and every [`RESPONSES_PER_REFUND`] of them give the turn back one
+    /// retry and one recovery.
     fn finished(&mut self) {
         self.recoveries = 0;
+        self.finished_responses = self.finished_responses.wrapping_add(1);
+        if self.finished_responses.is_multiple_of(RESPONSES_PER_REFUND) {
+            self.turn_retries = self.turn_retries.saturating_sub(1);
+            self.turn_recoveries = self.turn_recoveries.saturating_sub(1);
+        }
     }
 }
 
@@ -1426,6 +1464,10 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
     // words read: waiting fixes it, compacting does not.
     if http_status(&message) == Some(429)
         || RATE_LIMITED.iter().any(|marker| message.contains(marker))
+        // An output limit above the model's ("max_tokens must be less than
+        // …", which Cohere also calls too many tokens): compacting cannot
+        // help.
+        || message.contains("max_tokens must be less than")
     {
         return false;
     }
@@ -1468,11 +1510,34 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         // Text Generation Inference (Together, Hugging Face): "`inputs`
         // tokens + `max_new_tokens` must be <= 131073". It says the same when
         // the output limit alone is too large, which compacting cannot fix;
-        // `MAX_COMPACTIONS_PER_TURN` bounds the attempts then.
+        // `MAX_COMPACTIONS_UNANSWERED` bounds the attempts then.
         "tokens + `max_new_tokens` must be <=",
+        // vLLM's engine: "The decoder prompt (length 40000) is longer than
+        // the maximum model length of 32768".
+        "longer than the maximum model length",
+        // LM Studio: "the model is loaded with context length of only 4096
+        // tokens, which is not enough".
+        "context length of only",
+        // Qwen on DashScope: "Range of input length should be [1, 129024]".
+        "range of input length should be",
+        // Z.ai's code 1261 in Chinese.
+        "prompt 超长",
+        // LiteLLM's own name for it, whatever the model behind it said.
+        "contextwindowexceedederror",
+        // Cloudflare Workers AI.
+        "exceeded this model context window limit",
+        "exceeds the maximum allowed input length",
+        "tokens in request more than max tokens allowed",
     ]
     .iter()
     .any(|marker| message.contains(marker))
+        // Ollama's OpenAI-compatible API, SGLang and others: "the input
+        // length exceeds the context length", "Input length (40000 tokens)
+        // exceeds the maximum allowed context length".
+        || message.split_once("input length").is_some_and(|(_, rest)| {
+            rest.split_once("exceeds")
+                .is_some_and(|(_, rest)| rest.contains("context length"))
+        })
         // DeepInfra: "Requested input length 600010 exceeds maximum input
         // length 131071", read whole: a field of a request can be longer
         // than its own limit too.
@@ -4626,7 +4691,10 @@ impl AgentRuntime {
             items.retain(|item| item.sequence <= revert.sequence);
         }
         let models = self.components().providers.models(&thread.provider);
-        let window = stated_window(model_metadata(&models, &thread.model));
+        let window = self
+            .request_ceilings
+            .get(&thread.provider, &thread.model)
+            .context_window(stated_window(model_metadata(&models, &thread.model)));
         Ok(ContextUsage {
             estimate: tokens::context(&items, Tokenizer::for_model(&thread.model)),
             window,
@@ -5673,7 +5741,10 @@ impl AgentRuntime {
         let metadata = model_metadata(&models, model);
         compaction_input_limit(
             &components.config.compaction,
-            stated_window(metadata).unwrap_or(128_000),
+            self.request_ceilings
+                .get(provider, model)
+                .context_window(stated_window(metadata))
+                .unwrap_or(128_000),
             metadata.and_then(|info| info.max_output_tokens),
         )
     }
@@ -10536,14 +10607,22 @@ impl RunnerTask {
     }
 
     /// Bounded recovery for a provider which rejects the request before it
-    /// emits any semantic output. The caller enforces the per-turn recovery
-    /// ceiling; the same queue gate used by proactive compaction protects
-    /// steering that may arrive while summarization runs.
+    /// emits any semantic output. The caller bounds the compactions the
+    /// provider has not answered yet; the same queue gate used by proactive
+    /// compaction protects steering that may arrive while summarization runs.
+    ///
+    /// A refusal of the request as too long (`error`) also shows the model's
+    /// window where its metadata states none or a larger one (a server set up
+    /// here, whose window Haarness otherwise takes as 128K): the window the
+    /// refusal names, or no more than the refused request held. It is kept for
+    /// the model, so this compaction aims below it, and later rounds and chats
+    /// compact before reaching it and size their tools for it.
     async fn recover_context_overflow(
         &self,
         provider: &Arc<dyn ModelProvider>,
         model: &str,
         compactions: u8,
+        error: &CoreError,
     ) -> CoreResult<bool> {
         if !self.config.compaction.enabled {
             return Ok(false);
@@ -10552,11 +10631,35 @@ impl RunnerTask {
         if !unconsumed_queued(&items, self.turn.id).is_empty() {
             return Ok(false);
         }
+        // A request refused for its bytes (its attachments) says nothing of
+        // the window.
+        if let CoreError::Provider(message) = error
+            && is_provider_context_overflow(error)
+            && !is_provider_oversized_request(error)
+        {
+            let refused = tokens::context(&items, Tokenizer::for_model(model)).tokens;
+            if let Some(window) = crate::request_ceilings::shown_window(message, refused)
+                && self
+                    .request_ceilings
+                    .learn_window(provider.id(), model, window)
+            {
+                tracing::info!(
+                    thread = %self.thread.id,
+                    turn = %self.turn.id,
+                    window,
+                    refused,
+                    "the provider refused the request as longer than the model takes; compacting below that from now on"
+                );
+            }
+        }
         let models = self.providers.models(provider.id());
         let metadata = model_metadata(&models, model);
         let input_limit = compaction_input_limit(
             &self.config.compaction,
-            stated_window(metadata).unwrap_or(128_000),
+            self.request_ceilings
+                .get(provider.id(), model)
+                .context_window(stated_window(metadata))
+                .unwrap_or(128_000),
             metadata.and_then(|info| info.max_output_tokens),
         );
         request_fits(
@@ -10724,7 +10827,10 @@ impl RunnerTask {
                 .goal_max_turns
                 .filter(|turns| *turns > 0)
                 .unwrap_or(crate::goal::MAX_GOAL_TURNS);
-            let mut compactions_this_turn = 0_u8;
+            // Compactions since the provider last took a request, and the
+            // size of the context right after this turn's latest compaction.
+            let mut compactions_unanswered = 0_u8;
+            let mut compacted_at: Option<u64> = None;
             // A refusal of the request's bytes compacts once until the
             // provider takes a request again: when the summary leaves the
             // request too large, more summaries would only summarize the
@@ -10977,20 +11083,30 @@ impl RunnerTask {
                     Some(ItemData::Compaction { .. })
                 );
                 // A subagent's turn compacts its own chat as a person's does.
-                if self.config.compaction.enabled
-                    && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
-                    && !has_unconsumed_queued
-                    && !just_compacted
-                {
+                if self.config.compaction.enabled && !has_unconsumed_queued {
                     let provider_models = self.providers.models(provider_id);
                     let model_info = model_metadata(&provider_models, &model);
-                    let context_window = stated_window(model_info).unwrap_or(128_000);
+                    let context_window = self
+                        .request_ceilings
+                        .get(provider_id, &model)
+                        .context_window(stated_window(model_info))
+                        .unwrap_or(128_000);
                     let budget = compaction_input_limit(
                         &self.config.compaction,
                         context_window,
                         model_info.and_then(|info| info.max_output_tokens),
                     );
-                    if tokens::context(&items, Tokenizer::for_model(&model)).tokens > budget {
+                    let context = tokens::context(&items, Tokenizer::for_model(&model)).tokens;
+                    if just_compacted {
+                        compacted_at = Some(context);
+                    }
+                    if !just_compacted
+                        && compactions_unanswered < MAX_COMPACTIONS_UNANSWERED
+                        && context > budget
+                        && compacted_at.is_none_or(|after| {
+                            context >= after.saturating_add(budget / COMPACTION_REGROWTH_DIVISOR)
+                        })
+                    {
                         request_fits(
                             &self.config.compaction,
                             &items,
@@ -11055,7 +11171,7 @@ impl RunnerTask {
                                     expected_tail,
                                 )
                                 .await?;
-                            compactions_this_turn = compactions_this_turn.saturating_add(1);
+                            compactions_unanswered = compactions_unanswered.saturating_add(1);
                             self.events.publish_scoped(
                                 "item.created",
                                 Some(self.thread.id),
@@ -11074,6 +11190,8 @@ impl RunnerTask {
                             );
                             compacted = Some(item);
                             items = self.repository.list_items(self.thread.id, None).await?;
+                            compacted_at =
+                                Some(tokens::context(&items, Tokenizer::for_model(&model)).tokens);
                         } else {
                             items = current_items;
                         }
@@ -11455,13 +11573,18 @@ impl RunnerTask {
                         if oversized && compacted_for_size {
                             return Err(still_too_large(error_value));
                         }
-                        if compactions_this_turn < MAX_COMPACTIONS_PER_TURN
+                        if compactions_unanswered < MAX_COMPACTIONS_UNANSWERED
                             && (oversized || is_provider_context_overflow(&error_value))
                             && self
-                                .recover_context_overflow(&provider, &model, compactions_this_turn)
+                                .recover_context_overflow(
+                                    &provider,
+                                    &model,
+                                    compactions_unanswered,
+                                    &error_value,
+                                )
                                 .await?
                         {
-                            compactions_this_turn = compactions_this_turn.saturating_add(1);
+                            compactions_unanswered = compactions_unanswered.saturating_add(1);
                             compacted_for_size |= oversized;
                             continue 'provider_round;
                         }
@@ -11555,17 +11678,18 @@ impl RunnerTask {
                                 break;
                             }
                             if !saw_provider_event
-                                && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
+                                && compactions_unanswered < MAX_COMPACTIONS_UNANSWERED
                                 && (oversized || is_provider_context_overflow(&error_value))
                                 && self
                                     .recover_context_overflow(
                                         &provider,
                                         &model,
-                                        compactions_this_turn,
+                                        compactions_unanswered,
+                                        &error_value,
                                     )
                                     .await?
                             {
-                                compactions_this_turn = compactions_this_turn.saturating_add(1);
+                                compactions_unanswered = compactions_unanswered.saturating_add(1);
                                 compacted_for_size |= oversized;
                                 continue 'provider_round;
                             }
@@ -11634,9 +11758,11 @@ impl RunnerTask {
                     }
                     saw_provider_event = true;
                     // The provider took this request: a later one refused
-                    // for its size may compact again, and a later one it
-                    // turns away while busy backs off from the first wait.
+                    // for its size may compact again, aiming as high as the
+                    // first time, and a later one it turns away while busy
+                    // backs off from the first wait.
                     compacted_for_size = false;
+                    compactions_unanswered = 0;
                     retries.accepted();
                     // The request to explain a failure is answered once the
                     // reply shows something (words, a tool call or structured
@@ -16807,7 +16933,57 @@ fn fit_summary_input(messages: &mut [ProviderMessage], room: u64, tokenizer: Tok
     }
 }
 
-/// Run a tools-disabled summarization request and collect the text.
+/// Where a summary request is still larger than `room` with its tool
+/// outputs cut ([`fit_summary_input`]), as when the model wrote long answers
+/// or long files, leaves out its oldest messages after the first (which
+/// holds the earlier summary, or the chat's first request) until it fits,
+/// keeping the last two and every message the person wrote: what they asked
+/// for is what the summary is for. How many it left out.
+fn drop_oldest_to_fit(
+    messages: &mut Vec<ProviderMessage>,
+    origins: &mut Vec<crate::image_budget::Origin>,
+    room: u64,
+    tokenizer: Tokenizer,
+) -> usize {
+    let size = |message: &ProviderMessage| match message {
+        ProviderMessage::Text { content, .. } | ProviderMessage::Media { content, .. } => {
+            4 + tokenizer.text(content)
+        }
+        ProviderMessage::ToolCall {
+            name, arguments, ..
+        } => 4 + tokenizer.text(name) + tokenizer.text(&arguments.to_string()),
+        ProviderMessage::ToolResult { name, output, .. } => {
+            4 + tokenizer.text(name) + tokenizer.text(output)
+        }
+    };
+    let mut total: u64 = messages.iter().map(size).sum();
+    let mut left_out = 0;
+    while total > room {
+        let last_kept = messages.len().saturating_sub(2);
+        let Some(oldest) =
+            (1..last_kept).find(|index| !origins.get(*index).is_some_and(|origin| origin.person))
+        else {
+            break;
+        };
+        total = total.saturating_sub(size(&messages.remove(oldest)));
+        if oldest < origins.len() {
+            origins.remove(oldest);
+        }
+        left_out += 1;
+    }
+    left_out
+}
+
+/// Shares of the room a summary request that the provider refused as too
+/// long is sent again in: the estimate of it ran low.
+const SUMMARY_SHRINKS: [f64; 3] = [0.7, 0.5, 0.35];
+
+/// The summary of `items` for a compaction, asked of `model` within `room`
+/// tokens. A summary request meets what any request meets, and the turn that
+/// compacts fails with it: a busy, failing or unreachable provider is asked
+/// again after the waits a turn's own round gets, a summary cut short is
+/// asked for again as often as a round's response is recovered, and a request
+/// refused as too long for the model goes again in less room, each time.
 #[instrument(
     name = "context.compact",
     skip_all,
@@ -16821,17 +16997,77 @@ async fn summarize_context(
     cancel: CancellationToken,
     room: Option<u64>,
 ) -> CoreResult<String> {
+    let mut retries = RetryBudget::default();
+    let mut room = room;
+    let mut shrinks = SUMMARY_SHRINKS.iter();
+    loop {
+        let error = match summarize_once(
+            provider,
+            model,
+            system.clone(),
+            items.clone(),
+            cancel.clone(),
+            room,
+        )
+        .await
+        {
+            Ok(summary) => return Ok(summary),
+            Err(error) => error,
+        };
+        let pause = if is_provider_context_overflow(&error) || is_provider_oversized_request(&error)
+        {
+            let (Some(current), Some(share)) = (room, shrinks.next()) else {
+                return Err(error);
+            };
+            room = Some(scaled(current, *share));
+            None
+        } else if matches!(error, CoreError::ProviderIncomplete(_)) || is_stream_cut(&error) {
+            Some(retries.recover().ok_or(error)?)
+        } else {
+            Some(retries.retry(&error).ok_or(error)?.1)
+        };
+        tracing::info!(
+            model,
+            room,
+            delay_ms = pause.map_or(0, |pause| u64::try_from(pause.as_millis())
+                .unwrap_or(u64::MAX)),
+            "asking again for the compaction summary"
+        );
+        if let Some(pause) = pause {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                () = tokio::time::sleep(pause) => {}
+            }
+        }
+    }
+}
+
+/// Run a tools-disabled summarization request and collect the text.
+async fn summarize_once(
+    provider: &Arc<dyn ModelProvider>,
+    model: &str,
+    system: String,
+    items: Vec<Item>,
+    cancel: CancellationToken,
+    room: Option<u64>,
+) -> CoreResult<String> {
     // Summaries need the textual meaning of media turns, not the original
     // potentially huge or now-missing binary payload. This also makes overflow
     // recovery safe after an attachment pushed the provider over its limit.
-    let (mut messages, origins) = provider_messages_with_origins(items);
+    let (mut messages, mut origins) = provider_messages_with_origins(items);
     if let Some(room) = room {
         let tokenizer = Tokenizer::for_model(model);
-        fit_summary_input(
-            &mut messages,
-            room.saturating_sub(tokenizer.text(&system)),
-            tokenizer,
-        );
+        let room = room.saturating_sub(tokenizer.text(&system));
+        fit_summary_input(&mut messages, room, tokenizer);
+        let left_out = drop_oldest_to_fit(&mut messages, &mut origins, room, tokenizer);
+        if left_out > 0 {
+            tracing::info!(
+                model,
+                left_out,
+                "the oldest messages left out of the summary request to fit the model"
+            );
+        }
     }
     let messages = summary_messages(messages, &origins, &summary_key());
     let request = ProviderRequest {
@@ -21590,12 +21826,104 @@ mod tests {
         assert_eq!(pause(&mut budget), None);
         budget.finished();
         assert_eq!(pause(&mut budget), Some(250));
+        // Four rounds' worth of recoveries in all.
         let mut budget = super::RetryBudget::default();
-        for _ in 0..12 {
-            assert!(budget.recover().is_some());
+        for _ in 0..4 {
+            for _ in 0..3 {
+                assert!(budget.recover().is_some());
+            }
             budget.finished();
         }
         assert_eq!(budget.recover(), None);
+    }
+
+    #[test]
+    fn a_summary_request_too_long_with_its_outputs_cut_leaves_out_its_oldest_messages() {
+        let text = |index: usize| ProviderMessage::Text {
+            role: if index.is_multiple_of(2) {
+                "user"
+            } else {
+                "assistant"
+            }
+            .into(),
+            content: format!("message {index} ") + &"long answer words ".repeat(200),
+        };
+        let tokenizer = Tokenizer::for_model("coder");
+        let mut messages: Vec<_> = (0..10).map(text).collect();
+        let mut origins = vec![crate::image_budget::Origin::default(); 10];
+        // The person's request, kept behind the earlier summary.
+        origins[1].person = true;
+        let one = match &messages[0] {
+            ProviderMessage::Text { content, .. } => 4 + tokenizer.text(content),
+            _ => unreachable!(),
+        };
+        let left_out = super::drop_oldest_to_fit(&mut messages, &mut origins, one * 5, tokenizer);
+        assert_eq!(left_out, 5);
+        assert_eq!(messages.len(), 5);
+        assert_eq!(origins.len(), 5);
+        assert!(origins[1].person);
+        let starts: Vec<_> = messages
+            .iter()
+            .map(|message| match message {
+                ProviderMessage::Text { content, .. } => {
+                    content.split(' ').nth(1).unwrap().to_owned()
+                }
+                _ => unreachable!(),
+            })
+            .collect();
+        // The first (the earlier summary), the person's words and the newest
+        // stay.
+        assert_eq!(starts, ["0", "1", "7", "8", "9"]);
+        // A request that fits, or one down to three messages, loses nothing.
+        let mut few: Vec<_> = (0..3).map(text).collect();
+        let mut origins = vec![crate::image_budget::Origin::default(); 3];
+        assert_eq!(
+            super::drop_oldest_to_fit(&mut few, &mut origins, 10, tokenizer),
+            0
+        );
+        assert_eq!(few.len(), 3);
+    }
+
+    #[test]
+    fn a_long_turn_outlasts_failures_once_in_eight_responses_but_not_more() {
+        let busy = CoreError::Provider("HTTP 502 Bad Gateway".into());
+        // A gateway that answers 502 before one response in eight and cuts
+        // another short: a turn of 400 rounds goes on to its end.
+        let mut budget = super::RetryBudget::default();
+        for round in 0..400 {
+            if round % 8 == 3 {
+                assert!(budget.retry(&busy).is_some(), "round {round}");
+            }
+            budget.accepted();
+            if round % 8 == 5 {
+                assert!(budget.recover().is_some(), "round {round}");
+            }
+            budget.finished();
+        }
+        // One that fails before every other response still ends the turn,
+        // after not much more than the turn's own allowance.
+        let mut budget = super::RetryBudget::default();
+        let mut failed_at = None;
+        for round in 0..400 {
+            if round % 2 == 0 && budget.retry(&busy).is_none() {
+                failed_at = Some(round);
+                break;
+            }
+            budget.accepted();
+            budget.finished();
+        }
+        let failed_at = failed_at.expect("the turn ended");
+        assert!((32..48).contains(&failed_at), "{failed_at}");
+        let mut budget = super::RetryBudget::default();
+        let mut recovered = 0;
+        for _ in 0..400 {
+            if budget.recover().is_none() {
+                break;
+            }
+            recovered += 1;
+            budget.finished();
+        }
+        assert!((12..16).contains(&recovered), "{recovered}");
     }
 
     #[test]
@@ -21623,6 +21951,19 @@ mod tests {
             "HTTP 400 Bad Request: Requested input length 600010 exceeds maximum input length 131071",
             // Text Generation Inference (Together, Hugging Face).
             "HTTP 422 Unprocessable Entity: Input validation error: `inputs` tokens + `max_new_tokens` must be <= 131073. Given: 600035 `inputs` tokens and 16 `max_new_tokens`",
+            // Servers people set up themselves, and the gateways before them.
+            "HTTP 400 Bad Request: This model's maximum context length is 32768 tokens. However, you requested 33905 tokens in the messages, Please reduce the length of the messages.",
+            "HTTP 400 Bad Request: The decoder prompt (length 40000) is longer than the maximum model length of 32768. Make sure that `max_model_len` is no smaller than the number of text tokens.",
+            "HTTP 400 Bad Request: request (17565 tokens) exceeds the available context size (16384 tokens), try increasing it",
+            "Trying to keep the first 5000 tokens when context the overflows. However, the model is loaded with context length of only 4096 tokens, which is not enough. Try to load the model with a larger context length, or provide a shorter input",
+            "HTTP 400 Bad Request: <400> InternalError.Algo.InvalidParameter: Range of input length should be [1, 129024]",
+            "HTTP 400 Bad Request: [1261] Prompt 超长",
+            "HTTP 400 Bad Request: litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError",
+            "HTTP 400 Bad Request: Invalid request: Your request exceeded model token limit: 131072",
+            "HTTP 400 Bad Request: invalid params, context window exceeds limit (2013)",
+            "HTTP 413 Payload Too Large: AiError: AiError: Input exceeded this model context window limit",
+            "HTTP 400 Bad Request: the input length exceeds the context length",
+            "HTTP 400 Bad Request: This endpoint's maximum context length is 131072 tokens. However, you requested about 140210 tokens (124210 of text input, 16000 in the output).",
         ] {
             assert!(overflow(message), "{message}");
         }
@@ -21644,6 +21985,8 @@ mod tests {
             "The prompt is fine",
             "Requested input length is unknown",
             "HTTP 400 Bad Request: field `query` exceeds maximum input length of 512",
+            "HTTP 400 Bad Request: too many tokens: max_tokens must be less than or equal to 4096",
+            "HTTP 400 Bad Request: input length is fine; the request exceeds nothing",
         ] {
             assert!(!overflow(message), "{message}");
         }
@@ -24433,6 +24776,10 @@ mod tests {
             "request or response body error: error reading a body from connection: stream error received: unexpected internal error encountered",
             "error decoding response body: unexpected EOF during chunk size line",
             "upstream stream became idle",
+            // A tunnel or proxy before a server set up here.
+            "HTTP 524: A timeout occurred",
+            "HTTP 520 <unknown status code>: Web server is returning an unknown error",
+            "HTTP 508 Loop Detected",
         ] {
             assert!(
                 super::is_provider_transient(&provider(retried)),
@@ -24443,6 +24790,7 @@ mod tests {
             "HTTP 429: rate limit exceeded",
             "HTTP 400 Bad Request: API key not valid",
             "HTTP 413 Payload Too Large: maximum context length exceeded",
+            "HTTP 501 Not Implemented",
         ] {
             assert!(!super::is_provider_transient(&provider(failed)), "{failed}");
         }

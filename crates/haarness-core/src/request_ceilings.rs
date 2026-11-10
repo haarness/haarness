@@ -9,6 +9,11 @@
 //! `load_tool`, as they do in a small context window (about half of every
 //! request), and a reply is asked for no more output than the minute allows,
 //! so the turn goes on instead of failing, and more requests fit a minute.
+//!
+//! The same goes for a model's context window where its metadata states none
+//! (a server a person set up, whose window Haarness otherwise takes as 128K)
+//! or a larger one than the server runs it with: a refusal of a request as
+//! longer than the model takes shows it (see [`shown_window`]).
 
 use dashmap::DashMap;
 
@@ -85,6 +90,73 @@ pub(crate) fn per_minute_refusal(message: &str) -> Option<PerMinuteRefusal> {
         .map(|limit| limit.refusal)
 }
 
+/// The smallest context window learned from a refusal: below this no coding
+/// request fits whatever is compacted, and the refusal stands.
+const LEAST_WINDOW: u64 = 4_096;
+
+/// The context window a provider's refusal of a request as too long shows,
+/// given the size of the refused request as Haarness measured it
+/// (`refused`): the window the refusal names, or, where Haarness counts
+/// fewer tokens than the server does, no more than the refused request held,
+/// so the next request is measured against what the server took. A named
+/// window far above the refused request is about the room left for the reply
+/// (vLLM's "'max_tokens' is too large … maximum context length is 32768
+/// tokens and your request has 1200 input tokens"), not the history: it is
+/// taken as named.
+pub(crate) fn shown_window(message: &str, refused: u64) -> Option<u64> {
+    let window = match named_window(message) {
+        Some(named) if refused >= named / 2 => named.min(refused),
+        Some(named) => named,
+        None => refused,
+    };
+    (window >= LEAST_WINDOW).then_some(window)
+}
+
+/// The window a refusal of a request as too long names, in the words of the
+/// servers people run or reach: vLLM, SGLang, OpenAI, DeepSeek and
+/// OpenRouter ("maximum context length is 32768 tokens"), llama.cpp ("exceeds
+/// the available context size (16384 tokens)"), LM Studio ("loaded with
+/// context length of only 4096 tokens"), Moonshot ("exceeded model token
+/// limit: 131072"), Text Generation Inference ("`inputs` tokens +
+/// `max_new_tokens` must be <= 32769"), Mistral ("too large for model with
+/// 32768 maximum context length"), xAI ("maximum prompt length is 131072"),
+/// Qwen on DashScope ("Range of input length should be [1, 129024]"),
+/// DeepInfra ("exceeds maximum input length 131071"), Gemini ("exceeds the
+/// maximum number of tokens allowed (1048576)") and Claude ("prompt is too
+/// long: 210000 tokens > 200000 maximum").
+fn named_window(message: &str) -> Option<u64> {
+    const BEFORE: [&str; 15] = [
+        "maximum context length is ",
+        "maximum context length: ",
+        "available context size (",
+        "context length of only ",
+        "context length is only ",
+        "configured context size is ",
+        "model token limit: ",
+        "must be <= ",
+        "too large for model with ",
+        "maximum prompt length is ",
+        "input length should be [1, ",
+        "maximum input length ",
+        "maximum allowed input length of ",
+        "maximum number of tokens allowed (",
+        " tokens > ",
+    ];
+    let lower = message.to_ascii_lowercase();
+    BEFORE
+        .iter()
+        .filter_map(|before| {
+            let (_, rest) = lower.split_once(before)?;
+            let digits: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == ',')
+                .filter(char::is_ascii_digit)
+                .collect();
+            digits.parse::<u64>().ok().filter(|window| *window > 0)
+        })
+        .min()
+}
+
 /// The ceilings learned for one model on one provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Ceiling {
@@ -92,16 +164,27 @@ pub(crate) struct Ceiling {
     pub input: Option<u64>,
     /// The most output tokens one reply may be asked for.
     pub output: Option<u64>,
+    /// The context window a refusal of a request as too long showed.
+    pub window: Option<u64>,
 }
 
 impl Ceiling {
     /// The window the tool policy sizes this model's tools for: its context
     /// window, or the account's ceiling where that is smaller.
     pub fn tool_window(self, context_window: Option<u64>) -> Option<u64> {
-        match (context_window.filter(|window| *window > 0), self.input) {
+        match (self.context_window(context_window), self.input) {
             (Some(window), Some(ceiling)) => Some(window.min(ceiling)),
             (None, Some(ceiling)) => Some(ceiling),
             (window, None) => window,
+        }
+    }
+
+    /// The model's context window: as its metadata states it
+    /// (`stated`), or the smaller one a refusal showed.
+    pub fn context_window(self, stated: Option<u64>) -> Option<u64> {
+        match (stated.filter(|window| *window > 0), self.window) {
+            (Some(stated), Some(shown)) => Some(stated.min(shown)),
+            (stated, shown) => stated.or(shown),
         }
     }
 }
@@ -145,13 +228,30 @@ impl RequestCeilings {
         *known = Some(limit);
         true
     }
+
+    /// Learns that `model` on `provider` takes no more than `window` tokens
+    /// of context ([`shown_window`]). True when that is less than it knew.
+    pub fn learn_window(&self, provider: &str, model: &str, window: u64) -> bool {
+        if window < LEAST_WINDOW {
+            return false;
+        }
+        let mut ceiling = self
+            .learned
+            .entry((provider.to_owned(), model.to_owned()))
+            .or_default();
+        if ceiling.window.is_some_and(|known| known <= window) {
+            return false;
+        }
+        ceiling.window = Some(window);
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         Ceiling, PerMinuteLimit, PerMinuteRefusal, RequestCeilings, per_minute_limit,
-        per_minute_refusal,
+        per_minute_refusal, shown_window,
     };
 
     const TPM: &str = "HTTP 413 Payload Too Large: Request too large for model `openai/gpt-oss-120b` in organization `org_1` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 8421, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing";
@@ -236,7 +336,7 @@ mod tests {
             ceilings.get("groq", "openai/gpt-oss-120b"),
             Ceiling {
                 input: Some(8_000),
-                output: None
+                ..Ceiling::default()
             }
         );
         // Another model, or the same one elsewhere, keeps its own.
@@ -264,8 +364,8 @@ mod tests {
         assert_eq!(
             ceilings.get("groq", "qwen/qwen3.8-27b"),
             Ceiling {
-                input: None,
-                output: Some(1_000)
+                output: Some(1_000),
+                ..Ceiling::default()
             }
         );
         // A limit no coding request can fit under stays a refusal.
@@ -287,7 +387,7 @@ mod tests {
     fn tools_are_sized_for_the_smaller_of_the_window_and_the_ceiling() {
         let ceiling = Ceiling {
             input: Some(8_000),
-            output: None,
+            ..Ceiling::default()
         };
         assert_eq!(ceiling.tool_window(Some(131_072)), Some(8_000));
         assert_eq!(ceiling.tool_window(None), Some(8_000));
@@ -295,5 +395,114 @@ mod tests {
         assert_eq!(ceiling.tool_window(Some(4_096)), Some(4_096));
         assert_eq!(Ceiling::default().tool_window(Some(131_072)), Some(131_072));
         assert_eq!(Ceiling::default().tool_window(None), None);
+    }
+
+    #[test]
+    fn a_refusal_as_too_long_shows_the_window_the_server_runs() {
+        // Each server's words, against a refused request Haarness measured
+        // close to what the server counted.
+        for (message, window) in [
+            (
+                "HTTP 400 Bad Request: This model's maximum context length is 32768 tokens. However, you requested 33905 tokens in the messages, Please reduce the length of the messages.",
+                32_768,
+            ),
+            (
+                "HTTP 400 Bad Request: This endpoint's maximum context length is 131,072 tokens. However, you requested about 140210 tokens",
+                131_072,
+            ),
+            (
+                "HTTP 400 Bad Request: request (34000 tokens) exceeds the available context size (32768 tokens), try increasing it",
+                32_768,
+            ),
+            (
+                "Trying to keep the first 5000 tokens when context the overflows. However, the model is loaded with context length of only 32768 tokens, which is not enough.",
+                32_768,
+            ),
+            (
+                "HTTP 400 Bad Request: Invalid request: Your request exceeded model token limit: 32768",
+                32_768,
+            ),
+            (
+                "HTTP 422 Unprocessable Entity: Input validation error: `inputs` tokens + `max_new_tokens` must be <= 32769. Given: 33000 `inputs` tokens and 16 `max_new_tokens`",
+                32_769,
+            ),
+            (
+                "Prompt contains 34000 tokens and 0 draft tokens, too large for model with 32768 maximum context length",
+                32_768,
+            ),
+            (
+                "HTTP 400 Bad Request: This model's maximum prompt length is 32768 but the request contains 34000 tokens.",
+                32_768,
+            ),
+            (
+                "HTTP 400 Bad Request: <400> InternalError.Algo.InvalidParameter: Range of input length should be [1, 32768]",
+                32_768,
+            ),
+            (
+                "HTTP 400 Bad Request: Requested input length 34000 exceeds maximum input length 32768",
+                32_768,
+            ),
+            (
+                "The input token count (34000) exceeds the maximum number of tokens allowed (32768).",
+                32_768,
+            ),
+            ("prompt is too long: 34000 tokens > 32768 maximum", 32_768),
+            (
+                "HTTP 400 Bad Request: The decoder prompt (length 34000) is longer than the maximum model length of 32768.",
+                34_000,
+            ),
+        ] {
+            assert_eq!(shown_window(message, 34_000), Some(window), "{message}");
+        }
+        // Words that name no window: no more than the refused request held.
+        assert_eq!(
+            shown_window(
+                "HTTP 400 Bad Request: [1261] Prompt exceeds max length",
+                20_000
+            ),
+            Some(20_000)
+        );
+        // Haarness counted fewer tokens than the server: the next request is
+        // measured against what the server took.
+        assert_eq!(
+            shown_window(
+                "This model's maximum context length is 32768 tokens. However, you requested 33905 tokens",
+                26_000
+            ),
+            Some(26_000)
+        );
+        // A window far above the refused request is about the room for the
+        // reply, not the history.
+        assert_eq!(
+            shown_window(
+                "'max_tokens' or 'max_completion_tokens' is too large: 32000. This model's maximum context length is 32768 tokens and your request has 1200 input tokens",
+                1_500
+            ),
+            Some(32_768)
+        );
+        // Below any window a coding request fits in.
+        assert_eq!(
+            shown_window("This model's maximum context length is 2048 tokens.", 2_500),
+            None
+        );
+        assert_eq!(shown_window("Prompt exceeds max length", 3_000), None);
+    }
+
+    #[test]
+    fn a_shown_window_is_kept_per_model_and_only_lowered() {
+        let ceilings = RequestCeilings::default();
+        assert!(ceilings.learn_window("selfhosted", "coder", 32_768));
+        assert!(!ceilings.learn_window("selfhosted", "coder", 40_000));
+        assert!(ceilings.learn_window("selfhosted", "coder", 30_000));
+        assert!(!ceilings.learn_window("selfhosted", "coder", 1_000));
+        let ceiling = ceilings.get("selfhosted", "coder");
+        assert_eq!(ceiling.window, Some(30_000));
+        assert_eq!(ceilings.get("selfhosted", "other").window, None);
+        // The model's metadata states none, or a larger one: the shown one.
+        assert_eq!(ceiling.context_window(None), Some(30_000));
+        assert_eq!(ceiling.context_window(Some(131_072)), Some(30_000));
+        assert_eq!(ceiling.context_window(Some(16_384)), Some(16_384));
+        assert_eq!(ceiling.tool_window(None), Some(30_000));
+        assert_eq!(Ceiling::default().context_window(Some(0)), None);
     }
 }
