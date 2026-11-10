@@ -616,9 +616,12 @@ extension Dispatcher {
             ?? AXTree.element(AXTree.value(AXTree.application(pid), kAXMainWindowAttribute))
         let earlier = observe(app, root: focusedWindow)
         if var menu = menuItem(pid, for: combo) {
-            if !menu.enabled, let window = focusedWindow.flatMap(WindowServer.windowNumber) {
-                // Menu items that act on a window are enabled only while it is key.
-                _ = prove(app, window: window, field: nil, spot: nil)
+            if !menu.enabled {
+                // Menu items that act on a window are enabled only while it is key; one that could not be made key
+                // says nothing about the item, so the app comes forward for it.
+                guard let window = focusedWindow.flatMap(WindowServer.windowNumber), prove(app, window: window, field: nil, spot: nil) else {
+                    throw ComeForward("no-key-window")
+                }
                 menu = menuItem(pid, for: combo) ?? menu
             }
             // A disabled item (Copy with nothing selected) would do nothing in front either, so the app is left behind.

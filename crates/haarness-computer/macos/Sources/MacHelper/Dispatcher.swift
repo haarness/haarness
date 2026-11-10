@@ -24,6 +24,9 @@ final class Dispatcher {
     /// The apps computer use keeps invisible, from the latest request that listed them (a look, or the check before an
     /// action). Replies never name their windows.
     var hiddenApps: [String] = []
+    /// Per app, whether the last keyboard focus the helper saw outside a menu was a terminal. While a menu is open the
+    /// focus moves into it, yet Paste still lands where it was before.
+    var terminalFocus: [pid_t: Bool] = [:]
 
     /// Requests that use the screen: they put the bar up and are turned away during a pause.
     static let onScreen: Set<String> = ["snapshot", "inspect", "click", "type", "fill", "press", "scroll", "drag", "hover", "activate", "quit", "launch"]
@@ -347,8 +350,9 @@ final class Dispatcher {
             }()
             // Open menus and popovers hang off the app element rather than a window.
             let floating = AXTree.children(root).filter { AXTree.text($0, kAXRoleAttribute) == "AXMenu" }
+            let deadline = query.isEmpty ? nil : searchEnds
             for window in chosen + floating {
-                tree.walk(window, depthLimit: depth, viewport: view, take: take)
+                if !tree.walk(window, depthLimit: depth, viewport: view, until: deadline, take: take), !query.isEmpty { cut = true }
                 if budget.exhausted || cut { break }
             }
             if let bar = AXTree.element(AXTree.value(root, kAXMenuBarAttribute)) {
@@ -357,11 +361,11 @@ final class Dispatcher {
                 for item in AXTree.children(bar) {
                     for menu in AXTree.children(item) where AXTree.text(menu, kAXRoleAttribute) == "AXMenu" {
                         guard let box = AXTree.box(menu), box.width > 0, box.height > 0, !budget.exhausted, !cut else { continue }
-                        tree.walk(menu, depthLimit: depth, viewport: view, take: take)
+                        if !tree.walk(menu, depthLimit: depth, viewport: view, until: deadline, take: take), !query.isEmpty { cut = true }
                     }
                 }
                 if input["menuBar"] as? Bool == true {
-                    tree.walk(bar, depthLimit: 2, viewport: view, take: take)
+                    if !tree.walk(bar, depthLimit: 2, viewport: view, until: deadline, take: take), !query.isEmpty { cut = true }
                 }
             }
             if !query.isEmpty {
@@ -375,6 +379,7 @@ final class Dispatcher {
             if chosen.isEmpty && floating.isEmpty {
                 budget.take("(\(app.localizedName ?? "This app") exposes no Accessibility elements in any window, so only the screenshot can guide you.)")
             }
+            _ = focusIsTerminal(app.processIdentifier)
             if let focused = whole ? AXTree.focused() : AXTree.focused(in: app.processIdentifier) {
                 let info = AXTree.summary(focused)
                 let owner = (info["bundle"] as? String) ?? ""
@@ -520,7 +525,9 @@ final class Dispatcher {
             if AXTree.isPasteItem(element) {
                 out["paste"] = true
                 // Paste lands where the keyboard focus is: a terminal there makes it one.
-                if let focus = AXTree.focused(in: pid), AXTree.isTerminal(focus) { out["terminal"] = true }
+                if focusIsTerminal(pid) { out["terminal"] = true }
+            } else {
+                _ = focusIsTerminal(pid)
             }
             if let context = AXTree.context(element) { out["context"] = context }
         }
@@ -621,7 +628,10 @@ final class Dispatcher {
         try confirm(input, "expect", found.app.bundleIdentifier)
         try refusePaste(found, input)
         var fallback: String?
-        switch route(inFront: found.inFront) {
+        // A click posted into the app the person has in front would make its window key there, under their typing:
+        // where another app's window covers the spot, it comes forward instead (and is refused if still covered).
+        let frontButCovered = !found.inFront && WindowServer.frontPID() == found.app.processIdentifier
+        switch frontButCovered ? .forward("no-key-window") : route(inFront: found.inFront) {
         case .behind:
             do {
                 return try clickBehind(found, button: button, count: count, held: modifiers)
@@ -639,6 +649,15 @@ final class Dispatcher {
         return try clickInFront(found, input, button: button, count: count, held: modifiers, fallback: fallback)
     }
 
+    /// Whether `app`'s keyboard focus is in a terminal it hosts. While a menu is open, or when the focus cannot be read,
+    /// the answer is the one from before the menu opened.
+    func focusIsTerminal(_ pid: pid_t) -> Bool {
+        guard let focus = AXTree.focused(in: pid), !AXTree.isMenuPart(focus) else { return terminalFocus[pid] ?? false }
+        let terminal = AXTree.isTerminal(focus)
+        terminalFocus[pid] = terminal
+        return terminal
+    }
+
     /// Refuses a click on a Paste menu item (in the menu bar or a context menu) where pasted text would run as a
     /// command: with `refusePaste`, which the server sends for terminals and script runners, and whenever the app's
     /// keyboard focus is in a terminal it hosts, such as a code editor's terminal panel.
@@ -649,7 +668,7 @@ final class Dispatcher {
         if input["refusePaste"] as? Bool == true {
             throw HelperFailure("paste", "Pasting into \(name) runs the pasted text as a command, outside Haarness's approvals, so agents never use Paste there. Run commands with the shell tool instead.")
         }
-        if let focus = AXTree.focused(in: pid), AXTree.isTerminal(focus) {
+        if focusIsTerminal(pid) {
             throw HelperFailure("terminal", "The keyboard focus in \(name) is in its built-in terminal, which runs pasted text as a command outside Haarness's approvals, so agents never paste there. Run commands with the shell tool instead.")
         }
     }

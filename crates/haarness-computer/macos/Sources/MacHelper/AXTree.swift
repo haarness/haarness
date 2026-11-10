@@ -211,6 +211,11 @@ final class AXTree {
         return nil
     }
 
+    /// Whether `element` is part of a menu: the menu bar, a menu or one of its items.
+    static func isMenuPart(_ element: AXUIElement) -> Bool {
+        ["AXMenuBar", "AXMenuBarItem", "AXMenu", "AXMenuItem"].contains(text(element, kAXRoleAttribute) ?? "")
+    }
+
     /// Whether `element` is a menu item that pastes (see `isPasteMenuItem`).
     static func isPasteItem(_ element: AXUIElement) -> Bool {
         isPasteMenuItem(role: text(element, kAXRoleAttribute), character: text(element, kAXMenuItemCmdCharAttribute),
@@ -379,8 +384,10 @@ final class AXTree {
         }
     }
 
-    /// The same walk handing each line to `take`, which returns false to stop it.
-    func walk(_ root: AXUIElement, depthLimit: Int, viewport: Viewport, take: (OutlineEntry) -> Bool) {
+    /// The same walk handing each line to `take`, which returns false to stop it, and stopping at `deadline` too.
+    /// Returns false when it stopped before reading every element.
+    @discardableResult
+    func walk(_ root: AXUIElement, depthLimit: Int, viewport: Viewport, until deadline: Date? = nil, take: (OutlineEntry) -> Bool) -> Bool {
         // `element` nil marks the end of a scroll area's contents, where its count of hidden elements is reported.
         struct Step {
             var element: AXUIElement?
@@ -396,20 +403,21 @@ final class AXTree {
             guard let element = next.element else {
                 if let area = next.area, hidden[area] > 0,
                    !take(OutlineEntry(level: next.level, line: hiddenLine(hidden[area], level: next.level), words: "")) {
-                    return
+                    return false
                 }
                 continue
             }
             seen += 1
             // A runaway tree (a huge table) stops here instead of taking the helper's whole time limit.
-            if seen > 20_000 { return }
+            if seen > 20_000 { return false }
+            if let deadline, seen % 50 == 0, Date() > deadline { return false }
             guard case .seen(let box) = sight(of: Self.box(element), within: next.clip) else {
                 if let area = next.area { hidden[area] += 1 }
                 continue
             }
             let item = item(element, level: next.level, box: box, viewport: viewport)
             let shown = worthShowing(item)
-            if shown, !take(OutlineEntry(level: next.level, line: outlineLine(item), words: outlineWords(item))) { return }
+            if shown, !take(OutlineEntry(level: next.level, line: outlineLine(item), words: outlineWords(item))) { return false }
             if next.depth >= depthLimit { continue }
             let level = shown ? next.level + 1 : next.level
             var clip = next.clip
@@ -426,5 +434,6 @@ final class AXTree {
                 stack.append(Step(element: child, level: level, depth: next.depth + 1, clip: clip, area: area))
             }
         }
+        return true
     }
 }
