@@ -16495,6 +16495,50 @@ fn a_forked_chats_copied_and_new_agents_are_siblings_alike() {
     }
 }
 
+/// The child header fits the terminal in every language at every width
+/// from 30 to 120 columns, its place among siblings and its controls whole.
+#[test]
+fn the_child_header_fits_every_width_in_every_language() {
+    let (mut app, children) = three_children_fixture();
+    for parent_title in [
+        "Echo: Reply with only the requested tmux fixture output",
+        "Plan",
+    ] {
+        app.parent_stack[0].title = parent_title.into();
+        for (language, code, _) in crate::locale::Language::ALL {
+            app.language = language;
+            let place = language
+                .text("{index} of {total}")
+                .replace("{index}", "1")
+                .replace("{total}", "3");
+            for siblings in [true, false] {
+                if !siblings {
+                    app.children
+                        .retain(|_, task| task.child_thread_id == children[0].id);
+                }
+                for width in 30..=120 {
+                    let (lines, hits) = crate::view::header_rows(&app, width);
+                    for line in &lines {
+                        assert!(line.width() <= width, "{code} {width}: {}", line.text());
+                    }
+                    assert!(hits.iter().all(|hit| hit.end <= width), "{code} {width}");
+                    let text = lines.iter().map(Line::text).collect::<Vec<_>>().join("\n");
+                    assert!(text.contains('↑'), "{code} {width}: {text}");
+                    if siblings {
+                        assert!(lines[0].text().contains(&place), "{code} {width}: {text}");
+                        assert!(
+                            text.contains('←') && text.contains('→'),
+                            "{code} {width}: {text}"
+                        );
+                    }
+                }
+            }
+            app = three_children_fixture().0;
+            app.parent_stack[0].title = parent_title.into();
+        }
+    }
+}
+
 #[test]
 fn a_lone_child_keeps_its_short_id_and_its_agent_reads_in_the_language() {
     let (mut app, children) = three_children_fixture();

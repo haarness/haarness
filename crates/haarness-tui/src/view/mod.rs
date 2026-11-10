@@ -107,7 +107,7 @@ fn goal_header_line(app: &App, width: usize) -> Line {
 /// identity lives in the masthead at the top of the transcript and in the
 /// band on the last row, so the top edge of the terminal is content. Only a
 /// standing goal or a child-agent view earns a permanent row up here.
-fn header_rows(app: &App, width: usize) -> (Vec<Line>, Vec<frame::HitRegion>) {
+pub(crate) fn header_rows(app: &App, width: usize) -> (Vec<Line>, Vec<frame::HitRegion>) {
     let Some(parent) = app.parent_stack.last() else {
         if app.goal.is_some() {
             return (vec![goal_header_line(app, width)], Vec::new());
@@ -124,6 +124,23 @@ fn header_rows(app: &App, width: usize) -> (Vec<Line>, Vec<frame::HitRegion>) {
             (control("next →"), frame::HitTarget::ChildNext),
         ]);
     }
+    // Where even their own row is too narrow for the words, the controls are
+    // their arrows alone, never words cut off; the band's notice names them.
+    if controls
+        .iter()
+        .map(|(label, _)| label.width())
+        .sum::<usize>()
+        > width
+    {
+        for (label, target) in &mut controls {
+            let arrow = match target {
+                frame::HitTarget::ChildPrevious => " ← ",
+                frame::HitTarget::ChildNext => " → ",
+                _ => " ↑ ",
+            };
+            arrow.clone_into(label);
+        }
+    }
     let controls_width = controls
         .iter()
         .map(|(label, _)| label.width())
@@ -139,6 +156,7 @@ fn header_rows(app: &App, width: usize) -> (Vec<Line>, Vec<frame::HitRegion>) {
     // hiding it made a successful Previous/Next click look like a no-op.
     // Among siblings that is the agent and its place in ← → order, else the
     // short id.
+    let lead = "  ";
     let identity = match position {
         Some((index, total)) => {
             let agent = app
@@ -151,16 +169,23 @@ fn header_rows(app: &App, width: usize) -> (Vec<Line>, Vec<frame::HitRegion>) {
                 .text("{index} of {total}")
                 .replace("{index}", &index.to_string())
                 .replace("{total}", &total.to_string());
-            // A long custom agent name gives way before the chat's title.
-            let agent = title_line(agent, (breadcrumb_width / 4).min(24));
-            format!("  {agent} · {place}")
+            // A long custom agent name gives way before the chat's title,
+            // which keeps a cell, and the agent before the place.
+            let room = breadcrumb_width.saturating_sub(lead.width() + place.width() + 6);
+            let agent = title_line(agent, (breadcrumb_width / 4).min(24).min(room));
+            if agent.is_empty() {
+                format!("  {place}")
+            } else {
+                format!("  {agent} · {place}")
+            }
         }
         None => format!("  #{}", short_id(&app.thread.id.to_string())),
     };
-    let lead = "  ";
+    let identity = single_line(&identity, breadcrumb_width.saturating_sub(lead.width() + 1));
     let crumb = format!("{} › ", title_line(&parent.title, 24));
     let path_width = breadcrumb_width.saturating_sub(lead.width() + identity.width());
-    let crumb = single_line(&crumb, path_width);
+    // The title keeps at least one cell, so the crumb gives way first.
+    let crumb = single_line(&crumb, path_width.saturating_sub(1));
     let title = title_line(
         &app.thread.title,
         path_width.saturating_sub(crumb.width()).max(1),
