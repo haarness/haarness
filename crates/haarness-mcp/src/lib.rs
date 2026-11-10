@@ -327,18 +327,30 @@ impl CatalogClient {
             announce,
         }
     }
-    /// Whether the sign-in Haarness keeps for this server was stored at or
-    /// after `sent` (seconds since the epoch), while a request was out:
-    /// another process signed in, or refreshed the token they share, so the
-    /// server may take the token it now holds.
-    async fn stored_since(&self, sent: u64) -> bool {
+    /// The moment a request goes out, as [`Self::stored_since`] compares
+    /// against it.
+    fn stamp(&self) -> Sent {
+        Sent {
+            at: epoch_seconds(),
+            stored: self.credential.as_ref().and_then(stored_at),
+        }
+    }
+    /// Whether the sign-in Haarness keeps for this server was stored after
+    /// the request `sent` went out: another process signed in, or rmcp or
+    /// another process renewed the token they share, so the server may take
+    /// the token it now holds. The store's file changed since then, or the
+    /// token was received in a later second (where files keep only seconds).
+    /// A sign-in stored in the very second the request went, before it did,
+    /// is the one the request was refused with.
+    async fn stored_since(&self, sent: &Sent) -> bool {
         let Some(store) = &self.credential else {
             return false;
         };
+        let changed = stored_at(store) != sent.stored;
         matches!(
             OAuthCredentialStore::load(store).await,
             Ok(Some(stored)) if stored.token_response.is_some()
-                && stored.token_received_at.is_some_and(|at| at >= sent)
+                && (changed || stored.token_received_at.is_some_and(|at| at > sent.at))
         )
     }
     /// What became of the sign-in Haarness keeps for this server, once the
@@ -593,14 +605,14 @@ impl rmcp::ClientHandler for CatalogClient {
         }
         // A listing the server refuses for want of a sign-in tells the
         // person to sign in, as a request does.
-        let sent = epoch_seconds();
+        let sent = self.stamp();
         let first = self.list_tools(&context.peer).await;
         let connection = Connection {
             limit: None,
             sign_in: self.credential.is_some().then(|| self.clone()),
         };
         let listed = connection
-            .signed_in(sent, first, || async {
+            .signed_in(&sent, first, || async {
                 Some(self.list_tools(&context.peer).await)
             })
             .await;
@@ -2680,7 +2692,7 @@ async fn dispatch<T: Send + 'static>(
     if reply.is_closed() {
         return;
     }
-    let sent = epoch_seconds();
+    let sent = connection.stamp();
     // Kept to send again, should the server refuse a sign-in that another
     // process renewed meanwhile (see `Connection::signed_in`).
     let again = connection.sign_in.is_some().then(|| request.clone());
@@ -2711,7 +2723,7 @@ async fn dispatch<T: Send + 'static>(
                 Err(error) => Some(Err(error)),
             }
         };
-        let Some(result) = connection.signed_in(sent, first, resend).await else {
+        let Some(result) = connection.signed_in(&sent, first, resend).await else {
             return;
         };
         let result = match result {
@@ -2766,21 +2778,32 @@ impl Connection {
         settled(self.limit.as_deref(), result)
     }
 
+    /// When a request goes out (see [`CatalogClient::stamp`]); nothing is
+    /// read for a connection without a stored sign-in.
+    fn stamp(&self) -> Sent {
+        self.sign_in.as_ref().map_or_else(
+            || Sent {
+                at: epoch_seconds(),
+                stored: None,
+            },
+            CatalogClient::stamp,
+        )
+    }
+
     /// The answer to a listing, `list`, sent now (see [`Self::signed_in`]).
     async fn listed<T, F, Fut>(&self, list: F) -> CoreResult<T>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T, rmcp::ServiceError>>,
     {
-        let sent = epoch_seconds();
+        let sent = self.stamp();
         let first = list().await;
-        self.signed_in(sent, first, || async { Some(list().await) })
+        self.signed_in(&sent, first, || async { Some(list().await) })
             .await
             .unwrap_or_else(|| Err(mcp_error("the listing ended without an answer")))
     }
 
-    /// `first`, the answer to a request sent at `sent` (seconds since the
-    /// epoch). When the server refused it for want of a sign-in, on a
+    /// `first`, the answer to a request that went out at `sent`. When the server refused it for want of a sign-in, on a
     /// connection that signs in with the one Haarness keeps for the server,
     /// the request goes once more through `again` if that sign-in was stored
     /// since (another process signed in, or renewed a token both share and
@@ -2795,7 +2818,7 @@ impl Connection {
     /// connection stays. `None` when `again` was not waited for.
     async fn signed_in<T, Fut>(
         &self,
-        sent: u64,
+        sent: &Sent,
         first: Result<T, rmcp::ServiceError>,
         again: impl FnOnce() -> Fut,
     ) -> Option<CoreResult<T>>
@@ -2846,6 +2869,20 @@ impl Connection {
 /// A request the server refused for want of a sign-in, with the challenge
 /// it answered with (its `WWW-Authenticate`), if any.
 struct SignInRefused(Option<String>);
+
+/// When a request went out: the second, and when the stored sign-in was
+/// last written then (see [`CatalogClient::stored_since`]).
+struct Sent {
+    at: u64,
+    stored: Option<std::time::SystemTime>,
+}
+
+/// When the sign-in in `store` was last written, if it is there.
+fn stored_at(store: &FileCredentialStore) -> Option<std::time::SystemTime> {
+    std::fs::metadata(&store.path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
 
 /// What became of a stored sign-in a server refused (see
 /// [`CatalogClient::sign_in_state`]).
@@ -5116,6 +5153,19 @@ mod tests {
         let (registry, state, server, auth_dir) =
             signed_in_for("secure", Renewal::Refused, false).await;
         let told = announcements(&registry);
+        // Received in the very second the call goes out, as a sign-in just
+        // made is: it is the one the call is refused with, not a newer one.
+        let mut stored = serde_json::to_value(
+            OAuthCredentialStore::load(&state.store)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        stored["token_received_at"] = json!(epoch_seconds());
+        OAuthCredentialStore::save(&state.store, serde_json::from_value(stored).unwrap())
+            .await
+            .unwrap();
         state.rejecting.store(true, Ordering::SeqCst);
         let error = registry
             .call("secure", "secure_echo", json!({}))
