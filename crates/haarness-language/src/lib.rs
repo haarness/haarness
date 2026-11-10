@@ -1473,13 +1473,22 @@ fn language_id(config: &LspServerConfig, file: &Path) -> String {
             "py" | "pyi" => "python".into(),
             "go" => "go".into(),
             "c" | "h" => "c".into(),
-            "cc" | "cpp" | "cxx" | "hpp" => "cpp".into(),
+            "cc" | "cpp" | "cxx" | "c++" | "hh" | "hpp" | "hxx" | "h++" | "ipp" | "inl"
+            | "cppm" | "ccm" | "cxxm" | "c++m" | "ixx" => "cpp".into(),
             "sh" | "bash" => "shellscript".into(),
             "yaml" | "yml" => "yaml".into(),
             "toml" => "toml".into(),
             _ => bare.to_owned(),
         })
 }
+
+/// C and C++ sources and headers as clangd and clang-format take them: the
+/// usual spellings, inline and template implementation files, and C++20
+/// module interface units.
+const C_FAMILY: &[&str] = &[
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".c++", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".inl",
+    ".cppm", ".ccm", ".cxxm", ".c++m", ".ixx",
+];
 
 fn server(command: &[&str], extensions: &[&str]) -> LspServerConfig {
     LspServerConfig {
@@ -1504,10 +1513,7 @@ fn builtin_servers() -> BTreeMap<String, LspServerConfig> {
             server(&["pyright-langserver", "--stdio"], &[".py", ".pyi"]),
         ),
         ("gopls".into(), server(&["gopls"], &[".go"])),
-        (
-            "clangd".into(),
-            server(&["clangd"], &[".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"]),
-        ),
+        ("clangd".into(), server(&["clangd"], C_FAMILY)),
         (
             "bash".into(),
             server(&["bash-language-server", "start"], &[".sh", ".bash"]),
@@ -1553,10 +1559,7 @@ fn builtin_formatters() -> BTreeMap<String, FormatterDefinition> {
         ),
         (
             "clang-format".into(),
-            formatter(
-                &["clang-format", "-i", "$FILE"],
-                &[".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"],
-            ),
+            formatter(&["clang-format", "-i", "$FILE"], C_FAMILY),
         ),
         (
             "shfmt".into(),
@@ -1693,5 +1696,39 @@ mod tests {
         let formatters = builtin_formatters();
         assert!(formatters.contains_key("rustfmt"));
         assert!(formatters.contains_key("prettier"));
+    }
+
+    #[test]
+    fn every_cpp_spelling_is_cpp_for_clangd_and_clang_format() {
+        let clangd = &builtin_servers()["clangd"];
+        let clang_format = &builtin_formatters()["clang-format"];
+        for name in [
+            "a.cc", "a.cpp", "a.cxx", "a.c++", "a.hh", "a.hpp", "a.hxx", "a.h++", "a.ipp", "a.inl",
+            "a.cppm", "a.ccm", "a.cxxm", "a.c++m", "a.ixx", "A.IXX",
+        ] {
+            let path = Path::new(name);
+            assert_eq!(language_id(clangd, path), "cpp", "{name}");
+            assert!(
+                matches_file(&clangd.extensions, &clangd.filenames, path),
+                "{name}"
+            );
+            assert!(
+                matches_file(&clang_format.extensions, &clang_format.filenames, path),
+                "{name}"
+            );
+        }
+        for name in ["a.c", "a.h"] {
+            assert_eq!(language_id(clangd, Path::new(name)), "c", "{name}");
+            assert!(matches_file(
+                &clangd.extensions,
+                &clangd.filenames,
+                Path::new(name)
+            ));
+        }
+        assert!(!matches_file(
+            &clangd.extensions,
+            &clangd.filenames,
+            Path::new("a.rs")
+        ));
     }
 }
