@@ -258,10 +258,11 @@ impl ModelProvider for GeminiProvider {
         let declarations: Vec<_> = requested_tools
             .into_iter()
             .map(|t| {
+                let schema = crate::tool_schema::gemini_compatible(t.input_schema);
                 let schema = if forced {
-                    without_max_items(t.input_schema)
+                    without_max_items(schema)
                 } else {
-                    t.input_schema
+                    schema
                 };
                 json!({"name":t.name,"description":t.description,"parametersJsonSchema":schema})
             })
@@ -1526,5 +1527,58 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 1, "{parts:?}");
         assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
+    }
+
+    /// An MCP tool whose schema Gemini refuses failed every request of the
+    /// chat that loaded it, on every Gemini model: it is sent in the shape
+    /// Gemini takes.
+    #[tokio::test]
+    async fn tool_schemas_are_sent_in_the_shape_gemini_takes() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route(
+                "/models/gemini-3.8-flash:streamGenerateContent",
+                post(structured_content),
+            )
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = GeminiProvider::for_test(format!("http://{address}"));
+        provider
+            .stream(
+                ProviderRequest {
+                    model: "gemini-3.8-flash".into(),
+                    system: "test".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "look it up".into(),
+                    }],
+                    tools: vec![haarness_core::ToolDefinition {
+                        name: "mcp__glossary__lookup".into(),
+                        description: "Look up a word".into(),
+                        input_schema: json!({"type":"object","properties":{
+                            "word":{"type":"string"},
+                            "score":{"type":"number","minimum":0,"exclusiveMinimum":true}
+                        },"required":["word","language"]}),
+                    }],
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            state.0.lock()[0]["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"],
+            json!({"type":"object","properties":{
+                "word":{"type":"string"},
+                "score":{"type":"number","exclusiveMinimum":0},
+                "language":{}
+            },"required":["word","language"]})
+        );
     }
 }
