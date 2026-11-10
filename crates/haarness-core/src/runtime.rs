@@ -6741,8 +6741,13 @@ impl AgentRuntime {
             let explicit = !explicit_operations.is_empty();
             let operation = plan.describe(asked);
             let yolo_answers = yolo_may_answer(Some(tool.as_ref()), &arguments, &plan, &protected);
-            // As for model calls, a `--yolo` run approves computer use once.
-            if yolo_answers && stance.auto_approve {
+            // As for model calls, a `--yolo` run approves computer use once;
+            // a schedule's run only in a chat set to Yolo.
+            let yolo_chat = stance.unattended && yolo_answers && {
+                let _gate = self.approval_modes.gate.lock().await;
+                self.approval_modes.mode(thread_id).await == ApprovalMode::Yolo
+            };
+            if yolo_answers && stance.auto_approve && (!stance.unattended || yolo_chat) {
                 tracing::info!(
                     thread = %thread_id,
                     operation = %operation_for_log(&operation),
@@ -13804,10 +13809,13 @@ impl RunnerTask {
         let always_rules = plan.always_rules();
         let explicit = !explicit_operations.is_empty();
         // Yolo is yes to everything: a `--yolo` turn or a chat in Yolo
-        // approves computer use once too, also where it asks every time or
-        // nobody watches. Read under the gate, as below.
+        // approves computer use once too, also where it asks every time. Read
+        // under the gate, as below.
         if yolo_answers {
-            let automatic = self.config.auto_approve || self.request.auto_approve;
+            // A run nobody watches (a schedule) approves it only in a chat
+            // set to Yolo: its own approval does not stretch that far.
+            let automatic =
+                (self.config.auto_approve || self.request.auto_approve) && !self.unattended;
             let gate = self.approval_modes.gate.lock().await;
             let yolo =
                 automatic || self.approval_modes.mode(self.thread.id).await == ApprovalMode::Yolo;
