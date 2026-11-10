@@ -111,9 +111,9 @@ def state():
         return {}
 
 
-def bundle(name, identifier, executable=None):
+def bundle(name, identifier, executable=None, folder=None):
     """An app bundle around the lab's executable: the lab itself, the person's app, or a second lab to open."""
-    app = root / (name + ".app")
+    app = (folder or root) / (name + ".app")
     (app / "Contents/MacOS").mkdir(parents=True)
     (app / "Contents/Info.plist").write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -739,7 +739,10 @@ try:
     check(f"an app that brings itself forward hands the front back (handed back: {reply.get('handedBack', False)})")
 
     # Opening an app starts it behind the person's window.
-    lab2 = bundle("Haarness Lab Two", LAB2, lab / "Contents/MacOS/HaarnessLab")
+    # Launch Services does not look up apps registered inside the temporary folder, so this one sits in a folder of
+    # its own under the user's caches, removed at the end.
+    apps_folder = pathlib.Path(tempfile.mkdtemp(prefix="haarness-computer-live-", dir=pathlib.Path.home() / "Library/Caches"))
+    lab2 = bundle("Haarness Lab Two", LAB2, lab / "Contents/MacOS/HaarnessLab", folder=apps_folder)
     subprocess.run([LSREGISTER, "-f", str(lab2)], check=True)
     registered.append(lab2)
     reply = direct.ok("launch", bundle=LAB2)
@@ -812,6 +815,7 @@ finally:
         direct.close()
     for app in registered:
         subprocess.run([LSREGISTER, "-u", str(app)], capture_output=True)
+        shutil.rmtree(app.parent, ignore_errors=True)
     if person_process and person_process.poll() is None:
         person_process.terminate()
     if lab_process and lab_process.poll() is None:
