@@ -304,9 +304,15 @@ class Chat:
         raise AssertionError("no result for " + name)
 
 
+def switch_on():
+    """Turns computer use on with the terms this binary asks for accepted, as the person's own agreement would."""
+    version = json.loads(cli("mac", "status", "--json"))["terms"]["version"]
+    settings_file.write_text(json.dumps({"enabled": True, "terms": {"version": version, "acceptedAt": "2026-11-07T00:00:00Z"}}))
+
+
 try:
     lab = build_lab()
-    settings_file.write_text(json.dumps({"enabled": True, "terms": {"version": "1", "acceptedAt": "2026-11-07T00:00:00Z"}}))
+    switch_on()
     status = json.loads(cli("mac", "status", "--json"))
     assert status["supported"] and status["enabled"], status
     assert status["permissions"]["accessibility"] and status["permissions"]["screenRecording"], (
@@ -570,7 +576,7 @@ try:
     assert error, output
     check("turned off: the tools leave and a call is refused")
 
-    settings_file.write_text(json.dumps({"enabled": True, "terms": {"version": "1", "acceptedAt": "2026-11-07T00:00:00Z"}}))
+    switch_on()
     output, error, _, pending = chat.turn("mac_apps", {"action": "quit", "app": LAB}, answer="once", expect_ask=True)
     assert not error, output
     assert pending["detail"]["__mac"]["summary"] == "Quit Haarness Lab"
@@ -591,6 +597,16 @@ try:
     assert {"count", "name", "rows", "canvas", "notes", "forward"} <= set(direct.refs), direct.refs
     person_undisturbed("after the look")
     check("a look at the covered lab says it is behind, and leaves the person's app in front")
+
+    # A search keeps the matching elements with what holds them; a close-up keeps the snapshot's coordinates.
+    found = direct.ok("snapshot", bundle=LAB, find="Come forward")["outline"]
+    assert '"Come forward"' in found and '"Count"' not in found and "[window]" in found, found
+    x, y, width, height = direct.frames["canvas"]
+    close = direct.ok("snapshot", bundle=LAB, zoom={"x": x, "y": y, "width": width, "height": height})
+    assert close["zoom"]["scale"] > 1 and close["size"] == data["size"] and close.get("image"), {k: close.get(k) for k in ("zoom", "size")}
+    assert f"at={x},{y} size={width}x{height}" in close["outline"], close["outline"][:600]
+    direct.look()
+    check("a look can search the outline, or zoom in with the snapshot's coordinates kept")
 
     # The person types in their app while the agent presses Count in the lab behind it.
     typist = subprocess.Popen([str(lab / "Contents/MacOS/HaarnessLab"), "--typist", "3", "abc "])
