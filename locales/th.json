@@ -1792,6 +1792,7 @@
   "every URL fetch": "การดึง URL ทั้งหมด",
   "every {kind} request": "คำขอ {kind} ทั้งหมด",
   "only agent {agent} in this chat": "เฉพาะเอเจนต์ {agent} ในแชตนี้",
+  "reading {path}": "การอ่าน {path}",
   "1 of {count}": "1 จาก {count}",
   "{count} more lines": "อีก {count} บรรทัด",
   "rejected": "ถูกปฏิเสธ",

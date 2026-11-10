@@ -1792,6 +1792,7 @@
   "every URL fetch": "her URL getirme",
   "every {kind} request": "her {kind} isteği",
   "only agent {agent} in this chat": "yalnızca bu sohbetteki {agent} ajanı",
+  "reading {path}": "{path} okuma",
   "1 of {count}": "{count} içinden 1",
   "{count} more lines": "{count} satır daha",
   "rejected": "reddedildi",

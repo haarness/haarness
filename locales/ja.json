@@ -1792,6 +1792,7 @@
   "every URL fetch": "すべての URL 取得",
   "every {kind} request": "すべての {kind} リクエスト",
   "only agent {agent} in this chat": "このチャットのエージェント {agent} のみ",
+  "reading {path}": "{path} の読み取り",
   "1 of {count}": "{count} 件中 1 件目",
   "{count} more lines": "あと {count} 行",
   "rejected": "拒否済み",

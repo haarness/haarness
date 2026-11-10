@@ -1792,6 +1792,7 @@
   "every URL fetch": "любая загрузка URL",
   "every {kind} request": "любой запрос {kind}",
   "only agent {agent} in this chat": "только агент {agent} в этом чате",
+  "reading {path}": "чтение {path}",
   "1 of {count}": "1 из {count}",
   "{count} more lines": "ещё {count} строк",
   "rejected": "отклонено",

@@ -1792,6 +1792,7 @@
   "every URL fetch": "hver URL-hentning",
   "every {kind} request": "hver {kind}-anmodning",
   "only agent {agent} in this chat": "kun agenten {agent} i denne chat",
+  "reading {path}": "læsning af {path}",
   "1 of {count}": "1 af {count}",
   "{count} more lines": "{count} linjer mere",
   "rejected": "afvist",

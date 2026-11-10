@@ -119,6 +119,34 @@ test("Always on a file beside the project names that file, never the folder hold
   expect(errors).toEqual([]);
 });
 
+test("Always on a shell read of .env names that file's read in words, and keeps only it open",async()=>{
+  await choose(main);await session();
+  await send('!tool bash {"command":"cat .env"}');
+  await expect(page.getByRole("button",{name:"Allow once",exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"Always allow",exact:true}).click();
+  const folder=page.getByRole("menuitem",{name:"Always for this folder",exact:true});
+  await expect(folder).toHaveAttribute("aria-description",/Reading \.env$/);
+  await expect(folder).not.toContainText("read:");
+  for(const scheme of ["light","dark"] as const){
+    await app.evaluate(({nativeTheme},value)=>{nativeTheme.themeSource=value;},scheme);
+    await page.emulateMedia({colorScheme:scheme});
+    await expect.poll(()=>page.evaluate(()=>matchMedia("(prefers-color-scheme: dark)").matches)).toBe(scheme==="dark");
+    await page.waitForTimeout(300);await proof(`secret-read-always-${scheme}`);
+  }
+  await app.evaluate(({nativeTheme})=>{nativeTheme.themeSource="system";});await page.emulateMedia({colorScheme:null});
+  await folder.click();await idle();
+  await expect(page.locator(".transcript")).toContainText("PARITY_SECRET=fixture-only");
+  await send('!tool bash {"command":"cat .env"}');await idle();
+  await expect(page.getByRole("button",{name:"Allow once",exact:true})).toHaveCount(0);
+  // Another secret file read through the same program still asks.
+  await writeFile(join(main,".env.local"),"PARITY_LOCAL=fixture-only");
+  await send('!tool bash {"command":"cat .env.local"}');
+  await expect(page.getByRole("button",{name:"Allow once",exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"Deny",exact:true}).click();await idle();
+  await expect(page.locator(".transcript")).not.toContainText("PARITY_LOCAL=fixture-only");
+  expect(errors).toEqual([]);
+});
+
 test("larger media survives a real drop, draft reload and server submission",async()=>{
   await session();
   const transfer=await page.evaluateHandle(()=>{

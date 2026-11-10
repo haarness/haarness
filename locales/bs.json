@@ -1792,6 +1792,7 @@
   "every URL fetch": "svako preuzimanje URL-a",
   "every {kind} request": "svaki {kind} zahtjev",
   "only agent {agent} in this chat": "samo agent {agent} u ovom chatu",
+  "reading {path}": "čitanje {path}",
   "1 of {count}": "1 od {count}",
   "{count} more lines": "još {count} redova",
   "rejected": "odbijeno",

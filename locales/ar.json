@@ -1792,6 +1792,7 @@
   "every URL fetch": "كل جلب لعناوين URL",
   "every {kind} request": "كل طلبات {kind}",
   "only agent {agent} in this chat": "الوكيل {agent} فقط في هذه المحادثة",
+  "reading {path}": "قراءة {path}",
   "1 of {count}": "1 من {count}",
   "{count} more lines": "{count} أسطر أخرى",
   "rejected": "مرفوض",

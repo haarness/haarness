@@ -244,6 +244,8 @@ test("always rules read as plain words, never as stored permission patterns", ()
   assert.equal(say("bash", "bash:*"), "Every command");
   assert.equal(say("edit", "edit:*"), "Every file edit");
   assert.equal(say("read", "read:.env"), "Reading .env");
+  // A shell card that reads a secret file keeps that file's read too.
+  assert.equal(say("bash", "read:config/.env.production"), "Reading config/.env.production");
   assert.equal(say("media_generate", "media_generate:image:*"), "Any image generation");
   assert.equal(say("agent_switch", "agent_switch:thread:6275696c64"), "Only this agent, in this chat");
   assert.equal(say("glob", "glob:*"), "Every request of this kind");

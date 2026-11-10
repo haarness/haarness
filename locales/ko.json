@@ -1792,6 +1792,7 @@
   "every URL fetch": "모든 URL 가져오기",
   "every {kind} request": "모든 {kind} 요청",
   "only agent {agent} in this chat": "이 채팅의 {agent} 에이전트만",
+  "reading {path}": "{path} 읽기",
   "1 of {count}": "{count}개 중 1번째",
   "{count} more lines": "{count}줄 더",
   "rejected": "거부됨",
