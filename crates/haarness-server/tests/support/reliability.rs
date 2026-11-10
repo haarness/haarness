@@ -2312,6 +2312,7 @@ async fn long_chat(provider: Arc<ToolCallingSummarizer>) -> (AgentRuntime, Threa
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         )
         .await
