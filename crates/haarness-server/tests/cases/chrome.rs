@@ -851,6 +851,9 @@ async fn chrome_server(access: haarness_server::auth::ServerAccess) -> Server {
             ..RuntimeConfig::default()
         },
     ));
+    // The server runs in this test's own process, which is its own client here; without this, whether its requests
+    // count as a person's would depend on which test of this binary ran first.
+    haarness_server::request_origin::hear_this_process_as_a_person();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let handle = haarness_server::api::serve_with_access(
         listener,
