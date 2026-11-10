@@ -270,7 +270,7 @@ refs = {}
 
 def read_refs(output):
     """Every snapshot issues new refs and retires the old ones, so the lab's refs are re-read from each outline."""
-    if "elements (use these refs" in output:
+    if "Haarness Lab elements (use these refs" in output:
         refs.update({key: outline_ref(output, pattern) for key, pattern in LAB_ELEMENTS.items()})
         first = re.search(r'@(e\d+) \[static-text\] "Row 1"', output)
         refs["row1"] = first.group(1) if first else None
@@ -771,9 +771,15 @@ try:
           "the Privacy & Security pane is open and named", seconds=20)
     direct.close()
     look_only = Chat()
-    output, error, _, _ = look_only.turn("mac_snapshot", {"app": SETTINGS}, expect_ask=False)
-    assert not error, output
-    entry = re.search(r'@(e\d+) \[[^\]]+\] "Privacy & Security"', output)
+    # A pane that has just opened can take a moment to show its elements.
+    entry = None
+    for _ in range(10):
+        output, error, _, _ = look_only.turn("mac_snapshot", {"app": SETTINGS}, expect_ask=False)
+        assert not error, output
+        entry = re.search(r'@(e\d+) \[static-text\] "Privacy & Security"', output)
+        if entry:
+            break
+        time.sleep(1)
     assert entry, output[:2000]
     output, error, _, pending = look_only.turn("mac_click", {"ref": entry.group(1), "snapshot": False}, answer="reject")
     assert error and pending is None, (output, pending)

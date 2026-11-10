@@ -222,24 +222,29 @@ final class AXTree {
     }
 
     /// The pane System Settings shows: the identifier of the selected sidebar entry (an extension identifier such as
-    /// com.apple.settings.PrivacySecurity.extension), which stays the same in every language.
+    /// com.apple.settings.PrivacySecurity.extension), which stays the same in every language. The sidebar sits near the
+    /// top of the window's tree, so it is searched breadth first, before a large pane's contents.
     static func settingsPane(_ app: pid_t) -> String? {
-        var stack = (value(application(app), kAXWindowsAttribute) as? [AnyObject] ?? []).compactMap { element($0) }
-        var seen = 0
-        while let next = stack.popLast(), seen < 1500 {
-            seen += 1
-            if text(next, kAXRoleAttribute) == "AXRow", flag(next, kAXSelectedAttribute) == true {
-                var inner = children(next)
-                var looked = 0
-                while let item = inner.popLast(), looked < 40 {
-                    looked += 1
-                    if let identifier = text(item, kAXIdentifierAttribute), identifier.contains(".") {
-                        return String(identifier.prefix { $0 != "*" && $0 != ":" })
+        var queue = (value(application(app), kAXWindowsAttribute) as? [AnyObject] ?? []).compactMap { element($0) }
+        var index = 0
+        while index < queue.count, index < 400 {
+            let next = queue[index]
+            index += 1
+            if text(next, kAXRoleAttribute) == "AXOutline" {
+                for row in (value(next, kAXSelectedRowsAttribute) as? [AnyObject] ?? []).compactMap({ element($0) }) {
+                    var inner = [row]
+                    var looked = 0
+                    while !inner.isEmpty, looked < 40 {
+                        let item = inner.removeFirst()
+                        looked += 1
+                        if let identifier = text(item, kAXIdentifierAttribute), identifier.contains(".") {
+                            return String(identifier.prefix { $0 != "*" && $0 != ":" })
+                        }
+                        inner += children(item)
                     }
-                    inner += children(item)
                 }
             }
-            stack += children(next)
+            queue += children(next)
         }
         return nil
     }
