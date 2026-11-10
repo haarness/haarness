@@ -1356,6 +1356,9 @@ test("a right-click offers what fits where it lands, nothing on the sidebar, and
     await expect.poll(async () => (await contextMenus(app)).at(-1) ?? []).toContain("Paste");
     await shell.focus();
     await page.keyboard.press("Control+C");
+    // That press went to the menu alone: the program heard no Shift press (`<6;`).
+    await expect(rows).toContainText("^C");
+    expect(await rows.textContent()).not.toContain("^[[<6;");
     // Reports in the original encoding reach the program too, as the bytes
     // they are: a click far right is past column 95, so its column is one
     // byte over 127 (not that character's UTF-8).

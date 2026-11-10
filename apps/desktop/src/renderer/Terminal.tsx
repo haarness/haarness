@@ -430,6 +430,15 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     };
     host.addEventListener("contextmenu", contextMenu);
     onCleanup(() => host.removeEventListener("contextmenu", contextMenu));
+    // Shift with the right button is for that menu, so the program is not
+    // told of the press. (Off a Mac, xterm already keeps Shift presses to
+    // itself; on a Mac it does so for Option.)
+    const menuPress = (event: MouseEvent) => {
+      if (event.button === 2 && event.shiftKey && terminal.modes.mouseTrackingMode !== "none")
+        event.stopPropagation();
+    };
+    host.addEventListener("mousedown", menuPress, true);
+    onCleanup(() => host.removeEventListener("mousedown", menuPress, true));
     fit.fit();
     // This view's own connection: main ignores a late connect or detach of
     // a view of the same terminal that was replaced.
