@@ -2569,6 +2569,63 @@ fn a_question_a_hook_answered_says_so_on_its_row() {
     assert!(row("asked").contains("·  Unit tests"), "{text:#?}");
 }
 
+/// The message a Stop hook kept the turn going with shows as one quiet line
+/// with the hook's feedback; the runtime's other messages stay hidden.
+#[test]
+fn a_stop_hooks_message_shows_as_a_quiet_line_with_its_feedback() {
+    let thread = fixture_thread();
+    let user = |text: &str, hook: Option<&str>| ItemData::UserMessage {
+        text: text.into(),
+        attachments: Vec::new(),
+        queued: false,
+        synthetic: true,
+        command_line: None,
+        hook: hook.map(str::to_owned),
+    };
+    let items = vec![
+        message_item(1, &thread, user("HIDDEN_REMINDER", None)),
+        message_item(
+            2,
+            &thread,
+            ItemData::AssistantMessage {
+                text: "Fixed it.".into(),
+            },
+        ),
+        message_item(
+            3,
+            &thread,
+            user(
+                "MODEL_ONLY_WORDS\n\n<hook-feedback>\nrun the tests\nthen lint\n</hook-feedback>",
+                Some("Stop"),
+            ),
+        ),
+        message_item(
+            4,
+            &thread,
+            ItemData::AssistantMessage {
+                text: "The tests pass.".into(),
+            },
+        ),
+    ];
+    let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text: Vec<String> = app.lines((100, 45)).iter().map(line_text).collect();
+    let note: Vec<&String> = text
+        .iter()
+        .filter(|line| line.contains("Stop hook"))
+        .collect();
+    assert_eq!(note.len(), 1, "{text:#?}");
+    assert!(
+        note[0].starts_with("  ↻ Stop hook · run the tests then lint"),
+        "{text:#?}"
+    );
+    let joined = text.join("\n");
+    assert!(!joined.contains("MODEL_ONLY_WORDS"), "{joined}");
+    assert!(!joined.contains("HIDDEN_REMINDER"), "{joined}");
+    // It sits between the replies it came between.
+    let at = |words: &str| text.iter().position(|line| line.contains(words)).unwrap();
+    assert!(at("Fixed it.") < at("Stop hook") && at("Stop hook") < at("The tests pass."));
+}
+
 /// A single-choice question says how to answer it as a multiple-choice one
 /// does, and its toast stays hidden while the question itself is in view.
 #[tokio::test]
