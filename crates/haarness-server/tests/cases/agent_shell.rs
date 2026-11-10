@@ -78,7 +78,6 @@ impl HookPort for Unmarking {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
     async fn shell_env(&self, _: ThreadId, _: &Path) -> BTreeMap<String, String> {
         [
             ("AGENT", "0"),

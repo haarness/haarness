@@ -413,7 +413,6 @@ mod tests {
                 ..HookDecision::default()
             }
         }
-        async fn stop(&self, _: &HookCall) {}
     }
 
     async fn settle(runtime: &AgentRuntime, turn: haarness_protocol::TurnId) -> TurnStatus {

@@ -2897,6 +2897,13 @@
                   "null"
                 ]
               },
+              "hook": {
+                "description": "The lifecycle hook event (`Stop`) whose feedback this runtime\nmessage carries: a hook kept the turn going, and the model answers\nit. The feedback is the text inside its `<hook-feedback>` block,\nwhich clients may show as a quiet note rather than a message of\nthe person's. Absent for every other message.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "queued": {
                 "description": "True when the message arrived while a turn was already running and\nwas queued for steering into that turn's next provider round.",
                 "type": "boolean"

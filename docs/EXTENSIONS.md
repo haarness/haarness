@@ -202,16 +202,17 @@ correspond to runtime lifecycle events; `threadId` stands in for `sessionID`.
 | `chat.turn.failed` | `threadId`, `turnId`, `detail` | Terminal failure after recovery, excluding cancellation; `detail` holds `error` (`incomplete`, `content_filter`, `provider`, `tool` or `other`), `error_type` (what happened, as Claude Code names it: `authentication_failed`, `rate_limit`, `overloaded`, `server_error`, `invalid_request` or `unknown` for a provider error, otherwise the same as `error`, and `unknown` for `other`), `error_details`, `provider_id` and `model_id`; no result |
 | `chat.turn.end` | `threadId`, `turnId`, `agent`, `provider`, `model`, `finishReason` | Observation; no result |
 | `config` | Effective configuration summary (`workspace`, `provider`, `model`, `permission`, `mcp`, `agents`, `commands`, `execution`, …) | Observation; no result |
-| `stop` | `threadId` | Completion notification; no result |
+| `stop` | `threadId` | Each time a root turn would end, beside command `Stop` hooks; an observation, so it never keeps the turn going; no result |
 | `event` | `type` plus the corresponding hook input | Observes every hook above, before the specific hook |
 
 Where each hook fires:
 
 - `session.start` when a chat is created, but not a chat started inside
   another (a task subagent, a workflow's thread or agent); `session.end` when a thread is
-  archived (Haarness has no thread deletion). `chat.turn.end` follows `stop`
-  for every completed root turn; token and cost totals are not part of the
-  payload yet.
+  archived (Haarness has no thread deletion). `chat.turn.end` follows the
+  last `stop` once for every completed root turn (a command `Stop` hook that
+  keeps the turn going runs `stop` again before it); token and cost totals
+  are not part of the payload yet.
 - `chat`, `chat.params` and `chat.headers` run in that order on every
   provider request, once per extension. Temperature, top-p, top-k and the
   output-token limit reach the OpenAI-compatible, Anthropic, Gemini and OpenAI

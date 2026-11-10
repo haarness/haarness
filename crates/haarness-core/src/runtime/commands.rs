@@ -485,6 +485,7 @@ pub(crate) fn interrupted_report(command: &crate::StrandedCommand) -> Vec<ItemDa
             queued: false,
             synthetic: true,
             command_line: None,
+            hook: None,
         },
         ItemData::Error {
             message: format!(

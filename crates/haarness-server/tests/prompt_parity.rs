@@ -142,7 +142,6 @@ impl HookPort for Hooks {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 struct HeldTool {
     entered: CancellationToken,
@@ -457,7 +456,6 @@ impl HookPort for StampHooks {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 /// Every request must start with the previous one byte for byte (the system

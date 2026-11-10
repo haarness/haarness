@@ -579,7 +579,6 @@ impl HookPort for Rewrite {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 #[tokio::test]
@@ -698,7 +697,6 @@ impl HookPort for ShellEnv {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
     async fn shell_env(
         &self,
         _: ThreadId,
@@ -805,7 +803,6 @@ impl HookPort for RewritingAllow {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 #[tokio::test]
@@ -924,7 +921,6 @@ impl HookPort for EchoingAllow {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 #[cfg(unix)]
@@ -1030,7 +1026,6 @@ impl HookPort for FirstAllow {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 /// Runs `echo one`, then `echo two` in a later round, under `bash:*` ask.
@@ -1134,7 +1129,6 @@ impl HookPort for Refuses {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 /// The model reads a hook's refusal as the hook's, and a person's Reject as
@@ -1369,7 +1363,6 @@ impl HookPort for AnswersQuestions {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 fn question() -> ProviderEvent {
@@ -1534,7 +1527,6 @@ impl HookPort for StopsQuestions {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 #[tokio::test]

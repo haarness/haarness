@@ -395,6 +395,12 @@ pub trait ThreadRepository: Send + Sync {
     /// Soft-delete items past `sequence`; they stay in the database but leave
     /// every listing. Returns the number hidden.
     async fn soft_delete_items_after(&self, id: ThreadId, sequence: u64) -> CoreResult<u64>;
+    /// Hide item `item` of chat `id` from every listing: one the runtime
+    /// wrote and never announced, which a stop overtook. Stores that cannot
+    /// hide a single item say so.
+    async fn discard_item(&self, _id: ThreadId, _item: ItemId) -> CoreResult<()> {
+        Err(CoreError::Storage("hiding an item is unavailable".into()))
+    }
     /// Persist a workspace-scoped permission approval across restarts.
     async fn save_permission_rule(
         &self,
@@ -1315,7 +1321,14 @@ pub trait HookPort: Send + Sync {
         always: Option<&[String]>,
         detail: &Value,
     ) -> HookDecision;
-    async fn stop(&self, call: &HookCall);
+    /// A root turn has nothing left to do and is about to end (`Stop`).
+    /// `active` says hooks already kept this turn going and nothing the
+    /// person sent came since (`stop_hook_active`). A hook that blocks the
+    /// end answers with its feedback, which the model reads in a message of
+    /// the hook's before the turn goes on; `None` lets the turn end.
+    async fn stop(&self, _call: &HookCall, _active: bool) -> Option<String> {
+        None
+    }
     /// Observes only a committed compaction, never a discarded summary.
     async fn post_compact(&self, _call: &HookCall, _trigger: &str, _item: &Item) {}
     /// Observes a terminal failure once, after automatic recovery is exhausted.
@@ -1325,8 +1338,8 @@ pub trait HookPort: Send + Sync {
     async fn session_start(&self, _call: &HookCall) {}
     /// A thread was archived (`SessionEnd` / `session.end`).
     async fn session_end(&self, _call: &HookCall, _reason: &str) {}
-    /// A root turn completed, after `stop` (`TurnEnd` / `chat.turn.end`).
-    /// `detail` carries `turnId`, `agent`, `provider`, `model` and `finishReason`.
+    /// A root turn completed, once, after the last `stop` let it end
+    /// (`TurnEnd` / `chat.turn.end`). `detail` carries `turnId`, `agent`, `provider`, `model` and `finishReason`.
     async fn turn_end(&self, _call: &HookCall, _turn: TurnId, _detail: &Value) {}
     /// Attention-worthy moments: a pending permission prompt or a completed
     /// turn (`Notification`). Observational only; never awaited on the hot path.

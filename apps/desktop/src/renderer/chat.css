@@ -1135,6 +1135,17 @@ html[dir="rtl"] .tool-target {
   font-size: var(--ui-sm);
   padding: var(--s1) 0;
 }
+/* A hook's feedback stays one line: all of it is in the title. */
+.hook-note > * {
+  flex: none;
+  white-space: nowrap;
+}
+.hook-note > .hook-note-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .block-label {
   display: inline-flex;
   align-items: center;

@@ -1536,10 +1536,13 @@ fn presentation_order(items: &[Item]) -> Vec<&Item> {
     let mut ordered = Vec::with_capacity(items.len());
     let mut calls = Vec::new();
     for item in items {
+        // The runtime's own messages stay out of the transcript, except a
+        // hook's, which shows as its note.
         if matches!(
             item.data,
             ItemData::UserMessage {
                 synthetic: true,
+                hook: None,
                 ..
             }
         ) {
@@ -1591,6 +1594,7 @@ enum TranscriptGroup {
 
 fn transcript_group(item: &Item) -> TranscriptGroup {
     match &item.data {
+        ItemData::UserMessage { hook: Some(_), .. } => TranscriptGroup::System,
         ItemData::UserMessage { .. } => TranscriptGroup::User,
         ItemData::AssistantMessage { .. } => TranscriptGroup::Assistant,
         ItemData::Reasoning { .. } => TranscriptGroup::Reasoning,
@@ -1952,6 +1956,26 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         let group = transcript_group(item);
         let mut block = TaggedLines::default();
         match &item.data {
+            // A hook kept the turn going: one quiet line with what it said,
+            // not the message the model read.
+            ItemData::UserMessage {
+                text,
+                hook: Some(event),
+                ..
+            } => {
+                let label = app
+                    .language
+                    .format("{event} hook", &[("event", event.as_str())]);
+                let feedback =
+                    haarness_protocol::without_escapes(haarness_protocol::hook_feedback(text));
+                block.push(Line::new(vec![
+                    Span::new("  ↩ ", theme.muted),
+                    Span::new(
+                        single_line(&format!("{label} · {feedback}"), width.saturating_sub(4)),
+                        theme.muted,
+                    ),
+                ]));
+            }
             ItemData::UserMessage {
                 text,
                 attachments,

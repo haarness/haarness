@@ -34,7 +34,6 @@ impl HookPort for Starts {
     ) -> HookDecision {
         HookDecision::default()
     }
-    async fn stop(&self, _: &HookCall) {}
     async fn session_start(&self, call: &HookCall) {
         self.0.lock().unwrap().push(call.thread);
     }

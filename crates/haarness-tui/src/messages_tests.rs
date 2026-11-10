@@ -43,6 +43,7 @@ fn messages_search_full_text_unicode_and_hide_internal_records() {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     ));
     app.items.push(message_item(
@@ -54,6 +55,7 @@ fn messages_search_full_text_unicode_and_hide_internal_records() {
             queued: false,
             synthetic: true,
             command_line: None,
+            hook: None,
         },
     ));
     app.items.push(message_item(
@@ -256,6 +258,7 @@ fn conversation_app() -> App {
         queued: false,
         synthetic,
         command_line: None,
+        hook: None,
     };
     for turn in 1..=6_u64 {
         let base = turn * 10;

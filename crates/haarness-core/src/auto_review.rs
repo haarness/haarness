@@ -1534,6 +1534,7 @@ mod tests {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         }
     }
 
@@ -1604,6 +1605,7 @@ mod tests {
                     queued: false,
                     synthetic: true,
                     command_line: None,
+                    hook: None,
                 },
             ),
             item(
@@ -1639,6 +1641,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: Some("/review src".into()),
+                    hook: None,
                 },
             ),
             item(
@@ -1690,6 +1693,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: Some("/clean src".into()),
+                    hook: None,
                 },
             ),
             item(
@@ -2112,6 +2116,7 @@ mod tests {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
             created_at: chrono::Utc::now(),
         };

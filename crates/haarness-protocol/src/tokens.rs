@@ -913,6 +913,7 @@ mod tests {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         };
         let page = "word ".repeat(20_000);
         let items = vec![
@@ -999,6 +1000,7 @@ mod tests {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         }
     }
 

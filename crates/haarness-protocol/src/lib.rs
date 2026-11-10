@@ -183,6 +183,17 @@ pub fn is_untitled_chat_title(title: &str) -> bool {
     title == UNTITLED_CHAT_TITLE || title == LEGACY_UNTITLED_CHAT_TITLE
 }
 
+/// What the hooks said in a runtime message marked with a `hook` event: the
+/// text inside its `<hook-feedback …>` block, or all of it when it has none.
+#[must_use]
+pub fn hook_feedback(text: &str) -> &str {
+    text.find("<hook-feedback")
+        .and_then(|start| Some(start + text[start..].find('>')? + 1))
+        .and_then(|from| Some(&text[from..from + text[from..].rfind("</hook-feedback>")?]))
+        .unwrap_or(text)
+        .trim()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
@@ -364,6 +375,13 @@ pub enum ItemData {
         /// ordinary messages and for messages saved before it was kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command_line: Option<String>,
+        /// The lifecycle hook event (`Stop`) whose feedback this runtime
+        /// message carries: a hook kept the turn going, and the model answers
+        /// it. The feedback is the text inside its `<hook-feedback>` block,
+        /// which clients may show as a quiet note rather than a message of
+        /// the person's. Absent for every other message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook: Option<String>,
     },
     /// Durable boundary recording that a queued user message was included in
     /// a provider-round snapshot. The original message keeps `queued=true` as
@@ -1779,6 +1797,42 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).unwrap(),
             json!({"kind": "text", "text": "listed"})
+        );
+    }
+
+    /// A hook's message names its event on the wire; every other message,
+    /// older ones included, has no `hook`. The note shows its feedback block.
+    #[test]
+    fn a_hooks_message_names_its_event_and_shows_its_feedback() {
+        let older: ItemData =
+            serde_json::from_value(json!({"type": "user_message", "text": "hi"})).unwrap();
+        assert!(matches!(older, ItemData::UserMessage { hook: None, .. }));
+        assert_eq!(
+            serde_json::to_value(&older).unwrap(),
+            json!({"type": "user_message", "text": "hi", "attachments": []})
+        );
+        let text =
+            "Read this first.\n\n<hook-feedback event=\"Stop\">\nrun the tests\n</hook-feedback>";
+        let message = ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: true,
+            command_line: None,
+            hook: Some("Stop".into()),
+        };
+        assert_eq!(serde_json::to_value(&message).unwrap()["hook"], "Stop");
+        assert_eq!(super::hook_feedback(text), "run the tests");
+        // Feedback that writes the tag itself keeps it; text without a block
+        // is all feedback.
+        assert_eq!(
+            super::hook_feedback("<hook-feedback>\na </hook-feedback> b\n</hook-feedback>"),
+            "a </hook-feedback> b"
+        );
+        assert_eq!(super::hook_feedback(" plain words "), "plain words");
+        assert_eq!(
+            super::hook_feedback("<hook-feedback unclosed"),
+            "<hook-feedback unclosed"
         );
     }
 

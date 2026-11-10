@@ -681,6 +681,7 @@ async fn bare_fork_offers_only_assistant_message_boundaries() {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
         message_item(
@@ -699,6 +700,7 @@ async fn bare_fork_offers_only_assistant_message_boundaries() {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
         message_item(
@@ -2567,6 +2569,68 @@ fn a_question_a_hook_answered_says_so_on_its_row() {
     assert!(row("asked").contains("·  Unit tests"), "{text:#?}");
 }
 
+/// The message a Stop hook kept the turn going with shows as one quiet line
+/// with the hook's feedback; the runtime's other messages stay hidden.
+#[test]
+fn a_stop_hooks_message_shows_as_a_quiet_line_with_its_feedback() {
+    let thread = fixture_thread();
+    let user = |text: &str, hook: Option<&str>| ItemData::UserMessage {
+        text: text.into(),
+        attachments: Vec::new(),
+        queued: false,
+        synthetic: true,
+        command_line: None,
+        hook: hook.map(str::to_owned),
+    };
+    let items = vec![
+        message_item(1, &thread, user("HIDDEN_REMINDER", None)),
+        message_item(
+            2,
+            &thread,
+            ItemData::AssistantMessage {
+                text: "Fixed it.".into(),
+            },
+        ),
+        message_item(
+            3,
+            &thread,
+            user(
+                "MODEL_ONLY_WORDS\n\n<hook-feedback>\n\u{1b}[31mrun the tests\u{1b}[0m\nthen lint\u{1b}[3\n</hook-feedback>",
+                Some("Stop"),
+            ),
+        ),
+        message_item(
+            4,
+            &thread,
+            ItemData::AssistantMessage {
+                text: "The tests pass.".into(),
+            },
+        ),
+    ];
+    let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text: Vec<String> = app.lines((100, 45)).iter().map(line_text).collect();
+    let note: Vec<&String> = text
+        .iter()
+        .filter(|line| line.contains("Stop hook"))
+        .collect();
+    assert_eq!(note.len(), 1, "{text:#?}");
+    assert!(
+        note[0].starts_with("  ↩ Stop hook · run the tests then lint"),
+        "{text:#?}"
+    );
+    // Its colours are gone, the one cut short too.
+    assert!(
+        !note[0].contains('\u{1b}') && !note[0].contains("[31m"),
+        "{note:?}"
+    );
+    let joined = text.join("\n");
+    assert!(!joined.contains("MODEL_ONLY_WORDS"), "{joined}");
+    assert!(!joined.contains("HIDDEN_REMINDER"), "{joined}");
+    // It sits between the replies it came between.
+    let at = |words: &str| text.iter().position(|line| line.contains(words)).unwrap();
+    assert!(at("Fixed it.") < at("Stop hook") && at("Stop hook") < at("The tests pass."));
+}
+
 /// A single-choice question says how to answer it as a multiple-choice one
 /// does, and its toast stays hidden while the question itself is in view.
 #[tokio::test]
@@ -2739,6 +2803,7 @@ async fn ctrl_r_opens_and_closes_the_nearest_fold() {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     );
     let call = message_item(
@@ -2950,6 +3015,7 @@ fn transcript_spacing_separates_semantic_groups_without_splitting_activity_block
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
         message_item(
@@ -4067,6 +4133,7 @@ fn user_prompts_render_as_surface_blocks() {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -4384,6 +4451,7 @@ fn a_pinned_goal_keeps_a_quiet_row_before_the_masthead() {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -7556,6 +7624,7 @@ fn agent_roster_is_one_row_per_child_and_scoped_to_the_latest_turn() {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     ));
     later_items.push(message_item_for_turn(
@@ -7615,6 +7684,7 @@ fn background_completion_does_not_hide_the_completed_agent_roster() {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
         message_item_for_turn(
@@ -7661,6 +7731,7 @@ fn background_completion_does_not_hide_the_completed_agent_roster() {
                 queued: false,
                 synthetic: true,
                 command_line: None,
+                hook: None,
             },
         ),
     ];
@@ -7682,6 +7753,7 @@ fn background_completion_does_not_hide_the_completed_agent_roster() {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     ));
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -12180,6 +12252,7 @@ fn queued_followups_wait_above_the_composer_until_consumed() {
             queued: true,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     );
     let queued_id = queued.id;
@@ -12918,6 +12991,7 @@ fn queued_messages_use_transient_running_status_instead_of_a_transcript_badge() 
             queued: true,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     );
     let queued_id = queued.id;
@@ -12958,6 +13032,7 @@ fn synthetic_workflow_delivery_stays_out_of_transcript_export_and_queue_status()
             queued: true,
             synthetic: true,
             command_line: None,
+            hook: None,
         },
     );
     let mut app = App::new(
@@ -13023,6 +13098,7 @@ fn queued_status_yields_before_the_interrupt_shortcut_at_narrow_widths() {
             queued: true,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     );
     let mut app = App::new(thread.clone(), vec![thread], vec![queued], vec![], vec![]);
@@ -13510,6 +13586,7 @@ async fn a_narrow_terminal_keeps_the_plan_in_one_row_and_ctrl_b_opens_the_sideba
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
         message_item(
@@ -14407,6 +14484,7 @@ fn selection_beside_the_sidebar_copies_only_its_own_pane() {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
         message_item(
@@ -14494,6 +14572,7 @@ fn selection_leaves_out_gutters_but_keeps_written_bars() {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
         message_item(
@@ -14913,6 +14992,7 @@ async fn a_small_terminal_still_shows_the_conversation() {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ));
         items.push(message_item(
@@ -19861,6 +19941,7 @@ async fn the_timeline_lists_undoable_checkpoints_by_the_request_that_made_them()
                 synthetic: false,
                 command_line: None,
                 queued: false,
+                hook: None,
             },
             &mut sequence,
         );
@@ -19964,6 +20045,7 @@ fn an_undo_that_left_files_says_so_under_its_marker() {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
         message_item(
@@ -19975,6 +20057,7 @@ fn an_undo_that_left_files_says_so_under_its_marker() {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
     ];
@@ -21215,6 +21298,7 @@ fn sent_references_read_as_their_chips_in_the_bubble_and_come_back_as_chips() {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -21284,6 +21368,7 @@ fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     )];
     let id = items[0].id;
@@ -21336,6 +21421,7 @@ fn a_folded_prompt_counts_hidden_lines_not_rows() {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -21427,6 +21513,7 @@ fn a_paste_desktop_sent_as_a_chip_folds_under_its_label_until_the_prompt_opens()
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     )];
     let id = items[0].id;
@@ -21483,6 +21570,7 @@ fn a_slash_command_reads_as_the_line_typed_with_its_prompt_folded_below() {
             queued: false,
             synthetic: false,
             command_line: Some("/review src/foo.rs".into()),
+            hook: None,
         },
     )];
     let id = items[0].id;
@@ -21760,6 +21848,7 @@ fn queue_strip_numbers_three_messages_and_counts_the_rest() {
             queued: true,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
     );
     let mut app = queue_fixture(&["one\nstill one", "two", "three", "four", "five"]);
@@ -24596,6 +24685,7 @@ fn undo_fixture() -> (App, Thread) {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
         message_item(
@@ -24614,6 +24704,7 @@ fn undo_fixture() -> (App, Thread) {
                 queued: false,
                 synthetic: false,
                 command_line: None,
+                hook: None,
             },
         ),
         message_item(
@@ -25713,6 +25804,7 @@ async fn the_automatic_model_follows_whether_the_cloud_account_can_pay() {
             queued: false,
             synthetic: false,
             command_line: None,
+            hook: None,
         },
         created_at: Utc::now(),
     }];

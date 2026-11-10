@@ -806,6 +806,7 @@ impl SqliteStore {
                 attachments: request.attachments,
                 queued: false,
                 synthetic: request.synthetic,
+                hook: None,
             },
             created_at: now,
         };
@@ -1605,6 +1606,17 @@ impl ThreadRepository for SqliteStore {
             )
             .map_err(storage)?;
         u64::try_from(changed).map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
+    async fn discard_item(&self, id: ThreadId, item: ItemId) -> CoreResult<()> {
+        self.connection
+            .lock()
+            .execute(
+                "UPDATE items SET deleted=1 WHERE thread_id=?1 AND id=?2",
+                params![id.to_string(), item.to_string()],
+            )
+            .map_err(storage)?;
+        Ok(())
     }
 
     async fn thread_extras(
@@ -2445,6 +2457,45 @@ mod tests {
             .id
     }
 
+    /// Discarding an item hides that item alone: one written after it, and
+    /// the same item of another chat, stay.
+    #[tokio::test]
+    async fn a_discarded_item_leaves_every_listing_and_nothing_else_does() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let turn = command_turn(&store, thread.id).await;
+        let note = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let discarded = store
+            .append_item(thread.id, Some(turn), note("discarded"))
+            .await
+            .unwrap();
+        store
+            .append_item(thread.id, Some(turn), note("kept"))
+            .await
+            .unwrap();
+        let other = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        store.discard_item(other.id, discarded.id).await.unwrap();
+        assert_eq!(store.list_items(thread.id, None).await.unwrap().len(), 3);
+        store.discard_item(thread.id, discarded.id).await.unwrap();
+        let texts: Vec<_> = store
+            .list_items(thread.id, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|item| match item.data {
+                ItemData::AssistantMessage { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["kept"]);
+    }
+
     #[tokio::test]
     async fn the_files_an_undo_left_follow_its_steps_until_it_is_confirmed() {
         let store = SqliteStore::in_memory().unwrap();
@@ -2871,6 +2922,7 @@ mod tests {
                     queued: false,
                     synthetic: true,
                     command_line: None,
+                    hook: None,
                 },
             )
             .await
@@ -3386,6 +3438,7 @@ mod tests {
                     queued: false,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             )
             .await
@@ -3867,6 +3920,7 @@ mod tests {
                     queued: true,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             )
             .await
@@ -3912,6 +3966,7 @@ mod tests {
                     queued: true,
                     synthetic: false,
                     command_line: None,
+                    hook: None,
                 },
             )
             .await
@@ -4434,6 +4489,7 @@ mod tests {
                     queued: false,
                     synthetic: true,
                     command_line: None,
+                    hook: None,
                 },
             )
             .await

@@ -2402,6 +2402,7 @@
   "Haarness browser": "Navegador do Haarness",
   "Chrome": "Chrome",
   "Answered by hook": "Respondida por hook",
+  "{event} hook": "Hook {event}",
   "Not available in this chat": "Indisponível nesta conversa",
   "Chrome works with projects on the computer where Chrome runs. Open this project on that computer to use it.": "O Chrome funciona com projetos no computador em que ele está em execução. Abra este projeto nesse computador para usá-lo.",
   "This server cannot use Chrome": "Este servidor não pode usar o Chrome",
