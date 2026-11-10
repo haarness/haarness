@@ -3601,39 +3601,61 @@ async fn resolve_headers(
     // that runs it stops (see `process::Group`).
     #[cfg(unix)]
     command.process_group(0);
-    let child = command.spawn().map_err(|_| {
+    let not_run = || {
         CoreError::Tool(format!(
             "headersHelper for MCP server \"{name}\" could not be executed"
         ))
-    })?;
+    };
+    let mut child = command.spawn().map_err(|_| not_run())?;
+    // Declared after the child, so a start stopped while it runs stops the
+    // group before the child is dropped (and its shell killed): the shell is
+    // still there to find what it started, a child that left the group
+    // (`setsid`, a shell's job control) included.
     let group = process::Group::led_by(child.id());
+    let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(not_run());
+    };
+    let finished = async {
+        use tokio::io::AsyncReadExt as _;
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let (read, written, status) = tokio::join!(
+            out.read_to_end(&mut stdout),
+            err.read_to_end(&mut stderr),
+            child.wait()
+        );
+        read?;
+        written?;
+        Ok::<_, std::io::Error>((status?, stdout, stderr))
+    };
     let timeout = connection_timeout(config);
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| CoreError::Tool(format!("headersHelper for MCP server \"{name}\" timed out")))?
-        .map_err(|_| {
-            CoreError::Tool(format!(
-                "headersHelper for MCP server \"{name}\" could not be executed"
-            ))
-        })?;
+    let (status, stdout, stderr) = match tokio::time::timeout(timeout, finished).await {
+        Ok(Ok(finished)) => finished,
+        Ok(Err(_)) => return Err(not_run()),
+        Err(_) => {
+            // Stopped while its shell still runs (see above).
+            drop(group);
+            return Err(CoreError::Tool(format!(
+                "headersHelper for MCP server \"{name}\" timed out"
+            )));
+        }
+    };
     group.finished();
-    if output.stdout.len().saturating_add(output.stderr.len()) > HEADERS_HELPER_OUTPUT_LIMIT {
+    if stdout.len().saturating_add(stderr.len()) > HEADERS_HELPER_OUTPUT_LIMIT {
         return Err(CoreError::Tool(format!(
             "headersHelper for MCP server \"{name}\" produced more than 64 KiB of output"
         )));
     }
-    if !output.status.success() {
+    if !status.success() {
         return Err(CoreError::Tool(format!(
             "headersHelper for MCP server \"{name}\" exited with code {}",
-            output.status.code().unwrap_or(-1)
+            status.code().unwrap_or(-1)
         )));
     }
-    let dynamic: BTreeMap<String, String> =
-        serde_json::from_slice(&output.stdout).map_err(|_| {
-            CoreError::Tool(format!(
-                "headersHelper for MCP server \"{name}\" returned malformed JSON"
-            ))
-        })?;
+    let dynamic: BTreeMap<String, String> = serde_json::from_slice(&stdout).map_err(|_| {
+        CoreError::Tool(format!(
+            "headersHelper for MCP server \"{name}\" returned malformed JSON"
+        ))
+    })?;
     for (name, value) in dynamic {
         let previous = headers
             .keys()
@@ -5931,6 +5953,53 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
         assert!(!survived, "the helper's `sleep` outlived its timeout");
+    }
+
+    /// A helper's child that left its group (`setsid`, a shell with job
+    /// control) was looked for only after the helper's shell was killed, by
+    /// which time it had a new parent, so it outlived the timeout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_headers_helper_child_that_left_its_group_is_stopped_too() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-mcp-helper-session-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let detach = "import os, sys, time; os.setsid(); open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)";
+        let config: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http",
+            "url": "http://127.0.0.1:9/mcp",
+            "headersHelper": format!("python3 -c \"{detach}\" '{}' & wait", pid_file.display()),
+            "timeoutMs": 2500,
+            "enabled": true
+        }))
+        .unwrap();
+        let error = resolve_headers("detached", &config).await.unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while alive() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let survived = alive();
+        if survived {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            !survived,
+            "the helper's detached child outlived its timeout"
+        );
     }
 
     /// The helper is shell text: a `${VAR}` value that holds shell syntax

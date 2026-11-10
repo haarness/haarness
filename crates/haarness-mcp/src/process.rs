@@ -121,8 +121,9 @@ pub(super) fn stop_tree(pid: i32) {
 /// the command [`Self::finished`]: it ran past its limit, or what waited for
 /// it was stopped. A shell runs the steps of a pipeline or of `a; b` as its
 /// children, and one still holding the output open would otherwise go on
-/// after the shell is killed. A command that ends on its own leaves what it
-/// started running.
+/// after the shell is killed. Drop it while the command still runs, so the
+/// children that left its group are found through it (see [`stop_tree`]). A
+/// command that ends on its own leaves what it started running.
 pub(super) struct Group(#[cfg_attr(not(unix), allow(dead_code))] Option<i32>);
 
 impl Group {
