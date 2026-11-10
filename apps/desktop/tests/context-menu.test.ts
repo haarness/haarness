@@ -2,7 +2,7 @@ import { test } from "node:test";
 import { execFile } from "node:child_process";
 import assert from "node:assert/strict";
 import type { MenuItemConstructorOptions } from "electron";
-import { contextMenuItems, systemSpellings, type ContextMenuPlace } from "../src/main/context-menu";
+import { contextMenuItems, systemSpellings, terminalMenuItems, type ContextMenuPlace } from "../src/main/context-menu";
 import { dictionaries, translate } from "../src/localization";
 
 const PAGE = "file:///Applications/Haarness.app/Contents/Resources/app.asar/out/renderer/index.html";
@@ -165,4 +165,15 @@ test("the system spelling checker answers the script", { skip: process.platform 
   const spellings = await systemSpellings("teh", patient);
   assert.ok(spellings.includes("the"), spellings.join(", "));
   assert.ok(spellings.length <= 5);
+});
+
+test("the terminal's menu offers Copy for its selection, then Paste", () => {
+  const done: string[] = [];
+  const actions = { t: (key: string) => translate("en", key), copy: (text: string) => done.push(text) };
+  const lines = (items: MenuItemConstructorOptions[]) => items.map((item) => (item.role ? `${item.label} (${item.role})` : item.label));
+  assert.deepEqual(lines(terminalMenuItems("", actions)), ["Paste (paste)"]);
+  const items = terminalMenuItems("npm test\n  src/app.ts", actions);
+  assert.deepEqual(lines(items), ["Copy", "Paste (paste)"]);
+  (items[0].click as () => void)();
+  assert.deepEqual(done, ["npm test\n  src/app.ts"]);
 });

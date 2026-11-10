@@ -111,7 +111,7 @@ import { createVoiceInput, launchVoice } from "./voice";
 import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
 import { createNotifications, notificationPlace } from "./notifications";
-import { contextMenuItems, systemSpellings } from "./context-menu";
+import { contextMenuItems, systemSpellings, terminalMenuItems } from "./context-menu";
 import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
 import { quietClosedSocketReads } from "./closed-socket-read";
 import { removalSurvivesFailedStart } from "./unlinked-worktree";
@@ -1794,6 +1794,14 @@ function installHandlers() {
     logLevel(z.enum(["status", "detail-on", "detail-off"]).parse(action)),
   );
   handle("exportLogs", (win) => exportLogs(win, say));
+  // The terminal's right-click menu (see Terminal.tsx), with the text
+  // selected there.
+  handle("terminalMenu", (win, raw: unknown) =>
+    showContextMenu(
+      win,
+      terminalMenuItems(z.string().parse(raw), { t: say, copy: (text) => clipboard.writeText(text) }),
+    ),
+  );
   // An image a reply links to on another host, once the person asks for it.
   // End-to-end tests pin fixture host names with `haarnessImageHosts`.
   handle("remoteImage", (_, raw: unknown) =>
@@ -1965,22 +1973,16 @@ function createWindow() {
       // Closed, or right-clicked again, meanwhile.
       if (request !== menuRequest || win.isDestroyed()) return;
     }
-    const items = contextMenuItems({ ...params, dictionarySuggestions }, {
-      t: say,
-      replace: (word) => win.webContents.replaceMisspelling(word),
-      learn: (word) => win.webContents.session.addWordToSpellCheckerDictionary(word),
-      copy: (text) => clipboard.writeText(text),
-    });
-    if (!items.length) return;
-    const menu = Menu.buildFromTemplate(items);
-    // End-to-end tests read each menu from `haarnessContextMenus` instead of
-    // a native menu they could not close.
-    if (process.env.HAARNESS_DESKTOP_TEST === "1") {
-      const record = globalThis as { haarnessContextMenus?: Menu[] };
-      (record.haarnessContextMenus ??= []).push(menu);
-      return;
-    }
-    menu.popup({ window: win, ...(params.frame ? { frame: params.frame } : {}) });
+    showContextMenu(
+      win,
+      contextMenuItems({ ...params, dictionarySuggestions }, {
+        t: say,
+        replace: (word) => win.webContents.replaceMisspelling(word),
+        learn: (word) => win.webContents.session.addWordToSpellCheckerDictionary(word),
+        copy: (text) => clipboard.writeText(text),
+      }),
+      params.frame ? { frame: params.frame } : {},
+    );
   });
   win.webContents.session.setPermissionRequestHandler(
     (_web, permission, callback) =>
@@ -2113,6 +2115,23 @@ function createWindow() {
     }
   });
   return win;
+}
+/** Opens a right-click menu at the place clicked; nothing for no items.
+ * End-to-end tests read each menu from `haarnessContextMenus` instead of a
+ * native menu they could not close. */
+function showContextMenu(
+  win: BrowserWindow,
+  items: Electron.MenuItemConstructorOptions[],
+  place: Omit<Electron.PopupOptions, "window"> = {},
+) {
+  if (!items.length || win.isDestroyed()) return;
+  const menu = Menu.buildFromTemplate(items);
+  if (process.env.HAARNESS_DESKTOP_TEST === "1") {
+    const record = globalThis as { haarnessContextMenus?: Menu[] };
+    (record.haarnessContextMenus ??= []).push(menu);
+    return;
+  }
+  menu.popup({ window: win, ...place });
 }
 function menu() {
   const t = (key: string) => translate(data().preferences.language, key);

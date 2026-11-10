@@ -24,9 +24,10 @@ const MAX_SUGGESTIONS = 5;
  * The window's right-click menu, built from what Electron says about the place
  * clicked: spellings and Add to dictionary on a misspelled word, the edit
  * commands a text field allows right now, Copy on selected text and Copy link
- * on a web link. Anywhere else it is empty, and no menu opens. The edit
- * commands keep Electron's roles, so they act as the Edit menu's do, and they
- * are named in the interface language as that menu names them.
+ * on a web link. Anywhere else it is empty, and no menu opens. (The terminal
+ * keeps the page's right-click to itself and asks for `terminalMenuItems`.)
+ * The edit commands keep Electron's roles, so they act as the Edit menu's do,
+ * and they are named in the interface language as that menu names them.
  */
 export function contextMenuItems(
   place: ContextMenuPlace,
@@ -58,6 +59,22 @@ export function contextMenuItems(
   return groups.flatMap((group, index) =>
     index ? [{ type: "separator" as const }, ...group] : group,
   );
+}
+
+/**
+ * The terminal's right-click menu, which the terminal asks main for (see
+ * Terminal.tsx) in place of the page's: Copy while text is selected there,
+ * which copies that text, and Paste, which the terminal's own field takes and
+ * sends to the shell as it does Command/Ctrl+V.
+ */
+export function terminalMenuItems(
+  selection: string,
+  actions: Pick<ContextMenuActions, "t" | "copy">,
+): MenuItemConstructorOptions[] {
+  return [
+    ...(selection ? [{ label: actions.t("Copy"), click: () => actions.copy(selection) }] : []),
+    { label: actions.t("Paste"), role: "paste" },
+  ];
 }
 
 /**

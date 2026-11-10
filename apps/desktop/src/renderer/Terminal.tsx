@@ -418,6 +418,18 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     });
     window.addEventListener("blur", option.reset);
     onCleanup(() => window.removeEventListener("blur", option.reset));
+    // A right-click never opens the page's menu here: a program that reads
+    // the mouse (tmux, vim, htop, Haarness's own TUI) takes it as its own,
+    // unless Shift is held, and otherwise main shows the terminal's menu,
+    // Copy and Paste. Heard after xterm's own handler, which selects the word
+    // under the pointer on a Mac, so Copy takes what is selected then.
+    const contextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+      if (terminal.modes.mouseTrackingMode !== "none" && !event.shiftKey) return;
+      void window.haarness.terminalMenu(terminal.getSelection()).catch(() => {});
+    };
+    host.addEventListener("contextmenu", contextMenu);
+    onCleanup(() => host.removeEventListener("contextmenu", contextMenu));
     fit.fit();
     // This view's own connection: main ignores a late connect or detach of
     // a view of the same terminal that was replaced.

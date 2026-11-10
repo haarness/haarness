@@ -1307,12 +1307,58 @@ test("a right-click offers what fits where it lands, nothing on the sidebar, and
     }
     await contextMenus(app);
 
-    // The terminal moves its own field under the pointer: Paste there.
+    // The terminal's own menu: Paste, and Copy for what is selected there.
     await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
-    await expect(page.locator(".xterm-helper-textarea")).toBeFocused();
+    const shell = page.locator(".xterm-helper-textarea");
+    await expect(shell).toBeFocused();
+    const rows = page.locator(".xterm-rows");
     const screen = (await page.locator(".xterm-screen").boundingBox())!;
-    await page.mouse.click(screen.x + screen.width - 20, screen.y + screen.height - 20, { button: "right" });
+    const blank = { x: screen.x + screen.width - 20, y: screen.y + screen.height - 20 };
+    await page.mouse.click(blank.x, blank.y, { button: "right" });
+    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Paste"]);
+    await shell.focus();
+    await page.keyboard.type("printf 'menu%sproof\\n' -");
+    await page.keyboard.press("Enter");
+    const proof = rows.locator(":scope > div").filter({ hasText: "menu-proof" }).first();
+    await expect(proof).toBeVisible();
+    const word = (await proof.boundingBox())!;
+    await page.mouse.dblclick(word.x + 12, word.y + word.height / 2);
+    await page.mouse.click(word.x + 12, word.y + word.height / 2, { button: "right" });
+    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Copy", "Paste"]);
+    const saved = await app.evaluate(({ clipboard }) => clipboard.readText());
+    try {
+      await page.mouse.click(word.x + 12, word.y + word.height / 2, { button: "right" });
+      await expect
+        .poll(() =>
+          app.evaluate(({ clipboard }) => {
+            const menu = (globalThis as { haarnessContextMenus?: Electron.Menu[] }).haarnessContextMenus?.at(-1);
+            menu?.items.find((item) => item.label === "Copy")?.click();
+            return clipboard.readText();
+          }),
+        )
+        .toBe("menu-proof");
+    } finally {
+      await app.evaluate(({ clipboard }, text) => clipboard.writeText(text), saved);
+    }
+    await contextMenus(app);
+    // A program that reads the mouse gets the right-click, and no menu opens;
+    // with Shift held, the menu does. (SGR reports, as tmux, vim and the TUI ask for.)
+    await shell.focus();
+    await page.keyboard.type("printf '\\033[?1000h\\033[?1006h'; cat -v");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".xterm.enable-mouse-events")).toHaveCount(1);
+    await page.mouse.click(blank.x, blank.y, { button: "right" });
+    await expect(rows).toContainText("^[[<2;");
+    expect(await contextMenus(app)).toEqual([]);
+    await page.keyboard.down("Shift");
+    await page.mouse.click(blank.x, blank.y, { button: "right" });
+    await page.keyboard.up("Shift");
     await expect.poll(async () => (await contextMenus(app)).at(-1) ?? []).toContain("Paste");
+    await shell.focus();
+    await page.keyboard.press("Control+C");
+    await page.keyboard.type("printf '\\033[?1006l\\033[?1000l'");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".xterm.enable-mouse-events")).toHaveCount(0);
     await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
 
     // The approvals menu still opens and its choice still runs.
