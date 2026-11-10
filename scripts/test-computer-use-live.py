@@ -749,10 +749,11 @@ try:
     direct.look()
     x, y, width, height = direct.frames["level"]
     before = state().get("slider")
-    reply = direct.ok("drag", **{"from": {"x": x + width * 0.9, "y": y + height / 2}, "to": {"x": x + width * 0.1, "y": y + height / 2},
+    # The fresh lab's slider stands at 10, near its left end.
+    reply = direct.ok("drag", **{"from": {"x": x + width * 0.1, "y": y + height / 2}, "to": {"x": x + width * 0.9, "y": y + height / 2},
                                  "expect": LAB, "expectEnd": LAB})
     assert reply.get("fallback") == "drag" and reply["background"] is False, reply
-    until(lambda: state().get("slider", 100) < before - 30, "the slider moved")
+    until(lambda: state().get("slider", 0) > before + 30, "the slider moved")
     until(lambda: state().get("active"), "the lab came forward")
     check("a drag brings the covered lab forward and works there")
 
