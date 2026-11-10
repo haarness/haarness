@@ -1883,9 +1883,15 @@ fn named_paths(name: &str, arguments: &Value) -> Vec<String> {
             .into_iter()
             .flatten()
             .filter_map(|step| Some((step.get("tool")?.as_str()?, step.get("parameters")?)))
+            // A step's tool is named as the server reads it: a `functions.`
+            // prefix and a different case still name the tool.
+            .map(|(tool, parameters)| {
+                let tool = tool.strip_prefix("functions.").unwrap_or(tool);
+                (tool.to_ascii_lowercase(), parameters)
+            })
             // A batch cannot run a batch.
-            .filter(|(tool, _)| *tool != "batch")
-            .flat_map(|(tool, parameters)| named_paths(tool, parameters))
+            .filter(|(tool, _)| tool != "batch")
+            .flat_map(|(tool, parameters)| named_paths(&tool, parameters))
             .collect(),
         _ => Vec::new(),
     }
@@ -2425,13 +2431,21 @@ mod tests {
             {"tool":"edit", "parameters":{"path":"./a.rs", "old":"y", "new":"z"}},
             {"tool":"bash", "parameters":{"command":"ls"}},
             {"tool":"batch", "parameters":{"tool_calls":[{"tool":"read", "parameters":{"path":"c.rs"}}]}},
+            {"tool":"functions.Batch", "parameters":{"tool_calls":[{"tool":"read", "parameters":{"path":"d.rs"}}]}},
             {"tool":"write"},
+            // Named as a model may name it: the server still runs the tool.
+            {"tool":"functions.edit", "parameters":{"path":"e.rs", "old":"x", "new":"y"}},
+            {"tool":"Write", "parameters":{"path":"f.rs", "content":"x"}},
+            {"tool":"functions.GLOB", "parameters":{"pattern":"*.rs", "path":"src"}},
         ]});
         assert_eq!(
             located("batch", &batch),
             [
                 PathBuf::from("/work/app/a.rs"),
-                PathBuf::from("/work/app/b.rs")
+                PathBuf::from("/work/app/b.rs"),
+                PathBuf::from("/work/app/e.rs"),
+                PathBuf::from("/work/app/f.rs"),
+                PathBuf::from("/work/app/src"),
             ]
         );
         assert!(located("batch", &json!({})).is_empty());
