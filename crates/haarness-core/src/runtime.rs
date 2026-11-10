@@ -1083,8 +1083,23 @@ fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
             "The connection to {} broke off before this call ran, so it did not run.",
             provider.unwrap_or("the provider")
         ),
+        CoreError::ProviderIncomplete(inner) if unfinished_ending(inner) => {
+            "The response that made this call ended before it was done, so the call did not run."
+                .to_owned()
+        }
         error => error.to_string(),
     }
+}
+
+/// Whether an incomplete response's reason is that it ended without saying
+/// it was done ("missing completion event", a finish reason of
+/// "incomplete", "unknown" or "other", or none at all), rather than a
+/// transport's cut or a dropped call.
+fn unfinished_ending(reason: &str) -> bool {
+    matches!(
+        reason.to_ascii_lowercase().as_str(),
+        "" | "incomplete" | "unknown" | "other" | "missing completion event"
+    )
 }
 
 /// What a call the model made at its step limit says, unrun.
@@ -2389,6 +2404,15 @@ fn describe_cut(error: &CoreError, provider: Option<&str>, advice: bool) -> Opti
         CoreError::ProviderIncomplete(inner) if is_transport_cut(inner) => (
             format!("The connection to {name} kept breaking off mid-answer."),
             "Check the network connection, then send a message to continue.",
+        ),
+        // A response that ended without saying it was done, or saying it
+        // was not, each time it was continued.
+        CoreError::ProviderIncomplete(inner) if unfinished_ending(inner) => (
+            format!(
+                "{} kept ending its answer before it was done.",
+                provider.unwrap_or("The provider")
+            ),
+            "Send a message to continue. If it keeps happening, the server may be cutting its answers short.",
         ),
         CoreError::Provider(raw)
             if is_transport_cut(raw)
@@ -25907,15 +25931,29 @@ mod tests {
             super::describe_failure(&silent, Some("Anthropic"), true),
             "Anthropic sent nothing for 5 minutes, so the request was stopped. Try again, or check the network connection."
         );
-        // Other endings keep their words.
+        // A response that kept ending before it was done says so.
         let missing = CoreError::ProviderIncomplete("missing completion event".into());
         assert_eq!(
-            super::describe_failure(&missing, None, true),
-            "Provider response ended before completion (missing completion event)."
+            super::describe_failure(&missing, Some("Self-hosted"), true),
+            "Self-hosted kept ending its answer before it was done. Send a message to continue. If it keeps happening, the server may be cutting its answers short."
+        );
+        assert_eq!(
+            super::describe_failure(
+                &CoreError::ProviderIncomplete("incomplete".into()),
+                None,
+                false
+            ),
+            "The provider kept ending its answer before it was done."
         );
         assert_eq!(
             super::closed_call_reason(&missing, Some("Anthropic")),
-            "Provider response ended before completion (missing completion event)."
+            "The response that made this call ended before it was done, so the call did not run."
+        );
+        // Other endings keep their words.
+        let dropped = CoreError::ProviderIncomplete("MALFORMED_FUNCTION_CALL".into());
+        assert_eq!(
+            super::describe_failure(&dropped, None, true),
+            "Provider response ended before completion (MALFORMED_FUNCTION_CALL)."
         );
     }
 
