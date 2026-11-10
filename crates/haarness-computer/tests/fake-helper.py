@@ -18,8 +18,10 @@ does; a look at another app ignores zoom, as an older helper would.
 
 Actions on e12 answer the way a helper that works behind the person's window does: a click went in behind, was
 confirmed and opened and closed things; a scroll went in behind and showed no change; a drag and a hover came to the
-front, saying why. Opening Mail starts it behind. Every other action answers as an older helper does, with none of
-those fields. A look at Notes says it is behind, and one at Mail that its windows are minimized.
+front, saying why. A plain click on e4 answers like a press that changed nothing the helper could read back. Opening Mail
+starts it behind; opening Music has to bring it forward. Every other action answers as an older helper does, with none of
+those fields. A look at Notes says it is behind, one at Mail that its windows are minimized, and one at Music that it
+is hidden.
 """
 import json
 import os
@@ -76,24 +78,29 @@ ELEMENTS = {
          "content": False},
 }
 
-APPS = {"com.apple.TextEdit": "TextEdit", "com.apple.Notes": "Notes", "com.apple.Mail": "Mail"}
+APPS = {"com.apple.TextEdit": "TextEdit", "com.apple.Notes": "Notes", "com.apple.Mail": "Mail", "com.apple.Music": "Music"}
 
 NOTES = {"bundle": "com.apple.Notes", "pid": 4, "name": "Notes"}
 
-# How a helper that works behind the person's window answers an action on e12.
+# How a helper that works behind the person's window answers an action on e12, field for field: via, background,
+# target, opened and closed always; fallback, confirmed and handedBack only when they apply.
 BEHIND = {
     "click": {
         "via": "ax",
         "background": True,
-        "confirmed": True,
         "target": NOTES,
         "opened": [{"app": "Notes", "role": "sheet", "title": "Share\nNote"}, {"app": "Finder", "role": "menu"}],
         "closed": [{"app": "Notes", "role": "popover"}],
+        "confirmed": True,
+        "handedBack": True,
     },
-    "scroll": {"via": "process", "background": True, "confirmed": False, "target": NOTES},
-    "drag": {"via": "pointer", "background": False, "fallback": "drag", "target": NOTES},
-    "hover": {"via": "pointer", "background": False, "fallback": "hover", "target": NOTES},
+    "scroll": {"via": "process", "background": True, "target": NOTES, "opened": [], "closed": [], "confirmed": False},
+    "drag": {"via": "pointer", "background": False, "target": NOTES, "opened": [], "closed": [], "fallback": "drag"},
+    "hover": {"via": "pointer", "background": False, "target": NOTES, "opened": [], "closed": [], "fallback": "hover"},
 }
+
+# A press in front through Accessibility that changed nothing the helper could read back: no `confirmed` at all.
+PRESSED = {"via": "ax", "background": False, "target": NOTES, "opened": [], "closed": []}
 
 
 def answer(op, request):
@@ -108,7 +115,8 @@ def answer(op, request):
         ]}
     if op == "identify":
         bundle = request.get("bundle") or {"TextEdit": "com.apple.TextEdit", "Notes": "com.apple.Notes"}.get(request.get("name"), "")
-        names = {"com.apple.TextEdit": "TextEdit", "com.apple.Notes": "Notes", "com.apple.Terminal": "Terminal", "com.apple.Mail": "Mail"}
+        names = {"com.apple.TextEdit": "TextEdit", "com.apple.Notes": "Notes", "com.apple.Terminal": "Terminal", "com.apple.Mail": "Mail",
+                 "com.apple.Music": "Music"}
         if not bundle:
             return {"__error": ("not_found", "That app is not running.")}
         return {"bundle": bundle, "name": names.get(bundle, bundle), "running": bundle == "com.apple.TextEdit"}
@@ -127,13 +135,15 @@ def answer(op, request):
         }
         if request.get("zoom") and bundle == "com.apple.TextEdit":
             zoom = dict(request["zoom"])
-            zoom["width"] = min(zoom["width"], 100 - zoom["x"])
-            zoom["height"] = min(zoom["height"], 50 - zoom["y"])
-            reply["zoom"] = zoom
+            width = float(min(zoom["width"], 100 - zoom["x"]))
+            height = float(min(zoom["height"], 50 - zoom["y"]))
+            reply["zoom"] = {"x": float(zoom["x"]), "y": float(zoom["y"]), "width": width, "height": height, "scale": 100 / width}
         if bundle == "com.apple.Notes":
             reply["behind"] = True
         if bundle == "com.apple.Mail":
             reply["offscreen"] = "minimized"
+        if bundle == "com.apple.Music":
+            reply["offscreen"] = "hidden"
         return reply
     if op == "inspect":
         if "ref" in request:
@@ -170,7 +180,14 @@ def answer(op, request):
         time.sleep(30)
         return {}
     if op == "launch" and request.get("bundle") == "com.apple.Mail":
-        return {"via": "process", "background": True, "target": {"bundle": "com.apple.Mail", "pid": 5, "name": "Mail"}}
+        mail = {"bundle": "com.apple.Mail", "pid": 5, "name": "Mail"}
+        return {"background": True, "target": mail, "opened": [{"app": "Mail", "role": "window", "title": "Inbox"}],
+                "closed": [], **mail}
+    if op == "launch" and request.get("bundle") == "com.apple.Music":
+        music = {"bundle": "com.apple.Music", "pid": 6, "name": "Music"}
+        return {"background": False, "target": music, "opened": [], "closed": [], "fallback": "no-key-window", **music}
+    if op == "click" and request.get("ref") == 4:
+        return PRESSED
     if op in BEHIND and 12 in (request.get("ref"), (request.get("from") or {}).get("ref")):
         return BEHIND[op]
     return {"via": "test"}

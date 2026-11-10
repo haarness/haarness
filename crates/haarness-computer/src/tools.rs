@@ -962,7 +962,8 @@ fn delivery(reply: &Value, app: &str, pointer: bool) -> Vec<String> {
         lines.push(format!(
             "{app} came to the front for it, since {}.",
             match reason {
-                "no-key-window" => "its window could not take the input from behind",
+                // The helper's word for every case where the app can't take the action from behind.
+                "no-key-window" => "it could not take this from behind the person's window",
                 "private-calls-missing" =>
                     "this Mac cannot send input to an app behind other windows",
                 "drag" => "drags use the real pointer",
@@ -972,6 +973,13 @@ fn delivery(reply: &Value, app: &str, pointer: bool) -> Vec<String> {
             }
         ));
     }
+    if reply["handedBack"] == true {
+        lines.push(format!(
+            "{app} came forward by itself, so the person's own app was put back in front."
+        ));
+    }
+    // Only a reply that says so is a confirmation either way: none (an older helper, or a press with nothing to
+    // read back) claims nothing.
     match reply["confirmed"].as_bool() {
         Some(true) => lines.push(format!("{app} showed the change.")),
         Some(false) if behind && pointer => lines.push(format!(
@@ -1008,6 +1016,15 @@ fn delivery(reply: &Value, app: &str, pointer: bool) -> Vec<String> {
         }
     }
     lines
+}
+
+/// A pixel count from the helper as a whole number when it is one (the helper sends them as decimals).
+fn pixels(value: &Value) -> String {
+    match value.as_f64() {
+        Some(number) if number.fract() == 0.0 => format!("{number:.0}"),
+        Some(number) => format!("{number:.1}"),
+        None => value.to_string(),
+    }
 }
 
 /// Refuses the combinations that log out, lock the screen or open Force Quit, in any spelling. The helper refuses
@@ -1193,8 +1210,16 @@ impl MacTool {
             // The close-up's own pixels never become coordinates: the outline and the next actions keep the frame of
             // the screenshot it was cut from.
             Some(zoom) => format!(
-                "A close-up at full resolution of the area at x={}, y={}, {}x{} of the latest screenshot. x and y, here and in your next actions, still refer to that screenshot, not to this close-up's pixels.",
-                zoom["x"], zoom["y"], zoom["width"], zoom["height"]
+                "A close-up at full resolution of the area at x={}, y={}, {}x{} of the latest screenshot{}. x and y, here and in your next actions, still refer to that screenshot, not to this close-up's pixels.",
+                pixels(&zoom["x"]),
+                pixels(&zoom["y"]),
+                pixels(&zoom["width"]),
+                pixels(&zoom["height"]),
+                zoom["scale"]
+                    .as_f64()
+                    .filter(|scale| *scale > 1.05)
+                    .map(|scale| format!(", shown {scale:.1} times larger"))
+                    .unwrap_or_default()
             ),
             None => {
                 format!("Image size {width}x{height} pixels; x and y always refer to this image.")
@@ -1211,6 +1236,7 @@ impl MacTool {
             match data["offscreen"].as_str() {
                 Some("minimized") => lines.push(format!("None of {app}'s windows is on screen: they are all minimized. mac_apps with activate brings {app} back to the front.")),
                 Some("other-space") => lines.push(format!("None of {app}'s windows is on screen: they are on another Space. mac_apps with activate brings {app} to the front.")),
+                Some("hidden") => lines.push(format!("None of {app}'s windows is on screen: the app is hidden. mac_apps with activate shows it again.")),
                 _ if data["behind"] == true => lines.push(format!("{app} is behind the person's window. Clicks, scrolling, typing and keys reach it where it is, without bringing it forward; drags and hovering bring it to the front.")),
                 _ => {}
             }

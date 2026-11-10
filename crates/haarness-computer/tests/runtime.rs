@@ -1524,6 +1524,7 @@ async fn an_action_behind_the_person_s_window_says_so_and_looks_at_that_app() {
         "Notes showed the change.",
         "Opened: sheet \"Share Note\" of Notes; menu of Finder.",
         "Closed: popover of Notes.",
+        "Notes came forward by itself, so the person's own app was put back in front.",
         "Notes is behind the person's window.",
     ] {
         assert!(click.contains(words), "{words} in {click}");
@@ -1548,8 +1549,36 @@ async fn an_action_behind_the_person_s_window_says_so_and_looks_at_that_app() {
     let (open, _, _) = result(&items, "open");
     assert!(
         open.starts_with("Opened Mail. This happened behind the person's window")
+            && open.contains("Opened: window \"Inbox\" of Mail.")
             && open.contains("they are all minimized"),
         "{open}"
+    );
+    // A press that changed nothing the helper could read back claims nothing either way; an app that could not open
+    // behind says why it came forward, and a hidden one says so.
+    let items = lab
+        .run(
+            thread,
+            vec![vec![
+                call(
+                    "pressed",
+                    "mac_click",
+                    json!({"ref": "e4", "snapshot": false}),
+                ),
+                call(
+                    "music",
+                    "mac_apps",
+                    json!({"action": "launch", "app": "com.apple.Music"}),
+                ),
+            ]],
+        )
+        .await;
+    let (pressed, _, _) = result(&items, "pressed");
+    assert!(!pressed.contains("showed"), "{pressed}");
+    let (music, _, _) = result(&items, "music");
+    assert!(
+        music.contains("Music came to the front for it, since it could not take this from behind the person's window.")
+            && music.contains("the app is hidden"),
+        "{music}"
     );
     let looks: Vec<Value> = lab
         .log()
@@ -1599,7 +1628,7 @@ async fn a_look_can_filter_its_elements_and_show_an_area_up_close() {
     assert!(!error, "{output}");
     assert!(
         // The helper trimmed the area to the screenshot: the result says what it showed.
-        output.starts_with("A close-up at full resolution of the area at x=70, y=5, 30x20 of the latest screenshot.")
+        output.starts_with("A close-up at full resolution of the area at x=70, y=5, 30x20 of the latest screenshot, shown 3.3 times larger.")
             && output.contains("Showing only elements matching \"Save\""),
         "{output}"
     );
