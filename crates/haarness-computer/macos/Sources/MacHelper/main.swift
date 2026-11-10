@@ -39,11 +39,12 @@ Thread.detachNewThread {
             continue
         }
         let id = request["id"] ?? NSNull()
-        // End of turn: drop the bar immediately rather than after the request in progress. A pause ends with the turn and
-        // is reported as resumed, so the following turn starts unpaused.
+        // End of turn: drop the bar and the display's awake hold immediately rather than after the request in progress. A
+        // pause ends with the turn and is reported as resumed, so the following turn starts unpaused.
         if op == "release" {
             let wasPaused = ControlBar.shared.isPaused
             ControlBar.shared.hide()
+            KeepAwake.shared.release()
             if wasPaused { emit(["event": "resume"]) }
             emit(["id": id, "ok": true, "data": [String: Any]()])
             continue
@@ -78,5 +79,6 @@ Thread.detachNewThread {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 ControlBar.shared.report = { emit(["event": $0]) }
-Presence.shared.start { emit(["event": "escape"]) }
+// Escape stops the agent only while it works in the app in front (see Dispatcher.escapeStops).
+Presence.shared.start { if dispatcher.escapeStops { emit(["event": "escape"]) } }
 app.run()

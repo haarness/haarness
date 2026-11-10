@@ -126,4 +126,162 @@ final class MacKitTests: XCTestCase {
         XCTAssertEqual(hiddenLine(1, level: 2), "    (1 more element is scrolled out of view here; scroll this area to reach it.)")
         XCTAssertEqual(hiddenLine(54, level: 0), "(54 more elements are scrolled out of view here; scroll this area to reach them.)")
     }
+
+    // MARK: Background clicks
+
+    func testBackgroundClickPlanMovesFirstAndCountsPresses() {
+        let spot = Point(500, 300)
+        let single = backgroundClickPlan(at: spot, origin: Point(400, 200), button: 0, count: 1, outsidePress: false, windowLocal: false)
+        XCTAssertEqual(single.map(\.kind), [.move, .down, .up])
+        XCTAssertEqual(single[0].clickState, 0)
+        XCTAssertEqual(single[1].clickState, 1)
+        // Before macOS 27 the window server reads the screen point.
+        XCTAssertEqual(single.map(\.stamped), [spot, spot, spot])
+        let triple = backgroundClickPlan(at: spot, origin: Point(0, 0), button: 0, count: 3, outsidePress: false, windowLocal: false)
+        XCTAssertEqual(triple.filter { $0.kind == .down }.map(\.clickState), [1, 2, 3])
+        XCTAssertEqual(triple.filter { $0.kind == .up }.map(\.clickState), [1, 2, 3])
+        XCTAssertEqual(triple.last?.pause, 0)
+        XCTAssertEqual(backgroundClickPlan(at: spot, origin: spot, button: 0, count: 9, outsidePress: false, windowLocal: false).count, 7)
+    }
+
+    func testChromiumGetsOnePressOutsideEveryWindowFirst() {
+        let plan = backgroundClickPlan(at: Point(50, 60), origin: Point(0, 0), button: 0, count: 2, outsidePress: true, windowLocal: false)
+        XCTAssertEqual(plan.map(\.kind), [.move, .down, .up, .down, .up, .down, .up])
+        XCTAssertEqual(plan[1].screen, outsidePoint)
+        XCTAssertEqual(plan[2].screen, outsidePoint)
+        XCTAssertEqual(plan[3].screen, Point(50, 60))
+        XCTAssertEqual(plan.map(\.phase), [2, 1, 2, 3, 3, 3, 3])
+        // A right click goes without it: the outside press is a left press.
+        let right = backgroundClickPlan(at: Point(50, 60), origin: Point(0, 0), button: 1, count: 1, outsidePress: true, windowLocal: false)
+        XCTAssertEqual(right.map(\.kind), [.move, .down, .up])
+        XCTAssertEqual(right[1].button, 1)
+    }
+
+    func testMacOS27StampsWindowLocalPoints() {
+        XCTAssertFalse(windowLocationIsLocal(macOSMajor: 26))
+        XCTAssertTrue(windowLocationIsLocal(macOSMajor: 27))
+        let plan = backgroundClickPlan(at: Point(500, 300), origin: Point(400, 200), button: 0, count: 1, outsidePress: true, windowLocal: true)
+        XCTAssertEqual(plan[0].screen, Point(500, 300))
+        XCTAssertEqual(plan[0].stamped, Point(100, 100))
+        // The outside press keeps its spot either way.
+        XCTAssertEqual(plan[1].stamped, outsidePoint)
+        XCTAssertEqual(plan[3].stamped, Point(100, 100))
+    }
+
+    // MARK: Shortcuts
+
+    func testMenuShortcutsMatchKeyAndModifiersExactly() throws {
+        let save = try KeyCombo.read("Meta+S")
+        XCTAssertTrue(save.matchesMenuItem(character: "S", modifiers: 0))
+        XCTAssertTrue(save.matchesMenuItem(character: "s", modifiers: 0))
+        XCTAssertFalse(save.matchesMenuItem(character: "S", modifiers: MenuModifier.shift), "Save As is Command-Shift-S")
+        XCTAssertFalse(save.matchesMenuItem(character: "S", modifiers: MenuModifier.noCommand))
+        XCTAssertFalse(save.matchesMenuItem(character: "A", modifiers: 0))
+        let saveAs = try KeyCombo.read("Meta+Shift+s")
+        XCTAssertTrue(saveAs.matchesMenuItem(character: "S", modifiers: MenuModifier.shift))
+        XCTAssertFalse(saveAs.matchesMenuItem(character: "S", modifiers: 0))
+        let hideOthers = try KeyCombo.read("Meta+Alt+h")
+        XCTAssertTrue(hideOthers.matchesMenuItem(character: "H", modifiers: MenuModifier.option))
+        XCTAssertFalse(hideOthers.matchesMenuItem(character: "H", modifiers: MenuModifier.option | MenuModifier.control))
+        XCTAssertTrue(try KeyCombo.read("Meta+,").matchesMenuItem(character: ",", modifiers: 0))
+        // Without Command, or with a named key, a combination is a key press.
+        XCTAssertFalse(try KeyCombo.read("Control+a").mayBeMenuShortcut)
+        XCTAssertFalse(try KeyCombo.read("Meta+Enter").mayBeMenuShortcut)
+        XCTAssertFalse(try KeyCombo.read("Meta+ArrowUp").matchesMenuItem(character: "", modifiers: 0))
+    }
+
+    /// A layout typing Cyrillic on its own and Latin with Command, like the Russian ones.
+    static let cyrillic = KeyLayout(
+        plain: [0x08: "с", 0x09: "м", 0x00: "ф", 0x2C: ".", 0x12: "1"],
+        shifted: [0x08: "С", 0x09: "М", 0x00: "Ф", 0x2C: ",", 0x12: "!"],
+        command: [0x08: "c", 0x09: "v", 0x00: "a", 0x2C: "/", 0x12: "1"]
+    )
+
+    func testShortcutsUseTheCommandLayerOfTheLayout() throws {
+        XCTAssertEqual(Self.cyrillic.resolve(try KeyCombo.read("Meta+c"))?.code, 0x08)
+        XCTAssertEqual(Self.cyrillic.resolve(try KeyCombo.read("Meta+v"))?.code, 0x09)
+        // Letter case means nothing in a shortcut: Command-S, not Command-Shift-S.
+        let save = KeyLayout.us.resolve(try KeyCombo.read("Meta+S"))
+        XCTAssertEqual(save?.code, 0x01)
+        XCTAssertEqual(save?.held, [.command])
+        // A Dvorak layout whose Command layer is QWERTY presses the QWERTY key; one whose Command layer is Dvorak too
+        // presses the Dvorak one.
+        let dvorakQwerty = KeyLayout(plain: [0x22: "c", 0x08: "j"], shifted: [:], command: [0x08: "c", 0x22: "i"])
+        XCTAssertEqual(dvorakQwerty.resolve(try KeyCombo.read("Meta+c"))?.code, 0x08)
+        let dvorak = KeyLayout(plain: [0x22: "c", 0x08: "j"], shifted: [:], command: [0x22: "c", 0x08: "j"])
+        XCTAssertEqual(dvorak.resolve(try KeyCombo.read("Meta+c"))?.code, 0x22)
+        // A shifted symbol adds the Shift it needs.
+        let help = KeyLayout.us.resolve(try KeyCombo.read("Meta+?"))
+        XCTAssertEqual(help?.code, 0x2C)
+        XCTAssertEqual(help?.held, [.command, .shift])
+    }
+
+    func testCharactersTheLayoutLacksComeFromAUSKeyboard() throws {
+        // No Latin q anywhere on this layout: the US position is used.
+        XCTAssertEqual(Self.cyrillic.resolve(try KeyCombo.read("Meta+q"))?.code, 0x0C)
+        XCTAssertEqual(Self.cyrillic.resolve(try KeyCombo.read("Control+z"))?.code, 0x06)
+        // Plain keys type the character exactly, with Shift where the layout needs it.
+        let cyrillicEs = Self.cyrillic.resolve(try KeyCombo.read("С"))
+        XCTAssertEqual(cyrillicEs?.code, 0x08)
+        XCTAssertEqual(cyrillicEs?.held, [.shift])
+        XCTAssertEqual(Self.cyrillic.resolve(try KeyCombo.read("!"))?.held, [.shift])
+        XCTAssertEqual(KeyLayout.us.resolve(try KeyCombo.read("A"))?.held, [.shift])
+        XCTAssertEqual(KeyLayout.us.resolve(try KeyCombo.read("a"))?.held, [])
+        XCTAssertEqual(KeyLayout.us.resolve(try KeyCombo.read("Enter"))?.code, 0x24)
+        XCTAssertEqual(KeyLayout.us.resolve(try KeyCombo.read("Shift+Tab"))?.held, [.shift])
+        XCTAssertNil(KeyLayout.us.resolve(KeyCombo(held: [], key: "ж")))
+    }
+
+    // MARK: Typing
+
+    func testLineBreaksPressReturnAndTabsPressTab() {
+        let units = { (text: String) in TypingStep.text(Array(text.utf16)) }
+        XCTAssertEqual(typingSteps("ok\r"), [units("ok"), .enter])
+        XCTAssertEqual(typingSteps("\r"), [.enter])
+        XCTAssertEqual(typingSteps("a\nb\r\nc\td"), [units("a"), .enter, units("b"), .enter, units("c"), .tab, units("d")])
+        XCTAssertEqual(typingSteps(String(repeating: "x", count: 20)).count, 2)
+        XCTAssertTrue(isOneLine("hello lab"))
+        XCTAssertFalse(isOneLine("two\nlines"))
+        XCTAssertFalse(isOneLine("enter\r"))
+        XCTAssertFalse(isOneLine("a\tb"))
+    }
+
+    // MARK: Snapshot search
+
+    func testOutlineSearchKeepsMatchesAndWhatHoldsThem() {
+        let entries = [
+            OutlineEntry(level: 0, line: "window", words: "window Lab"),
+            OutlineEntry(level: 1, line: "group", words: "group Form"),
+            OutlineEntry(level: 2, line: "name", words: "text-field Name"),
+            OutlineEntry(level: 2, line: "save", words: "button Save"),
+            OutlineEntry(level: 1, line: "list", words: "list Rows"),
+            OutlineEntry(level: 2, line: "row", words: "static-text Row 1"),
+            OutlineEntry(level: 2, line: "(hidden)", words: ""),
+            OutlineEntry(level: 0, line: "menu", words: "menu Édition"),
+        ]
+        XCTAssertEqual(filterOutline(entries, keeping: "save").map(\.line), ["window", "group", "save"])
+        XCTAssertEqual(filterOutline(entries, keeping: "ROW").map(\.line), ["window", "list", "row"])
+        XCTAssertEqual(filterOutline(entries, keeping: "edition").map(\.line), ["menu"])
+        XCTAssertEqual(filterOutline(entries, keeping: "absent"), [])
+        XCTAssertEqual(filterOutline(entries, keeping: " ").count, entries.count)
+        // A password's value is never searched.
+        let secret = OutlineItem(role: "AXTextField", value: "hunter2", password: true)
+        XCTAssertFalse(outlineWords(secret).contains("hunter2"))
+    }
+
+    // MARK: Windows an action opened or closed
+
+    func testWindowChangesNameOtherAppsWithoutTitles() {
+        let before = [WindowFacts(id: 1, pid: 10, app: "Lab", layer: 0, title: "Haarness Lab"),
+                      WindowFacts(id: 2, pid: 20, app: "Mail", layer: 0, title: "Re: salary")]
+        let after = [WindowFacts(id: 1, pid: 10, app: "Lab", layer: 0, title: "Haarness Lab"),
+                     WindowFacts(id: 3, pid: 10, app: "Lab", layer: 0, title: "Save", role: "AXSheet"),
+                     WindowFacts(id: 4, pid: 20, app: "Mail", layer: 0, title: "New mail from Sam", subrole: "AXDialog"),
+                     WindowFacts(id: 5, pid: 10, app: "Lab", layer: 101)]
+        let changes = windowChanges(before: before, after: after, target: 10)
+        XCTAssertEqual(changes.opened, [["app": "Lab", "role": "sheet", "title": "Save"],
+                                        ["app": "Mail", "role": "dialog"],
+                                        ["app": "Lab", "role": "menu"]])
+        XCTAssertEqual(changes.closed, [["app": "Mail", "role": "window"]])
+    }
 }

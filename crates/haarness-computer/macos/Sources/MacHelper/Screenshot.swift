@@ -15,15 +15,30 @@ enum Screenshot {
     static func capture(size: (width: Int, height: Int), hidden: [String], only: [String]?) throws -> CGImage {
         let picture: CGImage
         if #available(macOS 14.0, *) {
-            picture = try withScreenCaptureKit(size: size, hidden: hidden, only: only)
+            picture = try withScreenCaptureKit(size: size, region: nil, hidden: hidden, only: only)
         } else {
             picture = try withWindowList(hidden: hidden, only: only)
         }
         return try resize(picture, to: size)
     }
 
+    /// A close-up of `region` (screen points) at the display's full resolution, no more than `longest` pixels on its
+    /// long side, drawn like `capture`.
+    static func closeUp(_ region: Box, longest: Int, hidden: [String], only: [String]?) throws -> CGImage {
+        let scale = Double(NSScreen.screens.first?.backingScaleFactor ?? 2)
+        let shrink = min(1, Double(longest) / (max(region.width, region.height) * scale))
+        let size = (width: max(1, Int((region.width * scale * shrink).rounded())), height: max(1, Int((region.height * scale * shrink).rounded())))
+        let picture: CGImage
+        if #available(macOS 14.0, *) {
+            picture = try withScreenCaptureKit(size: size, region: region, hidden: hidden, only: only)
+        } else {
+            picture = try withWindowList(hidden: hidden, only: only, bounds: CGRect(x: region.x, y: region.y, width: region.width, height: region.height))
+        }
+        return try resize(picture, to: size)
+    }
+
     @available(macOS 14.0, *)
-    private static func withScreenCaptureKit(size: (width: Int, height: Int), hidden: [String], only: [String]?) throws -> CGImage {
+    private static func withScreenCaptureKit(size: (width: Int, height: Int), region: Box?, hidden: [String], only: [String]?) throws -> CGImage {
         let signal = DispatchSemaphore(value: 0)
         var shareable: SCShareableContent?
         var problem: Error?
@@ -50,6 +65,7 @@ enum Screenshot {
         let settings = SCStreamConfiguration()
         settings.width = size.width
         settings.height = size.height
+        if let region { settings.sourceRect = CGRect(x: region.x, y: region.y, width: region.width, height: region.height) }
         settings.showsCursor = only == nil
         var picture: CGImage?
         SCScreenshotManager.captureImage(contentFilter: filter, configuration: settings) { image, error in
@@ -63,7 +79,7 @@ enum Screenshot {
     }
 
     /// Fallback for macOS 12 and 13: the window server composites the selected windows in screen order.
-    private static func withWindowList(hidden: [String], only: [String]?) throws -> CGImage {
+    private static func withWindowList(hidden: [String], only: [String]?, bounds: CGRect = display) throws -> CGImage {
         guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
             throw refusal(nil)
         }
@@ -77,7 +93,8 @@ enum Screenshot {
             return CGWindowID(number)
         }
         let list = ids.map { NSNumber(value: $0) } as CFArray
-        guard let picture = CGImage(windowListFromArrayScreenBounds: display, windowArray: list, imageOption: [.nominalResolution]) else {
+        let resolution: CGWindowImageOption = bounds == display ? .nominalResolution : .bestResolution
+        guard let picture = CGImage(windowListFromArrayScreenBounds: bounds, windowArray: list, imageOption: resolution) else {
             throw refusal(nil)
         }
         return picture
@@ -150,6 +167,7 @@ enum WindowList {
                   let alpha = window[kCGWindowAlpha as String] as? Double, alpha > 0 else { return nil }
             let box = Box(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0, width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0)
             if box.width < 2 || box.height < 2 { return nil }
+            if (window[kCGWindowLayer as String] as? Int ?? 0) >= pointerLayer { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
             let bundle = app?.bundleIdentifier ?? ""
             if matches(bundle, hidden) { return nil }
@@ -173,24 +191,74 @@ enum WindowList {
         top(x, y).flatMap { NSRunningApplication(processIdentifier: $0.pid) }
     }
 
-    /// The topmost window under a screen point, apart from the helper's own and screen-wide overlays: its owner and
-    /// its window level (0 for ordinary windows; menus and pop-ups sit higher).
+    /// The topmost window under a screen point, apart from the helper's own, the pointer's and screen-wide overlays:
+    /// its owner and its window level (0 for ordinary windows; menus and pop-ups sit higher).
     static func top(_ x: Double, _ y: Double) -> (pid: pid_t, layer: Int)? {
-        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-            return nil
-        }
-        let me = ProcessInfo.processInfo.processIdentifier
         let screen = Screenshot.display
-        for window in info {
-            guard let pid = window[kCGWindowOwnerPID as String] as? Int32, pid != me,
-                  let bounds = window[kCGWindowBounds as String] as? [String: Double],
-                  ((window[kCGWindowAlpha as String] as? Double) ?? 0) > 0 else { continue }
-            let box = Box(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0, width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0)
-            guard box.holds(x, y) else { continue }
-            let layer = window[kCGWindowLayer as String] as? Int ?? 0
-            if layer != 0 && box.width >= screen.width && box.height >= screen.height - 40 { continue }
-            return (pid, layer)
+        for window in entries() where window.frame.holds(x, y) {
+            if window.layer != 0 && window.frame.width >= screen.width && window.frame.height >= screen.height - 40 { continue }
+            return (window.pid, window.layer)
         }
         return nil
+    }
+
+    /// One window as the window server lists it.
+    struct Entry {
+        var id: CGWindowID
+        var pid: pid_t
+        var layer: Int
+        /// In screen points, top-left origin.
+        var frame: Box
+        var app: String
+        var title: String?
+        var onScreen: Bool
+    }
+
+    /// The pointer's own window level: the pointer is drawn in a window that belongs to no app and takes no input.
+    static let pointerLayer = Int(CGWindowLevelForKey(.cursorWindow))
+
+    /// The windows on screen (or every window, `onScreenOnly` false), front to back, without the helper's own, the
+    /// pointer's, invisible ones and slivers.
+    static func entries(onScreenOnly: Bool = true) -> [Entry] {
+        let options: CGWindowListOption = onScreenOnly ? [.optionOnScreenOnly, .excludeDesktopElements] : [.optionAll, .excludeDesktopElements]
+        guard let info = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return [] }
+        let me = ProcessInfo.processInfo.processIdentifier
+        return info.compactMap { window in
+            guard let pid = window[kCGWindowOwnerPID as String] as? Int32, pid != me,
+                  let number = window[kCGWindowNumber as String] as? Int,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Double] else { return nil }
+            let layer = window[kCGWindowLayer as String] as? Int ?? 0
+            let owner = window[kCGWindowOwnerName as String] as? String ?? ""
+            let title = window[kCGWindowName as String] as? String
+            if layer >= pointerLayer || (owner == "Window Server" && title == "Cursor") { return nil }
+            if onScreenOnly && ((window[kCGWindowAlpha as String] as? Double) ?? 0) <= 0 { return nil }
+            let frame = Box(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0, width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0)
+            if frame.width < 2 || frame.height < 2 { return nil }
+            return Entry(
+                id: CGWindowID(number), pid: pid, layer: layer, frame: frame,
+                app: NSRunningApplication(processIdentifier: pid)?.localizedName ?? owner, title: title,
+                onScreen: (window[kCGWindowIsOnscreen as String] as? Bool) ?? onScreenOnly
+            )
+        }
+    }
+
+    /// The topmost on-screen window of `pids` under a screen point, whatever other apps' windows lie over it.
+    static func topmost(of pids: Set<pid_t>, at x: Double, _ y: Double) -> Entry? {
+        entries().first { pids.contains($0.pid) && $0.frame.holds(x, y) }
+    }
+
+    /// Whether another app's window lies over any of `pid`'s on-screen windows. Status items, the menu bar, the Dock and
+    /// other screen furniture do not count.
+    static func covered(_ pid: pid_t, besides helpers: Set<pid_t> = []) -> Bool {
+        let all = entries()
+        var above: [Entry] = []
+        for window in all {
+            if window.pid == pid && window.layer == 0 {
+                if above.contains(where: { $0.frame.intersection(window.frame) != nil }) { return true }
+            } else if window.pid != pid && !helpers.contains(window.pid) && (0..<20).contains(window.layer) {
+                above.append(window)
+            }
+        }
+        return false
     }
 }

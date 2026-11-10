@@ -4,7 +4,8 @@ import MacKit
 /// Tracks the person's own mouse and keyboard, which the agent shares. The agent only yields where the two would
 /// collide: it holds off while the person types or has a button down, typing is cut short when they type or click,
 /// and a drag is cut short when they move the pointer. Plain pointer movement and scrolling interrupt nothing, since
-/// each click names its own position and the app there is checked just before it. Escape ends the agent's turn.
+/// each click names its own position and the app there is checked just before it. Escape ends the agent's turn while
+/// it works in the app in front.
 /// Events carrying `syntheticTag` are the helper's own and are ignored.
 final class Presence {
     static let shared = Presence()
