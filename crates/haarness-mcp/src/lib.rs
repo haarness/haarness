@@ -6,7 +6,9 @@ pub mod keychain;
 mod process;
 #[cfg(all(test, unix))]
 mod process_tests;
+mod session;
 use credentials::FileCredentialStore;
+use session::SessionClient;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -295,6 +297,13 @@ struct CatalogClient {
     /// tools, by the names they gave, quoted (`None` for one with no name;
     /// see [`Self::list_tools`]).
     skipped: Arc<RwLock<Vec<Option<String>>>>,
+    /// What renews the stored sign-in this connection sends, when it sends
+    /// one: asked whether a sign-in with no known expiry can still be
+    /// renewed (see [`Self::sign_in_state`]).
+    renewer: Option<Arc<tokio::sync::Mutex<AuthorizationManager>>>,
+    /// Told the server's name when it loses its sign-in (see
+    /// [`Self::sign_in_lost`]), as when a start comes to an answer.
+    announce: Announcer,
 }
 impl CatalogClient {
     fn new(
@@ -303,6 +312,7 @@ impl CatalogClient {
         generation: uuid::Uuid,
         credential: Option<FileCredentialStore>,
         apps_on: bool,
+        announce: Announcer,
     ) -> Self {
         Self {
             home,
@@ -313,6 +323,111 @@ impl CatalogClient {
             resources: Arc::default(),
             apps_on,
             skipped: Arc::default(),
+            renewer: None,
+            announce,
+        }
+    }
+    /// Whether the sign-in Haarness keeps for this server was stored at or
+    /// after `sent` (seconds since the epoch), while a request was out:
+    /// another process signed in, or refreshed the token they share, so the
+    /// server may take the token it now holds.
+    async fn stored_since(&self, sent: u64) -> bool {
+        let Some(store) = &self.credential else {
+            return false;
+        };
+        matches!(
+            OAuthCredentialStore::load(store).await,
+            Ok(Some(stored)) if stored.token_response.is_some()
+                && stored.token_received_at.is_some_and(|at| at >= sent)
+        )
+    }
+    /// What became of the sign-in Haarness keeps for this server, once the
+    /// server refused a request for want of one. It cannot be used when
+    /// there is none, it has no refresh token, or its access token has
+    /// expired (or is within the 30 s before it, when rmcp renews it), which
+    /// the refused request could not renew. One whose expiry is not known is
+    /// renewed now to tell: refused, it cannot be used; renewed, the request
+    /// may go again. A sign-in still current, one that failed to renew only
+    /// for now, or one whose store cannot be read, is not given up on.
+    async fn sign_in_state(&self) -> SignInState {
+        let Some(store) = &self.credential else {
+            return SignInState::Current;
+        };
+        let Ok(stored) = OAuthCredentialStore::load(store).await else {
+            return SignInState::Current;
+        };
+        let Some((token, received)) = stored.and_then(|stored| {
+            let token = serde_json::to_value(stored.token_response.as_ref()?).ok()?;
+            Some((token, stored.token_received_at))
+        }) else {
+            return SignInState::Unusable;
+        };
+        if token
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return SignInState::Unusable;
+        }
+        if let (Some(lasts), Some(received)) =
+            (token.get("expires_in").and_then(Value::as_u64), received)
+        {
+            let left = lasts.saturating_sub(epoch_seconds().saturating_sub(received));
+            return if left < RENEWAL_MARGIN_SECS {
+                SignInState::Unusable
+            } else {
+                SignInState::Current
+            };
+        }
+        let Some(renewer) = &self.renewer else {
+            return SignInState::Current;
+        };
+        match renewer.lock().await.refresh_token().await {
+            Ok(_) => SignInState::Renewed,
+            Err(
+                rmcp::transport::AuthError::TokenRefreshRejected(_)
+                | rmcp::transport::AuthError::AuthorizationRequired,
+            ) => SignInState::Unusable,
+            Err(_) => SignInState::Current,
+        }
+    }
+    /// The server no longer takes this connection's sign-in: its refresh
+    /// token was refused, or there was none to renew an expired access
+    /// token with. Connecting again would end there too, so the server needs
+    /// authorization now, as a start that ends there does: its tools are
+    /// gone, its worker is dropped (the requests still out end with their
+    /// own answers) and clients are told, so each offers to sign in. The
+    /// stored sign-in stays. Only while this connection is still the
+    /// server's: of several requests refused at once, the first changes the
+    /// status and the others find it changed.
+    fn sign_in_lost(&self, challenge: Option<String>) {
+        let lost = with_home(&self.home, |_, entries| {
+            let Some(entry) = entries.get_mut(&self.name) else {
+                return false;
+            };
+            if entry.generation != self.generation || entry.info.status != "connected" {
+                return false;
+            }
+            entry.generation = uuid::Uuid::now_v7();
+            entry.worker = None;
+            entry.resources = false;
+            entry.forget_catalog();
+            entry.identity = None;
+            entry.auth_challenge = challenge;
+            entry.info.status = "needs_auth".into();
+            entry.info.detail = Some(authorization_required(&self.name));
+            true
+        });
+        if lost != Some(true) {
+            return;
+        }
+        tracing::info!(
+            server = %self.name,
+            "an MCP server refused its stored sign-in; it needs authorization"
+        );
+        let told = self.announce.read().clone();
+        if let Some(announce) = told {
+            announce(&self.name);
         }
     }
     /// Every tool the server lists, across its pages. rmcp reads a page
@@ -473,7 +588,20 @@ impl rmcp::ClientHandler for CatalogClient {
             }
             entry.forget_catalog();
         }
-        let Ok(tools) = self.list_tools(&context.peer).await else {
+        // A listing the server refuses for want of a sign-in tells the
+        // person to sign in, as a request does.
+        let sent = epoch_seconds();
+        let first = self.list_tools(&context.peer).await;
+        let connection = Connection {
+            limit: None,
+            sign_in: self.credential.is_some().then(|| self.clone()),
+        };
+        let listed = connection
+            .signed_in(sent, first, || async {
+                Some(self.list_tools(&context.peer).await)
+            })
+            .await;
+        let Some(Ok(tools)) = listed else {
             return;
         };
         let Some(servers) = self.home.read().upgrade() else {
@@ -1313,12 +1441,18 @@ impl NativeMcpRegistry {
         self.revoke_stale();
         // The read guard ends with this statement: `stopped` reads the lock
         // again, and a second read while a writer waits would never return.
-        let worker = self
+        let (worker, signed_out_now) = self
             .servers
             .read()
             .get(name)
-            .and_then(|entry| entry.worker.clone());
+            .map(|entry| (entry.worker.clone(), entry.info.status == "needs_auth"))
+            .unwrap_or_default();
         let Some(worker) = worker else {
+            // A server waiting for a sign-in says so, to a script or a later
+            // call too, so the model tells the person what to do.
+            if signed_out_now {
+                return Err(signed_out(name));
+            }
             return Err(self.stopped(name).unwrap_or_else(|| {
                 CoreError::Conflict(format!("MCP server {name} is not connected"))
             }));
@@ -1529,6 +1663,7 @@ impl McpStart {
             generation,
             credential.clone(),
             config.apps != Some(false),
+            announce.clone(),
         );
         let oversized = (config.transport == "stdio").then(Arc::<AtomicBool>::default);
         let mut launch = launch_config(&config, folder.as_deref());
@@ -1641,9 +1776,7 @@ impl McpStart {
                     entry.worker = None;
                     entry.auth_challenge = challenge;
                     entry.info.status = "needs_auth".into();
-                    entry.info.detail = Some(format!(
-                        "authorization required; run `haarness mcp auth {name}`"
-                    ));
+                    entry.info.detail = Some(authorization_required(name));
                     return (Ok(entry.info.clone()), None);
                 }
                 Err(ActivationError::Core(_))
@@ -1779,6 +1912,11 @@ fn settled<T>(limit: Option<&Limit>, result: CoreResult<T>) -> CoreResult<T> {
         }
         _ => result,
     }
+}
+
+/// The status detail of a server that needs authorization.
+fn authorization_required(name: &str) -> String {
+    format!("authorization required; run `haarness mcp auth {name}`")
 }
 
 fn credential_valid(credential: Option<&FileCredentialStore>) -> bool {
@@ -2263,19 +2401,24 @@ async fn activate_remote(
             )
             .await?;
             if authorized {
+                let client = AuthClient::new(SessionClient(http), manager);
+                let handler = CatalogClient {
+                    renewer: Some(client.auth_manager.clone()),
+                    ..handler.clone()
+                };
                 activate_streamable(
-                    handler.clone(),
-                    StreamableHttpClientTransport::with_client(
-                        AuthClient::new(http, manager),
-                        transport_config,
-                    ),
+                    handler,
+                    StreamableHttpClientTransport::with_client(client, transport_config),
                     url,
                 )
                 .await
             } else {
                 activate_streamable(
                     handler.clone(),
-                    StreamableHttpClientTransport::with_client(http, transport_config),
+                    StreamableHttpClientTransport::with_client(
+                        SessionClient(http),
+                        transport_config,
+                    ),
                     url,
                 )
                 .await
@@ -2283,7 +2426,7 @@ async fn activate_remote(
         } else {
             activate_streamable(
                 handler.clone(),
-                StreamableHttpClientTransport::with_client(http, transport_config),
+                StreamableHttpClientTransport::with_client(SessionClient(http), transport_config),
                 url,
             )
             .await
@@ -2339,7 +2482,13 @@ fn spawn_worker(
     credential: Option<FileCredentialStore>,
     limit: Option<Limit>,
 ) -> mpsc::Sender<WorkerCommand> {
-    let limit = limit.map(Arc::new);
+    let connection = Connection {
+        limit: limit.map(Arc::new),
+        // Only a connection that signs in with the sign-in Haarness keeps
+        // for its server can lose it: a configured Authorization header or
+        // a headers helper is the setting's to fix.
+        sign_in: credential.is_some().then(|| client.service().clone()),
+    };
     let (tx, mut rx) = mpsc::channel(64);
     tokio::spawn(async move {
         let peer = client.peer().clone();
@@ -2381,7 +2530,7 @@ fn spawn_worker(
                         &mut calls,
                         request,
                         reply,
-                        limit.clone(),
+                        &connection,
                         false,
                         move |result| match result {
                             rmcp::model::ServerResult::CallToolResult(result) => match &app {
@@ -2402,14 +2551,14 @@ fn spawn_worker(
                         // client) is dropped, so the next request runs.
                         tokio::select! {
                             () = reply.closed() => continue,
-                            result = peer.list_all_resources() => {
-                                result.map_err(mcp_error).and_then(json_values)
+                            result = connection.listed(|| peer.list_all_resources()) => {
+                                result.and_then(json_values)
                             }
                         }
                     } else {
                         Ok(Vec::new())
                     };
-                    let _ = reply.send(settled(limit.as_deref(), result));
+                    let _ = reply.send(connection.settled(result));
                 }
                 WorkerCommand::ResourceTemplates { mut reply } => {
                     let result = if peer
@@ -2418,14 +2567,14 @@ fn spawn_worker(
                     {
                         tokio::select! {
                             () = reply.closed() => continue,
-                            result = peer.list_all_resource_templates() => {
-                                result.map_err(mcp_error).and_then(json_values)
+                            result = connection.listed(|| peer.list_all_resource_templates()) => {
+                                result.and_then(json_values)
                             }
                         }
                     } else {
                         Ok(Vec::new())
                     };
-                    let _ = reply.send(settled(limit.as_deref(), result));
+                    let _ = reply.send(connection.settled(result));
                 }
                 WorkerCommand::ReadResource { uri, reply } => {
                     let request = rmcp::model::ClientRequest::ReadResourceRequest(
@@ -2438,7 +2587,7 @@ fn spawn_worker(
                         &mut calls,
                         request,
                         reply,
-                        limit.clone(),
+                        &connection,
                         true,
                         |result| match result {
                             rmcp::model::ServerResult::ReadResourceResult(result) => {
@@ -2458,14 +2607,14 @@ fn spawn_worker(
                         // more is dropped, so the server's next request runs.
                         tokio::select! {
                             () = reply.closed() => continue,
-                            result = peer.list_all_prompts() => {
-                                result.map_err(mcp_error).and_then(json_values)
+                            result = connection.listed(|| peer.list_all_prompts()) => {
+                                result.and_then(json_values)
                             }
                         }
                     } else {
                         Ok(Vec::new())
                     };
-                    let _ = reply.send(settled(limit.as_deref(), result));
+                    let _ = reply.send(connection.settled(result));
                 }
                 WorkerCommand::GetPrompt {
                     prompt,
@@ -2484,7 +2633,7 @@ fn spawn_worker(
                         &mut calls,
                         request,
                         reply,
-                        limit.clone(),
+                        &connection,
                         true,
                         |result| match result {
                             rmcp::model::ServerResult::GetPromptResult(result) => {
@@ -2512,7 +2661,8 @@ fn spawn_worker(
 }
 
 /// Sends `request` now, after the requests before it, and answers `reply`
-/// from a task of its own once the server does, through `answer`. A request
+/// from a task of its own once the server does, through `answer`, which
+/// runs off the async executor (it may shrink a large image). A request
 /// nobody waits for any more is not sent. With `cancel`, the server is told
 /// to stop once nobody waits for the answer.
 async fn dispatch<T: Send + 'static>(
@@ -2520,45 +2670,240 @@ async fn dispatch<T: Send + 'static>(
     calls: &mut tokio::task::JoinSet<()>,
     request: rmcp::model::ClientRequest,
     mut reply: oneshot::Sender<CoreResult<T>>,
-    limit: Option<Arc<Limit>>,
+    connection: &Connection,
     cancel: bool,
     answer: impl FnOnce(rmcp::model::ServerResult) -> CoreResult<T> + Send + 'static,
 ) {
     if reply.is_closed() {
         return;
     }
+    let sent = epoch_seconds();
+    // Kept to send again, should the server refuse a sign-in that another
+    // process renewed meanwhile (see `Connection::signed_in`).
+    let again = connection.sign_in.is_some().then(|| request.clone());
     let handle = match peer
         .send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options())
         .await
     {
         Ok(handle) => handle,
         Err(error) => {
-            let _ = reply.send(settled(limit.as_deref(), Err(mcp_error(error))));
+            let _ = reply.send(connection.settled(Err(mcp_error(error))));
             return;
         }
     };
     let peer = peer.clone();
+    let connection = connection.clone();
     calls.spawn(async move {
-        let id = handle.id.clone();
-        let result = if cancel {
-            tokio::select! {
-                () = reply.closed() => {
-                    let _ = peer
-                        .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
-                            Some(id),
-                            Some("The user stopped the request".into()),
-                        ))
-                        .await;
-                    return;
-                }
-                result = handle.await_response() => result,
-            }
-        } else {
-            handle.await_response().await
+        let Some(first) = answered(&peer, handle, &mut reply, cancel).await else {
+            return;
         };
-        let result = result.map_err(mcp_error).and_then(answer);
-        let _ = reply.send(settled(limit.as_deref(), result));
+        let (to, waiting) = (&peer, &mut reply);
+        let resend = move || async move {
+            let request = again?;
+            match to
+                .send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options())
+                .await
+            {
+                Ok(handle) => answered(to, handle, waiting, cancel).await,
+                Err(error) => Some(Err(error)),
+            }
+        };
+        let Some(result) = connection.signed_in(sent, first, resend).await else {
+            return;
+        };
+        let result = match result {
+            Ok(result) => tokio::task::spawn_blocking(move || answer(result))
+                .await
+                .unwrap_or_else(|error| Err(mcp_error(error))),
+            Err(error) => Err(error),
+        };
+        let _ = reply.send(connection.settled(result));
     });
+}
+
+/// The server's answer to the request `handle` stands for, or `None` when,
+/// with `cancel`, nobody waits for it any more: the server is then told to
+/// stop.
+async fn answered<T>(
+    peer: &rmcp::service::Peer<RoleClient>,
+    handle: rmcp::service::RequestHandle<RoleClient>,
+    reply: &mut oneshot::Sender<CoreResult<T>>,
+    cancel: bool,
+) -> Option<Result<rmcp::model::ServerResult, rmcp::ServiceError>> {
+    if !cancel {
+        return Some(handle.await_response().await);
+    }
+    let id = handle.id.clone();
+    tokio::select! {
+        () = reply.closed() => {
+            let _ = peer
+                .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
+                    Some(id),
+                    Some("The user stopped the request".into()),
+                ))
+                .await;
+            None
+        }
+        result = handle.await_response() => Some(result),
+    }
+}
+
+/// What a connection's worker answers its requests with besides the
+/// server's answers: the message limit of a stdio server, and the sign-in
+/// of a server that signs in with the one Haarness keeps for it.
+#[derive(Clone)]
+struct Connection {
+    limit: Option<Arc<Limit>>,
+    sign_in: Option<CatalogClient>,
+}
+
+impl Connection {
+    /// `result`, as [`settled`] gives it.
+    fn settled<T>(&self, result: CoreResult<T>) -> CoreResult<T> {
+        settled(self.limit.as_deref(), result)
+    }
+
+    /// The answer to a listing, `list`, sent now (see [`Self::signed_in`]).
+    async fn listed<T, F, Fut>(&self, list: F) -> CoreResult<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, rmcp::ServiceError>>,
+    {
+        let sent = epoch_seconds();
+        let first = list().await;
+        self.signed_in(sent, first, || async { Some(list().await) })
+            .await
+            .unwrap_or_else(|| Err(mcp_error("the listing ended without an answer")))
+    }
+
+    /// `first`, the answer to a request sent at `sent` (seconds since the
+    /// epoch). When the server refused it for want of a sign-in, on a
+    /// connection that signs in with the one Haarness keeps for the server,
+    /// the request goes once more through `again` if that sign-in was stored
+    /// since (another process signed in, or renewed a token both share and
+    /// the authorization server rotated), or is stored within
+    /// [`SIGN_IN_SETTLES`] while the one there cannot be used, or was just
+    /// renewed. Refused all the same, the server needs authorization only
+    /// when the stored sign-in cannot be used (see
+    /// [`CatalogClient::sign_in_state`], [`CatalogClient::sign_in_lost`]),
+    /// and the request fails saying so.
+    /// Otherwise (an authorization server or a token check down for now,
+    /// clocks that disagree) the request keeps its own error and the
+    /// connection stays. `None` when `again` was not waited for.
+    async fn signed_in<T, Fut>(
+        &self,
+        sent: u64,
+        first: Result<T, rmcp::ServiceError>,
+        again: impl FnOnce() -> Fut,
+    ) -> Option<CoreResult<T>>
+    where
+        Fut: std::future::Future<Output = Option<Result<T, rmcp::ServiceError>>>,
+    {
+        let Some(sign_in) = &self.sign_in else {
+            return Some(first.map_err(mcp_error));
+        };
+        let mut result = first;
+        let Some(mut challenge) = result.as_ref().err().and_then(sign_in_refused) else {
+            return Some(result.map_err(mcp_error));
+        };
+        let mut newer = sign_in.stored_since(sent).await;
+        let mut known = None;
+        if !newer {
+            match sign_in.sign_in_state().await {
+                SignInState::Unusable => {
+                    tokio::time::sleep(SIGN_IN_SETTLES).await;
+                    newer = sign_in.stored_since(sent).await;
+                    if !newer {
+                        known = Some(SignInState::Unusable);
+                    }
+                }
+                SignInState::Renewed => newer = true,
+                SignInState::Current => known = Some(SignInState::Current),
+            }
+        }
+        if newer {
+            result = again().await?;
+            match result.as_ref().err().and_then(sign_in_refused) {
+                Some(refused) => challenge = refused,
+                None => return Some(result.map_err(mcp_error)),
+            }
+        }
+        let state = match known {
+            Some(state) => state,
+            None => sign_in.sign_in_state().await,
+        };
+        if state != SignInState::Unusable {
+            return Some(result.map_err(mcp_error));
+        }
+        sign_in.sign_in_lost(challenge.0);
+        Some(Err(signed_out(&sign_in.name)))
+    }
+}
+
+/// A request the server refused for want of a sign-in, with the challenge
+/// it answered with (its `WWW-Authenticate`), if any.
+struct SignInRefused(Option<String>);
+
+/// What became of a stored sign-in a server refused (see
+/// [`CatalogClient::sign_in_state`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SignInState {
+    /// Still current, or renewable once the authorization server answers.
+    Current,
+    /// Renewed just now: the refused request may go again.
+    Renewed,
+    /// It cannot be used: the server needs authorization.
+    Unusable,
+}
+
+/// Whether `error` says the server refused a request for want of a
+/// sign-in. rmcp sends a request without a token once the stored sign-in
+/// can no longer be refreshed, and the server answers 401.
+fn sign_in_refused(error: &rmcp::ServiceError) -> Option<SignInRefused> {
+    let rmcp::ServiceError::TransportSend(error) = error else {
+        return None;
+    };
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error.error.as_ref());
+    while let Some(current) = cause {
+        if let Some(required) =
+            current.downcast_ref::<rmcp::transport::streamable_http_client::AuthRequiredError>()
+        {
+            return Some(SignInRefused(Some(
+                required.www_authenticate_header.clone(),
+            )));
+        }
+        if matches!(
+            current.downcast_ref::<rmcp::transport::AuthError>(),
+            Some(rmcp::transport::AuthError::AuthorizationRequired)
+        ) {
+            return Some(SignInRefused(None));
+        }
+        cause = current.source();
+    }
+    None
+}
+
+/// What a request fails with when its server needs a sign-in it does not
+/// have: one it no longer takes, or none. The model reads it and tells the
+/// person.
+fn signed_out(name: &str) -> CoreError {
+    CoreError::Tool(format!(
+        "MCP server \"{name}\" needs the user to sign in to it before its tools work: its sign-in is missing or no longer accepted"
+    ))
+}
+
+/// How long before its access token expires rmcp renews a sign-in.
+const RENEWAL_MARGIN_SECS: u64 = 30;
+
+/// How long a request refused for an unusable sign-in waits for another
+/// process that may be renewing the sign-in both share to store the new
+/// one, before the server is marked as needing authorization.
+const SIGN_IN_SETTLES: Duration = Duration::from_secs(1);
+
+fn epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 fn json_values<T: serde::Serialize>(values: Vec<T>) -> CoreResult<Vec<Value>> {
@@ -2883,7 +3228,7 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
                     &image.data,
                     "image",
                     &mut attachment_bytes,
-                )?;
+                );
                 attachments.extend(attachment);
                 text_parts.push(line);
             }
@@ -2893,7 +3238,7 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
                     &audio.data,
                     "audio",
                     &mut attachment_bytes,
-                )?;
+                );
                 attachments.extend(attachment);
                 text_parts.push(line);
             }
@@ -2910,6 +3255,17 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
                 } => {
                     has_text |= !text.is_empty();
                     text_parts.push(resource_text(uri, mime_type.as_deref(), text));
+                }
+                rmcp::model::ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    ..
+                } if image_type(mime_type.as_deref()) => {
+                    let mime = mcp_content::media_type(mime_type.as_deref().unwrap_or_default());
+                    let (attachment, line) = image_blob(uri, &mime, blob, &mut attachment_bytes);
+                    attachments.extend(attachment);
+                    text_parts.push(line);
                 }
                 rmcp::model::ResourceContents::BlobResourceContents {
                     uri,
@@ -2975,6 +3331,14 @@ fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<Tool
     }
 }
 
+/// Whether a blob declared as `mime` holds an image: an `image/` type that
+/// is not text (an SVG is).
+fn image_type(mime: Option<&str>) -> bool {
+    use haarness_core::mcp_content;
+    let mime = mcp_content::media_type(mime.unwrap_or_default());
+    mime.starts_with("image/") && !mcp_content::textual(&mime)
+}
+
 /// A resource's text as a tool result holds it: a line naming the
 /// resource (`[notes://today: text/markdown]`), then the text.
 fn resource_text(uri: &str, mime: Option<&str>, text: &str) -> String {
@@ -2988,57 +3352,257 @@ fn resource_text(uri: &str, mime: Option<&str>, text: &str) -> String {
 }
 
 /// An image or audio block as the model takes it: the attachment and the
-/// line that stands for it, or, for a type Haarness does not carry to
-/// providers (`audio/webm`), only a line that names it. An image whose
-/// type is mislabelled (`image/jpg`) is attached as what its bytes are, and
-/// one of a text type (an SVG) is attached as before, which the model reads
-/// as its text. Base64 broken over lines is read without the breaks.
+/// line that stands for it, or only a line that names it when it is left
+/// out. An image goes as Read sends one (see [`mcp_image`]); other media
+/// are attached while the result's media (`total`) stay within
+/// [`haarness_core::mcp_content::MAX_ATTACHMENT_BYTES`], so one past that is
+/// named rather than failing the call and losing its text. A type Haarness
+/// does not carry to providers (`audio/webm`) is named too, and one of a
+/// text type (an SVG) is attached as before, which the model reads as its
+/// text. Base64 broken over lines is read without the breaks; base64 that
+/// does not decode is named too, never sent.
 fn media_block(
     declared: &str,
     data: &str,
     kind: &str,
     total: &mut usize,
-) -> CoreResult<(Option<String>, String)> {
+) -> (Option<String>, String) {
     use haarness_core::{attachments::is_supported_media_mime, mcp_content};
     let data = mcp_content::base64_text(data);
-    let mut mime = mcp_content::media_type(declared);
-    if !is_supported_media_mime(&mime) && !mcp_content::textual(&mime) {
-        let sniffed = mime
-            .starts_with("image/")
-            .then(|| STANDARD.decode(data.as_bytes()).ok())
-            .flatten()
-            .and_then(|bytes| haarness_core::images::sniff(&bytes))
-            .filter(|sniffed| is_supported_media_mime(sniffed));
-        let Some(sniffed) = sniffed else {
-            let bytes = data.trim_end_matches('=').len() / 4 * 3;
-            return Ok((
+    let mime = mcp_content::media_type(declared);
+    let invalid = || {
+        (
+            None,
+            format!("[{mime} {kind}, left out: its data is not valid base64]"),
+        )
+    };
+    if mime.starts_with("image/") && !mcp_content::textual(&mime) {
+        let Ok(image) = mcp_image(&data, total) else {
+            return invalid();
+        };
+        return match image {
+            McpImage::Attached {
+                mime,
+                data_url,
+                shown,
+            } => (
+                Some(data_url),
+                match shown {
+                    Some((width, height)) => {
+                        format!("[{mime} {kind} attachment, shown to you as {width}×{height}]")
+                    }
+                    None => format!("[{mime} {kind} attachment]"),
+                },
+            ),
+            McpImage::LeftOut { bytes, reason } => (
+                None,
+                format!("[{mime} {kind}, {bytes} bytes, left out: {reason}]"),
+            ),
+            McpImage::Unknown(bytes) if is_supported_media_mime(&mime) => (
+                None,
+                format!("[{mime} {kind}, {bytes} bytes, left out: its bytes are not an image]"),
+            ),
+            McpImage::Unknown(bytes) => (
                 None,
                 format!(
                     "[{mime} {kind}, about {bytes} bytes, left out: Haarness does not attach this type]"
                 ),
-            ));
+            ),
         };
-        sniffed.clone_into(&mut mime);
     }
-    count_mcp_attachment(&data, total)?;
-    Ok((
+    if !is_supported_media_mime(&mime) && !mcp_content::textual(&mime) {
+        let bytes = data.trim_end_matches('=').len() / 4 * 3;
+        return (
+            None,
+            format!(
+                "[{mime} {kind}, about {bytes} bytes, left out: Haarness does not attach this type]"
+            ),
+        );
+    }
+    let Ok(bytes) = STANDARD.decode(data.as_bytes()).map(|bytes| bytes.len()) else {
+        return invalid();
+    };
+    if total.saturating_add(bytes) > haarness_core::mcp_content::MAX_ATTACHMENT_BYTES {
+        return (
+            None,
+            format!("[{mime} {kind}, {bytes} bytes, left out: {MEDIA_PAST_LIMIT}]"),
+        );
+    }
+    *total += bytes;
+    (
         Some(format!("data:{mime};base64,{data}")),
         format!("[{mime} {kind} attachment]"),
-    ))
+    )
 }
 
-fn count_mcp_attachment(encoded: &str, total: &mut usize) -> CoreResult<()> {
-    let decoded = STANDARD
-        .decode(encoded)
-        .map_err(|error| CoreError::Tool(format!("invalid MCP media base64: {error}")))?;
-    *total = total.saturating_add(decoded.len());
-    if *total > haarness_core::mcp_content::MAX_ATTACHMENT_BYTES {
-        return Err(CoreError::Tool(
-            "MCP media attachments exceed the 10 MiB request limit".into(),
-        ));
-    }
-    Ok(())
+/// Why a result's medium past [`haarness_core::mcp_content::MAX_ATTACHMENT_BYTES`]
+/// is left out.
+const MEDIA_PAST_LIMIT: &str = "a result attaches at most 10 MiB of media";
+
+/// How an image an MCP server sends reaches the model.
+enum McpImage {
+    /// Attached as `data_url`, of type `mime`; `shown` is the size it was
+    /// shrunk or converted to, when it was.
+    Attached {
+        mime: &'static str,
+        data_url: String,
+        shown: Option<(u32, u32)>,
+    },
+    /// Left out, `bytes` long, for `reason`.
+    LeftOut { bytes: usize, reason: String },
+    /// `bytes` long, and no image type Haarness knows.
+    Unknown(usize),
 }
+
+/// The image `data` (base64 without line breaks) as Read sends one: made
+/// into an image every provider reads, shrunk to fit and converted from a
+/// type providers do not take, then counted into `total`, the media the
+/// result attaches. An image is judged against the ceiling a file has
+/// ([`haarness_core::attachments::MAX_IMAGE_SOURCE_BYTES`]) before it is
+/// decoded, and against the result's media limit once prepared, so a large
+/// screenshot reaches the model shrunk. Decoding is CPU work; the worker runs
+/// this off the async executor, and at most [`IMAGE_DECODES`] large images
+/// are decoded at once. One that could not fit the result's media any more
+/// is not decoded at all.
+fn mcp_image(data: &str, total: &mut usize) -> Result<McpImage, base64::DecodeError> {
+    use haarness_core::{attachments::MAX_IMAGE_SOURCE_BYTES, images, mcp_content};
+    let estimate = data.trim_end_matches('=').len() / 4 * 3;
+    if *total >= mcp_content::MAX_ATTACHMENT_BYTES {
+        return Ok(McpImage::LeftOut {
+            bytes: estimate,
+            reason: MEDIA_PAST_LIMIT.into(),
+        });
+    }
+    if u64::try_from(estimate).unwrap_or(u64::MAX) > MAX_IMAGE_SOURCE_BYTES {
+        return Ok(McpImage::LeftOut {
+            bytes: estimate,
+            reason: format!(
+                "larger than the {} MiB image limit",
+                MAX_IMAGE_SOURCE_BYTES / 1024 / 1024
+            ),
+        });
+    }
+    let bytes = STANDARD.decode(data.as_bytes())?;
+    let size = bytes.len();
+    if images::sniff(&bytes).is_none() {
+        return Ok(McpImage::Unknown(size));
+    }
+    let decoding = (size > LARGE_IMAGE_BYTES).then(Decoding::start);
+    let prepared = images::prepare(bytes);
+    drop(decoding);
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(refusal) => {
+            return Ok(McpImage::LeftOut {
+                bytes: size,
+                reason: match refusal {
+                    images::Refusal::Unreadable(detail) => {
+                        format!("it cannot be read as an image ({detail})")
+                    }
+                    images::Refusal::Unsupported("HEIC") => {
+                        "a HEIC image, which Haarness converts only on macOS".into()
+                    }
+                    images::Refusal::Unsupported(kind) => {
+                        format!("a {kind} image, which models do not read")
+                    }
+                    images::Refusal::TooLarge => "too large to send even after shrinking".into(),
+                    images::Refusal::NotAnImage => "its bytes are not an image".into(),
+                },
+            });
+        }
+    };
+    if total.saturating_add(prepared.bytes.len()) > mcp_content::MAX_ATTACHMENT_BYTES {
+        return Ok(McpImage::LeftOut {
+            bytes: size,
+            reason: MEDIA_PAST_LIMIT.into(),
+        });
+    }
+    *total += prepared.bytes.len();
+    let data_url = if prepared.changed {
+        format!(
+            "data:{};base64,{}",
+            prepared.mime_type,
+            STANDARD.encode(&prepared.bytes)
+        )
+    } else {
+        format!("data:{};base64,{data}", prepared.mime_type)
+    };
+    Ok(McpImage::Attached {
+        mime: prepared.mime_type,
+        data_url,
+        shown: prepared
+            .changed
+            .then_some((prepared.width, prepared.height)),
+    })
+}
+
+/// How many large MCP images (over [`LARGE_IMAGE_BYTES`]) are decoded at
+/// once, across every call: each may hold hundreds of megabytes of pixels
+/// while it is. Smaller ones (an icon, a chart) never wait behind them.
+const IMAGE_DECODES: usize = 2;
+
+/// The size from which an MCP image is a large one, as a screenshot is.
+const LARGE_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+
+/// The images being decoded, and the wait for one to end.
+static DECODING: (parking_lot::Mutex<usize>, parking_lot::Condvar) =
+    (parking_lot::Mutex::new(0), parking_lot::Condvar::new());
+
+/// One of the [`IMAGE_DECODES`] large images decoded at once, for as long as
+/// this is held. It is taken on a blocking thread, which waits for its turn.
+struct Decoding;
+
+impl Decoding {
+    fn start() -> Self {
+        let (running, ended) = &DECODING;
+        let mut running = running.lock();
+        while *running >= IMAGE_DECODES {
+            ended.wait(&mut running);
+        }
+        *running += 1;
+        Self
+    }
+}
+
+impl Drop for Decoding {
+    fn drop(&mut self) {
+        let (running, ended) = &DECODING;
+        *running.lock() -= 1;
+        ended.notify_one();
+    }
+}
+
+/// An image a tool's result embeds as a resource blob, as [`mcp_image`]
+/// gives it: the attachment and the line naming it, written as the other
+/// blobs' are (see [`haarness_core::mcp_content::blob`]).
+fn image_blob(uri: &str, mime: &str, blob: &str, total: &mut usize) -> (Option<String>, String) {
+    let blob = haarness_core::mcp_content::base64_text(blob);
+    match mcp_image(&blob, total) {
+        Ok(McpImage::Attached {
+            mime,
+            data_url,
+            shown,
+        }) => (
+            Some(data_url),
+            match shown {
+                Some((width, height)) => {
+                    format!("[{mime} attachment: {uri}, shown to you as {width}×{height}]")
+                }
+                None => format!("[{mime} attachment: {uri}]"),
+            },
+        ),
+        Ok(McpImage::LeftOut { bytes, reason }) => (
+            None,
+            format!("[{uri}: {mime}, {bytes} bytes, left out: {reason}]"),
+        ),
+        Ok(McpImage::Unknown(bytes)) => (None, format!("[{uri}: {mime}, {bytes} bytes]")),
+        Err(_) => (
+            None,
+            format!("[{uri}: {mime} content that is not valid base64]"),
+        ),
+    }
+}
+
 /// A server that could not be reached reads as that, with the innermost
 /// reason ("Connection refused"), not as rmcp's transport type names.
 fn initialize_error(error: &(dyn std::error::Error + 'static), url: &str) -> CoreError {
@@ -3140,37 +3704,72 @@ async fn resolve_headers(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let child = command.spawn().map_err(|_| {
+    // In a group of its own, stopped whole on a timeout or when the start
+    // that runs it stops (see `process::Group`).
+    #[cfg(unix)]
+    command.process_group(0);
+    let not_run = || {
         CoreError::Tool(format!(
             "headersHelper for MCP server \"{name}\" could not be executed"
         ))
-    })?;
+    };
+    let mut child = command.spawn().map_err(|_| not_run())?;
+    // Declared after the child, so a start stopped while it runs stops the
+    // group before the child is dropped (and its shell killed): the shell is
+    // still there to find what it started, a child that left the group
+    // (`setsid`, a shell's job control) included.
+    let group = process::Group::led_by(child.id());
+    let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(not_run());
+    };
+    // Both pipes are read at once, so a helper that fills one never waits
+    // on the other; one that writes past the limit ends the wait at once.
+    let finished = async {
+        let (stdout, stderr) = tokio::try_join!(helper_output(&mut out), helper_output(&mut err))?;
+        Ok::<_, std::io::Error>((child.wait().await?, stdout, stderr))
+    };
     let timeout = connection_timeout(config);
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| CoreError::Tool(format!("headersHelper for MCP server \"{name}\" timed out")))?
-        .map_err(|_| {
-            CoreError::Tool(format!(
-                "headersHelper for MCP server \"{name}\" could not be executed"
-            ))
-        })?;
-    if output.stdout.len().saturating_add(output.stderr.len()) > HEADERS_HELPER_OUTPUT_LIMIT {
-        return Err(CoreError::Tool(format!(
+    let ended = tokio::time::timeout(timeout, finished).await;
+    let too_much = || {
+        CoreError::Tool(format!(
             "headersHelper for MCP server \"{name}\" produced more than 64 KiB of output"
-        )));
+        ))
+    };
+    let (status, stdout, stderr) = match ended {
+        Ok(Ok(finished)) => finished,
+        unfinished => {
+            // Stopped while its shell still runs (see above). A shell that
+            // ended already, leaving a child that holds its output open,
+            // leaves no tree to walk: its pid may be another process's now.
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                group.leader_ended();
+            } else {
+                drop(group);
+            }
+            return Err(match unfinished {
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::FileTooLarge => too_much(),
+                Ok(_) => not_run(),
+                Err(_) => {
+                    CoreError::Tool(format!("headersHelper for MCP server \"{name}\" timed out"))
+                }
+            });
+        }
+    };
+    group.finished();
+    if stdout.len().saturating_add(stderr.len()) > HEADERS_HELPER_OUTPUT_LIMIT {
+        return Err(too_much());
     }
-    if !output.status.success() {
+    if !status.success() {
         return Err(CoreError::Tool(format!(
             "headersHelper for MCP server \"{name}\" exited with code {}",
-            output.status.code().unwrap_or(-1)
+            status.code().unwrap_or(-1)
         )));
     }
-    let dynamic: BTreeMap<String, String> =
-        serde_json::from_slice(&output.stdout).map_err(|_| {
-            CoreError::Tool(format!(
-                "headersHelper for MCP server \"{name}\" returned malformed JSON"
-            ))
-        })?;
+    let dynamic: BTreeMap<String, String> = serde_json::from_slice(&stdout).map_err(|_| {
+        CoreError::Tool(format!(
+            "headersHelper for MCP server \"{name}\" returned malformed JSON"
+        ))
+    })?;
     for (name, value) in dynamic {
         let previous = headers
             .keys()
@@ -3183,6 +3782,21 @@ async fn resolve_headers(
         headers.insert(name, value);
     }
     Ok(headers)
+}
+
+/// What a headers helper wrote to `pipe`, read to its end; past
+/// [`HEADERS_HELPER_OUTPUT_LIMIT`] the read ends there, failing, rather than
+/// holding all a runaway helper writes until its timeout.
+async fn helper_output(pipe: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+    let mut output = Vec::new();
+    pipe.take(HEADERS_HELPER_OUTPUT_LIMIT as u64 + 1)
+        .read_to_end(&mut output)
+        .await?;
+    if output.len() > HEADERS_HELPER_OUTPUT_LIMIT {
+        return Err(std::io::ErrorKind::FileTooLarge.into());
+    }
+    Ok(output)
 }
 
 /// A headers helper as `cmd.exe` runs it: each `${NAME}` or
@@ -4030,6 +4644,558 @@ mod tests {
         let _ = std::fs::remove_dir_all(auth_dir);
     }
 
+    /// How [`run_sign_in_fixture`]'s authorization server answers a refresh.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Renewal {
+        /// It refuses the refresh token (`invalid_grant`): the sign-in is gone.
+        Refused,
+        /// It is down for now (503).
+        Down,
+        /// It refuses this process's refresh token, which another process
+        /// rotated a moment before, storing a newer sign-in.
+        RotatedElsewhere,
+        /// As [`Self::RotatedElsewhere`], the other process storing its
+        /// newer sign-in a moment after the refusal.
+        RotatedLater,
+    }
+
+    /// An OAuth-protected Streamable HTTP server and its authorization
+    /// server, which give each `initialize` a session (forgotten by
+    /// `restart`) and take the tokens they issued.
+    struct SignInFixture {
+        renewal: parking_lot::Mutex<Renewal>,
+        /// Where the other process of [`Renewal::RotatedElsewhere`] stores
+        /// its newer sign-in.
+        store: FileCredentialStore,
+        sessions: parking_lot::Mutex<std::collections::HashSet<String>>,
+        refreshes: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
+        /// The server refuses every token, as one whose own token check is
+        /// down, or that disagrees with this computer's clock.
+        rejecting: AtomicBool,
+        /// The tokens it issues carry `expires_in`; some authorization
+        /// servers leave it out.
+        expiring: bool,
+    }
+
+    /// What another process stores in `store` once it renewed the sign-in
+    /// both share: a newer access and refresh token, received now.
+    async fn store_newer_sign_in(store: &FileCredentialStore) {
+        let mut stored =
+            serde_json::to_value(OAuthCredentialStore::load(store).await.unwrap().unwrap())
+                .unwrap();
+        stored["token_response"]["access_token"] = json!(SIGNED_IN[1]);
+        stored["token_response"]["refresh_token"] = json!("fixture-refresh-2");
+        stored["token_received_at"] = json!(epoch_seconds());
+        OAuthCredentialStore::save(store, serde_json::from_value(stored).unwrap())
+            .await
+            .unwrap();
+    }
+
+    const SIGNED_IN: [&str; 2] = ["fixture-access-token", "fixture-access-token-2"];
+
+    async fn run_sign_in_fixture(listener: TcpListener, state: Arc<SignInFixture>) {
+        let address = listener.local_addr().unwrap();
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let state = state.clone();
+            tokio::spawn(async move {
+                let (request, headers, body) = read_http_exchange(&mut stream).await;
+                let path = request.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                let method = request.split_whitespace().next().unwrap_or("").to_owned();
+                if method == "GET" && path.contains("oauth-protected-resource") {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        &json!({
+                            "resource": format!("http://{address}/mcp"),
+                            "authorization_servers": [format!("http://{address}")],
+                            "scopes_supported": ["mcp"]
+                        }),
+                    )
+                    .await;
+                    return;
+                }
+                if method == "GET" && path.contains(".well-known") {
+                    write_json_response(
+                        &mut stream,
+                        "200 OK",
+                        &json!({
+                            "issuer": format!("http://{address}"),
+                            "authorization_endpoint": format!("http://{address}/authorize"),
+                            "token_endpoint": format!("http://{address}/token"),
+                            "code_challenge_methods_supported": ["S256"],
+                            "scopes_supported": ["mcp"]
+                        }),
+                    )
+                    .await;
+                    return;
+                }
+                if method == "POST" && path == "/token" {
+                    let form = String::from_utf8(body).unwrap();
+                    if form.contains("grant_type=refresh_token") {
+                        state.refreshes.fetch_add(1, Ordering::SeqCst);
+                        let renewal = *state.renewal.lock();
+                        if renewal == Renewal::Down {
+                            write_response(
+                                &mut stream,
+                                "503 Service Unavailable",
+                                &[("Content-Type", "text/plain")],
+                                b"down for maintenance",
+                            )
+                            .await;
+                            return;
+                        }
+                        if renewal == Renewal::RotatedElsewhere {
+                            store_newer_sign_in(&state.store).await;
+                        }
+                        if renewal == Renewal::RotatedLater {
+                            let state = state.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(300)).await;
+                                store_newer_sign_in(&state.store).await;
+                            });
+                        }
+                        write_json_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            &json!({ "error": "invalid_grant" }),
+                        )
+                        .await;
+                        return;
+                    }
+                    assert!(form.contains("code=fixture-code"));
+                    let mut issued = json!({
+                        "access_token": SIGNED_IN[0],
+                        "refresh_token": "fixture-refresh-1",
+                        "token_type": "Bearer",
+                        "scope": "mcp"
+                    });
+                    if state.expiring {
+                        issued["expires_in"] = json!(3600);
+                    }
+                    write_json_response(&mut stream, "200 OK", &issued).await;
+                    return;
+                }
+                let signed_in = headers.lines().any(|line| {
+                    SIGNED_IN.iter().any(|token| {
+                        line.eq_ignore_ascii_case(&format!("authorization: Bearer {token}"))
+                    })
+                });
+                if path == "/mcp" && (!signed_in || state.rejecting.load(Ordering::SeqCst)) {
+                    let challenge = format!(
+                        "Bearer resource_metadata=\"http://{address}/.well-known/oauth-protected-resource\", scope=\"mcp\""
+                    );
+                    write_response(
+                        &mut stream,
+                        "401 Unauthorized",
+                        &[("WWW-Authenticate", &challenge)],
+                        b"",
+                    )
+                    .await;
+                    return;
+                }
+                if method != "POST" {
+                    write_response(&mut stream, "405 Method Not Allowed", &[], b"").await;
+                    return;
+                }
+                let message: Value = serde_json::from_slice(&body).unwrap();
+                let rpc = message.get("method").and_then(Value::as_str);
+                let mut extra = Vec::new();
+                let session;
+                if rpc == Some("initialize") {
+                    session = uuid::Uuid::now_v7().to_string();
+                    state.sessions.lock().insert(session.clone());
+                    extra.push(("Mcp-Session-Id", session.as_str()));
+                } else if !session_of(&headers)
+                    .is_some_and(|session| state.sessions.lock().contains(&session))
+                {
+                    let (kind, body) = session_refusal(Refusal::JsonSession).unwrap();
+                    write_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        &[("Content-Type", kind)],
+                        &body,
+                    )
+                    .await;
+                    return;
+                }
+                let Some(id) = message.get("id").cloned() else {
+                    write_response(&mut stream, "202 Accepted", &[], b"").await;
+                    return;
+                };
+                let result = match rpc {
+                    Some("initialize") => json!({
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": { "tools": {}, "resources": {} },
+                        "serverInfo": { "name": "sign-in-fixture", "version": "1.0.0" }
+                    }),
+                    Some("tools/list") => json!({
+                        "tools": [{ "name": "secure_echo", "inputSchema": { "type": "object" } }]
+                    }),
+                    Some("resources/list") => json!({ "resources": [] }),
+                    Some("tools/call") => {
+                        state.calls.fetch_add(1, Ordering::SeqCst);
+                        json!({
+                            "content": [{ "type": "text", "text": "OAuth MCP call succeeded" }],
+                            "isError": false
+                        })
+                    }
+                    rpc => panic!("unexpected sign-in fixture method {rpc:?}"),
+                };
+                extra.push(("Content-Type", "application/json"));
+                let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                write_response(
+                    &mut stream,
+                    "200 OK",
+                    &extra,
+                    &serde_json::to_vec(&reply).unwrap(),
+                )
+                .await;
+            });
+        }
+    }
+
+    /// A registry signed in to [`run_sign_in_fixture`] as `name`, connected,
+    /// with the fixture and its folder of credentials.
+    async fn signed_in(
+        name: &str,
+        renewal: Renewal,
+    ) -> (
+        NativeMcpRegistry,
+        Arc<SignInFixture>,
+        JoinHandle<()>,
+        PathBuf,
+    ) {
+        signed_in_for(name, renewal, true).await
+    }
+
+    /// [`signed_in`], its tokens issued with an expiry when `expiring`.
+    async fn signed_in_for(
+        name: &str,
+        renewal: Renewal,
+        expiring: bool,
+    ) -> (
+        NativeMcpRegistry,
+        Arc<SignInFixture>,
+        JoinHandle<()>,
+        PathBuf,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let auth_dir =
+            std::env::temp_dir().join(format!("haarness-mcp-sign-in-{}", uuid::Uuid::now_v7()));
+        let state = Arc::new(SignInFixture {
+            renewal: parking_lot::Mutex::new(renewal),
+            store: manager_store(name, Some(&auth_dir)),
+            sessions: parking_lot::Mutex::default(),
+            refreshes: std::sync::atomic::AtomicUsize::new(0),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            rejecting: AtomicBool::new(false),
+            expiring,
+        });
+        let server = tokio::spawn(run_sign_in_fixture(listener, state.clone()));
+        let registry = NativeMcpRegistry::with_auth_dir(&auth_dir);
+        let config: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http",
+            "url": format!("http://{address}/mcp"),
+            "timeoutMs": 5000,
+            "oauth": true,
+            "oauthClientId": "fixture-client",
+            "oauthScopes": ["mcp"],
+            "enabled": true
+        }))
+        .unwrap();
+        assert_eq!(
+            registry.configure(name, config).await.unwrap().status,
+            "needs_auth"
+        );
+        let redirect_uri = "http://127.0.0.1:19877/mcp/oauth/callback";
+        let session = registry.begin_oauth(name, redirect_uri).await.unwrap();
+        let state_param = reqwest::Url::parse(&session.authorization_url)
+            .unwrap()
+            .query_pairs()
+            .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
+            .unwrap();
+        session
+            .complete(&format!(
+                "{redirect_uri}?code=fixture-code&state={state_param}"
+            ))
+            .await
+            .unwrap();
+        assert_eq!(registry.reconnect(name).await.unwrap().status, "connected");
+        (registry, state, server, auth_dir)
+    }
+
+    /// Ages the stored access token past its expiry, so the next request
+    /// renews it with the refresh token first.
+    async fn expire_sign_in(store: &FileCredentialStore) {
+        let mut stored =
+            serde_json::to_value(OAuthCredentialStore::load(store).await.unwrap().unwrap())
+                .unwrap();
+        stored["token_received_at"] = json!(epoch_seconds() - 7200);
+        OAuthCredentialStore::save(store, serde_json::from_value(stored).unwrap())
+            .await
+            .unwrap();
+    }
+
+    fn announcements(registry: &NativeMcpRegistry) -> Arc<std::sync::atomic::AtomicUsize> {
+        let told = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = told.clone();
+        registry.announce_starts(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        told
+    }
+
+    /// A server whose authorization server refused the refresh token kept
+    /// its status `connected` and its tools, every call failing with
+    /// transport text, and nothing offered to sign in.
+    #[tokio::test]
+    async fn an_oauth_server_that_lost_its_sign_in_needs_auth_and_keeps_its_credentials() {
+        let (registry, state, server, auth_dir) = signed_in("secure", Renewal::Refused).await;
+        let told = announcements(&registry);
+        expire_sign_in(&state.store).await;
+        let error = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("needs the user to sign in to it"),
+            "{error}"
+        );
+        let info = registry.list().await.unwrap().remove(0);
+        assert_eq!(info.status, "needs_auth");
+        assert_eq!(
+            info.detail.as_deref(),
+            Some("authorization required; run `haarness mcp auth secure`")
+        );
+        assert!(registry.tool_snapshot().is_empty());
+        assert!(registry.tools("secure").await.unwrap().is_empty());
+        assert!(registry.resource_servers().is_empty());
+        assert!(manager_store("secure", Some(&auth_dir)).path.exists());
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+        assert_eq!(state.calls.load(Ordering::SeqCst), 0);
+        // A later request, a script's or the CLI's, says so too.
+        for error in [
+            registry
+                .call("secure", "secure_echo", json!({}))
+                .await
+                .unwrap_err(),
+            registry.resources("secure").await.unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("needs the user to sign in to it"),
+                "{error}"
+            );
+        }
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// Requests out together when the sign-in is found gone each end with
+    /// their own answer, and the server's status changes once.
+    #[tokio::test]
+    async fn requests_refused_together_change_the_status_once() {
+        let (registry, state, server, auth_dir) = signed_in("secure", Renewal::Refused).await;
+        let told = announcements(&registry);
+        expire_sign_in(&state.store).await;
+        let (first, second, listing) = tokio::join!(
+            registry.call("secure", "secure_echo", json!({})),
+            registry.call("secure", "secure_echo", json!({})),
+            registry.resources("secure"),
+        );
+        for error in [
+            first.unwrap_err(),
+            second.unwrap_err(),
+            listing.unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("needs the user to sign in to it"),
+                "{error}"
+            );
+        }
+        assert_eq!(registry.list().await.unwrap()[0].status, "needs_auth");
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// An authorization server that is only down leaves the sign-in, and the
+    /// server, as they are: a later request renews it once it is back.
+    #[tokio::test]
+    async fn an_authorization_server_that_is_down_leaves_the_server_connected() {
+        let (registry, state, server, auth_dir) = signed_in("secure", Renewal::Down).await;
+        let told = announcements(&registry);
+        expire_sign_in(&state.store).await;
+        let error = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            !error
+                .to_string()
+                .contains("needs the user to sign in to it"),
+            "{error}"
+        );
+        assert_eq!(state.refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+        assert_eq!(registry.tool_snapshot().len(), 1);
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// A token the server refuses though it has not expired (its token check
+    /// down, or a clock that disagrees), while the authorization server is
+    /// down too, so it cannot be renewed: rmcp reports the request refused
+    /// for want of a sign-in, which made the server need authorization and
+    /// the person sign in again.
+    #[tokio::test]
+    async fn a_refused_token_that_has_not_expired_leaves_the_server_connected() {
+        let (registry, state, server, auth_dir) = signed_in("secure", Renewal::Down).await;
+        let told = announcements(&registry);
+        state.rejecting.store(true, Ordering::SeqCst);
+        let error = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            !error
+                .to_string()
+                .contains("needs the user to sign in to it"),
+            "{error}"
+        );
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+        assert_eq!(registry.tool_snapshot().len(), 1);
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+        // Once the server takes the token again, so does the call.
+        state.rejecting.store(false, Ordering::SeqCst);
+        let output = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(output.text, "OAuth MCP call succeeded");
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// A sign-in whose token came with no expiry was never found unusable:
+    /// its refresh token refused, the server stayed connected with its
+    /// tools, each call failing with transport text. Renewing it tells: a
+    /// refusal means it is lost, an authorization server that is down only
+    /// that it cannot be renewed for now.
+    #[tokio::test]
+    async fn a_sign_in_with_no_known_expiry_is_lost_only_when_its_renewal_is_refused() {
+        let (registry, state, server, auth_dir) =
+            signed_in_for("secure", Renewal::Refused, false).await;
+        let told = announcements(&registry);
+        state.rejecting.store(true, Ordering::SeqCst);
+        let error = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("needs the user to sign in to it"),
+            "{error}"
+        );
+        assert_eq!(registry.list().await.unwrap()[0].status, "needs_auth");
+        assert!(registry.tool_snapshot().is_empty());
+        assert!(manager_store("secure", Some(&auth_dir)).path.exists());
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+
+        let (registry, state, server, auth_dir) =
+            signed_in_for("secure", Renewal::Down, false).await;
+        let told = announcements(&registry);
+        state.rejecting.store(true, Ordering::SeqCst);
+        let error = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            !error
+                .to_string()
+                .contains("needs the user to sign in to it"),
+            "{error}"
+        );
+        assert!(state.refreshes.load(Ordering::SeqCst) >= 1);
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+        assert_eq!(registry.tool_snapshot().len(), 1);
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// The other process stored its renewed sign-in a moment after this one
+    /// was refused: read once only, the store still held the spent one, and
+    /// the server needed a sign-in in the browser though a good one landed.
+    #[tokio::test]
+    async fn a_sign_in_another_process_stores_a_moment_later_is_used_too() {
+        let (registry, state, server, auth_dir) = signed_in("secure", Renewal::RotatedLater).await;
+        let told = announcements(&registry);
+        expire_sign_in(&state.store).await;
+        let output = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(output.text, "OAuth MCP call succeeded");
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// Two processes share one sign-in and the authorization server rotates
+    /// refresh tokens: the one that loses the race to renew it is refused,
+    /// though the other stored a newer sign-in it can use.
+    #[tokio::test]
+    async fn a_sign_in_another_process_renewed_is_used_rather_than_lost() {
+        let (registry, state, server, auth_dir) =
+            signed_in("secure", Renewal::RotatedElsewhere).await;
+        let told = announcements(&registry);
+        expire_sign_in(&state.store).await;
+        let output = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(output.text, "OAuth MCP call succeeded");
+        assert_eq!(state.refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// A signed-in server that restarted and forgot the session is answered
+    /// on a new one too: the session's recovery runs under the sign-in.
+    #[tokio::test]
+    async fn a_signed_in_server_that_forgot_the_session_answers_on_a_new_one() {
+        let (registry, state, server, auth_dir) = signed_in("secure", Renewal::Down).await;
+        state.sessions.lock().clear();
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            registry.call("secure", "secure_echo", json!({})),
+        )
+        .await
+        .expect("the call after the restart waited")
+        .unwrap();
+        assert_eq!(output.text, "OAuth MCP call succeeded");
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
     /// Streamable HTTP MCP fixture: `initialize` never answers when `hang` is
     /// set, and `tools/call` answers over SSE a second after its headers.
     async fn run_streamable_fixture(listener: TcpListener, hang: bool) {
@@ -4147,6 +5313,263 @@ mod tests {
                 .is_some_and(|detail| detail.contains("after 300 ms"))
         );
         server.abort();
+    }
+
+    /// How [`run_forgetful_fixture`] refuses a request: a session it does not
+    /// know, as servers built on the TypeScript SDK's examples do, as JSON
+    /// that names no request or as text; or every tool call, as JSON that
+    /// names no request: with a 400 for bad parameters, or with a 500 whose
+    /// message mentions a session, after the tool ran.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Refusal {
+        JsonSession,
+        TextSession,
+        Params,
+        ToolSession,
+    }
+
+    /// A Streamable HTTP server that gives each `initialize` a session and
+    /// forgets them all when it restarts (`restart`).
+    struct Forgetful {
+        refusal: Refusal,
+        sessions: parking_lot::Mutex<std::collections::HashSet<String>>,
+        initialized: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Forgetful {
+        fn new(refusal: Refusal) -> Arc<Self> {
+            Arc::new(Self {
+                refusal,
+                sessions: parking_lot::Mutex::default(),
+                initialized: std::sync::atomic::AtomicUsize::new(0),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+        fn restart(&self) {
+            self.sessions.lock().clear();
+        }
+        fn initialized(&self) -> usize {
+            self.initialized.load(Ordering::SeqCst)
+        }
+    }
+
+    /// The session a request names, from its `Mcp-Session-Id` header.
+    fn session_of(headers: &str) -> Option<String> {
+        headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("mcp-session-id")
+                .then(|| value.trim().to_owned())
+        })
+    }
+
+    async fn write_response(
+        stream: &mut TcpStream,
+        status: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) {
+        use std::fmt::Write as _;
+        let mut head = format!("HTTP/1.1 {status}\r\n");
+        for (name, value) in headers {
+            let _ = write!(head, "{name}: {value}\r\n");
+        }
+        let _ = write!(
+            head,
+            "Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes()).await;
+        let _ = stream.write_all(body).await;
+    }
+
+    /// What a server built on the TypeScript SDK's examples answers a
+    /// request whose session it does not know (`refusal`), or `None` for a
+    /// refusal of another kind.
+    fn session_refusal(refusal: Refusal) -> Option<(&'static str, Vec<u8>)> {
+        match refusal {
+            Refusal::JsonSession => Some((
+                "application/json",
+                serde_json::to_vec(&json!({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32000, "message": "Bad Request: No valid session ID provided"},
+                    "id": null
+                }))
+                .unwrap(),
+            )),
+            Refusal::TextSession => Some((
+                "text/plain",
+                b"Bad Request: Server not initialized".to_vec(),
+            )),
+            Refusal::Params | Refusal::ToolSession => None,
+        }
+    }
+
+    async fn run_forgetful_fixture(listener: TcpListener, state: Arc<Forgetful>) {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let state = state.clone();
+            tokio::spawn(async move {
+                let (request, headers, body) = read_http_exchange(&mut stream).await;
+                if !request.starts_with("POST ") {
+                    write_response(&mut stream, "405 Method Not Allowed", &[], b"").await;
+                    return;
+                }
+                let message: Value = serde_json::from_slice(&body).unwrap();
+                let method = message.get("method").and_then(Value::as_str);
+                if method == Some("initialize") {
+                    let session = uuid::Uuid::now_v7().to_string();
+                    state.sessions.lock().insert(session.clone());
+                    state.initialized.fetch_add(1, Ordering::SeqCst);
+                    let reply = json!({"jsonrpc": "2.0", "id": message["id"], "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "forgetful-fixture", "version": "1.0.0" }
+                    }});
+                    write_response(
+                        &mut stream,
+                        "200 OK",
+                        &[
+                            ("Content-Type", "application/json"),
+                            ("Mcp-Session-Id", &session),
+                        ],
+                        &serde_json::to_vec(&reply).unwrap(),
+                    )
+                    .await;
+                    return;
+                }
+                let known = session_of(&headers)
+                    .is_some_and(|session| state.sessions.lock().contains(&session));
+                if !known && let Some((kind, body)) = session_refusal(state.refusal) {
+                    write_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        &[("Content-Type", kind)],
+                        &body,
+                    )
+                    .await;
+                    return;
+                }
+                let Some(id) = message.get("id").cloned() else {
+                    write_response(&mut stream, "202 Accepted", &[], b"").await;
+                    return;
+                };
+                let result = match method {
+                    Some("tools/list") => json!({
+                        "tools": [{ "name": "echo", "inputSchema": { "type": "object" } }]
+                    }),
+                    Some("tools/call")
+                        if matches!(state.refusal, Refusal::Params | Refusal::ToolSession) =>
+                    {
+                        state.calls.fetch_add(1, Ordering::SeqCst);
+                        let (status, code, message) = if state.refusal == Refusal::Params {
+                            (
+                                "400 Bad Request",
+                                -32602,
+                                "Invalid params: city is required",
+                            )
+                        } else {
+                            (
+                                "500 Internal Server Error",
+                                -32603,
+                                "database session timed out",
+                            )
+                        };
+                        let refusal = json!({
+                            "jsonrpc": "2.0",
+                            "error": {"code": code, "message": message},
+                            "id": null
+                        });
+                        write_response(
+                            &mut stream,
+                            status,
+                            &[("Content-Type", "application/json")],
+                            &serde_json::to_vec(&refusal).unwrap(),
+                        )
+                        .await;
+                        return;
+                    }
+                    Some("tools/call") => json!({
+                        "content": [{ "type": "text", "text": "echoed" }],
+                        "isError": false
+                    }),
+                    method => panic!("unexpected forgetful fixture method {method:?}"),
+                };
+                let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                write_response(
+                    &mut stream,
+                    "200 OK",
+                    &[("Content-Type", "application/json")],
+                    &serde_json::to_vec(&reply).unwrap(),
+                )
+                .await;
+            });
+        }
+    }
+
+    /// A server built on the TypeScript SDK's examples that restarted
+    /// answered the session its client still named with a 400: as JSON that
+    /// names no request, which rmcp let go, so the call waited until it was
+    /// stopped; or as text, which failed every request until a reconnect.
+    #[tokio::test]
+    async fn a_server_that_restarted_and_forgot_the_session_answers_on_a_new_one() {
+        for refusal in [Refusal::JsonSession, Refusal::TextSession] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let state = Forgetful::new(refusal);
+            let server = tokio::spawn(run_forgetful_fixture(listener, state.clone()));
+            let registry = NativeMcpRegistry::default();
+            let info = registry
+                .configure("forgetful", streamable_config(address, 2_000))
+                .await
+                .unwrap();
+            assert_eq!(info.status, "connected");
+            let call = || registry.call("forgetful", "mcp__forgetful__echo", json!({}));
+            assert_eq!(call().await.unwrap().text, "echoed");
+            state.restart();
+            let output = tokio::time::timeout(Duration::from_secs(5), call())
+                .await
+                .expect("the call after the restart waited")
+                .unwrap();
+            assert_eq!(output.text, "echoed");
+            assert_eq!(state.initialized(), 2);
+            assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+            server.abort();
+        }
+    }
+
+    /// Any other refusal is the request's own answer, even one that names no
+    /// request: it fails the call at once, sent once, and the session is
+    /// kept. So is a tool's own failure that mentions a session, which a
+    /// status-blind reading sent again on a new session after it had run.
+    #[tokio::test]
+    async fn a_refusal_that_is_not_about_the_session_fails_the_call_on_the_same_session() {
+        for (refusal, said) in [
+            (Refusal::Params, "Invalid params: city is required"),
+            (Refusal::ToolSession, "database session timed out"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let state = Forgetful::new(refusal);
+            let server = tokio::spawn(run_forgetful_fixture(listener, state.clone()));
+            let registry = NativeMcpRegistry::default();
+            registry
+                .configure("strict", streamable_config(address, 2_000))
+                .await
+                .unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(5),
+                registry.call("strict", "mcp__strict__echo", json!({})),
+            )
+            .await
+            .expect("the refused call waited")
+            .unwrap_err();
+            assert!(error.to_string().contains(said), "{error}");
+            assert_eq!(state.initialized(), 1);
+            assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+            server.abort();
+        }
     }
 
     /// A server that offers prompts and never answers a prompt request, but
@@ -4684,6 +6107,148 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A helper that ran past its limit lost only its shell: what the shell
+    /// started (a step of a pipeline, a command it waits for) went on, and
+    /// each reconnect left another one running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_headers_helper_past_its_limit_is_stopped_with_what_it_started() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-mcp-helper-group-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let config: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http",
+            "url": "http://127.0.0.1:9/mcp",
+            "headersHelper": format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+            "timeoutMs": 1500,
+            "enabled": true
+        }))
+        .unwrap();
+        let error = resolve_headers("slow", &config).await.unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while alive() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let survived = alive();
+        if survived {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(!survived, "the helper's `sleep` outlived its timeout");
+    }
+
+    /// A helper that writes without end was read in full until its timeout,
+    /// holding all of it; past 64 KiB it now fails at once, and is stopped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_headers_helper_that_writes_past_its_limit_fails_at_once() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-mcp-helper-output-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let config: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http",
+            "url": "http://127.0.0.1:9/mcp",
+            // Its pid written before it writes anything.
+            "headersHelper": format!(
+                "sh -c 'echo $$ > \"$0\"; exec yes' '{}' & wait",
+                pid_file.display()
+            ),
+            "timeoutMs": 20000,
+            "enabled": true
+        }))
+        .unwrap();
+        let started = std::time::Instant::now();
+        let error = resolve_headers("chatty", &config).await.unwrap_err();
+        assert!(error.to_string().contains("more than 64 KiB"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while alive() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let survived = alive();
+        if survived {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(!survived, "the helper's `yes` went on");
+    }
+
+    /// A helper's child that left its group (`setsid`, a shell with job
+    /// control) was looked for only after the helper's shell was killed, by
+    /// which time it had a new parent, so it outlived the timeout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_headers_helper_child_that_left_its_group_is_stopped_too() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-mcp-helper-session-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("pid");
+        let detach = "import os, sys, time; os.setsid(); open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)";
+        let config: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http",
+            "url": "http://127.0.0.1:9/mcp",
+            "headersHelper": format!("python3 -c \"{detach}\" '{}' & wait", pid_file.display()),
+            "timeoutMs": 2500,
+            "enabled": true
+        }))
+        .unwrap();
+        let error = resolve_headers("detached", &config).await.unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while alive() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let survived = alive();
+        if survived {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            !survived,
+            "the helper's detached child outlived its timeout"
+        );
+    }
+
     /// The helper is shell text: a `${VAR}` value that holds shell syntax
     /// stays plain text, written bare, in double quotes or in single quotes,
     /// and a plugin root with a space is one word.
@@ -4780,11 +6345,55 @@ mod tests {
         )));
     }
 
+    /// A 1×1 PNG every provider reads as it is.
+    const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    /// An image of `width`×`height` in `format`, a gradient, so a PNG of it
+    /// shrunk stays small; uncompressed when `stored`.
+    fn picture(width: u32, height: u32, format: image::ImageFormat, stored: bool) -> Vec<u8> {
+        use image::ImageEncoder as _;
+        let image = image::RgbaImage::from_fn(width, height, |x, y| {
+            image::Rgba([
+                u8::try_from(x % 256).unwrap(),
+                u8::try_from(y % 256).unwrap(),
+                128,
+                255,
+            ])
+        });
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        if stored {
+            image::codecs::png::PngEncoder::new_with_quality(
+                &mut bytes,
+                image::codecs::png::CompressionType::Uncompressed,
+                image::codecs::png::FilterType::NoFilter,
+            )
+            .write_image(&image, width, height, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        } else if format == image::ImageFormat::Jpeg {
+            image::DynamicImage::ImageRgba8(image)
+                .to_rgb8()
+                .write_to(&mut bytes, format)
+                .unwrap();
+        } else {
+            image.write_to(&mut bytes, format).unwrap();
+        }
+        bytes.into_inner()
+    }
+
+    /// The width and height of the image a data URL holds.
+    fn shown(data_url: &str) -> (u32, u32) {
+        use image::GenericImageView as _;
+        let data = data_url.split_once(";base64,").unwrap().1;
+        image::load_from_memory(&STANDARD.decode(data).unwrap())
+            .unwrap()
+            .dimensions()
+    }
+
     #[test]
     fn rich_mcp_image_and_audio_outputs_remain_provider_visible() {
         let result = rmcp::model::CallToolResult::success(vec![
             rmcp::model::ContentBlock::text("generated media"),
-            rmcp::model::ContentBlock::image("iVBORw0KGgo=", "image/png"),
+            rmcp::model::ContentBlock::image(PIXEL, "image/png"),
             rmcp::model::ContentBlock::audio("SUQz", "audio/mpeg"),
         ]);
         let output = to_output(result, "media").unwrap();
@@ -4792,9 +6401,110 @@ mod tests {
         assert_eq!(
             output.metadata["attachments"],
             serde_json::json!([
-                "data:image/png;base64,iVBORw0KGgo=",
+                format!("data:image/png;base64,{PIXEL}"),
                 "data:audio/mpeg;base64,SUQz"
             ])
+        );
+    }
+
+    /// A full-page screenshot went to the model as the server sent it, which
+    /// a provider refuses past its side or size limit, so the model never saw
+    /// it; past 10 MiB it failed the whole call, its text with it.
+    #[test]
+    fn a_large_screenshot_reaches_the_model_shrunk_as_read_sends_one() {
+        use rmcp::model::{ContentBlock, ResourceContents};
+        let png = STANDARD.encode(picture(2400, 1400, image::ImageFormat::Png, true));
+        assert!(png.len() / 4 * 3 > 12 * 1024 * 1024, "{}", png.len());
+        let result = rmcp::model::CallToolResult::success(vec![
+            ContentBlock::text("The whole page."),
+            ContentBlock::image(&png, "image/png"),
+            ContentBlock::resource(
+                ResourceContents::blob(&png, "ui://page.png").with_mime_type("image/png"),
+            ),
+        ]);
+        let output = to_output(result, "screenshot").unwrap();
+        let attachments: Vec<String> =
+            serde_json::from_value(output.metadata["attachments"].clone()).unwrap();
+        assert_eq!(attachments.len(), 2, "{}", output.text);
+        for attachment in &attachments {
+            assert!(attachment.starts_with("data:image/png;base64,"));
+            assert_eq!(shown(attachment), (2000, 1167));
+        }
+        assert_eq!(
+            output.text,
+            "The whole page.\n\
+             [image/png image attachment, shown to you as 2000×1167]\n\
+             [image/png attachment: ui://page.png, shown to you as 2000×1167]"
+        );
+    }
+
+    /// Media past 10 MiB failed the whole call, its text with it.
+    #[test]
+    fn media_past_a_limit_is_named_and_the_rest_of_the_result_kept() {
+        use rmcp::model::{ContentBlock, ResourceContents};
+        let large = STANDARD.encode(vec![0_u8; 11 * 1024 * 1024]);
+        // Past the 64 MiB an image may be: named before it is decoded.
+        let huge = "A".repeat(90 * 1024 * 1024);
+        let result = rmcp::model::CallToolResult::success(vec![
+            ContentBlock::text("Three files."),
+            ContentBlock::resource(
+                ResourceContents::blob(&large, "files://report.pdf")
+                    .with_mime_type("application/pdf"),
+            ),
+            ContentBlock::audio(&large, "audio/mpeg"),
+            ContentBlock::image(&huge, "image/png"),
+            ContentBlock::image(PIXEL, "image/png"),
+        ]);
+        let output = to_output(result, "files").unwrap();
+        assert_eq!(
+            output.metadata["attachments"],
+            json!([format!("data:image/png;base64,{PIXEL}")])
+        );
+        assert_eq!(
+            output.text,
+            "Three files.\n\
+             [files://report.pdf: application/pdf, 11534334 bytes, left out: the images and PDFs attached with it already come to 10 MiB]\n\
+             [audio/mpeg audio, 11534336 bytes, left out: a result attaches at most 10 MiB of media]\n\
+             [image/png image, 70778880 bytes, left out: larger than the 64 MiB image limit]\n\
+             [image/png image attachment]"
+        );
+        // An image whose bytes cannot be read is named too.
+        let cut = STANDARD.encode(&picture(64, 64, image::ImageFormat::Png, false)[..60]);
+        // Once the result's media come to 10 MiB, an image is not decoded:
+        // it could not be attached whatever it holds.
+        let full = STANDARD.encode(vec![0_u8; 10 * 1024 * 1024]);
+        let output = to_output(
+            rmcp::model::CallToolResult::success(vec![
+                ContentBlock::audio(&full, "audio/mpeg"),
+                ContentBlock::image(&cut, "image/png"),
+            ]),
+            "full",
+        )
+        .unwrap();
+        assert_eq!(output.metadata["attachments"].as_array().unwrap().len(), 1);
+        assert!(
+            output.text.ends_with(
+                "\n[image/png image, 60 bytes, left out: a result attaches at most 10 MiB of media]"
+            ),
+            "{}",
+            output.text
+        );
+        let output = to_output(
+            rmcp::model::CallToolResult::success(vec![ContentBlock::image(&cut, "image/png")]),
+            "cut",
+        )
+        .unwrap();
+        assert!(
+            output.metadata.get("attachments").is_none(),
+            "{}",
+            output.metadata
+        );
+        assert!(
+            output.text.starts_with(
+                "[image/png image, 60 bytes, left out: it cannot be read as an image ("
+            ),
+            "{}",
+            output.text
         );
     }
 
@@ -4803,7 +6513,7 @@ mod tests {
     #[test]
     fn embedded_blobs_reach_the_model_as_what_they_hold() {
         use rmcp::model::{ContentBlock, ResourceContents};
-        let png = STANDARD.encode(b"\x89PNG\r\n\x1a\nfixture");
+        let png = PIXEL.to_owned();
         let blob = |uri: &str, mime: &str, data: &str| {
             ContentBlock::resource(ResourceContents::blob(data, uri).with_mime_type(mime))
         };
@@ -4872,7 +6582,7 @@ mod tests {
     /// later request of the chat failed to load it.
     #[test]
     fn mcp_media_of_a_type_haarness_does_not_carry_is_named_not_attached() {
-        let jpeg = STANDARD.encode(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00fixture");
+        let jpeg = STANDARD.encode(picture(4, 3, image::ImageFormat::Jpeg, false));
         let result = rmcp::model::CallToolResult::success(vec![
             rmcp::model::ContentBlock::audio("GkXfo0AAAA==", "audio/webm"),
             rmcp::model::ContentBlock::audio("SUQz", "Audio/MPEG"),
@@ -4902,17 +6612,26 @@ mod tests {
         );
     }
 
+    /// Media whose base64 does not decode never reaches the transcript; it
+    /// failed the whole call, the result's text with it.
     #[test]
-    fn invalid_mcp_media_is_rejected_before_it_reaches_the_transcript() {
-        let result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::image(
-            "not base64",
-            "image/png",
-        )]);
+    fn invalid_mcp_media_is_named_rather_than_attached_and_the_text_kept() {
+        let result = rmcp::model::CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text("Two clips."),
+            rmcp::model::ContentBlock::image("not base64", "image/png"),
+            rmcp::model::ContentBlock::audio("not base64", "audio/mpeg"),
+        ]);
+        let output = to_output(result, "media").unwrap();
         assert!(
-            to_output(result, "media")
-                .unwrap_err()
-                .to_string()
-                .contains("base64")
+            output.metadata.get("attachments").is_none(),
+            "{}",
+            output.metadata
+        );
+        assert_eq!(
+            output.text,
+            "Two clips.\n\
+             [image/png image, left out: its data is not valid base64]\n\
+             [audio/mpeg audio, left out: its data is not valid base64]"
         );
     }
 
@@ -5078,7 +6797,8 @@ mod tests {
         };
         // An image that alone is over the limit is left out of the page's copy;
         // the model still gets it as an attachment.
-        let image = STANDARD.encode(vec![0u8; MCP_APP_RESULT_LIMIT]);
+        let image = STANDARD.encode(picture(400, 400, image::ImageFormat::Png, true));
+        assert!(image.len() > MCP_APP_RESULT_LIMIT);
         let mut result = rmcp::model::CallToolResult::success(vec![
             rmcp::model::ContentBlock::text("chart"),
             rmcp::model::ContentBlock::image(image, "image/png"),
@@ -5124,10 +6844,7 @@ mod tests {
         assert_eq!(output.metadata, structured);
         // Only an image beside it.
         let mut result = rmcp::model::CallToolResult::structured(structured.clone());
-        result.content = vec![rmcp::model::ContentBlock::image(
-            "iVBORw0KGgo=",
-            "image/png",
-        )];
+        result.content = vec![rmcp::model::ContentBlock::image(PIXEL, "image/png")];
         let output = to_output(result, "chart").unwrap();
         assert!(output.text.contains("[image/png image attachment]"));
         assert!(
@@ -5138,7 +6855,7 @@ mod tests {
         assert_eq!(output.metadata["temperature"], 21);
         assert_eq!(
             output.metadata["attachments"],
-            serde_json::json!(["data:image/png;base64,iVBORw0KGgo="])
+            serde_json::json!([format!("data:image/png;base64,{PIXEL}")])
         );
         // Text beside it is the answer, as before.
         let mut result =

@@ -711,6 +711,28 @@ server reports `needs_auth` with a non-secret detail until the CLI completes
 the public OAuth authorization-code + PKCE flow. `disconnect` drops the live
 worker and advertised tools without deleting configuration; `reconnect`
 performs initialization and capability discovery again.
+A Streamable HTTP server that restarted, or ended its session, gets a new
+session: when its transport turns down the session a request names (a 404, or
+what servers built on the TypeScript SDK's examples answer, a 400 whose text,
+or a JSON-RPC error with no `id` and the transport's code -32000 or -32001,
+says the session is unknown or the server not initialized), the connection
+opens a new session once and sends the request again. Any other error is that
+request's own, even one whose JSON-RPC error carries no `id` or mentions a
+session: the request is not sent again. A server that stops taking its stored
+OAuth sign-in while connected, once that sign-in can no longer be used (none is
+stored, it has no refresh token, its access token has expired with its refresh
+token refused, or, for a token issued with no expiry, the authorization server
+refuses to renew it when asked), reports `needs_auth` as a server never signed
+in does: its tools are withdrawn, the requests that met it, and any sent to it
+later, fail saying the user needs to sign in, an `assets.updated` event tells
+clients, and the stored credentials stay until a new sign-in replaces them.
+When another process that shares those credentials stores a newer sign-in
+meanwhile (within a second of the refusal), or a token with no expiry is
+renewed when asked, the request is sent once more with it instead. A refusal
+while the stored sign-in is still current, or can still be renewed (an
+authorization server that is only unreachable, a token check that is down,
+clocks that disagree), fails only that request and leaves the server
+connected; a later request renews the sign-in once it answers.
 A local server, and a remote server's `headersHelper`, run in the server's
 project folder (the chat home's own folder there); a relative `cwd` is read
 from the project folder, `~/…` from the home folder, and the settings keep
@@ -719,9 +741,14 @@ with the server's and tool's names as written); only requests to a model
 provider carry names in the characters providers accept (see
 [Plugins, skills and tools](REFERENCE.md#plugins-skills-and-tools)).
 `timeoutMs` (default 30 s) bounds the socket connect, initialization, and tool
-discovery as one deadline, plus a `headersHelper` run. A local (stdio) server
-without it has 2 minutes for that start (spawning it, initializing it and
-listing its tools), as `npx -y` and `uvx` fetch the server on its first run;
+discovery as one deadline, plus a `headersHelper` run. On macOS and Linux the
+helper runs in a process group of its own, so one that outlasts it (or whose
+start is stopped) is stopped with every process it started, a pipeline's
+steps included; a helper that ends on its own leaves what it started. One
+that writes more than 64 KiB fails at once, and is stopped the same way.
+A local (stdio) server without it has 2 minutes for that start (spawning it,
+initializing it and listing its tools), as `npx -y` and `uvx` fetch the server
+on its first run;
 its other requests keep 30 s. In a JSON file a
 `timeout` key counts too, in its ecosystem's unit: milliseconds in an opencode
 entry (`type: "local"` or `"remote"`), seconds in a Claude Code or plugin

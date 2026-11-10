@@ -1,9 +1,28 @@
 """MCP stdio fixture whose tools answer with structured content and little or no text, or embed resources as
 base64 blobs (an image under a type in capitals, text, an archive), or answer with 200 KB of text, or with the
-same text each call and the call's number as structured content."""
+same text each call and the call's number as structured content, or with screenshots larger than providers take."""
 import base64
 import json
+import struct
 import sys
+import zlib
+
+
+def png(width, height, level):
+    """A PNG of `width`×`height` RGB pixels, a gradient, its data compressed at zlib `level` (0 stores it as it is)."""
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+    row = bytearray(3 * width)
+    row[0::3] = bytes(x % 256 for x in range(width))
+    row[2::3] = b'\x80' * width
+    rows = []
+    for y in range(height):
+        row[1::3] = bytes([y % 256]) * width
+        rows.append(b'\x00' + bytes(row))
+    header = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', header) + chunk(b'IDAT', zlib.compress(b''.join(rows), level))
+            + chunk(b'IEND', b''))
+
 
 WEATHER = {'temperature': 21, 'unit': 'C', 'proof': 'structured-only-proof'}
 CHART = {'points': 3, 'proof': 'structured-beside-image-proof'}
@@ -60,6 +79,12 @@ TOOLS = {
              'structuredContent': {'rows': 2000}},
 }
 
+# Screenshots, made when called: a 4K one stored uncompressed (24 MB, past the 10 MiB a result attaches), and a
+# full page far taller than providers take (small, compressed).
+SCREENSHOTS = {'screenshot': (3840, 2160, 0), 'full_page': (1440, 9000, 1)}
+for name in SCREENSHOTS:
+    TOOLS[name] = {'content': []}
+
 calls = 0
 for line in sys.stdin:
     request = json.loads(line)
@@ -79,4 +104,9 @@ for line in sys.stdin:
             result = {'content': TOOLS['spaced']['content'], 'structuredContent': {'call': calls}}
     else:
         result = {}
+    if method == 'tools/call' and request['params']['name'] in SCREENSHOTS:
+        width, height, level = SCREENSHOTS[request['params']['name']]
+        data = base64.b64encode(png(width, height, level)).decode()
+        result = {'content': [{'type': 'text', 'text': 'The whole page.'},
+                              {'type': 'image', 'data': data, 'mimeType': 'image/png'}]}
     print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)

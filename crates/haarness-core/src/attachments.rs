@@ -23,8 +23,9 @@ use crate::{CoreError, CoreResult};
 /// The largest text file read into a message.
 pub const MAX_TEXT_ATTACHMENT_BYTES: usize = 512 * 1024;
 
-/// The largest image file read for conversion; what is kept is far smaller.
-const MAX_IMAGE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+/// The largest image read for conversion, a file or an image an MCP tool
+/// returns; what is kept is far smaller.
+pub const MAX_IMAGE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// How far into a file PDF readers look for its `%PDF-` header.
 const PDF_HEADER_WINDOW: usize = 1024;

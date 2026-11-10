@@ -80,28 +80,86 @@ impl Process {
     #[cfg_attr(not(unix), allow(clippy::unused_self))]
     fn stop(&mut self) {
         #[cfg(unix)]
-        if let Some(pid) = self.pid.take().filter(|pid| *pid > 1) {
-            use nix::{
-                sys::signal::{Signal, kill, killpg},
-                unistd::Pid,
-            };
-            // Snapshot before stopping the parent, since detached grandchildren
-            // can be reparented when it exits. Never select processes by name.
-            if let Ok(output) = std::process::Command::new("ps")
-                .args(["-axo", "pid=,ppid="])
-                .output()
-                && output.status.success()
-            {
-                for child in descendants(&String::from_utf8_lossy(&output.stdout), pid)
-                    .into_iter()
-                    .rev()
-                {
-                    let _ = kill(Pid::from_raw(child), Signal::SIGKILL);
-                }
-            }
-            // The dedicated group also catches children born during the snapshot
-            // and children already reparented after the MCP leader exited.
-            let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+        if let Some(pid) = self.pid.take() {
+            stop_tree(pid);
+        }
+    }
+}
+
+/// Stops the process `pid`, which leads a process group of its own, with
+/// every process it started and every process left in its group.
+#[cfg(unix)]
+pub(super) fn stop_tree(pid: i32) {
+    use nix::{
+        sys::signal::{Signal, kill, killpg},
+        unistd::Pid,
+    };
+    if pid <= 1 {
+        return;
+    }
+    // Snapshot before stopping the parent, since detached grandchildren
+    // can be reparented when it exits. Never select processes by name.
+    if let Ok(output) = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        && output.status.success()
+    {
+        for child in descendants(&String::from_utf8_lossy(&output.stdout), pid)
+            .into_iter()
+            .rev()
+        {
+            let _ = kill(Pid::from_raw(child), Signal::SIGKILL);
+        }
+    }
+    // The dedicated group also catches children born during the snapshot
+    // and children already reparented after the leader exited.
+    let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+}
+
+/// A short-lived command started in a process group of its own (a headers
+/// helper), stopped with everything it started when this is dropped before
+/// the command [`Self::finished`]: it ran past its limit, or what waited for
+/// it was stopped. A shell runs the steps of a pipeline or of `a; b` as its
+/// children, and one still holding the output open would otherwise go on
+/// after the shell is killed. Drop it while the command still runs, so the
+/// children that left its group are found through it (see [`stop_tree`]). A
+/// command that ends on its own leaves what it started running.
+pub(super) struct Group(#[cfg_attr(not(unix), allow(dead_code))] Option<i32>);
+
+impl Group {
+    /// Watches the group led by `leader`, just started.
+    pub fn led_by(leader: Option<u32>) -> Self {
+        Self(leader.and_then(|pid| i32::try_from(pid).ok()))
+    }
+
+    /// The command ended on its own: nothing is stopped.
+    pub fn finished(mut self) {
+        self.0 = None;
+    }
+
+    /// The command's process ended, and was reaped, before what it started
+    /// did: what is left in its group is stopped, but no tree is walked from
+    /// a pid that may be another process's by now.
+    pub fn leader_ended(mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.take().filter(|pid| *pid > 1) {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            self.0 = None;
+        }
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.take() {
+            stop_tree(pid);
         }
     }
 }
