@@ -24,6 +24,11 @@ pub struct TerminalGuard;
 
 const MOUSE_TRACKING_ENABLE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
 const MOUSE_TRACKING_DISABLE: &str = "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1015l\x1b[?1006l";
+/// Numeric keypad mode (DECKPNM): keypad digits and Enter arrive as the main
+/// keys' characters. A full-screen program that exits without leaving
+/// application keypad mode (`ESC =`) has them sent as `ESC O q`, `ESC O M`,
+/// which the key reader drops, so the keypad would type nothing.
+const NUMERIC_KEYPAD: &str = "\x1b>";
 
 #[cfg(unix)]
 struct RawProbeGuard;
@@ -516,7 +521,7 @@ fn activate_terminal() -> Result<()> {
         // Button, drag, and any-motion tracking with SGR encoding. Motion
         // is required for hover/focus feedback; the event
         // loop only mutates state when the hovered target actually changes.
-        write!(io::stdout(), "{MOUSE_TRACKING_ENABLE}")?;
+        write!(io::stdout(), "{MOUSE_TRACKING_ENABLE}{NUMERIC_KEYPAD}")?;
         io::stdout().flush()?;
         Ok(())
     })();
@@ -657,7 +662,7 @@ mod tests {
     #[cfg(unix)]
     use super::run_clipboard_helper;
     use super::{
-        MOUSE_TRACKING_DISABLE, MOUSE_TRACKING_ENABLE, clipboard_helpers, osc_text,
+        MOUSE_TRACKING_DISABLE, MOUSE_TRACKING_ENABLE, NUMERIC_KEYPAD, clipboard_helpers, osc_text,
         panic_ends_the_tui, parse_background_variant, parse_terminal_rgb,
     };
 
@@ -769,6 +774,14 @@ mod tests {
         assert!(normal < drag && drag < motion && motion < sgr);
         assert!(MOUSE_TRACKING_DISABLE.contains("?1003l"));
         assert!(MOUSE_TRACKING_DISABLE.contains("?1006l"));
+    }
+
+    /// The keypad types and sends like the main keys whatever mode the last
+    /// program left it in: numeric mode, never application mode.
+    #[test]
+    fn entering_the_screen_puts_the_keypad_in_numeric_mode() {
+        assert_eq!(NUMERIC_KEYPAD, "\x1b>");
+        assert!(!NUMERIC_KEYPAD.contains("\x1b="));
     }
 
     #[test]

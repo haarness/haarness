@@ -344,6 +344,8 @@ A terminal under 40 columns or 12 rows drops the masthead, the sidebar and the b
 
 Option (Alt) with an arrow, Home, End or Page Up/Down is one key in every terminal. macOS Terminal, and iTerm2's Terminal.app preset, send Option+Up as Escape followed by the arrow (`ESC ESC [ A`); tmux usually re-encodes that as `ESC [1;3A` but can pass it on as it is. The TUI reads it as Alt+Up whenever it arrives in one read, several in a row included, never as Escape (which would arm an interrupt or reject a focused approval) and typed text. So an Escape followed by an arrow within the same read is taken as Alt with that arrow.
 
+The numeric keypad types and sends as the main keys do, also when a program run before the TUI left the terminal's keypad in application mode: the TUI puts it back in numeric mode when it takes the screen. Inside tmux, which sends the keypad's Enter as a line feed, that Enter starts a new line, as Ctrl+J does.
+
 `/terminal` opens a full-screen VT terminal backed by a server-owned workspace PTY. `Ctrl+]` (or `F12`, for keyboards where `]` is hard to reach) detaches without stopping it, `Ctrl+Shift+T` opens another tab (in terminals with enhanced key reporting; elsewhere use `/terminal new`), `Ctrl+Shift+W` closes and terminates the active tab, `Alt+Left/Right` switches tabs, and `Shift+PgUp` scrolls back. A shell that exits closes its tab, and closing the last one returns to the chat. Reopening `/terminal` reconnects and replays bounded output.
 
 The server keeps the last two megabytes of a terminal's output. Reopening `/terminal` after more output than that replays from the first whole line still kept, in the terminal modes the dropped output left on (alternate screen, cursor and keypad keys, mouse reporting, bracketed paste).
