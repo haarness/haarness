@@ -1672,6 +1672,9 @@ impl Reader<'_> {
                 outside.as_deref(),
                 reads,
             );
+            if reads && complete {
+                self.name_glob_secrets(&node_text(dest, command), &value);
+            }
             self.folder = None;
             if let Some(dir) = outside {
                 push_unique(&mut self.analysis.external_dirs, glob(&dir));
@@ -2414,6 +2417,9 @@ impl Reader<'_> {
                         "type" | "more" | "copy" | "xcopy" | "robocopy" | "move"
                     )));
         self.name_path(raw, value, complete, outside.as_deref(), reads);
+        if reads && complete {
+            self.name_glob_secrets(raw, value);
+        }
         if let Some(dir) = outside {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
@@ -2451,15 +2457,16 @@ impl Reader<'_> {
         outside: Option<&Path>,
         reads: bool,
     ) {
-        // Every secret name holds `.env`; the test is cheap for the rest.
-        let secret = complete
+        // Every secret name holds `.env`; the test is cheap for the rest. A
+        // link of another name (`notes.txt -> .env`) is judged by where it
+        // leads.
+        let named = complete
             && reads
             && value.contains(".env")
             && crate::permissions::is_secret_path(Path::new(value));
-        if outside.is_none()
-            && !secret
-            && !(complete && crate::permissions::may_name_credential_store(value))
-        {
+        let linked = complete && reads && !named && is_link(self.from(), raw, value);
+        let credential = complete && crate::permissions::may_name_credential_store(value);
+        if outside.is_none() && !named && !linked && !credential {
             return;
         }
         let target = if complete {
@@ -2474,13 +2481,72 @@ impl Reader<'_> {
             Some(expanded) => resolve(self.from(), &expanded),
             None => resolve(self.from(), Path::new(target)),
         };
+        let secret =
+            (named || (linked && crate::permissions::is_secret_path(&path))) && !path.is_dir();
+        if outside.is_none() && !secret && !credential {
+            return;
+        }
         self.analysis.paths.push(NamedPath {
             file: complete && !path.is_dir(),
             literal: complete,
-            secret: secret && !path.is_dir(),
+            secret,
             path,
             outside: outside.map(glob),
         });
+    }
+
+    /// Record each secret file that a glob a command reads (`cat .env*`,
+    /// `cat .e*`) matches where the shell is, when the word is an unquoted
+    /// glob: only its last part may hold `*`, `?` or a `[…]` class, read as
+    /// any one character, and a name starting with `.` is matched only by a
+    /// part that starts with one, as the shell does. A folder holding many
+    /// entries is read up to [`MAX_GLOB_ENTRIES`].
+    fn name_glob_secrets(&mut self, raw: &str, value: &str) {
+        if !unquoted_glob(raw) {
+            return;
+        }
+        let (folder, part) = value
+            .rsplit_once('/')
+            .map_or(("", value), |(folder, part)| (folder, part));
+        if part.is_empty() || unquoted_glob(folder) {
+            return;
+        }
+        let folder = if value.contains('/') {
+            let folder = if folder.is_empty() { "/" } else { folder };
+            match home_expansion(raw, folder) {
+                Some(expanded) => resolve(self.from(), &expanded),
+                None => resolve(self.from(), Path::new(folder)),
+            }
+        } else {
+            self.from().to_path_buf()
+        };
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            return;
+        };
+        for entry in entries.flatten().take(MAX_GLOB_ENTRIES) {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if (name.starts_with('.') && !part.starts_with('.')) || !glob_part_matches(part, &name)
+            {
+                continue;
+            }
+            // Its name says it is a secret, or it is a link to one.
+            let named =
+                name.contains(".env") && crate::permissions::is_secret_path(&folder.join(&*name));
+            if !named && !entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+                continue;
+            }
+            let path = resolve(&folder, &*name);
+            if path.is_file() && (named || crate::permissions::is_secret_path(&path)) {
+                self.analysis.paths.push(NamedPath {
+                    file: true,
+                    literal: true,
+                    secret: true,
+                    path,
+                    outside: None,
+                });
+            }
+        }
     }
 
     /// What `name` deletes or overwrites among `arguments`: see
@@ -3022,6 +3088,10 @@ impl Reader<'_> {
                     _ => value,
                 };
                 self.name_path(&word.raw, &value, complete, None, true);
+                // `du` only sums the sizes of what a glob matches.
+                if complete && name != "du" {
+                    self.name_glob_secrets(&word.raw, &value);
+                }
             }
         }
         if !complete || !self.path_command(&name) {
@@ -3126,6 +3196,72 @@ fn copy_destination(name: &str, arguments: &[Word<'_>]) -> Option<usize> {
         }
     }
     operands.get(1).and(operands.last().copied())
+}
+
+/// How many entries of a folder [`Reader::name_glob_secrets`] reads.
+const MAX_GLOB_ENTRIES: usize = 4096;
+
+/// Whether a word as written holds a glob the shell expands: `*`, `?` or
+/// `[`, in a word with no quote or escape (a quoted one is taken as it is).
+fn unquoted_glob(raw: &str) -> bool {
+    raw.contains(['*', '?', '[']) && !raw.contains(['\'', '"', '\\', '$', '`'])
+}
+
+/// Whether a file `name` matches one part of a glob (`*`, `?`, and a `[…]`
+/// class read as any one character).
+fn glob_part_matches(part: &str, name: &str) -> bool {
+    let mut pattern: Vec<Option<char>> = Vec::new();
+    let mut chars = part.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' => pattern.push(None),
+            '?' => pattern.push(Some('\0')),
+            '[' => {
+                for c in chars.by_ref() {
+                    if c == ']' {
+                        break;
+                    }
+                }
+                pattern.push(Some('\0'));
+            }
+            other => pattern.push(Some(other)),
+        }
+    }
+    let name: Vec<char> = name.chars().collect();
+    // Matching with backtracking to the last `*`, in linear steps.
+    let (mut p, mut n) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        match pattern.get(p) {
+            Some(None) => {
+                star = Some((p, n));
+                p += 1;
+            }
+            Some(Some(c)) if *c == '\0' || *c == name[n] => {
+                p += 1;
+                n += 1;
+            }
+            _ => match star {
+                Some((at, from)) => {
+                    p = at + 1;
+                    n = from + 1;
+                    star = Some((at, from + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    pattern[p..].iter().all(Option::is_none)
+}
+
+/// Whether `value`, a word as written (`raw`), names a symbolic link where
+/// the shell is: its name says nothing of the file it leads to.
+fn is_link(from: &Path, raw: &str, value: &str) -> bool {
+    if value.is_empty() || value.starts_with('-') || value.len() > 4096 || value.contains('\n') {
+        return false;
+    }
+    let candidate = home_expansion(raw, value).unwrap_or_else(|| PathBuf::from(value));
+    std::fs::symlink_metadata(from.join(candidate)).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /// Whether `word` is a literal `--`, which ends a program's options.

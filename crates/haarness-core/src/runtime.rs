@@ -19071,7 +19071,10 @@ mod shell_reading_tests {
         let project =
             std::env::temp_dir().join(format!("haarness-shell-secrets-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
+        std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+        std::os::unix::fs::symlink(".env", project.join("notes.txt")).unwrap();
         // Haarness's defaults: shell commands run, `.env` reads ask.
         let defaults = engine(&[]);
         let verdict = |engine: &PermissionEngine, command: &str| {
@@ -19110,6 +19113,13 @@ mod shell_reading_tests {
             "mv --target-directory=/tmp .env",
             "cp .env{,.bak}",
             "cp $FLAGS .env.example .env",
+            // A link of another name to it, and a glob that matches it.
+            "cat notes.txt",
+            "grep TOKEN notes.txt",
+            "cat .env*",
+            "cat .e*",
+            "head -1 .?nv",
+            "cat *",
         ] {
             assert_eq!(verdict(&defaults, command), Ask, "{command}");
         }
@@ -19130,6 +19140,12 @@ mod shell_reading_tests {
             "cp -n .env.template .env",
             "mv .env.example .env",
             "cp README.md -- .env",
+            // Globs that match no secret file, or that are quoted, and a
+            // link only looked at.
+            "cat src/*.rs",
+            "cat '.env*'",
+            "ls -la notes.txt",
+            "du -sh .*",
         ] {
             assert_eq!(verdict(&defaults, command), Allow, "{command}");
         }
