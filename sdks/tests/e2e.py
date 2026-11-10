@@ -199,9 +199,26 @@ def scenario(mode):
             assert isinstance(extension["server"]["pid"], int), extension
             host = c("connect_browser_host", tid)
             assert host["type"] == "attached"
-            # Real TCP tunnel to the fixture server through the browser host API.
+            # Real TCP tunnel through the browser host API to a plain web server on this computer. One to the Haarness
+            # server itself is refused: what came through it would arrive from the server.
             from urllib.parse import urlsplit
-            target = {"host": "127.0.0.1", "port": urlsplit(fixture.url).port}
+            from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+            class Healthy(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok")
+
+                def log_message(self, *args):
+                    pass
+
+            web = ThreadingHTTPServer(("127.0.0.1", 0), Healthy)
+            threading.Thread(target=web.serve_forever, daemon=True).start()
+            own = {"host": "127.0.0.1", "port": urlsplit(fixture.url).port}
+            c("browser_tunnel", tid, "open", {"lease": host["lease"], "target": own}, error=400)
+            target = {"host": "127.0.0.1", "port": web.server_address[1]}
             tunnel = c("browser_tunnel", tid, "open", {"lease":host["lease"], "target": target})
             c("browser_tunnel", tid, "write", {"lease":host["lease"], "id": tunnel, "data": base64.b64encode(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").decode()})
             data = c("browser_tunnel", tid, "read", {"lease":host["lease"], "id": tunnel})
@@ -216,6 +233,8 @@ def scenario(mode):
             assert c("adopt_browser_draft", draft, {"thread": adopted_thread, "lease": lease})["adopted"]
             c("update_thread", adopted_thread, {"archived": True})
             c("draft_browser_tunnel", draft, "close", {"lease": "incorrect-lease", "id": tunnel}, error=400)
+            web.shutdown()
+            web.server_close()
             # A pre-existing published share is read through the SDK's HTML route.
             share = uuid4().hex + uuid4().hex
             shares = fixture.data / "data" / "shares"
