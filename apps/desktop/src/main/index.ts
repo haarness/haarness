@@ -111,7 +111,7 @@ import { createVoiceInput, launchVoice } from "./voice";
 import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
 import { createNotifications, notificationPlace } from "./notifications";
-import { contextMenuItems } from "./context-menu";
+import { contextMenuItems, systemSpellings } from "./context-menu";
 import { chatHomeFolder, chatHomePath, isChatHome } from "./chat-home";
 import { quietClosedSocketReads } from "./closed-socket-read";
 import { removalSurvivesFailedStart } from "./unlinked-worktree";
@@ -1956,8 +1956,16 @@ function createWindow() {
   // The right-click menu (see context-menu.ts), for the window's own page and
   // its frames (previews, app frames). A page in the Browser panel is a view
   // of its own, which this does not reach.
-  win.webContents.on("context-menu", (_event, params) => {
-    const items = contextMenuItems(params, {
+  let menuRequest = 0;
+  win.webContents.on("context-menu", async (_event, params) => {
+    const request = ++menuRequest;
+    let dictionarySuggestions = params.dictionarySuggestions;
+    if (process.platform === "darwin" && params.misspelledWord && !dictionarySuggestions.length) {
+      dictionarySuggestions = await systemSpellings(params.misspelledWord);
+      // Closed, or right-clicked again, meanwhile.
+      if (request !== menuRequest || win.isDestroyed()) return;
+    }
+    const items = contextMenuItems({ ...params, dictionarySuggestions }, {
       t: say,
       replace: (word) => win.webContents.replaceMisspelling(word),
       learn: (word) => win.webContents.session.addWordToSpellCheckerDictionary(word),

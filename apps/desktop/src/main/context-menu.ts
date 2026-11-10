@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import type { ContextMenuParams, MenuItemConstructorOptions } from "electron";
 
 /** What a right-click in a window says about the place it was made. */
@@ -79,3 +80,46 @@ function webLink(url: string, page: string) {
   } catch {}
   return url;
 }
+
+/**
+ * Asks the system spelling checker of macOS for the spellings of `word` it
+ * would suggest, in its own language. There, a page names the misspelled word
+ * it was right-clicked on but suggests nothing (the system checks spelling
+ * outside the page, and Electron does not ask it for guesses), so main asks:
+ * JavaScript for Automation, run with the word as its argument. Nothing when
+ * it does not answer within a second; the menu then offers Add to dictionary
+ * alone.
+ */
+export function systemSpellings(
+  word: string,
+  run: typeof execFile = execFile,
+): Promise<string[]> {
+  // An argument that looked like an option would not reach the script.
+  if (!word || word.startsWith("-")) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    run(
+      "/usr/bin/osascript",
+      ["-l", "JavaScript", "-e", GUESSES, word],
+      { timeout: 1000, encoding: "utf8" },
+      (error, stdout) => {
+        if (error) return resolve([]);
+        resolve(
+          String(stdout)
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .slice(0, MAX_SUGGESTIONS),
+        );
+      },
+    );
+  });
+}
+
+const GUESSES = `ObjC.import("AppKit");
+function run(argv) {
+  const word = argv[0] || "";
+  const checker = $.NSSpellChecker.sharedSpellChecker;
+  const guesses = checker.guessesForWordRangeInStringLanguageInSpellDocumentWithTag(
+    $.NSMakeRange(0, word.length), word, checker.language, 0);
+  return (ObjC.deepUnwrap(guesses) || []).join("\\n");
+}`;

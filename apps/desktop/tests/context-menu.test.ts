@@ -1,7 +1,8 @@
 import { test } from "node:test";
+import { execFile } from "node:child_process";
 import assert from "node:assert/strict";
 import type { MenuItemConstructorOptions } from "electron";
-import { contextMenuItems, type ContextMenuPlace } from "../src/main/context-menu";
+import { contextMenuItems, systemSpellings, type ContextMenuPlace } from "../src/main/context-menu";
 import { dictionaries, translate } from "../src/localization";
 
 const PAGE = "file:///Applications/Haarness.app/Contents/Resources/app.asar/out/renderer/index.html";
@@ -133,4 +134,35 @@ test("the menu speaks the interface language", () => {
     "ja",
   );
   assert.deepEqual(value.lines, ["辞書に追加", "-", "切り取り (cut)", "コピー (copy)"]);
+});
+
+test("on macOS the system's own spellings are asked for, with the word as an argument", async () => {
+  const calls: { file: string; args: string[]; options: { timeout?: number } }[] = [];
+  const answer = (result: { error?: Error; stdout?: string }) =>
+    ((file: string, args: string[], options: { timeout?: number }, done: (error: Error | null, stdout: string) => void) => {
+      calls.push({ file, args, options });
+      done(result.error ?? null, result.stdout ?? "");
+    }) as unknown as Parameters<typeof systemSpellings>[1];
+  assert.deepEqual(await systemSpellings("teh", answer({ stdout: "the\ntbh\nten\ntea\ntej\nfeh\nyeh\n" })), ["the", "tbh", "ten", "tea", "tej"]);
+  const [call] = calls;
+  assert.equal(call.file, "/usr/bin/osascript");
+  assert.deepEqual(call.args.slice(0, 3), ["-l", "JavaScript", "-e"]);
+  // The word is the script's argument, never part of its text.
+  assert.equal(call.args[4], "teh");
+  assert.doesNotMatch(call.args[3], /teh/);
+  assert.equal(call.options.timeout, 1000);
+  // No answer in time, or none at all: no spellings, and the menu still offers Add to dictionary.
+  assert.deepEqual(await systemSpellings("teh", answer({ error: new Error("timed out") })), []);
+  assert.deepEqual(await systemSpellings("qzxv", answer({ stdout: "\n" })), []);
+  assert.deepEqual(await systemSpellings("-e", answer({ stdout: "e\n" })), []);
+  assert.equal(calls.length, 3);
+});
+
+test("the system spelling checker answers the script", { skip: process.platform !== "darwin" }, async () => {
+  // Given time to start, as a cold machine may need.
+  const patient = ((file: string, args: string[], options: object, done: never) =>
+    execFile(file, args, { ...options, timeout: 15000 }, done)) as unknown as Parameters<typeof systemSpellings>[1];
+  const spellings = await systemSpellings("teh", patient);
+  assert.ok(spellings.includes("the"), spellings.join(", "));
+  assert.ok(spellings.length <= 5);
 });
