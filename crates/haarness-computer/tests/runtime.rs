@@ -1698,6 +1698,7 @@ async fn paste_in_a_terminal_and_privacy_settings_are_refused_before_anyone_is_a
             thread,
             vec![vec![
                 call("paste", "mac_click", json!({"ref": "e16"})),
+                call("unmarked", "mac_click", json!({"ref": "e19"})),
                 call("privacy", "mac_click", json!({"ref": "e18"})),
                 call("tab", "mac_click", json!({"ref": "e5"})),
                 call("save", "mac_click", json!({"ref": "e1"})),
@@ -1706,6 +1707,11 @@ async fn paste_in_a_terminal_and_privacy_settings_are_refused_before_anyone_is_a
         .await;
     let (paste, error, _) = result(&items, "paste");
     assert!(error && paste.contains("never paste there"), "{paste}");
+    let (unmarked, error, _) = result(&items, "unmarked");
+    assert!(
+        error && unmarked.contains("never paste there"),
+        "{unmarked}"
+    );
     let (privacy, error, _) = result(&items, "privacy");
     assert!(error && privacy.contains("Privacy & Security"), "{privacy}");
     let clicks: Vec<Value> = lab
@@ -1807,7 +1813,7 @@ async fn a_terminal_panel_takes_no_typing_and_privacy_settings_are_look_only() {
     assert_eq!(ops.iter().filter(|op| *op == "click").count(), 1, "{ops:?}");
 }
 
-/// A workflow's mac_* call in a chat in Auto: the reviewer answers it while it is on, and a person while it is off.
+/// A workflow's mac_* call in a chat in Auto goes to the reviewer while it is on, and to a person while it is off.
 #[tokio::test]
 async fn a_workflow_s_computer_use_in_auto_follows_the_reviewer_switch() {
     let lab = Lab::new(Lab::on());

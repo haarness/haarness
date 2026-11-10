@@ -84,9 +84,9 @@ Every native entry runs the hidden command
 4. That turn and everything it starts (subagents, workflows, background completions) approve ordinary
    permission prompts on their own and cannot use the question tool, since nobody is there to answer.
    Requests only a person can answer, such as a site in the user's Chrome, fail at once instead of
-   waiting ([Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals)). So does computer use in
-   an app the person has not allowed, unless the chat is set to Yolo
-   ([Computer use](COMPUTER-USE.md#approvals-and-app-rules)).
+   waiting ([Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals)). Computer use works only
+   in apps set to **Act without asking**; any other app is refused, also on a server started with
+   `serve --yolo` ([Computer use](COMPUTER-USE.md#approvals-and-app-rules)).
 5. The run then waits for its own work: the subagents, workflows and shell commands its turn started
    in the background, the turns their results start, and what those turns start in turn, down to
    the workflows its subagents start (a foreground subagent's too, even once it has ended) and the

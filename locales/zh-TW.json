@@ -3151,11 +3151,11 @@
   "add credits with /billing topup": "使用 /billing topup 加購額度",
   "turn on overage so your purchased credits pay": "開啟超額使用，讓已購額度可以支付",
   "add credits and turn on overage to keep working": "加購額度並開啟超額使用以繼續工作",
-  "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "代理程式在你未允許的 App 中操作前會先詢問。在設為自動的對話中，自動模式的審核模型可能會代你回答，但你設為每次都詢問的 App 除外；設為 Yolo 的對話會核准一切。你允許某個 App 後，代理程式會在其中直接操作，其所作所為仍由你負責。",
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "密碼管理工具和 Haarness 本身永遠不會被使用，代理程式也絕不會在終端機中輸入。在自動模式下，設為每次都詢問的 App 仍會詢問你。",
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "終端機和編輯器中的文字可能包含他人的提示，因此每次點按都需要你的核准。",
   "You agreed to an earlier version of these terms.": "你同意的是這些條款的較早版本。",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "「先詢問」是指每個對話中每個 App 需核准一次；在自動模式下，審核模型開啟時由它核准。",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "代理程式工作時，畫面頂端的橫條會顯示正在使用的 App，並提供「暫停」和「停止」。它在最前端的 App 中操作時，按 Esc 也可停止。",
-  "Esc stops it too, while it acts in the frontmost app": "在最前端的 App 中操作時，按 Esc 也可停止"
+  "Esc stops it too, while it acts in the frontmost app": "在最前端的 App 中操作時，按 Esc 也可停止",
+  "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app, the agent uses it without checking with you, and what it does remains your responsibility.": "代理程式在你未允許的 App 中操作前會先詢問。在設為自動的對話中，自動模式的審核模型可能會代你回答，但你設為每次都詢問的 App 除外；設為 Yolo 的對話會核准一切。你允許某個 App 後，代理程式會直接使用它而不再向你確認，其所作所為仍由你負責。"
 }

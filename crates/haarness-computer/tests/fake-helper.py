@@ -7,7 +7,7 @@ Reload button and e11 the address field in Safari, e7 a button in Haarness itsel
 New Tab button, e4 a button in Notes, e3 Notes' icon in the Dock, e10 the editor of Visual Studio Code, e14 its
 terminal panel, e13 a switch in System Settings whose pane the helper cannot name, e15 a switch in its Privacy &
 Security pane, e17 a switch in its Displays pane, e18 a switch owned by the Privacy & Security pane's own process,
-e16 Terminal's Paste menu item, and e12 a Share button in Notes, which sits behind the person's window. The Save button names its
+e16 Terminal's Paste menu item, e19 another Paste item an older helper does not mark, and e12 a Share button in Notes, which sits behind the person's window. The Save button names its
 window and the toolbar around it, and a look at the focus for Meta+S names the menu item it would choose. Typing "PAUSE" pauses the
 agent the way the bar would (and resumes half a second later); typing "HOLD" pauses it the same way until the server
 sends "resume", as Resume pressed in a client does; typing "STOP" pauses it and then presses the bar's Stop; typing
@@ -69,6 +69,7 @@ ELEMENTS = {
     15: {"bundle": "com.apple.systempreferences", "app": "System Settings", "role": "AXCheckBox", "name": "Terminal", "content": False,
          "pane": "com.apple.settings.PrivacySecurity.extension", "context": "Automation"},
     16: {"bundle": "com.apple.Terminal", "app": "Terminal", "role": "AXMenuItem", "name": "Paste", "content": False, "paste": True},
+    19: {"bundle": "com.apple.Terminal", "app": "Terminal", "role": "AXMenuItem", "name": "Paste Escaped Text", "content": False},
     17: {"bundle": "com.apple.systempreferences", "app": "System Settings", "role": "AXCheckBox", "name": "Night Shift", "content": False,
          "pane": "com.apple.Displays-Settings.extension"},
     18: {"bundle": "com.apple.settings.PrivacySecurity.extension", "app": "Privacy & Security", "role": "AXCheckBox", "name": "Terminal",

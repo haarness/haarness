@@ -138,6 +138,12 @@ pub const EDITORS: &[&str] = &[
     "com.sublimetext.3",
     "com.panic.Nova",
     "com.barebones.bbedit",
+    "com.trae.app",
+    "dev.kiro.desktop",
+    "com.voideditor.Void",
+    "co.posit.positron",
+    "com.rstudio.desktop",
+    "com.macromates.TextMate",
 ];
 
 /// System Settings, which agents work in like any other app, apart from its Privacy & Security pane.
@@ -452,6 +458,8 @@ mod tests {
             "com.jetbrains.pycharm",
             "com.apple.dt.Xcode",
             "com.sublimetext.4",
+            "com.macromates.TextMate",
+            "com.rstudio.desktop",
             "com.apple.settings.PrivacySecurity.extension",
         ] {
             assert!(!reviewable(bundle, None), "{bundle}");

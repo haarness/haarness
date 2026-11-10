@@ -636,8 +636,11 @@ impl MacTool {
         if target.terminal && gesture == Gesture::Input {
             return Err(tool_error(policy::terminal_refusal(target.app_name())));
         }
-        // Paste in a terminal or script runner runs the clipboard as a command: refused as typing there is.
-        if target.paste && policy::group(&target.bundle, None) == Group::Runner {
+        // Paste in a terminal or script runner runs the clipboard as a command: refused as typing there is. A helper
+        // that does not mark Paste items still names them: an English menu item called Paste is one.
+        let paste =
+            target.paste || (target.role == "AXMenuItem" && target.name.starts_with("Paste"));
+        if paste && policy::group(&target.bundle, None) == Group::Runner {
             return Err(tool_error(policy::paste_refusal(target.app_name())));
         }
         if let Some(refusal) = policy::pane_refusal(&target.bundle, target.pane.as_deref(), gesture)

@@ -3151,11 +3151,11 @@
   "add credits with /billing topup": "/billing topup でクレジットを追加",
   "turn on overage so your purchased credits pay": "超過利用をオンにすると購入済みクレジットで支払えます",
   "add credits and turn on overage to keep working": "続けるにはクレジットを追加し、超過利用をオンにしてください",
-  "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app the agent acts there without asking, and what it does remains your responsibility.": "許可していないアプリで操作する前に、エージェントは確認します。自動に設定したチャットでは、毎回確認するように設定したアプリを除き、自動モードの審査役があなたに代わって答えることがあります。Yolo に設定したチャットはすべてを承認します。アプリを許可すると、エージェントはそのアプリでは確認せずに操作し、その結果の責任は引き続きあなたにあります。",
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "パスワード管理アプリと Haarness 自体は使われず、エージェントがターミナルに入力することもありません。自動でも、毎回確認するように設定したアプリはあなたに確認します。",
   "Terminal and editor text can hold someone's prompt, so every click on it needs your approval.": "ターミナルやエディタのテキストには誰かへの確認が含まれていることがあるため、そこをクリックするたびに承認が必要です。",
   "You agreed to an earlier version of these terms.": "これらの規約の以前の版に同意しています。",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "「先に確認」では、各チャットでアプリごとに1回承認します。自動では、審査役がオンのときは審査役が承認します。",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "エージェントが作業している間、画面上部の帯に使用中のアプリと「一時停止」「停止」が表示されます。最前面のアプリを操作している間は Esc キーでも停止します。",
-  "Esc stops it too, while it acts in the frontmost app": "最前面のアプリを操作中は Esc キーでも停止できます"
+  "Esc stops it too, while it acts in the frontmost app": "最前面のアプリを操作中は Esc キーでも停止できます",
+  "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app, the agent uses it without checking with you, and what it does remains your responsibility.": "許可していないアプリで操作する前に、エージェントは確認します。自動に設定したチャットでは、毎回確認するように設定したアプリを除き、自動モードの審査役があなたに代わって答えることがあります。Yolo に設定したチャットはすべてを承認します。アプリを許可すると、エージェントはあなたに確かめることなくそのアプリを使い、その結果の責任は引き続きあなたにあります。"
 }
