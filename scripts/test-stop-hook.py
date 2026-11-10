@@ -10,6 +10,7 @@
   the daemon log says why.
 - `continue: false`, an exit 2 with nothing on stderr and a block with no reason all let it end.
 - A Stop pressed while the hook runs ends the turn, and no message of the hook's is added.
+- `haarness run` writes one stderr line when a Stop hook sends the agent back; its JSON output is unchanged.
 - A message the person sends while the hook runs goes first: no feedback is added for that end.
 Every daemon runs on isolated data under one temporary root and is stopped at the end.
 """
@@ -177,12 +178,12 @@ model="echo-1"
     until(lambda: 'Stop hook' in capture() and 'run the tests before you finish' in capture(), 'TUI shows the note')
     (root / 'tui-stop-hook-note.txt').write_text(capture())
     (root / 'tui-stop-hook-note.ansi').write_text(tmux('capture-pane', '-p', '-e', '-t', session + ':0.0'))
-    note = next(line for line in capture().splitlines() if '↻' in line)
+    note = next(line for line in capture().splitlines() if '◇ Stop hook' in line)
     # The echo model repeats the hook's message in its reply; no prompt row shows it.
     prompts = [line for line in capture().splitlines() if line.lstrip().startswith('▎')]
     check('the TUI shows one quiet line for the hook, not the message the model read',
-          'run the tests before you finish' in note and note.lstrip().startswith('↻ Stop hook · ')
-          and not any('Your turn has not ended' in line for line in prompts), capture())
+          'run the tests before you finish' in note and note.lstrip().startswith('◇ Stop hook · ')
+          and not any('Stop hook output follows' in line for line in prompts), capture())
     tmux('send-keys', '-t', session, '/language ar', 'Enter')
     until(lambda: 'خطاف Stop' in capture(), 'the TUI note in Arabic')
     (root / 'tui-stop-hook-note-ar.txt').write_text(capture())
@@ -195,6 +196,20 @@ model="echo-1"
     chat = Chat(c, 'Stop hook JSON')
     check('a JSON block keeps the turn going too', chat.finish(chat.turn('tidy up'))['status'] == 'completed'
           and len(chat.replies()) == 2 and 'check the formatting too' in chat.replies()[1], chat.replies())
+
+    # --- haarness run ------------------------------------------------------------------------
+    mode.write_text('exit2')
+    run = lambda *args: subprocess.run([binary, '--workspace', str(ws), '--trust-project', 'run', *args], env=env,
+                                       text=True, capture_output=True, timeout=120)
+    ran = run('fix the build')
+    check('haarness run says on stderr, once, that the Stop hook sent the agent back',
+          ran.returncode == 0 and ran.stderr.count('Stop hook: run the tests before you finish') == 1
+          and ran.stdout.count('Echo: ') == 2, (ran.stdout, ran.stderr))
+    ran = run('--format', 'json', 'fix the build again')
+    check('its JSON output is unchanged: the two replies, no hook line',
+          ran.returncode == 0 and 'Stop hook:' not in ran.stderr
+          and [json.loads(line)['type'] for line in ran.stdout.splitlines() if line.startswith('{')] == ['assistant', 'assistant'],
+          (ran.stdout, ran.stderr))
 
     # --- a hook that always blocks ----------------------------------------------------------
     mode.write_text('always')

@@ -213,13 +213,77 @@ async fn a_stop_hook_that_blocks_once_gets_one_more_reply_in_the_same_turn() {
     assert_eq!(replies[0], "Echo: fix the bug");
     // The model read the hook's message, which says who wrote it.
     assert!(
-        replies[1].contains("The hook wrote it, not the person")
+        replies[1].contains("the person did not type")
             && replies[1].ends_with("<hook-feedback>\nrun the tests\n</hook-feedback>"),
         "{}",
         replies[1]
     );
     assert!(items.iter().all(|item| item.turn_id == Some(turn.id)));
     assert_eq!(hooks.active(), [false, true]);
+    assert_eq!(hooks.turn_ends.load(Ordering::SeqCst), 1);
+    remove_test_folder(directory).await;
+}
+
+#[tokio::test]
+async fn a_stop_hooks_long_feedback_is_cut_as_other_hook_text_is() {
+    let long: &'static str = "x".repeat(20_000).leak();
+    let hooks = Arc::new(StopHooks::answering(&[Some(long), None]));
+    let (directory, runtime) = runtime(hooks.clone());
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("test it"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    wait_idle(&runtime, thread.id).await;
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let feedback = hook_messages(&items);
+    assert_eq!(feedback.len(), 1);
+    assert_eq!(
+        feedback[0],
+        format!("{}… (4000 more characters not shown)", "x".repeat(16_000))
+    );
+    remove_test_folder(directory).await;
+}
+
+/// A workflow takes its agent's last reply as the agent's answer: Stop
+/// hooks observe the end of the agent's turn, and never send it back.
+#[tokio::test]
+async fn a_workflow_agents_turn_ends_whatever_its_stop_hooks_say() {
+    let hooks = Arc::new(StopHooks::answering(&[Some("run the tests")]));
+    let (directory, runtime) = runtime(hooks.clone());
+    let chat = echo_thread(&runtime).await;
+    let child = |parent: ThreadId, title: &str| CreateThreadRequest {
+        title: Some(title.into()),
+        parent_id: Some(parent),
+        provider: Some("echo".into()),
+        model: Some("echo-1".into()),
+        ..Default::default()
+    };
+    let workflow = runtime
+        .create_thread(child(chat.id, "Workflow"))
+        .await
+        .unwrap();
+    let agent = runtime
+        .create_thread(child(workflow.id, "Workflow agent"))
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_workflow_agent_turn(chat.id, agent.id, turn_request("review the diff"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    wait_idle(&runtime, agent.id).await;
+    let items = runtime.items(agent.id, None).await.unwrap();
+    assert!(hook_messages(&items).is_empty());
+    assert_eq!(replies(&items), ["Echo: review the diff"]);
+    assert_eq!(*hooks.runs.lock().unwrap(), [(agent.id, false)]);
     assert_eq!(hooks.turn_ends.load(Ordering::SeqCst), 1);
     remove_test_folder(directory).await;
 }

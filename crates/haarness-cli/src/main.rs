@@ -8340,8 +8340,11 @@ async fn print_run_output_client(
         .max()
         .unwrap_or(0);
     if format == RunFormat::Default && !thinking {
-        for text in assistant_messages_for_turn(items, turn_id) {
-            println!("{text}");
+        for output in output_for_turn(items, turn_id) {
+            match output {
+                TurnOutput::Reply(text) => println!("{text}"),
+                TurnOutput::Hook(line) => eprintln!("{line}"),
+            }
         }
         return Ok(printed_through);
     }
@@ -8349,6 +8352,12 @@ async fn print_run_output_client(
         .into_iter()
         .filter(|item| item.turn_id == Some(turn_id))
     {
+        if format != RunFormat::Json
+            && let Some(line) = hook_line(&item.data)
+        {
+            eprintln!("{line}");
+            continue;
+        }
         let (kind, text) = match item.data {
             ItemData::AssistantMessage { text } => ("assistant", text),
             ItemData::Reasoning { text, .. } if thinking => ("reasoning", text),
@@ -8473,6 +8482,12 @@ async fn settle_cli_subagents_client(
         .into_iter()
         .filter(|item| item.sequence > printed_through)
     {
+        if format != RunFormat::Json
+            && let Some(line) = hook_line(&item.data)
+        {
+            eprintln!("{line}");
+            continue;
+        }
         let turn_id = item.turn_id;
         match item.data {
             ItemData::AssistantMessage { text } => {
@@ -8751,18 +8766,51 @@ fn finish_goal_run(state: &GoalState) -> Result<()> {
     }
 }
 
-fn assistant_messages_for_turn(
-    items: Vec<haarness_protocol::Item>,
-    turn_id: TurnId,
-) -> Vec<String> {
+/// What a run prints of its turn, in order: the agent's replies, and a line
+/// for each time a hook sent the agent back to work.
+#[derive(Debug, PartialEq)]
+enum TurnOutput {
+    Reply(String),
+    Hook(String),
+}
+
+fn output_for_turn(items: Vec<haarness_protocol::Item>, turn_id: TurnId) -> Vec<TurnOutput> {
     items
         .into_iter()
         .filter(|item| item.turn_id == Some(turn_id))
-        .filter_map(|item| match item.data {
-            ItemData::AssistantMessage { text } => Some(text),
-            _ => None,
+        .filter_map(|item| match hook_line(&item.data) {
+            Some(line) => Some(TurnOutput::Hook(line)),
+            None => match item.data {
+                ItemData::AssistantMessage { text } => Some(TurnOutput::Reply(text)),
+                _ => None,
+            },
         })
         .collect()
+}
+
+/// The line a run writes to stderr for a hook's message that sent the agent
+/// back to work: the event and its feedback on one line, cut at 200
+/// characters.
+fn hook_line(data: &ItemData) -> Option<String> {
+    let ItemData::UserMessage {
+        text,
+        hook: Some(event),
+        ..
+    } = data
+    else {
+        return None;
+    };
+    let feedback = haarness_protocol::hook_feedback(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let shown: String = feedback.chars().take(200).collect();
+    let cut = if shown.len() < feedback.len() {
+        "…"
+    } else {
+        ""
+    };
+    Some(format!("{event} hook: {shown}{cut}"))
 }
 
 struct ComposedRuntimeSources {
@@ -15499,16 +15547,16 @@ mod tests {
     use super::{
         AgentRuntime, AuthCommand, BTreeMap, Cli, Command, Credential, FileConfig,
         LiveWorkspaceServer, McpCommand, McpConfigureRequest, McpOAuthCallback, Paths,
-        ProviderSection, RunFormat, RuntimeDiscovery, SessionCommand, StartLog,
-        assistant_messages_for_turn, configured_mcp, current_executable_fingerprint,
-        finish_goal_run, goal_idle_timeout_from, load_output_style, loaded_mcp_entry,
-        local_server_compatibility_error, mcp_config_for_display, mcp_oauth_callback,
-        migrate_legacy_workspace_database, normalize_natural_language_args,
-        normalized_provider_url, parse_mcp_key_values, prepare_start_log, provider_url_problem,
-        read_mcp_entry, receive_oauth_callback, replace_incompatible_workspace_server,
-        resolved_credentials, select_run_thread_client, server_compatibility_error,
-        set_goal_for_run_client, start_failure, valid_provider_url, wait_for_goal_client,
-        write_entry_fields, write_mcp_entry, write_provider_entry, write_runtime,
+        ProviderSection, RunFormat, RuntimeDiscovery, SessionCommand, StartLog, TurnOutput,
+        configured_mcp, current_executable_fingerprint, finish_goal_run, goal_idle_timeout_from,
+        hook_line, load_output_style, loaded_mcp_entry, local_server_compatibility_error,
+        mcp_config_for_display, mcp_oauth_callback, migrate_legacy_workspace_database,
+        normalize_natural_language_args, normalized_provider_url, output_for_turn,
+        parse_mcp_key_values, prepare_start_log, provider_url_problem, read_mcp_entry,
+        receive_oauth_callback, replace_incompatible_workspace_server, resolved_credentials,
+        select_run_thread_client, server_compatibility_error, set_goal_for_run_client,
+        start_failure, valid_provider_url, wait_for_goal_client, write_entry_fields,
+        write_mcp_entry, write_provider_entry, write_runtime,
     };
     use super::{
         Approver, NO_MODEL_CONNECTED, Refusals, RunWatch, TurnStatus, allow_rule_example,
@@ -18048,7 +18096,7 @@ request_timeout = 0
             data,
             created_at: chrono::Utc::now(),
         };
-        let messages = assistant_messages_for_turn(
+        let messages = output_for_turn(
             vec![
                 item(
                     1,
@@ -18079,7 +18127,59 @@ request_timeout = 0
             ],
             current_turn,
         );
-        assert_eq!(messages, ["new answer"]);
+        assert_eq!(messages, [TurnOutput::Reply("new answer".into())]);
+    }
+
+    /// A Stop hook that sent the agent back shows as one line between the
+    /// replies, its feedback on that line.
+    #[test]
+    fn run_output_says_when_a_stop_hook_sent_the_agent_back() {
+        let turn = TurnId::new();
+        let item = |sequence, data| Item {
+            id: ItemId::new(),
+            thread_id: ThreadId::new(),
+            turn_id: Some(turn),
+            sequence,
+            data,
+            created_at: chrono::Utc::now(),
+        };
+        let reply = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let hook = ItemData::UserMessage {
+            text: "For the model.\n\n<hook-feedback>\nrun the tests\n  then lint\n</hook-feedback>"
+                .into(),
+            attachments: Vec::new(),
+            synthetic: true,
+            command_line: None,
+            queued: false,
+            hook: Some("Stop".into()),
+        };
+        assert_eq!(
+            output_for_turn(
+                vec![
+                    item(1, reply("Fixed.")),
+                    item(2, hook),
+                    item(3, reply("Tests pass."))
+                ],
+                turn
+            ),
+            [
+                TurnOutput::Reply("Fixed.".into()),
+                TurnOutput::Hook("Stop hook: run the tests then lint".into()),
+                TurnOutput::Reply("Tests pass.".into()),
+            ]
+        );
+        let long = ItemData::UserMessage {
+            text: "x".repeat(250),
+            attachments: Vec::new(),
+            synthetic: true,
+            command_line: None,
+            queued: false,
+            hook: Some("Stop".into()),
+        };
+        assert_eq!(
+            hook_line(&long),
+            Some(format!("Stop hook: {}…", "x".repeat(200)))
+        );
     }
 
     #[tokio::test]

@@ -261,9 +261,10 @@ for that.\n</system-reminder>";
 
 /// What the model reads before the feedback of a Stop hook that kept its
 /// turn going, which follows in a `<hook-feedback>` block.
-const STOP_HOOK_FEEDBACK: &str = "Your turn has not ended: a Stop hook asked for more, in the \
-block below. The hook wrote it, not the person you are working with. Take care of it, then end \
-your turn.";
+const STOP_HOOK_FEEDBACK: &str = "Stop hook output follows. A Stop hook runs when you finish \
+working; this one objected, so the turn continues. Treat the block as the report of an \
+automated check that the person did not type, resolve what it reports, and finish again when \
+that is done.";
 
 /// How often in a row Stop hooks may keep one turn going: a hook that
 /// always blocks cannot hold a turn forever.
@@ -4066,6 +4067,7 @@ impl AgentRuntime {
                     None,
                     Some(queue.revision),
                     false,
+                    false,
                 )
                 .await;
             return match turn {
@@ -4274,6 +4276,7 @@ impl AgentRuntime {
                     None,
                     None,
                     unattended,
+                    false,
                 )
                 .await
             {
@@ -7866,7 +7869,7 @@ impl AgentRuntime {
         thread_id: ThreadId,
         request: StartTurnRequest,
     ) -> CoreResult<Turn> {
-        self.start_turn_with_ceilings(thread_id, request, Vec::new(), None, None, false)
+        self.start_turn_with_ceilings(thread_id, request, Vec::new(), None, None, false, false)
             .await
     }
 
@@ -7909,10 +7912,12 @@ impl AgentRuntime {
             output_schema,
             None,
             stance.unattended || kept.unattended,
+            true,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_turn_with_ceilings(
         &self,
         thread_id: ThreadId,
@@ -7921,6 +7926,7 @@ impl AgentRuntime {
         output_schema: Option<serde_json::Value>,
         queue_revision: Option<u64>,
         unattended: bool,
+        workflow_agent: bool,
     ) -> CoreResult<Turn> {
         // As `queue_input` refuses it: a blank message would stay in the
         // chat, and Claude refuses whitespace-only text on every later turn.
@@ -8287,6 +8293,7 @@ impl AgentRuntime {
             parent: None,
             inherited_ceilings,
             output_schema,
+            workflow_agent,
             progress: Mutex::new(TaskProgress::default()),
             last_round: Mutex::new(None),
             status: Mutex::new(StatusState::default()),
@@ -8777,6 +8784,9 @@ struct RunnerTask {
     /// Schema-constrained final output requested by a workflow-owned turn.
     /// Normal user and nested task turns always leave this unset.
     output_schema: Option<serde_json::Value>,
+    /// A workflow's agent runs this turn, and the workflow takes its last
+    /// reply as the agent's answer: Stop hooks only observe its end.
+    workflow_agent: bool,
     /// Child-side liveness counters feeding `task.updated` events.
     progress: Mutex<TaskProgress>,
     /// How the latest provider round of this turn ended.
@@ -10262,11 +10272,43 @@ impl RunnerTask {
         result
     }
 
-    /// Write the hidden message that carries the Stop hooks' feedback, which
-    /// the next round answers. The caller holds the turn's acceptance gate,
-    /// so no message of the person's lands meanwhile. A stop that comes
-    /// while it is written ends the turn, and the message goes with it,
-    /// never announced, so no later turn answers it either.
+    /// Why the Stop hooks' feedback stays out of this turn, if it does. It is
+    /// for the model of a person's chat only (a workflow takes its agent's
+    /// last reply as its answer), while the agent has steps left, at most
+    /// [`STOP_HOOK_CONTINUATIONS`] times in a row, and not while a queued
+    /// message waits to start a turn of its own (a paused queue starts none).
+    async fn stop_feedback_held_back(
+        &self,
+        at_step_limit: bool,
+        continuations: u32,
+    ) -> CoreResult<Option<String>> {
+        Ok(if self.workflow_agent {
+            Some("a workflow agent's turn".into())
+        } else if at_step_limit {
+            Some("no steps left".into())
+        } else if continuations >= STOP_HOOK_CONTINUATIONS {
+            Some(format!(
+                "Stop hooks kept the turn going {STOP_HOOK_CONTINUATIONS} times in a row"
+            ))
+        } else if !self.queue_pauses.contains_key(&self.thread.id)
+            && !self
+                .repository
+                .input_queue(self.thread.id)
+                .await?
+                .items
+                .is_empty()
+        {
+            Some("a queued message waits".into())
+        } else {
+            None
+        })
+    }
+
+    /// Records the Stop hooks' feedback, cut to the length of other hook
+    /// text, as a hidden message the next round reads. It runs under the
+    /// acceptance gate, so no steer can land between the two. Should a stop
+    /// arrive while the row is being saved, the row is hidden again before
+    /// any client hears of it, and the turn ends as stopped.
     async fn add_stop_hook_message(&self, feedback: &str) -> CoreResult<()> {
         if self.cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -10278,7 +10320,8 @@ impl RunnerTask {
                 Some(self.turn.id),
                 ItemData::UserMessage {
                     text: format!(
-                        "{STOP_HOOK_FEEDBACK}\n\n<hook-feedback>\n{feedback}\n</hook-feedback>"
+                        "{STOP_HOOK_FEEDBACK}\n\n<hook-feedback>\n{}\n</hook-feedback>",
+                        clip_hook_text(feedback)
                     ),
                     attachments: Vec::new(),
                     queued: false,
@@ -12230,8 +12273,8 @@ impl RunnerTask {
                         let seen = items.last().map(|item| item.sequence);
                         let newer = self.repository.list_items(self.thread.id, seen).await?;
                         queued = !unconsumed_queued(&newer, self.turn.id).is_empty();
-                        if queued && stop_feedback.is_some() {
-                            tracing::info!(thread = %self.thread.id, turn = %self.turn.id, "a Stop hook blocked while a message of the person's came in, so that message is answered instead");
+                        if queued && stop_feedback.take().is_some() {
+                            tracing::info!(thread = %self.thread.id, turn = %self.turn.id, reason = "the person sent a message meanwhile", "Stop hook feedback not sent to the model");
                         }
                     }
                     // Queued prompts are not delivered here: each starts as its own
@@ -12263,24 +12306,22 @@ impl RunnerTask {
                         }
                         continue;
                     }
-                    // A Stop hook's feedback goes to the model, which answers
-                    // it in this turn, unless the agent is at its step limit,
-                    // hooks already kept the turn going too often in a row, or
-                    // a message the person queued waits for a turn of its own.
                     if let Some(feedback) = stop_feedback {
                         let (thread, turn) = (self.thread.id, self.turn.id);
-                        if tool_round_limit_reached {
-                            tracing::info!(%thread, %turn, "a Stop hook blocked at the agent's step limit, so the turn ends");
-                        } else if stop_continuations >= STOP_HOOK_CONTINUATIONS {
-                            tracing::info!(%thread, %turn, "Stop hooks kept the turn going {STOP_HOOK_CONTINUATIONS} times in a row, so it ends");
-                        } else if !self.repository.input_queue(thread).await?.items.is_empty() {
-                            tracing::info!(%thread, %turn, "a Stop hook blocked while a queued message waits, so the turn ends and that message starts its own");
-                        } else {
-                            self.add_stop_hook_message(&feedback).await?;
-                            stop_continuations += 1;
-                            drop(accepting);
-                            tracing::info!(%thread, %turn, times = stop_continuations, "a Stop hook kept the turn going");
-                            continue 'provider_round;
+                        match self
+                            .stop_feedback_held_back(tool_round_limit_reached, stop_continuations)
+                            .await?
+                        {
+                            Some(reason) => {
+                                tracing::info!(%thread, %turn, %reason, "Stop hook feedback not sent to the model");
+                            }
+                            None => {
+                                self.add_stop_hook_message(&feedback).await?;
+                                stop_continuations += 1;
+                                drop(accepting);
+                                tracing::info!(%thread, %turn, times = stop_continuations, "Stop hook feedback sent to the model");
+                                continue 'provider_round;
+                            }
                         }
                     }
                     // Close acceptance while holding the same gate used by
@@ -14955,6 +14996,7 @@ impl RunnerTask {
             }),
             inherited_ceilings: parent_boundary,
             output_schema: None,
+            workflow_agent: false,
             progress: Mutex::new(TaskProgress::default()),
             last_round: Mutex::new(None),
             status: Mutex::new(StatusState::default()),
@@ -16221,6 +16263,35 @@ pub fn shorten_title(title: &str, limit: usize) -> String {
     format!("{cut}…")
 }
 
+/// The messages Stop hooks kept a turn going with that the model never
+/// began to answer: the turn ended first (a stop, a failure) and a person's
+/// or the runtime's message started another. A later turn leaves them out,
+/// so it does not take up a check that belonged to the turn before.
+fn unanswered_hook_messages(items: &[Item]) -> HashSet<ItemId> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| matches!(item.data, ItemData::UserMessage { hook: Some(_), .. }))
+        .filter(|(index, item)| {
+            let later = &items[index + 1..];
+            let answered = later.iter().any(|next| {
+                next.turn_id == item.turn_id
+                    && matches!(
+                        next.data,
+                        ItemData::AssistantMessage { .. }
+                            | ItemData::Reasoning { .. }
+                            | ItemData::ToolCall { .. }
+                    )
+            });
+            let next_turn = later.iter().any(|next| {
+                next.turn_id != item.turn_id && matches!(next.data, ItemData::UserMessage { .. })
+            });
+            !answered && next_turn
+        })
+        .map(|(_, item)| item.id)
+        .collect()
+}
+
 /// `provider_messages_with_origins` without the origins, for tests that read
 /// only the messages.
 #[cfg(test)]
@@ -16233,6 +16304,11 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
 fn provider_messages_with_origins(
     items: Vec<Item>,
 ) -> (Vec<ProviderMessage>, Vec<crate::image_budget::Origin>) {
+    let unanswered = unanswered_hook_messages(&items);
+    let items: Vec<Item> = items
+        .into_iter()
+        .filter(|item| !unanswered.contains(&item.id))
+        .collect();
     let omitted = omitted_media(&items);
     // What the newest compaction kept from before its tail (the person's
     // request), and how it cuts the tool results it kept.
@@ -21110,6 +21186,63 @@ mod tests {
             &messages[1],
             ProviderMessage::Text { content, .. } if content == "fresh question"
         ));
+    }
+
+    /// A Stop hook's message stays in the request that answers it, and in
+    /// later turns once answered; one its turn never answered (a stop came
+    /// first) is left out of the turns after it.
+    #[test]
+    fn a_stop_hooks_message_its_turn_never_answered_stays_out_of_later_turns() {
+        let (first, second) = (Some(TurnId::new()), Some(TurnId::new()));
+        let at = |sequence: u64, turn: Option<TurnId>, data: ItemData| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let user = |text: &str, hook: Option<&str>| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: hook.is_some(),
+            command_line: None,
+            hook: hook.map(str::to_owned),
+        };
+        let reply = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let texts = |items: Vec<Item>| -> Vec<String> {
+            provider_messages(items)
+                .into_iter()
+                .filter_map(|message| match message {
+                    ProviderMessage::Text { content, .. } => Some(content),
+                    _ => None,
+                })
+                .collect()
+        };
+        let asked = vec![
+            at(1, first, user("fix it", None)),
+            at(2, first, reply("Fixed.")),
+            at(3, first, user("HOOK", Some("Stop"))),
+        ];
+        // The round that answers it reads it.
+        assert_eq!(texts(asked.clone()), ["fix it", "Fixed.", "HOOK"]);
+        // Answered, it stays for later turns.
+        let mut answered = asked.clone();
+        answered.push(at(4, first, reply("Tests pass.")));
+        answered.push(at(5, second, user("next", None)));
+        assert_eq!(
+            texts(answered),
+            ["fix it", "Fixed.", "HOOK", "Tests pass.", "next"]
+        );
+        // Stopped before any answer, the next turn never reads it.
+        let mut stopped = asked;
+        stopped.push(at(
+            4,
+            first,
+            ItemData::Error {
+                message: "operation cancelled".into(),
+                retryable: false,
+            },
+        ));
+        stopped.push(at(5, second, user("something else", None)));
+        assert_eq!(texts(stopped), ["fix it", "Fixed.", "something else"]);
     }
 
     #[test]

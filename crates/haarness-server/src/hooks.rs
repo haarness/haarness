@@ -336,6 +336,12 @@ impl ConfiguredHooks {
                     .map(str::to_owned);
             }
             outcome.halt = parsed.get("continue").and_then(Value::as_bool) == Some(false);
+            if outcome.halt {
+                outcome.halt_reason = parsed
+                    .get("stopReason")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
             if parsed.get("decision").and_then(Value::as_str) == Some("block") || outcome.halt {
                 outcome.block = Some(
                     parsed
@@ -462,6 +468,9 @@ impl ConfiguredHooks {
             // The first block stops an action; where a block is feedback,
             // every hook's reaches the model.
             combined.halt |= outcome.halt;
+            if combined.halt_reason.is_none() {
+                combined.halt_reason = outcome.halt_reason;
+            }
             if let Some(block) = outcome.block {
                 match &mut combined.block {
                     Some(existing) if gives_feedback(event) => {
@@ -732,8 +741,9 @@ struct HookOutcome {
     permission: Option<PermissionDecision>,
     updated_input: Option<Value>,
     always: bool,
-    /// A hook answered `continue: false`.
+    /// A hook answered `continue: false`, with this `stopReason` if any.
     halt: bool,
+    halt_reason: Option<String>,
 }
 
 impl From<HookOutcome> for HookDecision {
@@ -865,13 +875,7 @@ impl HookLabel {
     /// hook whose feedback reaches the model after a tool ran. Events whose
     /// block the runtime ignores log at DEBUG so the INFO lines stay true.
     fn blocked(&self, code: Option<i32>, reason: &str) {
-        let redacted = redact(head(reason, SCAN_CHARS));
-        let line = redacted
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or_default();
-        let reason = log_text(line, REASON_CHARS);
+        let reason = reason_line(reason);
         if matches!(
             self.event.as_str(),
             "PreToolUse" | "PermissionRequest" | "UserPromptSubmit"
@@ -915,6 +919,18 @@ impl HookLabel {
             );
         }
     }
+}
+
+/// The first line of a reason a hook gave, redacted and clipped for a log
+/// line.
+fn reason_line(reason: &str) -> String {
+    let redacted = redact(head(reason, SCAN_CHARS));
+    let line = redacted
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    log_text(line, REASON_CHARS)
 }
 
 fn exit_signal(status: std::process::ExitStatus) -> Option<i32> {
@@ -1486,9 +1502,15 @@ impl HookPort for ConfiguredHooks {
             )
             .await;
         // As in Claude Code, `continue: false` from any hook ends the turn,
-        // whatever feedback another gave.
-        if outcome.halt && outcome.block.is_some() {
-            tracing::info!(session = %call.thread, "a Stop hook answered continue: false, so the turn ends");
+        // whatever feedback another gave. Its `stopReason` is for the person;
+        // only the log has it.
+        if outcome.halt {
+            let stop_reason = outcome.halt_reason.as_deref().map(reason_line);
+            tracing::info!(
+                session = %call.thread,
+                stop_reason = stop_reason.as_deref(),
+                "Stop hook ended the turn with continue: false"
+            );
             return None;
         }
         outcome.block
@@ -2834,6 +2856,7 @@ mod tests {
     /// Claude Code), or nothing at all.
     #[tokio::test]
     async fn a_stop_hook_without_feedback_for_the_model_lets_the_turn_end() {
+        let (capture, _guard) = Capture::install();
         let feedback = r#"echo '{"decision":"block","reason":"run the tests"}'"#;
         for hooks in [
             json!([{"command": "exit 2"}]),
@@ -2849,6 +2872,15 @@ mod tests {
                 .await;
             assert!(answer.is_none(), "{hooks}: {answer:?}");
         }
+        // `continue: false` is logged with its `stopReason`, which is for
+        // the person.
+        let ended = capture.matching("Stop hook ended the turn with continue: false");
+        assert_eq!(ended.len(), 3, "{:?}", capture.lines());
+        assert!(
+            ended[0].contains("stop_reason=for the person"),
+            "{}",
+            ended[0]
+        );
         assert!(
             ConfiguredHooks::new(Vec::new(), std::env::temp_dir())
                 .stop(&HookCall::new(ThreadId::new()), false)
