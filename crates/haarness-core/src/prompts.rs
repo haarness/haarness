@@ -387,7 +387,7 @@ mod tests {
             (PromptName::Ultracode, "sha256:64098e16d1cf"),
             (PromptName::MaxSteps, "sha256:79561ada1787"),
             (PromptName::Goal, "sha256:e345ec53c17e"),
-            (PromptName::AutoReview, "sha256:a6637f759ca2"),
+            (PromptName::AutoReview, "sha256:ab3e4f2bd8ac"),
         ];
         let actual: Vec<(PromptName, String)> = golden
             .iter()

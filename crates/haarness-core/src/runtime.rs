@@ -6459,6 +6459,15 @@ impl AgentRuntime {
         let thread = self
             .with_chat_folder(self.repository.get_thread(thread_id).await?)
             .await?;
+        // As in its turns: a published chat's viewers see its transcript, so
+        // this Mac's screen stays out of a workflow's or a client's calls too.
+        if name.starts_with("mac_")
+            && crate::shared_chats::contains(thread_id, self.resolve_root(&thread).await)
+        {
+            return Err(CoreError::PermissionDenied(format!(
+                "tool {name} is not available in a published chat: its viewers would see this Mac's screen."
+            )));
+        }
         let workspace = self.thread_workspace(&thread, FolderAccess::Write).await?;
         let snapshots = self.snapshots_at(&thread, &workspace).await?;
         if let Some(store) = &self.repository_approvals {
@@ -6775,11 +6784,13 @@ impl AgentRuntime {
                 .any(|pattern| personal.contains(&plan.operation(pattern)));
             // What only a person answers stays theirs, apart from what
             // Auto's reviewer may answer while it is on (computer use, see
-            // `Tool::reviewer_may_answer`).
+            // `Tool::reviewer_may_answer`), and never in a published chat,
+            // whose viewers could set its mode and write what it reads.
             let person_answers_only = forced
                 || (explicit
                     && !(review_on
                         && agent_work
+                        && !crate::shared_chats::contains(thread_id, root)
                         && explicit_operations
                             .iter()
                             .all(|operation| tool.reviewer_may_answer(&arguments, operation))));
@@ -13917,10 +13928,12 @@ impl RunnerTask {
         let review_on = self.config.auto_review.enabled;
         // What only a person answers stays theirs, apart from what Auto's
         // reviewer may answer while it is on (computer use, see
-        // `Tool::reviewer_may_answer`).
+        // `Tool::reviewer_may_answer`), and never in a published chat, whose
+        // viewers could set its mode and write what it reads.
         let person_answers_only = forced
             || (explicit
                 && !(review_on
+                    && !crate::shared_chats::contains(self.thread.id, self.root_thread_id)
                     && self.tools.get(tool.0).is_some_and(|asking| {
                         explicit_operations
                             .iter()
