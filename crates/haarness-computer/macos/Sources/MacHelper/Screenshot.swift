@@ -47,7 +47,8 @@ enum Screenshot {
             problem = error
             signal.signal()
         }
-        if signal.wait(timeout: .now() + 10) == .timedOut { throw HelperFailure("failed", "ScreenCaptureKit gave no answer.") }
+        // The first answer in a fresh helper can take a while on a busy Mac.
+        if signal.wait(timeout: .now() + 20) == .timedOut { throw HelperFailure("failed", "ScreenCaptureKit gave no answer.") }
         guard let shareable else { throw refusal(problem) }
         let main = CGMainDisplayID()
         guard let screen = shareable.displays.first(where: { $0.displayID == main }) ?? shareable.displays.first else {
