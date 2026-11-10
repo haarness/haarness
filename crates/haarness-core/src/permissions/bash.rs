@@ -3169,8 +3169,10 @@ impl Reader<'_> {
 /// Which of `cp`'s or `mv`'s `arguments` is where it writes: the last of
 /// two operands or more (`cp .env.example .env`), unless an option names the
 /// target folder (`-t`, `--target-directory`), which makes every operand a
-/// source. Only when every word is plain text: an expansion, a glob or a
-/// brace list could add a `-t` when it runs.
+/// source, or an option follows an operand: macOS's `cp` and `mv` stop
+/// reading options at the first operand, so `cp .env.example .env -k`
+/// copies `.env` into a folder named `-k`. Only when every word is plain
+/// text: an expansion, a glob or a brace list could add a `-t` when it runs.
 fn copy_destination(name: &str, arguments: &[Word<'_>]) -> Option<usize> {
     if !matches!(name, "cp" | "mv") {
         return None;
@@ -3184,6 +3186,9 @@ fn copy_destination(name: &str, arguments: &[Word<'_>]) -> Option<usize> {
         if !ended && ends_options(word) {
             ended = true;
         } else if !ended && word.value.starts_with('-') && word.value != "-" {
+            if !operands.is_empty() {
+                return None;
+            }
             let target = match word.value.strip_prefix("--") {
                 Some(long) => long.starts_with('t'),
                 None => word.value[1..].contains('t'),

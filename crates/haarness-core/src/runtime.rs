@@ -19113,6 +19113,9 @@ mod shell_reading_tests {
             "mv --target-directory=/tmp .env",
             "cp .env{,.bak}",
             "cp $FLAGS .env.example .env",
+            // macOS's `cp` and `mv` take a word after an operand as one.
+            "cp .env.example .env -k",
+            "mv .env.example .env -k",
             // A link of another name to it, and a glob that matches it.
             "cat notes.txt",
             "grep TOKEN notes.txt",
