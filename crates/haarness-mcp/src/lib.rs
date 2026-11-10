@@ -297,6 +297,10 @@ struct CatalogClient {
     /// tools, by the names they gave, quoted (`None` for one with no name;
     /// see [`Self::list_tools`]).
     skipped: Arc<RwLock<Vec<Option<String>>>>,
+    /// What renews the stored sign-in this connection sends, when it sends
+    /// one: asked whether a sign-in with no known expiry can still be
+    /// renewed (see [`Self::sign_in_state`]).
+    renewer: Option<Arc<tokio::sync::Mutex<AuthorizationManager>>>,
     /// Told the server's name when it loses its sign-in (see
     /// [`Self::sign_in_lost`]), as when a start comes to an answer.
     announce: Announcer,
@@ -319,6 +323,7 @@ impl CatalogClient {
             resources: Arc::default(),
             apps_on,
             skipped: Arc::default(),
+            renewer: None,
             announce,
         }
     }
@@ -336,37 +341,54 @@ impl CatalogClient {
                 && stored.token_received_at.is_some_and(|at| at >= sent)
         )
     }
-    /// Whether the sign-in Haarness keeps for this server can no longer be
-    /// used: there is none, it has no refresh token, or its access token has
+    /// What became of the sign-in Haarness keeps for this server, once the
+    /// server refused a request for want of one. It cannot be used when
+    /// there is none, it has no refresh token, or its access token has
     /// expired (or is within the 30 s before it, when rmcp renews it), which
-    /// a request that was refused could not renew. A sign-in still current,
-    /// or one whose store cannot be read, is not given up on.
-    async fn sign_in_unusable(&self) -> bool {
+    /// the refused request could not renew. One whose expiry is not known is
+    /// renewed now to tell: refused, it cannot be used; renewed, the request
+    /// may go again. A sign-in still current, one that failed to renew only
+    /// for now, or one whose store cannot be read, is not given up on.
+    async fn sign_in_state(&self) -> SignInState {
         let Some(store) = &self.credential else {
-            return false;
+            return SignInState::Current;
         };
         let Ok(stored) = OAuthCredentialStore::load(store).await else {
-            return false;
+            return SignInState::Current;
         };
-        let Some(token) = stored.and_then(|stored| {
+        let Some((token, received)) = stored.and_then(|stored| {
             let token = serde_json::to_value(stored.token_response.as_ref()?).ok()?;
             Some((token, stored.token_received_at))
         }) else {
-            return true;
+            return SignInState::Unusable;
         };
-        let (token, received) = token;
         if token
             .get("refresh_token")
             .and_then(Value::as_str)
             .is_none_or(str::is_empty)
         {
-            return true;
+            return SignInState::Unusable;
         }
-        match (token.get("expires_in").and_then(Value::as_u64), received) {
-            (Some(lasts), Some(received)) => {
-                lasts.saturating_sub(epoch_seconds().saturating_sub(received)) < RENEWAL_MARGIN_SECS
-            }
-            _ => false,
+        if let (Some(lasts), Some(received)) =
+            (token.get("expires_in").and_then(Value::as_u64), received)
+        {
+            let left = lasts.saturating_sub(epoch_seconds().saturating_sub(received));
+            return if left < RENEWAL_MARGIN_SECS {
+                SignInState::Unusable
+            } else {
+                SignInState::Current
+            };
+        }
+        let Some(renewer) = &self.renewer else {
+            return SignInState::Current;
+        };
+        match renewer.lock().await.refresh_token().await {
+            Ok(_) => SignInState::Renewed,
+            Err(
+                rmcp::transport::AuthError::TokenRefreshRejected(_)
+                | rmcp::transport::AuthError::AuthorizationRequired,
+            ) => SignInState::Unusable,
+            Err(_) => SignInState::Current,
         }
     }
     /// The server no longer takes this connection's sign-in: its refresh
@@ -2379,12 +2401,14 @@ async fn activate_remote(
             )
             .await?;
             if authorized {
+                let client = AuthClient::new(SessionClient(http), manager);
+                let handler = CatalogClient {
+                    renewer: Some(client.auth_manager.clone()),
+                    ..handler.clone()
+                };
                 activate_streamable(
-                    handler.clone(),
-                    StreamableHttpClientTransport::with_client(
-                        AuthClient::new(SessionClient(http), manager),
-                        transport_config,
-                    ),
+                    handler,
+                    StreamableHttpClientTransport::with_client(client, transport_config),
                     url,
                 )
                 .await
@@ -2758,10 +2782,11 @@ impl Connection {
     /// the request goes once more through `again` if that sign-in was stored
     /// since (another process signed in, or renewed a token both share and
     /// the authorization server rotated), or is stored within
-    /// [`SIGN_IN_SETTLES`] while the one there cannot be used. Refused all
-    /// the same, the server needs authorization only when the stored sign-in
-    /// cannot be used (see [`CatalogClient::sign_in_unusable`],
-    /// [`CatalogClient::sign_in_lost`]), and the request fails saying so.
+    /// [`SIGN_IN_SETTLES`] while the one there cannot be used, or was just
+    /// renewed. Refused all the same, the server needs authorization only
+    /// when the stored sign-in cannot be used (see
+    /// [`CatalogClient::sign_in_state`], [`CatalogClient::sign_in_lost`]),
+    /// and the request fails saying so.
     /// Otherwise (an authorization server or a token check down for now,
     /// clocks that disagree) the request keeps its own error and the
     /// connection stays. `None` when `again` was not waited for.
@@ -2782,9 +2807,19 @@ impl Connection {
             return Some(result.map_err(mcp_error));
         };
         let mut newer = sign_in.stored_since(sent).await;
-        if !newer && sign_in.sign_in_unusable().await {
-            tokio::time::sleep(SIGN_IN_SETTLES).await;
-            newer = sign_in.stored_since(sent).await;
+        let mut known = None;
+        if !newer {
+            match sign_in.sign_in_state().await {
+                SignInState::Unusable => {
+                    tokio::time::sleep(SIGN_IN_SETTLES).await;
+                    newer = sign_in.stored_since(sent).await;
+                    if !newer {
+                        known = Some(SignInState::Unusable);
+                    }
+                }
+                SignInState::Renewed => newer = true,
+                SignInState::Current => known = Some(SignInState::Current),
+            }
         }
         if newer {
             result = again().await?;
@@ -2793,7 +2828,11 @@ impl Connection {
                 None => return Some(result.map_err(mcp_error)),
             }
         }
-        if !sign_in.sign_in_unusable().await {
+        let state = match known {
+            Some(state) => state,
+            None => sign_in.sign_in_state().await,
+        };
+        if state != SignInState::Unusable {
             return Some(result.map_err(mcp_error));
         }
         sign_in.sign_in_lost(challenge.0);
@@ -2804,6 +2843,18 @@ impl Connection {
 /// A request the server refused for want of a sign-in, with the challenge
 /// it answered with (its `WWW-Authenticate`), if any.
 struct SignInRefused(Option<String>);
+
+/// What became of a stored sign-in a server refused (see
+/// [`CatalogClient::sign_in_state`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SignInState {
+    /// Still current, or renewable once the authorization server answers.
+    Current,
+    /// Renewed just now: the refused request may go again.
+    Renewed,
+    /// It cannot be used: the server needs authorization.
+    Unusable,
+}
 
 /// Whether `error` says the server refused a request for want of a
 /// sign-in. rmcp sends a request without a token once the stored sign-in
@@ -4596,6 +4647,9 @@ mod tests {
         /// The server refuses every token, as one whose own token check is
         /// down, or that disagrees with this computer's clock.
         rejecting: AtomicBool,
+        /// The tokens it issues carry `expires_in`; some authorization
+        /// servers leave it out.
+        expiring: bool,
     }
 
     /// What another process stores in `store` once it renewed the sign-in
@@ -4685,18 +4739,16 @@ mod tests {
                         return;
                     }
                     assert!(form.contains("code=fixture-code"));
-                    write_json_response(
-                        &mut stream,
-                        "200 OK",
-                        &json!({
-                            "access_token": SIGNED_IN[0],
-                            "refresh_token": "fixture-refresh-1",
-                            "token_type": "Bearer",
-                            "expires_in": 3600,
-                            "scope": "mcp"
-                        }),
-                    )
-                    .await;
+                    let mut issued = json!({
+                        "access_token": SIGNED_IN[0],
+                        "refresh_token": "fixture-refresh-1",
+                        "token_type": "Bearer",
+                        "scope": "mcp"
+                    });
+                    if state.expiring {
+                        issued["expires_in"] = json!(3600);
+                    }
+                    write_json_response(&mut stream, "200 OK", &issued).await;
                     return;
                 }
                 let signed_in = headers.lines().any(|line| {
@@ -4789,6 +4841,20 @@ mod tests {
         JoinHandle<()>,
         PathBuf,
     ) {
+        signed_in_for(name, renewal, true).await
+    }
+
+    /// [`signed_in`], its tokens issued with an expiry when `expiring`.
+    async fn signed_in_for(
+        name: &str,
+        renewal: Renewal,
+        expiring: bool,
+    ) -> (
+        NativeMcpRegistry,
+        Arc<SignInFixture>,
+        JoinHandle<()>,
+        PathBuf,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let auth_dir =
@@ -4800,6 +4866,7 @@ mod tests {
             refreshes: std::sync::atomic::AtomicUsize::new(0),
             calls: std::sync::atomic::AtomicUsize::new(0),
             rejecting: AtomicBool::new(false),
+            expiring,
         });
         let server = tokio::spawn(run_sign_in_fixture(listener, state.clone()));
         let registry = NativeMcpRegistry::with_auth_dir(&auth_dir);
@@ -4989,6 +5056,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(output.text, "OAuth MCP call succeeded");
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+    }
+
+    /// A sign-in whose token came with no expiry was never found unusable:
+    /// its refresh token refused, the server stayed connected with its
+    /// tools, each call failing with transport text. Renewing it tells: a
+    /// refusal means it is lost, an authorization server that is down only
+    /// that it cannot be renewed for now.
+    #[tokio::test]
+    async fn a_sign_in_with_no_known_expiry_is_lost_only_when_its_renewal_is_refused() {
+        let (registry, state, server, auth_dir) =
+            signed_in_for("secure", Renewal::Refused, false).await;
+        let told = announcements(&registry);
+        state.rejecting.store(true, Ordering::SeqCst);
+        let error = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("needs the user to sign in to it"),
+            "{error}"
+        );
+        assert_eq!(registry.list().await.unwrap()[0].status, "needs_auth");
+        assert!(registry.tool_snapshot().is_empty());
+        assert!(manager_store("secure", Some(&auth_dir)).path.exists());
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+        server.abort();
+        let _ = std::fs::remove_dir_all(auth_dir);
+
+        let (registry, state, server, auth_dir) =
+            signed_in_for("secure", Renewal::Down, false).await;
+        let told = announcements(&registry);
+        state.rejecting.store(true, Ordering::SeqCst);
+        let error = registry
+            .call("secure", "secure_echo", json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            !error
+                .to_string()
+                .contains("needs the user to sign in to it"),
+            "{error}"
+        );
+        assert!(state.refreshes.load(Ordering::SeqCst) >= 1);
+        assert_eq!(registry.list().await.unwrap()[0].status, "connected");
+        assert_eq!(registry.tool_snapshot().len(), 1);
+        assert_eq!(told.load(Ordering::SeqCst), 0);
         server.abort();
         let _ = std::fs::remove_dir_all(auth_dir);
     }

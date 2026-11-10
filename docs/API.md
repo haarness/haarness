@@ -719,18 +719,20 @@ says the session is unknown or the server not initialized), the connection
 opens a new session once and sends the request again. Any other error is that
 request's own, even one whose JSON-RPC error carries no `id` or mentions a
 session: the request is not sent again. A server that stops taking its stored
-OAuth sign-in while connected, once that sign-in can no longer be used (its
-access token expired and its refresh token refused, or none left to renew it
-with), reports `needs_auth` as a server never signed in does: its tools are
-withdrawn, the requests that met it, and any sent to it later, fail saying the
-user needs to sign in, an `assets.updated` event tells clients, and the stored
-credentials stay until a new sign-in replaces them. When another process that
-shares those credentials stores a newer sign-in meanwhile (within a second of
-the refusal), the request is sent once more with it instead. A refusal while
-the stored sign-in is still current, or can still be renewed (an authorization
-server that is only unreachable, a token check that is down, clocks that
-disagree), fails only that request and leaves the server connected; a later
-request renews the sign-in once it answers.
+OAuth sign-in while connected, once that sign-in can no longer be used (none is
+stored, it has no refresh token, its access token has expired with its refresh
+token refused, or, for a token issued with no expiry, the authorization server
+refuses to renew it when asked), reports `needs_auth` as a server never signed
+in does: its tools are withdrawn, the requests that met it, and any sent to it
+later, fail saying the user needs to sign in, an `assets.updated` event tells
+clients, and the stored credentials stay until a new sign-in replaces them.
+When another process that shares those credentials stores a newer sign-in
+meanwhile (within a second of the refusal), or a token with no expiry is
+renewed when asked, the request is sent once more with it instead. A refusal
+while the stored sign-in is still current, or can still be renewed (an
+authorization server that is only unreachable, a token check that is down,
+clocks that disagree), fails only that request and leaves the server
+connected; a later request renews the sign-in once it answers.
 A local server, and a remote server's `headersHelper`, run in the server's
 project folder (the chat home's own folder there); a relative `cwd` is read
 from the project folder, `~/…` from the home folder, and the settings keep
