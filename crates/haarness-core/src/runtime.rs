@@ -2714,6 +2714,19 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             provider.unwrap_or("The provider")
         );
     }
+    // Still overloaded after the turn's retries ("HTTP 503 Service
+    // Unavailable: The model is overloaded. Please try again later."): the
+    // status line says nothing more to the person.
+    let status = http_status(&lower);
+    if matches!(status, Some(503 | 529))
+        || (status.is_none_or(|status| status >= 500)
+            && (lower.contains("overloaded") || lower.contains("high demand")))
+    {
+        return format!(
+            "{} is overloaded or unavailable right now, and didn't take the request after several tries. Send the message again in a moment, or choose another model.",
+            provider.unwrap_or("The provider")
+        );
+    }
     format!("Provider error: {}", clean_error_text(raw, 600))
 }
 
@@ -25520,6 +25533,30 @@ mod tests {
         assert!((hours("2026-10-31T20:00:00Z") - 11.0).abs() < 1e-9);
         assert!((hours("2026-11-01T10:00:00Z") - 22.0).abs() < 1e-9);
         assert!((hours("2026-03-08T11:00:00Z") - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_provider_still_overloaded_after_the_retries_says_so_plainly() {
+        for raw in [
+            "HTTP 503 Service Unavailable: The model is overloaded. Please try again later.",
+            "HTTP 529: overloaded_error",
+            "HTTP 503 Service Unavailable",
+            "the model is overloaded",
+        ] {
+            assert_eq!(
+                super::describe_error(&CoreError::Provider(raw.into()), Some("Google Gemini")),
+                "Google Gemini is overloaded or unavailable right now, and didn't take the request after several tries. Send the message again in a moment, or choose another model.",
+                "{raw}"
+            );
+        }
+        // A refusal that only mentions load keeps its own words.
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider("HTTP 400 Bad Request: [invalid] overloaded field".into()),
+                Some("Google Gemini")
+            ),
+            "Google Gemini rejected the request: overloaded field"
+        );
     }
 
     #[test]
