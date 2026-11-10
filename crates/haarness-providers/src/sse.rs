@@ -322,6 +322,7 @@ pub(crate) fn provider_error_detail(body: &str) -> Option<String> {
             body.split_whitespace().collect::<Vec<_>>().join(" ")
         }
     };
+    let quotas = parsed.as_ref().map(quota_ids).unwrap_or_default();
     // Keep machine-readable error codes without exposing unrelated response
     // fields. Managed-router admission failures are not upstream API quotas.
     let code = parsed.and_then(|value| {
@@ -339,7 +340,45 @@ pub(crate) fn provider_error_detail(body: &str) -> Option<String> {
     if truncated {
         detail.push('…');
     }
+    for quota in quotas {
+        detail.push_str("\n* Quota id: ");
+        detail.push_str(&quota);
+    }
     Some(detail)
+}
+
+/// The quotas a Google refusal names in its details
+/// (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), which its message
+/// leaves out: they say whether a limit is a minute's or a day's, and the
+/// wait the message names ("Please retry in 11.6s") is the same either way.
+fn quota_ids(body: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    let details = body
+        .pointer("/error/details")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    for violation in details
+        .filter_map(|detail| detail.get("violations")?.as_array())
+        .flatten()
+    {
+        if let Some(id) = violation
+            .get("quotaId")
+            .and_then(Value::as_str)
+            .filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 120
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            })
+            && !ids.iter().any(|known| known == id)
+            && ids.len() < 4
+        {
+            ids.push(id.to_owned());
+        }
+    }
+    ids
 }
 
 /// The error a body holds in a list of one: Gemini's OpenAI-compatible API
@@ -725,6 +764,34 @@ mod tests {
         assert_eq!(
             provider_error_detail(r#"[{"message":"one"},{"message":"two"}]"#),
             None
+        );
+    }
+
+    /// Google names a day's quota used up with the same short wait as a
+    /// minute's ("Please retry in 11.6s"); only the quota's id in the
+    /// details says it is a day's, so the words keep it.
+    #[test]
+    fn a_google_refusal_keeps_the_ids_of_the_quotas_it_names() {
+        let daily = r#"{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\nPlease retry in 11.615098148s.","status":"RESOURCE_EXHAUSTED","details":[
+            {"@type":"type.googleapis.com/google.rpc.Help","links":[{"description":"Learn more about Gemini API quotas","url":"https://ai.google.dev/gemini-api/docs/rate-limits"}]},
+            {"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[
+                {"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_requests","quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaDimensions":{"location":"global","model":"gemini-3.8-flash"},"quotaValue":"20"},
+                {"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_requests","quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"},
+                {"quotaId":"not an id {\"x\"}"}
+            ]},
+            {"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"11s"}]}}"#;
+        assert_eq!(
+            provider_error_detail(daily).as_deref(),
+            Some(
+                "You exceeded your current quota, please check your plan and billing details.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash\nPlease retry in 11.615098148s.\n* Quota id: GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+            )
+        );
+        // Through its OpenAI-compatible API too, in a list of one.
+        let listed = format!("[{daily}]");
+        assert!(
+            provider_error_detail(&listed)
+                .unwrap()
+                .ends_with("\n* Quota id: GenerateRequestsPerDayPerProjectPerModel-FreeTier")
         );
     }
 

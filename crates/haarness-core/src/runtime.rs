@@ -1232,8 +1232,10 @@ fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
     };
     let lower = message.to_ascii_lowercase();
     // A quota of nothing ("limit: 0", Google's free tier for a model it
-    // leaves out) names a wait all the same, but no wait lifts it.
-    if quota_limits(&lower).any(|limit| limit == 0) {
+    // leaves out) names a wait all the same, but no wait lifts it; nor does
+    // a wait of seconds lift a day's quota used up, which Google names with
+    // the same short wait as a minute's.
+    if quota_limits(&lower).any(|limit| limit == 0) || names_daily_quota(&lower) {
         return None;
     }
     let Some(advised) = named_wait(&lower) else {
@@ -1306,11 +1308,62 @@ fn quota_limits(lower: &str) -> impl Iterator<Item = u64> + '_ {
     })
 }
 
+/// Whether a refusal names a quota of a day (Google's quota ids, which the
+/// provider adapters add to its words: "Quota id:
+/// GenerateRequestsPerDayPerProjectPerModel-FreeTier"), in a lower-cased
+/// message. Google names a wait of seconds for it ("Please retry in
+/// 11.6s"), as for a minute's quota, but it comes back only after midnight
+/// Pacific time.
+fn names_daily_quota(lower: &str) -> bool {
+    lower
+        .split("quota id: ")
+        .skip(1)
+        .filter_map(|rest| rest.split_whitespace().next())
+        .any(|id| id.contains("perday"))
+}
+
+/// How long until midnight Pacific time after `now`, when Google renews a
+/// day's quotas. Pacific daylight time runs from the second Sunday of March
+/// to the first Sunday of November (from 2 a.m. local time).
+fn until_pacific_midnight(now: DateTime<Utc>) -> std::time::Duration {
+    use chrono::{Datelike as _, NaiveDate, TimeZone as _, Weekday};
+    let nth_sunday = |year: i32, month: u32, nth: u32| {
+        NaiveDate::from_weekday_of_month_opt(year, month, Weekday::Sun, u8::try_from(nth).ok()?)
+    };
+    let daylight = |at: DateTime<Utc>| {
+        let year = at.year();
+        let (Some(start), Some(end)) = (nth_sunday(year, 3, 2), nth_sunday(year, 11, 1)) else {
+            return false;
+        };
+        // 2 a.m. standard time (UTC-8) and 2 a.m. daylight time (UTC-7).
+        let start = Utc.from_utc_datetime(&start.and_hms_opt(10, 0, 0).unwrap_or_default());
+        let end = Utc.from_utc_datetime(&end.and_hms_opt(9, 0, 0).unwrap_or_default());
+        at >= start && at < end
+    };
+    let offset = |at: DateTime<Utc>| chrono::Duration::hours(if daylight(at) { -7 } else { -8 });
+    let local = now + offset(now);
+    let Some(next_midnight) = local
+        .date_naive()
+        .succ_opt()
+        .and_then(|day| day.and_hms_opt(0, 0, 0))
+    else {
+        return std::time::Duration::from_secs(24 * 3600);
+    };
+    // Midnight keeps the offset of the evening before it: the clocks change
+    // at 2 a.m.
+    let midnight = Utc.from_utc_datetime(&next_midnight) - offset(now);
+    (midnight - now)
+        .to_std()
+        .unwrap_or(std::time::Duration::from_secs(0))
+}
+
 /// A refusal of Google's free tier: the smallest quota it names (`0` for a
-/// model the free tier leaves out) and the wait it names.
+/// model the free tier leaves out), the wait it names, and whether the quota
+/// is a day's.
 struct FreeTierQuota {
     limit: u64,
     wait: Option<std::time::Duration>,
+    daily: bool,
 }
 
 fn free_tier_quota(lower: &str) -> Option<FreeTierQuota> {
@@ -1322,6 +1375,7 @@ fn free_tier_quota(lower: &str) -> Option<FreeTierQuota> {
         wait: lower
             .split_once("retry in ")
             .and_then(|(_, rest)| advised_wait(rest)),
+        daily: names_daily_quota(lower),
     })
 }
 
@@ -1947,6 +2001,20 @@ fn describe_model_refusal(
                 format!("{provider}'s free tier doesn't include {name} for this API key.")
             });
         }
+        // A day's free allowance is the model's own: other Flash models have
+        // theirs.
+        if quota.daily {
+            let renews = renews_in(until_pacific_midnight(Utc::now()));
+            return Some(if advice {
+                format!(
+                    "This API key has used up today's free allowance for {name} on {provider}, which comes back at midnight Pacific time, in {renews}. Choose another model for this chat{such_as}, or {billing}."
+                )
+            } else {
+                format!(
+                    "This API key has used up today's free allowance for {name} on {provider}, which comes back at midnight Pacific time, in {renews}."
+                )
+            });
+        }
         if let Some(wait) = quota.wait.filter(|wait| *wait > LONGEST_ADVISED_WAIT) {
             let renews = renews_in(wait);
             return Some(if advice {
@@ -1965,6 +2033,25 @@ fn describe_model_refusal(
             )
         } else {
             format!("{name} is at the limit of {provider}'s free tier for this API key.")
+        });
+    }
+    // A day's quota of a paid Google project (the same refusal without the
+    // free tier) is back at midnight Pacific time too.
+    if lower.contains("quota exceeded") && names_daily_quota(&lower) {
+        let renews = renews_in(until_pacific_midnight(Utc::now()));
+        let used = format!(
+            "This API key's project has used today's quota for {name} on {provider}, which comes back at midnight Pacific time, in {renews}."
+        );
+        return Some(if advice {
+            let such_as = match others.as_slice() {
+                [] => String::new(),
+                names => format!(", such as {}", spoken_list(names, "or")),
+            };
+            format!(
+                "{used} Choose another model for this chat{such_as}, or raise the project's limits in Google AI Studio."
+            )
+        } else {
+            used
         });
     }
     // A day's allowance for the model used up (Groq's free tier: "Rate limit
@@ -25336,6 +25423,103 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    /// Google refuses a free-tier key that has used a model's 20 requests
+    /// of the day with "Please retry in 11.6s", the wait a minute's limit
+    /// names too; the quota's id says it is a day's. A turn sat out four
+    /// such waits and then said "Wait a minute and send the message again".
+    #[test]
+    fn a_day_of_google_quota_used_up_is_not_waited_for_and_says_when_it_returns() {
+        let mut flash = model_info("gemini-3.8-flash", 1_048_576);
+        flash.display_name = "Gemini 3.8 Flash".into();
+        let mut older = model_info("gemini-3.7-flash", 1_048_576);
+        older.display_name = "Gemini 3.7 Flash".into();
+        let mut argon = model_info("gemini-4-argon", 1_048_576);
+        argon.display_name = "Gemini 4 Argon".into();
+        let catalog = haarness_protocol::ProviderInfo {
+            id: "gemini".into(),
+            name: "Google Gemini".into(),
+            authenticated: true,
+            models: vec![flash, argon, older],
+        };
+        let refusal = |tier: &str, quota: &str| {
+            CoreError::Provider(format!(
+                "HTTP 429 Too Many Requests: You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_{tier}_requests, limit: 20, model: gemini-3.8-flash\nPlease retry in 11.615098148s.\n* Quota id: {quota}"
+            ))
+        };
+        let daily = refusal(
+            "free_tier",
+            "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+        );
+        assert_eq!(super::retry_delay(&daily, 1), None);
+        let words =
+            super::describe_model_refusal(&daily, &catalog, "gemini-3.8-flash", true).unwrap();
+        let (said, renews) = words
+            .split_once(", which comes back at midnight Pacific time, in about ")
+            .unwrap();
+        assert_eq!(
+            said,
+            "This API key has used up today's free allowance for Gemini 3.8 Flash on Google Gemini"
+        );
+        assert!(
+            renews.ends_with(
+                ". Choose another model for this chat, such as Gemini 3.7 Flash, or turn on billing for this API key's project in Google AI Studio."
+            ),
+            "{words}"
+        );
+        assert!(
+            super::describe_model_refusal(&daily, &catalog, "gemini-3.8-flash", false)
+                .unwrap()
+                .starts_with("This API key has used up today's free allowance for Gemini 3.8 Flash on Google Gemini, which comes back at midnight Pacific time, in about ")
+        );
+        // A paid project's day of quota is not waited for either.
+        let paid = refusal("paid_tier", "GenerateRequestsPerDayPerProjectPerModel");
+        assert_eq!(super::retry_delay(&paid, 1), None);
+        let words =
+            super::describe_model_refusal(&paid, &catalog, "gemini-3.8-flash", true).unwrap();
+        assert!(
+            words.starts_with("This API key's project has used today's quota for Gemini 3.8 Flash on Google Gemini, which comes back at midnight Pacific time, in about "),
+            "{words}"
+        );
+        assert!(
+            words.ends_with(". Choose another model for this chat, such as Gemini 4 Argon or Gemini 3.7 Flash, or raise the project's limits in Google AI Studio."),
+            "{words}"
+        );
+        // A minute's quota names the same wait and is still waited out.
+        let minute = refusal(
+            "free_tier",
+            "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+        );
+        assert!(super::retry_delay(&minute, 1).is_some_and(|wait| {
+            wait > std::time::Duration::from_secs(12) && wait < std::time::Duration::from_secs(13)
+        }));
+        assert!(
+            super::describe_model_refusal(&minute, &catalog, "gemini-3.8-flash", true)
+                .unwrap()
+                .starts_with("Gemini 3.8 Flash is at the limit of Google Gemini's free tier")
+        );
+    }
+
+    #[test]
+    fn google_renews_a_days_quota_at_midnight_pacific_time() {
+        let at = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let hours = |text: &str| super::until_pacific_midnight(at(text)).as_secs_f64() / 3600.0;
+        // Daylight time (UTC-7): midnight is 07:00 UTC.
+        assert!((hours("2026-07-01T06:00:00Z") - 1.0).abs() < 1e-9);
+        assert!((hours("2026-07-01T07:00:00Z") - 24.0).abs() < 1e-9);
+        // Standard time (UTC-8): midnight is 08:00 UTC.
+        assert!((hours("2026-11-10T14:00:00Z") - 18.0).abs() < 1e-9);
+        assert!((hours("2026-01-15T07:30:00Z") - 0.5).abs() < 1e-9);
+        // Daylight time ends on the first Sunday of November (2026-11-01)
+        // and begins on the second Sunday of March (2026-03-08).
+        assert!((hours("2026-10-31T20:00:00Z") - 11.0).abs() < 1e-9);
+        assert!((hours("2026-11-01T10:00:00Z") - 22.0).abs() < 1e-9);
+        assert!((hours("2026-03-08T11:00:00Z") - 20.0).abs() < 1e-9);
     }
 
     #[test]
