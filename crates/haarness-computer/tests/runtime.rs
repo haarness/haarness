@@ -819,7 +819,6 @@ impl HookPort for AllowsEverything {
             ..HookDecision::default()
         }
     }
-    async fn stop(&self, _: &HookCall) {}
 }
 
 #[tokio::test]
