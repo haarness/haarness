@@ -1211,6 +1211,35 @@ mod tests {
         }
     }
     #[test]
+    fn a_description_that_opens_with_a_bracketed_tag_loads_as_text() {
+        // Claude Code reads a leading tag as part of the text; YAML alone
+        // starts a list there and refuses what follows it.
+        for description in [
+            "[Team] Reviews PRs. Use when: asked",
+            "[Infra] Checks the deploy scripts",
+            "[Sam's team] Drafts release notes",
+            "[Docs]: proofreads a page",
+            "[Team] [Infra] Plans a migration",
+        ] {
+            let text = format!(
+                "---\nname: reviewer\ndescription: {description}\nmodel: inherit\ntools: [Read, Grep]\n---\nBody"
+            );
+            let (front, body) = markdown(&text).unwrap();
+            assert_eq!(front["description"], description);
+            assert_eq!(front["name"], "reviewer");
+            assert_eq!(front["model"], "inherit");
+            assert_eq!(list(front.get("tools")), vec!["Read", "Grep"]);
+            assert_eq!(body, "Body");
+        }
+        // A malformed list beside it still fails the file.
+        assert!(
+            markdown(
+                "---\nname: reviewer\ndescription: [Team] Reviews PRs. Use when: asked\nallowed-tools: [Read] [Grep]\n---\nBody"
+            )
+            .is_err()
+        );
+    }
+    #[test]
     fn tool_masks_handle_defaults_and_mcp_patterns() {
         let map = std::collections::HashMap::from([
             ("*".into(), false),
