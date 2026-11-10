@@ -39,7 +39,7 @@ test("relative times move on at once when the window shows again or takes the fo
     const view = new EventTarget();
     const timers: (() => void)[] = [];
     let ticks = 0;
-    startTicks(() => ticks++, {
+    const woke = startTicks(() => ticks++, {
       document: page,
       window: view,
       setInterval: (run) => timers.push(run),
@@ -63,6 +63,12 @@ test("relative times move on at once when the window shows again or takes the fo
     assert.equal(timers.length, 1);
     timers[0]();
     assert.equal(ticks, 3);
+    // A wake with the window in front all along fires neither event, and
+    // ticks through what `startTicks` returns; not twice in one second.
+    time += 10 * 60_000;
+    woke();
+    woke();
+    assert.equal(ticks, 4);
   } finally {
     Date.now = realNow;
   }
