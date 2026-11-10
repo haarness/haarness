@@ -54,11 +54,12 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    an `rm *` deny refuses with an `rm` after it.
 18. quoted_lines: a double-quoted script that `bash -c`, `sh -c` or `eval` runs keeps its line breaks, so an
    `rm *` deny refuses the `rm` on its own line of it.
-19. secret_always: through a server, Always on `cat .env` saves `cat *` with the read of that file (`read:.env`), so
-   `cat .env` and `cat README.md` run again without asking while `cat config/.env.production` still asks,
-   under the defaults and under `"bash": "ask"`; the waiting line in the log says which check asked. Under the
-   defaults `cp .env.example .env.local` runs (a template, copied onto a secret file), while a copy of
-   `config/.env.production` asks.
+19. secret_always: through a server, Always on `cat .env` shows `cat *` and also keeps `cat .env` itself, so `cat .env`
+   and `cat README.md` run again without asking while `head -1 .env`, a read of `.env` and `cat
+   config/.env.production` still ask, under the defaults and under `"bash": "ask"`; the waiting line in the log says
+   which check asked. Under the defaults, Always on `echo .env >> .gitignore` opens no read of `.env`, and `cp
+   .env.example .env.local` runs (a template, copied onto a secret file) while a copy of `config/.env.production`
+   asks.
 
 Usage: python3 scripts/test-permission-readings.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of
@@ -452,16 +453,17 @@ def case_secret_always():
             server = connect(env, folder)
             thread = api(server, '/threads', {'title': 'Secret Always', 'provider': 'echo', 'model': 'echo-1'})
 
-            def turn(command):
+            def turn(command, tool='bash'):
+                arguments = {'command': command} if tool == 'bash' else {'path': command}
                 return api(server, f'/threads/{thread["id"]}/turns',
-                           {'requestId': str(uuid.uuid4()), 'text': '!tool bash ' + json.dumps({'command': command})})['id']
+                           {'requestId': str(uuid.uuid4()), 'text': f'!tool {tool} ' + json.dumps(arguments)})['id']
 
             def finished(turn_id):
                 until(lambda: api(server, f'/turns/{turn_id}')['status'] not in ('running', 'queued'), 'turn did not end')
                 assert not api(server, '/permissions'), 'a request is still waiting'
 
-            def asks(command, decision):
-                turn_id = turn(command)
+            def asks(command, decision, tool='bash'):
+                turn_id = turn(command, tool)
                 request = until(lambda: api(server, '/permissions'), f'{command} did not ask')[0]
                 api(server, f'/permissions/{request["permissionId"]}', {'decision': decision})
                 finished(turn_id)
@@ -472,10 +474,17 @@ def case_secret_always():
                 time.sleep(1)
                 finished(turn_id)
 
+            if not rules:
+                # Always on a line that only names the file opens no read of it.
+                request = asks('echo .env >> .gitignore', 'always')
+                assert request['alwaysPatterns'] == ['bash:echo *'], request
             request = asks('cat .env', 'always')
-            assert request['alwaysPatterns'] == ['bash:cat *', 'read:.env'], request
+            # The card shows the rule it always showed; the exact command it also keeps is not shown.
+            assert request['alwaysPatterns'] == ['bash:cat *'], request
             runs('cat .env')
             runs('cat README.md')
+            asks('head -1 .env', 'reject')
+            asks('.env', 'reject', tool='read')
             asks('cat config/.env.production', 'reject')
             if not rules:
                 # A template is no secret, and a copy onto a secret file writes it; a copy away reads it.
@@ -492,9 +501,10 @@ def case_secret_always():
         assert any('operation="bash:cat .env"' in line and f'cause={cause}' in line for line in waiting), waiting
         assert any('operation="bash:cat config/.env.production"' in line and 'cause=secret_via_shell' in line
                    and 'matched="read:*.env.*"' in line for line in waiting), waiting
-    passed('Always on cat .env saves cat * with that file\'s read, so it runs again (and cat README.md runs) while '
-           'cat config/.env.production still asks, under the defaults and under "bash": "ask"; the log says why; '
-           'a template copied onto .env.local runs, a copy of .env.production asks')
+    passed('Always on cat .env shows cat * and keeps cat .env itself, so it runs again (and cat README.md runs) while '
+           'head .env, a read of .env and cat config/.env.production still ask, under the defaults and under '
+           '"bash": "ask"; the log says why; Always on echo .env >> .gitignore opens no read; a template copied '
+           'onto .env.local runs, a copy of .env.production asks')
 
 
 def case_workdir_home():

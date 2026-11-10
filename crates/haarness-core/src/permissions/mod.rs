@@ -704,28 +704,40 @@ impl PermissionEngine {
         self.evaluate_passing_over(operation, &|_| false, PermissionDecision::Ask)
     }
 
-    /// Whether `matched`, the rule an evaluation names, is an allow someone
-    /// gave for something narrower than everything: an "always" answer, a
-    /// repository grant, or a configured rule rather than one of Haarness's
-    /// defaults. A blanket `bash:*` says nothing about any one command, and
-    /// neither does a remembered answer that ends in `*` (`bash:cat *`, what
-    /// Always saves for `cat .env`): it was given for one command and covers
-    /// its program's other arguments only by being generalized.
+    /// Whether someone chose to allow `operation` itself rather than
+    /// everything: `matched`, the rule its evaluation names, is a configured
+    /// allow narrower than everything (a blanket `bash:*` says nothing about
+    /// any one command), or a remembered allow (an "always" answer or a
+    /// repository grant) names it exactly. A remembered allow that ends in
+    /// `*` (`bash:cat *`, what Always shows for `cat .env`) was given for one
+    /// command and reaches its program's other arguments only by being
+    /// generalized: it counts too when `generalized` says so.
     #[must_use]
-    pub fn allowed_by_choice(&self, matched: Option<&str>) -> bool {
-        let Some(matched) = matched else {
-            return false;
-        };
-        let chosen = |rule: &PermissionRule| {
-            rule.decision == PermissionDecision::Allow
-                && rule.pattern == matched
-                && !catch_all(rule)
-        };
-        self.session_rules
-            .iter()
-            .chain(&self.repository_grants)
-            .any(|rule| chosen(rule) && !rule.pattern.ends_with('*'))
-            || self.rules.iter().skip(self.builtin).any(chosen)
+    pub fn allowed_by_choice(
+        &self,
+        matched: Option<&str>,
+        operation: &str,
+        generalized: bool,
+    ) -> bool {
+        let configured = matched.is_some_and(|matched| {
+            self.rules.iter().skip(self.builtin).any(|rule| {
+                rule.decision == PermissionDecision::Allow
+                    && rule.pattern == matched
+                    && !catch_all(rule)
+            })
+        });
+        configured
+            || self
+                .session_rules
+                .iter()
+                .chain(&self.repository_grants)
+                .any(|rule| {
+                    rule.decision == PermissionDecision::Allow
+                        && !catch_all(rule)
+                        && (rule.pattern == operation
+                            || (matched == Some(rule.pattern.as_str())
+                                && (generalized || !rule.pattern.ends_with('*'))))
+                })
     }
 
     /// The verdict on a pattern read from inside a written shell command

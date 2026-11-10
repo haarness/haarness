@@ -6895,6 +6895,7 @@ impl AgentRuntime {
                     permission: plan.permission.clone(),
                     patterns: asked.clone(),
                     always_rules: always_rules.clone(),
+                    exact_rules: plan.exact_rules(),
                     detail: card.clone(),
                     script: shown.as_ref().map(|shown| shown.script.clone()),
                     thread_id,
@@ -7304,6 +7305,18 @@ impl AgentRuntime {
                         decision: PermissionDecision::Allow,
                     })
                     .collect();
+                // A line that reads a secret file also keeps its exact
+                // commands open (see `AskPlan::exact_rules`).
+                if !explicit {
+                    for exact in &pending.exact_rules {
+                        if !rules.iter().any(|rule| rule.pattern == *exact) {
+                            rules.push(PermissionRule {
+                                pattern: exact.clone(),
+                                decision: PermissionDecision::Allow,
+                            });
+                        }
+                    }
+                }
                 if explicit {
                     // Ask again for every explicit operation the grant left out.
                     for operation in &pending.explicit_operations {
@@ -9165,6 +9178,9 @@ struct PendingPermission {
     patterns: Vec<String>,
     /// Full rules an "always" answer persists, e.g. `bash:git status *`.
     always_rules: Vec<String>,
+    /// The exact commands it also persists, unshown (see
+    /// `AskPlan::exact_rules`).
+    exact_rules: Vec<String>,
     detail: serde_json::Value,
     /// The script a bash request's command runs, for the card.
     script: Option<haarness_protocol::PermissionScript>,
@@ -9866,23 +9882,17 @@ impl PendingPermission {
             review: self.review.clone(),
         }
     }
-    /// Every asked pattern is covered by some rule in `rules`. A shell line
-    /// that reads a secret file also needs the exact read of each one it
-    /// remembers (see `AskPlan::always_rules`): another card's `bash:cat *`
+    /// Every asked pattern is covered by some rule in `rules`. A line that
+    /// reads a secret file also needs each exact command it remembers (see
+    /// `AskPlan::exact_rules`), by equality: another card's `bash:cat *`
     /// does not release a `cat` of another `.env`.
     fn covered_by(&self, rules: &[PermissionRule]) -> bool {
         !self.forced
-            && (self.permission != "bash"
-                || self
-                    .always_rules
-                    .iter()
-                    .filter(|read| read.starts_with("read:"))
-                    .all(|read| {
-                        rules.iter().any(|rule| {
-                            rule.decision == PermissionDecision::Allow
-                                && crate::permissions::wildcard_match(&rule.pattern, read)
-                        })
-                    }))
+            && self.exact_rules.iter().all(|exact| {
+                rules.iter().any(|rule| {
+                    rule.decision == PermissionDecision::Allow && rule.pattern == *exact
+                })
+            })
             && self.patterns.iter().all(|pattern| {
                 let operation = if self.permission == "multiple" {
                     pattern.clone()
@@ -13828,6 +13838,7 @@ impl RunnerTask {
         let (forced, yolo_answers) = asks;
         let operation = plan.describe(&plan.patterns);
         let always_rules = plan.always_rules();
+        let remembered = plan.remembered_rules();
         let explicit = !explicit_operations.is_empty();
         // Yolo is yes to everything: a `--yolo` turn or a chat in Yolo
         // approves computer use once too, also where it asks every time or
@@ -13868,7 +13879,7 @@ impl RunnerTask {
             // reach every chat on this server.
             if self.config.auto_approve {
                 let mut session = self.session_rules.lock();
-                for pattern in &always_rules {
+                for pattern in &remembered {
                     session.push(PermissionRule {
                         pattern: pattern.clone(),
                         decision: PermissionDecision::Allow,
@@ -13906,12 +13917,20 @@ impl RunnerTask {
             // offered and kept: not for a request only a person answers, not
             // in a run nobody watches (which records nothing), and not in a
             // chat in Auto, which approves once and records nothing either.
+            // It is told every pattern its Always keeps, the exact commands
+            // of a line that reads a secret file included.
+            let kept: Vec<String> = plan
+                .always
+                .iter()
+                .cloned()
+                .chain(plan.exact_patterns())
+                .collect();
             let always = (!forced
                 && !explicit
                 && !self.unattended
                 && hook_may_remember(plan)
                 && !self.approval_modes.is_auto(self.thread.id).await)
-                .then_some(plan.always.as_slice());
+                .then_some(kept.as_slice());
             let call = self.hook_call(Some(agent));
             match permission_hook_answer(hooks.as_ref(), &call, plan, always, detail).await {
                 HookAnswer::Refused(reason) => {
@@ -13928,7 +13947,7 @@ impl RunnerTask {
                 }
                 HookAnswer::Allowed { always } if !forced && !explicit => {
                     if always {
-                        self.remember_hook_always(&operation, &always_rules);
+                        self.remember_hook_always(&operation, &remembered);
                     }
                     return Ok(PermissionResolution::allowed());
                 }
@@ -14044,6 +14063,7 @@ impl RunnerTask {
                     permission: plan.permission.clone(),
                     patterns: plan.patterns.clone(),
                     always_rules: always_rules.clone(),
+                    exact_rules: plan.exact_rules(),
                     detail: detail.clone(),
                     script: shown.as_ref().map(|shown| shown.script.clone()),
                     thread_id: self.thread.id,
@@ -17121,22 +17141,6 @@ fn model_pricing(
     model_metadata(&models, model).and_then(|info| info.pricing)
 }
 
-/// The rule Always remembers for a read of `path`, a secret file a shell
-/// line reads: written from the project when the file is in it, as the read
-/// tool's own Always is (`read:.env`), else in full.
-fn secret_read_rule(workspace: &Path, path: &Path) -> String {
-    let relative = path
-        .strip_prefix(workspace)
-        .ok()
-        .map(Path::to_path_buf)
-        .or_else(|| {
-            let root = crate::paths::canonicalize(workspace).ok()?;
-            path.strip_prefix(root).ok().map(Path::to_path_buf)
-        })
-        .filter(|relative| !relative.as_os_str().is_empty());
-    format!("read:{}", relative.as_deref().unwrap_or(path).display())
-}
-
 /// One permission group a tool call needs: every pattern is evaluated as
 /// `permission:pattern`; the ones that come back `ask` prompt together, and
 /// an "always" answer persists the (generalized) `always` rules.
@@ -17186,13 +17190,10 @@ struct ShellReadings {
     credentials: bool,
     /// The secret files (`.env`) the line reads: see [`AskPlan::evaluate`].
     secrets: Vec<std::path::PathBuf>,
-    /// The read rule Always remembers for each of them: see
-    /// [`AskPlan::always_rules`].
-    secret_rules: Vec<String>,
 }
 
 impl ShellReadings {
-    fn new(analysis: &crate::permissions::bash::BashAnalysis, workspace: &Path) -> Self {
+    fn new(analysis: &crate::permissions::bash::BashAnalysis) -> Self {
         let mut sources: HashMap<String, Vec<usize>> = HashMap::new();
         let mut always = HashMap::new();
         for derived in &analysis.derived {
@@ -17237,12 +17238,6 @@ impl ShellReadings {
                 .filter(|named| named.secret)
                 .map(|named| named.path.clone())
                 .collect(),
-            secret_rules: analysis
-                .paths
-                .iter()
-                .filter(|named| named.secret)
-                .map(|named| secret_read_rule(workspace, &named.path))
-                .collect(),
         }
     }
 
@@ -17265,21 +17260,43 @@ impl AskPlan {
             format!("{}:{pattern}", self.permission)
         }
     }
-    /// A shell line that reads a secret file (`cat .env`) also remembers the
-    /// exact read of each one: its command's rule (`bash:cat *`) does not
-    /// settle a secret read (see [`PermissionEngine::allowed_by_choice`]),
-    /// so the file approved stays open and other secrets still ask.
     fn always_rules(&self) -> Vec<String> {
-        let mut rules: Vec<String> = self
-            .always
+        self.always
             .iter()
             .map(|pattern| self.operation(pattern))
-            .collect();
-        for read in self.shell.iter().flat_map(|shell| &shell.secret_rules) {
-            if !rules.contains(read) {
-                rules.push(read.clone());
-            }
+            .collect()
+    }
+    /// The commands as written of a line that reads a secret file that is
+    /// there (`cat .env`): Always also remembers each one exactly, since the
+    /// "always" rule it shows (`bash:cat *`) does not settle a read of a
+    /// secret file (see [`PermissionEngine::allowed_by_choice`]). They are
+    /// not shown: the card names its "always" rules as before, and its
+    /// Always opens `cat .env` again and nothing more.
+    fn exact_patterns(&self) -> Vec<String> {
+        let Some(shell) = &self.shell else {
+            return Vec::new();
+        };
+        if !shell.secrets.iter().any(|path| path.is_file()) {
+            return Vec::new();
         }
+        self.patterns
+            .iter()
+            .filter(|pattern| shell.index.contains_key(*pattern) && !self.always.contains(pattern))
+            .cloned()
+            .collect()
+    }
+    /// [`Self::exact_patterns`] as rules.
+    fn exact_rules(&self) -> Vec<String> {
+        self.exact_patterns()
+            .iter()
+            .map(|pattern| self.operation(pattern))
+            .collect()
+    }
+    /// Everything Always remembers: [`Self::always_rules`], then
+    /// [`Self::exact_rules`].
+    fn remembered_rules(&self) -> Vec<String> {
+        let mut rules = self.always_rules();
+        rules.extend(self.exact_rules());
         rules
     }
     fn is_resolved(&self, pattern: &str) -> bool {
@@ -17407,13 +17424,21 @@ impl AskPlan {
         // A command that reads a secret file (`cat .env`, `source .env`)
         // gets what a read of it gets, unless someone chose to allow the
         // command itself: a shell command could otherwise print what the
-        // read tool asks about first.
+        // read tool asks about first. A remembered `*` rule (`bash:cat *`)
+        // settles a secret's name that is no file (`grep -rn "process.env"
+        // src`), as it always did, but never a file that is there.
         if evaluation.decision == PermissionDecision::Allow
             && shell.index.contains_key(pattern)
-            && !engine.allowed_by_choice(evaluation.matched.as_deref())
             && let Some(read) = shell
                 .secrets
                 .iter()
+                .filter(|path| {
+                    !engine.allowed_by_choice(
+                        evaluation.matched.as_deref(),
+                        &operation,
+                        !path.is_file(),
+                    )
+                })
                 .map(|path| engine.evaluate_detailed(&format!("read:{}", path.display())))
                 .find(|read| read.decision != PermissionDecision::Allow)
         {
@@ -17805,7 +17830,8 @@ enum AskCause {
     SecretViaShell,
     /// The tool's own policy, where the rules allowed the call.
     Tool,
-    /// Only an answer given in this chat settles it (a Chrome site).
+    /// Only an answer given in this chat settles it (a Chrome site,
+    /// computer use, an extension tool's own approval).
     Explicit,
 }
 
@@ -18331,7 +18357,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             });
         }
         if !analysis.patterns.is_empty() {
-            let shell = ShellReadings::new(&analysis, workspace);
+            let shell = ShellReadings::new(&analysis);
             plans.push(AskPlan {
                 permission: "bash".into(),
                 patterns: analysis.patterns,
@@ -19140,6 +19166,7 @@ mod shell_reading_tests {
             permission: plan.permission.clone(),
             patterns: plan.patterns.clone(),
             always_rules: plan.always_rules(),
+            exact_rules: plan.exact_rules(),
             detail: json!({}),
             script: None,
             thread_id: thread,
@@ -19161,14 +19188,16 @@ mod shell_reading_tests {
     // POSIX shell text: Windows runs commands in cmd.exe.
     #[cfg(unix)]
     #[test]
-    fn always_on_a_shell_secret_read_keeps_that_file_open_and_other_secrets_asking() {
+    fn always_on_a_shell_secret_read_keeps_that_command_open_and_nothing_more() {
         use PermissionDecision::{Allow, Ask};
         let project = std::env::temp_dir().join(format!(
             "haarness-shell-secret-always-{}",
             uuid::Uuid::now_v7()
         ));
         std::fs::create_dir_all(project.join("config")).unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
+        std::fs::write(project.join(".env.local"), "TOKEN=l").unwrap();
         std::fs::write(project.join("config/.env.production"), "TOKEN=y").unwrap();
         std::fs::write(project.join("README.md"), "# x").unwrap();
         // As a chat's engine, which knows the project folder.
@@ -19177,68 +19206,74 @@ mod shell_reading_tests {
             engine.set_workspace(&project);
             engine
         };
-        let plan = |command: &str| {
-            ask_plans("bash", &json!({ "command": command }), &project)
+        // What a call of `name` asks: its plans narrowed to the asking
+        // patterns, as cards show them, or nothing when it runs.
+        let calls = |engine: &PermissionEngine, name: &str, arguments: serde_json::Value| {
+            ask_plans(name, &arguments, &project)
                 .into_iter()
-                .find(|plan| plan.permission == "bash")
-                .unwrap()
+                .filter_map(|plan| {
+                    let asked: Vec<String> = plan
+                        .patterns
+                        .iter()
+                        .filter(|pattern| plan.evaluate(engine, pattern).decision == Ask)
+                        .cloned()
+                        .collect();
+                    (!asked.is_empty()).then(|| plan.asking(asked))
+                })
+                .collect::<Vec<_>>()
         };
-        // What a call of `command` asks: the plan narrowed to its asking
-        // patterns, as a card shows it, or nothing when it runs.
         let asks = |engine: &PermissionEngine, command: &str| {
-            let plan = plan(command);
-            let asked: Vec<String> = plan
-                .patterns
-                .iter()
-                .filter(|pattern| plan.evaluate(engine, pattern).decision == Ask)
-                .cloned()
-                .collect();
-            (!asked.is_empty()).then(|| plan.asking(asked))
+            calls(engine, "bash", json!({ "command": command })).pop()
         };
-        // Always on `cat .env` saves the command's rule and the exact read
-        // of the file, from the project as the read tool's Always is, and
-        // in full for a file outside it.
-        let saved = asks(&in_project(&[]), "cat .env").unwrap().always_rules();
-        assert_eq!(saved, ["bash:cat *", "read:.env"]);
-        assert_eq!(
-            asks(&in_project(&[]), "cd config && cat .env.production")
-                .unwrap()
-                .always_rules(),
-            ["bash:cat *", "read:config/.env.production"]
-        );
-        let outside = asks(&in_project(&[]), "cat /elsewhere/.env").unwrap();
-        assert!(
-            outside
-                .always_rules()
-                .contains(&format!("read:{}", Path::new("/elsewhere/.env").display())),
-            "{:?}",
-            outside.always_rules()
-        );
-        // Under the defaults and under `"bash": "ask"`, the card asks the
-        // same, and its Always (for this server or this repository) keeps
-        // that file open, ordinary `cat` running, and other secrets asking.
-        for rules in [&[][..], &[("bash:*", Ask)][..]] {
-            assert_eq!(
-                asks(&in_project(rules), "cat .env").unwrap().always_rules(),
-                saved
-            );
-            let mut remembered = in_project(rules);
+        let reads = |engine: &PermissionEngine, path: &str| {
+            !calls(engine, "read", json!({ "path": path })).is_empty()
+        };
+        // What Always on `command`'s card remembers, in each place it
+        // keeps rules.
+        let answered = |rules: &[(&str, PermissionDecision)], command: &str| {
+            let card = asks(&in_project(rules), command).unwrap();
+            let mut session = in_project(rules);
             let mut repository = in_project(rules);
-            for pattern in &saved {
-                remembered.add_grant(rule(pattern, Allow));
-                repository.add_repository_grant(rule(pattern, Allow));
+            for pattern in card.remembered_rules() {
+                session.add_grant(rule(&pattern, Allow));
+                repository.add_repository_grant(rule(&pattern, Allow));
             }
-            for answered in [&remembered, &repository] {
-                assert!(asks(answered, "cat .env").is_none(), "{rules:?}");
-                assert!(asks(answered, "cat README.md").is_none(), "{rules:?}");
-                assert!(
-                    asks(answered, "cat config/.env.production").is_some(),
-                    "{rules:?}"
-                );
+            [session, repository]
+        };
+        // The card shows `cat *` as before, and Always also keeps the exact
+        // command.
+        let card = asks(&in_project(&[]), "cat .env").unwrap();
+        assert_eq!(card.always_rules(), ["bash:cat *"]);
+        assert_eq!(card.remembered_rules(), ["bash:cat *", "bash:cat .env"]);
+        // Under the defaults and under `"bash": "ask"`, Always opens that
+        // command again and nothing more: not another program, not the read
+        // tool, not another secret file through `cat`.
+        for rules in [&[][..], &[("bash:*", Ask)][..]] {
+            for engine in answered(rules, "cat .env") {
+                assert!(asks(&engine, "cat .env").is_none(), "{rules:?}");
+                assert!(asks(&engine, "cat README.md").is_none(), "{rules:?}");
+                for command in ["head .env", "cat .env.local", "cat config/.env.production"] {
+                    assert!(asks(&engine, command).is_some(), "{command} {rules:?}");
+                }
+                assert!(reads(&engine, ".env"), "{rules:?}");
             }
         }
+        // A line that only names a secret file opens nothing else either.
+        for engine in answered(&[], "echo .env >> .gitignore") {
+            assert!(asks(&engine, "echo .env >> .gitignore").is_none());
+            assert!(asks(&engine, "cat .env").is_some());
+            assert!(reads(&engine, ".env"));
+        }
+        // A secret's name that is no file keeps what a remembered rule
+        // settled before: one Always on a search for `process.env`.
+        let card = asks(&in_project(&[]), "grep -rn process.env src").unwrap();
+        assert_eq!(card.remembered_rules(), ["bash:grep *"]);
+        for engine in answered(&[], "grep -rn process.env src") {
+            assert!(asks(&engine, "grep -rn import.meta.env src").is_none());
+            assert!(asks(&engine, "grep TOKEN .env").is_some());
+        }
         // A configured rule naming the command still settles a secret read,
-        // and so does an Always saved for exactly that command.
+        // and so does a remembered rule for exactly that command.
         let configured = in_project(&[("bash:cat *", Allow)]);
         assert!(asks(&configured, "cat config/.env.production").is_none());
         let mut exact = in_project(&[]);
@@ -19246,15 +19281,19 @@ mod shell_reading_tests {
         assert!(asks(&exact, "cat config/.env.production").is_none());
         // A card of the same command waiting meanwhile is released by that
         // Always; one reading another secret file waits for its own answer.
-        let answer: Vec<PermissionRule> =
-            saved.iter().map(|pattern| rule(pattern, Allow)).collect();
+        let saved: Vec<PermissionRule> = asks(&in_project(&[]), "cat .env")
+            .unwrap()
+            .remembered_rules()
+            .iter()
+            .map(|pattern| rule(pattern, Allow))
+            .collect();
         let defaults = in_project(&[]);
-        assert!(waiting(&asks(&defaults, "cat .env").unwrap()).covered_by(&answer));
+        assert!(waiting(&asks(&defaults, "cat .env").unwrap()).covered_by(&saved));
         assert!(
-            !waiting(&asks(&defaults, "cat config/.env.production").unwrap()).covered_by(&answer)
+            !waiting(&asks(&defaults, "cat config/.env.production").unwrap()).covered_by(&saved)
         );
         let review = in_project(&[("bash:*", Ask)]);
-        assert!(waiting(&asks(&review, "cat README.md").unwrap()).covered_by(&answer));
+        assert!(waiting(&asks(&review, "cat README.md").unwrap()).covered_by(&saved));
         std::fs::remove_dir_all(&project).unwrap();
     }
 
