@@ -105,6 +105,8 @@ test("a Stop hook's feedback shows as one quiet line between the replies it came
   // a message of the person's (the echo model repeats it in its reply).
   await expect(page.locator(".message.user")).toHaveCount(1);
   await expect(page.locator(".message.user")).toHaveText(/fix the bug/);
+  // Nor is it a prompt of the outline: one prompt draws no outline at all.
+  await expect(page.locator("nav.outline")).toHaveCount(0);
   const kinds = await messages.evaluateAll((rows) =>
     rows.map((row) => (row.querySelector(".hook-note") ? "note" : row.getAttribute("data-type"))),
   );

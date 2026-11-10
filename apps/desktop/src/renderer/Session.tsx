@@ -1439,7 +1439,8 @@ export function Session() {
   };
   const outline = createMemo(() =>
     rows().flatMap((item, index) =>
-      item.data.type === "user_message"
+      // A hook's note is no prompt of the person's.
+      item.data.type === "user_message" && !item.data.hook
         ? [{
             id: item.id,
             index,

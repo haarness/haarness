@@ -2615,7 +2615,7 @@ fn a_stop_hooks_message_shows_as_a_quiet_line_with_its_feedback() {
         .collect();
     assert_eq!(note.len(), 1, "{text:#?}");
     assert!(
-        note[0].starts_with("  ↻ Stop hook · run the tests then lint"),
+        note[0].starts_with("  ◇ Stop hook · run the tests then lint"),
         "{text:#?}"
     );
     let joined = text.join("\n");
