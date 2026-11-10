@@ -43,6 +43,28 @@ use crate::{
 
 const MAX_COMPACTIONS_PER_TURN: u8 = 4;
 
+/// How a refusal of a request as longer than the model's window begins when
+/// the turn had already compacted the chat as often as it may: the turn
+/// outgrew the window while it ran (a model reading one large file after
+/// another), not its instructions and the person's message. The provider's
+/// words follow.
+const OUTGREW_WINDOW: &str = "the turn outgrew the model's context after compacting the chat: ";
+
+/// `error` as [`OUTGREW_WINDOW`] says it, when it refuses the request as too
+/// long once the turn has compacted `compactions` times, as often as it may.
+fn outgrew_window(error: CoreError, compactions: u8) -> CoreError {
+    match error {
+        CoreError::Provider(message)
+            if compactions >= MAX_COMPACTIONS_PER_TURN
+                && !message.starts_with(OUTGREW_WINDOW)
+                && is_provider_context_overflow(&CoreError::Provider(message.clone())) =>
+        {
+            CoreError::Provider(format!("{OUTGREW_WINDOW}{message}"))
+        }
+        other => other,
+    }
+}
+
 fn latest_todos(items: &[Item], through: Option<u64>) -> Vec<TodoEntry> {
     items
         .iter()
@@ -2214,6 +2236,22 @@ fn describe_local_model_failure(
                 }
             ),
         )
+    } else if let Some(window) = ollama_window_refused(&lower)
+        && raw.starts_with(OUTGREW_WINDOW)
+    {
+        (
+            format!(
+                "{name} reads at most {} tokens at once here, and this turn outgrew that while it ran, though the chat was compacted {MAX_COMPACTIONS_PER_TURN} times to make room.",
+                grouped_number(window)
+            ),
+            match instead(window.saturating_add(1)).as_slice() {
+                [] => "Ask for less in one message, such as fewer or smaller files at a time, or start a new chat.".to_owned(),
+                names => format!(
+                    "Ask for less in one message, such as fewer or smaller files at a time, or choose a model with a longer context for this chat, such as {}.",
+                    spoken_list(names, "or")
+                ),
+            },
+        )
     } else if let Some(window) = ollama_window_refused(&lower) {
         (
             format!(
@@ -2415,6 +2453,11 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             "{} is not available in your country or region. Choose a model from another provider.",
             provider.unwrap_or("This provider")
         );
+    }
+    // Other providers' refusals read as they did; Ollama's are said by
+    // `describe_local_model_failure`.
+    if let Some(words) = raw.strip_prefix(OUTGREW_WINDOW) {
+        return describe_error(&CoreError::Provider(words.to_owned()), provider);
     }
     // Asked twice, the model wrote no summary of the chat (it called a tool,
     // or only reasoned).
@@ -11547,6 +11590,7 @@ impl RunnerTask {
                             compacted_for_size |= oversized;
                             continue 'provider_round;
                         }
+                        let error_value = outgrew_window(error_value, compactions_this_turn);
                         if let Some(reason) = refused_tool_call(&error_value)
                             && refused_calls < REFUSED_CALL_RETRIES
                         {
@@ -11651,6 +11695,11 @@ impl RunnerTask {
                                 compacted_for_size |= oversized;
                                 continue 'provider_round;
                             }
+                            let error_value = if saw_provider_event {
+                                error_value
+                            } else {
+                                outgrew_window(error_value, compactions_this_turn)
+                            };
                             // A provider that checks the model's tool calls
                             // itself (Groq) refuses a reply whose call does
                             // not match its tool, before anything streamed:
@@ -25284,6 +25333,33 @@ mod tests {
             words("HTTP 400 Bad Request: request (14112 tokens) exceeds the available context size (8192 tokens), try increasing it", "llama3:8b").as_deref(),
             Some("llama3:8b reads at most 8,192 tokens at once here, fewer than Haarness's instructions, tools and this message take. Choose one with a longer context for this chat, such as qwen3:8b or gpt-oss:20b.")
         );
+        // A turn that read one large file after another outgrew the window
+        // though the chat was compacted as often as a turn may: not the
+        // instructions and the message. gpt-oss on Ollama, 2026-11-10.
+        let refused = "HTTP 400 Bad Request: request (40069 tokens) exceeds the available context size (32768 tokens), try increasing it";
+        let outgrown = super::outgrew_window(
+            CoreError::Provider(refused.into()),
+            super::MAX_COMPACTIONS_PER_TURN,
+        );
+        assert!(matches!(
+            super::outgrew_window(CoreError::Provider(refused.into()), super::MAX_COMPACTIONS_PER_TURN - 1),
+            CoreError::Provider(words) if words == refused
+        ));
+        assert_eq!(
+            super::describe_local_model_failure(&outgrown, &ollama, "gpt-oss:20b", true).as_deref(),
+            Some(
+                "gpt-oss:20b reads at most 32,768 tokens at once here, and this turn outgrew that while it ran, though the chat was compacted 4 times to make room. Ask for less in one message, such as fewer or smaller files at a time, or start a new chat."
+            )
+        );
+        // Any other provider's refusal reads as it did.
+        let claude = super::outgrew_window(
+            CoreError::Provider(
+                "HTTP 400 Bad Request: prompt is too long: 210000 tokens > 200000 maximum".into(),
+            ),
+            super::MAX_COMPACTIONS_PER_TURN,
+        );
+        assert!(super::describe_error(&claude, Some("Anthropic")).contains("prompt is too long"));
+        assert!(!super::describe_error(&claude, Some("Anthropic")).contains("outgrew"));
         // With nothing here that could, one to download.
         let alone = haarness_protocol::ProviderInfo {
             models: vec![gemma, cloud],
