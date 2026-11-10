@@ -32,9 +32,9 @@ use agent_client_protocol::schema::{
 use agent_client_protocol::{Agent, Client, ConnectionTo, Stdio};
 use anyhow::{Context as _, Result};
 use haarness_protocol::{
-    CreateThreadRequest, FileDiff, FileDiffStatus, Item, ItemData, McpConfigureRequest,
-    PermissionReply, PermissionReplyDecision, RequestId, StartTurnRequest, Thread, ThreadId, Turn,
-    TurnId, TurnStatus,
+    CreateThreadRequest, Item, ItemData, McpConfigureRequest, PermissionReply,
+    PermissionReplyDecision, RequestId, StartTurnRequest, Thread, ThreadId, Turn, TurnId,
+    TurnStatus,
 };
 use haarness_tui::api::{ApiClient, SubscriptionEvent};
 use serde_json::{Value, json};
@@ -84,6 +84,9 @@ struct Service {
     /// Held by a session's prompt until its turn has ended (see
     /// `Service::prompt`).
     gates: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// The folder each session was last opened in (`cwd` of its
+    /// `session/new` or `session/load`), as the editor spells it.
+    cwds: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 impl Service {
@@ -101,6 +104,7 @@ impl Service {
             starting: Arc::new(Mutex::new(HashMap::new())),
             waits: Arc::new(Mutex::new(HashMap::new())),
             gates: Arc::new(Mutex::new(HashMap::new())),
+            cwds: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -227,6 +231,10 @@ impl Service {
             .map_err(internal)?;
         self.configure_mcp(thread.id, request.mcp_servers, &request.cwd)
             .await?;
+        self.cwds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(thread.id.to_string(), request.cwd);
         Ok(NewSessionResponse::new(thread.id.to_string()))
     }
 
@@ -240,8 +248,12 @@ impl Service {
         let chat = self.client.thread(thread).await.map_err(not_found)?;
         self.configure_mcp(thread, request.mcp_servers, &request.cwd)
             .await?;
+        self.cwds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(request.session_id.to_string(), request.cwd);
         let items = self.client.items(thread).await.map_err(internal)?;
-        let mut files = Files::new(self.folder(&chat));
+        let mut files = self.files(&chat, &request.session_id);
         let mut diffs = files.replayed_diffs(&items);
         let mut calls = HashMap::new();
         for (index, item) in items.into_iter().enumerate() {
@@ -315,19 +327,23 @@ impl Service {
             if stop.is_cancelled() {
                 let _ = self.client.interrupt(turn.id).await;
             }
-            Ok(Some((turn, events, event_task, self.folder(&chat))))
+            Ok(Some((
+                turn,
+                events,
+                event_task,
+                self.files(&chat, &request.session_id),
+            )))
         }
         .await;
         self.waits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
-        let Some((turn, mut events, event_task, folder)) = begun? else {
+        let Some((turn, mut events, event_task, mut files)) = begun? else {
             return Ok(PromptResponse::new(StopReason::Cancelled));
         };
 
         let mut calls = Calls::new();
-        let mut files = Files::new(folder);
         // The chats this turn starts under the session (subagents, workflow
         // agents): what each is called where the client is shown its work.
         let mut children = HashMap::<ThreadId, Child>::new();
@@ -562,11 +578,24 @@ impl Service {
         Ok(())
     }
 
-    /// The folder `chat`'s tools work in: its own, or the workspace's.
-    fn folder(&self, chat: &Thread) -> PathBuf {
-        chat.directory
+    /// What a prompt or a load of `session` tells the editor about files:
+    /// paths are read from the folder `chat`'s tools work in (its own, or
+    /// the workspace), and those in the workspace are spelled from the
+    /// folder the editor opened the session in, which names the same folder
+    /// (see `validate_scope`) but may reach it another way (a link, a
+    /// mapped drive).
+    fn files(&self, chat: &Thread, session: &SessionId) -> Files {
+        let folder = chat
+            .directory
             .as_deref()
-            .map_or_else(|| self.workspace.clone(), PathBuf::from)
+            .map_or_else(|| self.workspace.clone(), PathBuf::from);
+        let opened = self
+            .cwds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session.to_string())
+            .map(|cwd| fold(cwd));
+        Files::new(folder, opened.map(|cwd| (self.workspace.clone(), cwd)))
     }
 
     /// Tells the editor how full the chat's context is and what it has cost
@@ -997,7 +1026,7 @@ impl Service {
                     .get(&call_id)
                     .map(|(_, arguments)| files.locations(&name, arguments))
                     .unwrap_or_default();
-                let diffs = files.diffs(&metadata);
+                let diffs = files.diffs(&name, &metadata);
                 notify(
                     connection,
                     session,
@@ -1049,7 +1078,7 @@ impl Service {
                     .get(&call_id)
                     .map(|(_, arguments)| files.locations(&name, arguments))
                     .unwrap_or_default();
-                let diffs = files.diffs(&metadata);
+                let diffs = files.diffs(&name, &metadata);
                 notify(
                     connection,
                     session,
@@ -1094,13 +1123,13 @@ impl Service {
     }
 
     /// One stored item of the session's chat, as it was shown live. `calls`
-    /// holds the arguments of the calls replayed so far, for their results'
-    /// locations; `diffs` are the result's (see [`Files::replayed_diffs`]).
+    /// holds the locations of the calls replayed whose results have not
+    /// come yet; `diffs` are the result's (see [`Files::replayed_diffs`]).
     fn replay(
         session: &SessionId,
         item: Item,
         files: &Files,
-        calls: &mut HashMap<String, Value>,
+        calls: &mut HashMap<String, Vec<ToolCallLocation>>,
         diffs: Vec<ToolCallContent>,
         connection: &ConnectionTo<Client>,
     ) -> AcpResult<()> {
@@ -1124,26 +1153,24 @@ impl Service {
                 arguments,
                 ..
             } => {
-                calls.insert(call_id.clone(), arguments.clone());
+                let locations = files.locations(&name, &arguments);
+                calls.insert(call_id.clone(), locations.clone());
                 Some(SessionUpdate::ToolCall(
                     ToolCall::new(call_id, title(&name, &arguments))
                         .kind(tool_kind(&name))
                         .status(ToolCallStatus::InProgress)
-                        .locations(files.locations(&name, &arguments))
+                        .locations(locations)
                         .raw_input(arguments),
                 ))
             }
             ItemData::ToolResult {
                 call_id,
-                name,
                 output,
                 is_error,
                 metadata,
+                ..
             } => {
-                let locations = calls
-                    .get(&call_id)
-                    .map(|arguments| files.locations(&name, arguments))
-                    .unwrap_or_default();
+                let locations = calls.remove(&call_id).unwrap_or_default();
                 Some(SessionUpdate::ToolCallUpdate(result_update(
                     call_id, &output, is_error, &metadata, locations, diffs,
                 )))
@@ -1710,61 +1737,103 @@ fn result_update(
 }
 
 /// What a prompt or a load tells the editor about the files its calls work
-/// on: the chat's folder, which relative paths are read from, and how much
-/// file text its diffs may still carry (`DIFF_TEXT_LIMIT` in all).
+/// on: the chat's folder, which relative paths are read from, how the
+/// editor spells the workspace, and how much file text its diffs may still
+/// carry (`DIFF_TEXT_LIMIT` in all).
 struct Files {
     folder: PathBuf,
+    /// The workspace as Haarness names it and as the editor opened it: a
+    /// path in it is given the editor's spelling, so the editor finds it in
+    /// its own project.
+    spelling: Option<(PathBuf, PathBuf)>,
     left: usize,
 }
 
 impl Files {
-    fn new(folder: PathBuf) -> Self {
+    fn new(folder: PathBuf, spelling: Option<(PathBuf, PathBuf)>) -> Self {
         Self {
             folder,
+            spelling,
             left: DIFF_TEXT_LIMIT,
         }
     }
 
+    /// `path` as the file tools read it (see [`absolute`]), spelled as the
+    /// editor spells the workspace when it lies in it.
+    fn path(&self, path: &str) -> PathBuf {
+        let path = absolute(&self.folder, path);
+        let Some((workspace, opened)) = &self.spelling else {
+            return path;
+        };
+        match path.strip_prefix(workspace) {
+            Ok(rest) if rest.as_os_str().is_empty() => opened.clone(),
+            Ok(rest) => opened.join(rest),
+            Err(_) => path,
+        }
+    }
+
+    /// The files and folders a call works on, for the editor to open and to
+    /// follow (see [`named_paths`]), each once.
     fn locations(&self, name: &str, arguments: &Value) -> Vec<ToolCallLocation> {
-        locations(name, arguments, &self.folder)
+        let mut seen = HashSet::new();
+        named_paths(name, arguments)
+            .iter()
+            .map(|path| self.path(path))
+            .filter(|path| seen.insert(path.clone()))
+            .map(ToolCallLocation::new)
+            .collect()
     }
 
     /// The diffs of a result whose `metadata.diffs` holds the before and
     /// after texts of the files it changed (`write`, `edit`, `multiedit`,
-    /// `apply_patch`), at absolute paths: a new file has no old text and a
-    /// deleted one an empty new text. A binary file or a text the server cut
-    /// short has none, nor has a diff larger than what is left to send; the
-    /// result's text names those files still.
-    fn diffs(&mut self, metadata: &Value) -> Vec<ToolCallContent> {
-        let Some(entries) = metadata.get("diffs").and_then(Value::as_array) else {
-            return Vec::new();
+    /// `apply_patch`, and a `batch` for each of its steps), at absolute
+    /// paths: a new file has no old text and a deleted one an empty new
+    /// text. A binary file or a text the server cut short has none, nor has
+    /// a diff larger than what is left to send; the result's text names
+    /// those files still.
+    fn diffs(&mut self, name: &str, metadata: &Value) -> Vec<ToolCallContent> {
+        let steps = if name == "batch" {
+            metadata.get("results").and_then(Value::as_array)
+        } else {
+            None
         };
+        let recorded = std::iter::once(metadata)
+            .chain(steps.into_iter().flatten().map(|step| &step["metadata"]))
+            .filter_map(|metadata| metadata.get("diffs").and_then(Value::as_array))
+            .flatten();
         let mut diffs = Vec::new();
-        for entry in entries {
-            let Ok(diff) = serde_json::from_value::<FileDiff>(entry.clone()) else {
-                continue;
-            };
-            if diff.binary || diff.truncated {
-                continue;
+        for entry in recorded {
+            if self.left == 0 {
+                break;
             }
-            let (old, new) = match (diff.status, diff.before, diff.after) {
-                (FileDiffStatus::Added, _, Some(after)) => (None, after),
-                (FileDiffStatus::Modified, Some(before), Some(after)) => (Some(before), after),
-                (FileDiffStatus::Deleted, Some(before), _) => (Some(before), String::new()),
-                _ => continue,
-            };
-            let size = old.as_ref().map_or(0, String::len) + new.len();
-            if size > self.left {
-                continue;
+            if let Some(diff) = self.diff(entry) {
+                diffs.push(diff.into());
             }
-            self.left -= size;
-            diffs.push(
-                Diff::new(absolute(&self.folder, &diff.file), new)
-                    .old_text(old)
-                    .into(),
-            );
         }
         diffs
+    }
+
+    /// One recorded change (a `FileDiff`) as a diff, when it holds its whole
+    /// texts and they fit in what is left. Its size is known before any text
+    /// is copied.
+    fn diff(&mut self, entry: &Value) -> Option<Diff> {
+        if entry["binary"] == true || entry["truncated"] == true {
+            return None;
+        }
+        let file = entry["file"].as_str()?;
+        let (before, after) = (entry["before"].as_str(), entry["after"].as_str());
+        let (old, new) = match (entry["status"].as_str()?, before, after) {
+            ("added", _, Some(after)) => (None, after),
+            ("modified", Some(before), Some(after)) => (Some(before), after),
+            ("deleted", Some(before), _) => (Some(before), ""),
+            _ => return None,
+        };
+        let size = old.map_or(0, str::len) + new.len();
+        if size > self.left {
+            return None;
+        }
+        self.left -= size;
+        Some(Diff::new(self.path(file), new).old_text(old.map(str::to_owned)))
     }
 
     /// The diffs of each tool result of a replayed chat, by its index in
@@ -1773,8 +1842,11 @@ impl Files {
     fn replayed_diffs(&mut self, items: &[Item]) -> HashMap<usize, Vec<ToolCallContent>> {
         let mut diffs = HashMap::new();
         for (index, item) in items.iter().enumerate().rev() {
-            if let ItemData::ToolResult { metadata, .. } = &item.data {
-                let found = self.diffs(metadata);
+            if self.left == 0 {
+                break;
+            }
+            if let ItemData::ToolResult { name, metadata, .. } = &item.data {
+                let found = self.diffs(name, metadata);
                 if !found.is_empty() {
                     diffs.insert(index, found);
                 }
@@ -1784,31 +1856,39 @@ impl Files {
     }
 }
 
-/// The files and folders a call works on, for the editor to open and to
-/// follow: the file a file tool reads or changes, every file a patch names
-/// (both ends of a move), and the folder a search or a listing looks in,
-/// `folder` when it names none. Other tools name none.
-fn locations(name: &str, arguments: &Value, folder: &Path) -> Vec<ToolCallLocation> {
-    let path = arguments
-        .get("path")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty());
-    let named = match name {
-        "read" | "write" | "edit" | "multiedit" => path.into_iter().map(str::to_owned).collect(),
+/// The paths a call names as it wrote them: the file a file tool reads or
+/// changes, or `lsp` asks about; every file a patch names (both ends of a
+/// move); the folder a search or a listing looks in (`.` when it names
+/// none); and those of each step of a `batch`. Other tools name none.
+fn named_paths(name: &str, arguments: &Value) -> Vec<String> {
+    let named = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+    };
+    match name {
+        "read" | "write" | "edit" | "multiedit" => {
+            named("path").into_iter().map(str::to_owned).collect()
+        }
+        "lsp" => named("filePath").into_iter().map(str::to_owned).collect(),
         "apply_patch" => patch_files(arguments)
             .into_iter()
             .flat_map(|(file, target)| std::iter::once(file).chain(target))
             .collect(),
-        "glob" | "grep" | "list" => vec![path.unwrap_or(".").to_owned()],
+        "glob" | "grep" | "list" => vec![named("path").unwrap_or(".").to_owned()],
+        "batch" => arguments
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|step| Some((step.get("tool")?.as_str()?, step.get("parameters")?)))
+            // A batch cannot run a batch.
+            .filter(|(tool, _)| *tool != "batch")
+            .flat_map(|(tool, parameters)| named_paths(tool, parameters))
+            .collect(),
         _ => Vec::new(),
-    };
-    let mut seen = HashSet::new();
-    named
-        .iter()
-        .map(|path| absolute(folder, path))
-        .filter(|path| seen.insert(path.clone()))
-        .map(ToolCallLocation::new)
-        .collect()
+    }
 }
 
 /// The files an `apply_patch` call's patch works on, in its order: each
@@ -1834,18 +1914,22 @@ fn patch_files(arguments: &Value) -> Vec<(String, Option<String>)> {
 /// `path` as the file tools read it: a leading `~` is the home folder and
 /// a relative path is under `folder`, with `.` and `..` folded away.
 fn absolute(folder: &Path, path: &str) -> PathBuf {
-    let path = haarness_core::expand_home(path);
-    let mut absolute = PathBuf::new();
-    for component in folder.join(path.as_ref()).components() {
+    fold(&folder.join(haarness_core::expand_home(path).as_ref()))
+}
+
+/// `path` with `.` and `..` folded away, as written: links are not followed.
+fn fold(path: &Path) -> PathBuf {
+    let mut folded = PathBuf::new();
+    for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                absolute.pop();
+                folded.pop();
             }
-            component => absolute.push(component.as_os_str()),
+            component => folded.push(component.as_os_str()),
         }
     }
-    absolute
+    folded
 }
 
 /// The chat's usage as the editor's meter shows it: the context number
@@ -2256,15 +2340,18 @@ mod tests {
         assert_eq!(title("edit", &json!({"path":"a.rs"})), "Edit a.rs");
     }
 
+    /// The locations of a call in a chat working in `/work/app`.
+    fn located(name: &str, arguments: &Value) -> Vec<PathBuf> {
+        Files::new(PathBuf::from("/work/app"), None)
+            .locations(name, arguments)
+            .into_iter()
+            .map(|location| location.path)
+            .collect()
+    }
+
     #[test]
     fn calls_name_the_files_they_work_on_as_absolute_paths() {
-        let folder = Path::new("/work/app");
-        let paths = |name: &str, arguments: Value| {
-            locations(name, &arguments, folder)
-                .into_iter()
-                .map(|location| location.path)
-                .collect::<Vec<_>>()
-        };
+        let paths = |name: &str, arguments: Value| located(name, &arguments);
         let path = PathBuf::from;
         assert_eq!(
             paths("read", json!({"path":"src/main.rs", "offset": 10})),
@@ -2281,6 +2368,13 @@ mod tests {
         assert_eq!(
             paths("multiedit", json!({"path":"a.rs", "edits": []})),
             [path("/work/app/a.rs")]
+        );
+        assert_eq!(
+            paths(
+                "lsp",
+                json!({"operation":"hover", "filePath":"src/lib.rs", "line":3, "character":1})
+            ),
+            [path("/work/app/src/lib.rs")]
         );
         // `~` is the home folder, as the file tools read it.
         let home = haarness_core::expand_home("~");
@@ -2322,6 +2416,80 @@ mod tests {
         assert!(paths("webfetch", json!({"url":"https://example.com"})).is_empty());
     }
 
+    /// A batch works on the files its steps name.
+    #[test]
+    fn a_batch_names_the_files_of_its_steps() {
+        let batch = json!({"tool_calls": [
+            {"tool":"edit", "parameters":{"path":"a.rs", "old":"x", "new":"y"}},
+            {"tool":"read", "parameters":{"path":"b.rs"}},
+            {"tool":"edit", "parameters":{"path":"./a.rs", "old":"y", "new":"z"}},
+            {"tool":"bash", "parameters":{"command":"ls"}},
+            {"tool":"batch", "parameters":{"tool_calls":[{"tool":"read", "parameters":{"path":"c.rs"}}]}},
+            {"tool":"write"},
+        ]});
+        assert_eq!(
+            located("batch", &batch),
+            [
+                PathBuf::from("/work/app/a.rs"),
+                PathBuf::from("/work/app/b.rs")
+            ]
+        );
+        assert!(located("batch", &json!({})).is_empty());
+    }
+
+    /// Paths in the workspace are spelled as the editor opened it (through
+    /// a link, here), so it finds them in its own project; others stay as
+    /// they are.
+    #[test]
+    fn paths_in_the_workspace_take_the_editor_s_spelling() {
+        let mut files = Files::new(
+            PathBuf::from("/private/var/work/app/sub"),
+            Some((
+                PathBuf::from("/private/var/work/app"),
+                PathBuf::from("/var/work/app"),
+            )),
+        );
+        let paths = |files: &Files, name: &str, arguments: Value| {
+            files
+                .locations(name, &arguments)
+                .into_iter()
+                .map(|location| location.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths(&files, "read", json!({"path":"src/main.rs"})),
+            [PathBuf::from("/var/work/app/sub/src/main.rs")]
+        );
+        assert_eq!(
+            paths(&files, "read", json!({"path":"/private/var/work/app/x.rs"})),
+            [PathBuf::from("/var/work/app/x.rs")]
+        );
+        assert_eq!(
+            paths(&files, "list", json!({"path":".."})),
+            [PathBuf::from("/var/work/app")]
+        );
+        assert_eq!(
+            paths(
+                &files,
+                "read",
+                json!({"path":"/private/var/work/application"})
+            ),
+            [PathBuf::from("/private/var/work/application")]
+        );
+        assert_eq!(
+            paths(&files, "write", json!({"path":"/tmp/out.txt"})),
+            [PathBuf::from("/tmp/out.txt")]
+        );
+        let diffs = files.diffs(
+            "write",
+            &json!({"diffs":[{"file":"new.txt", "status":"added", "additions":1, "deletions":0, "after":"x"}]}),
+        );
+        assert_eq!(
+            diff_parts(&diffs[0]).0,
+            PathBuf::from("/var/work/app/sub/new.txt")
+        );
+    }
+
     fn diff_parts(content: &ToolCallContent) -> (PathBuf, Option<&str>, &str) {
         match content {
             ToolCallContent::Diff(diff) => (
@@ -2333,25 +2501,48 @@ mod tests {
         }
     }
 
+    /// A change as the server records it in `metadata.diffs`.
+    fn recorded(
+        file: &str,
+        status: haarness_protocol::FileDiffStatus,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> Value {
+        serde_json::to_value(haarness_protocol::FileDiff {
+            file: file.into(),
+            status,
+            additions: 1,
+            deletions: 1,
+            patch: None,
+            before: before.map(str::to_owned),
+            after: after.map(str::to_owned),
+            binary: false,
+            truncated: false,
+        })
+        .unwrap()
+    }
+
     /// An edit's result carries the before and after texts the server
     /// recorded, as the editor's diffs.
     #[test]
     fn a_result_s_recorded_changes_become_diffs() {
-        let mut files = Files::new(PathBuf::from("/work/app"));
+        use haarness_protocol::FileDiffStatus::{Added, Deleted, Modified};
+        let mut files = Files::new(PathBuf::from("/work/app"), None);
+        let mut binary = recorded("logo.png", Modified, None, Some(""));
+        binary["binary"] = json!(true);
+        binary["truncated"] = json!(true);
+        let mut cut = recorded("big.txt", Modified, Some("cut"), Some("cut"));
+        cut["truncated"] = json!(true);
         let metadata = json!({"diffs": [
-            {"file":"new.txt", "status":"added", "additions":1, "deletions":0, "after":"hello\n"},
-            {"file":"src/lib.rs", "status":"modified", "additions":1, "deletions":1,
-             "before":"fn a() {}\n", "after":"fn b() {}\n"},
-            {"file":"/work/app/gone.txt", "status":"deleted", "additions":0, "deletions":1,
-             "before":"bye\n"},
-            {"file":"logo.png", "status":"modified", "additions":0, "deletions":0,
-             "after":"", "binary":true, "truncated":true},
-            {"file":"big.txt", "status":"modified", "additions":1, "deletions":1,
-             "before":"cut", "after":"cut", "truncated":true},
-            {"file":"odd.txt", "status":"modified", "additions":0, "deletions":0},
+            recorded("new.txt", Added, None, Some("hello\n")),
+            recorded("src/lib.rs", Modified, Some("fn a() {}\n"), Some("fn b() {}\n")),
+            recorded("/work/app/gone.txt", Deleted, Some("bye\n"), None),
+            binary,
+            cut,
+            recorded("odd.txt", Modified, None, None),
             {"not":"a diff"},
         ], "diffsTruncated": false});
-        let diffs = files.diffs(&metadata);
+        let diffs = files.diffs("multiedit", &metadata);
         let parts = diffs.iter().map(diff_parts).collect::<Vec<_>>();
         assert_eq!(
             parts,
@@ -2369,27 +2560,62 @@ mod tests {
             files.left,
             DIFF_TEXT_LIMIT - "hello\n".len() - 2 * "fn a() {}\n".len() - "bye\n".len()
         );
-        assert!(files.diffs(&json!({"truncated": true})).is_empty());
-        assert!(files.diffs(&Value::Null).is_empty());
+        assert!(files.diffs("write", &json!({"truncated": true})).is_empty());
+        assert!(files.diffs("write", &Value::Null).is_empty());
+    }
+
+    /// A batch's steps record their changes in its result, each in its own
+    /// metadata; only a batch's result is read that way.
+    #[test]
+    fn a_batch_s_steps_changes_become_diffs() {
+        use haarness_protocol::FileDiffStatus::{Added, Modified};
+        let metadata = json!({"failures": 1, "results": [
+            {"tool":"edit", "output":"edited a.rs", "metadata": {"diffs": [
+                recorded("a.rs", Modified, Some("x\n"), Some("y\n")),
+            ]}},
+            {"tool":"read", "output":"…", "metadata": null},
+            {"tool":"edit", "error":"no match"},
+            {"tool":"write", "output":"wrote b.rs", "metadata": {"diffs": [
+                recorded("b.rs", Added, None, Some("new\n")),
+            ]}},
+        ]});
+        let mut files = Files::new(PathBuf::from("/work/app"), None);
+        let parts = files
+            .diffs("batch", &metadata)
+            .iter()
+            .map(|diff| diff_parts(diff).0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parts,
+            [
+                PathBuf::from("/work/app/a.rs"),
+                PathBuf::from("/work/app/b.rs")
+            ]
+        );
+        assert!(files.diffs("other", &metadata).is_empty());
     }
 
     /// The diffs of one prompt carry a bounded amount of text: one that no
     /// longer fits is left out, and a smaller one after it still goes.
     #[test]
     fn diffs_stop_at_the_prompt_s_text_limit() {
-        let mut files = Files::new(PathBuf::from("/work/app"));
+        let mut files = Files::new(PathBuf::from("/work/app"), None);
         let big = "x".repeat(DIFF_TEXT_LIMIT / 2);
         let added = |file: &str, text: &str| json!({"diffs": [{"file": file, "status":"added", "additions":1, "deletions":0, "after": text}]});
-        assert_eq!(files.diffs(&added("one.txt", &big)).len(), 1);
-        assert_eq!(files.diffs(&added("two.txt", &big)).len(), 1);
+        assert_eq!(files.diffs("write", &added("one.txt", &big)).len(), 1);
+        assert_eq!(files.diffs("write", &added("two.txt", &big)).len(), 1);
         assert_eq!(files.left, 0);
-        assert!(files.diffs(&added("three.txt", "y")).is_empty());
+        assert!(files.diffs("write", &added("three.txt", "")).is_empty());
 
-        let mut files = Files::new(PathBuf::from("/work/app"));
+        let mut files = Files::new(PathBuf::from("/work/app"), None);
         let most = "x".repeat(DIFF_TEXT_LIMIT - 10);
-        assert_eq!(files.diffs(&added("one.txt", &most)).len(), 1);
-        assert!(files.diffs(&added("two.txt", &"y".repeat(11))).is_empty());
-        assert_eq!(files.diffs(&added("three.txt", "small")).len(), 1);
+        assert_eq!(files.diffs("write", &added("one.txt", &most)).len(), 1);
+        assert!(
+            files
+                .diffs("write", &added("two.txt", &"y".repeat(11)))
+                .is_empty()
+        );
+        assert_eq!(files.diffs("write", &added("three.txt", "small")).len(), 1);
     }
 
     /// A load that cannot send every diff of the chat sends its latest ones.
@@ -2418,7 +2644,7 @@ mod tests {
             result(2, "middle.txt", DIFF_TEXT_LIMIT / 2),
             result(3, "new.txt", DIFF_TEXT_LIMIT / 2),
         ];
-        let diffs = Files::new(PathBuf::from("/work/app")).replayed_diffs(&items);
+        let diffs = Files::new(PathBuf::from("/work/app"), None).replayed_diffs(&items);
         let mut kept = diffs.keys().copied().collect::<Vec<_>>();
         kept.sort_unstable();
         assert_eq!(kept, [1, 2]);

@@ -500,6 +500,26 @@ async fn subagent_requests_and_tool_calls_reach_the_client_named_after_the_subag
         }),
         "the subagent's result did not reach the client: {messages:?}"
     );
+    // The subagent's call names its file, as the session was opened, and its
+    // result shows what it wrote.
+    let proof = workspace
+        .join("child-proof.txt")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        call["params"]["update"]["locations"],
+        json!([{"path": proof}])
+    );
+    let result = call_update(
+        &messages,
+        "tool_call_update",
+        &call["params"]["update"]["toolCallId"],
+    );
+    assert_eq!(result["locations"], call["params"]["update"]["locations"]);
+    assert_eq!(
+        diffs(result),
+        [json!({"type":"diff", "path": proof, "newText":"CHILD_OK"})]
+    );
     assert!(
         !messages.iter().any(|message| {
             message["params"]["update"]["sessionUpdate"].as_str() == Some("agent_message_chunk")
@@ -1400,8 +1420,9 @@ fn diffs(update: &Value) -> Vec<Value> {
 }
 
 /// An editor is told which files a call works on, at absolute paths it can
-/// open and follow, and sees what an edit changed as a diff beside the
-/// call's text result, live and when the session is loaded again.
+/// open and follow, spelled from the folder it opened the session in, and
+/// sees what an edit changed as a diff beside the call's text result, live
+/// and when the session is loaded again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn edits_reach_the_editor_as_diffs_at_the_files_they_change() {
     let directory = TestDirectory::new();
@@ -1409,8 +1430,10 @@ async fn edits_reach_the_editor_as_diffs_at_the_files_they_change() {
         acp_session(&directory).await;
     std::fs::write(workspace.join("notes.txt"), "one\ntwo\n").expect("write the edited file");
     std::fs::write(workspace.join("gone.txt"), "bye\n").expect("write the deleted file");
-    let root = std::fs::canonicalize(&workspace).expect("canonical workspace");
-    let at = |file: &str| root.join(file).to_string_lossy().into_owned();
+    // As the session was opened: on macOS the temporary folder is reached
+    // through a link (`/var` is `/private/var`), and on Windows through a
+    // short name, which the server's own name for the workspace resolves.
+    let at = |file: &str| workspace.join(file).to_string_lossy().into_owned();
 
     let edit = json!({"path":"notes.txt", "old":"two", "new":"TWO"});
     send(
@@ -1476,15 +1499,50 @@ async fn edits_reach_the_editor_as_diffs_at_the_files_they_change() {
         ]
     );
 
+    // A batch names the files of its steps and shows what each changed.
+    let batch = json!({"tool_calls": [
+        {"tool":"edit", "parameters":{"path":"notes.txt", "old":"one", "new":"ONE"}},
+        {"tool":"write", "parameters":{"path":"batched.txt", "content":"step\n"}},
+    ]});
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":5, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool batch {batch}")}]}}),
+    )
+    .await;
+    let mut batched = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 5, &mut batched).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{batched:?}");
+    let call = batched
+        .iter()
+        .map(|message| &message["params"]["update"])
+        .find(|update| update["sessionUpdate"] == "tool_call")
+        .unwrap_or_else(|| panic!("no tool call: {batched:?}"));
+    assert_eq!(
+        call["locations"],
+        json!([{"path": at("notes.txt")}, {"path": at("batched.txt")}])
+    );
+    let result = call_update(&batched, "tool_call_update", &call["toolCallId"]);
+    assert_eq!(
+        diffs(result),
+        [
+            json!({"type":"diff", "path": at("notes.txt"),
+                   "oldText":"one\nTWO\n", "newText":"ONE\nTWO\n"}),
+            json!({"type":"diff", "path": at("batched.txt"), "newText":"step\n"}),
+        ],
+        "{result}"
+    );
+
     // A load shows the same, from the stored chat.
     send(
         &mut stdin,
-        json!({"jsonrpc":"2.0", "id":5, "method":"session/load",
+        json!({"jsonrpc":"2.0", "id":6, "method":"session/load",
                "params":{"sessionId":session, "cwd":workspace, "mcpServers":[]}}),
     )
     .await;
     let mut replayed = Vec::new();
-    let loaded = receive_response(&mut lines, &mut stdin, 5, &mut replayed).await;
+    let loaded = receive_response(&mut lines, &mut stdin, 6, &mut replayed).await;
     assert_eq!(loaded["result"], json!({}), "{replayed:?}");
     let updates = replayed
         .iter()
@@ -1510,6 +1568,9 @@ async fn edits_reach_the_editor_as_diffs_at_the_files_they_change() {
                    "oldText":"one\ntwo\n", "newText":"one\nTWO\n"}),
             json!({"type":"diff", "path": at("added.txt"), "newText":"fresh\n"}),
             json!({"type":"diff", "path": at("gone.txt"), "oldText":"bye\n", "newText":""}),
+            json!({"type":"diff", "path": at("notes.txt"),
+                   "oldText":"one\nTWO\n", "newText":"ONE\nTWO\n"}),
+            json!({"type":"diff", "path": at("batched.txt"), "newText":"step\n"}),
         ]
     );
 

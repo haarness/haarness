@@ -59,16 +59,20 @@ version 1.
   sent as a plan. An `apply_patch` call is titled after the first file its patch names (`Edit
   src/lib.rs and 2 more`).
 - **Locations.** A call and its result carry `locations`, as absolute paths the editor can open and
-  follow: the `path` of `read`, `write`, `edit` and `multiedit`; every file an `apply_patch` patch
-  names, both ends of a move included; and the folder `glob`, `grep` and `list` look in (the chat's
-  folder when the call gives no `path`). As the tools do, the bridge reads a relative path from the
-  chat's folder and a leading `~` as the home folder. Other tools name no location.
+  follow: the `path` of `read`, `write`, `edit` and `multiedit`, and the `filePath` of `lsp`; every
+  file an `apply_patch` patch names, both ends of a move included; the folder `glob`, `grep` and
+  `list` look in (the chat's folder when the call gives no `path`); and for a `batch`, those of its
+  steps. As the tools do, the bridge reads a relative path from the chat's folder and a leading `~`
+  as the home folder. A path in the workspace is spelled from the `cwd` the editor opened the session
+  with, even when that reaches the folder through a link or a mapped drive, so the editor finds it
+  in its own project. Other tools name no location.
 - **Diffs.** The result of a call that changed files carries, after its text, one `diff` per file
-  from the before and after texts the server recorded (`metadata.diffs`): `oldText` is absent for a
-  new file and `newText` is empty for a deleted one. A binary file, or one whose text the server cut
-  at 32 KiB, gets no diff, and a prompt's diffs carry at most 1 MB of text in all; the text result
-  still names every file. A load replays the diffs as well, with the same limit; when the chat holds
-  more, the latest are the ones sent.
+  from the before and after texts the server recorded (`metadata.diffs`, and each step's for a
+  `batch`), spelled as its locations are: `oldText` is absent for a new file and `newText` is empty
+  for a deleted one. A binary file, or one whose text the server cut at 32 KiB, gets no diff, and a
+  prompt's diffs carry at most 1 MB of text in all; the text result still names every file. A load
+  replays the diffs as well, with the same limit; when the chat holds more, the latest are the ones
+  sent.
 - **Usage.** After each prompt, and after `session/load`, a `usage_update` says how many tokens the
   chat's context holds (`used`, the number the Haarness apps show) out of the model's window (`size`),
   and what the chat and its subagents have cost so far in USD when the turns are priced. It is sent
