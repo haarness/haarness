@@ -8495,15 +8495,71 @@ async fn a_question_closed_elsewhere_goes_quietly_and_a_failed_reply_keeps_it() 
 }
 
 /// A typed answer to a question that did not take it comes back to the
-/// prompt: as a draft when the question had closed already, for another try
-/// when the reply failed.
+/// prompt as it was typed, its paste still a chip: as a draft when the
+/// question had closed already, for another try when the reply failed.
 #[tokio::test]
 async fn a_typed_answer_that_did_not_land_comes_back_to_the_prompt() {
     let thread = fixture_thread();
+    let paste = (1..=12)
+        .map(|line| format!("log line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     for (reply, closes) in [("settled", true), ("proxy", false)] {
-        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        let mut app = asked_free_text(&thread, &["q-typed"]).await;
+        let (client, _) = answering_server(thread.id, reply).await;
+        type_text(&mut app, "the release branch ", &client).await;
+        app.paste_into_prompt(&paste, false);
+        let typed = app.composer.text().to_owned();
+        assert!(typed.contains("[#1 pasted 12 lines]"), "{typed}");
+        let sent = crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &client,
+        )
+        .await;
+        assert_eq!(sent.is_ok(), closes, "{reply}");
+        assert_eq!(app.pending_questions.is_empty(), closes, "{reply}");
+        assert_eq!(app.composer.text(), typed, "{reply}");
+        assert!(
+            app.composer.expanded_text().ends_with("log line 12"),
+            "{reply}"
+        );
+    }
+}
+
+/// When the question a typed answer was for had closed and another waits,
+/// the prompt now answers that one: the text is not put there to be sent as
+/// its answer by the next Enter. ↑ still brings it back.
+#[tokio::test]
+async fn a_typed_answer_never_becomes_the_next_questions_answer() {
+    let thread = fixture_thread();
+    let mut app = asked_free_text(&thread, &["q-first", "q-second"]).await;
+    let (client, _) = answering_server(thread.id, "settled").await;
+    type_text(&mut app, "the release branch", &client).await;
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.first_pending_question()
+            .map(|pending| pending.question_id.as_str()),
+        Some("q-second")
+    );
+    assert_eq!(app.notice, "Already answered");
+    assert!(app.composer.is_empty(), "{}", app.composer.text());
+    assert!(app.composer.history_prev());
+    assert_eq!(app.composer.text(), "the release branch");
+}
+
+/// An App with free-text questions waiting, in the order given.
+async fn asked_free_text(thread: &Thread, ids: &[&str]) -> App {
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    for id in ids {
         let question = serde_json::json!({
-            "questionId": "q-typed",
+            "questionId": id,
             "prompt": "Which branch?",
             "choices": ["main"],
             "multiple": false,
@@ -8515,18 +8571,8 @@ async fn a_typed_answer_that_did_not_land_comes_back_to_the_prompt() {
         )
         .await
         .unwrap();
-        let (client, _) = answering_server(thread.id, reply).await;
-        type_text(&mut app, "the release branch", &client).await;
-        let sent = crate::input::handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &client,
-        )
-        .await;
-        assert_eq!(sent.is_ok(), closes, "{reply}");
-        assert_eq!(app.pending_questions.is_empty(), closes, "{reply}");
-        assert_eq!(app.composer.text(), "the release branch", "{reply}");
     }
+    app
 }
 
 #[tokio::test]

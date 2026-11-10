@@ -245,14 +245,24 @@ pub(crate) async fn reply_to_question(
     }
 }
 
-/// An answer typed for a question that did not take it (closed already, or
-/// the reply failed) goes back into the prompt, picks and all, rather than
-/// being lost.
-fn give_back_typed_answer(app: &mut App, typed: Option<String>, sent: &Result<bool>) {
+/// An answer typed for a question that did not take it goes back into the
+/// prompt as it was, pastes and picks included: for another try when the
+/// reply failed (the question still waits), and as a draft when the question
+/// had closed already, unless another question waits now, whose answer the
+/// prompt would send it as. ↑ recalls it from the history either way.
+fn give_back_typed_answer(
+    app: &mut App,
+    typed: Option<crate::input::composer::SetAside>,
+    sent: &Result<bool>,
+) {
+    let give_back = match sent {
+        Ok(answered) => !answered && app.first_pending_question().is_none(),
+        Err(_) => true,
+    };
     if let Some(typed) = typed
-        && !matches!(sent, Ok(true))
+        && give_back
     {
-        app.composer.set_text(typed);
+        app.composer.restore(typed);
     }
 }
 
@@ -990,10 +1000,9 @@ pub async fn handle_key_at(
                     .collect::<Vec<_>>();
                 let mut typed = None;
                 if question.custom && !app.composer.text().trim().is_empty() {
-                    let text = app.composer.take();
+                    typed = Some(app.composer.copy_aside());
                     // A pick in an answer is its `@name`, never its marker.
-                    let custom = crate::resource_mentions::plain(&text);
-                    typed = Some(text);
+                    let custom = crate::resource_mentions::plain(&app.composer.take());
                     app.save_prompt_history();
                     answers.extend(
                         custom
@@ -1011,10 +1020,11 @@ pub async fn handle_key_at(
             }
             KeyCode::Enter if plain => {
                 let typed = (custom_allowed && !app.composer.text().trim().is_empty())
-                    .then(|| app.composer.take());
-                let answer = if let Some(text) = &typed {
+                    .then(|| app.composer.copy_aside());
+                let answer = if typed.is_some() {
+                    let text = app.composer.take();
                     app.save_prompt_history();
-                    Some(crate::resource_mentions::plain(text))
+                    Some(crate::resource_mentions::plain(&text))
                 } else {
                     app.question_choice(app.question_selection)
                 };

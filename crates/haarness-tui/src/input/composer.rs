@@ -543,6 +543,12 @@ impl Composer {
         expand(&self.text, &self.expansions)
     }
 
+    /// A copy of the draft as [`Self::set_aside`] would lift it, leaving the
+    /// prompt as it is.
+    pub fn copy_aside(&self) -> SetAside {
+        SetAside(self.edit_snapshot())
+    }
+
     /// Lift the draft out of the prompt whole, collapsed pastes and attached
     /// context included, leaving the prompt empty. History stays put.
     pub fn set_aside(&mut self) -> SetAside {
