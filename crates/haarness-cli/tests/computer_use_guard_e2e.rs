@@ -28,7 +28,7 @@ impl Fixture {
         Self::running(None)
     }
 
-    /// A fixture running Haarness from a file called `renamed` (the built program, linked or copied), or as built.
+    /// A fixture running Haarness from a file called `renamed` (a copy of the built program), or as built.
     fn running(renamed: Option<&str>) -> Self {
         let root = std::env::temp_dir().join(format!("haarness-computer-guard-{}", Uuid::now_v7()));
         let built = PathBuf::from(env!("CARGO_BIN_EXE_haarness"));
@@ -37,9 +37,9 @@ impl Fixture {
             |name| {
                 let program = root.join("bin").join(name);
                 std::fs::create_dir_all(root.join("bin")).expect("create the program's folder");
-                std::fs::hard_link(&built, &program)
-                    .or_else(|_| std::fs::copy(&built, &program).map(drop))
-                    .expect("put the program under its new name");
+                // A copy, not a hard link: macOS now and then kills a hard link to the built program as it starts
+                // while the other test starts the program itself.
+                std::fs::copy(&built, &program).expect("put the program under its new name");
                 program
             },
         );
