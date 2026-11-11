@@ -548,6 +548,39 @@ async fn background_with_a_command_id_moves_that_command_or_says_why_not() {
 }
 
 #[tokio::test]
+async fn background_in_a_working_subagent_s_view_says_its_own_tasks_stay() {
+    let root = fixture_thread();
+    let child = Thread {
+        id: ThreadId::new(),
+        parent_id: Some(root.id),
+        is_subagent: true,
+        ..fixture_thread()
+    };
+    // The server moves nothing: a subagent's work stays in the foreground.
+    let (client, _seen) = recording_server(|_, _| ("200 OK", "[]".into())).await;
+    let mut app = App::new(
+        child.clone(),
+        vec![root.clone(), child.clone()],
+        vec![],
+        vec![],
+        vec![],
+    );
+    app.server_info = Some(side_server_info(vec![
+        haarness_protocol::BACKGROUND_COMMANDS_CAPABILITY.into(),
+    ]));
+    app.active_turn = Some(TurnId::new());
+    app.execute_command("/background", &client).await.unwrap();
+    assert_eq!(
+        app.notice,
+        "A subagent's own agent tasks stay in the foreground"
+    );
+    // With nothing running there, nothing is said to be.
+    app.active_turn = None;
+    app.execute_command("/background", &client).await.unwrap();
+    assert_eq!(app.notice, "Nothing is running in the foreground");
+}
+
+#[tokio::test]
 async fn this_client_says_it_follows_background_work_and_scripts_do_not() {
     let thread = fixture_thread();
     let turn = serde_json::to_string(&fixture_running_turn(thread.id)).unwrap();

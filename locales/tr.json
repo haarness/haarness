@@ -1,5 +1,6 @@
 {
   "...": "...",
+  "A subagent's own agent tasks stay in the foreground": "Bir alt ajanın başlattığı ajan görevleri ön planda kalır",
   "API error": "API hatası",
   "API key": "API anahtarı",
   "About": "Hakkında",

@@ -1,5 +1,6 @@
 {
   "...": "...",
+  "A subagent's own agent tasks stay in the foreground": "子智能体启动的智能体任务会留在前台",
   "API error": "API 错误",
   "API key": "API 密钥",
   "About": "关于",

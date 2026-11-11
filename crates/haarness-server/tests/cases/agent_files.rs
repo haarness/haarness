@@ -610,9 +610,25 @@ async fn a_subagent_s_children_stay_in_the_foreground_and_it_is_not_offered_back
     let requests = provider.requests.lock().unwrap().clone();
     let parent = request_for(&requests, &parent_prompt);
     assert!(task_arguments(&parent).contains(&"background".to_owned()));
-    let offered = task_arguments(&request_for(&requests, &child_prompt));
+    let child = request_for(&requests, &child_prompt);
+    let offered = task_arguments(&child);
     assert!(offered.contains(&"prompt".to_owned()), "{offered:?}");
     assert!(!offered.contains(&"background".to_owned()), "{offered:?}");
+    // Nor is it told when to use it; the chat's description is as it was.
+    let description = |request: &ProviderRequest| {
+        request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "task")
+            .map(|tool| tool.description.clone())
+            .unwrap_or_default()
+    };
+    assert!(description(&parent).contains("background=true"));
+    assert!(
+        !description(&child).contains("background"),
+        "{}",
+        description(&child)
+    );
 }
 
 /// Echo, with a second model to tell runs apart.

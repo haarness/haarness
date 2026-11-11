@@ -1,5 +1,6 @@
 {
   "...": "...",
+  "A subagent's own agent tasks stay in the foreground": "子代理程式啟動的代理程式任務會留在前景",
   "API error": "API 錯誤",
   "API key": "API 金鑰",
   "About": "關於",

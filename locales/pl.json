@@ -1,5 +1,6 @@
 {
   "...": "...",
+  "A subagent's own agent tasks stay in the foreground": "Zadania agenta uruchomione przez podagenta zostają na pierwszym planie",
   "API error": "Błąd API",
   "API key": "Klucz API",
   "About": "O aplikacji",

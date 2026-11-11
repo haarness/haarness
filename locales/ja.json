@@ -1,5 +1,6 @@
 {
   "...": "...",
+  "A subagent's own agent tasks stay in the foreground": "サブエージェントが始めたエージェントのタスクはフォアグラウンドのままです",
   "API error": "APIエラー",
   "API key": "APIキー",
   "About": "このアプリについて",

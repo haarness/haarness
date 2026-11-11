@@ -101,7 +101,12 @@ export function AgentTask(props: { task: Task }) {
   // so the reply carries on (servers with background-commands.v1).
   const offered = commandsOffered();
   const [moving, setMoving] = createSignal(false);
-  const movable = () => offered() && status() === "running" && !!active() && !!childId();
+  // A subagent waits for the agent tasks it starts: in its chat they stay.
+  const inSubagent = () =>
+    !!app.state.threads.find((thread) => thread.id === props.task.item.threadId)
+      ?.isSubagent;
+  const movable = () =>
+    offered() && status() === "running" && !!active() && !!childId() && !inSubagent();
   const move = async () => {
     if (!movable() || moving()) return;
     setMoving(true);

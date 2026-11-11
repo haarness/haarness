@@ -528,6 +528,43 @@ test.describe("a chat at its limit of commands in the background", () => {
   });
 });
 
+test.describe("a subagent's own agent tasks", () => {
+  test.beforeAll(async () => {
+    test.setTimeout(150000);
+    root = await realpath(await mkdtemp(join(process.env.HAARNESS_E2E_DIR ?? tmpdir(), "haarness-background-nested-")));
+    project = join(root, "project");
+    await mkdir(join(project, ".haarness"), { recursive: true });
+    // Subagents may start subagents of their own.
+    await writeFile(
+      join(project, ".haarness/config.toml"),
+      '[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="allow"\n[lsp]\nenabled=false\n' +
+        "[execution]\nsubagent_depth=2\n",
+    );
+    await launch(binary);
+  });
+  test.afterAll(async () => close(binary));
+
+  test("a subagent's chat offers no Send to background for the agent task it waits on", async () => {
+    test.setTimeout(120000);
+    const inner = { description: "Inner survey", agent: "general", prompt: bash("printf 'inner\\n'; sleep 15") };
+    await send(
+      "!tool task " +
+        JSON.stringify({ description: "Outer survey", agent: "general", prompt: "!tool task " + JSON.stringify(inner) }),
+    );
+    // The chat's own agent task can still move.
+    const outer = page.locator(".transcript .agent-task-row").filter({ hasText: "Outer survey" });
+    await expect(outer.getByRole("button", { name: /^Send to background/ })).toBeVisible({ timeout: 15000 });
+    await outer.getByRole("button", { name: /^Open agent task: Outer survey/ }).click();
+    const nested = page.locator(".transcript .agent-task-row").filter({ hasText: "Inner survey" });
+    await expect(nested.locator(".agent-task")).toHaveAttribute("data-status", "running", { timeout: 15000 });
+    await expect(nested.getByRole("button", { name: /^Stop agent task/ })).toBeVisible();
+    await expect(nested.getByRole("button", { name: /^Send to background/ })).toHaveCount(0);
+    await pictures("subagent-nested-task", nested);
+    await idle();
+    expect(errors).toEqual([]);
+  });
+});
+
 test.describe("the sidebar's ring across chats and projects", () => {
   let second = "";
   test.beforeAll(async () => {

@@ -652,6 +652,12 @@ impl App {
             (0, 0) if commands && waiting_on_command => {
                 Some(self.language.text("Nothing could move to the background"))
             }
+            // A subagent waits for what it starts: its own agent tasks
+            // never move, whatever it is doing.
+            (0, 0) if self.thread.is_subagent && self.active_turn.is_some() => Some(
+                self.language
+                    .text("A subagent's own agent tasks stay in the foreground"),
+            ),
             (0, 0) if commands => Some(self.language.text("Nothing is running in the foreground")),
             (0, 0) => Some("No matching foreground subagent is running"),
             _ => None,
