@@ -265,6 +265,54 @@ def main():
             kit=next(p for p in json.loads(run("marketplace","request",json.dumps({"action":"plugin_marketplaces"})).stdout) if p["name"]=="git-fixture")
             assert kit["type"]=="git" and kit["autoUpdate"] is True,kit
             kit_command=next(data.rglob("cache/git-fixture/kit/commands/proof.md"))
+
+            # One that follows a branch: commits on the default branch leave it
+            # alone, commits on its branch reach its plugin, and the listings
+            # show the address with the branch.
+            staged,staged_bare=root/"staged-upstream",root/"staged-upstream.git"
+            def staged_commit(text,branch):
+                (staged/"relkit/commands").mkdir(parents=True,exist_ok=True)
+                (staged/"relkit/.claude-plugin").mkdir(parents=True,exist_ok=True)
+                (staged/".claude-plugin").mkdir(exist_ok=True)
+                (staged/".claude-plugin/marketplace.json").write_text(json.dumps({"name":"staged-fixture","plugins":[{"name":"relkit","source":"./relkit"}]}))
+                (staged/"relkit/.claude-plugin/plugin.json").write_text('{"name":"relkit"}')
+                (staged/"relkit/commands/proof.md").write_text(text)
+                git("add","-A",cwd=staged);git("commit","-qm",text,cwd=staged);git("push","-q","origin",f"HEAD:{branch}",cwd=staged)
+                return subprocess.run(["git","rev-parse","HEAD"],cwd=staged,check=True,capture_output=True,text=True).stdout.strip()
+            staged.mkdir();git("init","-q","--bare",str(staged_bare),cwd=root);git("init","-q",cwd=staged);git("remote","add","origin",str(staged_bare),cwd=staged)
+            first=staged_commit("MAIN_ONE","main")
+            staged_commit("RELEASE_ONE","release")
+            address=f"file://{staged_bare}#release"
+            assert "registered" in run("plugin","marketplace","add",address).stdout
+            run("plugin","install","relkit@staged-fixture")
+            relkit_command=next(data.rglob("cache/staged-fixture/relkit/commands/proof.md"))
+            assert relkit_command.read_text()=="RELEASE_ONE"
+            assert f"staged-fixture  {address}  (updates automatically)" in run("plugin","list").stdout
+            staged_row=next(p for p in marketplace("plugin_marketplaces") if p["name"]=="staged-fixture")
+            assert staged_row["type"]=="git" and staged_row["source"]==address,staged_row
+            staged_commit("MAIN_TWO","main")  # main moves on; release stays where it was
+            assert "staged-fixture is up to date" in run("plugin","marketplace","update","staged-fixture").stdout
+            assert relkit_command.read_text()=="RELEASE_ONE"
+            release_two=staged_commit("RELEASE_TWO","release")
+            assert f"staged-fixture updated to commit {release_two[:12]}." in run("plugin","marketplace","update","staged-fixture").stdout
+            assert relkit_command.read_text()=="RELEASE_TWO"
+            # Added again at the default branch, with automatic updates off: its
+            # plugin follows at once and the setting stays off.
+            run("plugin","marketplace","auto-update","staged-fixture","--off")
+            readded=run("plugin","marketplace","add",f"file://{staged_bare}").stdout
+            assert "Updated plugins: relkit" in readded and "updates automatically" not in readded,readded
+            assert relkit_command.read_text()=="MAIN_TWO"
+            assert next(p for p in marketplace("plugin_marketplaces") if p["name"]=="staged-fixture")["autoUpdate"] is False
+            # The same address once more, as the agent adds it: nothing moved, and
+            # its answer says so in the shape an update answers with.
+            again=marketplace("add_plugin_marketplace",source=f"file://{staged_bare}")
+            assert again["name"]=="staged-fixture" and again["marketplaces"][0]["status"]=="unchanged",again
+            assert not again["marketplaces"][0]["plugins"] and not again["marketplaces"][0]["failed"],again
+            assert relkit_command.read_text()=="MAIN_TWO"
+            # A commit never moves, so it is refused as the ref to follow.
+            refused=run("plugin","marketplace","add",f"file://{staged_bare}#{first}",ok=False)
+            assert refused.returncode and "is a commit, which never moves" in refused.stderr,refused.stderr
+            print("PASS a Git plugin marketplace added at #release follows that branch only, lists its address with the ref, and brings its plugin along when added again at another ref")
             plugin_commit("GIT_PLUGIN_TWO","two")
 
             # The server's own round, a minute after it starts.

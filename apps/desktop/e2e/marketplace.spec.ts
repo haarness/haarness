@@ -231,6 +231,40 @@ test("Plugin settings list Git marketplaces with Update and an automatic update 
     await expect(row).toContainText("Updated just now · Plugins updated: kit");
     const installed = execFileSync("find", [root, "-path", "*/plugins/cache/team-tools/kit/commands/proof.md"], { encoding: "utf8" }).trim();
     expect(await readFile(installed, "utf8")).toBe("Two");
+
+    // Registered from the form at a branch, its row shows the address with
+    // the ref it follows.
+    git(upstream, "checkout", "-q", "-b", "release");
+    await writeFile(join(upstream, ".claude-plugin/marketplace.json"), JSON.stringify({ name: "team-release", plugins: [{ name: "kit", source: "./kit", description: "Fixture kit" }] }));
+    git(upstream, "commit", "-qam", "Release");
+    git(upstream, "push", "-q", "origin", "HEAD:release");
+    git(upstream, "checkout", "-q", "main");
+    await settings.getByRole("button", { name: "Register marketplace", exact: true }).click();
+    const form = page.getByRole("dialog", { name: "Register a marketplace", exact: true });
+    const kind = form.getByRole("combobox", { name: "Source", exact: true });
+    await kind.click();
+    await page.locator(`[id=${JSON.stringify(await kind.getAttribute("aria-controls"))}] [role="option"][data-value="repository"]`).click();
+    await form.getByLabel("Repository URL", { exact: true }).fill(`file://${bare}#release`);
+    await form.getByRole("button", { name: "Register", exact: true }).click();
+    await expect(form).toHaveCount(0);
+    const release = list.locator('[data-setting="marketplace:team-release"]');
+    const address = release.locator(".marketplace-source");
+    await expect(address).toHaveAttribute("title", `file://${bare}#release`);
+    // The long address gives way; the branch it follows stays in view, right
+    // after the ellipsis.
+    const ref = address.locator(".path-text-tail");
+    await expect(ref).toHaveText("#release");
+    await expect(address.locator(".path-text-head")).toHaveText(/^file:\/\/\/.+…$/);
+    const [head, end] = [await address.locator(".path-text-head").boundingBox(), await ref.boundingBox()];
+    expect(Math.abs(head!.x + head!.width - end!.x)).toBeLessThan(1);
+    const switchBox = await release.locator(".quiet-switch").boundingBox();
+    expect(end!.x + end!.width).toBeLessThan(switchBox!.x);
+    // Without a ref, an address still gives way at its end.
+    await expect(row.locator(".marketplace-source .path-text-tail")).toHaveText("");
+    await expect(row.locator(".marketplace-source .path-text-head")).toHaveText(/^file:\/\/\/.+…$/);
+    await expect(release.getByRole("switch", { name: "Update team-release automatically", exact: true })).toBeChecked();
+    await release.getByRole("button", { name: "Update", exact: true }).click();
+    await expect(release).toContainText("Up to date");
     await expect(settings.getByRole("alert")).toHaveCount(0);
     for (const scheme of ["light", "dark"] as const) {
       await app.evaluate(({ nativeTheme }, value) => { nativeTheme.themeSource = value; }, scheme);

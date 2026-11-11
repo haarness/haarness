@@ -1912,12 +1912,6 @@ button.settings-link:hover:not(:disabled) {
   padding-bottom: var(--s3);
   border-bottom: 1px solid var(--hairline);
 }
-/* A Git address gives way at its end rather than pushing the controls out. */
-.setting-row .path-text.marketplace-source {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .plugin-marketplaces .quiet-switch {
   white-space: nowrap;
 }

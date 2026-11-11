@@ -1915,12 +1915,18 @@ interface PluginMarketplace {
   /** A Git clone Haarness fetches, or a folder it reads as it is. Servers
    * before this field list neither, and get no controls. */
   type?: "git" | "folder";
+  /** A Git one's address ends in `#<ref>` when it follows that branch or tag. */
   source?: string | null;
   autoUpdate?: boolean;
   updatedAt?: string | null;
   /** Installed plugins of it whose automatic update waits, and why. */
   held?: { plugin: string; reason: string }[];
   error?: string;
+}
+/** The `#<ref>` a Git marketplace's address ends in when it follows that branch or tag, else "". */
+function followedRef(source: string) {
+  const at = source.indexOf("#");
+  return at < 0 ? "" : source.slice(at);
 }
 /** What fetching one marketplace again did. */
 interface MarketplaceRefresh {
@@ -2094,9 +2100,12 @@ function Plugins() {
                         when={marketplace.type === "git"}
                         fallback={<PathText path={marketplace.source ?? marketplace.path} />}
                       >
-                        <span class="path-text marketplace-source" title={marketplace.source ?? ""} dir="ltr">
-                          {marketplace.source}
-                        </span>
+                        {/* It gives way at its end, but for the branch or tag it follows. */}
+                        <PathText
+                          path={marketplace.source ?? ""}
+                          end={followedRef(marketplace.source ?? "")}
+                          class="marketplace-source"
+                        />
                       </Show>
                       <Show when={failure()}>
                         <p role="alert">{outcomes()[marketplace.name]?.text}</p>

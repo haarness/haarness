@@ -211,16 +211,44 @@ impl ManagementService {
             .await??;
             return Ok(json!({
                 "name": input["name"],
-                "source": haarness_core::redact::url(&source.source),
+                "source": source.shown(),
                 "autoUpdate": source.auto_update,
                 "commit": source.commit,
                 "updatedAt": source.updated_at,
             }));
         }
+        // Registered again in place of its clone, a marketplace says what its
+        // installed plugins did, as an update does (`marketplaces`).
+        if action == "add_plugin_marketplace" {
+            let data = self.paths.data.clone();
+            let source = required_string(input, "source")?.to_owned();
+            let service = plugins::PluginService::new(
+                self.paths.data.clone(),
+                self.paths.config_dir().into(),
+                self.workspace.clone(),
+                self.trust_project,
+            );
+            let (added, listed) = tokio::task::spawn_blocking(move || -> Result<_> {
+                let added = plugins::marketplace_add(&data, &source)?;
+                Ok((added, haarness_server::PluginRegistry::list(&service)?))
+            })
+            .await??;
+            self.capabilities_changed("plugin", "marketplace");
+            let mut answer = json!({
+                "action": "marketplace",
+                "plugin": input["source"],
+                "name": added.name,
+                "plugins": listed,
+                "restartRequired": false,
+            });
+            if let Some(refresh) = added.refresh {
+                answer["marketplaces"] = json!([refresh]);
+            }
+            return Ok(answer);
+        }
         // Claude Code plugin marketplaces use the same plugin service as
         // `/plugin` in the TUI and Desktop's Plugins page.
         let plugin = match action {
-            "add_plugin_marketplace" => Some(("marketplace", required_string(input, "source")?)),
             "install" | "update" | "enable" | "disable" | "remove" => input
                 .get("plugin")
                 .and_then(Value::as_str)

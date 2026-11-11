@@ -2943,6 +2943,19 @@ impl App {
                         )
                     {
                         self.notice = "Use /plugin, /plugin search <text>, /plugin install <name@marketplace|local-path>, /plugin update|enable|disable|remove <name>, /plugin marketplace add <path-or-url>, or /plugin marketplace update [name]".into();
+                    } else if action == "marketplace" {
+                        // Added by the server, which says what a clone it
+                        // took the place of did to the installed plugins.
+                        let result = client
+                            .manage(
+                                "marketplace",
+                                &serde_json::json!({
+                                    "action": "add_plugin_marketplace",
+                                    "source": target,
+                                }),
+                            )
+                            .await?;
+                        self.notice = marketplace_added_notice(&result);
                     } else {
                         client
                             .plugin_action(haarness_protocol::PluginActionRequest {
@@ -2951,13 +2964,16 @@ impl App {
                             })
                             .await?;
                         self.notice = match action {
-                            "install" => "Plugin installed · reload queued until active work is idle",
+                            "install" => {
+                                "Plugin installed · reload queued until active work is idle"
+                            }
                             "enable" => "Plugin enabled · reload queued until active work is idle",
-                            "disable" => "Plugin disabled · reload queued until active work is idle",
+                            "disable" => {
+                                "Plugin disabled · reload queued until active work is idle"
+                            }
                             "remove" | "uninstall" => {
                                 "Plugin removed · reload queued until active work is idle"
                             }
-                            "marketplace" => "Marketplace added · install its plugins with /plugin install <name>@<marketplace>",
                             _ => "Plugin updated · reload queued until active work is idle",
                         }
                         .into();
@@ -5268,6 +5284,19 @@ pub(crate) fn marketplace_refresh_notice(result: &serde_json::Value) -> String {
         parts.push("reload queued until active work is idle".into());
     }
     parts.join(" · ")
+}
+
+/// `/plugin marketplace add`'s answer: when the marketplace took the place
+/// of a clone of the same name, what that did, as an update says it; else
+/// how to install from it.
+pub(crate) fn marketplace_added_notice(result: &serde_json::Value) -> String {
+    if result["marketplaces"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty())
+    {
+        return marketplace_refresh_notice(result);
+    }
+    "Marketplace added · install its plugins with /plugin install <name>@<marketplace>".into()
 }
 
 /// `/usage`'s cost: unpriced turns make a total a subtotal, and none priced

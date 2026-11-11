@@ -120,19 +120,27 @@ the runtime with the next idle configuration reload.
 
 **Git plugin marketplaces.** `marketplaces.json` stays a plain `name → path` map, which older
 versions read. Beside it, `<data>/plugins/marketplace-sources.json` records where each Git clone came
-from: `name → {source, autoUpdate, commit, updatedAt}`. Registering a Git marketplace writes its entry
-with `autoUpdate: true` (and says how to turn that off); a folder gets none, because it is read as it
-is. `haarness plugin marketplace update [name]` (the `update_plugin_marketplace` request, or plugin
-action `marketplace_update`) asks the repository for its default branch's commit with `git ls-remote`
-and does nothing more when the clone and the record already hold it. Otherwise it clones into a
-staging folder beside the old clone, refuses the result if the marketplace now gives itself another
-name, swaps the folders (the old one comes back if the swap fails, and one left aside by a swap that
-stopped halfway is put back next time) and then updates each installed plugin of that marketplace
-whose files would change. A plugin the marketplace no longer lists stays installed as it is and is
-reported. A marketplace registered before sources were recorded has no entry and is not refreshed in
-the background; updating it by hand works when its clone has an `origin`, and records an entry with
-`autoUpdate: false`. `haarness plugin marketplace auto-update <name> [--off]` (the
-`plugin_marketplace_auto_update` request with `name` and `enabled`, or plugin action
+from: `name → {source, autoUpdate, commit, updatedAt}`. When the address named a branch or tag,
+`source` ends in that `#<ref>` (`https://github.com/team/plugins.git#release`). The ref lives inside
+`source` on purpose: a Haarness from before refs reads an address it cannot fetch, so it reports a
+failed update instead of moving the marketplace to the default branch, and the ref stays when it
+rewrites the file. Registering a Git marketplace writes its entry with `autoUpdate: true` (and says
+how to turn that off); a folder gets none, because it is read as it is. Registering one again under the
+same name, at another ref or none, keeps the `autoUpdate` it had and swaps in the new clone as an update
+does; when the new clone holds another commit it then updates its installed plugins the same way, and
+on the same commit it leaves them alone, as an update that finds nothing new does.
+`haarness plugin marketplace update [name]` (the `update_plugin_marketplace` request, or plugin
+action `marketplace_update`) asks the repository with `git ls-remote` for the commit of the ref it
+follows (the default branch when there is none) and does nothing more when the clone and the record
+already hold it; a ref the repository no longer has fails the update and keeps the clone. Otherwise
+it clones that ref into a staging folder beside the old clone, refuses the result if the marketplace
+now gives itself another name, swaps the folders (the old one comes back if the swap fails, and one
+left aside by a swap that stopped halfway is put back next time) and then updates each installed
+plugin of that marketplace whose files would change. A plugin the marketplace no longer lists stays
+installed as it is and is reported. A marketplace registered before sources were recorded has no entry
+and is not refreshed in the background; updating it by hand works when its clone has an `origin`, and
+records an entry with `autoUpdate: false`. `haarness plugin marketplace auto-update <name> [--off]`
+(the `plugin_marketplace_auto_update` request with `name` and `enabled`, or plugin action
 `marketplace_auto_update` with `name`, `name:on` or `name:off`) changes that setting.
 
 These automatic plugin updates are careful about what they replace. `installed.json` keeps a digest of

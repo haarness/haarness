@@ -1171,12 +1171,14 @@ enum WorkspaceCommand {
 #[derive(Subcommand)]
 enum PluginCommand {
     /// Register a marketplace: a git URL, owner/repo, or local directory
-    /// holding .claude-plugin/marketplace.json. `marketplace update [name]`
-    /// fetches registered Git marketplaces again and updates their installed
-    /// plugins; `marketplace auto-update <name> [--off]` says whether one is
-    /// fetched again in the background.
+    /// holding .claude-plugin/marketplace.json. A Git address may end in
+    /// #<branch or tag> to follow that ref instead of the default branch.
+    /// `marketplace update [name]` fetches registered Git marketplaces again
+    /// and updates their installed plugins; `marketplace auto-update <name>
+    /// [--off]` says whether one is fetched again in the background.
     Marketplace {
-        /// Git URL, owner/repo, or local folder; or `add`, `update` or `auto-update`.
+        /// Git URL or owner/repo, either with an optional #<branch or tag>, or
+        /// a local folder; or `add`, `update` or `auto-update`.
         source: String,
         /// The source after `add`, or the marketplace after `update` or `auto-update`.
         compatibility_source: Option<String>,
@@ -13166,17 +13168,32 @@ fn plugin_command(
                     "use 'plugin marketplace <source>' or 'plugin marketplace add <source>'"
                 ),
             };
-            let name = plugins::marketplace_add(&paths.data, source)?;
+            let added = plugins::marketplace_add(&paths.data, source)?;
+            let name = &added.name;
             println!(
                 "Marketplace '{name}' registered. Install with: haarness plugin install <plugin>@{name}"
             );
+            // It took the place of a clone of the same name: what its
+            // installed plugins did, under the line above.
+            if let Some(refresh) = &added.refresh {
+                for line in marketplace_refresh_lines(refresh).into_iter().skip(1) {
+                    println!("{line}");
+                }
+            }
             if plugins::marketplace_sources(&paths.data)
-                .get(&name)
+                .get(name)
                 .is_some_and(|source| source.auto_update)
             {
                 println!(
                     "It updates automatically; `haarness plugin marketplace auto-update {name} --off` stops that."
                 );
+            }
+            if added
+                .refresh
+                .as_ref()
+                .is_some_and(|refresh| !refresh.failed.is_empty())
+            {
+                anyhow::bail!("Some plugins were not updated");
             }
         }
         PluginCommand::Install { spec } => {

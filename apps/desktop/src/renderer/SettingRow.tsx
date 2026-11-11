@@ -42,11 +42,16 @@ let measure: CanvasRenderingContext2D | null | undefined;
  * a path of the server Desktop runs on), and a long path giving way in the
  * middle so its last folder stays in sight. The cut is measured, so the
  * ellipsis meets the last folder without a gap. The whole path is the
- * tooltip and what assistive technology reads.
+ * tooltip and what assistive technology reads. With `end`, the part of
+ * `path` that stays in sight is that instead (a Git address's `#release`,
+ * or nothing, so the address gives way at its end).
  */
-export function PathText(props: { path: string; local?: boolean; class?: string }) {
+export function PathText(props: { path: string; local?: boolean; class?: string; end?: string }) {
   let element!: HTMLSpanElement;
-  const parts = () => splitPath(props.path, props.local ? localHome() : undefined);
+  const parts = () =>
+    props.end !== undefined && props.path.endsWith(props.end)
+      ? { head: props.path.slice(0, props.path.length - props.end.length), tail: props.end }
+      : splitPath(props.path, props.local ? localHome() : undefined);
   const [head, setHead] = createSignal<string>();
   function fit() {
     const box = element?.parentElement;
