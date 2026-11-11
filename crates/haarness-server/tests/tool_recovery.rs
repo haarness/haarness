@@ -496,7 +496,7 @@ async fn unknown_disabled_and_deferred_errors_have_distinct_recovery_instruction
                 json!({"path":"bad.txt","content":"blocked"}),
             ),
             call("denied", "Bash", json!({"command":"touch forbidden"})),
-            call("deferred", "Image_Generate", json!({"prompt":"a tree"})),
+            call("deferred", "Skill", json!({"name":"no-such-skill"})),
             call(
                 "bad-loader",
                 "FUNCTIONS.Load_Tool",
@@ -523,11 +523,26 @@ async fn unknown_disabled_and_deferred_errors_have_distinct_recovery_instruction
         );
         assert!(!failure.contains("Call load_tool"));
     }
+    // A tool left out only to keep requests small, called by its name, is
+    // loaded and runs: the error is the skill tool's own, and the next
+    // request carries its schema.
     let deferred = error(&items, "deferred");
     assert!(
-        deferred.contains("is deferred") && deferred.contains("\"queries\":[\"image_generate\"]"),
+        !deferred.contains("is deferred")
+            && !deferred.contains("load_tool")
+            && deferred.contains("skill"),
         "{deferred}"
     );
+    {
+        let requests = fixture.provider.requests.lock().unwrap();
+        let offered = |index: usize| {
+            requests[index]
+                .tools
+                .iter()
+                .any(|tool| tool.name == "skill")
+        };
+        assert!(!offered(0) && offered(1));
+    }
     assert!(error(&items, "bad-loader").contains("queries[0]: expected string"));
     let thread = fixture.thread().await;
     let unknown = fixture
@@ -1562,4 +1577,141 @@ async fn a_pre_tool_use_block_or_deny_stops_a_question() {
         );
         assert!(fixture.runtime.pending_questions().is_empty());
     }
+}
+
+#[tokio::test]
+async fn a_call_that_failed_the_same_way_twice_is_not_run_again_in_the_turn() {
+    let fixture = Fixture::new(RuntimeConfig::default());
+    let bad = || json!({"command": "touch made.txt", "bogus": 1});
+    let items = fixture
+        .run(vec![
+            vec![call("r1", "bash", bad())],
+            vec![call("r2", "bash", bad())],
+            vec![call("r3", "bash", bad())],
+            vec![call("r4", "bash", bad())],
+            vec![call("ok", "bash", json!({"command": "echo fixed"}))],
+        ])
+        .await;
+    for id in ["r1", "r2"] {
+        let refused = error(&items, id);
+        assert!(refused.contains("unexpected fields: bogus"), "{refused}");
+        assert!(
+            refused.contains("bash takes command (string, required), timeout (integer), workdir (string) and run_in_background (boolean)."),
+            "{refused}"
+        );
+    }
+    for id in ["r3", "r4"] {
+        let refused = error(&items, id);
+        assert!(
+            refused.contains(
+                "Not run: this exact call already failed 2 times in this turn with the same error"
+            ) && refused.contains("unexpected fields: bogus")
+                && refused.contains("Change the call as that error says"),
+            "{refused}"
+        );
+    }
+    assert!(tool_results(&items).contains(&("exit: 0\nfixed\n".to_owned(), false)));
+    assert!(!fixture.root.join("made.txt").exists());
+}
+
+#[tokio::test]
+async fn calls_written_the_way_other_agents_write_them_run_as_this_ones() {
+    let fixture = Fixture::new(RuntimeConfig::default());
+    let items = fixture
+        .run(vec![
+            vec![call(
+                "named",
+                "run_command",
+                json!({"command": "echo by name"}),
+            )],
+            vec![call(
+                "read",
+                "read_file",
+                json!({"file_path": "sample.txt"}),
+            )],
+            vec![call(
+                "words",
+                "bash",
+                json!({"command": ["echo", "two words"], "description": "Say it"}),
+            )],
+            vec![call(
+                "cmd",
+                "bash",
+                json!({"cmd": "echo cmd", "is_background": false}),
+            )],
+            vec![call(
+                "nulls",
+                "bash",
+                json!({"command": "echo nulls", "timeout": null, "workdir": null}),
+            )],
+            vec![call(
+                "unknown",
+                "str_replace_editor",
+                json!({"command": "view", "path": "sample.txt"}),
+            )],
+        ])
+        .await;
+    let results = tool_results(&items);
+    for expected in [
+        "exit: 0\nby name\n",
+        "exit: 0\ntwo words\n",
+        "exit: 0\ncmd\n",
+        "exit: 0\nnulls\n",
+    ] {
+        assert!(
+            results.contains(&(expected.to_owned(), false)),
+            "{expected:?} in {results:?}"
+        );
+    }
+    assert!(
+        results
+            .iter()
+            .any(|(output, error)| !error && output.contains("real file contents")),
+        "{results:?}"
+    );
+    let unknown = error(&items, "unknown");
+    assert!(
+        unknown.contains("read views a file, write creates one"),
+        "{unknown}"
+    );
+}
+
+#[tokio::test]
+async fn a_command_out_of_time_is_told_the_unit_and_the_timeout_to_send() {
+    let fixture = Fixture::new(RuntimeConfig::default());
+    let items = fixture
+        .run(vec![vec![call(
+            "slow",
+            "bash",
+            json!({"command": "sleep 5", "timeout": 1200}),
+        )]])
+        .await;
+    let refused = error(&items, "slow");
+    assert!(
+        refused.contains("command timed out after 1200 ms"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("The timeout is in milliseconds: 1200 is 1.2 seconds. To give the command 1200 seconds, send timeout 1200000."),
+        "{refused}"
+    );
+    assert!(refused.contains("run_in_background"), "{refused}");
+}
+
+#[tokio::test]
+async fn a_failed_call_names_the_fields_it_was_run_without() {
+    let fixture = Fixture::new(RuntimeConfig::default());
+    let items = fixture
+        .run(vec![vec![call(
+            "missing",
+            "read",
+            json!({"path": "missing.txt", "line_start": 1}),
+        )]])
+        .await;
+    let refused = error(&items, "missing");
+    assert!(refused.contains("does not exist"), "{refused}");
+    assert!(
+        refused.contains("(Not used: line_start. read takes path, offset and limit.)"),
+        "{refused}"
+    );
 }

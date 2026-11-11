@@ -2109,6 +2109,13 @@ impl Tool for ScheduleTool {
         // Scheduler registration is external state, not a workspace mutation.
         false
     }
+    /// A field the schedule tool does not take is refused, never left out:
+    /// it changes no file, but a schedule made without a field the model
+    /// meant (a time given as `cron`, a timezone as `tz`) runs at another
+    /// time than asked.
+    fn without_unknown_fields(&self, _arguments: &Value) -> Option<(Value, Vec<String>)> {
+        None
+    }
 
     async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput> {
         if context.cancel.is_cancelled() {
@@ -2204,7 +2211,7 @@ impl Tool for ScheduleTool {
                 let schedule = self
                     .scheduler
                     .update(&reference()?, schedule_update(input)?)
-                    .map_err(schedule_error)?;
+                    .map_err(schedule_change_error)?;
                 schedule_output(&format!("Updated schedule {}", schedule.name), &schedule)
             }
             "create" => {
@@ -2235,11 +2242,11 @@ impl Tool for ScheduleTool {
                         trigger: trigger(input)?,
                         timezone: schedule_string(input, "timezone"),
                     })
-                    .map_err(schedule_error)?;
+                    .map_err(schedule_change_error)?;
                 schedule_output(&format!("Created schedule {}", schedule.name), &schedule)
             }
             _ => Err(CoreError::Invalid(format!(
-                "unknown schedule action: {action}"
+                "unknown schedule action: {action}. The actions are create, list, update, delete, enable, disable, run and history."
             ))),
         }
     }
@@ -2323,7 +2330,11 @@ fn trigger(input: &serde_json::Map<String, Value>) -> CoreResult<Option<Trigger>
         .cloned()
         .map(serde_json::from_value)
         .transpose()
-        .map_err(|error| CoreError::Invalid(format!("invalid schedule trigger: {error}")))
+        .map_err(|error| {
+            CoreError::Invalid(format!(
+                "invalid schedule trigger: {error}. A trigger is {{\"type\":\"interval\",\"seconds\":3600}} (60 or more), {{\"type\":\"cron\",\"expression\":\"0 9 * * 1-5\"}} or {{\"type\":\"once\",\"at\":\"2030-01-31T09:00:00+00:00\"}} (an RFC3339 time with its offset)."
+            ))
+        })
 }
 
 fn schedule_update(input: &serde_json::Map<String, Value>) -> CoreResult<UpdateSchedule> {
@@ -2344,6 +2355,55 @@ fn schedule_update(input: &serde_json::Map<String, Value>) -> CoreResult<UpdateS
 
 fn schedule_error(error: anyhow::Error) -> CoreError {
     CoreError::Tool(error.to_string())
+}
+
+/// A schedule the scheduler would not make or change, in its words, and
+/// what the model sends instead: the forms a request is read in, a
+/// structured trigger, the model's provider/model form, a cron the
+/// computer's scheduler takes.
+fn schedule_change_error(error: anyhow::Error) -> CoreError {
+    let message = error.to_string();
+    let advice = if message.contains("schedule request")
+        || message.contains("schedule interval")
+        || message.contains("invalid schedule time")
+        || message.contains("invalid schedule date")
+        || message.contains("needs a prompt")
+        || message.contains("needs a time to run")
+        || message.contains("prompt must follow")
+    {
+        Some(
+            "Send request in one of these forms: 'in 10 minutes to <prompt>', 'every 2 hours to <prompt>', \
+             'every day at 8am to <prompt>', 'every Monday at 8am to <prompt>', 'on 2030-01-31T09:00:00+00:00 to <prompt>'. \
+             Or leave request out and send prompt with trigger: {\"type\":\"cron\",\"expression\":\"0 9 * * 1-5\"} \
+             (9:00 on weekdays), {\"type\":\"interval\",\"seconds\":3600} or {\"type\":\"once\",\"at\":\"<RFC3339 time with offset>\"}.",
+        )
+    } else if message.contains("provider/model form") {
+        Some(
+            "Write model as provider/model (the provider's id, a slash, then the model's id), or leave model out to use the default model.",
+        )
+    } else if message.contains("cron") && message.contains("Windows Task Scheduler") {
+        Some(
+            "On Windows a cron schedule runs daily or weekly: keep its day-of-month and month fields *, or send an interval trigger instead.",
+        )
+    } else if message.contains("cron") {
+        Some(
+            "A cron expression has 5 fields: minute, hour, day of month, month and day of week, such as 0 9 * * 1-5 for 9:00 on weekdays.",
+        )
+    } else if message.contains("at most once a minute") {
+        Some("Send an interval of 60 seconds or more.")
+    } else {
+        None
+    };
+    // The scheduler's own list of forms is said once, with the rest.
+    let message = if message.starts_with("could not parse schedule request") {
+        "The schedule request could not be read".to_owned()
+    } else {
+        message
+    };
+    CoreError::Tool(match advice {
+        Some(advice) => format!("{message}. {advice}"),
+        None => message,
+    })
 }
 
 fn schedule_output<T: serde::Serialize>(title: &str, value: &T) -> CoreResult<ToolOutput> {
@@ -3304,6 +3364,22 @@ impl Tool for BuiltinTool {
         schema
     }
 
+    /// A shell call whose command is a list of words (other agents' shells
+    /// take it so) runs those words as one line of POSIX shell, where the
+    /// shell reads POSIX quoting; cmd.exe does not, and there the call is
+    /// refused with the field's type.
+    fn aliased_arguments(&self, arguments: &Value) -> Option<Value> {
+        let mut definition = self.definition();
+        definition.input_schema = self.validation_schema();
+        if matches!(self.kind, Kind::Bash)
+            && arguments.get("command").is_some_and(Value::is_array)
+            && haarness_core::agent_shell::current().posix()
+        {
+            return haarness_core::shell_call_from_words(&definition, arguments);
+        }
+        haarness_core::with_field_aliases(&definition, arguments)
+    }
+
     fn definition(&self) -> ToolDefinition {
         if matches!(self.kind, Kind::Skill) {
             return ToolDefinition {
@@ -4156,6 +4232,18 @@ impl Tool for BuiltinTool {
                             "\n\n(timeout {seconds} was read as {seconds} seconds: it is in milliseconds.)"
                         );
                         Ok(output)
+                    }
+                    (Err(CoreError::Tool(message)), in_seconds)
+                        if message.starts_with("command timed out after") =>
+                    {
+                        Err(CoreError::Tool(format!(
+                            "{message}\n{}",
+                            timeout_advice(
+                                written,
+                                in_seconds,
+                                context.execution.shell_call.is_some()
+                            )
+                        )))
                     }
                     (ran, _) => ran,
                 }
@@ -5346,6 +5434,31 @@ fn shell_timeout(written: Option<u64>) -> (Option<u64>, Option<u64>) {
         Some(seconds @ 1..1_000) => (Some(seconds * 1_000), Some(seconds)),
         written => (written, None),
     }
+}
+
+/// What a command that ran out of time is told to send instead: the unit
+/// its timeout was read in, the timeout that gives the time it most likely
+/// meant (a model that writes 1200 or 3600 meaning seconds gets 1.2 or 3.6
+/// seconds), and how a longer command runs.
+fn timeout_advice(written: Option<u64>, in_seconds: Option<u64>, agent: bool) -> String {
+    let mut advice = match (written, in_seconds) {
+        (_, Some(seconds)) => format!("Its timeout {seconds} was read as {seconds} seconds. "),
+        (Some(given @ 1_000..60_000), None) => {
+            let seconds = given / 1_000;
+            let tenths = given % 1_000 / 100;
+            format!(
+                "The timeout is in milliseconds: {given} is {seconds}.{tenths} seconds. To give the command {given} seconds, send timeout {}. ",
+                given.saturating_mul(1_000)
+            )
+        }
+        _ => String::new(),
+    };
+    advice.push_str(if agent {
+        "For a command that runs longer, send a larger timeout in milliseconds, or run_in_background true and follow it with bash_output."
+    } else {
+        "For a command that runs longer, send a larger timeout in milliseconds."
+    });
+    advice
 }
 
 /// A search that found nothing says so: an empty result reads to a small
@@ -7189,9 +7302,56 @@ mod tests {
             "{}",
             updated.text
         );
-        tool.execute(json!({"action":"delete","name":"daily"}), context)
+        tool.execute(json!({"action":"delete","name":"daily"}), context.clone())
             .await
             .unwrap();
+        assert!(tool.scheduler.list().unwrap().is_empty());
+        // What the scheduler refuses says what to send instead.
+        let refused = |arguments: Value| {
+            let tool = &tool;
+            let context = context.clone();
+            async move {
+                tool.execute(arguments, context)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+            }
+        };
+        let words =
+            refused(json!({"action":"create","request":"every weekday at 9am to run the tests"}))
+                .await;
+        assert!(
+            words.contains("'every day at 8am to <prompt>'")
+                && words.contains("{\"type\":\"cron\",\"expression\":\"0 9 * * 1-5\"}"),
+            "{words}"
+        );
+        let words = refused(json!({"action":"create","request":"daily at 9am run tests"})).await;
+        assert!(
+            words.starts_with("tool error: The schedule request could not be read. Send request in one of these forms"),
+            "{words}"
+        );
+        let words = refused(
+            json!({"action":"create","request":"every day at 8am to x","model":"qwen3-coder"}),
+        )
+        .await;
+        assert!(
+            words.contains("or leave model out to use the default model"),
+            "{words}"
+        );
+        let words = refused(json!({"action":"create","prompt":"x","trigger":{"type":"cron","expression":"0 0 9 * * *"}})).await;
+        assert!(
+            words.contains("minute, hour, day of month, month and day of week"),
+            "{words}"
+        );
+        let words = refused(json!({"action":"create","prompt":"x","trigger":{"type":"once","at":"2030-01-01T09:00:00"}})).await;
+        assert!(words.contains("an RFC3339 time with its offset"), "{words}");
+        // A field the tool does not take is refused, not left out.
+        assert_eq!(
+            tool.without_unknown_fields(
+                &json!({"action":"create","prompt":"x","cron":"0 9 * * *"})
+            ),
+            None
+        );
         assert!(tool.scheduler.list().unwrap().is_empty());
         tokio::fs::remove_dir_all(root).await.unwrap();
     }

@@ -2194,6 +2194,88 @@ fn join_adjacent_user_messages(messages: &mut Vec<Value>) {
     *messages = joined;
 }
 
+/// Endpoints and models (`endpoint\0model`) whose chat template takes one
+/// tool call per assistant message, learned from its refusal (see
+/// [`refuses_parallel_calls`]) for as long as this process runs.
+fn one_call_a_message() -> &'static std::sync::Mutex<HashSet<String>> {
+    static LEARNED: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
+        std::sync::OnceLock::new();
+    LEARNED.get_or_init(Default::default)
+}
+
+/// Whether a server's refusal is a chat template's that takes only one tool
+/// call per assistant message: Llama 3.1's, 3.2's and 3.3's raise "This
+/// model only supports single tool-calls at once!".
+fn refuses_parallel_calls(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("only supports single tool-call")
+        || lower.contains("only supports single tool call")
+}
+
+/// `body`'s messages with each assistant message that holds several tool
+/// calls split into one per call, each followed by its result, the way a
+/// model that calls one tool at a time would have written them, and the
+/// server asked for one call at a time (`parallel_tool_calls`). The words
+/// and reasoning that came with the calls stay with the first. Whether any
+/// message held several.
+fn one_call_per_message(body: &mut Value) -> bool {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let several = |message: &Value| {
+        message["role"] == "assistant"
+            && message["tool_calls"]
+                .as_array()
+                .is_some_and(|calls| calls.len() > 1)
+    };
+    if !messages.iter().any(several) {
+        body["parallel_tool_calls"] = json!(false);
+        return false;
+    }
+    let mut split: Vec<Value> = Vec::with_capacity(messages.len() + 4);
+    let mut rest = std::mem::take(messages).into_iter().peekable();
+    while let Some(message) = rest.next() {
+        if !several(&message) {
+            split.push(message);
+            continue;
+        }
+        let mut results = Vec::new();
+        while let Some(result) = rest.next_if(|next| next["role"] == "tool") {
+            results.push(result);
+        }
+        let calls = message["tool_calls"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for (index, call) in calls.into_iter().enumerate() {
+            let mut single = message.clone();
+            single["tool_calls"] = json!([call.clone()]);
+            if index > 0 {
+                if let Some(object) = single.as_object_mut() {
+                    object.insert("content".into(), Value::Null);
+                    object.remove("reasoning_details");
+                    if object.contains_key("reasoning_content") {
+                        object.insert("reasoning_content".into(), json!(""));
+                    }
+                }
+            }
+            split.push(single);
+            if let Some(at) = results
+                .iter()
+                .position(|result| result["tool_call_id"] == call["id"])
+            {
+                split.push(results.remove(at));
+            }
+        }
+        // A result whose call is not there (never in a request Haarness
+        // writes) still goes, after the others.
+        split.extend(results);
+    }
+    *messages = split;
+    body["parallel_tool_calls"] = json!(false);
+    true
+}
+
 fn push_tool_call_message(messages: &mut Vec<Value>, message: Value) {
     if let Some(previous) = messages.last_mut()
         && previous["role"] == "assistant"
@@ -2600,6 +2682,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
         for (key, value) in &parameters.options {
             body[key.as_str()] = value.clone();
         }
+        let single_calls_key = format!("{}\u{0}{model}", self.endpoint);
+        if one_call_a_message()
+            .lock()
+            .is_ok_and(|learned| learned.contains(&single_calls_key))
+        {
+            one_call_per_message(&mut body);
+        }
         let mut headers = self.headers.map();
         crate::apply_request_headers(&mut headers, &parameters.headers);
         if let Some(key) = self.bearer_token().await? {
@@ -2714,9 +2803,39 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let text = crate::sse::within(idle, response.text())
                 .await?
                 .unwrap_or_default();
+            // A chat template that takes one tool call per assistant
+            // message (Llama 3's, on a server the person runs or behind a
+            // gateway) refuses every request once the model made two calls
+            // at once: ask again with each call in a message of its own, as
+            // every later request to that model will be.
+            if matches!(status.as_u16(), 400 | 422 | 500)
+                && refuses_parallel_calls(&text)
+                && one_call_per_message(&mut body)
+            {
+                tracing::info!(provider = %self.id, model = %body["model"], "asking again with one tool call a message");
+                if let Ok(mut learned) = one_call_a_message().lock() {
+                    learned.insert(single_calls_key);
+                }
+                let builder = self
+                    .client
+                    .post(&self.endpoint)
+                    .headers(headers)
+                    .json(&body);
+                let response = crate::sse::send(builder, limits).await?;
+                request_id = crate::request_id(response.headers());
+                if response.status().is_success() {
+                    Ok(response)
+                } else {
+                    let status = response.status();
+                    let headers_seen = response.headers().clone();
+                    let text = crate::sse::within(idle, response.text())
+                        .await?
+                        .unwrap_or_default();
+                    Err(crate::sse::status_error(status, &headers_seen, &text))
+                }
             // Some servers (older gateways and local runtimes) refuse the
             // usage option instead of ignoring it: ask once more without it.
-            if matches!(status.as_u16(), 400 | 422)
+            } else if matches!(status.as_u16(), 400 | 422)
                 && body.get("stream_options").is_some()
                 && text.contains("stream_options")
             {
@@ -7515,6 +7634,98 @@ mod tests {
                 .contains("The model `gone` does not exist"),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_template_that_takes_one_call_a_message_gets_the_calls_one_by_one() {
+        let state = FixtureState::default();
+        let root = serve(
+            Router::new()
+                .route(
+                    "/v1/chat/completions",
+                    post(
+                        |State(state): State<FixtureState>, Json(request): Json<Value>| async move {
+                            // Llama 3.1's chat template on vLLM.
+                            let several = request["messages"].as_array().unwrap().iter().any(|message| {
+                                message["tool_calls"].as_array().is_some_and(|calls| calls.len() > 1)
+                            });
+                            state.0.lock().push(request);
+                            if several {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    [(CONTENT_TYPE, "application/json")],
+                                    r#"{"object":"error","message":"This model only supports single tool-calls at once!","type":"BadRequestError","code":400}"#,
+                                );
+                            }
+                            (
+                                axum::http::StatusCode::OK,
+                                [(CONTENT_TYPE, "text/event-stream")],
+                                "data: {\"choices\":[{\"delta\":{\"content\":\"ready\"},\"finish_reason\":\"stop\"}]}\n\n",
+                            )
+                        },
+                    ),
+                )
+                .with_state(state.clone()),
+        )
+        .await;
+        let mut request = hello("llama-3.1-8b");
+        let call = |id: &str, path: &str| ProviderMessage::ToolCall {
+            call_id: id.into(),
+            name: "read".into(),
+            arguments: json!({"path": path}),
+            provider_metadata: Value::Null,
+        };
+        let result = |id: &str| ProviderMessage::ToolResult {
+            call_id: id.into(),
+            name: "read".into(),
+            output: format!("contents of {id}"),
+            is_error: false,
+            attachments: vec![],
+        };
+        request.messages.extend([
+            call("a", "a.txt"),
+            call("b", "b.txt"),
+            ProviderMessage::Text {
+                role: "assistant".into(),
+                content: "Reading both.".into(),
+            },
+            result("a"),
+            result("b"),
+        ]);
+        let provider = custom_at(format!("{root}/v1"));
+        let events = outcome(&provider, request.clone()).await.unwrap();
+        assert_eq!(text_of(&events), "ready");
+        {
+            let requests = state.0.lock();
+            assert_eq!(requests.len(), 2);
+            let sent = requests[1]["messages"].as_array().unwrap();
+            let shape: Vec<String> = sent
+                .iter()
+                .map(|message| match message["role"].as_str().unwrap() {
+                    "assistant" => {
+                        format!("call {}", message["tool_calls"][0]["id"].as_str().unwrap())
+                    }
+                    "tool" => format!("result {}", message["tool_call_id"].as_str().unwrap()),
+                    role => role.to_owned(),
+                })
+                .collect();
+            assert_eq!(
+                shape,
+                ["system", "user", "call a", "result a", "call b", "result b"]
+            );
+            // The words that came with the calls stay with the first.
+            assert_eq!(sent[2]["content"], "Reading both.");
+            assert!(sent[4]["content"].is_null());
+            assert_eq!(requests[1]["parallel_tool_calls"], false);
+        }
+        // Every later request to that model goes one call a message at once.
+        let events = outcome(&provider, request).await.unwrap();
+        assert_eq!(text_of(&events), "ready");
+        assert_eq!(state.0.lock().len(), 3);
+        // Another refusal is still the server's own.
+        assert!(!super::refuses_parallel_calls(
+            "This model's maximum context length is 8192 tokens"
+        ));
     }
 
     #[tokio::test]

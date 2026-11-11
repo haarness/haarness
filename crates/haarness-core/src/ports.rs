@@ -886,9 +886,10 @@ pub trait Tool: Send + Sync {
         self.definition().input_schema
     }
     fn validate_arguments(&self, arguments: &Value) -> CoreResult<()> {
-        let mut definition = self.definition();
+        let listed = self.definition();
+        let mut definition = listed.clone();
         definition.input_schema = self.validation_schema();
-        crate::tool_validation::validate_arguments(&definition, arguments)
+        crate::tool_validation::validate_listing(&definition, arguments, &listed)
     }
     /// A model's arguments whose only faults are scalars written as strings
     /// (`"timeout": "0"`), as the validation schema's types; `None` for any

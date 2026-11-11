@@ -8735,6 +8735,7 @@ impl AgentRuntime {
             request_ceilings: self.request_ceilings.clone(),
             advertised_tools: Mutex::new(HashSet::new()),
             turn_tools: Mutex::new(HashSet::new()),
+            repeated_failures: Mutex::new(RepeatedFailures::default()),
             last_tool_catalog: Mutex::new(None),
             config: components.config.clone(),
             snapshots,
@@ -9241,6 +9242,10 @@ struct RunnerTask {
     /// ends, so the list the cached prompt opens with changes at most once a
     /// turn, when a tool becomes usable (see `request_tools`).
     turn_tools: Mutex<HashSet<String>>,
+    /// The calls of this turn that failed, by tool and arguments: how many
+    /// times in a row and the words of the last failure (see
+    /// [`RepeatedFailures`]).
+    repeated_failures: Mutex<RepeatedFailures>,
     last_tool_catalog: Mutex<Option<ToolCatalogResponse>>,
     config: Arc<RuntimeConfig>,
     /// The store of `workspace`.
@@ -10356,6 +10361,76 @@ fn refusal_message(feedback: Option<&str>) -> String {
 
 /// How much of an unattended run's reason the agent reads.
 const REFUSAL_REASON_CHARS: usize = 300;
+
+/// The calls a turn made that failed, keyed by tool and arguments, with how
+/// many times in a row each failed with the same words and those words. A
+/// call that failed the same way [`REPEATED_FAILURE_LIMIT`] times is not run
+/// again in the turn: it is answered with what it failed with and what to
+/// do instead. Words that change from one failure to the next (a timeout's
+/// output file, a server's request id) start the count again, so a call
+/// that may go through on another try is still tried.
+#[derive(Default)]
+struct RepeatedFailures(HashMap<String, (u32, String)>);
+
+/// How many identical failures of one call a turn runs before it stops
+/// running that call.
+const REPEATED_FAILURE_LIMIT: u32 = 2;
+
+/// How much of the repeated failure's words the refusal quotes.
+const REPEATED_FAILURE_CHARS: usize = 600;
+
+impl RepeatedFailures {
+    fn key(name: &str, arguments: &serde_json::Value) -> String {
+        format!("{name}\u{0}{arguments}")
+    }
+
+    /// The words that answer the call `key` in place of running it, or
+    /// `None` when it runs.
+    fn refusal(&self, key: &str) -> Option<String> {
+        let (count, words) = self.0.get(key)?;
+        (*count >= REPEATED_FAILURE_LIMIT).then(|| {
+            // On one line, without the category its kind of error adds.
+            let said = words.split_whitespace().collect::<Vec<_>>().join(" ");
+            let said = ["tool error: ", "invalid request: ", "permission denied: "]
+                .iter()
+                .find_map(|category| said.strip_prefix(category))
+                .unwrap_or(&said);
+            let first = if said.chars().count() > REPEATED_FAILURE_CHARS {
+                let cut: String = said.chars().take(REPEATED_FAILURE_CHARS - 1).collect();
+                format!("{}…", cut.trim_end())
+            } else {
+                said.to_owned()
+            };
+            let first = if first.ends_with(['.', '…']) {
+                first
+            } else {
+                format!("{first}.")
+            };
+            format!(
+                "Not run: this exact call already failed {count} times in this turn with the same error, so it would fail again. The error was: {first} Change the call as that error says, or take another approach."
+            )
+        })
+    }
+
+    fn record(&mut self, key: String, result: &CoreResult<ToolOutput>) {
+        match result {
+            // A stop says nothing about the call.
+            Err(CoreError::Cancelled) => {}
+            Err(error) => {
+                let words = user_facing_error(error);
+                let entry = self.0.entry(key).or_insert((0, String::new()));
+                if entry.1 == words {
+                    entry.0 += 1;
+                } else {
+                    *entry = (1, words);
+                }
+            }
+            Ok(_) => {
+                self.0.remove(&key);
+            }
+        }
+    }
+}
 
 /// What the agent reads when a `PermissionRequest` hook or an extension's
 /// `permission.ask` refused its call, or `failed` to answer it: the hook's
@@ -13204,14 +13279,27 @@ impl RunnerTask {
             return name.to_owned();
         }
         // Include the runtime-supplied loader in ambiguity detection too.
-        crate::tool_validation::resolve_name(
+        let resolved = crate::tool_validation::resolve_name(
             name,
             self.tools
                 .list()
                 .into_iter()
                 .map(|tool| tool.name)
                 .chain(std::iter::once(LOAD_TOOL_NAME.to_owned())),
-        )
+        );
+        if self.tools.get(&resolved).is_some() {
+            return resolved;
+        }
+        // A name another coding agent gives its tool (`read_file`,
+        // `run_command`) is the tool here that does that, checked, refused
+        // and run as that tool.
+        match crate::tool_validation::other_agent_tool(name) {
+            Some(own) if self.tools.get(own).is_some() => {
+                tracing::info!(thread = %self.thread.id, called = name, tool = own, "reading another agent's tool name as this one's");
+                own.to_owned()
+            }
+            _ => resolved,
+        }
     }
 
     /// The tools for this turn's next request: those the chat can use now
@@ -13316,9 +13404,16 @@ impl RunnerTask {
                         .any(|tool| tool.id == name && tool.enabled && !tool.advertised)
                 })
             {
-                return Err(CoreError::Tool(format!(
-                    "tool {name} is deferred and was not advertised for this provider round. Call {LOAD_TOOL_NAME} with {{\"queries\":[\"{name}\"]}}, then retry on the following model round."
-                )));
+                // A tool left out only to keep requests small, which the
+                // model calls by name (`schedule` when asked to schedule
+                // something): it is loaded, as load_tool would load it, and
+                // the call goes on to be checked like any other. Its schema
+                // goes with the following rounds.
+                drop(catalog);
+                drop(advertised);
+                tracing::info!(thread = %self.thread.id, tool = name, "loading a deferred tool the model called by name");
+                let _ = self.promote_tools([name.to_owned()]);
+                return Ok(());
             }
             return Err(CoreError::PermissionDenied(format!(
                 "tool {name} was not advertised for this provider round. Use a currently available tool; loading cannot enable a disabled tool."
@@ -13891,9 +13986,25 @@ impl RunnerTask {
         name: &str,
         arguments: serde_json::Value,
     ) -> CoreResult<ToolOutput> {
-        let result = self
-            .execute_call_inner(agent, call_id, name, arguments, true, None)
-            .await;
+        // A call that failed the same way twice already in this turn, sent
+        // once more unchanged, would fail again: it is not run, and the model
+        // is told to change it (a model that is refused tends to send the
+        // same call again and again).
+        let key = RepeatedFailures::key(name, &arguments);
+        let repeated = self.repeated_failures.lock().refusal(&key);
+        let result = match repeated {
+            Some(refusal) => {
+                tracing::info!(thread = %self.thread.id, tool = name, call_id, "not running a call that failed the same way twice in this turn");
+                Err(CoreError::Invalid(refusal))
+            }
+            None => {
+                let result = self
+                    .execute_call_inner(agent, call_id, name, arguments, true, None)
+                    .await;
+                self.repeated_failures.lock().record(key, &result);
+                result
+            }
+        };
         if let Err(error) = &result {
             record_span_error(&tracing::Span::current(), error);
         }
@@ -14318,7 +14429,14 @@ impl RunnerTask {
         );
         let mut output = match result {
             Ok(output) => output,
-            Err(error) => {
+            Err(mut error) => {
+                // The fields left out are named when the call fails too: a
+                // failure they explain (a time to run given under another
+                // name) says what to send.
+                if let (Some(note), Some(message)) = (&unused_fields, failure_message(&mut error)) {
+                    message.push('\n');
+                    message.push_str(note);
+                }
                 return Err(self
                     .after_failed_call(&hook_call, name, &arguments, hook_context, error)
                     .await);
@@ -15606,6 +15724,7 @@ impl RunnerTask {
             request_ceilings: self.request_ceilings.clone(),
             advertised_tools: Mutex::new(HashSet::new()),
             turn_tools: Mutex::new(HashSet::new()),
+            repeated_failures: Mutex::new(RepeatedFailures::default()),
             last_tool_catalog: Mutex::new(None),
             config: self.config.clone(),
             snapshots: self.snapshots.clone(),
@@ -23351,6 +23470,45 @@ mod tests {
             ),
             "The provider did not accept this API key: it is not valid, or not a key for this provider. Connect it again to replace it."
         );
+    }
+
+    #[test]
+    fn a_call_that_failed_the_same_way_twice_is_not_run_a_third_time() {
+        let mut failures = super::RepeatedFailures::default();
+        let call = super::RepeatedFailures::key("bash", &json!({"command": "ls", "bogus": 1}));
+        let other = super::RepeatedFailures::key("bash", &json!({"command": "ls"}));
+        let refused: crate::CoreResult<crate::ToolOutput> = Err(CoreError::Invalid(
+            "The bash tool was called with invalid arguments. Fix the input and retry the same tool.\n- <root>: unexpected fields: bogus".into(),
+        ));
+        assert_eq!(failures.refusal(&call), None);
+        failures.record(call.clone(), &refused);
+        assert_eq!(failures.refusal(&call), None);
+        // Another call between them changes nothing.
+        failures.record(other.clone(), &Ok(super::plain_tool_output("ok".into())));
+        failures.record(call.clone(), &refused);
+        let refusal = failures
+            .refusal(&call)
+            .expect("third identical call refused");
+        assert_eq!(
+            refusal,
+            "Not run: this exact call already failed 2 times in this turn with the same error, so it would fail again. The error was: The bash tool was called with invalid arguments. Fix the input and retry the same tool. - <root>: unexpected fields: bogus. Change the call as that error says, or take another approach."
+        );
+        assert_eq!(failures.refusal(&other), None);
+        // A failure in other words (a timeout's own output file) counts from
+        // one again; a stop is no failure; a success clears the call.
+        let timed_out = |path: &str| -> crate::CoreResult<crate::ToolOutput> {
+            Err(CoreError::Tool(format!(
+                "command timed out after 1200 ms; output saved to {path}"
+            )))
+        };
+        let slow =
+            super::RepeatedFailures::key("bash", &json!({"command": "sleep 5", "timeout": 1200}));
+        failures.record(slow.clone(), &timed_out("/tmp/a.txt"));
+        failures.record(slow.clone(), &timed_out("/tmp/b.txt"));
+        failures.record(slow.clone(), &Err(CoreError::Cancelled));
+        assert_eq!(failures.refusal(&slow), None);
+        failures.record(call.clone(), &Ok(super::plain_tool_output("ran".into())));
+        assert_eq!(failures.refusal(&call), None);
     }
 
     #[test]
