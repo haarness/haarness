@@ -19511,6 +19511,81 @@ fn a_line_of_code_measures_and_opens_its_tabs_to_their_stops() {
     assert_eq!(used, 3);
 }
 
+/// Plain ASCII lines take the byte-by-byte path; it cuts and opens them
+/// exactly as reading them grapheme by grapheme does.
+#[test]
+fn plain_ascii_lines_with_tabs_cut_and_open_as_their_graphemes_would() {
+    use crate::view::span::{
+        CODE_TABS, OUTPUT_TABS, code_cells, code_line_spans, single_code_line,
+    };
+    use haarness_opentui::Span;
+    use unicode_segmentation::UnicodeSegmentation as _;
+    // The grapheme reading, as text that is not plain ASCII takes it.
+    let by_graphemes = |value: &str, width: usize, stops: usize, column: usize| {
+        let value = value.replace(['\n', '\r'], " ");
+        let total = value.graphemes(true).fold(0, |used, grapheme| {
+            used + code_cells(column + used, grapheme, stops)
+        });
+        if total <= width {
+            return value;
+        }
+        if width == 0 {
+            return String::new();
+        }
+        let mut used = 0;
+        let mut kept = String::new();
+        for grapheme in value.graphemes(true) {
+            let cells = code_cells(column + used, grapheme, stops);
+            if used + cells > width - 1 {
+                break;
+            }
+            kept.push_str(grapheme);
+            used += cells;
+        }
+        kept + "…"
+    };
+    let white = Color::rgb(255, 255, 255);
+    for value in [
+        "col1\tcol2\tend",
+        "\t\treturn x",
+        "a\tb\tc\td\te\tf",
+        "ends with a tab\t",
+        "line\rbreak\tand\nmore",
+        "module_17\t-O2\t-Wall\tdone",
+    ] {
+        for stops in [CODE_TABS, OUTPUT_TABS] {
+            for width in 0..40 {
+                assert_eq!(
+                    single_code_line(value, width, stops),
+                    by_graphemes(value, width, stops, 0),
+                    "{value:?} {width} {stops}"
+                );
+                for column in [0, 3] {
+                    let (spans, used) =
+                        code_line_spans(value, width, stops, column, &Span::new("", white));
+                    let drawn: String = spans.iter().map(|span| span.text.as_str()).collect();
+                    let expected = by_graphemes(value, width, stops, column);
+                    let mut at = column;
+                    let opened: String = expected
+                        .chars()
+                        .map(|character| {
+                            let cells = code_cells(at, &character.to_string(), stops);
+                            at += cells;
+                            if character == '\t' {
+                                " ".repeat(cells)
+                            } else {
+                                character.to_string()
+                            }
+                        })
+                        .collect();
+                    assert_eq!(drawn, opened, "{value:?} {width} {stops} {column}");
+                    assert_eq!(used, at - column, "{value:?} {width} {stops} {column}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn wrapped_text_draws_tabs_to_their_stops_copies_them_and_previews_them_as_spaces() {
     use crate::view::span::{single_line, wrap_spans};
