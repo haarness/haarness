@@ -580,8 +580,10 @@ struct Snippet<'t> {
 /// fence (one shown as an example inside a longer fence stays text), and
 /// ends at a fence of at least as many backticks; one never closed is text.
 /// Each line of a block is a command: a line ending in `\` goes on with the
-/// next, as in the shell, and blank lines and `#` comments are left out.
-fn snippets(template: &str) -> Vec<Snippet<'_>> {
+/// next when the shell is a `posix` one (cmd.exe reads `\` as a path's),
+/// and blank lines and `#` comments are left out. An inline one that runs
+/// into a block (its closing backtick missing) is text. No two overlap.
+fn snippets(template: &str, posix: bool) -> Vec<Snippet<'_>> {
     static INLINE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"(?m)(?:^|[ \t\r\n])!`([^`]+)`").expect("constant regex")
     });
@@ -626,7 +628,7 @@ fn snippets(template: &str) -> Vec<Snippet<'_>> {
                     blocks.push(Snippet {
                         span: *begin..start + text.len(),
                         lead: "",
-                        commands: block_commands(lines),
+                        commands: block_commands(lines, posix),
                     });
                 }
                 open = None;
@@ -639,7 +641,7 @@ fn snippets(template: &str) -> Vec<Snippet<'_>> {
             let whole = capture.get(0)?;
             if blocks
                 .iter()
-                .any(|block| block.span.contains(&whole.start()))
+                .any(|block| block.span.start < whole.end() && whole.start() < block.span.end)
             {
                 return None;
             }
@@ -656,8 +658,9 @@ fn snippets(template: &str) -> Vec<Snippet<'_>> {
 }
 
 /// A block's commands: its lines, a line ending in an odd number of `\`
-/// joined to the next, without blank lines and `#` comments.
-fn block_commands(lines: &[&str]) -> Vec<String> {
+/// joined to the next in a `posix` shell, without blank lines and `#`
+/// comments.
+fn block_commands(lines: &[&str], posix: bool) -> Vec<String> {
     let mut commands = Vec::new();
     let mut current = String::new();
     for line in lines {
@@ -665,7 +668,7 @@ fn block_commands(lines: &[&str]) -> Vec<String> {
             continue;
         }
         let escapes = line.len() - line.trim_end_matches('\\').len();
-        if escapes % 2 == 1 {
+        if posix && escapes % 2 == 1 {
             current.push_str(&line[..line.len() - 1]);
             continue;
         }
@@ -686,7 +689,7 @@ fn block_commands(lines: &[&str]) -> Vec<String> {
 /// Whether `template` has a `!` snippet, inline or a block.
 #[must_use]
 pub fn has_snippets(template: &str) -> bool {
-    !snippets(template).is_empty()
+    !snippets(template, true).is_empty()
 }
 
 /// In place of a snippet of a skill the model loaded that would have asked
@@ -734,7 +737,12 @@ pub async fn prepare(
     };
     let mut prepared = String::new();
     let mut last = 0;
-    for snippet in snippets(template) {
+    for snippet in snippets(template, crate::agent_shell::current().posix()) {
+        // Snippets never overlap; one that would is text, so no input can
+        // cut the text out of order.
+        if snippet.span.start < last {
+            continue;
+        }
         prepared.push_str(&substitutions(
             &template[last..snippet.span.start],
             &context,
@@ -844,7 +852,10 @@ pub fn preloaded_text(template: &str, execution: &DefinitionExecution) -> String
     let values = placeholder_values(execution, SESSION_PLACEHOLDER, PROJECT_PLACEHOLDER);
     let mut text = String::new();
     let mut last = 0;
-    for snippet in snippets(template) {
+    for snippet in snippets(template, crate::agent_shell::current().posix()) {
+        if snippet.span.start < last {
+            continue;
+        }
         text.push_str(&fill_placeholders(
             &template[last..snippet.span.start],
             &values,
@@ -2603,5 +2614,106 @@ mod tests {
                 "bash:/plugins/kit/run.sh"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn an_inline_snippet_left_open_before_a_block_is_text_and_the_block_runs() {
+        // The inline snippet's closing backtick is missing: its match would
+        // run into the block's fence.
+        let template = "A !`echo one\n```!\necho two\n```\nB";
+        let invoker = Scripted::new(&[]);
+        let text = prepare(template, "", &DefinitionExecution::default(), "s", &invoker)
+            .await
+            .unwrap();
+        assert_eq!(text, "A !`echo one\n<echo two>\nB");
+        let ran: Vec<String> = invoker
+            .ran
+            .lock()
+            .iter()
+            .map(|(shown, _)| shown.clone())
+            .collect();
+        assert_eq!(ran, ["echo two"]);
+        assert_eq!(
+            preloaded_text(template, &DefinitionExecution::default()),
+            "A !`echo one\n(skipped: `echo two` does not run for a skill an agent starts with; call bash with it to run it)\nB"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_text_of_backticks_fences_and_bangs_breaks_reading_snippets() {
+        // Single marks, and whole fence lines so that blocks do form.
+        const PIECES: [&str; 28] = [
+            "`",
+            "``",
+            "```",
+            "````",
+            "!",
+            "!`",
+            "~~~",
+            "\n",
+            "\r\n",
+            " ",
+            "\t",
+            "echo x",
+            "#",
+            "\\",
+            "é",
+            "${CLAUDE_PROJECT_DIR}",
+            "\n```!\n",
+            "\n```\n",
+            "\n````!\n",
+            "\n````\n",
+            "\n````markdown\n",
+            "\n~~~\n",
+            " !`echo y",
+            " !`echo z`",
+            "\n# note\n",
+            "echo a \\\n",
+            "\r\n```!\r\n",
+            "\r\n```\r\n",
+        ];
+        // A fixed sequence of pseudo-random choices, the same on every run.
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..6_000 {
+            let length = usize::try_from(next() % 16).unwrap();
+            let template: String = (0..length)
+                .map(|_| PIECES[usize::try_from(next() % PIECES.len() as u64).unwrap()])
+                .collect();
+            let _ = has_snippets(&template);
+            let _ = preloaded_text(&template, &DefinitionExecution::default());
+            for posix in [true, false] {
+                let mut last = 0;
+                for snippet in snippets(&template, posix) {
+                    assert!(snippet.span.start >= last, "{template:?}");
+                    assert!(
+                        template.is_char_boundary(snippet.span.start),
+                        "{template:?}"
+                    );
+                    assert!(template.is_char_boundary(snippet.span.end), "{template:?}");
+                    last = snippet.span.end;
+                }
+            }
+            let _ = prepare(
+                &template,
+                "",
+                &DefinitionExecution::default(),
+                "s",
+                &Scripted::new(&[]),
+            )
+            .await;
+        }
+    }
+
+    #[test]
+    fn only_a_posix_shell_continues_a_line_that_ends_in_a_backslash() {
+        let lines = ["dir C:\\", "echo next"];
+        assert_eq!(block_commands(&lines, true), ["dir C:echo next"]);
+        assert_eq!(block_commands(&lines, false), ["dir C:\\", "echo next"]);
     }
 }

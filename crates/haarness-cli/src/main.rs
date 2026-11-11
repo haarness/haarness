@@ -8891,7 +8891,15 @@ pub(crate) fn preload_agent_skills(
 ) {
     for agent in agents {
         let rules = rules(agent);
-        haarness_core::definitions::preload_skills(agent, skills, &rules);
+        // A fault reading one agent's skills (a bug, not a bad file) leaves
+        // that agent without them, never the server without its agents.
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            haarness_core::definitions::preload_skills(agent, skills, &rules);
+        }));
+        if read.is_err() {
+            agent.preloaded.clear();
+            tracing::error!(agent = %agent.id, "the skills this agent lists could not be read; it starts without them");
+        }
     }
 }
 
@@ -9422,7 +9430,24 @@ impl HotReloadController {
                     settle_since = None;
                     continue;
                 }
-                match self.candidate().await {
+                // A fault while composing (a bug, not a bad file) rejects the
+                // generation as an invalid one would: the live one stays and
+                // the next edit is read again. The panic hook logged where.
+                let composed = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                    self.candidate(),
+                ))
+                .await
+                .unwrap_or_else(|panic| {
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or("no message");
+                    Err(anyhow::anyhow!(
+                        "composing the configuration stopped on an internal error ({message})"
+                    ))
+                });
+                match composed {
                     Ok(candidate) => pending = Some(candidate),
                     Err(error) => {
                         tracing::warn!(%error, "configuration hot reload rejected; retaining last-known-good generation");
@@ -15280,6 +15305,43 @@ mod tests {
         std::fs::write(memory.join("settings.json"), r#"{"enabled": false,}"#).unwrap();
         assert_eq!(compose(), Ok(Some(false)));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A registry that fails while one agent's skills are read.
+    struct Faulty;
+    #[async_trait::async_trait]
+    impl haarness_core::SkillRegistry for Faulty {
+        async fn discover(&self) -> haarness_core::CoreResult<Vec<haarness_protocol::SkillInfo>> {
+            Ok(Vec::new())
+        }
+        async fn load(&self, _: &str) -> haarness_core::CoreResult<String> {
+            Ok(String::new())
+        }
+        fn peek(&self, name: &str) -> Option<(haarness_protocol::SkillInfo, String)> {
+            assert_ne!(name, "faulty", "a fault reading this skill");
+            None
+        }
+    }
+
+    #[test]
+    fn a_fault_reading_one_agent_s_skills_leaves_the_other_agents_whole() {
+        let mut agents = vec![
+            haarness_core::CustomAgent {
+                id: "broken".into(),
+                skills: vec!["faulty".into()],
+                ..Default::default()
+            },
+            haarness_core::CustomAgent {
+                id: "fine".into(),
+                skills: vec!["missing".into()],
+                ..Default::default()
+            },
+        ];
+        super::preload_agent_skills(&mut agents, &Faulty, &|_| {
+            haarness_core::PermissionEngine::build_defaults()
+        });
+        assert_eq!(agents.len(), 2);
+        assert!(agents.iter().all(|agent| agent.preloaded.is_empty()));
     }
 
     /// The skills an agent starts with are judged by the rules its calls
