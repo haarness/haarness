@@ -1218,26 +1218,31 @@ pub(crate) fn editor_rows(
         }
         // Rows break after the last space that fits, as prose wraps; a word
         // longer than a row (a path, a URL) breaks where it reaches the edge.
-        // Every byte stays in exactly one row, so the cursor maps exactly.
+        // Every byte stays in exactly one row, so the cursor maps exactly. A
+        // tab reaches the next stop counted from its row's start, as
+        // `drawn` opens it.
         let mut start = 0;
         let mut cells = 0;
-        let mut after_space: Option<(usize, usize)> = None;
+        let mut after_space: Option<usize> = None;
         for (index, character) in row.char_indices() {
-            let character_width = character.width().unwrap_or(0);
+            let mut character_width = draft_cells(character, cells);
             while index > start && cells + character_width > inner_width {
-                let (cut, cut_cells) = after_space
+                let cut = after_space
                     .take()
-                    .filter(|(cut, _)| *cut > start)
-                    .unwrap_or((index, cells));
+                    .filter(|cut| *cut > start)
+                    .unwrap_or(index);
                 let segment = row[start..cut].to_owned();
                 let holds_cursor = cursor_here && cursor_byte >= start && cursor_byte < cut;
                 display.push((segment, holds_cursor.then(|| cursor_byte - start)));
                 start = cut;
-                cells -= cut_cells;
+                cells = row[start..index]
+                    .chars()
+                    .fold(0, |used, character| used + draft_cells(character, used));
+                character_width = draft_cells(character, cells);
             }
             cells += character_width;
             if character == ' ' {
-                after_space = Some((index + 1, cells));
+                after_space = Some(index + 1);
             }
         }
         {
@@ -1277,30 +1282,75 @@ pub(crate) fn editor_rows(
         if index == start {
             spans.extend(lead.take());
         }
+        let plain = Span::new("", theme.text);
+        let mut drawn_to = 0;
         if let Some(column) = cursor_column {
             let column = (*column).min(row.len());
-            let before = row[..column].to_owned();
+            drawn(&mut spans, &row[..column], &mut drawn_to, &plain);
             let mut tail = row[column..].chars();
-            let mut at = tail
-                .next()
-                .map_or_else(|| " ".to_owned(), |value| value.to_string());
-            if at == "\t" {
-                at = " ".into();
+            let cursor_cell = |value: String| {
+                if focused {
+                    cursor_span(value, app)
+                } else {
+                    Span::new(value, theme.text)
+                }
+            };
+            match tail.next() {
+                None => spans.push(cursor_cell(" ".to_owned())),
+                // On a tab the cursor takes the first of its cells, which a
+                // selection copies as the tab; the rest are drawn only.
+                Some('\t') => {
+                    let cells = draft_cells('\t', drawn_to);
+                    let mut first = cursor_cell(" ".to_owned());
+                    first.tab = true;
+                    spans.push(first);
+                    spans.push(Span::new(" ".repeat(cells - 1), theme.text).unselectable());
+                    drawn_to += cells;
+                }
+                Some(value) => {
+                    spans.push(cursor_cell(value.to_string()));
+                    drawn_to += draft_cells(value, drawn_to);
+                }
             }
-            let after: String = tail.collect();
-            spans.push(Span::new(before, theme.text));
-            if focused {
-                spans.push(cursor_span(at, app));
-            } else {
-                spans.push(Span::new(at, theme.text));
-            }
-            spans.push(Span::new(after, theme.text));
+            drawn(&mut spans, tail.as_str(), &mut drawn_to, &plain);
         } else {
-            spans.push(Span::new(row.clone(), theme.text));
+            drawn(&mut spans, row, &mut drawn_to, &plain);
         }
         lines.push(clamp(spans, width));
     }
     lines
+}
+
+/// Cells a character of the draft takes `cells` into its row: a tab reaches
+/// the next stop.
+fn draft_cells(character: char, cells: usize) -> usize {
+    if character == '\t' {
+        crate::view::span::tab_cells(cells, crate::view::span::CODE_TABS)
+    } else {
+        character.width().unwrap_or(0)
+    }
+}
+
+/// A piece of a draft row as drawn, in `template`'s style: each tab as a
+/// [`crate::view::span::tab_span`] to its stop; `column` counts the cells
+/// drawn so far.
+fn drawn(spans: &mut Vec<Span>, text: &str, column: &mut usize, template: &Span) {
+    for (index, piece) in text.split('\t').enumerate() {
+        if index > 0 {
+            let cells = draft_cells('\t', *column);
+            spans.push(crate::view::span::tab_span(template, cells));
+            *column += cells;
+        }
+        if !piece.is_empty() {
+            *column += piece
+                .chars()
+                .map(|character| character.width().unwrap_or(0))
+                .sum::<usize>();
+            let mut span = template.clone();
+            piece.clone_into(&mut span.text);
+            spans.push(span);
+        }
+    }
 }
 
 /// A cursor must remain unmistakable on every theme and at end-of-line,

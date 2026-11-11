@@ -2,13 +2,15 @@
 //! deletion, undo/redo, input history, and collapsed large pastes. Pure state
 //! with no terminal knowledge, so every behavior is unit-testable.
 
-use crate::width::DisplayWidth as _;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 /// A paste of more lines or bytes than these becomes a chip. Desktop's
 /// composer uses the same sizes (`pasteFolds` in `prompt-context.ts`).
 const PASTE_LINE_THRESHOLD: usize = 8;
 const PASTE_CHAR_THRESHOLD: usize = 1000;
+/// The largest paste a second paste opens in place: the prompt edits text
+/// much longer than this slowly, so such a paste makes a chip as before.
+const UNFOLD_LIMIT: usize = 256 * 1024;
 const UNDO_CAP: usize = 100;
 /// Prompts ↑ reaches back through in a project, and the history file keeps
 /// for it: the text alone, so a long reach costs little.
@@ -63,6 +65,14 @@ fn context_placeholder(label: &str) -> String {
 /// The chip a large paste shows as while it is a draft.
 fn paste_placeholder(id: usize, lines: usize) -> String {
     format!("[#{id} pasted {} lines]", lines.max(1))
+}
+
+/// Terminal cells `text` (one line of the draft) is drawn in, a tab
+/// reaching the next stop as the prompt draws it.
+fn columns(text: &str) -> usize {
+    text.graphemes(true).fold(0, |column, grapheme| {
+        column + crate::view::span::code_cells(column, grapheme, crate::view::span::CODE_TABS)
+    })
 }
 
 fn expand(text: &str, expansions: &[Expansion]) -> String {
@@ -269,8 +279,20 @@ impl Composer {
 
     /// Large pastes are opaque chips with tracked byte ranges. Their labels
     /// never act as delimiters in ordinary text or inside another payload.
+    /// Pasting a chip's text again right after it opens the chip into that
+    /// text, to edit in place (up to [`UNFOLD_LIMIT`]); undo folds it back.
     pub fn paste(&mut self, value: &str) {
         let value = value.replace("\r\n", "\n").replace('\r', "\n");
+        let repeated = self.expansions.iter().find(|e| {
+            matches!(e.kind, ExpansionKind::Paste(_))
+                && e.end == self.cursor
+                && value.len() <= UNFOLD_LIMIT
+                && e.content == value
+        });
+        if let Some(&Expansion { start, end, .. }) = repeated {
+            self.edit(start, end, &value, LastEdit::Other);
+            return;
+        }
         let lines = value.lines().count();
         if lines > PASTE_LINE_THRESHOLD || value.len() > PASTE_CHAR_THRESHOLD {
             let id = self.next_paste_id();
@@ -352,7 +374,7 @@ impl Composer {
         if start == 0 {
             return false;
         }
-        let column = self.text[start..self.cursor].width();
+        let column = columns(&self.text[start..self.cursor]);
         let previous_start = self.text[..start - 1]
             .rfind('\n')
             .map_or(0, |index| index + 1);
@@ -368,7 +390,7 @@ impl Composer {
             return false;
         }
         let start = self.line_start();
-        let column = self.text[start..self.cursor].width();
+        let column = columns(&self.text[start..self.cursor]);
         let next_start = end + 1;
         let next_end = self.text[next_start..]
             .find('\n')
@@ -692,7 +714,8 @@ impl Composer {
     fn line_boundary_at_column(&self, start: usize, end: usize, target: usize) -> usize {
         let mut column = 0;
         for (offset, grapheme) in self.text[start..end].grapheme_indices(true) {
-            let next = column + grapheme.width();
+            let next = column
+                + crate::view::span::code_cells(column, grapheme, crate::view::span::CODE_TABS);
             if next > target {
                 return if target - column >= next - target {
                     start + offset + grapheme.len()
@@ -767,6 +790,29 @@ mod tests {
         assert_eq!(wide.cursor(), "界".len());
         wide.insert_char('!');
         assert_eq!(wide.text(), "界!a\nxy");
+    }
+
+    #[test]
+    fn vertical_motion_counts_a_tab_to_its_stop_as_the_prompt_draws_it() {
+        // `\tab` is drawn six cells wide, so ↓ lands six cells into the next line.
+        let mut composer = typed("abcdefgh");
+        composer.move_home();
+        composer.insert_str("\tab\n");
+        composer.move_up();
+        composer.move_end();
+        assert_eq!(composer.cursor(), "\tab".len());
+        assert!(composer.move_down());
+        assert_eq!(composer.cursor(), "\tab\nabcdef".len());
+        assert!(composer.move_up());
+        assert_eq!(composer.cursor(), "\tab".len());
+        // From four cells in, ↑ lands after the tab rather than inside it.
+        composer.move_down();
+        composer.move_home();
+        for _ in 0..4 {
+            composer.move_right();
+        }
+        assert!(composer.move_up());
+        assert_eq!(composer.cursor(), "\t".len());
     }
 
     #[test]
@@ -947,6 +993,92 @@ mod tests {
         composer.redo();
         assert_eq!(composer.text(), "[#1 pasted 10 lines]");
         assert_eq!(composer.take(), second);
+    }
+
+    fn numbered(word: &str, count: usize) -> String {
+        let mut text = String::new();
+        for line in 1..=count {
+            use std::fmt::Write as _;
+            let _ = writeln!(text, "{word} {line}");
+        }
+        text
+    }
+
+    #[test]
+    fn the_same_paste_right_after_its_chip_unfolds_it_and_undo_folds_it_back() {
+        let block = numbered("block", 12);
+        let mut composer = typed("see ");
+        composer.paste(&block);
+        assert_eq!(composer.text(), "see [#1 pasted 12 lines]");
+        composer.paste(&block);
+        assert_eq!(composer.text(), format!("see {block}"));
+        assert_eq!(composer.expanded_text(), composer.text());
+        assert_eq!(composer.cursor(), composer.text().len());
+
+        composer.undo();
+        assert_eq!(composer.text(), "see [#1 pasted 12 lines]");
+        assert_eq!(composer.cursor(), composer.text().len());
+        assert_eq!(composer.expanded_text(), format!("see {block}"));
+        composer.redo();
+        assert_eq!(composer.text(), format!("see {block}"));
+
+        // The unfolded text edits like typed text and is sent once.
+        composer.insert_str("thanks");
+        assert_eq!(composer.take(), format!("see {block}thanks"));
+
+        // The terminal's carriage returns are the same text.
+        let mut composer = Composer::default();
+        composer.paste(&block);
+        composer.paste(&block.replace('\n', "\r\n"));
+        assert_eq!(composer.text(), block);
+    }
+
+    #[test]
+    fn a_paste_anywhere_but_right_after_its_own_chip_folds_as_before() {
+        let block = numbered("block", 12);
+        let other = numbered("other", 12);
+        // Different text right after the chip.
+        let mut composer = Composer::default();
+        composer.paste(&block);
+        composer.paste(&other);
+        assert_eq!(composer.text(), "[#1 pasted 12 lines][#2 pasted 12 lines]");
+        // The same text after another chip, or after a space typed after its own.
+        composer.paste(&block);
+        assert_eq!(
+            composer.text(),
+            "[#1 pasted 12 lines][#2 pasted 12 lines][#3 pasted 12 lines]"
+        );
+        let mut composer = Composer::default();
+        composer.paste(&block);
+        composer.insert_char(' ');
+        composer.paste(&block);
+        assert_eq!(composer.text(), "[#1 pasted 12 lines] [#2 pasted 12 lines]");
+        // The same text with the cursor before the chip.
+        let mut composer = typed("see ");
+        composer.paste(&block);
+        composer.move_left();
+        composer.paste(&block);
+        assert_eq!(
+            composer.text(),
+            "see [#2 pasted 12 lines][#1 pasted 12 lines]"
+        );
+        assert_eq!(composer.take(), format!("see {block}{block}"));
+        // A paste too large to edit in the prompt stays a chip.
+        let huge = numbered("huge", 30_000);
+        assert!(huge.len() > super::UNFOLD_LIMIT);
+        let mut composer = Composer::default();
+        composer.paste(&huge);
+        composer.paste(&huge);
+        assert_eq!(
+            composer.text(),
+            "[#1 pasted 30000 lines][#2 pasted 30000 lines]"
+        );
+        // Only a paste's chip unfolds, not an attached reference holding the same text.
+        let mut composer = typed("@notes");
+        composer.attach_context(0, 6, "notes", &block).unwrap();
+        composer.move_left();
+        composer.paste(&block);
+        assert_eq!(composer.text(), "[notes][#1 pasted 12 lines] ");
     }
 
     #[test]

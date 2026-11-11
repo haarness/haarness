@@ -1070,6 +1070,36 @@ mod workflow_tests {
     }
 }
 
+#[cfg(test)]
+mod output_tab_tests {
+    use crate::theme::Theme;
+
+    fn copied(lines: &[haarness_opentui::Line]) -> String {
+        crate::view::frame::CopyFrame::new(lines, Vec::new()).text((0, 0), (lines.len() - 1, 1000))
+    }
+
+    /// A command's output lines up its tabs at a terminal's stops, folded or
+    /// opened, and a drag copies the tabs it printed.
+    #[test]
+    fn output_rows_set_tabs_every_eight_and_copy_them() {
+        let theme = Theme::editorial_dark();
+        let color = theme.muted;
+        for line in ["ab\tX", "abcdef\tY", "col1\tcol2\tend"] {
+            let folded = super::gutter_row(line, 80, color, &theme);
+            let opened = super::gutter_rows(line, 80, color, &theme);
+            assert_eq!(folded.text(), opened[0].text(), "{line:?}");
+            assert_eq!(copied(&[folded]), line);
+            assert_eq!(copied(&opened), line);
+        }
+        let row = |line| super::gutter_row(line, 80, color, &theme).text();
+        assert_eq!(row("ab\tX"), "  ▏ ab      X");
+        assert_eq!(row("abcdef\tY"), "  ▏ abcdef  Y");
+        assert_eq!(row("col1\tcol2\tend"), "  ▏ col1    col2    end");
+        // Without a tab the row is the line itself.
+        assert_eq!(row("plain output"), "  ▏ plain output");
+    }
+}
+
 struct QuestionView<'a> {
     id: &'a str,
     prompt: &'a str,
@@ -1224,46 +1254,50 @@ fn render_tool_result(
     // every word of an error shows; a quiet preview keeps one row per line.
     // The caps count rows on screen either way.
     let wrap = expanded || failed;
-    let lines: Vec<Vec<Line>> = output
-        .lines()
-        .map(|source| {
-            if wrap {
-                gutter_rows(source, width, color, theme)
-            } else {
-                vec![gutter_row(source, width, color, theme)]
-            }
-        })
-        .collect();
-    let total_rows: usize = lines.iter().map(Vec::len).sum();
-    let collapsible = folds || total_rows > collapsed_cap;
-    let mut shown_rows = 0;
-    let mut whole_lines = 0;
-    for rows in &lines {
-        let room = cap.saturating_sub(shown_rows);
+    // Only the rows shown are built: a long output's folded lines are only
+    // counted, as each frame draws every result in the chat.
+    let mut shown: Vec<Line> = Vec::new();
+    let (mut lines, mut whole_lines, mut built_rows) = (0, 0, 0);
+    let mut cut = false;
+    for source in output.lines() {
+        lines += 1;
+        let room = cap.saturating_sub(shown.len());
         if room == 0 {
-            break;
+            cut = true;
+            continue;
         }
-        for row in rows.iter().take(room).cloned() {
-            if collapsible {
-                transcript.push_tagged(row, HitTarget::ToolToggle(item.id));
-            } else {
-                transcript.push(row);
-            }
-        }
-        shown_rows += rows.len().min(room);
+        let rows = if wrap {
+            gutter_rows(source, width, color, theme)
+        } else {
+            vec![gutter_row(source, width, color, theme)]
+        };
+        built_rows += rows.len();
         whole_lines += usize::from(rows.len() <= room);
+        cut |= rows.len() > room;
+        shown.extend(rows.into_iter().take(room));
     }
-    if total_rows > shown_rows {
+    // Rows past the cap exist exactly when some were cut; opened, every row
+    // was built and counted.
+    let total_rows_over = |rows: usize| if cut { true } else { built_rows > rows };
+    let collapsible = folds || total_rows_over(collapsed_cap);
+    for row in shown {
+        if collapsible {
+            transcript.push_tagged(row, HitTarget::ToolToggle(item.id));
+        } else {
+            transcript.push(row);
+        }
+    }
+    if cut {
         transcript.push_tagged(
             gutter_row(
-                &more_lines_hint(app, lines.len() - whole_lines),
+                &more_lines_hint(app, lines - whole_lines),
                 width,
                 theme.muted,
                 theme,
             ),
             HitTarget::ToolToggle(item.id),
         );
-    } else if expanded && total_rows > TOOL_SUMMARY_ROWS {
+    } else if expanded && total_rows_over(TOOL_SUMMARY_ROWS) {
         transcript.push_tagged(
             gutter_row(&collapse_hint(app), width, theme.muted, theme),
             HitTarget::ToolToggle(item.id),
@@ -1495,15 +1529,24 @@ fn tail_line(value: &str, width: usize) -> String {
     std::iter::once("…").chain(kept.into_iter().rev()).collect()
 }
 
-/// Muted gutter row inside a tool output block.
+/// Muted gutter row inside a tool output block. Tabs reach a terminal's
+/// stops, as in the command's own output view.
 fn gutter_row(text: &str, width: usize, color: haarness_opentui::Color, theme: &Theme) -> Line {
-    Line::new(vec![
-        // A hairline quote bar, not a box edge: tool output is subordinate
-        // content hanging off the activity row, the same way a prompt hangs
-        // off its own bar.
-        Span::new("  ▏ ", theme.hairline()).unselectable(),
-        Span::new(single_line(text, width.saturating_sub(6)), color),
-    ])
+    use crate::view::span::{OUTPUT_TABS, expand_tabs, single_code_line};
+    // A hairline quote bar, not a box edge: tool output is subordinate
+    // content hanging off the activity row, the same way a prompt hangs off
+    // its own bar.
+    let mut spans = vec![Span::new("  ▏ ", theme.hairline()).unselectable()];
+    let body = Span::new(
+        single_code_line(text, width.saturating_sub(6), OUTPUT_TABS),
+        color,
+    );
+    if body.text.contains('\t') {
+        spans.extend(expand_tabs(vec![body], OUTPUT_TABS));
+    } else {
+        spans.push(body);
+    }
+    Line::new(spans)
 }
 
 /// One output line wrapped under the gutter, word by word, with long
@@ -1514,12 +1557,13 @@ fn gutter_rows(
     color: haarness_opentui::Color,
     theme: &Theme,
 ) -> Vec<Line> {
-    let mut rows = wrap_spans(
+    let mut rows = crate::view::span::wrap_spans_with_tabs(
         &[Span::new(text.replace('\r', ""), color)],
         width.saturating_sub(2),
         "  ▏ ",
         "  ▏ ",
         theme.hairline(),
+        crate::view::span::OUTPUT_TABS,
     );
     for row in &mut rows {
         crate::view::span::decorate_prefix(row, "  ▏ ");

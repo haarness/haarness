@@ -55,10 +55,11 @@ pub fn render_diff(old: &str, new: &str, width: usize, theme: &Theme, indent: &s
                             .iter_strings_lossy()
                             .map(|(_, value)| value.into_owned())
                             .collect();
-                        Line::new(vec![
-                            gutter,
-                            Span::new(format!("  {}", clip(line_body(&text), inner)), theme.muted),
-                        ])
+                        let mut spans = vec![gutter, Span::new("  ", theme.muted)];
+                        spans.extend(
+                            code(line_body(&text), inner, 0, &Span::new("", theme.muted)).0,
+                        );
+                        Line::new(spans)
                     }
                 };
                 lines.push(row);
@@ -105,13 +106,14 @@ fn inline_row(
         if remaining == 0 {
             break;
         }
-        let clipped = clip(value, remaining);
-        used += clipped.chars().count();
-        let mut span = Span::new(clipped, fg).on(bg);
+        let mut template = Span::new("", fg).on(bg);
         if emphasized {
-            span.attributes |= attr::INVERSE;
+            template.attributes |= attr::INVERSE;
         }
-        spans.push(span);
+        // Tab stops count from the start of the line's text, after `- `.
+        let (pieces, cells) = code(value, remaining, used - 2, &template);
+        used += cells;
+        spans.extend(pieces);
     }
     let pad = inner.saturating_sub(used);
     if pad > 0 {
@@ -157,13 +159,15 @@ fn styled_row(
     } else {
         (theme.diff.removed, theme.diff.removed_bg)
     };
-    let body = format!("{marker} {}", clip(text, inner.saturating_sub(2)));
-    let pad = inner.saturating_sub(body.chars().count());
-    Line::new(vec![
+    let (body, cells) = code(text, inner.saturating_sub(2), 0, &Span::new("", fg).on(bg));
+    let pad = inner.saturating_sub(2 + cells);
+    let mut spans = vec![
         Span::new(indent, theme.muted),
-        Span::new(body, fg).on(bg),
-        Span::new(" ".repeat(pad), fg).on(bg),
-    ])
+        Span::new(format!("{marker} "), fg).on(bg),
+    ];
+    spans.extend(body);
+    spans.push(Span::new(" ".repeat(pad), fg).on(bg));
+    Line::new(spans)
 }
 
 /// A line of a diff without its line end: the line feed, then one carriage
@@ -190,10 +194,18 @@ fn trim_line_end(segments: &mut Vec<(bool, String)>) {
     }
 }
 
-/// A file's text clipped to `width`. Its control characters show as codes,
-/// so an escape string in a changed line cannot hide what follows it.
-fn clip(text: &str, width: usize) -> String {
-    crate::view::span::single_line(&crate::escapes::spelled_in_file(text), width)
+/// A file's text drawn from `column` of its line, clipped to `width`, with
+/// its tabs to their stops: [`crate::view::span::code_line_spans`]. Its
+/// control characters show as codes, so an escape string in a changed line
+/// cannot hide what follows it.
+fn code(text: &str, width: usize, column: usize, template: &Span) -> (Vec<Span>, usize) {
+    crate::view::span::code_line_spans(
+        &crate::escapes::spelled_in_file(text),
+        width,
+        crate::view::span::CODE_TABS,
+        column,
+        template,
+    )
 }
 
 #[cfg(test)]
@@ -241,6 +253,43 @@ mod tests {
         let added = text_of(&render_added(new, 80, &theme, "", 10)).join("\n");
         assert_eq!(added.matches("\\u{D}").count(), 1, "{added}");
         assert!(added.contains("gam\\u{D}ma"), "{added}");
+    }
+
+    /// A changed line's tabs reach their stops, counted from the line's text,
+    /// in a diff and in a new file's lines; a drag copies them as tabs.
+    #[test]
+    fn tabs_in_changed_lines_reach_their_stops_and_copy_as_tabs() {
+        let theme = Theme::editorial_dark();
+        let old = "all:\n\techo \"build\"\n\tgo vet\t./...\n";
+        let new = "all:\n\techo \"built\"\tdone\n\tgo vet\t./...\n";
+        let copied = |lines: &[haarness_opentui::Line]| {
+            crate::view::frame::CopyFrame::new(lines, Vec::new())
+                .text((0, 0), (lines.len() - 1, 1000))
+        };
+        let diff = render_diff(old, new, 80, &theme, "");
+        let text = text_of(&diff).join("\n");
+        assert!(text.contains("-     echo \"build\""), "{text}");
+        assert!(text.contains("+     echo \"built\"    done"), "{text}");
+        assert!(text.contains("      go vet  ./..."), "{text}");
+        let copy = copied(&diff);
+        assert!(copy.contains("- \techo \"build\""), "{copy:?}");
+        assert!(copy.contains("+ \techo \"built\"\tdone"), "{copy:?}");
+        assert!(copy.contains("  \tgo vet\t./..."), "{copy:?}");
+        let added = render_added(new, 80, &theme, "", 10);
+        assert!(
+            text_of(&added)
+                .join("\n")
+                .contains("+     echo \"built\"    done")
+        );
+        assert!(copied(&added).contains("+ \techo \"built\"\tdone"));
+        // A wide line's padding counts cells, not characters.
+        let wide = render_added("日本語\n", 20, &theme, "", 10);
+        assert_eq!(
+            haarness_opentui::display_width(&wide[0].text()),
+            20,
+            "{:?}",
+            wide[0].text()
+        );
     }
 
     #[test]

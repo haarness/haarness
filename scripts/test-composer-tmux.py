@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """The TUI's composer features in a real tmux pane, on the echo provider:
-long pastes (its own and Desktop's), slash commands shown as typed, the
-thinking display (Compact, Show, Hide), and files dropped into the prompt
-(media attached, other files and every file in shell mode kept as paths,
-media over a message's limit refused with the draft kept). Pane captures,
-with their colours, go to COMPOSER_TMUX_EVIDENCE."""
+long pastes (its own, one pasted again to open its chip, and Desktop's),
+slash commands shown as typed, the thinking display (Compact, Show, Hide),
+and files dropped into the prompt (media attached, other files and every
+file in shell mode kept as paths, media over a message's limit refused with
+the draft kept). Pane captures, with their colours, go to
+COMPOSER_TMUX_EVIDENCE."""
 import json
 import os
 import shlex
@@ -132,6 +133,29 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
         assert "tui paste line 20" in sent["data"]["text"], sent
         screen("tui-paste-sent")
         checks.append("TUI paste: one [#1 pasted 20 lines] chip, sent whole, folded in the transcript")
+
+        # The same text pasted again right after its chip opens the chip into
+        # that text, Ctrl+- folds it back, and the message holds the text once.
+        repeat = "\n".join(f"repeat paste line {index}" for index in range(1, 13))
+        run("tmux", "set-buffer", "-b", "composer", repeat)
+        run("tmux", "paste-buffer", "-p", "-b", "composer", "-t", session)
+        until(lambda: "[#1 pasted 12 lines]" in composer(), "the repeated paste's first chip did not show")
+        run("tmux", "paste-buffer", "-p", "-b", "composer", "-t", session)
+        until(lambda: "repeat paste line 12" in composer() and "pasted 12 lines]" not in pane(), "pasting the same text again did not open the chip")
+        screen("tui-paste-unfolded")
+        keys("C-_")
+        until(lambda: "[#1 pasted 12 lines]" in composer() and "repeat paste line" not in pane(), "Ctrl+- did not fold the text back into its chip")
+        run("tmux", "paste-buffer", "-p", "-b", "composer", "-t", session)
+        until(lambda: "repeat paste line 12" in composer() and "pasted 12 lines]" not in pane(), "the chip did not open again")
+        keys("Enter")
+
+        def sent_repeat():
+            texts = [item["data"]["text"] for item in api(f"/threads/{thread}/items") if item["data"]["type"] == "user_message"]
+            return [text for text in texts if "repeat paste line" in text]
+        sent = until(sent_repeat, "the message with the opened paste was not sent")
+        idle()
+        assert sent == [repeat], sent
+        checks.append("Repeated paste: the same text right after its chip opens it in place, Ctrl+- folds it back, sent once")
 
         # A paste Desktop sent folds under its label until the prompt opens.
         desktop_paste = "\n".join(f"desktop log line {index}" for index in range(1, 31))

@@ -12,9 +12,9 @@ pub fn line(text: impl Into<String>, foreground: Color) -> Line {
 }
 
 /// One display line, truncated to `width` with an ellipsis when content was
-/// dropped mid-way.
+/// dropped mid-way. Line breaks and tabs read as a space each.
 pub fn single_line(value: &str, width: usize) -> String {
-    let value = value.replace(['\n', '\r'], " ");
+    let value = value.replace(['\n', '\r', '\t'], " ");
     if value.width() <= width {
         return value;
     }
@@ -34,6 +34,163 @@ pub fn single_line(value: &str, width: usize) -> String {
     }
     truncated.push('…');
     truncated
+}
+
+/// Tab stops of code and of what people write (a reply's code block, a
+/// diff's rows, a prompt): every four columns.
+pub const CODE_TABS: usize = 4;
+/// Tab stops of a command's output, where a terminal sets them: every eight.
+pub const OUTPUT_TABS: usize = 8;
+
+/// Cells a tab at `column` takes: up to the next of the `stops`.
+pub(crate) const fn tab_cells(column: usize, stops: usize) -> usize {
+    stops - column % stops
+}
+
+/// Cells a grapheme takes at `column`, a tab reaching the next of the `stops`.
+pub(crate) fn code_cells(column: usize, grapheme: &str, stops: usize) -> usize {
+    if grapheme == "\t" {
+        tab_cells(column, stops)
+    } else {
+        grapheme.width()
+    }
+}
+
+/// One tab as it is drawn: `cells` spaces in `template`'s style, which a
+/// selection copies as the tab. The renderer gives a raw tab a width of its
+/// own, not the one a view measures, so every view that keeps a text's tabs
+/// draws them as these.
+pub fn tab_span(template: &Span, cells: usize) -> Span {
+    let mut span = template.clone();
+    span.text = " ".repeat(cells);
+    span.tab = true;
+    span
+}
+
+/// [`single_line`] for a line whose tabs [`expand_tabs`] draws: its tabs
+/// stay, each measured to the next of the `stops`.
+pub fn single_code_line(value: &str, width: usize, stops: usize) -> String {
+    if !value.contains('\t') {
+        return single_line(value, width);
+    }
+    let value = value.replace(['\n', '\r'], " ");
+    let total = value
+        .graphemes(true)
+        .fold(0, |used, grapheme| used + code_cells(used, grapheme, stops));
+    if total <= width {
+        return value;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let budget = width.saturating_sub(1);
+    let mut used = 0;
+    let mut truncated = String::new();
+    for grapheme in value.graphemes(true) {
+        let cells = code_cells(used, grapheme, stops);
+        if used + cells > budget {
+            break;
+        }
+        truncated.push_str(grapheme);
+        used += cells;
+    }
+    truncated.push('…');
+    truncated
+}
+
+/// `text` as one line of code drawn from `column` in `template`'s style,
+/// within `width` cells: line breaks as spaces, each tab a [`tab_span`] to
+/// the next of the `stops`, cut with an ellipsis where it does not fit. Its
+/// spans, and the cells they take.
+pub fn code_line_spans(
+    text: &str,
+    width: usize,
+    stops: usize,
+    column: usize,
+    template: &Span,
+) -> (Vec<Span>, usize) {
+    if !text.contains('\t') {
+        let mut span = template.clone();
+        span.text = single_line(text, width);
+        let used = span.width();
+        return (
+            vec![span]
+                .into_iter()
+                .filter(|span| !span.text.is_empty())
+                .collect(),
+            used,
+        );
+    }
+    let text = text.replace(['\n', '\r'], " ");
+    let total = text.graphemes(true).fold(0, |used, grapheme| {
+        used + code_cells(column + used, grapheme, stops)
+    });
+    let fits = total <= width;
+    if !fits && width == 0 {
+        return (Vec::new(), 0);
+    }
+    let budget = if fits { width } else { width - 1 };
+    let piece = |run: &mut String| {
+        let mut span = template.clone();
+        span.text = std::mem::take(run);
+        span
+    };
+    let (mut spans, mut run, mut used) = (Vec::new(), String::new(), 0);
+    for grapheme in text.graphemes(true) {
+        let cells = code_cells(column + used, grapheme, stops);
+        if used + cells > budget {
+            break;
+        }
+        if grapheme == "\t" {
+            if !run.is_empty() {
+                spans.push(piece(&mut run));
+            }
+            spans.push(tab_span(template, cells));
+        } else {
+            run.push_str(grapheme);
+        }
+        used += cells;
+    }
+    if !fits {
+        run.push('…');
+        used += 1;
+    }
+    if !run.is_empty() {
+        spans.push(piece(&mut run));
+    }
+    (spans, used)
+}
+
+/// A line with each tab drawn as a [`tab_span`] up to the next of the
+/// `stops`, counted from its first span; a line without tabs comes back as
+/// it is.
+pub fn expand_tabs(spans: Vec<Span>, stops: usize) -> Vec<Span> {
+    if !spans.iter().any(|span| span.text.contains('\t')) {
+        return spans;
+    }
+    let mut column = 0;
+    let mut opened = Vec::with_capacity(spans.len() + 2);
+    for span in spans {
+        if !span.text.contains('\t') {
+            column += span.width();
+            opened.push(span);
+            continue;
+        }
+        for (index, piece) in span.text.split('\t').enumerate() {
+            if index > 0 {
+                let cells = tab_cells(column, stops);
+                opened.push(tab_span(&span, cells));
+                column += cells;
+            }
+            if !piece.is_empty() {
+                let mut part = span.clone();
+                piece.clone_into(&mut part.text);
+                column += part.width();
+                opened.push(part);
+            }
+        }
+    }
+    opened
 }
 
 /// A chat title as one display line: [`single_line`] without the escape
@@ -132,7 +289,7 @@ pub fn short_id(value: &str) -> &str {
 /// Wrap styled runs to `width` display columns, prefixing the first line with
 /// `first_prefix` and continuations with `cont_prefix` (same color). Styling
 /// survives the wrap: each output line carries spans grouped by their source
-/// run's colors and attributes.
+/// run's colors and attributes. Tabs reach stops of [`CODE_TABS`].
 pub fn wrap_spans(
     spans: &[Span],
     width: usize,
@@ -140,23 +297,52 @@ pub fn wrap_spans(
     cont_prefix: &str,
     prefix_color: Color,
 ) -> Vec<Line> {
+    wrap_spans_with_tabs(
+        spans,
+        width,
+        first_prefix,
+        cont_prefix,
+        prefix_color,
+        CODE_TABS,
+    )
+}
+
+/// [`wrap_spans`] with tabs reaching the next of the `stops`, counted from
+/// the start of the row they land on (as a terminal and the prompt count
+/// them), each drawn as a [`tab_span`].
+pub fn wrap_spans_with_tabs(
+    spans: &[Span],
+    width: usize,
+    first_prefix: &str,
+    cont_prefix: &str,
+    prefix_color: Color,
+    stops: usize,
+) -> Vec<Line> {
     let inner = width
         .saturating_sub(first_prefix.width().max(cont_prefix.width()))
         .max(10);
-    // Flatten to (character, style index) so breaks can land anywhere.
+    // Flatten to (character, style index) so breaks can land anywhere. A
+    // tab's width depends on its row, so it is measured there.
     let mut cells: Vec<(char, usize, usize)> = Vec::new();
     for (index, span) in spans.iter().enumerate() {
         for character in span.text.chars() {
             cells.push((character, index, character.width().unwrap_or(0)));
         }
     }
+    let cells_at = |cell: &(char, usize, usize), column: usize| {
+        if cell.0 == '\t' {
+            tab_cells(column, stops)
+        } else {
+            cell.2
+        }
+    };
     let mut lines = Vec::new();
     let mut start = 0;
     while start < cells.len() {
         let mut end = start;
         let mut used = 0;
         while end < cells.len() {
-            let cells_wide = cells[end].2;
+            let cells_wide = cells_at(&cells[end], used);
             if end > start && used + cells_wide > inner {
                 break;
             }
@@ -164,8 +350,11 @@ pub fn wrap_spans(
             end += 1;
         }
         if end < cells.len() {
-            // Prefer breaking at the last space inside the window.
-            if let Some(break_at) = (start..end).rev().find(|&index| cells[index].0 == ' ') {
+            // Prefer breaking at the last space (or tab) inside the window.
+            if let Some(break_at) = (start..end)
+                .rev()
+                .find(|&index| matches!(cells[index].0, ' ' | '\t'))
+            {
                 if break_at > start {
                     end = break_at;
                 }
@@ -178,7 +367,18 @@ pub fn wrap_spans(
         };
         let mut line_spans = vec![Span::new(prefix, prefix_color)];
         let mut current: Option<(usize, String)> = None;
-        for &(character, style, _) in &cells[start..end] {
+        let mut column = 0;
+        for cell in &cells[start..end] {
+            let (character, style, _) = *cell;
+            let cells_wide = cells_at(cell, column);
+            column += cells_wide;
+            if character == '\t' {
+                if let Some((active, text)) = current.take() {
+                    line_spans.push(styled_run(&spans[active], text));
+                }
+                line_spans.push(tab_span(&spans[style], cells_wide));
+                continue;
+            }
             match &mut current {
                 Some((active, text)) if *active == style => text.push(character),
                 _ => {
@@ -195,7 +395,7 @@ pub fn wrap_spans(
         lines.push(Line::new(line_spans));
         start = end;
         // Consume the whitespace the break landed on.
-        while start < cells.len() && cells[start].0 == ' ' {
+        while start < cells.len() && matches!(cells[start].0, ' ' | '\t') {
             start += 1;
         }
     }
@@ -233,16 +433,13 @@ pub fn dialog_item_region(line: &mut Line, from: usize, to: usize, theme: &Theme
     let mut rebuilt: Vec<Span> = Vec::with_capacity(line.spans.len());
     let mut column = 0usize;
     for span in line.spans.drain(..) {
-        for grapheme in span.text.graphemes(true) {
-            let cell_width = grapheme.width();
+        for (mut styled, cell_width) in style_pieces(span) {
             let end = column.saturating_add(cell_width);
             let hovered = if cell_width == 0 {
                 column > from && column <= to
             } else {
                 column < to && end > from
             };
-            let mut styled = span.clone();
-            styled.text = grapheme.to_string();
             if hovered {
                 styled.bg = Some(theme.selected);
             }
@@ -264,16 +461,13 @@ fn style_cells(
     let mut rebuilt: Vec<Span> = Vec::with_capacity(line.spans.len() + 2);
     let mut column = 0usize;
     for span in line.spans.drain(..) {
-        for grapheme in span.text.graphemes(true) {
-            let cell_width = grapheme.width();
+        for (mut styled, cell_width) in style_pieces(span) {
             let end = column.saturating_add(cell_width);
             let selected = if cell_width == 0 {
                 column > from && column <= to
             } else {
                 column < to && end > from
             };
-            let mut styled = span.clone();
-            styled.text = grapheme.to_string();
             if selected {
                 styled.bg = Some(theme.primary);
                 styled.fg = theme.bg;
@@ -319,8 +513,12 @@ pub fn decorate_prefix(line: &mut Line, prefix: &str) {
     }
 }
 
+/// Add `span` to `spans`, joined to the last one when they look alike. A tab
+/// stays a span of its own, so a selection still copies it as one.
 fn push_run(spans: &mut Vec<Span>, span: Span) {
     if let Some(previous) = spans.last_mut()
+        && !previous.tab
+        && !span.tab
         && previous.fg == span.fg
         && previous.bg == span.bg
         && previous.attributes == span.attributes
@@ -339,7 +537,25 @@ fn styled_run(template: &Span, text: String) -> Span {
         bg: template.bg,
         attributes: template.attributes,
         selectable: template.selectable,
+        tab: false,
     }
+}
+
+/// `span` cut into the pieces a cell style is laid over: each grapheme, or a
+/// [`tab_span`] whole, with the cells each piece takes.
+fn style_pieces(span: Span) -> Vec<(Span, usize)> {
+    if span.tab {
+        let cells = span.width();
+        return vec![(span, cells)];
+    }
+    span.text
+        .graphemes(true)
+        .map(|grapheme| {
+            let mut piece = span.clone();
+            piece.text = grapheme.to_string();
+            (piece, grapheme.width())
+        })
+        .collect()
 }
 
 #[cfg(test)]

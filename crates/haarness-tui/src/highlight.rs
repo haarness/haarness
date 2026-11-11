@@ -299,6 +299,44 @@ fn role_theme(theme: &Theme) -> syntect::highlighting::Theme {
     }
 }
 
+/// The grammar for `code` in `language`. PHP's reads a file as HTML until
+/// `<?php`, so a snippet in a code fence, or one row of a `.php` diff, would
+/// come out uncoloured: `php` code with no PHP tag and no line of markup is
+/// read as PHP alone. A template (`phtml`, as the review viewer names one)
+/// keeps the HTML reading.
+fn php_code<'a>(
+    set: &'a syntect::parsing::SyntaxSet,
+    syntax: &'a syntect::parsing::SyntaxReference,
+    language: &str,
+    code: &str,
+) -> &'a syntect::parsing::SyntaxReference {
+    use syntect::parsing::Scope;
+    if !language.eq_ignore_ascii_case("php")
+        || Scope::new("embedding.php").ok() != Some(syntax.scope)
+    {
+        return syntax;
+    }
+    let markup = code.contains("<?")
+        || code.lines().any(|line| {
+            let line = line.trim_start();
+            closes_php(line) || (line.starts_with('<') && !line.starts_with("<<<"))
+        });
+    if markup {
+        return syntax;
+    }
+    Scope::new("source.php")
+        .ok()
+        .and_then(|scope| set.find_syntax_by_scope(scope))
+        .unwrap_or(syntax)
+}
+
+/// Whether `line` holds a PHP closing tag: a `?>` that does not open an
+/// atomic group of a pattern, `(?>`.
+pub(crate) fn closes_php(line: &str) -> bool {
+    line.match_indices("?>")
+        .any(|(at, _)| !line[..at].ends_with('('))
+}
+
 /// Highlight a whole code block with multi-line-correct grammar state.
 /// Unknown languages fall back to the legacy single-line highlighter.
 pub fn highlight_block(code: &str, language_name: &str, theme: &Theme) -> Vec<Vec<Span>> {
@@ -320,6 +358,7 @@ pub fn highlight_block(code: &str, language_name: &str, theme: &Theme) -> Vec<Ve
             .map(|row| highlight_line(row, language_name, theme))
             .collect();
     };
+    let syntax = php_code(set, syntax, token, code);
     let syntect_theme = role_theme(theme);
     let mut highlighter = syntect::easy::HighlightLines::new(syntax, &syntect_theme);
     code.lines()
@@ -415,6 +454,103 @@ mod tests {
                 "{extension}"
             );
         }
+    }
+
+    /// The text of the spans drawn in `color`, joined.
+    fn in_color(lines: &[Vec<haarness_opentui::Span>], color: haarness_opentui::Color) -> String {
+        lines
+            .iter()
+            .flatten()
+            .filter(|span| span.fg == color)
+            .map(|span| span.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn php_snippets_with_no_tag_are_read_as_php() {
+        let theme = Theme::editorial_dark();
+        let syntax = &theme.syntax;
+        let block = super::highlight_block("$name = strlen(\"x\"); // why", "php", &theme);
+        assert_eq!(in_color(&block, syntax.string), "\"x\"");
+        assert_eq!(in_color(&block, syntax.comment), "// why");
+        let code = "function greet(string $who): string {\n    return \"Hi, $who\";\n}";
+        let block = super::highlight_block(code, "php", &theme);
+        assert!(in_color(&block, syntax.keyword).contains("function"));
+        assert!(in_color(&block[1..2], syntax.keyword).contains("return"));
+        // One row of a `.php` diff, which the review viewer draws on its own.
+        let row = super::highlight_block_transparent("return \"ok\";", "php", &theme);
+        assert_eq!(in_color(&row, syntax.keyword), "return");
+        assert_eq!(in_color(&row, syntax.string), "\"ok\"");
+        assert!(row[0].iter().all(|span| span.bg.is_none()));
+    }
+
+    #[test]
+    fn php_with_a_tag_or_a_line_of_markup_keeps_the_html_reading() {
+        let theme = Theme::editorial_dark();
+        let syntax = &theme.syntax;
+        let block = super::highlight_block("<?php echo 'a'; ?>\n<p>hi</p>", "php", &theme);
+        assert_eq!(in_color(&block, syntax.string), "'a'");
+        assert!(in_color(&block[1..], syntax.keyword).is_empty());
+        // A template's markup row in a `.php` diff stays markup: its
+        // attribute is not taken for the `class` keyword.
+        let row = super::highlight_block("<div class=\"card\">", "php", &theme);
+        assert_eq!(in_color(&row, syntax.string), "\"card\"");
+        assert!(in_color(&row, syntax.keyword).is_empty());
+        assert!(in_color(&row, syntax.constant).is_empty());
+        // So does the row that closes the PHP and goes back to markup.
+        let row = super::highlight_block("?></div>", "php", &theme);
+        assert!(in_color(&row, syntax.keyword).is_empty());
+        assert!(in_color(&row, syntax.constant).is_empty());
+        // A template excerpt whose markup comes after its first line.
+        for code in [
+            "@extends('layouts.app')\n<div class=\"card\">Welcome back, and new</div>",
+            "// header.php\n  <p>Hello and welcome</p>",
+        ] {
+            let block = super::highlight_block(code, "php", &theme);
+            assert!(in_color(&block, syntax.keyword).is_empty(), "{code}");
+            assert!(in_color(&block, syntax.constant).is_empty(), "{code}");
+        }
+        // A heredoc's opening line is not markup.
+        let code = "$text =\n  <<<TXT\nplain words\nTXT;\nreturn $text;";
+        let block = super::highlight_block(code, "php", &theme);
+        assert!(in_color(&block, syntax.string).contains("plain words"));
+        assert_eq!(in_color(&block[4..], syntax.keyword), "return");
+    }
+
+    #[test]
+    fn a_php_template_keeps_the_html_reading_on_every_row() {
+        let theme = Theme::editorial_dark();
+        let syntax = &theme.syntax;
+        for row in [
+            "    Welcome back, {{ $user->name }}! Don't forget to check.",
+            "    Posted in the archive for this year and older",
+            "@endsection",
+        ] {
+            let spans = super::highlight_block_transparent(row, "phtml", &theme);
+            for role in [syntax.keyword, syntax.string, syntax.constant] {
+                assert!(in_color(&spans, role).is_empty(), "{row}");
+            }
+        }
+        // `phtml` is a grammar of its own, not the plain fallback: a tag's
+        // attribute still reads as a string.
+        let row = super::highlight_block_transparent("<div class=\"card\">", "phtml", &theme);
+        assert_eq!(in_color(&row, syntax.string), "\"card\"");
+    }
+
+    #[test]
+    fn a_pattern_s_atomic_group_is_not_a_closing_tag() {
+        assert!(super::closes_php("?>"));
+        assert!(super::closes_php("<?= $title ?></h1>"));
+        assert!(!super::closes_php("preg_match('/^(?>\\d+)$/', $id);"));
+        assert!(!super::closes_php("return $user?->name;"));
+        let theme = Theme::editorial_dark();
+        let row = super::highlight_block_transparent(
+            "return preg_match('/^(?>\\d+)$/', $id);",
+            "php",
+            &theme,
+        );
+        // Read as PHP: the keyword and the pattern's own operators coloured.
+        assert!(in_color(&row, theme.syntax.keyword).starts_with("return"));
     }
 
     #[test]

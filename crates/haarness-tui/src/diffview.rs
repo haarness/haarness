@@ -134,6 +134,8 @@ pub struct FileRows {
     pub truncated: bool,
     /// A body-free explanation (binary, over budget, nothing to show).
     pub note: Option<String>,
+    /// What the rows are coloured as: see [`row_language`].
+    pub language: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -172,11 +174,62 @@ pub fn file_rows(file: &FileDiff, context: Option<u32>) -> FileRows {
         Some("No patch body for this file".into())
     };
     let pairs = split_pairs(&rows);
+    let language = row_language(file, &rows);
     FileRows {
         rows,
         pairs,
         truncated: truncated || file.truncated,
         note,
+        language,
+    }
+}
+
+/// The language a file's rows are coloured as: its extension, or `phtml` for
+/// a PHP template. The viewer colours each row on its own, and a template's
+/// rows of text (prose, `{{ $name }}`, the end of a tag) read right only in
+/// the grammar that starts in HTML, so a template keeps it for every row
+/// while a file of PHP code alone has each row read as PHP.
+///
+/// A `.php` file reads as a template unless its lines (the whole file where
+/// the review holds it, else the rows shown) have one that looks like code
+/// and none of markup. A closing tag alone on the last line, as older code
+/// ends, or one in a pattern (`(?>`), is not markup.
+fn row_language(file: &FileDiff, rows: &[DiffRow]) -> String {
+    let extension = file
+        .file
+        .rsplit_once('.')
+        .map_or("", |(_, extension)| extension);
+    if !extension.eq_ignore_ascii_case("php") {
+        return extension.to_owned();
+    }
+    let texts = [&file.before, &file.after]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let lines: Vec<Vec<&str>> = if texts.is_empty() {
+        vec![rows.iter().map(|row| row.text.as_str()).collect()]
+    } else {
+        texts.iter().map(|text| text.lines().collect()).collect()
+    };
+    let markup = |lines: &[&str]| {
+        let last = lines.iter().rposition(|line| !line.trim().is_empty());
+        lines.iter().enumerate().any(|(index, line)| {
+            let line = line.trim();
+            (crate::highlight::closes_php(line) && !(Some(index) == last && line == "?>"))
+                || (line.starts_with('<') && !line.starts_with("<?php") && !line.starts_with("<<<"))
+        })
+    };
+    let code = |line: &&str| {
+        let line = line.trim();
+        line.starts_with("<?php") || line.ends_with([';', '{', '}'])
+    };
+    let template = file.file.to_ascii_lowercase().ends_with(".blade.php")
+        || lines.iter().any(|lines| markup(lines))
+        || !lines.iter().any(|lines| lines.iter().any(code));
+    if template {
+        "phtml".to_owned()
+    } else {
+        extension.to_owned()
     }
 }
 
@@ -1466,6 +1519,56 @@ mod tests {
             binary: false,
             truncated: false,
         }
+    }
+
+    #[test]
+    fn php_templates_keep_the_html_reading_for_every_row() {
+        let rows = |name: &str, body: &str| {
+            let patch =
+                format!("@@ -1,2 +1,2 @@\n {body}\n-    return $who;\n+    return $name;\n");
+            file_rows(&file(name, &patch), None).language
+        };
+        // PHP code alone is read as PHP.
+        assert_eq!(rows("src/User.php", "<?php"), "php");
+        assert_eq!(rows("src/User.php", "$x = <<<TXT"), "php");
+        assert_eq!(rows("src/user.PHP", "{"), "PHP");
+        // Templates: by name, by a closing tag, or by a row of markup.
+        assert_eq!(rows("views/home.blade.php", "@section('content')"), "phtml");
+        assert_eq!(rows("views/Home.Blade.php", "{"), "phtml");
+        assert_eq!(rows("page.php", "<?php get_header(); ?>"), "phtml");
+        assert_eq!(rows("page.php", "  <main>"), "phtml");
+        assert_eq!(rows("page.php", "<?= $title ?>"), "phtml");
+        assert_eq!(rows("page.phtml", "{"), "phtml");
+        assert_eq!(rows("main.rs", "<T>"), "rs");
+        assert_eq!(rows("Makefile", "<"), "");
+        // A closing tag in a pattern, or alone on the last line, is code's.
+        assert_eq!(
+            rows("src/Id.php", "preg_match('/^(?>\\d+)$/', $id);"),
+            "php"
+        );
+        assert_eq!(rows("page.php", "?>"), "phtml");
+        let ending = "@@ -1,3 +1,3 @@\n-    return $who;\n+    return $name;\n }\n?>\n\n";
+        assert_eq!(
+            file_rows(&file("src/Old.php", ending), None).language,
+            "php"
+        );
+        // Rows with nothing that reads as code are not taken for it.
+        let prose =
+            "@@ -1,2 +1,2 @@\n Posted in the archive\n-for this year\n+for this year and older\n";
+        assert_eq!(file_rows(&file("page.php", prose), None).language, "phtml");
+        // A snapshot review looks at the whole file, not only the rows shown.
+        let mut old = file("src/Old.php", "");
+        old.patch = None;
+        old.before = Some("<?php\n\nclass A\n{\n    public $x;\n}\n?>\n".into());
+        old.after = Some("<?php\n\nclass A\n{\n    public $y;\n}\n?>\n".into());
+        assert_eq!(file_rows(&old, Some(1)).language, "php");
+        let mut snapshot = file("page.php", "");
+        snapshot.patch = None;
+        snapshot.before = Some("<div>\n\n\nPosted in the archive\n\n\n</div>\n".into());
+        snapshot.after = Some("<div>\n\n\nPosted in the old archive\n\n\n</div>\n".into());
+        let snapshot = file_rows(&snapshot, Some(1));
+        assert!(snapshot.rows.iter().all(|row| !row.text.contains('<')));
+        assert_eq!(snapshot.language, "phtml");
     }
 
     #[test]

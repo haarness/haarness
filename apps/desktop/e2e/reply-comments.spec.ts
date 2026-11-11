@@ -685,3 +685,48 @@ test("in a column too narrow for the button beside Copy and Fork, it goes just u
   await page.evaluate(() => window.haarness.preferences({ language: "en" }));
   expect(errors).toEqual([]);
 });
+
+test("a reply's last paragraph, picked with a triple click, gets the button and is quoted whole", async () => {
+  /** Triple-clicks `paragraph`, comments on it, and returns what the message box then holds. */
+  async function commentOn(paragraph: ReturnType<Page["locator"]>, words: string) {
+    await page.evaluate(() => document.getSelection()?.removeAllRanges());
+    await paragraph.click({ clickCount: 3 });
+    // The selection runs on past the reply's text, to the start of what follows it.
+    expect(
+      await paragraph.evaluate((element) =>
+        element.closest(".markdown")!.contains(document.getSelection()!.getRangeAt(0).endContainer),
+      ),
+    ).toBe(false);
+    await expect(comment()).toBeVisible();
+    await comment().click();
+    const field = page.getByRole("textbox", { name: "Comment on the reply", exact: true });
+    await expect(field).toBeFocused();
+    await field.fill(words);
+    await field.press("Enter");
+    await expect(field).toHaveCount(0);
+    const value = await message().inputValue();
+    await message().fill("");
+    return value;
+  }
+
+  // The last paragraph of a whole reply.
+  await wheelTo("top");
+  const last = reply("Restart the daemon").locator("p").last();
+  await expect(last).toHaveText("A third paragraph closes the reply.");
+  expect(await commentOn(last, "Why last?")).toBe(
+    "Comment on this part of your reply:\n> A third paragraph closes the reply.\n\nWhy last?",
+  );
+
+  // The last paragraph of a reply's text that a tool row follows.
+  await writeFile(join(workspace, "README.md"), "# Fixture\n\nA README the agent reads.\n");
+  await message().fill('!preface read {"path":"README.md"}');
+  await message().press("Enter");
+  await expect(reply("Tool read =>")).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".composer")).not.toHaveClass(/running/);
+  const before = reply("inspect the repository first").locator("p").last();
+  await expect(before).toHaveText("I’ll inspect the repository first.");
+  expect(await commentOn(before, "Which files?")).toBe(
+    "Comment on this part of your reply:\n> I’ll inspect the repository first.\n\nWhich files?",
+  );
+  expect(errors).toEqual([]);
+});

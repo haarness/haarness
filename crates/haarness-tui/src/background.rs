@@ -1352,13 +1352,14 @@ fn overprinted(line: &str) -> String {
     shown.trim_end().to_owned()
 }
 
-/// Cut a line of output into rows of `width` columns, tabs set every eight.
+/// Cut a line of output into rows of `width` columns, tabs set at a
+/// terminal's stops, as a command's output reads in the chat.
 fn wrap_into(rows: &mut Vec<String>, line: &str, width: usize) {
     let mut row = String::new();
     let mut used = 0;
     for character in line.chars() {
         if character == '\t' {
-            let stop = (used / 8 + 1) * 8;
+            let stop = used + crate::view::span::tab_cells(used, crate::view::span::OUTPUT_TABS);
             if stop > width {
                 rows.push(std::mem::take(&mut row));
                 used = 0;

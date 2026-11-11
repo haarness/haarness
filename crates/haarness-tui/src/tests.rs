@@ -9634,6 +9634,35 @@ fn pending_permission_fixture(
     }
 }
 
+/// An edit's change preview on the card draws a line's tabs to their stops
+/// and copies them as tabs.
+#[test]
+fn an_edit_card_draws_and_copies_the_tabs_of_its_changed_lines() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mut pending = pending_permission_fixture(&thread, "tabbed-edit");
+    pending.permission = "edit".into();
+    pending.operation = "edit:Makefile".into();
+    pending.detail = serde_json::json!({
+        "path": "Makefile",
+        "old": "all:\n\techo \"build\"\n",
+        "new": "all:\n\techo \"built\"\tdone\n",
+    });
+    pending.patterns = vec!["Makefile".into()];
+    pending.always_patterns = vec!["edit:Makefile".into()];
+    app.pending_permissions.push(pending);
+    app.permission_focus = true;
+    let lines = app.lines((100, 40));
+    let drawn = haarness_opentui::Renderer::new(100, 40, true)
+        .unwrap()
+        .snapshot_lines(&lines);
+    assert!(drawn.contains("-     echo \"build\""), "{drawn}");
+    assert!(drawn.contains("+     echo \"built\"    done"), "{drawn}");
+    let copy = copied(&lines);
+    assert!(copy.contains("- \techo \"build\""), "{copy:?}");
+    assert!(copy.contains("+ \techo \"built\"\tdone"), "{copy:?}");
+}
+
 #[test]
 fn approval_names_the_file_a_linked_path_leads_to() {
     let thread = fixture_thread();
@@ -19360,6 +19389,288 @@ async fn review_key(app: &mut App, code: KeyCode) {
     )
     .await
     .unwrap();
+}
+
+/// A long tab-separated output folds to its first rows with the rest
+/// counted, and opens whole, its tabs at a terminal's stops either way.
+#[test]
+fn a_long_output_with_tabs_folds_counts_and_opens_with_its_tabs() {
+    let thread = fixture_thread();
+    let mut output = String::new();
+    for index in 1..=5000 {
+        use std::fmt::Write as _;
+        let _ = writeln!(output, "module_{index}\t-O2\t-Wall\tdone");
+    }
+    let mut items = Vec::new();
+    for index in 0..8 {
+        let id = format!("cat-{index}");
+        items.push(message_item(
+            index * 2 + 1,
+            &thread,
+            ItemData::ToolCall {
+                call_id: id.clone(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": "cat build.tsv"}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        ));
+        items.push(message_item(
+            index * 2 + 2,
+            &thread,
+            ItemData::ToolResult {
+                call_id: id,
+                name: "bash".into(),
+                output: format!("exit: 0\n{output}"),
+                is_error: false,
+                metadata: serde_json::json!({"exit": 0, "truncated": false}),
+            },
+        ));
+    }
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.tool_details = true;
+    let text = frame_text(&app, (100, 60));
+    assert!(
+        text.contains("  ▏ module_1        -O2     -Wall   done"),
+        "{text}"
+    );
+    assert!(
+        text.contains("… +4997 more lines · ctrl+r or click to expand"),
+        "{text}"
+    );
+    assert!(!text.contains("module_4"), "{text}");
+    let id = app.items.last().unwrap().id;
+    app.expanded.insert(id);
+    let lines = app.lines((100, 60));
+    let copy = copied(&lines);
+    assert!(copy.contains("module_5000\t-O2\t-Wall\tdone"), "{copy:?}");
+}
+
+/// What a drag over every row of `lines` copies.
+fn copied(lines: &[Line]) -> String {
+    let frame = crate::view::frame::CopyFrame::new(lines, Vec::new());
+    frame.text((0, 0), (lines.len().saturating_sub(1), 10_000))
+}
+
+/// The text and the tab flag of each span of `spans`.
+fn tab_pieces(spans: &[haarness_opentui::Span]) -> Vec<(&str, bool)> {
+    spans
+        .iter()
+        .map(|span| (span.text.as_str(), span.tab))
+        .collect()
+}
+
+#[test]
+fn a_line_of_code_measures_and_opens_its_tabs_to_their_stops() {
+    use crate::view::span::{
+        CODE_TABS, OUTPUT_TABS, code_line_spans, expand_tabs, single_code_line,
+    };
+    use haarness_opentui::Span;
+    // Cut to the width the tabs take once opened, keeping them for the drawing.
+    assert_eq!(single_code_line("\tab\tc", 9, CODE_TABS), "\tab\tc");
+    assert_eq!(single_code_line("\tab\tcd", 9, CODE_TABS), "\tab\t…");
+    assert_eq!(single_code_line("plain text", 6, CODE_TABS), "plain…");
+    let white = Color::rgb(255, 255, 255);
+    // Each tab a span of its own, holding the spaces to its stop.
+    let spans = expand_tabs(
+        vec![
+            Span::new("\tif", white),
+            Span::new(" x\t", white),
+            Span::new("y", white),
+        ],
+        CODE_TABS,
+    );
+    assert_eq!(
+        tab_pieces(&spans),
+        [
+            ("    ", true),
+            ("if", false),
+            (" x", false),
+            ("    ", true),
+            ("y", false)
+        ]
+    );
+    // A command's output sets them every eight, as a terminal does.
+    let spans = expand_tabs(vec![Span::new("ab\tX", white)], OUTPUT_TABS);
+    assert_eq!(
+        tab_pieces(&spans),
+        [("ab", false), ("      ", true), ("X", false)]
+    );
+    // Without a tab the spans come back as they were.
+    let plain = vec![Span::new("no tabs", white)];
+    assert_eq!(expand_tabs(plain.clone(), CODE_TABS), plain);
+    // Drawn from a column of a line, cut where it does not fit.
+    let template = Span::new("", white);
+    let (spans, used) = code_line_spans("\tab\tcd", 9, CODE_TABS, 0, &template);
+    assert_eq!(
+        tab_pieces(&spans),
+        [("    ", true), ("ab", false), ("  ", true), ("…", false)]
+    );
+    assert_eq!(used, 9);
+    let (spans, used) = code_line_spans("\tx", 10, CODE_TABS, 2, &template);
+    assert_eq!(tab_pieces(&spans), [("  ", true), ("x", false)]);
+    assert_eq!(used, 3);
+}
+
+#[test]
+fn wrapped_text_draws_tabs_to_their_stops_copies_them_and_previews_them_as_spaces() {
+    use crate::view::span::{single_line, wrap_spans};
+    use haarness_opentui::Span;
+    assert_eq!(single_line("one\ttwo", 20), "one two");
+    let white = Color::rgb(255, 255, 255);
+    let rows = wrap_spans(
+        &[Span::new("\tfirst second\tthird fourth", white)],
+        20,
+        "",
+        "",
+        white,
+    );
+    // Measured at its stops, the tab's four cells wrap the row before `third`,
+    // breaking at the tab as at a space.
+    let texts: Vec<String> = rows.iter().map(line_text).collect();
+    assert_eq!(texts, ["    first second", "third fourth"]);
+    assert_eq!(copied(&rows), "\tfirst second\nthird fourth");
+    let rows = wrap_spans(&[Span::new("all:\techo \"ok\"", white)], 40, "", "", white);
+    assert_eq!(copied(&rows), "all:\techo \"ok\"");
+    // A tab on a continuation row reaches a stop of that row, as a terminal
+    // and the prompt count it, not one of the whole line.
+    let long = format!("{}\tY", "x".repeat(25));
+    let rows = wrap_spans(&[Span::new(long, white)], 22, "", "", white);
+    let texts: Vec<String> = rows.iter().map(line_text).collect();
+    assert_eq!(texts, ["x".repeat(22), "xxx Y".to_owned()]);
+    assert_eq!(copied(&rows), format!("{}\nxxx\tY", "x".repeat(22)));
+}
+
+/// A sent prompt with tabs reads whole in its block once drawn: before, the
+/// renderer drew each tab wider than the block measured it and the text after
+/// it lost its first letters.
+#[test]
+fn a_sent_prompt_with_tabs_is_drawn_whole_in_its_block() {
+    let theme = Theme::editorial_dark();
+    let lines = crate::view::transcript::user_block(
+        "Go:\nfunc main() {\n\tfmt.Println(\"hi\")\t// say it\n\tif ok {\n\t\treturn\n\t}\n}",
+        60,
+        &theme,
+        crate::locale::Language::default(),
+        false,
+    );
+    assert!(lines.iter().all(|line| !line_text(line).contains('\t')));
+    let mut renderer = haarness_opentui::Renderer::new(60, 10, true).unwrap();
+    let drawn = renderer.snapshot_lines(&lines);
+    for row in [
+        "▎     fmt.Println(\"hi\")   // say it",
+        "▎     if ok {",
+        "▎         return",
+        "▎     }",
+    ] {
+        assert!(drawn.contains(row), "{row:?}\n{drawn}");
+    }
+    // A drag over the block copies the prompt's own tabs.
+    let copy = copied(&lines);
+    assert!(
+        copy.contains("\n\tfmt.Println(\"hi\")\t// say it\n\tif ok {\n\t\treturn\n\t}\n}"),
+        "{copy:?}"
+    );
+}
+
+/// The prompt draws a draft's tabs to their stops, and the cursor lands on
+/// the cell its position is drawn at: after a tab, and on one.
+#[test]
+fn the_prompt_draws_tabs_to_their_stops_with_the_cursor_where_it_is() {
+    let mut app = selector_fixture();
+    app.composer.set_text("\tif ok {".to_owned());
+    let cursor_column = |app: &App| {
+        let lines = crate::view::composer::editor_rows(app, &app.composer, "", None, true, 40);
+        let line = &lines[0];
+        let mut column = 0;
+        for span in &line.spans {
+            if span.bg == Some(app.theme.primary) {
+                return (line_text(line), column);
+            }
+            column += span.text.width();
+        }
+        panic!("no cursor in {:?}", line_text(line));
+    };
+    // At the end: the text drawn with the tab opened, the cursor after it.
+    let (text, column) = cursor_column(&app);
+    assert_eq!(text.trim_end(), "      if ok {");
+    assert_eq!(column, 2 + 4 + "if ok {".len());
+    // Just after the tab: the cursor on `i`, four cells in.
+    app.composer.move_home();
+    app.composer.move_right();
+    assert_eq!(cursor_column(&app), ("      if ok {".to_owned(), 2 + 4));
+    // On the tab itself: the first of its cells, the text after it in place.
+    app.composer.move_home();
+    let (text, column) = cursor_column(&app);
+    assert_eq!(text.trim_end(), "      if ok {");
+    assert_eq!(column, 2);
+    // A drag over the draft copies its tab, wherever the cursor is.
+    for at in [0, 1, "\tif ok {".len()] {
+        app.composer.move_home();
+        for _ in 0..at {
+            app.composer.move_right();
+        }
+        let lines = crate::view::composer::editor_rows(&app, &app.composer, "", None, true, 40);
+        assert_eq!(copied(&lines).trim_start_matches(' '), "\tif ok {", "{at}");
+    }
+}
+
+/// A row with tabs reads whole in both layouts once the native renderer has
+/// drawn it: a tab opens to the next stop of four, and the text after it is
+/// not drawn over.
+#[test]
+fn review_rows_with_tabs_are_drawn_whole_side_by_side_and_stacked() {
+    let mut app = selector_fixture();
+    let files = vec![haarness_protocol::FileDiff {
+        file: "Makefile".into(),
+        status: haarness_protocol::FileDiffStatus::Modified,
+        additions: 1,
+        deletions: 1,
+        patch: Some(
+            "@@ -1,3 +1,3 @@\n build:\n-\techo \"build\"\n+\techo \"built\"\tdone\n \tgo vet\t./...\n"
+                .into(),
+        ),
+        before: None,
+        after: None,
+        binary: false,
+        truncated: false,
+    }];
+    let viewer = crate::diffview::DiffViewer::new(
+        crate::diffview::DiffSource::WorkingTree,
+        files,
+        crate::diffview::DiffPreferences::default(),
+    );
+    app.overlay = crate::state::Overlay::Diff(Box::new(viewer));
+    app.sync_diff_layout(160);
+    let mut renderer = haarness_opentui::Renderer::new(160, 20, true).unwrap();
+    for layout in [
+        crate::diffview::DiffLayout::Split,
+        crate::diffview::DiffLayout::Unified,
+    ] {
+        viewer_mut(&mut app).layout = Some(layout);
+        viewer_mut(&mut app).rebuild_display();
+        let lines = app.lines((160, 20));
+        let drawn = renderer.snapshot_lines(&lines);
+        for code in [
+            "    echo \"build\"",
+            "    echo \"built\"    done",
+            "    go vet  ./...",
+        ] {
+            assert!(drawn.contains(code), "{layout:?} {code:?}\n{drawn}");
+        }
+        // A drag over a row copies the file's own tabs.
+        let row = lines
+            .iter()
+            .position(|line| line_text(line).contains("go vet"))
+            .unwrap();
+        let frame = crate::view::frame::CopyFrame::new(&lines, Vec::new());
+        let copy = frame.text((row, 0), (row, 159));
+        assert!(copy.contains("\tgo vet\t./..."), "{layout:?} {copy:?}");
+    }
+    // Stacked, the changed rows copy whole too.
+    let lines = app.lines((160, 20));
+    let copy = copied(&lines);
+    assert!(copy.contains("\techo \"build\"\n"), "{copy:?}");
+    assert!(copy.contains("\techo \"built\"\tdone\n"), "{copy:?}");
 }
 
 #[test]
