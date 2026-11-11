@@ -10407,15 +10407,20 @@ impl RepeatedFailures {
                 format!("{first}.")
             };
             format!(
-                "Not run: this exact call already failed {count} times in this turn with the same error, so it would fail again. The error was: {first} Change the call as that error says, or take another approach."
+                "Not run: this exact call already failed {count} times in this turn with the same error, and nothing that could change that has worked since. The error was: {first} Change the call as that error says, or take another approach."
             )
         })
     }
 
-    fn record(&mut self, key: String, result: &CoreResult<ToolOutput>) {
+    /// Count `result` for the call `key`. A call that may have changed
+    /// something (`reads_only` false: a write, an edit, a command) and
+    /// worked starts every count over, since a call that failed before may
+    /// work now: a file it read was made, a folder it needed was created.
+    fn record(&mut self, key: String, result: &CoreResult<ToolOutput>, reads_only: bool) {
         match result {
             // A stop says nothing about the call.
             Err(CoreError::Cancelled) => {}
+            Ok(_) if !reads_only => self.0.clear(),
             Err(error) => {
                 let words = user_facing_error(error);
                 let entry = self.0.entry(key).or_insert((0, String::new()));
@@ -13991,6 +13996,10 @@ impl RunnerTask {
         // is told to change it (a model that is refused tends to send the
         // same call again and again).
         let key = RepeatedFailures::key(name, &arguments);
+        let reads_only = self
+            .tools
+            .get(&self.resolve_tool_name(name))
+            .is_some_and(|tool| tool.parallel_safe(&arguments));
         let repeated = self.repeated_failures.lock().refusal(&key);
         let result = match repeated {
             Some(refusal) => {
@@ -14001,7 +14010,9 @@ impl RunnerTask {
                 let result = self
                     .execute_call_inner(agent, call_id, name, arguments, true, None)
                     .await;
-                self.repeated_failures.lock().record(key, &result);
+                self.repeated_failures
+                    .lock()
+                    .record(key, &result, reads_only);
                 result
             }
         };
@@ -23481,17 +23492,21 @@ mod tests {
             "The bash tool was called with invalid arguments. Fix the input and retry the same tool.\n- <root>: unexpected fields: bogus".into(),
         ));
         assert_eq!(failures.refusal(&call), None);
-        failures.record(call.clone(), &refused);
+        failures.record(call.clone(), &refused, true);
         assert_eq!(failures.refusal(&call), None);
         // Another call between them changes nothing.
-        failures.record(other.clone(), &Ok(super::plain_tool_output("ok".into())));
-        failures.record(call.clone(), &refused);
+        failures.record(
+            other.clone(),
+            &Ok(super::plain_tool_output("ok".into())),
+            true,
+        );
+        failures.record(call.clone(), &refused, true);
         let refusal = failures
             .refusal(&call)
             .expect("third identical call refused");
         assert_eq!(
             refusal,
-            "Not run: this exact call already failed 2 times in this turn with the same error, so it would fail again. The error was: The bash tool was called with invalid arguments. Fix the input and retry the same tool. - <root>: unexpected fields: bogus. Change the call as that error says, or take another approach."
+            "Not run: this exact call already failed 2 times in this turn with the same error, and nothing that could change that has worked since. The error was: The bash tool was called with invalid arguments. Fix the input and retry the same tool. - <root>: unexpected fields: bogus. Change the call as that error says, or take another approach."
         );
         assert_eq!(failures.refusal(&other), None);
         // A failure in other words (a timeout's own output file) counts from
@@ -23503,11 +23518,26 @@ mod tests {
         };
         let slow =
             super::RepeatedFailures::key("bash", &json!({"command": "sleep 5", "timeout": 1200}));
-        failures.record(slow.clone(), &timed_out("/tmp/a.txt"));
-        failures.record(slow.clone(), &timed_out("/tmp/b.txt"));
-        failures.record(slow.clone(), &Err(CoreError::Cancelled));
+        failures.record(slow.clone(), &timed_out("/tmp/a.txt"), true);
+        failures.record(slow.clone(), &timed_out("/tmp/b.txt"), true);
+        failures.record(slow.clone(), &Err(CoreError::Cancelled), true);
         assert_eq!(failures.refusal(&slow), None);
-        failures.record(call.clone(), &Ok(super::plain_tool_output("ran".into())));
+        failures.record(
+            call.clone(),
+            &Ok(super::plain_tool_output("ran".into())),
+            true,
+        );
+        assert_eq!(failures.refusal(&call), None);
+        // A call that may have changed something and worked starts every
+        // count over: the call that failed twice may work now.
+        failures.record(call.clone(), &refused, true);
+        failures.record(call.clone(), &refused, true);
+        assert!(failures.refusal(&call).is_some());
+        failures.record(
+            other.clone(),
+            &Ok(super::plain_tool_output("made it".into())),
+            false,
+        );
         assert_eq!(failures.refusal(&call), None);
     }
 
