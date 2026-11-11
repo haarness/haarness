@@ -2683,6 +2683,11 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     {
         return clean_error_text(raw.trim(), 600);
     }
+    // The AWS sign-in on this machine gave no credentials: the words say
+    // which profile, why, and what to run.
+    if raw.starts_with("Amazon Bedrock could not get AWS credentials") {
+        return clean_error_text(raw.trim(), 600);
+    }
     if is_region_unavailable(raw) {
         return format!(
             "{} is not available in your country or region. Choose a model from another provider.",
@@ -23244,6 +23249,13 @@ mod tests {
                 Some("Amazon Bedrock")
             ),
             "Amazon Bedrock rejected the request: anthropic.claude-haiku-5-5 is not available for this account."
+        );
+        // The AWS sign-in on this machine gave no credentials: said as is,
+        // naming the profile and what to run, not as a provider error.
+        let sign_in = "Amazon Bedrock could not get AWS credentials for the AWS profile corp: Token has expired and refresh failed. If the profile signs in through AWS IAM Identity Center, run `aws sso login --profile corp` and try again.";
+        assert_eq!(
+            super::describe_error(&provider(sign_in), Some("Amazon Bedrock")),
+            sign_in
         );
     }
 
