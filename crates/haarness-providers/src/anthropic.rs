@@ -528,7 +528,7 @@ impl ModelProvider for AnthropicProvider {
         let mut headers = self.headers.map();
         crate::apply_request_headers(&mut headers, &parameters.headers);
         if bound_thinking {
-            let beta = "thinking-binding-controls-2026-08-01";
+            let beta = THINKING_BINDING_BETA;
             let existing = headers
                 .get("anthropic-beta")
                 .and_then(|value| value.to_str().ok())
@@ -817,9 +817,14 @@ fn thinking_in_place(built: Vec<(Value, bool)>) -> Vec<Value> {
     messages
 }
 
+/// The beta that lets a request ask Claude to retire a thinking block whose
+/// prompt changed instead of refusing the request (Anthropic's API takes it
+/// as a header, Bedrock's Converse in the request body).
+pub(crate) const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+
 /// Claude 5.5 onwards (Fable and Mythos from 5.1) binds its thinking blocks to
 /// the prompt before them, so a refreshed prompt must retire them.
-fn binds_thinking(id: &str) -> bool {
+pub(crate) fn binds_thinking(id: &str) -> bool {
     claude_release(id).is_some_and(|release| {
         release.version >= (5, 5)
             || (matches!(release.family.as_str(), "fable" | "mythos") && release.version >= (5, 1))

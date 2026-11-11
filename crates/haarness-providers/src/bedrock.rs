@@ -3,9 +3,8 @@
 //! region offers, read from the Bedrock control plane.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{HashMap, HashSet},
     fmt::Write as _,
-    path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -27,18 +26,13 @@ use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    CompatibleModelDefaults, CredentialStore, NativeInstance, ProviderHeaders, aws_event_stream,
+    CompatibleModelDefaults, CredentialStore, NativeInstance, ProviderHeaders,
+    aws_config::{AwsCredentials, AwsSignIn},
+    aws_event_stream,
     media::Unreadable,
 };
 
 type HmacSha256 = Hmac<Sha256>;
-
-#[derive(Clone)]
-struct AwsCredentials {
-    access_key: String,
-    secret_key: SecretString,
-    session_token: Option<SecretString>,
-}
 
 /// Shown until the account's own list arrives, and whenever it cannot be read.
 const DEFAULT_MODELS: &[&str] = &[
@@ -80,25 +74,37 @@ pub struct BedrockProvider {
     auth_store: Option<Arc<CredentialStore>>,
     region: String,
     bearer: Option<SecretString>,
-    credentials: Option<AwsCredentials>,
+    /// The AWS CLI's sign-in on this machine, for SigV4.
+    sign_in: Option<AwsSignIn>,
     /// The configured models, or a few current ones until discovery answers.
     models: Vec<ModelInfo>,
     live_models: crate::live_models::LiveModels,
     /// What the account's discovered models take, by the id requests use.
     controls: RwLock<HashMap<String, ModelControls>>,
+    /// The inference profile a model that does not run on demand is asked
+    /// through, by its own id (`anthropic.claude-haiku-5-5` →
+    /// `global.anthropic.claude-haiku-5-5`): from the model list, or learned
+    /// when Bedrock refused the id itself.
+    profiles: RwLock<HashMap<String, String>>,
+    /// Models that refused tools on ConverseStream, answered whole instead.
+    whole_with_tools: RwLock<HashSet<String>>,
+    /// Models that refused a forced tool choice.
+    unforced: RwLock<HashSet<String>>,
+}
+
+/// How a request is signed.
+enum Signer {
+    Bearer(String),
+    SigV4(AwsCredentials),
 }
 
 impl BedrockProvider {
     pub fn from_environment(auth_store: Option<Arc<CredentialStore>>) -> Self {
-        let region = std::env::var("AWS_REGION")
-            .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-            .unwrap_or_else(|_| "us-east-1".into());
-        let base_url = std::env::var("AWS_BEDROCK_RUNTIME_ENDPOINT")
-            .unwrap_or_else(|_| format!("https://bedrock-runtime.{region}.amazonaws.com"));
+        let endpoint = std::env::var("AWS_BEDROCK_RUNTIME_ENDPOINT").ok();
         let instance = NativeInstance {
             id: "amazon-bedrock".into(),
             name: "Amazon Bedrock".into(),
-            base_url,
+            base_url: endpoint.clone().unwrap_or_default(),
             api_key: None,
             models: DEFAULT_MODELS.iter().map(|id| (*id).to_owned()).collect(),
             discover_models: true,
@@ -106,14 +112,42 @@ impl BedrockProvider {
             assume_authenticated: false,
             headers: ProviderHeaders::default(),
         };
-        Self::new_with_region(instance, auth_store, region)
+        let mut provider = Self::new_with_region(instance, auth_store, String::new());
+        provider.region = provider.default_region();
+        if endpoint.is_none() {
+            provider.instance.base_url =
+                format!("https://bedrock-runtime.{}.amazonaws.com", provider.region);
+        }
+        provider
     }
 
     pub fn new(instance: NativeInstance, auth_store: Option<Arc<CredentialStore>>) -> Self {
-        let region = std::env::var("AWS_REGION")
+        // An endpoint of AWS's names its region, which a signature must name.
+        let region = crate::aws_config::endpoint_region(&instance.base_url);
+        let mut provider = Self::new_with_region(instance, auth_store, region.unwrap_or_default());
+        if provider.region.is_empty() {
+            provider.region = provider.default_region();
+        }
+        provider
+    }
+
+    /// The region when no endpoint names one: the environment's, else the
+    /// AWS profile's, else the one a short-term API key was made for (it
+    /// works nowhere else), else us-east-1.
+    fn default_region(&self) -> String {
+        std::env::var("AWS_REGION")
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-            .unwrap_or_else(|_| "us-east-1".into());
-        Self::new_with_region(instance, auth_store, region)
+            .ok()
+            .filter(|region| !region.is_empty())
+            .or_else(crate::aws_config::profile_region)
+            .or_else(|| {
+                self.bearer
+                    .as_ref()
+                    .map(|key| key.expose_secret().to_owned())
+                    .or_else(|| self.stored_bearer())
+                    .and_then(|key| crate::aws_config::api_key_region(&key))
+            })
+            .unwrap_or_else(|| "us-east-1".into())
     }
 
     fn new_with_region(
@@ -127,7 +161,7 @@ impl BedrockProvider {
             .or_else(|| std::env::var("AWS_BEARER_TOKEN_BEDROCK").ok())
             .filter(|value| !value.is_empty())
             .map(SecretString::from);
-        let credentials = aws_credentials_from_environment();
+        let sign_in = AwsSignIn::from_environment();
         let ids = if instance.models.is_empty() {
             DEFAULT_MODELS.iter().map(|id| (*id).to_owned()).collect()
         } else {
@@ -146,10 +180,13 @@ impl BedrockProvider {
             auth_store,
             region,
             bearer,
-            credentials,
+            sign_in,
             models,
             live_models: crate::live_models::LiveModels::default(),
             controls: RwLock::default(),
+            profiles: RwLock::default(),
+            whole_with_tools: RwLock::default(),
+            unforced: RwLock::default(),
         }
     }
 
@@ -163,36 +200,56 @@ impl BedrockProvider {
     }
 
     fn authenticated(&self) -> bool {
-        self.bearer.is_some() || self.credentials.is_some() || self.stored_bearer().is_some()
+        self.bearer.is_some()
+            || self.sign_in.as_ref().is_some_and(AwsSignIn::usable)
+            || self.stored_bearer().is_some()
     }
 
-    /// Sign `headers` for a request to `url`: a Bedrock API key as a bearer
-    /// token, else the AWS credentials found in the environment.
-    fn authorize(
-        &self,
-        method: &str,
-        url: &str,
-        payload: &[u8],
-        headers: &mut reqwest::header::HeaderMap,
-    ) -> CoreResult<()> {
+    /// Whether a request could be signed at all, if the AWS sign-in works.
+    fn can_sign(&self) -> bool {
+        self.bearer.is_some() || self.sign_in.is_some() || self.stored_bearer().is_some()
+    }
+
+    /// How requests are signed: a Bedrock API key as a bearer token, else
+    /// the AWS credentials this machine's AWS setup gives.
+    async fn signer(&self) -> CoreResult<Signer> {
         if let Some(token) = self
             .bearer
             .as_ref()
             .map(|value| value.expose_secret().to_owned())
             .or_else(|| self.stored_bearer())
         {
-            headers.insert(
-                reqwest::header::AUTHORIZATION,
-                header(&format!("Bearer {token}"))?,
-            );
-            return Ok(());
+            return Ok(Signer::Bearer(token));
         }
-        if let Some(credentials) = &self.credentials {
-            return sign_request(method, url, payload, &self.region, credentials, headers);
+        if let Some(sign_in) = &self.sign_in {
+            return Ok(Signer::SigV4(sign_in.credentials().await?));
         }
         Err(CoreError::Provider(
             "Amazon Bedrock is not authenticated; set AWS_BEARER_TOKEN_BEDROCK, AWS credentials, or run `haarness auth login amazon-bedrock`".into(),
         ))
+    }
+
+    /// Sign `headers` for a request to `url`.
+    fn authorize(
+        &self,
+        signer: &Signer,
+        method: &str,
+        url: &str,
+        payload: &[u8],
+        headers: &mut reqwest::header::HeaderMap,
+    ) -> CoreResult<()> {
+        match signer {
+            Signer::Bearer(token) => {
+                headers.insert(
+                    reqwest::header::AUTHORIZATION,
+                    header(&format!("Bearer {token}"))?,
+                );
+                Ok(())
+            }
+            Signer::SigV4(credentials) => {
+                sign_request(method, url, payload, &self.region, credentials, headers)
+            }
+        }
     }
 
     /// The control plane beside the runtime endpoint (`bedrock.<region>`
@@ -213,7 +270,9 @@ impl BedrockProvider {
             reqwest::header::CONTENT_TYPE,
             reqwest::header::HeaderValue::from_static("application/json"),
         );
-        self.authorize("GET", &url, b"", &mut headers).ok()?;
+        let signer = self.signer().await.ok()?;
+        self.authorize(&signer, "GET", &url, b"", &mut headers)
+            .ok()?;
         let response = self
             .client
             .get(&url)
@@ -233,7 +292,7 @@ impl BedrockProvider {
     /// request names it by: its own where it runs on demand, else a
     /// cross-region inference profile.
     async fn fetch_models(&self) -> Option<Vec<ModelInfo>> {
-        if !self.instance.discover_models || !self.authenticated() {
+        if !self.instance.discover_models || !self.can_sign() {
             return None;
         }
         let foundation = self.control_get("/foundation-models").await?;
@@ -259,13 +318,14 @@ impl BedrockProvider {
                 _ => break,
             }
         }
-        let (models, controls) = discovered_models(
+        let (models, controls, aliases) = discovered_models(
             &foundation,
             &profiles,
             &self.region,
             &self.instance.model_defaults,
         );
         *self.controls.write().unwrap() = controls;
+        self.profiles.write().unwrap().extend(aliases);
         Some(crate::merge_discovered_models(self.models.clone(), models))
     }
 
@@ -277,6 +337,83 @@ impl BedrockProvider {
             .cloned()
             .unwrap_or_else(|| known_controls(model))
     }
+
+    /// The id a request for `model` names: its inference profile when it
+    /// runs only through one.
+    fn wire_model(&self, model: &str) -> String {
+        self.profiles
+            .read()
+            .unwrap()
+            .get(model)
+            .cloned()
+            .unwrap_or_else(|| model.to_owned())
+    }
+
+    /// Whether a request with tools to `model` goes to Converse, answered
+    /// whole, rather than ConverseStream.
+    fn answers_tools_whole(&self, model: &str) -> bool {
+        refuses_streamed_tools(model) || self.whole_with_tools.read().unwrap().contains(model)
+    }
+}
+
+/// The models AWS lists as taking tools on Converse but refusing them on
+/// ConverseStream ("This model doesn't support tool use in streaming mode"):
+/// Llama 3.1 and 3.3, Llama 4, Mistral Large 1 and 2, Pixtral Large and
+/// Writer's Palmyra X4 and X5. Any other that refuses so is learned.
+fn refuses_streamed_tools(model: &str) -> bool {
+    [
+        "meta.llama3-1-",
+        "meta.llama3-3-",
+        "meta.llama4-",
+        "mistral.mistral-large-2402",
+        "mistral.mistral-large-2407",
+        "mistral.pixtral-large",
+        "writer.palmyra-x4",
+        "writer.palmyra-x5",
+    ]
+    .iter()
+    .any(|family| model.contains(family))
+}
+
+/// The cross-region inference profile of this region's geography for a
+/// model named by its own id (`us.amazon.nova-micro-v1:0`), for a model that
+/// Bedrock runs only through a profile; none for an ARN or a profile id.
+fn regional_profile(model: &str, region: &str) -> Option<String> {
+    let profiled = GEOGRAPHIES.iter().any(|prefix| model.starts_with(prefix));
+    (!profiled && !model.starts_with("arn:") && model.contains('.'))
+        .then(|| format!("{}.{model}", geography(region)))
+}
+
+/// Whether Bedrock refused replayed reasoning: a block moved or changed, or,
+/// from Claude 5.5, one bound to a prompt that has changed since.
+fn refuses_reasoning(lower: &str) -> bool {
+    lower.contains("bound to a different conversation")
+        || (lower.contains("thinking") && lower.contains("cannot be modified"))
+        || lower.contains("invalid `signature` in `thinking` block")
+}
+
+/// `body` without the reasoning it replays or asks for, when it held any:
+/// asked once more after Bedrock refused the reasoning, the conversation
+/// goes on without it rather than failing.
+fn without_reasoning(body: &mut Value) -> bool {
+    let mut removed = false;
+    for message in body["messages"].as_array_mut().into_iter().flatten() {
+        if let Some(content) = message["content"].as_array_mut() {
+            let before = content.len();
+            content.retain(|block| block.get("reasoningContent").is_none());
+            removed |= content.len() != before;
+        }
+    }
+    if let Some(extra) = body["additionalModelRequestFields"].as_object_mut() {
+        for field in ["thinking", "reasoningConfig", "anthropic_beta"] {
+            removed |= extra.remove(field).is_some();
+        }
+        if extra.is_empty() {
+            body.as_object_mut()
+                .map(|fields| fields.remove("additionalModelRequestFields"));
+        }
+    }
+    removed
 }
 
 #[async_trait]
@@ -347,11 +484,7 @@ impl ModelProvider for BedrockProvider {
                     .map(|value| value.expose_secret().to_owned())
                     .or_else(|| self.stored_bearer())
                     .as_deref()
-                    .or_else(|| {
-                        self.credentials
-                            .as_ref()
-                            .map(|value| value.access_key.as_str())
-                    }),
+                    .or_else(|| self.sign_in.as_ref().and_then(AwsSignIn::access_key_hint)),
                 &self.instance.headers,
             )
         })
@@ -366,44 +499,241 @@ impl ModelProvider for BedrockProvider {
             return Err(CoreError::Cancelled);
         }
         let limits = request.parameters.limits;
-        let controls = self.controls(&request.model);
-        let url = format!(
-            "{}/model/{}/converse-stream",
-            self.instance.base_url.trim_end_matches('/'),
-            encode_path_segment(&request.model)
-        );
+        let asked = request.model.clone();
+        let mut model_id = self.wire_model(&asked);
+        let controls = self.controls(&model_id);
         let models = self.live_models.get(&self.models);
-        let model = models.iter().find(|info| info.id == request.model);
-        let body = bedrock_request(request, &controls, model)?;
-        let payload = serde_json::to_vec(&body).map_err(|error| {
-            CoreError::Provider(format!("cannot encode Bedrock request: {error}"))
-        })?;
-        let mut headers = self.instance.headers.map();
-        headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            reqwest::header::HeaderValue::from_static("application/json"),
-        );
-        self.authorize("POST", &url, &payload, &mut headers)?;
-        let response = tokio::select! {
-            () = cancel.cancelled() => return Err(CoreError::Cancelled),
-            response = crate::sse::send(self.client.post(&url).headers(headers).body(payload), limits) => response?,
-        };
-        if !response.status().is_success() {
+        let model = models
+            .iter()
+            .find(|info| info.id == asked || info.id == model_id);
+        let mut body = bedrock_request(request, &controls, model)?;
+        if self.unforced.read().unwrap().contains(&model_id) {
+            unforce(&mut body);
+        }
+        let tools = body.get("toolConfig").is_some();
+        let (mut profiled, mut unforced, mut unreasoned, mut renewed) =
+            (false, false, false, false);
+        let mut first_refusal = None;
+        loop {
+            let whole = tools && self.answers_tools_whole(&model_id);
+            let url = format!(
+                "{}/model/{}/{}",
+                self.instance.base_url.trim_end_matches('/'),
+                encode_path_segment(&model_id),
+                if whole { "converse" } else { "converse-stream" }
+            );
+            let payload = serde_json::to_vec(&body).map_err(|error| {
+                CoreError::Provider(format!("cannot encode Bedrock request: {error}"))
+            })?;
+            let mut headers = self.instance.headers.map();
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                reqwest::header::HeaderValue::from_static("application/json"),
+            );
+            let signer = self.signer().await?;
+            self.authorize(&signer, "POST", &url, &payload, &mut headers)?;
+            // A whole answer sends nothing until it is complete: it may take
+            // as long as the response limit allows.
+            let wait = if whole {
+                StreamLimits {
+                    idle: Some(limits.total().unwrap_or(Duration::ZERO)),
+                    total: limits.total,
+                }
+            } else {
+                limits
+            };
+            let response = tokio::select! {
+                () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                response = crate::sse::send(self.client.post(&url).headers(headers).body(payload), wait) => response?,
+            };
+            if response.status().is_success() {
+                if profiled {
+                    self.profiles
+                        .write()
+                        .unwrap()
+                        .insert(asked.clone(), model_id.clone());
+                }
+                let provider = self.instance.id.clone();
+                return Ok(if whole {
+                    converse_whole(response, cancel, limits, provider)
+                } else {
+                    converse_stream(response, cancel, limits, provider)
+                });
+            }
             let status = response.status();
             let kind = error_type(response.headers());
             let limit = limits.idle(crate::sse::is_loopback(response.url()));
-            let body = crate::sse::within(limit, response.text())
+            let text = crate::sse::within(limit, response.text())
                 .await?
                 .unwrap_or_default();
-            return Err(http_error(status, kind.as_deref(), &body));
+            let lower = text.to_ascii_lowercase();
+            // Temporary AWS credentials that expired before their stated
+            // time (or that name none) are read afresh once.
+            if status == reqwest::StatusCode::FORBIDDEN
+                && !renewed
+                && lower.contains("security token included in the request is expired")
+                && let (Ok(Signer::SigV4(_)), Some(sign_in)) = (self.signer().await, &self.sign_in)
+            {
+                renewed = true;
+                sign_in.forget();
+                continue;
+            }
+            if status == reqwest::StatusCode::BAD_REQUEST {
+                // Llama 3.1+, Mistral Large and others take tools only on
+                // Converse, as AWS documents: the turn is answered whole.
+                if tools && !whole && lower.contains("tool use in streaming mode") {
+                    tracing::info!(model = %model_id, "Bedrock takes this model's tools only on Converse; answering whole");
+                    self.whole_with_tools
+                        .write()
+                        .unwrap()
+                        .insert(model_id.clone());
+                    continue;
+                }
+                // A forced tool choice the model refuses ("doesn't support
+                // the toolConfig.toolChoice.tool field"): the structured
+                // answer is asked for without forcing it.
+                if !unforced
+                    && body.pointer("/toolConfig/toolChoice").is_some()
+                    && (lower.contains("toolchoice") || lower.contains("tool_choice"))
+                {
+                    unforced = true;
+                    unforce(&mut body);
+                    self.unforced.write().unwrap().insert(model_id.clone());
+                    continue;
+                }
+                // A model named by its own id that Bedrock runs only through
+                // an inference profile: asked through this region's.
+                if !profiled
+                    && lower.contains("with on-demand throughput isn")
+                    && let Some(profile) = regional_profile(&model_id, &self.region)
+                {
+                    tracing::info!(model = %model_id, %profile, "Bedrock runs this model only through an inference profile");
+                    profiled = true;
+                    first_refusal = Some(http_error(status, kind.as_deref(), &text));
+                    model_id = profile;
+                    continue;
+                }
+                if !unreasoned && refuses_reasoning(&lower) && without_reasoning(&mut body) {
+                    tracing::warn!(model = %model_id, "Bedrock refused the replayed reasoning; asking once more without it");
+                    unreasoned = true;
+                    continue;
+                }
+                // The profile guessed for this region does not exist: what
+                // Bedrock said of the model's own id says more.
+                if profiled
+                    && lower.contains("model identifier is invalid")
+                    && let Some(refusal) = first_refusal.take()
+                {
+                    return Err(refusal);
+                }
+            }
+            return Err(http_error(status, kind.as_deref(), &text));
         }
-        Ok(converse_stream(
-            response,
-            cancel,
-            limits,
-            self.instance.id.clone(),
-        ))
     }
+}
+
+/// `body` with no forced tool choice.
+fn unforce(body: &mut Value) {
+    if let Some(config) = body["toolConfig"].as_object_mut() {
+        config.remove("toolChoice");
+    }
+}
+
+/// A whole Converse answer, for a model that takes tools only so, read as
+/// the same events a streamed one gives.
+fn converse_whole(
+    response: reqwest::Response,
+    cancel: CancellationToken,
+    limits: StreamLimits,
+    provider_id: String,
+) -> ProviderStream {
+    let request_id = crate::request_id(response.headers());
+    Box::pin(try_stream! {
+        let body = async {
+            match limits.total() {
+                Some(limit) => tokio::time::timeout(limit, response.text())
+                    .await
+                    .map_err(|_| haarness_core::response_timeout(limit))?
+                    .map_err(crate::sse::transport_error),
+                None => response.text().await.map_err(crate::sse::transport_error),
+            }
+        };
+        let body = tokio::select! {
+            () = cancel.cancelled() => Err(CoreError::Cancelled),
+            body = body => body,
+        }?;
+        let answer: Value = serde_json::from_str(&body).map_err(|error| {
+            CoreError::Provider(format!("Bedrock sent an unreadable answer: {error}"))
+        })?;
+        let mut events = ConverseEvents::default();
+        for (kind, payload) in whole_answer_events(&answer) {
+            for event in events.event(kind, &payload) {
+                yield event;
+            }
+        }
+        let finished = events.finish()?;
+        if let ProviderEvent::Finished { reason } = &finished {
+            crate::log_blocked_finish(&provider_id, reason, request_id.as_deref(), None);
+        }
+        yield finished;
+    })
+}
+
+/// A whole Converse answer as the ConverseStream events that would have
+/// carried it.
+fn whole_answer_events(answer: &Value) -> Vec<(&'static str, Value)> {
+    let mut events = Vec::new();
+    let content = answer
+        .pointer("/output/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    for (index, block) in content.enumerate() {
+        let delta = |delta: Value| json!({"contentBlockIndex":index,"delta":delta});
+        if let Some(reasoning) = block.get("reasoningContent") {
+            if let Some(text) = reasoning.pointer("/reasoningText/text") {
+                events.push((
+                    "contentBlockDelta",
+                    delta(json!({"reasoningContent":{"text":text}})),
+                ));
+            }
+            if let Some(signature) = reasoning.pointer("/reasoningText/signature") {
+                events.push((
+                    "contentBlockDelta",
+                    delta(json!({"reasoningContent":{"signature":signature}})),
+                ));
+            }
+            if let Some(redacted) = reasoning.get("redactedContent") {
+                events.push((
+                    "contentBlockDelta",
+                    delta(json!({"reasoningContent":{"redactedContent":redacted}})),
+                ));
+            }
+        } else if let Some(call) = block.get("toolUse") {
+            events.push((
+                "contentBlockStart",
+                json!({"contentBlockIndex":index,"start":{"toolUse":{"toolUseId":call["toolUseId"],"name":call["name"]}}}),
+            ));
+            let input = call
+                .get("input")
+                .map_or_else(|| "{}".to_owned(), Value::to_string);
+            events.push((
+                "contentBlockDelta",
+                delta(json!({"toolUse":{"input":input}})),
+            ));
+        } else if let Some(text) = block.get("text") {
+            events.push(("contentBlockDelta", delta(json!({"text":text}))));
+        }
+        events.push(("contentBlockStop", json!({"contentBlockIndex":index})));
+    }
+    events.push((
+        "messageStop",
+        json!({"stopReason":answer.get("stopReason").cloned().unwrap_or(json!("end_turn"))}),
+    ));
+    if let Some(usage) = answer.get("usage") {
+        events.push(("metadata", json!({"usage":usage})));
+    }
+    events
 }
 
 /// The answer's events as they arrive. Any byte resets the idle limit; a
@@ -463,6 +793,10 @@ fn converse_stream(
     })
 }
 
+/// Set on a call's metadata when some of its reasoning came after words of
+/// the same answer: how many of its reasoning blocks came before them.
+const REASONING_BEFORE_WORDS: &str = "bedrock_reasoning_before_words";
+
 /// ConverseStream's events turned into Haarness's, holding back what is
 /// only whole at its block's end: a tool call's arguments and a reasoning
 /// block with its signature, which goes back to the model with the call.
@@ -470,7 +804,16 @@ fn converse_stream(
 struct ConverseEvents {
     tool: Option<(String, String, String)>,
     reasoning: Option<Value>,
+    /// The redacted reasoning of the open block, which Bedrock may send in
+    /// several pieces (each base64 on the wire).
+    redacted: Vec<u8>,
     reasoning_blocks: Vec<Value>,
+    /// Whether words were written since the last call, and how many of the
+    /// reasoning blocks held for the next call came before any. Claude binds
+    /// its reasoning to everything written before it, so each block goes
+    /// back where it was written (see [`thinking_in_place`]).
+    words_since_call: bool,
+    reasoning_before_words: usize,
     stop: Option<String>,
 }
 
@@ -505,6 +848,7 @@ impl ConverseEvents {
             "contentBlockDelta" => {
                 let delta = &payload["delta"];
                 if let Some(text) = delta["text"].as_str().filter(|text| !text.is_empty()) {
+                    self.words_since_call = true;
                     events.push(ProviderEvent::TextDelta(text.to_owned()));
                 }
                 if let (Some((_, _, input)), Some(piece)) = (
@@ -529,13 +873,24 @@ impl ConverseEvents {
                     if let Some(signature) = reasoning["signature"].as_str() {
                         block["reasoningText"]["signature"] = json!(signature);
                     }
-                    if let Some(redacted) = reasoning.get("redactedContent") {
-                        *block = json!({"redactedContent": redacted});
+                    // Redacted reasoning goes back whole: its pieces joined.
+                    if let Some(piece) = reasoning["redactedContent"].as_str() {
+                        use base64::Engine as _;
+                        let engine = base64::engine::general_purpose::STANDARD;
+                        match engine.decode(piece) {
+                            Ok(bytes) => self.redacted.extend(bytes),
+                            Err(_) => self.redacted.extend(piece.as_bytes()),
+                        }
+                        *block = json!({"redactedContent": engine.encode(&self.redacted)});
                     }
                 }
             }
             "contentBlockStop" => {
                 if let Some(block) = self.reasoning.take() {
+                    self.redacted.clear();
+                    if !self.words_since_call {
+                        self.reasoning_before_words += 1;
+                    }
                     self.reasoning_blocks
                         .push(json!({"reasoningContent": block}));
                 }
@@ -544,10 +899,18 @@ impl ConverseEvents {
                     if name == STRUCTURED_OUTPUT_TOOL_NAME {
                         events.push(ProviderEvent::StructuredOutput(arguments));
                     } else {
+                        self.words_since_call = false;
+                        let before_words = std::mem::take(&mut self.reasoning_before_words);
                         let provider_metadata = if self.reasoning_blocks.is_empty() {
                             Value::Null
                         } else {
-                            json!({"bedrock_reasoning": std::mem::take(&mut self.reasoning_blocks)})
+                            let blocks = std::mem::take(&mut self.reasoning_blocks);
+                            let mut metadata = json!({});
+                            if before_words < blocks.len() {
+                                metadata[REASONING_BEFORE_WORDS] = json!(before_words);
+                            }
+                            metadata["bedrock_reasoning"] = json!(blocks);
+                            metadata
                         };
                         events.push(ProviderEvent::ToolCall {
                             call_id,
@@ -621,17 +984,20 @@ fn stream_exception(kind: &str, payload: &Value) -> CoreError {
     http_error(status, Some(&name), &payload.to_string())
 }
 
+/// The geographies inference profile ids begin with.
+const GEOGRAPHIES: [&str; 8] = [
+    "global.", "us.", "eu.", "apac.", "jp.", "au.", "ca.", "us-gov.",
+];
+
 /// Bedrock writes a model id with a geography (`us.`, `global.`), its
 /// vendor and a version tag (`-v1:0`); the bare id (`claude-sonnet-5-5`,
 /// `gpt-oss-120b`) is what the price table and the names know.
 fn bare_model_id(id: &str) -> &str {
     let id = id.rsplit_once('/').map_or(id, |(_, id)| id);
-    let id = [
-        "global.", "us.", "eu.", "apac.", "jp.", "au.", "ca.", "us-gov.",
-    ]
-    .iter()
-    .find_map(|prefix| id.strip_prefix(prefix))
-    .unwrap_or(id);
+    let id = GEOGRAPHIES
+        .iter()
+        .find_map(|prefix| id.strip_prefix(prefix))
+        .unwrap_or(id);
     let id = id.split_once('.').map_or(id, |(_, id)| id);
     let (id, versioned) = id
         .rsplit_once(':')
@@ -725,6 +1091,14 @@ fn geography(region: &str) -> &str {
     }
 }
 
+/// The chat models of a region, what each takes, and the inference profile
+/// each model that does not run on demand is asked through.
+type Discovered = (
+    Vec<ModelInfo>,
+    HashMap<String, ModelControls>,
+    HashMap<String, String>,
+);
+
 /// The models of a `ListFoundationModels` answer a chat can use: active,
 /// text in and out, answered through Converse, and not a safety classifier.
 /// Each is named by the id a request uses: its own where it runs on demand,
@@ -735,7 +1109,7 @@ fn discovered_models(
     profiles: &[Value],
     region: &str,
     defaults: &CompatibleModelDefaults,
-) -> (Vec<ModelInfo>, HashMap<String, ModelControls>) {
+) -> Discovered {
     let geography = format!("{}.", geography(region));
     let rank = |id: &str| {
         if id.starts_with("global.") {
@@ -775,6 +1149,7 @@ fn discovered_models(
     };
     let mut models = Vec::new();
     let mut controls = HashMap::new();
+    let mut aliases = HashMap::new();
     for entry in foundation["modelSummaries"]
         .as_array()
         .into_iter()
@@ -805,6 +1180,9 @@ fn discovered_models(
         let id = if has(entry, "inferenceTypesSupported", "ON_DEMAND") {
             model
         } else if let Some(profile) = profile_for.get(model) {
+            // A model named by its own id, as in AWS's docs, is asked
+            // through the profile: Bedrock refuses it on demand.
+            aliases.insert(model.to_owned(), (*profile).to_owned());
             profile
         } else {
             continue;
@@ -833,7 +1211,7 @@ fn discovered_models(
         ));
         controls.insert(id.to_owned(), model_controls);
     }
-    (models, controls)
+    (models, controls, aliases)
 }
 
 /// The reasoning setting a model's `additionalRequestFieldsSchema`
@@ -934,14 +1312,16 @@ fn bedrock_request(
             json!({"text":place.stand_in(&item)?})
         })
     };
-    let mut messages = Vec::new();
+    // Each message, with how many of its opening reasoning blocks Claude
+    // wrote before the words of the message ahead of it (a call's only).
+    let mut messages: Vec<(Value, usize)> = Vec::new();
     for (index, message) in request.messages.into_iter().enumerate() {
         match message {
             // Converse refuses a blank text block, so blank text is left out
             // wherever it would stand alone.
             ProviderMessage::Text { content, .. } if content.trim().is_empty() => {}
             ProviderMessage::Text { role, content } => {
-                messages.push(json!({"role":role,"content":[{"text":content}]}));
+                messages.push((json!({"role":role,"content":[{"text":content}]}), 0));
             }
             ProviderMessage::Media {
                 role,
@@ -965,7 +1345,7 @@ fn bedrock_request(
                 for item in media {
                     blocks.push(block(item, place)?);
                 }
-                messages.push(json!({"role":role,"content":blocks}));
+                messages.push((json!({"role":role,"content":blocks}), 0));
             }
             ProviderMessage::ToolCall {
                 call_id,
@@ -979,8 +1359,13 @@ fn bedrock_request(
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+                // A call saved before this was recorded had all of it first.
+                let before_words = provider_metadata[REASONING_BEFORE_WORDS]
+                    .as_u64()
+                    .and_then(|count| usize::try_from(count).ok())
+                    .map_or(blocks.len(), |count| count.min(blocks.len()));
                 blocks.push(json!({"toolUse":{"toolUseId":crate::tool_ids::portable(&call_id),"name":name,"input":arguments}}));
-                messages.push(json!({"role":"assistant","content":blocks}));
+                messages.push((json!({"role":"assistant","content":blocks}), before_words));
             }
             ProviderMessage::ToolResult {
                 call_id,
@@ -1003,39 +1388,24 @@ fn bedrock_request(
                 for item in media {
                     content.push(block(item, Unreadable::FromTool)?);
                 }
-                messages.push(json!({"role":"user","content":[{"toolResult":{"toolUseId":crate::tool_ids::portable(&call_id),"content":content,"status":if is_error {"error"} else {"success"}}}]}));
+                messages.push((json!({"role":"user","content":[{"toolResult":{"toolUseId":crate::tool_ids::portable(&call_id),"content":content,"status":if is_error {"error"} else {"success"}}}]}), 0));
             }
         }
     }
-    // Converse wants user and assistant turns to alternate: parallel calls
-    // share one assistant turn, their results one user turn, and a prompt
-    // followed by its stored reminder or a steered message is one user turn.
-    let mut grouped: Vec<Value> = Vec::new();
-    for message in messages {
-        if let Some(previous) = grouped
-            .last_mut()
-            .filter(|previous| previous["role"] == message["role"])
-        {
-            previous["content"]
-                .as_array_mut()
-                .unwrap()
-                .extend(message["content"].as_array().unwrap().iter().cloned());
-        } else {
-            grouped.push(message);
-        }
-    }
-    // A turn's reasoning opens it, ahead of its text and calls.
-    for message in &mut grouped {
-        if let Some(content) = message["content"].as_array_mut() {
-            content.sort_by_key(|block| block.get("reasoningContent").is_none());
-        }
-    }
-    let mut messages = grouped;
+    let mut messages = thinking_in_place(messages);
+    // Within the model's own ceiling: Bedrock refuses a request asking for
+    // more ("The maximum tokens you requested exceeds the model limit").
     let mut max_tokens = request
         .parameters
         .max_output_tokens
         .filter(|limit| *limit > 0)
-        .unwrap_or(8192);
+        .unwrap_or(8192)
+        .min(
+            controls
+                .max_output_tokens
+                .filter(|limit| *limit > 0)
+                .unwrap_or(u64::MAX),
+        );
     let mut extra = json!({});
     match (&controls.reasoning, request.reasoning_effort.as_deref()) {
         (Some(Reasoning::Level { path, levels }), Some(effort)) => {
@@ -1095,24 +1465,49 @@ fn bedrock_request(
     let claude = request.model.contains("anthropic.claude");
     // Claude refuses a forced tool call while it thinks.
     let forced = forced && !(claude && extra.as_object().is_some_and(|fields| !fields.is_empty()));
+    // Claude 5.5 (Fable and Mythos from 5.1) thinks whatever the request
+    // says and binds each thinking block to everything before it: a block
+    // whose prompt changed (tools offered, a compaction, a moved block) is
+    // refused with "The block is bound to a different conversation" unless
+    // the request asks Bedrock to drop such a block instead, as Haarness asks
+    // Anthropic's API.
+    if claude
+        && crate::anthropic::binds_thinking(&request.model)
+        && !matches!(controls.reasoning, Some(Reasoning::Budget { .. }))
+    {
+        extra["thinking"] = json!({
+            "type":"adaptive",
+            "display":"summarized",
+            "block_binding":{"prefix_mismatch_behavior":"drop_block"}
+        });
+        extra["anthropic_beta"] = json!([crate::anthropic::THINKING_BINDING_BETA]);
+    }
     let mut tools: Vec<_> = requested_tools
         .into_iter()
         .map(|tool| json!({"toolSpec":{"name":tool.name,"description":tool.description,"inputSchema":{"json":tool.input_schema}}}))
         .collect();
-    let mut system = vec![json!({"text":request.system})];
+    // Converse refuses a blank system block, and a cache point alone.
+    let mut system: Vec<Value> = (!request.system.trim().is_empty())
+        .then(|| json!({"text":request.system}))
+        .into_iter()
+        .collect();
     if cache {
-        system.push(serde_json::from_str(CACHE_POINT).unwrap_or_default());
+        if !system.is_empty() {
+            system.push(serde_json::from_str(CACHE_POINT).unwrap_or_default());
+        }
         // Claude caches the tools too; other models refuse a cache point there.
         if claude && !tools.is_empty() {
             tools.push(serde_json::from_str(CACHE_POINT).unwrap_or_default());
         }
     }
     let mut body = json!({
-        "system":system,
         "messages":messages,
         // The Anthropic adapter's default; a configured limit wins.
         "inferenceConfig":{"maxTokens":max_tokens}
     });
+    if !system.is_empty() {
+        body["system"] = json!(system);
+    }
     if extra.as_object().is_some_and(|fields| !fields.is_empty()) {
         body["additionalModelRequestFields"] = extra;
     }
@@ -1123,6 +1518,46 @@ fn bedrock_request(
         }
     }
     Ok(body)
+}
+
+/// Converse wants user and assistant turns to alternate: parallel calls
+/// share one assistant turn, their results one user turn, and a prompt
+/// followed by its stored reminder or a steered message is one user turn.
+///
+/// Each reasoning block goes back where the model wrote it. Words written
+/// before a call are their own message, ahead of the call carrying the
+/// reasoning; the reasoning written before those words opens the turn and
+/// the rest follows them. Claude refuses a turn whose reasoning was moved
+/// ("blocks in the latest assistant message cannot be modified"), and from
+/// Claude 5.5 a block moved past words is bound to a different prompt, so
+/// one misplaced block failed every later request of the chat.
+fn thinking_in_place(messages: Vec<(Value, usize)>) -> Vec<Value> {
+    let mut grouped: Vec<Value> = Vec::new();
+    for (mut message, before_words) in messages {
+        let Some(previous) = grouped
+            .last_mut()
+            .filter(|previous| previous["role"] == message["role"])
+        else {
+            grouped.push(message);
+            continue;
+        };
+        let content = message["content"]
+            .as_array_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let earlier = previous["content"].as_array_mut().unwrap();
+        let words_only = earlier.iter().all(|block| block.get("text").is_some());
+        if before_words > 0 && words_only {
+            let words = std::mem::take(earlier);
+            let mut content = content.into_iter();
+            earlier.extend(content.by_ref().take(before_words));
+            earlier.extend(words);
+            earlier.extend(content);
+        } else {
+            earlier.extend(content);
+        }
+    }
+    grouped
 }
 
 fn bedrock_document_name(filename: &str) -> String {
@@ -1148,51 +1583,6 @@ fn bedrock_document_name(filename: &str) -> String {
 
 fn number(value: &Value, key: &str) -> u64 {
     value.get(key).and_then(Value::as_u64).unwrap_or(0)
-}
-
-fn aws_credentials_from_environment() -> Option<AwsCredentials> {
-    if let (Ok(access_key), Ok(secret_key)) = (
-        std::env::var("AWS_ACCESS_KEY_ID"),
-        std::env::var("AWS_SECRET_ACCESS_KEY"),
-    ) {
-        return Some(AwsCredentials {
-            access_key,
-            secret_key: SecretString::from(secret_key),
-            session_token: std::env::var("AWS_SESSION_TOKEN")
-                .ok()
-                .map(SecretString::from),
-        });
-    }
-    let path = std::env::var_os("AWS_SHARED_CREDENTIALS_FILE")
-        .map(PathBuf::from)
-        .or_else(|| {
-            haarness_protocol::home_dir().map(|home| home.join(".aws").join("credentials"))
-        })?;
-    let profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".into());
-    parse_aws_profile(&std::fs::read_to_string(path).ok()?, &profile)
-}
-
-fn parse_aws_profile(contents: &str, profile: &str) -> Option<AwsCredentials> {
-    let mut in_profile = false;
-    let mut values = BTreeMap::new();
-    for raw in contents.lines() {
-        let line = raw.trim();
-        if let Some(section) = line
-            .strip_prefix('[')
-            .and_then(|line| line.strip_suffix(']'))
-        {
-            in_profile = section == profile || section == format!("profile {profile}");
-            continue;
-        }
-        if in_profile && let Some((key, value)) = line.split_once('=') {
-            values.insert(key.trim(), value.trim().to_owned());
-        }
-    }
-    Some(AwsCredentials {
-        access_key: values.remove("aws_access_key_id")?,
-        secret_key: SecretString::from(values.remove("aws_secret_access_key")?),
-        session_token: values.remove("aws_session_token").map(SecretString::from),
-    })
 }
 
 fn sign_request(
@@ -1396,12 +1786,24 @@ fn http_error(status: reqwest::StatusCode, kind: Option<&str>, body: &str) -> Co
 /// AWS's words for an account that may not use a model yet say neither why
 /// nor where to look ("… is not available for this account … contact AWS
 /// Sales"; "Too many tokens per day, please wait", when the quota is 0).
-/// Both are what a new account gets.
+/// Both are what a new account gets. A model that takes no tools is said
+/// so too, with what to do.
 fn account_reason(detail: &str) -> Option<String> {
     if let Some((model, _)) = detail.split_once(" is not available for this account") {
         return Some(format!(
-            "AWS has not enabled {model} for this account yet. It refuses this way while the account is on AWS's Free plan or the model's Marketplace agreement is pending; the model's page in the Bedrock console says which."
+            "AWS has not enabled {model} for this account yet. It refuses this way while the account is on AWS's Free plan, while AWS is still verifying a new account, or while the model's Marketplace agreement is pending; the model's page in the Bedrock console says which, and AWS Support can tell you more."
         ));
+    }
+    // A model that takes no tools at all (DeepSeek-R1, Llama 3, Mistral 7B,
+    // Mixtral): Haarness works through its tools.
+    let lower = detail.to_ascii_lowercase();
+    if (lower.starts_with("this model doesn't support tool use")
+        || lower.starts_with("this model does not support tool use"))
+        && !lower.contains("streaming")
+    {
+        return Some(
+            "This model can't use tools, which Haarness needs to read and change your files. Pick a model that can, such as Claude, Nova or gpt-oss.".to_owned(),
+        );
     }
     detail.starts_with("Too many tokens per day").then(|| {
         "This model's daily token quota on this AWS account is used up, or is 0, as on a new account. Service Quotas in the AWS console shows it.".to_owned()
@@ -1478,7 +1880,7 @@ mod tests {
         Ok(out)
     }
 
-    fn discovered() -> (Vec<ModelInfo>, HashMap<String, ModelControls>) {
+    fn discovered() -> Discovered {
         let foundation: Value =
             serde_json::from_str(include_str!("testdata/bedrock-foundation-models.json")).unwrap();
         let profiles: Value =
@@ -1493,7 +1895,7 @@ mod tests {
 
     #[test]
     fn the_picker_lists_the_regions_chat_models_under_the_ids_requests_use() {
-        let (models, _) = discovered();
+        let (models, _, _) = discovered();
         let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
         // On demand where the model runs so, else the global profile; no
         // embeddings, speech, video-only, safety classifiers, provisioned-only
@@ -1537,7 +1939,7 @@ mod tests {
 
     #[test]
     fn a_models_reasoning_level_and_cache_points_go_where_its_metadata_says() {
-        let (_, controls) = discovered();
+        let (_, controls, _) = discovered();
         let request = |model: &str, effort: Option<&str>, tools: bool| {
             super::bedrock_request(
                 ProviderRequest {
@@ -1567,8 +1969,12 @@ mod tests {
         };
         let sonnet = request("global.anthropic.claude-sonnet-5-5", Some("xhigh"), true);
         assert_eq!(
-            sonnet["additionalModelRequestFields"],
-            json!({"output_config":{"effort":"xhigh"}})
+            sonnet["additionalModelRequestFields"]["output_config"],
+            json!({"effort":"xhigh"})
+        );
+        assert_eq!(
+            sonnet["additionalModelRequestFields"]["thinking"]["block_binding"],
+            json!({"prefix_mismatch_behavior":"drop_block"})
         );
         // Claude caches its tools, system prompt and newest turn.
         assert_eq!(
@@ -1747,17 +2153,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_credentials_are_parsed_without_exposing_secrets() {
-        let credentials = parse_aws_profile(
-            "[default]\naws_access_key_id = key\naws_secret_access_key = secret\naws_session_token = session\n",
-            "default",
-        )
-        .unwrap();
-        assert_eq!(credentials.access_key, "key");
-        assert_eq!(credentials.secret_key.expose_secret(), "secret");
-    }
-
-    #[test]
     fn converse_stream_maps_tools_structured_output_and_usage() {
         let events = mapped(&[
             ("contentBlockDelta", json!({"delta":{"reasoningContent":{"text":"thinking"}}})),
@@ -1925,7 +2320,7 @@ mod tests {
                 r#"{"message":"anthropic.claude-haiku-5-5 is not available for this account. You can explore other available models on Amazon Bedrock. For additional access options, contact AWS Sales at https://aws.amazon.com/contact-us/sales-support/"}"#
             )
             .to_string(),
-            "provider error: HTTP 403 Forbidden: [AccessDeniedException] AWS has not enabled anthropic.claude-haiku-5-5 for this account yet. It refuses this way while the account is on AWS's Free plan or the model's Marketplace agreement is pending; the model's page in the Bedrock console says which."
+            "provider error: HTTP 403 Forbidden: [AccessDeniedException] AWS has not enabled anthropic.claude-haiku-5-5 for this account yet. It refuses this way while the account is on AWS's Free plan, while AWS is still verifying a new account, or while the model's Marketplace agreement is pending; the model's page in the Bedrock console says which, and AWS Support can tell you more."
         );
         let daily = http_error(
             reqwest::StatusCode::TOO_MANY_REQUESTS,
@@ -2401,6 +2796,640 @@ mod tests {
             events[1].as_ref().unwrap_err().to_string(),
             "provider error: the provider sent nothing for 300 milliseconds"
         );
+    }
+
+    /// A Bedrock that answers each request as `answer` says, by the path
+    /// asked for and the body sent, keeping what it was sent.
+    type Answer = Arc<dyn Fn(&str, &Value) -> (u16, Vec<u8>) + Send + Sync>;
+    /// The path and body of each request a scripted Bedrock was sent.
+    type Seen = Arc<Mutex<Vec<(String, Value)>>>;
+
+    async fn scripted_bedrock(answer: Answer) -> (String, Seen) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let state = (answer, seen.clone());
+        let router = Router::new()
+            .fallback(
+                |State((answer, seen)): State<(Answer, Seen)>,
+                 uri: axum::http::Uri,
+                 Json(body): Json<Value>| async move {
+                    let path = uri.path().to_owned();
+                    seen.lock().push((path.clone(), body.clone()));
+                    let (status, bytes) = answer(&path, &body);
+                    (axum::http::StatusCode::from_u16(status).unwrap(), bytes)
+                },
+            )
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{address}"), seen)
+    }
+
+    fn scripted_provider(base_url: String, models: &[&str]) -> BedrockProvider {
+        BedrockProvider::new_with_region(
+            NativeInstance {
+                id: "amazon-bedrock".into(),
+                name: "Amazon Bedrock".into(),
+                base_url,
+                api_key: Some("bedrock-token".into()),
+                models: models.iter().map(|model| (*model).to_owned()).collect(),
+                discover_models: false,
+                model_defaults: CompatibleModelDefaults::default(),
+                assume_authenticated: false,
+                headers: ProviderHeaders::default(),
+            },
+            None,
+            "us-east-1".into(),
+        )
+    }
+
+    fn ask(model: &str, tools: bool) -> ProviderRequest {
+        ProviderRequest {
+            model: model.into(),
+            system: "system".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "list the files".into(),
+            }],
+            tools: if tools {
+                vec![haarness_core::ToolDefinition {
+                    name: "list".into(),
+                    description: "List files".into(),
+                    input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+                }]
+            } else {
+                Vec::new()
+            },
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        }
+    }
+
+    async fn answer_of(
+        provider: &BedrockProvider,
+        request: ProviderRequest,
+    ) -> CoreResult<Vec<ProviderEvent>> {
+        provider
+            .stream(request, CancellationToken::new())
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect()
+    }
+
+    fn refusal(message: &str) -> (u16, Vec<u8>) {
+        (400, json!({"message": message}).to_string().into_bytes())
+    }
+
+    fn streamed_text(text: &str) -> (u16, Vec<u8>) {
+        (
+            200,
+            converse_frames(&[
+                ("messageStart", json!({"role":"assistant"})),
+                (
+                    "contentBlockDelta",
+                    json!({"contentBlockIndex":0,"delta":{"text":text}}),
+                ),
+                ("contentBlockStop", json!({"contentBlockIndex":0})),
+                ("messageStop", json!({"stopReason":"end_turn"})),
+                (
+                    "metadata",
+                    json!({"usage":{"inputTokens":3,"outputTokens":1}}),
+                ),
+            ]),
+        )
+    }
+
+    #[test]
+    fn reasoning_goes_back_where_claude_wrote_it() {
+        let sign = |text: &str, signature: &str| {
+            [
+                (
+                    "contentBlockDelta",
+                    json!({"delta":{"reasoningContent":{"text":text}}}),
+                ),
+                (
+                    "contentBlockDelta",
+                    json!({"delta":{"reasoningContent":{"signature":signature}}}),
+                ),
+                ("contentBlockStop", json!({})),
+            ]
+        };
+        let call = |id: &str| {
+            [
+                (
+                    "contentBlockStart",
+                    json!({"start":{"toolUse":{"toolUseId":id,"name":"read"}}}),
+                ),
+                (
+                    "contentBlockDelta",
+                    json!({"delta":{"toolUse":{"input":"{}"}}}),
+                ),
+                ("contentBlockStop", json!({})),
+            ]
+        };
+        let words = [
+            (
+                "contentBlockDelta",
+                json!({"delta":{"text":"Let me look."}}),
+            ),
+            ("contentBlockStop", json!({})),
+        ];
+        let stop = [("messageStop", json!({"stopReason":"tool_use"}))];
+        let calls = |events: Vec<(&str, Value)>| -> Vec<ProviderMessage> {
+            mapped(&events)
+                .unwrap()
+                .into_iter()
+                .filter_map(|event| match event {
+                    ProviderEvent::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                        provider_metadata,
+                    } => Some(ProviderMessage::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                        provider_metadata,
+                    }),
+                    _ => None,
+                })
+                .collect()
+        };
+        let turn = |history: Vec<ProviderMessage>| -> Vec<String> {
+            let mut messages = vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "read it".into(),
+            }];
+            messages.extend(history);
+            let body = bedrock_request(ProviderRequest {
+                model: "global.anthropic.claude-sonnet-5-5".into(),
+                system: "system".into(),
+                messages,
+                tools: Vec::new(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            })
+            .unwrap();
+            body["messages"][1]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|block| {
+                    if let Some(signature) =
+                        block.pointer("/reasoningContent/reasoningText/signature")
+                    {
+                        format!("reasoning {}", signature.as_str().unwrap())
+                    } else if let Some(text) = block.get("text") {
+                        format!("words {}", text.as_str().unwrap())
+                    } else {
+                        format!("call {}", block["toolUse"]["toolUseId"].as_str().unwrap())
+                    }
+                })
+                .collect()
+        };
+        let said = || ProviderMessage::Text {
+            role: "assistant".into(),
+            content: "Let me look.".into(),
+        };
+
+        // Claude 5.5 often writes a few words, then thinks, then calls: the
+        // thinking goes back after the words, not ahead of them.
+        let mut history = vec![said()];
+        history.extend(calls(
+            [
+                &words[..],
+                &sign("plan", "s1")[..],
+                &call("a")[..],
+                &stop[..],
+            ]
+            .concat(),
+        ));
+        assert_eq!(
+            turn(history),
+            ["words Let me look.", "reasoning s1", "call a"]
+        );
+
+        // Thinking first, then words, then the call.
+        let mut history = vec![said()];
+        history.extend(calls(
+            [
+                &sign("plan", "s1")[..],
+                &words[..],
+                &call("a")[..],
+                &stop[..],
+            ]
+            .concat(),
+        ));
+        assert_eq!(
+            turn(history),
+            ["reasoning s1", "words Let me look.", "call a"]
+        );
+
+        // Thinking, words, more thinking, the call.
+        let mut history = vec![said()];
+        history.extend(calls(
+            [
+                &sign("plan", "s1")[..],
+                &words[..],
+                &sign("more", "s2")[..],
+                &call("a")[..],
+                &stop[..],
+            ]
+            .concat(),
+        ));
+        assert_eq!(
+            turn(history),
+            [
+                "reasoning s1",
+                "words Let me look.",
+                "reasoning s2",
+                "call a"
+            ]
+        );
+
+        // Thinking between two calls of one answer stays between them: two
+        // reasoning blocks side by side are refused as modified.
+        let history = calls(
+            [
+                &sign("first", "s1")[..],
+                &call("a")[..],
+                &sign("second", "s2")[..],
+                &call("b")[..],
+                &stop[..],
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            turn(history),
+            ["reasoning s1", "call a", "reasoning s2", "call b"]
+        );
+
+        // A call saved before Haarness kept the place has its reasoning first.
+        let old = ProviderMessage::ToolCall {
+            call_id: "a".into(),
+            name: "read".into(),
+            arguments: json!({}),
+            provider_metadata: json!({"bedrock_reasoning":[{"reasoningContent":{"reasoningText":{"text":"plan","signature":"s1"}}}]}),
+        };
+        assert_eq!(
+            turn(vec![said(), old]),
+            ["reasoning s1", "words Let me look.", "call a"]
+        );
+    }
+
+    #[test]
+    fn claude_5_5_asks_bedrock_to_drop_thinking_bound_to_an_older_prompt() {
+        let extra = |model: &str| {
+            bedrock_request(ask(model, true)).unwrap()["additionalModelRequestFields"].clone()
+        };
+        for model in [
+            "global.anthropic.claude-sonnet-5-5",
+            "us.anthropic.claude-haiku-5-5",
+            "global.anthropic.claude-fable-5-1",
+        ] {
+            let fields = extra(model);
+            assert_eq!(fields["thinking"]["type"], "adaptive", "{model}");
+            assert_eq!(
+                fields["thinking"]["block_binding"]["prefix_mismatch_behavior"], "drop_block",
+                "{model}"
+            );
+            assert_eq!(
+                fields["anthropic_beta"],
+                json!(["thinking-binding-controls-2026-08-01"]),
+                "{model}"
+            );
+        }
+        // Older Claude and other models bind nothing.
+        for model in [
+            "global.anthropic.claude-sonnet-4-6",
+            "global.anthropic.claude-sonnet-5",
+            "amazon.nova-pro-v1:0",
+            "openai.gpt-oss-120b-1:0",
+        ] {
+            assert!(extra(model).get("thinking").is_none(), "{model}");
+        }
+        // Haiku 5.5 still takes the forced structured answer it took.
+        let mut structured = ask("global.anthropic.claude-haiku-5-5", false);
+        structured.output_schema = Some(json!({"type":"object"}));
+        assert!(
+            bedrock_request(structured).unwrap()["toolConfig"]
+                .get("toolChoice")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn requests_stay_within_the_models_output_ceiling_and_skip_a_blank_system() {
+        let controls = ModelControls {
+            max_output_tokens: Some(4096),
+            ..ModelControls::default()
+        };
+        let mut request = ask("writer.palmyra-vision-7b", false);
+        request.system = "  ".into();
+        let body = super::bedrock_request(request, &controls, None).unwrap();
+        assert_eq!(body["inferenceConfig"]["maxTokens"], 4096);
+        assert!(body.get("system").is_none(), "{body}");
+        let mut configured = ask("writer.palmyra-vision-7b", false);
+        configured.parameters.max_output_tokens = Some(32_000);
+        assert_eq!(
+            super::bedrock_request(configured, &controls, None).unwrap()["inferenceConfig"]["maxTokens"],
+            4096
+        );
+    }
+
+    #[test]
+    fn redacted_reasoning_sent_in_pieces_goes_back_whole() {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let events = mapped(&[
+            (
+                "contentBlockDelta",
+                json!({"delta":{"reasoningContent":{"redactedContent":engine.encode(b"abc")}}}),
+            ),
+            (
+                "contentBlockDelta",
+                json!({"delta":{"reasoningContent":{"redactedContent":engine.encode(b"def")}}}),
+            ),
+            ("contentBlockStop", json!({})),
+            (
+                "contentBlockStart",
+                json!({"start":{"toolUse":{"toolUseId":"a","name":"read"}}}),
+            ),
+            ("contentBlockStop", json!({})),
+            ("messageStop", json!({"stopReason":"tool_use"})),
+        ])
+        .unwrap();
+        let metadata = events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::ToolCall {
+                    provider_metadata, ..
+                } => Some(provider_metadata.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            metadata["bedrock_reasoning"][0]["reasoningContent"]["redactedContent"],
+            engine.encode(b"abcdef")
+        );
+    }
+
+    #[test]
+    fn a_model_that_takes_no_tools_says_what_to_do() {
+        assert_eq!(
+            http_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                Some("ValidationException"),
+                r#"{"message":"This model doesn't support tool use."}"#
+            )
+            .to_string(),
+            "provider error: HTTP 400 Bad Request: [ValidationException] This model can't use tools, which Haarness needs to read and change your files. Pick a model that can, such as Claude, Nova or gpt-oss."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_that_refuses_streamed_tools_is_answered_whole() {
+        let answer: Answer = Arc::new(|path, body| {
+            if path.ends_with("/converse-stream") {
+                if body.get("toolConfig").is_some() {
+                    return refusal("This model doesn't support tool use in streaming mode.");
+                }
+                return streamed_text("hello");
+            }
+            (
+                200,
+                json!({
+                    "output":{"message":{"role":"assistant","content":[
+                        {"text":"Listing."},
+                        {"toolUse":{"toolUseId":"tooluse_1","name":"list","input":{"path":"."}}}
+                    ]}},
+                    "stopReason":"tool_use",
+                    "usage":{"inputTokens":10,"outputTokens":4,"totalTokens":14},
+                    "metrics":{"latencyMs":10}
+                })
+                .to_string()
+                .into_bytes(),
+            )
+        });
+        let (base, seen) = scripted_bedrock(answer).await;
+        let provider = scripted_provider(
+            base,
+            &["acme.chat-v1:0", "us.meta.llama3-3-70b-instruct-v1:0"],
+        );
+        let events = answer_of(&provider, ask("acme.chat-v1:0", true))
+            .await
+            .unwrap();
+        assert!(
+            matches!(&events[0], ProviderEvent::TextDelta(text) if text == "Listing."),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ProviderEvent::ToolCall { call_id, name, arguments, .. }
+                    if call_id == "tooluse_1" && name == "list" && arguments == &json!({"path":"."})
+            )),
+            "{events:?}"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::Usage {
+                input_tokens: 10,
+                output_tokens: 4,
+                ..
+            }
+        )));
+        assert!(
+            matches!(events.last(), Some(ProviderEvent::Finished { reason }) if reason == "tool_use")
+        );
+        // Learned: the next request with tools goes whole at once; one
+        // without tools still streams.
+        answer_of(&provider, ask("acme.chat-v1:0", true))
+            .await
+            .unwrap();
+        answer_of(&provider, ask("acme.chat-v1:0", false))
+            .await
+            .unwrap();
+        // Llama 3.3, which AWS lists so, goes whole from the first request.
+        answer_of(&provider, ask("us.meta.llama3-3-70b-instruct-v1:0", true))
+            .await
+            .unwrap();
+        let paths: Vec<String> = seen.lock().iter().map(|(path, _)| path.clone()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/model/acme.chat-v1:0/converse-stream",
+                "/model/acme.chat-v1:0/converse",
+                "/model/acme.chat-v1:0/converse",
+                "/model/acme.chat-v1:0/converse-stream",
+                "/model/us.meta.llama3-3-70b-instruct-v1:0/converse",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_named_by_its_own_id_is_asked_through_its_inference_profile() {
+        let answer: Answer = Arc::new(|path, _| {
+            if path.starts_with("/model/acme.") {
+                return refusal(
+                    "Invocation of model ID acme.chat-v1:0 with on-demand throughput isn\u{2019}t supported. Retry your request with the ID or ARN of an inference profile that contains this model.",
+                );
+            }
+            streamed_text("hello")
+        });
+        let (base, seen) = scripted_bedrock(answer).await;
+        let provider = scripted_provider(base, &["acme.chat-v1:0"]);
+        for _ in 0..2 {
+            let events = answer_of(&provider, ask("acme.chat-v1:0", false))
+                .await
+                .unwrap();
+            assert!(matches!(&events[0], ProviderEvent::TextDelta(text) if text == "hello"));
+        }
+        let paths: Vec<String> = seen.lock().iter().map(|(path, _)| path.clone()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/model/acme.chat-v1:0/converse-stream",
+                "/model/us.acme.chat-v1:0/converse-stream",
+                "/model/us.acme.chat-v1:0/converse-stream",
+            ]
+        );
+        // Discovery names the profile up front for the models it lists.
+        let (_, _, aliases) = discovered();
+        assert_eq!(
+            aliases
+                .get("anthropic.claude-sonnet-5-5")
+                .map(String::as_str),
+            Some("global.anthropic.claude-sonnet-5-5")
+        );
+        assert!(!aliases.contains_key("amazon.nova-micro-v1:0"));
+        // A guessed profile that does not exist leaves Bedrock's first words.
+        let answer: Answer = Arc::new(|path, _| {
+            if path.starts_with("/model/acme.") {
+                return refusal(
+                    "Invocation of model ID acme.chat-v1:0 with on-demand throughput isn\u{2019}t supported. Retry your request with the ID or ARN of an inference profile that contains this model.",
+                );
+            }
+            refusal("The provided model identifier is invalid.")
+        });
+        let (base, _) = scripted_bedrock(answer).await;
+        let provider = scripted_provider(base, &["acme.chat-v1:0"]);
+        let error = answer_of(&provider, ask("acme.chat-v1:0", false))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("on-demand throughput"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_forced_tool_choice_the_model_refuses_is_asked_unforced() {
+        let answer: Answer = Arc::new(|_, body| {
+            if body.pointer("/toolConfig/toolChoice").is_some() {
+                return refusal(
+                    "This model doesn't support the toolConfig.toolChoice.tool field. Remove toolConfig.toolChoice.tool and try again.",
+                );
+            }
+            streamed_text("{}")
+        });
+        let (base, seen) = scripted_bedrock(answer).await;
+        let provider = scripted_provider(base, &["openai.gpt-oss-120b-1:0"]);
+        let structured = || {
+            let mut request = ask("openai.gpt-oss-120b-1:0", false);
+            request.output_schema = Some(json!({"type":"object"}));
+            request
+        };
+        answer_of(&provider, structured()).await.unwrap();
+        answer_of(&provider, structured()).await.unwrap();
+        let forced: Vec<bool> = seen
+            .lock()
+            .iter()
+            .map(|(_, body)| body.pointer("/toolConfig/toolChoice").is_some())
+            .collect();
+        assert_eq!(forced, [true, false, false]);
+    }
+
+    #[tokio::test]
+    async fn reasoning_bedrock_refuses_is_left_out_once_instead_of_failing_the_turn() {
+        // Bedrock's words for a block whose prompt changed, as it answered
+        // Claude Opus 5.5 asked not to drop such blocks.
+        let answer: Answer = Arc::new(|_, body| {
+            if body.to_string().contains("reasoningContent") {
+                return refusal(
+                    "The model returned the following errors: messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \"drop_block\". The `system` prompt differs from the one this block was created with.",
+                );
+            }
+            streamed_text("done")
+        });
+        let (base, seen) = scripted_bedrock(answer).await;
+        let provider = scripted_provider(base, &["global.anthropic.claude-opus-5-5"]);
+        let mut request = ask("global.anthropic.claude-opus-5-5", true);
+        request.messages.extend([
+            ProviderMessage::ToolCall {
+                call_id: "a".into(),
+                name: "list".into(),
+                arguments: json!({}),
+                provider_metadata: json!({"bedrock_reasoning":[{"reasoningContent":{"reasoningText":{"text":"plan","signature":"s1"}}}]}),
+            },
+            ProviderMessage::ToolResult {
+                call_id: "a".into(),
+                name: "list".into(),
+                output: "a.txt".into(),
+                is_error: false,
+                attachments: Vec::new(),
+            },
+        ]);
+        let events = answer_of(&provider, request).await.unwrap();
+        assert!(matches!(&events[0], ProviderEvent::TextDelta(text) if text == "done"));
+        let bodies = seen.lock();
+        assert_eq!(bodies.len(), 2);
+        assert!(
+            bodies[1]
+                .1
+                .get("additionalModelRequestFields")
+                .is_none_or(|fields| fields.get("thinking").is_none())
+        );
+        assert_eq!(
+            bodies[1].1["messages"][1]["content"][0]["toolUse"]["toolUseId"],
+            "a"
+        );
+    }
+
+    #[tokio::test]
+    async fn requests_sign_with_the_aws_sign_in_when_there_is_no_api_key() {
+        let answer: Answer = Arc::new(|_, _| streamed_text("hi"));
+        let (base, _) = scripted_bedrock(answer).await;
+        let mut provider = scripted_provider(base.clone(), &["test-model"]);
+        provider.bearer = None;
+        provider.sign_in = Some(AwsSignIn::fixed(AwsCredentials {
+            access_key: "AKIDEXAMPLE".into(),
+            secret_key: SecretString::from("secret"),
+            session_token: None,
+        }));
+        assert!(provider.authenticated());
+        let signer = provider.signer().await.unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        provider
+            .authorize(
+                &signer,
+                "POST",
+                &format!("{base}/model/test-model/converse-stream"),
+                b"{}",
+                &mut headers,
+            )
+            .unwrap();
+        assert!(
+            headers[reqwest::header::AUTHORIZATION]
+                .to_str()
+                .unwrap()
+                .starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+        );
+        answer_of(&provider, ask("test-model", false))
+            .await
+            .unwrap();
     }
 
     #[test]
