@@ -24913,7 +24913,15 @@ fn a_plugin_marketplace_refresh_reads_as_one_line() {
             {"name": "other", "status": "failed", "error": "could not reach it",
              "plugins": [], "unlisted": [], "failed": []}
         ]})),
-        "team updated · plugins updated: kit · no longer listed, kept as is: old · could not update: broken · other not updated: could not reach it · reload queued until active work is idle"
+        "team updated · plugins updated: kit · no longer listed, kept as is: old · could not update: broken (/plugin update broken tries again) · other not updated: could not reach it · reload queued until active work is idle"
+    );
+    // Several that failed are tried again one by one.
+    assert_eq!(
+        notice(serde_json::json!({"marketplaces": [
+            {"name": "team", "status": "updated", "plugins": [], "unlisted": [],
+             "failed": [{"plugin": "kit", "error": "offline"}, {"plugin": "docs", "error": "offline"}]}
+        ]})),
+        "team updated · could not update: kit, docs (/plugin update <name> tries again)"
     );
 
     // `/plugin marketplace add` says the same when the marketplace took the
@@ -24925,6 +24933,13 @@ fn a_plugin_marketplace_refresh_reads_as_one_line() {
             {"name": "team", "status": "updated", "plugins": ["kit"], "unlisted": [], "failed": []}
         ]})),
         "team updated · plugins updated: kit · reload queued until active work is idle"
+    );
+    assert_eq!(
+        added(serde_json::json!({"name": "team", "marketplaces": [
+            {"name": "team", "status": "updated", "plugins": [], "unlisted": [],
+             "failed": [{"plugin": "kit", "error": "offline"}]}
+        ]})),
+        "team updated · could not update: kit (/plugin update kit tries again)"
     );
     for result in [
         serde_json::json!({"name": "team", "plugins": []}),

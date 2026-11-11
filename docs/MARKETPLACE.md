@@ -137,8 +137,10 @@ it clones that ref into a staging folder beside the old clone, refuses the resul
 now gives itself another name, swaps the folders (the old one comes back if the swap fails, and one
 left aside by a swap that stopped halfway is put back next time) and then updates each installed
 plugin of that marketplace whose files would change. A plugin the marketplace no longer lists stays
-installed as it is and is reported. A marketplace registered before sources were recorded has no entry
-and is not refreshed in the background; updating it by hand works when its clone has an `origin`, and
+installed as it is and is reported. One that could not be updated is reported with the error and the
+command that tries again (`haarness plugin update <name>`, `/plugin update <name>` in the TUI). A
+marketplace registered before sources were recorded has no entry and is not refreshed in the
+background; updating it by hand works when its clone has an `origin`, and
 records an entry with `autoUpdate: false`. `haarness plugin marketplace auto-update <name> [--off]`
 (the `plugin_marketplace_auto_update` request with `name` and `enabled`, or plugin action
 `marketplace_auto_update` with `name`, `name:on` or `name:off`) changes that setting.
