@@ -72,6 +72,11 @@ running_desktop() {
   ps -axo pid=,comm= 2>/dev/null | awk -v app="$1/Contents/MacOS/Haarness" '{ pid = $1; sub(/^ *[0-9]+ /, ""); if ($0 == app) print pid }'
 }
 
+# The other copies of the app a Desktop runs from (one opened from a disk image or from Downloads): the folder of each.
+other_desktops() {
+  ps -axo comm= 2>/dev/null | awk -v app="$1/Contents/MacOS/Haarness" '{ sub(/^ +/, "") } $0 != app && /\/Haarness\.app\/Contents\/MacOS\/Haarness$/ { sub(/\/Contents\/MacOS\/Haarness$/, ""); print }' | sort -u
+}
+
 # FUSE 2 mounts an AppImage; Ubuntu has not installed it by default since 22.04.
 has_fuse2() {
   { ldconfig -p || /sbin/ldconfig -p; } 2>/dev/null | grep -q 'libfuse\.so\.2'
@@ -297,6 +302,15 @@ ENTRY
     echo 'Haarness Desktop is open again.'
   else
     printf 'Open %s/%s to launch Desktop.\n' "$destination" "$name"
+  fi
+  # A Desktop open from another copy of another version stays that version, and opening Haarness may just bring it
+  # to the front.
+  if [ "$product:$os" = desktop:macos ]; then
+    other_desktops "$destination/$name" | while IFS= read -r other; do
+      other_version=$(plutil -extract CFBundleShortVersionString raw -o - "$other/Contents/Info.plist" 2>/dev/null) || other_version=
+      [ "$other_version" != "$released" ] || continue
+      printf 'Haarness Desktop %s is also open, from %s: quit it to use %s.\n' "${other_version:-of another version}" "$other" "$released"
+    done
   fi
 )
 

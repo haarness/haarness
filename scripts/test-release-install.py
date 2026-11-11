@@ -200,6 +200,25 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-both-') as d:
                 finally:
                     app.kill();app.wait()
             print('PASS: a Desktop open from the copy being replaced quits and opens again; one that stays open keeps its copy')
+            # A Desktop open from another copy (a disk image, Downloads) is left alone, and named: it keeps its version,
+            # and opening Haarness could just bring it to the front.
+            # One of the version just installed is not worth a word.
+            plist='<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>{}</string></dict></plist>\n'
+            apps=[]
+            for folder,version in (('elsewhere','1.9.0'),('current','2.0.0')):
+                other=d/folder/'Haarness.app';(other/'Contents'/'MacOS').mkdir(parents=True)
+                (other/'Contents'/'Info.plist').write_text(plist.format(version))
+                shutil.copy(shim/'sleeper',other/'Contents'/'MacOS'/'Haarness')
+                apps.append(subprocess.Popen([str(other/'Contents'/'MacOS'/'Haarness')]))
+            try:
+                root,r=run('other-copy',extra={'PATH':f'{shim}:{os.environ["PATH"]}','OPEN_LOG':str(d/'other-copy.open')})
+                assert r.returncode==0 and (root/'apps'/'Haarness.app').is_dir(),(r.stdout,r.stderr)
+                assert f'Haarness Desktop 1.9.0 is also open, from {d/"elsewhere"/"Haarness.app"}: quit it to use 2.0.0.' in r.stdout,r.stdout
+                assert str(d/'current') not in r.stdout,r.stdout
+                assert 'Closing Haarness Desktop' not in r.stdout and all(app.poll() is None for app in apps),(r.stdout,r.stderr)
+            finally:
+                for app in apps: app.kill();app.wait()
+            print('PASS: a Desktop open from another copy is left open and named')
         if not macos:
             root,r=run('headless',extra={'DISPLAY':None})
             assert r.returncode==0 and 'No graphical session' in r.stdout,(r.stdout,r.stderr)
