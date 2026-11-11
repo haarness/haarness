@@ -1711,14 +1711,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A name no other test of this run shares: the clock alone repeats
+    /// for tests that start together (macOS reads it to the microsecond),
+    /// and two stand-ins sharing a folder read each other's sign-in.
     fn uuid_for_test() -> String {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         format!(
-            "{}-{}",
+            "{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
         )
     }
 }
