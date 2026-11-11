@@ -29,6 +29,8 @@
   page give the same sentence, which names the server (and the variable where the setting keeps the reference) but
   not the url.
 - A tool listed without an `inputSchema` is left out by name and the server's other tools work.
+- A server configured through the API (as an editor's session or an SDK does) stays connected through a reload a new
+  skill causes, without starting again, and one disconnected stays disconnected.
 - A 20 MB tool result reaches the model cut to 50 KiB with the whole saved to a file; base64 text and an image in
   capitals read from a resource come back as text and as an attachment.
 - An HTTP server that restarted and forgot its sessions, answering the session a request names with a 400 as servers
@@ -544,6 +546,22 @@ try:
     assert api('/mcp/flood/reconnect', {})['status'] == 'connected'
     assert call(thread, 'mcp__flood__ping', {})['output'] == 'pong'
     check('a reconnect brings the stopped server back')
+
+    # --- servers a client configures through the API (an editor's session, an SDK) through a reload
+    def launched(label): return len((root/label).read_text().split()) if (root/label).exists() else 0
+    for label in ('extra', 'spare'):
+        api(f'/mcp/{label}', {'transport': 'stdio', 'command': python, 'args': [str(fixtures/'recovery.py')], 'enabled': True,
+                              'env': {'LAUNCH_LOG': str(root/label), 'CALL_LOG': str(root/'runtime-calls')}})
+    api('/mcp/spare/disconnect', {})
+    skill = workspace/'.haarness/skills/late/SKILL.md'; skill.parent.mkdir(parents=True)
+    skill.write_text('---\nname: late\ndescription: Says late.\n---\n\nSay late.\n')
+    until(lambda: any(item['name'] == 'late' for item in api('/skills')), 'the new skill did not reload the configuration', 60)
+    assert servers()['extra']['status'] == 'connected' and servers()['spare']['status'] == 'disconnected', servers()
+    assert (launched('extra'), launched('spare')) == (1, 1), 'the reload started a server again'
+    assert call(thread, 'mcp__extra__ping', {})['output'] == 'pong'
+    assert api('/mcp/extra/reconnect', {})['status'] == 'connected'
+    check('a server configured through the API stays connected through a reload without starting again, its tool answers, '
+          'and one disconnected stays disconnected')
 
     # --- TUI rows
     command = e2e_tmux.pane_command(env, [binary, '--workspace', workspace, '--trust-project'])

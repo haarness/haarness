@@ -225,6 +225,18 @@ struct Entry {
     resources: bool,
     /// The start in flight, until it ends.
     start: Option<Arc<Running>>,
+    /// Set for a server a client configured (an editor's session, an SDK),
+    /// which the configuration files do not hold: a reload keeps it.
+    added: Option<Added>,
+}
+/// What a server a client configured stands in for (see
+/// [`NativeMcpRegistry::replace_from`]).
+#[derive(Clone)]
+struct Added {
+    /// The settings the configuration had for the same name when the client
+    /// configured it, if any. A reload that finds other settings there, or
+    /// none, lets the configuration's apply.
+    shadowed: Option<McpConfigureRequest>,
 }
 impl Entry {
     /// Stop the start on its way, if any. Explicitly: a hot reload's
@@ -756,7 +768,7 @@ impl McpRegistry for NativeMcpRegistry {
         config: McpConfigureRequest,
     ) -> CoreResult<McpServerInfo> {
         let enabled = config.enabled;
-        let info = self.register(name, config)?;
+        let info = self.register(name, config, true)?;
         if !enabled {
             return Ok(info);
         }
@@ -925,8 +937,14 @@ impl NativeMcpRegistry {
         }
     }
     /// Record `name` with `config`, not connected yet: `disconnected`, or
-    /// `disabled` when it is off.
-    fn register(&self, name: &str, config: McpConfigureRequest) -> CoreResult<McpServerInfo> {
+    /// `disabled` when it is off. `added` when a client configured it
+    /// rather than the configuration files (see [`Added`]).
+    fn register(
+        &self,
+        name: &str,
+        config: McpConfigureRequest,
+        added: bool,
+    ) -> CoreResult<McpServerInfo> {
         if !matches!(
             config.transport.as_str(),
             "stdio" | "streamable_http" | "sse"
@@ -952,6 +970,15 @@ impl NativeMcpRegistry {
             turned_off: None,
         };
         let mut servers = self.servers.write();
+        // Configured again, it still stands in for what it first did.
+        let added = added.then(|| Added {
+            shadowed: servers
+                .get(name)
+                .and_then(|replaced| match &replaced.added {
+                    Some(added) => added.shadowed.clone(),
+                    None => Some(replaced.config.clone()),
+                }),
+        });
         if let Some(replaced) = servers.get_mut(name) {
             replaced.stop_start();
         }
@@ -973,6 +1000,7 @@ impl NativeMcpRegistry {
                 oversized: None,
                 resources: false,
                 start: None,
+                added,
             },
         );
         Ok(info)
@@ -1144,7 +1172,7 @@ impl NativeMcpRegistry {
         first: bool,
     ) -> CoreResult<(McpServerInfo, Option<StartEnd>)> {
         let enabled = config.enabled;
-        let info = self.register(name, config)?;
+        let info = self.register(name, config, false)?;
         if !enabled {
             return Ok((info, None));
         }
@@ -1211,15 +1239,43 @@ impl NativeMcpRegistry {
     /// readers never observe a partly-added/partly-removed MCP set. Servers
     /// of the candidate still starting finish here: their starts follow the
     /// move.
+    ///
+    /// A server a client configured (see [`Added`]) stays as it is, started,
+    /// disconnected or still starting, while the candidate's entry of that
+    /// name is the one it stands in for, or the candidate has none and it
+    /// stands in for none. Otherwise the candidate's entry applies, or the
+    /// name goes: the configuration's entry was edited or removed, or the
+    /// configuration now has one (`haarness mcp add` saves the entry and
+    /// configures the server, in either order with a reload). One turned
+    /// off that stands in for no entry is let go, as `haarness mcp remove`
+    /// turns a server off before it removes the entry.
     pub fn replace_from(&self, candidate: &Self) {
         // Held to the end: a start that finishes meanwhile writes into the
         // candidate before its entries are copied, or into this registry
         // once its home points here (see `with_home`).
         let staged = candidate.servers.write();
-        let mut entries = staged.clone();
         let mut servers = self.servers.write();
+        let kept: BTreeMap<String, Entry> = servers
+            .iter()
+            .filter(|(name, live)| {
+                live.added.as_ref().is_some_and(|added| {
+                    match (&added.shadowed, staged.get(*name)) {
+                        (None, None) => live.config.enabled,
+                        (Some(shadowed), Some(configured)) => {
+                            same_effective_config(shadowed, &configured.config)
+                        }
+                        _ => false,
+                    }
+                })
+            })
+            .map(|(name, live)| (name.clone(), live.clone()))
+            .collect();
+        let mut entries = staged.clone();
         let mut watch = Vec::new();
         for (name, entry) in &mut entries {
+            if kept.contains_key(name) {
+                continue;
+            }
             if std::mem::take(&mut entry.adopted)
                 && let Some(live) = servers
                     .get(name)
@@ -1232,12 +1288,16 @@ impl NativeMcpRegistry {
                 let scope = entry.info.scope.take();
                 *entry = live.clone();
                 entry.info.scope = scope;
+                // The configuration's now, should a client have configured
+                // it with these very settings.
+                entry.added = None;
                 continue;
             }
             if entry.info.status == "connected" {
                 watch.push((name.clone(), entry.generation));
             }
         }
+        entries.extend(kept);
         for home in entries.values().filter_map(|entry| entry.home.as_ref()) {
             *home.write() = Arc::downgrade(&self.servers);
         }
@@ -1289,6 +1349,19 @@ impl NativeMcpRegistry {
         name: &str,
         config: McpConfigureRequest,
     ) -> CoreResult<(McpServerInfo, Option<StartEnd>)> {
+        // A server a client configured in this entry's place keeps the name
+        // while the entry is as it was then (see `replace_from`): nothing
+        // starts for the entry.
+        let taken = live.servers.read().get(name).is_some_and(|entry| {
+            entry
+                .added
+                .as_ref()
+                .and_then(|added| added.shadowed.as_ref())
+                .is_some_and(|shadowed| same_effective_config(shadowed, &config))
+        });
+        if taken {
+            return Ok((self.register(name, config, false)?, None));
+        }
         let current = (self.auth_dir == live.auth_dir)
             .then(|| live.servers.read().get(name).cloned())
             .flatten()
@@ -8001,6 +8074,199 @@ mod recovery_tests {
                 .unwrap();
             assert!(again.is_some(), "the stuck server was kept as it was");
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `config` that logs each launch to `<root>/<label>`, so a test tells
+    /// which settings started.
+    fn launched_as(root: &Path, label: &str) -> McpConfigureRequest {
+        let mut config = config(&root.join("calls"), "0");
+        config
+            .env
+            .insert("LAUNCH_LOG".into(), root.join(label).display().to_string());
+        config
+    }
+
+    /// A hot reload of the configuration `configured` (names and settings)
+    /// into `live`, its starts run to their end.
+    async fn reload_with(live: &NativeMcpRegistry, configured: &[(&str, &McpConfigureRequest)]) {
+        let candidate = NativeMcpRegistry::default().following(live);
+        for (name, config) in configured {
+            if let (_, Some(ended)) = candidate
+                .prepare_reusing(live, name, (*config).clone())
+                .unwrap()
+            {
+                ended.await.expect("the start came to an end").unwrap();
+            }
+        }
+        live.replace_from(&candidate);
+    }
+
+    async fn statuses(registry: &NativeMcpRegistry) -> BTreeMap<String, String> {
+        registry
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|info| (info.name, info.status))
+            .collect()
+    }
+
+    /// A reload (a skill added, a memory written) keeps the servers a client
+    /// configured (an editor's session, an SDK), as they were: connected
+    /// without starting again, or disconnected by the person. One turned off
+    /// that no entry of the configuration names is let go.
+    #[tokio::test]
+    async fn a_reload_keeps_a_server_a_client_configured() {
+        let root = scratch("added");
+        let configured = launched_as(&root, "configured");
+        let live = NativeMcpRegistry::default();
+        live.prepare("configured", configured.clone()).unwrap();
+        let added = live.configure("added", launched_as(&root, "added"));
+        assert_eq!(added.await.unwrap().status, "connected");
+        live.configure("off", launched_as(&root, "off"))
+            .await
+            .unwrap();
+        live.disconnect("off").await.unwrap();
+        let mut disabled = launched_as(&root, "disabled");
+        disabled.enabled = false;
+        live.configure("disabled", disabled).await.unwrap();
+
+        reload_with(&live, &[("configured", &configured)]).await;
+        let listed = statuses(&live).await;
+        assert_eq!(listed.get("added").map(String::as_str), Some("connected"));
+        assert_eq!(listed.get("off").map(String::as_str), Some("disconnected"));
+        assert!(!listed.contains_key("disabled"), "{listed:?}");
+        assert_eq!(
+            launches(&root.join("added")),
+            1,
+            "the reload started it again"
+        );
+        assert_eq!(launches(&root.join("off")), 1);
+        assert!(
+            live.tool_snapshot()
+                .iter()
+                .any(|tool| tool.name == "mcp__added__ping")
+        );
+        let ping = live.call("added", "ping", serde_json::json!({})).await;
+        assert_eq!(ping.unwrap().text, "pong");
+        // And through the next reload too.
+        reload_with(&live, &[("configured", &configured)]).await;
+        assert_eq!(statuses(&live).await["added"], "connected");
+        assert_eq!(launches(&root.join("added")), 1);
+        assert_eq!(launches(&root.join("configured")), 1);
+        for name in ["configured", "added"] {
+            live.disconnect(name).await.unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A client's server configured under the name of an entry of the
+    /// configuration stays while that entry is as it was, and the entry does
+    /// not start meanwhile; an edit or removal of the entry applies.
+    #[tokio::test]
+    async fn an_edit_of_the_configurations_entry_applies_over_a_clients_server() {
+        let root = scratch("shadowed");
+        let configured = launched_as(&root, "configured");
+        let live = NativeMcpRegistry::default();
+        let (_, started) = live.prepare("fixture", configured.clone()).unwrap();
+        started.unwrap().await.unwrap().unwrap();
+        live.configure("fixture", launched_as(&root, "added"))
+            .await
+            .unwrap();
+        reload_with(&live, &[("fixture", &configured)]).await;
+        assert_eq!(statuses(&live).await["fixture"], "connected");
+        assert_eq!(
+            launches(&root.join("configured")),
+            1,
+            "the configuration's entry started again"
+        );
+        assert_eq!(launches(&root.join("added")), 1);
+
+        let edited = launched_as(&root, "edited");
+        reload_with(&live, &[("fixture", &edited)]).await;
+        assert_eq!(statuses(&live).await["fixture"], "connected");
+        assert_eq!(launches(&root.join("edited")), 1);
+        reload_with(&live, &[("fixture", &edited)]).await;
+        assert_eq!(launches(&root.join("edited")), 1);
+        assert_eq!(launches(&root.join("added")), 1);
+
+        live.configure("fixture", launched_as(&root, "added"))
+            .await
+            .unwrap();
+        reload_with(&live, &[]).await;
+        assert!(
+            statuses(&live).await.is_empty(),
+            "the entry's removal was kept from it"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// What `haarness mcp disable` and `remove` do (configure the server off,
+    /// and save the entry off or remove it, in either order with a reload)
+    /// still holds: a server turned off over an entry that stays stays off,
+    /// and one whose entry is removed is gone.
+    #[tokio::test]
+    async fn a_server_turned_off_stays_off_and_one_removed_is_gone() {
+        let root = scratch("off");
+        let configured = launched_as(&root, "configured");
+        let mut off = configured.clone();
+        off.enabled = false;
+        for saved_first in [false, true] {
+            let live = NativeMcpRegistry::default();
+            reload_with(&live, &[("fixture", &configured)]).await;
+            // Disable: the entry is saved off, the server configured off.
+            if saved_first {
+                reload_with(&live, &[("fixture", &off)]).await;
+            }
+            assert_eq!(
+                live.configure("fixture", off.clone()).await.unwrap().status,
+                "disabled"
+            );
+            reload_with(&live, &[("fixture", &off)]).await;
+            assert_eq!(statuses(&live).await["fixture"], "disabled");
+            // Turned off through the API over an entry left on: off still.
+            reload_with(&live, &[("fixture", &configured)]).await;
+            live.configure("fixture", off.clone()).await.unwrap();
+            reload_with(&live, &[("fixture", &configured)]).await;
+            assert_eq!(statuses(&live).await["fixture"], "disabled");
+            // Remove: configured off, then the entry removed.
+            reload_with(&live, &[]).await;
+            assert!(statuses(&live).await.is_empty());
+        }
+        // Added and removed again before a reload saw the entry.
+        let live = NativeMcpRegistry::default();
+        live.configure("fixture", configured.clone()).await.unwrap();
+        live.configure("fixture", off.clone()).await.unwrap();
+        reload_with(&live, &[]).await;
+        assert!(statuses(&live).await.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `haarness mcp add` saves the entry and configures the server, and the
+    /// reload the save causes may come before or after: the server starts
+    /// once for each, and is the configuration's from then on, so editing
+    /// the entry away removes it.
+    #[tokio::test]
+    async fn a_server_added_and_saved_is_the_configurations_after_a_reload() {
+        let root = scratch("saved");
+        let configured = launched_as(&root, "configured");
+        let live = NativeMcpRegistry::default();
+        live.configure("fixture", configured.clone()).await.unwrap();
+        reload_with(&live, &[("fixture", &configured)]).await;
+        assert_eq!(statuses(&live).await["fixture"], "connected");
+        assert_eq!(launches(&root.join("configured")), 1);
+        reload_with(&live, &[]).await;
+        assert!(statuses(&live).await.is_empty());
+
+        reload_with(&live, &[("fixture", &configured)]).await;
+        live.configure("fixture", configured.clone()).await.unwrap();
+        assert_eq!(launches(&root.join("configured")), 3);
+        reload_with(&live, &[("fixture", &configured)]).await;
+        assert_eq!(statuses(&live).await["fixture"], "connected");
+        assert_eq!(launches(&root.join("configured")), 3);
+        reload_with(&live, &[]).await;
+        assert!(statuses(&live).await.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 

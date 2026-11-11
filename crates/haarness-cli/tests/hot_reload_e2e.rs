@@ -980,3 +980,118 @@ async fn a_reload_keeps_the_model_list_of_a_provider_defined_as_before() {
     process.wait().await.expect("reap server");
     models.abort();
 }
+
+/// A server a client configured through the API (an editor's session, an
+/// SDK) is in no configuration file. A reload for another change (a skill
+/// added) keeps it as it was: connected without starting again, or
+/// disconnected by the person. Once the configuration names it, the
+/// configuration's entry wins, and removing that entry removes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_keeps_the_mcp_servers_a_client_configured() {
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness")).expect("create project config root");
+    std::fs::create_dir_all(data.join("data")).expect("create isolated data root");
+    std::fs::create_dir_all(&home).expect("create isolated home");
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    let server = |launches: &str| {
+        json!({
+            "transport": "stdio", "command": PYTHON, "args": [fixture], "enabled": true,
+            "env": {"LAUNCH_LOG": directory.0.join(launches), "CALL_LOG": directory.0.join("calls")}
+        })
+    };
+    let config = workspace.join(".haarness/haarness.json");
+    std::fs::write(&config, "{}\n").expect("write project config");
+    let address = unused_address().await;
+    let mut process = server_command(&workspace, &data, &home, address)
+        .spawn()
+        .expect("launch Haarness server");
+    wait_until_listening(address).await;
+    let client = Client::new();
+    let post = |path: String, body: Value| {
+        client
+            .post(format!("http://{address}/v1{path}"))
+            .bearer_auth(TOKEN)
+            .json(&body)
+            .send()
+    };
+    for name in ["extra", "quiet"] {
+        let configured = post(format!("/mcp/{name}"), server(name))
+            .await
+            .expect("configure an MCP server");
+        assert!(
+            configured.status().is_success(),
+            "{name}: {}",
+            configured.status()
+        );
+    }
+    wait_for_mcp_status(&client, address, "extra", "connected").await;
+    post("/mcp/quiet/disconnect".into(), json!({}))
+        .await
+        .expect("disconnect an MCP server")
+        .error_for_status()
+        .expect("disconnected");
+
+    let skill = workspace.join(".haarness/skills/late/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).expect("create skill folder");
+    std::fs::write(
+        &skill,
+        "---\nname: late\ndescription: Says late.\n---\n\nSay late.\n",
+    )
+    .expect("write skill");
+    wait_for_array_entry(&client, address, "/skills", "name", "late", true).await;
+    wait_for_mcp_status(&client, address, "extra", "connected").await;
+    wait_for_mcp_status(&client, address, "quiet", "disconnected").await;
+    assert_eq!(
+        line_count(&directory.0.join("extra")),
+        1,
+        "the reload started the server again"
+    );
+    let ping = post("/mcp/extra/tools/ping".into(), json!({}))
+        .await
+        .expect("call the kept server");
+    let status = ping.status();
+    let body = ping.text().await.unwrap_or_default();
+    assert!(
+        status.is_success() && body.contains("pong"),
+        "{status}: {body}"
+    );
+    let reconnected = post("/mcp/extra/reconnect".into(), json!({}))
+        .await
+        .expect("reconnect the kept server");
+    assert_eq!(reconnected.status(), StatusCode::OK);
+
+    // The configuration names it now: its entry wins, and taking the entry
+    // out takes the server with it.
+    std::fs::write(
+        &config,
+        serde_json::to_string_pretty(&json!({"mcp": {"extra": {
+            "command": PYTHON, "args": [fixture],
+            "env": {"LAUNCH_LOG": directory.0.join("saved"), "CALL_LOG": directory.0.join("calls")}
+        }}}))
+        .expect("serialize project config"),
+    )
+    .expect("write project config");
+    for _ in 0..200 {
+        if line_count(&directory.0.join("saved")) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        line_count(&directory.0.join("saved")),
+        1,
+        "the saved entry did not start"
+    );
+    wait_for_mcp_status(&client, address, "extra", "connected").await;
+    std::fs::write(&config, "{}\n").expect("remove the entry");
+    wait_for_array_entry(&client, address, "/mcp", "name", "extra", false).await;
+    wait_for_mcp_status(&client, address, "quiet", "disconnected").await;
+    process.kill().await.expect("stop server");
+    process.wait().await.expect("reap server");
+}

@@ -345,7 +345,16 @@ request to a server that is starting (its tools, a tool call, a resource or
 prompt request) waits for that start too.
 
 A server configured through `POST /v1/mcp/{name}` (as an editor's ACP
-session does) holds up no turn while it starts: its client waits for it. ACP
+session or an SDK's `configureMcp` does) is in no configuration file, and a
+reload keeps it as it is: connected, still starting, or disconnected by the
+person. One configured under the name of a server in the configuration keeps
+that name while the configuration's entry stays as it was; once the entry is
+edited or removed, the configuration's entry applies again. One configured
+with `enabled: false` under a name the configuration does not hold is let go
+at the next reload, as `haarness mcp remove` turns a server off before
+removing its entry. A restart of the server forgets them.
+
+Such a server holds up no turn while it starts: its client waits for it. ACP
 takes a server still starting (or needing authorization) after 2 seconds as
 configured, so the session is set up at once, and waits for its servers
 still starting before the session's next prompt. A session's prompts run
