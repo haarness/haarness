@@ -1352,6 +1352,12 @@ pub struct McpOwner {
     /// When the process started, as Haarness reads it on its computer, so a
     /// later process given the same pid is not taken for it.
     pub started: String,
+    /// The owner asks again for a server it had on the project's earlier
+    /// server (after a restart). One turned off on this server since (a
+    /// configure with `enabled: false` and no owner) is not created again:
+    /// the answer says `disabled`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rejoin: bool,
 }
 
 /// One unanswered permission prompt, listable so clients can repopulate

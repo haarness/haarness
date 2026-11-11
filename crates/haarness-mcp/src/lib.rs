@@ -155,6 +155,11 @@ pub struct NativeMcpRegistry {
     /// Set once a task looks every [`OWNER_SWEEP`] for owners whose process
     /// ended (see [`Added::owners`]).
     sweeping: Arc<AtomicBool>,
+    /// The servers a client turned off without naming an owner (a person,
+    /// through the API), for as long as this registry lives: an owner asking
+    /// for one again after a restart of Haarness ([`McpOwner::rejoin`]) does
+    /// not bring it back.
+    turned_off: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 /// How often the processes owning servers clients configured are looked
 /// for, to let go of the servers whose owners all ended: one killed (an
@@ -1072,16 +1077,21 @@ impl NativeMcpRegistry {
     /// server (`owner`, and whether it runs on this computer). Configured on
     /// with the settings it already runs (or starts) with, the server gains
     /// the owner and goes on as it is; configured off, it loses the owner,
-    /// and goes only once none is left. Whether the server was recorded
-    /// anew, and is to start when it is on.
+    /// and goes only once none is left. One turned off without an owner is
+    /// not created again for an owner rejoining (see [`Self::turned_off`]),
+    /// which is told `disabled`. Whether the server was recorded anew, and
+    /// is to start when it is on.
     fn register_owned(
         &self,
         name: &str,
         mut config: McpConfigureRequest,
         added: bool,
-        owner: Option<(McpOwner, bool)>,
+        mut owner: Option<(McpOwner, bool)>,
     ) -> CoreResult<(McpServerInfo, bool)> {
         config.owner = None;
+        let rejoin = owner
+            .as_mut()
+            .is_some_and(|(owner, _)| std::mem::take(&mut owner.rejoin));
         if !matches!(
             config.transport.as_str(),
             "stdio" | "streamable_http" | "sse"
@@ -1107,6 +1117,18 @@ impl NativeMcpRegistry {
             turned_off: None,
         };
         let mut servers = self.servers.write();
+        if added {
+            let mut turned_off = self.turned_off.write();
+            if !config.enabled && owner.is_none() {
+                turned_off.insert(name.to_owned());
+            } else if config.enabled && rejoin && turned_off.contains(name) {
+                // Turned off here since its owner had it: it stays off.
+                info.status = "disabled".into();
+                return Ok((info, false));
+            } else if config.enabled && !rejoin {
+                turned_off.remove(name);
+            }
+        }
         let owners = servers
             .get(name)
             .and_then(|live| live.added.as_ref())
@@ -1897,6 +1919,7 @@ impl NativeMcpRegistry {
                     closed,
                     announce,
                     sweeping: Arc::default(),
+                    turned_off: Arc::default(),
                 };
                 let _ = registry.connect(&name, Some(generation)).await;
                 return;
@@ -2159,6 +2182,7 @@ impl McpStart {
                 closed,
                 announce: announce.clone(),
                 sweeping: Arc::default(),
+                turned_off: Arc::default(),
             }
             .watch(name, generation);
         }
@@ -8807,6 +8831,7 @@ mod recovery_tests {
         owned.owner = Some(McpOwner {
             pid,
             started: started.into(),
+            rejoin: false,
         });
         owned
     }
@@ -8932,6 +8957,7 @@ mod recovery_tests {
                 McpOwner {
                     pid: before.pid,
                     started: format!("{started} (earlier)"),
+                    rejoin: false,
                 },
                 here,
             );
@@ -8958,6 +8984,7 @@ mod recovery_tests {
             let owner = McpOwner {
                 pid,
                 started: started.into(),
+                rejoin: false,
             };
             assert!(!owner_ended(&owner, true), "{started:?}");
         }
@@ -8965,10 +8992,69 @@ mod recovery_tests {
             let elsewhere = McpOwner {
                 pid,
                 started: format!("{started} 1"),
+                rejoin: false,
             };
             assert!(owner_ended(&elsewhere, true));
             assert!(!owner_ended(&elsewhere, false));
         }
+    }
+
+    /// A server the person turned off (configured off with no owner) is not
+    /// brought back by an owner rejoining it after a restart (a second
+    /// window setting the chat's servers up again), whether it was turned
+    /// off before or while that owner looked; an owner releasing it does
+    /// not count, and a fresh configure (a session newly opened) still
+    /// starts it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_server_turned_off_is_not_brought_back_by_a_rejoining_owner() {
+        let root = scratch("rejoin");
+        let config = launched_as(&root, "ed");
+        let (mut owner, started) = owner_process();
+        let live = NativeMcpRegistry::default();
+        let mine = owned_by(&config, owner.id(), &started);
+        let mut rejoining = mine.clone();
+        rejoining.owner.as_mut().unwrap().rejoin = true;
+        assert_eq!(
+            live.configure("ed", rejoining.clone())
+                .await
+                .unwrap()
+                .status,
+            "connected"
+        );
+        let mut off = config.clone();
+        off.enabled = false;
+        live.configure("ed", off).await.unwrap();
+        assert!(statuses(&live).await.is_empty());
+        assert_eq!(
+            live.configure("ed", rejoining.clone())
+                .await
+                .unwrap()
+                .status,
+            "disabled"
+        );
+        assert!(
+            statuses(&live).await.is_empty(),
+            "the rejoin brought it back"
+        );
+        assert_eq!(launches(&root.join("ed")), 1);
+        // A fresh configure starts it, and from then on it rejoins.
+        assert_eq!(
+            live.configure("ed", mine.clone()).await.unwrap().status,
+            "connected"
+        );
+        let mut released = mine;
+        released.enabled = false;
+        live.configure("ed", released).await.unwrap();
+        assert!(statuses(&live).await.is_empty());
+        assert_eq!(
+            live.configure("ed", rejoining).await.unwrap().status,
+            "connected"
+        );
+        live.disconnect("ed").await.unwrap();
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Without `timeout_ms`, a local server's start gets 2 minutes and

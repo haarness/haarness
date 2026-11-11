@@ -55,8 +55,9 @@ version 1.
   process cannot say so, and on macOS and Linux the project's server lets them go once it sees the process
   has ended, within 30 seconds or at the next listing of its servers. On Windows, and for an editor whose
   agent runs in another pid namespace (a Flatpak sandbox), it cannot see that, and a killed agent's
-  servers stay until the project's server stops. One turned off through the API stays off (see
-  [MCP servers in the API](API.md)).
+  servers stay until the project's server stops. One turned off through the API stays off while that
+  project server runs, also for an agent process that sets the chat's servers up again after a restart;
+  a session the editor opens or loads afterwards asks for it again (see [MCP servers in the API](API.md)).
 - **Approvals** offer *Allow once*, *Allow while Haarness is running* (only when the request allows
   more than once; *Allow in this chat* for a site in the user's Chrome) and *Reject*. The editor is
   asked one request at a time. A request settled first somewhere else (another app, a sibling's

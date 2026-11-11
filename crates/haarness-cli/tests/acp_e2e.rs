@@ -1884,6 +1884,132 @@ async fn agents_sharing_a_chat_both_own_its_server_after_a_restart() {
     daemon_guard.stop().await;
 }
 
+/// The chat's server turned off through the API on the project's server a
+/// restart brought up stays off, also for a second agent process on the
+/// chat that had it on the earlier server: turned off before that agent's
+/// next prompt (`before`), or while that prompt was setting it up again
+/// (the agent made to wait between reading the listing and configuring).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_server_turned_off_after_a_restart_stays_off_for_a_second_agent() {
+    for before in [true, false] {
+        let directory = TestDirectory::new();
+        let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, _) =
+            acp_session(&directory).await;
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../haarness-mcp/tests/fixtures/recovery.py"
+        );
+        let launch_log = directory.0.join("launches");
+        let launched =
+            || std::fs::read_to_string(&launch_log).map_or(0, |text| text.lines().count());
+        let server = json!({"name": "editor", "command": python3(), "args": [fixture],
+                            "env": [{"name": "LAUNCH_LOG", "value": launch_log},
+                                    {"name": "CALL_LOG", "value": directory.0.join("calls")}]});
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0", "id":100, "method":"session/new",
+                   "params":{"cwd":workspace, "mcpServers":[server.clone()]}}),
+        )
+        .await;
+        let mut messages = Vec::new();
+        let created = receive_response(&mut lines, &mut stdin, 100, &mut messages).await;
+        let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+        let name = editor_server(&daemon_api(&data), &session, "editor").await;
+        let tool = format!("mcp__{name}__ping");
+        let mut command = base_command(&workspace, &data, &directory.0.join("home"));
+        command
+            .args(["acp", "--provider", "echo", "--model", "echo-1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        if !before {
+            command.env("HAARNESS_TEST_ACP_RESTORE_DELAY_MS", "3000");
+        }
+        let mut second = command.spawn().expect("launch a second Haarness ACP agent");
+        let mut second_in = second.stdin.take().expect("ACP stdin");
+        let mut second_lines = BufReader::new(second.stdout.take().expect("ACP stdout")).lines();
+        send(
+            &mut second_in,
+            json!({"jsonrpc":"2.0", "id":1, "method":"initialize",
+                   "params":{"protocolVersion":1, "clientCapabilities":{}}}),
+        )
+        .await;
+        assert_eq!(receive(&mut second_lines).await["id"], 1);
+        send(
+            &mut second_in,
+            json!({"jsonrpc":"2.0", "id":101, "method":"session/load",
+                   "params":{"sessionId":session, "cwd":workspace, "mcpServers":[server]}}),
+        )
+        .await;
+        let mut messages = Vec::new();
+        let loaded = receive_response(&mut second_lines, &mut second_in, 101, &mut messages).await;
+        assert!(loaded.get("error").is_none(), "{loaded}");
+
+        daemon_guard.stop().await;
+        daemon_guard.stopped = false;
+        prompt_calls(&mut stdin, &mut lines, 102, &session, &tool).await;
+        assert_eq!(launched(), 2);
+        let turn_off = async || {
+            daemon(
+                &daemon_api(&data),
+                reqwest::Method::POST,
+                &format!("/mcp/{name}"),
+                Some(
+                    json!({"transport": "stdio", "command": python3(), "args": [fixture],
+                            "enabled": false}),
+                ),
+            )
+            .await;
+        };
+        if before {
+            turn_off().await;
+            asked(&mut stdin, &mut lines, 103, &session, &tool, "once").await;
+            asked(
+                &mut second_in,
+                &mut second_lines,
+                104,
+                &session,
+                &tool,
+                "once",
+            )
+            .await;
+        } else {
+            send(
+                &mut second_in,
+                json!({"jsonrpc":"2.0", "id":104, "method":"session/prompt",
+                       "params":{"sessionId":session,
+                                 "prompt":[{"type":"text", "text":format!("!tool {tool} {{}}")}]}}),
+            )
+            .await;
+            // The second agent has read the listing and waits to configure.
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            turn_off().await;
+            let mut messages = Vec::new();
+            let answered =
+                receive_response(&mut second_lines, &mut second_in, 104, &mut messages).await;
+            assert_eq!(answered["result"]["stopReason"], "end_turn", "{answered}");
+        }
+        assert!(
+            editor_servers(&daemon_api(&data), &session, "editor")
+                .await
+                .is_empty(),
+            "turned off before: {before}"
+        );
+        assert_eq!(launched(), 2, "turned off before: {before}");
+
+        drop(second_in);
+        drop(stdin);
+        for agent in [&mut child, &mut second] {
+            timeout(Duration::from_secs(20), agent.wait())
+                .await
+                .expect("an ACP agent did not exit")
+                .expect("wait for an ACP agent");
+        }
+        daemon_guard.stop().await;
+    }
+}
+
 /// Send a prompt that calls `tool`, answer each request it raises with
 /// `answer`, and say how many it raised.
 async fn asked(

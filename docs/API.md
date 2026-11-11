@@ -367,7 +367,10 @@ of the project is offered its tools. How long it lives depends on `owner`:
   owner Haarness cannot find there stays until it lets the server go: one on
   another computer, one in another pid namespace (an editor in a Flatpak
   sandbox), and any on Windows, where Haarness does not read a process's
-  start time.
+  start time. A server turned off without an owner is not created again,
+  while the project's server runs, for an owner that sets it up again after
+  a restart (`"rejoin": true`, as `haarness acp` sends then): that configure
+  answers `disabled`. A configure without `rejoin` still creates it.
 
 One configured under the name of a server in the configuration keeps that
 name while the configuration's entry stays as it was; configured off, it

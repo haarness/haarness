@@ -3539,6 +3539,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "rejoin": {
+            "description": "The owner asks again for a server it had on the project's earlier\nserver (after a restart). One turned off on this server since (a\nconfigure with `enabled: false` and no owner) is not created again:\nthe answer says `disabled`.",
+            "type": "boolean"
+          },
           "started": {
             "description": "When the process started, as Haarness reads it on its computer, so a\nlater process given the same pid is not taken for it.",
             "type": "string"

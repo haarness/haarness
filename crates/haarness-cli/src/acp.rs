@@ -136,6 +136,7 @@ impl Service {
                 // keeps its servers until it lets them go.
                 started: haarness_core::process_groups::process_start(std::process::id())
                     .unwrap_or_default(),
+                rejoin: false,
             },
             mcp: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
@@ -246,6 +247,19 @@ pub async fn serve(config: Config) -> Result<()> {
     service.release_all().await;
     result
 }
+
+/// A server a session had on the project's earlier server that was turned
+/// off on the one serving it now (see `Service::start_mcp`).
+#[derive(Debug)]
+struct TurnedOff;
+
+impl std::fmt::Display for TurnedOff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the MCP server was turned off")
+    }
+}
+
+impl std::error::Error for TurnedOff {}
 
 /// Debug builds under the test providers wait
 /// `HAARNESS_TEST_ACP_RESTORE_DELAY_MS` before configuring a session's server
@@ -774,7 +788,7 @@ impl Service {
                 );
                 held
             };
-            let started = self.start_mcp(&name, &config).await;
+            let started = self.start_mcp(&name, &config, false).await;
             if !self.configured(&name, on) {
                 // The session closed meanwhile.
                 self.release_mcp(&name, config).await;
@@ -1000,7 +1014,15 @@ impl Service {
             if let Some(config) = config {
                 tracing::info!(server = %name, "configuring an editor's MCP server on a new Haarness server");
                 restore_delay().await;
-                let started = self.start_mcp(&name, &config).await;
+                let started = self.start_mcp(&name, &config, true).await;
+                if started.as_ref().is_err_and(anyhow::Error::is::<TurnedOff>) {
+                    tracing::info!(server = %name, "an editor's MCP server was turned off; its sessions let it go");
+                    self.mcp
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&name);
+                    continue;
+                }
                 if !self.configured(&name, on) {
                     self.release_mcp(&name, config).await;
                     continue;
@@ -1117,10 +1139,21 @@ impl Service {
     /// counts as configured for the session. Its start goes on on the
     /// server, and the session's next prompt waits for it. A server that
     /// needs authorization is configured too.
-    async fn start_mcp(&self, name: &str, config: &McpConfigureRequest) -> Result<bool> {
+    /// `rejoin` when this process asks again for a server it had on the
+    /// project's earlier server: the server refuses one turned off there
+    /// since ([`TurnedOff`]).
+    async fn start_mcp(
+        &self,
+        name: &str,
+        config: &McpConfigureRequest,
+        rejoin: bool,
+    ) -> Result<bool> {
         let mut config = config.clone();
-        config.owner = Some(self.owner.clone());
+        let mut owner = self.owner.clone();
+        owner.rejoin = rejoin;
+        config.owner = Some(owner);
         match tokio::time::timeout(MCP_START_WAIT, self.client.configure_mcp(name, &config)).await {
+            Ok(Ok(info)) if rejoin && info.status == "disabled" => Err(TurnedOff.into()),
             Ok(configured) => configured.map(|_| false),
             Err(_) => {
                 let servers = self.client.mcp().await?;
