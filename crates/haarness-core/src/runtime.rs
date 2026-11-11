@@ -1018,6 +1018,9 @@ fn is_provider_transient(error: &CoreError) -> bool {
     if is_stream_cut(error) {
         return true;
     }
+    if provider_server_failure(message) {
+        return true;
+    }
     let message = message.to_ascii_lowercase();
     if renewal_server_busy(&message) {
         return true;
@@ -1046,6 +1049,27 @@ fn is_provider_transient(error: &CoreError) -> bool {
     ]
     .iter()
     .any(|marker| message.contains(marker))
+}
+
+/// Whether a provider's own error event says its server failed or was too
+/// busy to finish the response, which no HTTP status names: OpenAI's
+/// Responses stream ends such a response with `response.failed` and code
+/// `server_error` ("An error occurred while processing your request. You can
+/// retry your request…"), `server_is_overloaded` or `slow_down`, after a 200,
+/// and Claude's stream with an `api_error` ("Internal server error").
+fn provider_server_failure(raw: &str) -> bool {
+    provider_error_fields(raw).is_some_and(|(_, code, kind)| {
+        [code, kind].into_iter().flatten().any(|value| {
+            matches!(
+                value.as_str(),
+                "server_error"
+                    | "server_is_overloaded"
+                    | "slow_down"
+                    | "api_error"
+                    | "internal_error"
+            )
+        })
+    })
 }
 
 /// Whether a sign-in's renewal failed because its server was busy or down
@@ -1120,7 +1144,9 @@ fn closed_call_reason(error: &CoreError, provider: Option<&str>) -> String {
             "The connection to {} broke off before this call ran, so it did not run.",
             provider.unwrap_or("the provider")
         ),
-        CoreError::ProviderIncomplete(inner) if unfinished_ending(inner) => {
+        CoreError::ProviderIncomplete(inner)
+            if unfinished_ending(inner) || provider_server_failure(inner) =>
+        {
             "The response that made this call ended before it was done, so the call did not run."
                 .to_owned()
         }
@@ -2639,7 +2665,7 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     // is named as silent, as it is before any output.
     if let CoreError::ProviderIncomplete(inner) = error {
         let silent = CoreError::Provider(inner.clone());
-        if crate::stream_stall_silence(&silent).is_some() {
+        if crate::stream_stall_silence(&silent).is_some() || provider_server_failure(inner) {
             return describe_error(&silent, provider);
         }
     }
@@ -2684,6 +2710,29 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
                 provider.unwrap_or("The provider")
             )
         };
+    }
+    // The provider's server failed or was too busy to finish, after the
+    // turn's retries (or partway through an answer, continued as often as a
+    // cut one is): its own words ask to retry and quote a request id.
+    if provider_server_failure(raw) {
+        return format!(
+            "{} had a problem on its side and couldn't finish the response. Send your message again in a moment, or choose another model.",
+            provider.unwrap_or("The provider")
+        );
+    }
+    // OpenAI's safety check flags the whole request, the chat's earlier
+    // messages too ("Invalid prompt: your prompt was flagged as potentially
+    // violating our usage policy. Please try again with a different
+    // prompt"): a new message in the same chat can be refused again for an
+    // old one.
+    if provider_error_fields(raw)
+        .is_some_and(|(_, code, _)| code.as_deref() == Some("invalid_prompt"))
+        || raw.contains("[invalid_prompt]")
+    {
+        return format!(
+            "{} refused this chat: its safety check flagged it as possibly against its usage policy. Rephrase your last message, or start a new chat if something earlier in this one set it off.",
+            provider.unwrap_or("The provider")
+        );
     }
     if let Some((message, code, kind)) = provider_error_fields(raw) {
         let label = code.or_else(|| {
@@ -12171,9 +12220,12 @@ impl RunnerTask {
                                 continue 'provider_round;
                             }
                             // A response that broke off after it began (its
-                            // connection was cut, or the provider fell silent)
-                            // is recovered like a response cut short.
-                            let cut = saw_provider_event && is_stream_cut(&error_value);
+                            // connection was cut, the provider fell silent, or
+                            // its server failed partway) is recovered like a
+                            // response cut short.
+                            let cut = saw_provider_event
+                                && (is_stream_cut(&error_value)
+                                    || matches!(&error_value, CoreError::Provider(message) if provider_server_failure(message)));
                             blocked = Some(match error_value {
                                 CoreError::Provider(message) if cut => {
                                     CoreError::ProviderIncomplete(message)
@@ -26405,10 +26457,26 @@ mod tests {
             "HTTP 524: A timeout occurred",
             "HTTP 520 <unknown status code>: Web server is returning an unknown error",
             "HTTP 508 Loop Detected",
+            // OpenAI's Responses stream: a response its server failed, or was
+            // too busy, to finish, after a 200.
+            r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_0123 in your message."}}}"#,
+            r#"{"type":"error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null,"sequence_number":2}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"slow_down","message":"Please slow down."}}}"#,
+            r#"{"type":"error","error":{"type":"api_error","message":"Internal server error"}}"#,
         ] {
             assert!(
                 super::is_provider_transient(&provider(retried)),
                 "{retried}"
+            );
+        }
+        // What the request asked for, refused: another try is refused too.
+        for refused in [
+            r#"{"type":"response.failed","response":{"error":{"code":"invalid_prompt","message":"Invalid prompt: your prompt was flagged as potentially violating our usage policy."}}}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}}"#,
+        ] {
+            assert!(
+                !super::is_provider_transient(&provider(refused)),
+                "{refused}"
             );
         }
         for failed in [
@@ -27723,6 +27791,64 @@ mod tests {
         ));
         assert!(!super::names_json_position("upstream stream became idle"));
         assert!(!super::names_json_position("failed at line 3"));
+    }
+
+    #[test]
+    fn a_response_the_providers_server_failed_says_so_plainly() {
+        let raw = r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_0123 in your message."}}}"#;
+        let words = "OpenAI had a problem on its side and couldn't finish the response. Send your message again in a moment, or choose another model.";
+        assert_eq!(
+            super::describe_failure(&CoreError::Provider(raw.into()), Some("OpenAI"), true),
+            words
+        );
+        // Partway through an answer, once its continuations ran out.
+        assert_eq!(
+            super::describe_failure(
+                &CoreError::ProviderIncomplete(raw.into()),
+                Some("OpenAI"),
+                true
+            ),
+            words
+        );
+        assert_eq!(
+            super::closed_call_reason(&CoreError::ProviderIncomplete(raw.into()), Some("OpenAI")),
+            "The response that made this call ended before it was done, so the call did not run."
+        );
+    }
+
+    #[test]
+    fn a_chat_the_providers_safety_check_flagged_says_a_new_chat_may_help() {
+        assert_eq!(
+            super::describe_failure(
+                &CoreError::Provider(
+                    r#"{"type":"response.failed","response":{"error":{"code":"invalid_prompt","message":"Invalid prompt: flagged."}}}"#.into()
+                ),
+                Some("OpenAI"),
+                true
+            ),
+            "OpenAI refused this chat: its safety check flagged it as possibly against its usage policy. Rephrase your last message, or start a new chat if something earlier in this one set it off."
+        );
+        assert_eq!(
+            super::describe_failure(
+                &CoreError::Provider(
+                    "HTTP 400 Bad Request: [invalid_prompt] Invalid prompt: your prompt was flagged as potentially violating our usage policy.".into()
+                ),
+                Some("OpenAI"),
+                true
+            ),
+            "OpenAI refused this chat: its safety check flagged it as possibly against its usage policy. Rephrase your last message, or start a new chat if something earlier in this one set it off."
+        );
+        // Any other refusal of the request keeps the provider's words.
+        assert_eq!(
+            super::describe_failure(
+                &CoreError::Provider(
+                    r#"{"type":"response.failed","response":{"error":{"code":"model_not_found","message":"No such model."}}}"#.into()
+                ),
+                Some("OpenAI"),
+                true
+            ),
+            "Provider rejected the request (model_not_found): No such model."
+        );
     }
 
     #[test]

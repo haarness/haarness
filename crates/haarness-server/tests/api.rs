@@ -5025,6 +5025,105 @@ async fn a_busy_provider_is_retried_instead_of_failing_the_turn() {
     assert!(retrying, "a turn.status retrying event is published");
 }
 
+/// OpenAI's Responses stream ending a response its server could not finish,
+/// after a 200: no status line names it, only the event's code.
+const OPENAI_SERVER_ERROR: &str = r#"{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"server_error","message":"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_0123 in your message."}}}"#;
+
+/// Fails its first round with OpenAI's `server_error` event, before any
+/// output or after `partial` text, then answers normally.
+struct ServerFailsOnce {
+    rounds: Arc<std::sync::atomic::AtomicUsize>,
+    partial: bool,
+}
+
+#[async_trait]
+impl ModelProvider for ServerFailsOnce {
+    fn id(&self) -> &str {
+        "busy"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        BusyOnce::default().info()
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        if let Some(title) = title_fixture(&request) {
+            return title;
+        }
+        if self
+            .rounds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            let mut events = Vec::new();
+            if self.partial {
+                events.push(Ok(ProviderEvent::TextDelta("Looking at it".into())));
+            }
+            events.push(Err(CoreError::Provider(OPENAI_SERVER_ERROR.into())));
+            return Ok(Box::pin(stream::iter(events)));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderEvent::TextDelta(
+                "answered after a server error".into(),
+            )),
+            Ok(ProviderEvent::Finished {
+                reason: "done".into(),
+            }),
+        ])))
+    }
+}
+
+/// A response OpenAI's server failed to finish (`server_error`, which its own
+/// words ask to retry) was the turn's end; it is sent again, before any
+/// output or continued after some, as a busy or cut-off response is.
+#[tokio::test]
+async fn a_response_the_providers_server_failed_is_retried_instead_of_failing_the_turn() {
+    for partial in [false, true] {
+        let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime = AgentRuntime::new(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new(vec![
+                Arc::new(ServerFailsOnce {
+                    rounds: rounds.clone(),
+                    partial,
+                }) as Arc<dyn ModelProvider>,
+            ])),
+            Arc::new(EmptyToolRegistry),
+            EventBus::new(256),
+        );
+        let thread = runtime
+            .create_thread(CreateThreadRequest {
+                title: Some("Server error".into()),
+                provider: Some("busy".into()),
+                model: Some("busy-1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let turn = runtime
+            .start_turn(thread.id, turn_request("hello"))
+            .await
+            .unwrap();
+        let done = wait_done(&runtime, &turn).await;
+        assert_eq!(
+            done.status,
+            TurnStatus::Completed,
+            "partial {partial}: {:?}",
+            done.error
+        );
+        assert_eq!(rounds.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let items = runtime.items(thread.id, None).await.unwrap();
+        assert!(items.iter().any(|item| matches!(
+            &item.data,
+            haarness_protocol::ItemData::AssistantMessage { text } if text.contains("answered after a server error")
+        )));
+    }
+}
+
 /// Answers a structured-output turn with scripted rounds, in order.
 struct ScriptedStructured {
     rounds: Arc<std::sync::atomic::AtomicUsize>,
