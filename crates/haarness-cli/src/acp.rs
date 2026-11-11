@@ -18,21 +18,22 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::schema::{
     ProtocolVersion,
     v1::{
-        AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, Diff,
-        EmbeddedResourceResource, Implementation, InitializeRequest, InitializeResponse,
-        LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest,
-        NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry,
-        PlanEntryPriority, PlanEntryStatus, PromptCapabilities, PromptRequest, PromptResponse,
-        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, SessionId,
-        SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
-        ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-        UsageUpdate,
+        AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse,
+        ContentBlock, ContentChunk, Cost, Diff, EmbeddedResourceResource, Implementation,
+        InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+        McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse, PermissionOption,
+        PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+        PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
+        RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities,
+        SessionCloseCapabilities, SessionId, SessionNotification, SessionUpdate, StopReason,
+        TextContent, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
+        ToolCallUpdateFields, ToolKind, UsageUpdate,
     },
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Stdio};
 use anyhow::{Context as _, Result};
 use haarness_protocol::{
-    CreateThreadRequest, Item, ItemData, McpConfigureRequest, PermissionReply,
+    CreateThreadRequest, Item, ItemData, McpConfigureRequest, McpOwner, PermissionReply,
     PermissionReplyDecision, RequestId, StartTurnRequest, Thread, ThreadId, Turn, TurnId,
     TurnStatus,
 };
@@ -42,6 +43,27 @@ use uuid::Uuid;
 
 /// An MCP server of a session: Haarness's name for it, and the editor's.
 type SessionServer = (String, String);
+
+/// An MCP server an editor passed: the sessions it came with (chats made
+/// within a minute or so share the start of their id, which names it), the
+/// editor's name for it and its settings, and the server it was last
+/// configured on, by its instance id.
+struct SessionMcp {
+    sessions: HashSet<String>,
+    shown: String,
+    config: McpConfigureRequest,
+    on: Uuid,
+    /// When it was last configured, once the server had taken it: a listing
+    /// read before that may not show it.
+    since: std::time::Instant,
+    /// Held while it is configured, so a session sharing it waits for that
+    /// rather than reading a listing in between.
+    turn: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// How long `haarness acp` waits, as it exits, for the server to take back
+/// its sessions' MCP servers.
+const MCP_RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long setting a session up waits for one of its MCP servers to start
 /// before leaving the rest of that start to the server (see
@@ -74,7 +96,15 @@ struct Service {
     agent: Option<String>,
     auto_approve: bool,
     active: Arc<Mutex<HashMap<String, TurnId>>>,
-    mcp: Arc<Mutex<HashSet<String>>>,
+    /// This process, named with each MCP server it configures: the server
+    /// keeps it while any process that configured it runs and has not let it
+    /// go, the same chat open in a second window's included, and sees one
+    /// an editor killed (SIGKILL says nothing) gone.
+    owner: McpOwner,
+    /// The MCP servers the sessions' editors passed, by Haarness's name for
+    /// them, so a prompt can configure again one the server no longer has
+    /// (see `Service::restore_mcp`).
+    mcp: Arc<Mutex<HashMap<String, SessionMcp>>>,
     /// Each session's MCP servers still starting when it was set up, by
     /// session: Haarness's name and the editor's. Its next prompt waits for
     /// them (see `Service::await_mcp`).
@@ -100,7 +130,15 @@ impl Service {
             agent: config.agent,
             auto_approve: config.auto_approve,
             active: Arc::new(Mutex::new(HashMap::new())),
-            mcp: Arc::new(Mutex::new(HashSet::new())),
+            owner: McpOwner {
+                pid: std::process::id(),
+                // Unknown, the server cannot tell when the process ends, and
+                // keeps its servers until it lets them go.
+                started: haarness_core::process_groups::process_start(std::process::id())
+                    .unwrap_or_default(),
+                rejoin: false,
+            },
+            mcp: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             waits: Arc::new(Mutex::new(HashMap::new())),
             gates: Arc::new(Mutex::new(HashMap::new())),
@@ -137,8 +175,9 @@ pub async fn serve(config: Config) -> Result<()> {
     let create = service.clone();
     let load = service.clone();
     let prompt = service.clone();
-    let cancel = service;
-    Agent
+    let cancel = service.clone();
+    let close = service.clone();
+    let served = Agent
         .builder()
         .name("haarness")
         .on_receive_request(
@@ -187,9 +226,80 @@ pub async fn serve(config: Config) -> Result<()> {
             },
             agent_client_protocol::on_receive_notification!(),
         )
-        .connect_to(Stdio::new())
-        .await
-        .context("serve ACP over stdio")
+        .on_receive_request(
+            async move |request: CloseSessionRequest, responder, connection| {
+                let service = close.clone();
+                connection.spawn(async move {
+                    responder.respond_with_result(service.close(&request.session_id).await)
+                })?;
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_to(Stdio::new());
+    // The editor closing the connection (it quit, or stopped this process)
+    // ends the sessions: their MCP servers are let go, so no process of
+    // theirs runs on and no other chat is offered their tools.
+    let result = tokio::select! {
+        result = served => result.context("serve ACP over stdio"),
+        () = stopped() => Ok(()),
+    };
+    service.release_all().await;
+    result
+}
+
+/// A server a session had on the project's earlier server that was turned
+/// off on the one serving it now (see `Service::start_mcp`).
+#[derive(Debug)]
+struct TurnedOff;
+
+impl std::fmt::Display for TurnedOff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the MCP server was turned off")
+    }
+}
+
+impl std::error::Error for TurnedOff {}
+
+/// Debug builds under the test providers wait
+/// `HAARNESS_TEST_ACP_RESTORE_DELAY_MS` before configuring a session's server
+/// again, so a test can have a session sharing it read the listing first.
+async fn restore_delay() {
+    if cfg!(debug_assertions)
+        && std::env::var_os("HAARNESS_TEST_PROVIDER").is_some()
+        && let Some(delay) = std::env::var("HAARNESS_TEST_ACP_RESTORE_DELAY_MS")
+            .ok()
+            .and_then(|delay| delay.parse().ok())
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+    }
+}
+
+/// A signal that asks `haarness acp` to stop.
+async fn stopped() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut signals = [
+            SignalKind::terminate(),
+            SignalKind::interrupt(),
+            SignalKind::hangup(),
+        ]
+        .into_iter()
+        .filter_map(|kind| signal(kind).ok())
+        .collect::<Vec<_>>();
+        if signals.is_empty() {
+            return std::future::pending().await;
+        }
+        let waits = signals.iter_mut().map(|signal| Box::pin(signal.recv()));
+        futures::future::select_all(waits).await;
+    }
+    #[cfg(not(unix))]
+    {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 impl Service {
@@ -205,7 +315,10 @@ impl Service {
                             .audio(true)
                             .embedded_context(true),
                     )
-                    .mcp_capabilities(McpCapabilities::new().http(true).sse(true)),
+                    .mcp_capabilities(McpCapabilities::new().http(true).sse(true))
+                    .session_capabilities(
+                        SessionCapabilities::new().close(SessionCloseCapabilities::new()),
+                    ),
             )
             .agent_info(
                 Implementation::new("haarness", env!("CARGO_PKG_VERSION")).title("Haarness"),
@@ -214,6 +327,7 @@ impl Service {
 
     async fn create(&self, request: NewSessionRequest) -> AcpResult<NewSessionResponse> {
         self.validate_scope(&request.cwd, &request.additional_directories)?;
+        let server = self.client.reach_server().await.map_err(unreachable)?;
         let thread = self
             .client
             .create_thread(CreateThreadRequest {
@@ -229,8 +343,13 @@ impl Service {
             })
             .await
             .map_err(internal)?;
-        self.configure_mcp(thread.id, request.mcp_servers, &request.cwd)
-            .await?;
+        self.configure_mcp(
+            thread.id,
+            request.mcp_servers,
+            &request.cwd,
+            server.server_instance_id,
+        )
+        .await?;
         self.cwds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -245,9 +364,15 @@ impl Service {
     ) -> AcpResult<LoadSessionResponse> {
         self.validate_scope(&request.cwd, &request.additional_directories)?;
         let thread = thread_id(&request.session_id)?;
+        let server = self.client.reach_server().await.map_err(unreachable)?;
         let chat = self.client.thread(thread).await.map_err(not_found)?;
-        self.configure_mcp(thread, request.mcp_servers, &request.cwd)
-            .await?;
+        self.configure_mcp(
+            thread,
+            request.mcp_servers,
+            &request.cwd,
+            server.server_instance_id,
+        )
+        .await?;
         self.cwds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -303,7 +428,13 @@ impl Service {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key.clone(), stop.clone());
         let begun: AcpResult<Option<_>> = async {
+            // The project's server may have been replaced since the last
+            // prompt (an update), or stopped: the prompt goes to the one that
+            // serves the project now, with the session's servers set up there.
+            let server = self.client.reach_server().await.map_err(unreachable)?;
             let chat = self.client.thread(thread).await.map_err(not_found)?;
+            self.restore_mcp(&request.session_id, server.server_instance_id)
+                .await;
             if self
                 .await_mcp(&request.session_id, &stop, connection)
                 .await?
@@ -622,29 +753,59 @@ impl Service {
         thread: ThreadId,
         servers: Vec<McpServer>,
         cwd: &Path,
+        on: Uuid,
     ) -> AcpResult<()> {
+        let session = thread.to_string();
         for server in servers {
             let (shown, config) = mcp_config(server, cwd)?;
-            let name = format!("acp-{}-{shown}", &thread.to_string()[..8]);
-            let fresh = self
-                .mcp
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(name.clone());
-            if !fresh {
+            let name = format!("acp-{}-{shown}", &session[..8]);
+            // Held from the moment the name is known, so a session sharing
+            // it waits until the server has taken it.
+            let held = {
+                let mut known = self
+                    .mcp
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(passed) = known.get_mut(&name) {
+                    passed.sessions.insert(session.clone());
+                    continue;
+                }
+                let turn = Arc::new(tokio::sync::Mutex::new(()));
+                let held = turn
+                    .clone()
+                    .try_lock_owned()
+                    .expect("a lock made just now is free");
+                known.insert(
+                    name.clone(),
+                    SessionMcp {
+                        sessions: HashSet::from([session.clone()]),
+                        shown: shown.clone(),
+                        config: config.clone(),
+                        on,
+                        since: std::time::Instant::now(),
+                        turn,
+                    },
+                );
+                held
+            };
+            let started = self.start_mcp(&name, &config, false).await;
+            if !self.configured(&name, on) {
+                // The session closed meanwhile.
+                self.release_mcp(&name, config).await;
                 continue;
             }
-            match self.start_mcp(&name, &config).await {
+            drop(held);
+            match started {
                 Ok(true) => self
                     .starting
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .entry(thread.to_string())
+                    .entry(session.clone())
                     .or_default()
                     .push((name, shown)),
                 Ok(false) => {}
                 Err(error) => {
-                    self.forget_mcp(&name).await;
+                    self.forget_mcp(&name, &session).await;
                     return Err(internal(error));
                 }
             }
@@ -652,24 +813,244 @@ impl Service {
         Ok(())
     }
 
-    /// Forget `name`, so the session's next load configures it again, and
-    /// leave it stopped: an editor retrying the session configures it again
-    /// under the new chat's name, and this one would serve every chat.
-    async fn forget_mcp(&self, name: &str) {
-        self.mcp
+    /// Forget `name` for `session`, where it did not start, so the
+    /// session's next load configures it again. Once no session has it, it
+    /// is let go on the server: an editor retrying the session configures it
+    /// again under the new chat's name, and this one would serve every chat.
+    async fn forget_mcp(&self, name: &str, session: &str) {
+        let released = {
+            let mut known = self
+                .mcp
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match known.get_mut(name) {
+                Some(server) => {
+                    server.sessions.remove(session);
+                    server
+                        .sessions
+                        .is_empty()
+                        .then(|| known.remove(name))
+                        .flatten()
+                }
+                None => None,
+            }
+        };
+        if let Some(server) = released {
+            self.let_go(name, server).await;
+        }
+    }
+
+    /// Let `server` (no longer tracked) go once a configure of it on its way
+    /// has ended, waiting [`MCP_RELEASE_WAIT`] for that at most: let go
+    /// before that configure landed, it would start again.
+    async fn let_go(&self, name: &str, server: SessionMcp) {
+        let _turn = tokio::time::timeout(MCP_RELEASE_WAIT, server.turn.lock()).await;
+        self.release_mcp(name, server.config).await;
+    }
+
+    /// Release `name` on the server as this process's: the server goes once
+    /// no process that configured it is left.
+    async fn release_mcp(&self, name: &str, mut config: McpConfigureRequest) {
+        config.enabled = false;
+        config.owner = Some(self.owner.clone());
+        if let Err(error) = self.client.configure_mcp(name, &config).await {
+            tracing::debug!(server = %name, %error, "an editor's MCP server was not let go");
+        }
+    }
+
+    /// The editor closed `session`: its work stops, and the MCP servers no
+    /// other open session shares are let go.
+    async fn close(&self, session: &SessionId) -> AcpResult<CloseSessionResponse> {
+        let _ = self.cancel(session).await;
+        let key = session.to_string();
+        let released: Vec<(String, SessionMcp)> = {
+            let mut known = self
+                .mcp
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for server in known.values_mut() {
+                server.sessions.remove(&key);
+            }
+            let unused: Vec<String> = known
+                .iter()
+                .filter(|(_, server)| server.sessions.is_empty())
+                .map(|(name, _)| name.clone())
+                .collect();
+            unused
+                .into_iter()
+                .filter_map(|name| known.remove(&name).map(|server| (name, server)))
+                .collect()
+        };
+        self.starting
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(name);
-        let _ = self.client.disconnect_mcp(name).await;
+            .remove(&key);
+        futures::future::join_all(
+            released
+                .into_iter()
+                .map(|(name, server)| async move { self.let_go(&name, server).await }),
+        )
+        .await;
+        Ok(CloseSessionResponse::new())
+    }
+
+    /// Let every session's MCP servers go, as `haarness acp` exits, waiting
+    /// [`MCP_RELEASE_WAIT`] at most.
+    async fn release_all(&self) {
+        let servers: Vec<(String, SessionMcp)> = self
+            .mcp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .collect();
+        if servers.is_empty() {
+            return;
+        }
+        let releases = servers
+            .into_iter()
+            .map(|(name, server)| async move { self.let_go(&name, server).await });
+        let _ = tokio::time::timeout(MCP_RELEASE_WAIT, futures::future::join_all(releases)).await;
+    }
+
+    /// Record that `name` was configured on the server `on` and that the
+    /// server has taken it; `false` when it is no longer tracked (its
+    /// sessions closed meanwhile), and is to be let go.
+    fn configured(&self, name: &str, on: Uuid) -> bool {
+        let mut known = self
+            .mcp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(server) = known.get_mut(name) else {
+            return false;
+        };
+        server.on = on;
+        server.since = std::time::Instant::now();
+        true
+    }
+
+    /// Before a prompt, configure each of the session's MCP servers on a new
+    /// server (`on`, a restart or an update) this process has not configured
+    /// it on yet: again when the server does not have it, and to become one
+    /// of its owners when another process on the chat set it up there. One
+    /// still starting, configured again here or by a session sharing it, is
+    /// waited for and told to the editor as a new session's are (see
+    /// `Service::await_mcp`). One the server it was configured on no longer
+    /// lists was turned off there (by the person, or through the API): the
+    /// sessions let it go, and a later restart does not bring it back. One
+    /// the person disconnected is still listed, and stays as it is.
+    async fn restore_mcp(&self, session: &SessionId, on: Uuid) {
+        let key = session.to_string();
+        let servers: Vec<String> = self
+            .mcp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, server)| server.sessions.contains(&key))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if servers.is_empty() {
+            return;
+        }
+        let asked = std::time::Instant::now();
+        let Ok(listed) = self.client.mcp().await else {
+            return;
+        };
+        for name in servers {
+            let Some(turn) = self
+                .mcp
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&name)
+                .map(|server| server.turn.clone())
+            else {
+                continue;
+            };
+            // A session sharing it that is configuring it has the turn: this
+            // one decides once that is done.
+            let held = turn.lock().await;
+            let status = listed
+                .iter()
+                .find(|listed| listed.name == name)
+                .map(|listed| listed.status.clone());
+            let (shown, config, wait) = {
+                let mut known = self
+                    .mcp
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(server) = known.get_mut(&name) else {
+                    continue;
+                };
+                // Configured by this process on this server (or seen there).
+                let ours = server.on == on;
+                let configured_since = ours && server.since > asked;
+                match status.as_deref() {
+                    // Set up there by another process on the chat (the same
+                    // chat open in another window, after a restart): this one
+                    // becomes an owner too, so the server stays when that one
+                    // ends.
+                    Some(status @ ("connected" | "connecting" | "needs_auth")) if !ours => (
+                        server.shown.clone(),
+                        Some(server.config.clone()),
+                        status == "connecting",
+                    ),
+                    Some(status) => {
+                        server.on = on;
+                        if status != "connecting" {
+                            continue;
+                        }
+                        (server.shown.clone(), None, true)
+                    }
+                    // Configured after the listing was read, for a session of
+                    // this process sharing it.
+                    None if configured_since => (server.shown.clone(), None, true),
+                    None if ours => {
+                        tracing::info!(server = %name, "an editor's MCP server was turned off; its sessions let it go");
+                        known.remove(&name);
+                        continue;
+                    }
+                    None => (server.shown.clone(), Some(server.config.clone()), false),
+                }
+            };
+            if let Some(config) = config {
+                tracing::info!(server = %name, "configuring an editor's MCP server on a new Haarness server");
+                restore_delay().await;
+                let started = self.start_mcp(&name, &config, true).await;
+                if started.as_ref().is_err_and(anyhow::Error::is::<TurnedOff>) {
+                    tracing::info!(server = %name, "an editor's MCP server was turned off; its sessions let it go");
+                    self.mcp
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&name);
+                    continue;
+                }
+                if !self.configured(&name, on) {
+                    self.release_mcp(&name, config).await;
+                    continue;
+                }
+                if matches!(started, Ok(false)) && !wait {
+                    continue;
+                }
+            }
+            drop(held);
+            let mut starting = self
+                .starting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let waits = starting.entry(key.clone()).or_default();
+            if !waits.iter().any(|(waited, _)| *waited == name) {
+                waits.push((name, shown));
+            }
+        }
     }
 
     /// Before a prompt, wait for the session's MCP servers still starting
     /// when it was set up, as a turn waits for the servers Haarness starts
     /// itself: a start an editor asked for holds up no other chat. Cancel
     /// (`stop`) ends the wait (`true`) and the next prompt waits again. A
-    /// server that did not start is told to the editor, logged and left
-    /// stopped; one still starting after the wait is told too and waited
-    /// for again next time. Either way the prompt goes on without it.
+    /// server that did not start is told to the editor, logged and let go
+    /// (see `Service::forget_mcp`); one still starting after the wait is
+    /// told too and waited for again next time. Either way the prompt goes
+    /// on without it.
     async fn await_mcp(
         &self,
         session: &SessionId,
@@ -738,7 +1119,7 @@ impl Service {
                             )),
                         ))),
                     )?;
-                    self.forget_mcp(&name).await;
+                    self.forget_mcp(&name, &key).await;
                 }
             }
         }
@@ -758,8 +1139,21 @@ impl Service {
     /// counts as configured for the session. Its start goes on on the
     /// server, and the session's next prompt waits for it. A server that
     /// needs authorization is configured too.
-    async fn start_mcp(&self, name: &str, config: &McpConfigureRequest) -> Result<bool> {
-        match tokio::time::timeout(MCP_START_WAIT, self.client.configure_mcp(name, config)).await {
+    /// `rejoin` when this process asks again for a server it had on the
+    /// project's earlier server: the server refuses one turned off there
+    /// since ([`TurnedOff`]).
+    async fn start_mcp(
+        &self,
+        name: &str,
+        config: &McpConfigureRequest,
+        rejoin: bool,
+    ) -> Result<bool> {
+        let mut config = config.clone();
+        let mut owner = self.owner.clone();
+        owner.rejoin = rejoin;
+        config.owner = Some(owner);
+        match tokio::time::timeout(MCP_START_WAIT, self.client.configure_mcp(name, &config)).await {
+            Ok(Ok(info)) if rejoin && info.status == "disabled" => Err(TurnedOff.into()),
             Ok(configured) => configured.map(|_| false),
             Err(_) => {
                 let servers = self.client.mcp().await?;
@@ -1619,6 +2013,7 @@ fn mcp_config(server: McpServer, cwd: &Path) -> AcpResult<(String, McpConfigureR
             oauth_scopes: Vec::new(),
             enabled: true,
             apps: None,
+            owner: None,
         },
     ))
 }
@@ -1987,6 +2382,14 @@ fn invalid_request(message: &str) -> agent_client_protocol::Error {
     refusal
 }
 
+/// The project's server answers no longer and could not be started again:
+/// the editor shows why, in place of the protocol's own words.
+fn unreachable(error: anyhow::Error) -> agent_client_protocol::Error {
+    let mut failure = agent_client_protocol::Error::internal_error();
+    failure.message = format!("{error:#}");
+    failure
+}
+
 fn not_found(error: impl std::fmt::Display) -> agent_client_protocol::Error {
     agent_client_protocol::Error::resource_not_found(None).data(error.to_string())
 }
@@ -2062,8 +2465,25 @@ mod tests {
     #[test]
     fn initialize_advertises_every_prompt_block_it_accepts() {
         let response = Service::initialize(InitializeRequest::new(ProtocolVersion::V1));
-        let prompt = response.agent_capabilities.prompt_capabilities;
+        let capabilities = response.agent_capabilities;
+        let prompt = capabilities.prompt_capabilities;
         assert!(prompt.image && prompt.audio && prompt.embedded_context);
+        // Closing a session lets its MCP servers go.
+        assert!(capabilities.session_capabilities.close.is_some());
+    }
+
+    /// A project server that could not be reached or started again reaches
+    /// the editor as the reason, not as the protocol's "Internal error".
+    #[test]
+    fn an_unreachable_server_tells_the_editor_why() {
+        let error = unreachable(
+            anyhow::anyhow!("the data folder is read-only")
+                .context("Haarness could not start the project's server again"),
+        );
+        assert_eq!(
+            error.message,
+            "Haarness could not start the project's server again: the data folder is read-only"
+        );
     }
 
     #[test]

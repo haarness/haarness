@@ -1,6 +1,7 @@
 """MCP stdio fixture whose tools answer with structured content and little or no text, or embed resources as
 base64 blobs (an image under a type in capitals, text, an archive), or answer with 200 KB of text, or with the
-same text each call and the call's number as structured content, or with screenshots larger than providers take."""
+same text each call and the call's number as structured content, or with screenshots larger than providers take, or
+with content that is not valid MCP, or with nothing."""
 import base64
 import json
 import struct
@@ -74,6 +75,11 @@ TOOLS = {
              'structuredContent': {'tree': [{'path': 'a'}], 'truncated': False}},
     # A failure that says why at length.
     'loud_failure': {'content': [{'type': 'text', 'text': 'f' * 200 * 1024}], 'isError': True},
+    # A message that went out, answered with an image that gives no type and a block of a type MCP does not define.
+    'unshaped': {'content': [{'type': 'text', 'text': 'Message sent.'}, {'type': 'image', 'data': PIXEL},
+                             {'type': 'chart', 'points': [1, 2]}]},
+    # Nothing at all, as a REST API's 204 becomes.
+    'emptied': {},
     # 200 KB of text, as a tool that returns a whole table does.
     'wide': {'content': [{'type': 'text', 'text': ''.join('row %05d %s\n' % (n, 'w' * 90) for n in range(2000))}],
              'structuredContent': {'rows': 2000}},

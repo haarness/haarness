@@ -980,7 +980,14 @@ impl ManagementService {
             "logout" => {
                 let name = required_string(input, "name")?;
                 let (target, _, entry) = self.resolve_mcp_readable(name, optional_scope(input)?)?;
-                let entry = loaded_mcp_entry(&target, entry);
+                // The entry in force, which a project's may be over this one.
+                let entry = super::composed_mcp_entry(
+                    &self.paths,
+                    &self.workspace,
+                    self.trust_project,
+                    name,
+                )
+                .unwrap_or_else(|| loaded_mcp_entry(&target, entry));
                 self.mcp.clear_oauth(name).await.map_err(core_error)?;
                 let live = if entry.enabled {
                     self.mcp.reconnect(name).await.map_err(core_error)?
@@ -2677,6 +2684,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             oauth_scopes: Vec::new(),
             enabled,
             apps: input.get("apps").and_then(Value::as_bool).filter(|on| !on),
+            owner: None,
         },
         "remote" => McpConfigureRequest {
             transport: "streamable_http".into(),
@@ -2693,6 +2701,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             oauth_scopes: string_array(input, "oauthScopes")?,
             enabled,
             apps: input.get("apps").and_then(Value::as_bool).filter(|on| !on),
+            owner: None,
         },
         _ => bail!("MCP type must be local or remote"),
     };
@@ -3922,10 +3931,7 @@ mod tests {
         );
         assert_eq!(fs::read(&target).unwrap(), before);
         assert_eq!(
-            mcp.configure("fixture-mcp", persisted)
-                .await
-                .unwrap()
-                .status,
+            mcp.prepare("fixture-mcp", persisted).unwrap().0.status,
             "disabled"
         );
         let logout = service

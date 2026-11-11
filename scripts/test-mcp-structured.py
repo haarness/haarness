@@ -6,7 +6,8 @@ larger than providers take (a 24 MB 4K one, a full page 9,000 pixels tall) reach
 an image, with the result's text; and a 200 KB result reaches the model cut with the whole saved, while a workflow gets
 all of it. One-line JSON is laid out a value a line, whole when it then fits, and within a few times its length however deep
 it nests; what a Code Mode script returns is cut too, a string as its own lines, a list whole on one line when only that
-fits. A script gets the server's metadata for its own call, never an earlier call's with the same text.
+fits. A script gets the server's metadata for its own call, never an earlier call's with the same text. A tool that ran and
+answered with content that is not valid MCP, or with nothing, is no failed call.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -104,6 +105,13 @@ try:
     again = call(thread, 'weather')
     assert not again['is_error'], again
     check('audio of a type Haarness does not carry is named, not attached, beside an image it does attach, and the chat goes on')
+
+    result = call(thread, 'unshaped')
+    assert not result['is_error'] and result['output'] == ('Message sent.\n[image content, left out: it is not valid MCP content]\n'
+                                                          '[chart content, left out: it is not valid MCP content]'), result
+    result = call(thread, 'emptied')
+    assert not result['is_error'], result
+    check('a tool that ran and answered with content that is not valid MCP (an image without its type, a block of an unknown type) or with nothing at all is no failed call: its text reaches the model, each block it could not read named')
 
     def shown(data_url):
         """The width and height of the PNG a data URL holds, from its header."""

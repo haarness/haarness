@@ -1749,7 +1749,15 @@ async fn cli_main() -> Result<()> {
         Some(Command::Acp(args)) => {
             let discovery =
                 ensure_workspace_server(&paths, &workspace, project_config).await?;
-            let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
+            // It follows the project's server when an update replaces it, or
+            // starts it again when it stopped, as the TUI does.
+            let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?
+                .with_endpoint_resolver(runtime_endpoint_resolver(&paths, &workspace))
+                .with_server_restarter(workspace_server_restarter(
+                    &paths,
+                    &workspace,
+                    project_config,
+                ));
             // `-m provider/model` names its provider, as for `haarness run`:
             // left whole, the id would go to the default provider, which can be
             // another account's.
@@ -10715,6 +10723,7 @@ async fn mcp_command(
                 .complete(&callback_url)
                 .await
                 .map_err(management::plain_error)?;
+            let entry = composed_mcp_entry(paths, workspace, trust, &name).unwrap_or(entry);
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
@@ -10723,6 +10732,7 @@ async fn mcp_command(
             let entry = loaded_mcp_entry(&target, entry);
             let registry = oauth_registry(paths, workspace, &name, &entry, false).await?;
             registry.clear_oauth(&name).await?;
+            let entry = composed_mcp_entry(paths, workspace, trust, &name).unwrap_or(entry);
             let server = client.configure_mcp(&name, &entry).await?;
             println!(
                 "Cleared OAuth credentials for '{}': {}",
@@ -10790,6 +10800,7 @@ async fn mcp_command(
                         oauth_scopes: Vec::new(),
                         enabled: !disabled,
                         apps: None,
+                        owner: None,
                     }
                 }
                 (None, Some(url)) => {
@@ -10817,6 +10828,7 @@ async fn mcp_command(
                         oauth_scopes: oauth_scopes.clone(),
                         enabled: !disabled,
                         apps: None,
+                        owner: None,
                     }
                 }
                 _ => anyhow::bail!("provide exactly one of --command or --url"),
@@ -10826,10 +10838,9 @@ async fn mcp_command(
             write_mcp_entry(&target, &scope, &name, Some(&entry))?;
             // The entry stays saved when the server cannot start: fixing the
             // program or the URL and reconnecting is the usual next step.
-            match client
-                .configure_mcp(&name, &loaded_mcp_entry(&target, entry))
-                .await
-            {
+            let entry = composed_mcp_entry(paths, workspace, trust, &name)
+                .unwrap_or_else(|| loaded_mcp_entry(&target, entry));
+            match client.configure_mcp(&name, &entry).await {
                 Ok(server) => println!(
                     "Added MCP server '{name}' to {} ({}).",
                     target.display(),
@@ -10851,11 +10862,13 @@ async fn mcp_command(
         }
         McpCommand::Enable { name, project } => {
             let entry = set_mcp_enabled(paths, workspace, &name, project, true)?;
+            let entry = composed_mcp_entry(paths, workspace, trust, &name).unwrap_or(entry);
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
         McpCommand::Disable { name, project } => {
             let entry = set_mcp_enabled(paths, workspace, &name, project, false)?;
+            let entry = composed_mcp_entry(paths, workspace, trust, &name).unwrap_or(entry);
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
@@ -10872,10 +10885,30 @@ async fn mcp_command(
                 &name,
                 None,
             )?;
+            // Another file (the project's, the system folder's) still
+            // defines it: that entry is in force now.
+            if let Some(remaining) = composed_mcp_entry(paths, workspace, trust, &name) {
+                client.configure_mcp(&name, &remaining).await?;
+            }
             println!("Removed MCP server '{name}' from {}.", target.display());
         }
     }
     Ok(())
+}
+
+/// MCP server `name` as the project's server composes it on a reload: from
+/// every configuration file, a project's entry over the global one, and with
+/// a server turned off as a capability off. Configured with one file's entry
+/// instead, the running server would keep that entry over the one in force.
+fn composed_mcp_entry(
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+    name: &str,
+) -> Option<McpConfigureRequest> {
+    compose_runtime_sources(paths, workspace, trust, false, Vec::new(), false)
+        .ok()
+        .and_then(|mut sources| sources.file_config.mcp.remove(name))
 }
 
 async fn mcp_secret_command(command: McpSecretCommand) -> Result<()> {
@@ -10941,7 +10974,14 @@ async fn oauth_registry(
         NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth")).in_folder(workspace);
     let mut staged = entry.clone();
     staged.enabled = probe;
-    registry.configure(name, staged).await?;
+    if probe {
+        registry.configure(name, staged).await?;
+    } else {
+        // Recorded as the configuration records it: configured off as a
+        // client configures it, a server no file names is removed at once,
+        // and signing out needs it there.
+        registry.prepare(name, staged)?;
+    }
     Ok(registry)
 }
 
@@ -16785,6 +16825,7 @@ mod tests {
             oauth_scopes: vec!["mcp:read".into(), "mcp:write".into()],
             enabled: false,
             apps: None,
+            owner: None,
         };
         write_mcp_entry(
             &path,
@@ -16848,6 +16889,7 @@ mod tests {
             oauth_scopes: Vec::new(),
             enabled: true,
             apps: None,
+            owner: None,
         };
         let writers: Vec<_> = (0..8)
             .map(|writer| {
@@ -16912,6 +16954,7 @@ mod tests {
             oauth_scopes: Vec::new(),
             enabled: true,
             apps: None,
+            owner: None,
         };
         let shown = mcp_config_for_display(&remote, false).unwrap();
         assert_eq!(

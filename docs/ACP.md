@@ -44,7 +44,20 @@ version 1.
   invalid request (`-32600`) whose message is the server's own sentence (`prompt blocked by a hook:
   <reason>` for a hook's block); a turn running elsewhere runs on.
 - **MCP servers** the editor passes are added to the server as `acp-<chat id prefix>-<name>`; a stdio
-  server's command must be an absolute path.
+  server's command must be an absolute path. A session's servers live while it is open, through
+  configuration reloads, and every chat of the project is offered their tools meanwhile. Two agent
+  processes on one chat (the same session open in two windows, an editor that reconnects before its old
+  process has exited) share them, and an *Allow while Haarness is running* answer for one of their tools
+  holds in either. When the project's server is replaced (an update) or stopped, the next prompt reaches
+  the one serving the project now, starting it if needed, and sets the session's servers up there again.
+  They are let go when the editor closes the session (`session/close`) or the connection, or stops
+  `haarness acp` with SIGTERM, SIGINT or SIGHUP; killed with SIGKILL (Zed stops its agents so), the
+  process cannot say so, and on macOS and Linux the project's server lets them go once it sees the process
+  has ended, within 30 seconds or at the next listing of its servers. On Windows, and for an editor whose
+  agent runs in another pid namespace (a Flatpak sandbox), it cannot see that, and a killed agent's
+  servers stay until the project's server stops. One turned off through the API stays off while that
+  project server runs, also for an agent process that sets the chat's servers up again after a restart;
+  a session the editor opens or loads afterwards asks for it again (see [MCP servers in the API](API.md)).
 - **Approvals** offer *Allow once*, *Allow while Haarness is running* (only when the request allows
   more than once; *Allow in this chat* for a site in the user's Chrome) and *Reject*. The editor is
   asked one request at a time. A request settled first somewhere else (another app, a sibling's

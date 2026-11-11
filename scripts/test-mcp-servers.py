@@ -29,6 +29,10 @@
   page give the same sentence, which names the server (and the variable where the setting keeps the reference) but
   not the url.
 - A tool listed without an `inputSchema` is left out by name and the server's other tools work.
+- A server configured through the API (as an editor's session or an SDK does) stays connected through a reload a new
+  skill causes, without starting again, and one disconnected stays disconnected; configured off, it is gone at once.
+  `haarness mcp add`, `disable` and `remove` of a global entry leave the project's entry of the same name in force.
+  `haarness mcp logout` of a server that is off clears its stored sign-in.
 - A 20 MB tool result reaches the model cut to 50 KiB with the whole saved to a file; base64 text and an image in
   capitals read from a resource come back as text and as an attachment.
 - An HTTP server that restarted and forgot its sessions, answering the session a request names with a 400 as servers
@@ -544,6 +548,57 @@ try:
     assert api('/mcp/flood/reconnect', {})['status'] == 'connected'
     assert call(thread, 'mcp__flood__ping', {})['output'] == 'pong'
     check('a reconnect brings the stopped server back')
+
+    # --- servers a client configures through the API (an editor's session, an SDK) through a reload
+    def launched(label): return len((root/label).read_text().split()) if (root/label).exists() else 0
+    for label in ('extra', 'spare'):
+        api(f'/mcp/{label}', {'transport': 'stdio', 'command': python, 'args': [str(fixtures/'recovery.py')], 'enabled': True,
+                              'env': {'LAUNCH_LOG': str(root/label), 'CALL_LOG': str(root/'runtime-calls')}})
+    api('/mcp/spare/disconnect', {})
+    skill = workspace/'.haarness/skills/late/SKILL.md'; skill.parent.mkdir(parents=True)
+    skill.write_text('---\nname: late\ndescription: Says late.\n---\n\nSay late.\n')
+    until(lambda: any(item['name'] == 'late' for item in api('/skills')), 'the new skill did not reload the configuration', 60)
+    assert servers()['extra']['status'] == 'connected' and servers()['spare']['status'] == 'disconnected', servers()
+    assert (launched('extra'), launched('spare')) == (1, 1), 'the reload started a server again'
+    assert call(thread, 'mcp__extra__ping', {})['output'] == 'pong'
+    assert api('/mcp/extra/reconnect', {})['status'] == 'connected'
+    check('a server configured through the API stays connected through a reload without starting again, its tool answers, '
+          'and one disconnected stays disconnected')
+    api('/mcp/extra', {'transport': 'stdio', 'command': python, 'args': [str(fixtures/'recovery.py')], 'enabled': False})
+    assert 'extra' not in servers() and not any(tool['id'].startswith('mcp__extra__') for tool in api(f'/tools?threadId={thread}')['tools'])
+    check('a server configured through the API and then configured off is gone at once, with its tools')
+
+    # --- a server the project defines over a global entry of the same name
+    edited = json.loads(settings.read_text())
+    edited['mcp']['twice'] = server('recovery.py', env={'LAUNCH_LOG': str(root/'twice-project'), 'CALL_LOG': str(root/'runtime-calls')})
+    settings.write_text(json.dumps(edited, indent=2) + '\n')
+    until(lambda: servers().get('twice', {}).get('status') == 'connected', "the project's twice did not start", 60)
+    cli('mcp', 'add', 'twice', '--command', python, '--arg', str(fixtures/'recovery.py'),
+        '--env', f"LAUNCH_LOG={root/'twice-global'}", '--env', f"CALL_LOG={root/'runtime-calls'}")
+    disabled = cli('mcp', 'disable', 'twice')
+    assert 'twice: connected' in disabled, disabled
+    later = workspace/'.haarness/skills/later/SKILL.md'; later.parent.mkdir(parents=True)
+    later.write_text('---\nname: later\ndescription: Says later.\n---\n\nSay later.\n')
+    until(lambda: any(item['name'] == 'later' for item in api('/skills')), 'the new skill did not reload the configuration', 60)
+    assert servers()['twice']['status'] == 'connected', servers()['twice']
+    assert launched('twice-global') == 0, 'the global entry started over the project\'s'
+    assert call(thread, 'mcp__twice__ping', {})['output'] == 'pong'
+    # The global entry removed (other projects read it too), the project's stays in force.
+    cli('mcp', 'remove', 'twice')
+    assert servers()['twice']['status'] == 'connected', servers()['twice']
+    assert launched('twice-global') == 0
+    check("`haarness mcp add`, `disable` and `remove` of a global entry leave the project's entry of the same name in "
+          'force, through a reload too')
+
+    # --- signing out of a server that is off (Desktop's Sign out runs this command)
+    cli('mcp', 'add', 'signed', '--url', 'http://127.0.0.1:9/mcp', '--oauth', '--disabled', '--project')
+    sign_in = root/'data/data/mcp-oauth'/('mcp-' + 'signed'.encode().hex() + '.json')
+    sign_in.parent.mkdir(parents=True, exist_ok=True)
+    sign_in.write_text('{"note": "a stored sign-in"}')
+    signed_out = cli('mcp', 'logout', 'signed', '--project')
+    assert "Cleared OAuth credentials for 'signed': disabled" in signed_out, signed_out
+    assert not sign_in.exists(), 'the stored sign-in was kept'
+    check('`haarness mcp logout` of a server that is off clears its stored sign-in and leaves it off')
 
     # --- TUI rows
     command = e2e_tmux.pane_command(env, [binary, '--workspace', workspace, '--trust-project'])
