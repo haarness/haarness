@@ -28,11 +28,19 @@ const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60)
 /// servers) is counted as `mcp` or `other`, so custom names never leave; a
 /// name the model made up counts as `other` too.
 const BUILTIN_TOOLS: &[&str] = &[
+    "agent_manage",
+    "agent_switch",
     "apply_patch",
     "bash",
     "bash_output",
     "bash_stop",
     "batch",
+    "capability_manage",
+    "cloud_agent_manage",
+    "cloud_chat",
+    "cloud_schedule",
+    "cloud_workspace",
+    "command_manage",
     "edit",
     "execute",
     "get_goal",
@@ -42,17 +50,31 @@ const BUILTIN_TOOLS: &[&str] = &[
     "list",
     "load_tool",
     "lsp",
+    "marketplace_manage",
+    "mcp_manage",
+    "mcp_resource_list",
+    "mcp_resource_read",
+    "memory_delete",
+    "memory_list",
     "memory_read",
+    "memory_save",
+    "memory_search",
     "multiedit",
+    "plugin_manage",
     "preview",
     "propose_goal_criteria",
     "question",
     "read",
     "schedule",
     "session_manage",
+    "session_message",
+    "session_rename",
+    "session_wait",
     "skill",
+    "skill_manage",
     "StructuredOutput",
     "task",
+    "task_abort",
     "todo",
     "todoread",
     "todowrite",
@@ -284,11 +306,18 @@ fn reported_model(provider: &str, model: &str) -> (String, String) {
     }
 }
 
+/// A tool's reported name: Haarness's own by name (the browser's and
+/// computer use's as their groups), every MCP tool as `mcp`, and anything
+/// else (an extension's tool, a name a model made up) as `other`.
 fn reported_tool(name: &str) -> &str {
     if BUILTIN_TOOLS.contains(&name) {
         name
     } else if name.starts_with("mcp__") {
         "mcp"
+    } else if name.starts_with("browser_") {
+        "browser"
+    } else if name.starts_with("mac_") {
+        "computer"
     } else {
         "other"
     }
@@ -691,8 +720,24 @@ mod tests {
         for builtin in ["multiedit", "batch", "execute", "lsp", "workflow"] {
             assert_eq!(reported_tool(builtin), builtin);
         }
+        // Haarness's own tools that only some turns are offered (Cloud,
+        // memory, sessions, managers) were `other`, among made-up names.
+        for builtin in [
+            "cloud_schedule",
+            "cloud_workspace",
+            "memory_save",
+            "session_wait",
+            "skill_manage",
+            "marketplace_manage",
+            "mcp_resource_read",
+        ] {
+            assert_eq!(reported_tool(builtin), builtin);
+        }
+        assert_eq!(reported_tool("browser_navigate"), "browser");
+        assert_eq!(reported_tool("mac_click"), "computer");
         assert_eq!(reported_tool("mcp__acme__deploy"), "mcp");
         assert_eq!(reported_tool("acme_release"), "other");
+        assert_eq!(reported_tool("read_file"), "other");
         assert_eq!(clean("claude sonnet<script>"), "claudesonnetscript");
         assert_eq!(clean("   "), "other");
     }
