@@ -24548,6 +24548,26 @@ fn a_plugin_marketplace_refresh_reads_as_one_line() {
         ]})),
         "team updated · plugins updated: kit · no longer listed, kept as is: old · could not update: broken · other not updated: could not reach it · reload queued until active work is idle"
     );
+
+    // `/plugin marketplace add` says the same when the marketplace took the
+    // place of its clone, and how to install from a new one otherwise (an
+    // older server never says more).
+    let added = |value| crate::commands::marketplace_added_notice(&value);
+    assert_eq!(
+        added(serde_json::json!({"name": "team", "marketplaces": [
+            {"name": "team", "status": "updated", "plugins": ["kit"], "unlisted": [], "failed": []}
+        ]})),
+        "team updated · plugins updated: kit · reload queued until active work is idle"
+    );
+    for result in [
+        serde_json::json!({"name": "team", "plugins": []}),
+        serde_json::json!({"action": "marketplace", "plugins": []}),
+    ] {
+        assert_eq!(
+            added(result),
+            "Marketplace added · install its plugins with /plugin install <name>@<marketplace>"
+        );
+    }
 }
 
 /// In Review, the default, a passing notice wins the band's room: the mode

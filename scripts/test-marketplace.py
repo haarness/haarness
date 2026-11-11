@@ -303,6 +303,12 @@ def main():
             assert "Updated plugins: relkit" in readded and "updates automatically" not in readded,readded
             assert relkit_command.read_text()=="MAIN_TWO"
             assert next(p for p in marketplace("plugin_marketplaces") if p["name"]=="staged-fixture")["autoUpdate"] is False
+            # The same address once more, as the agent adds it: nothing moved, and
+            # its answer says so in the shape an update answers with.
+            again=marketplace("add_plugin_marketplace",source=f"file://{staged_bare}")
+            assert again["name"]=="staged-fixture" and again["marketplaces"][0]["status"]=="unchanged",again
+            assert not again["marketplaces"][0]["plugins"] and not again["marketplaces"][0]["failed"],again
+            assert relkit_command.read_text()=="MAIN_TWO"
             # A commit never moves, so it is refused as the ref to follow.
             refused=run("plugin","marketplace","add",f"file://{staged_bare}#{first}",ok=False)
             assert refused.returncode and "is a commit, which never moves" in refused.stderr,refused.stderr

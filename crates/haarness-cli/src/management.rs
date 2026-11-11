@@ -3586,9 +3586,14 @@ mod tests {
         let service = ManagementService::new(paths, workspace, true, skills, mcp);
         let request = async |input: Value| service.marketplace_request(&input).await;
 
-        request(json!({"action":"add_plugin_marketplace","source":market.to_str().unwrap()}))
-            .await
-            .unwrap();
+        let added =
+            request(json!({"action":"add_plugin_marketplace","source":market.to_str().unwrap()}))
+                .await
+                .unwrap();
+        // A first registration names the marketplace and has no update to report.
+        assert_eq!(added["name"], "team-tools");
+        assert_eq!(added["action"], "marketplace");
+        assert!(added["plugins"].is_array() && added.get("marketplaces").is_none());
         let listed = request(json!({"action":"plugin_marketplaces"}))
             .await
             .unwrap();
