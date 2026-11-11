@@ -513,6 +513,8 @@ impl ModelProvider for BedrockProvider {
         let tools = body.get("toolConfig").is_some();
         let (mut profiled, mut unforced, mut unreasoned, mut renewed) =
             (false, false, false, false);
+        // The refusal of the model's own id, its status and trace, kept while
+        // its inference profile is asked.
         let mut first_refusal = None;
         loop {
             let whole = tools && self.answers_tools_whole(&model_id);
@@ -610,7 +612,8 @@ impl ModelProvider for BedrockProvider {
                 {
                     tracing::info!(model = %model_id, %profile, "Bedrock runs this model only through an inference profile");
                     profiled = true;
-                    first_refusal = Some(http_error(status, kind.as_deref(), &text));
+                    first_refusal =
+                        Some((http_error(status, kind.as_deref(), &text), status, trace));
                     model_id = profile;
                     continue;
                 }
@@ -623,9 +626,10 @@ impl ModelProvider for BedrockProvider {
                 // Bedrock said of the model's own id says more.
                 if profiled
                     && lower.contains("model identifier is invalid")
-                    && let Some(refusal) = first_refusal.take()
+                    && let Some((refusal, first_status, first_trace)) = first_refusal.take()
                 {
-                    trace.refused(status);
+                    // The log names the request whose refusal the person reads.
+                    first_trace.refused(first_status);
                     return Err(refusal);
                 }
             }
@@ -2822,9 +2826,18 @@ mod tests {
                  uri: axum::http::Uri,
                  Json(body): Json<Value>| async move {
                     let path = uri.path().to_owned();
-                    seen.lock().push((path.clone(), body.clone()));
+                    let number = {
+                        let mut seen = seen.lock();
+                        seen.push((path.clone(), body.clone()));
+                        seen.len()
+                    };
                     let (status, bytes) = answer(&path, &body);
-                    (axum::http::StatusCode::from_u16(status).unwrap(), bytes)
+                    // Each answer names its request, as AWS does.
+                    (
+                        axum::http::StatusCode::from_u16(status).unwrap(),
+                        [("x-amzn-requestid", format!("bedrock-step-{number}"))],
+                        bytes,
+                    )
                 },
             )
             .with_state(state);
@@ -3327,11 +3340,20 @@ mod tests {
         });
         let (base, _) = scripted_bedrock(answer).await;
         let provider = scripted_provider(base, &["acme.chat-v1:0"]);
+        let (logged, _guard) = crate::log_capture::Logged::start();
         let error = answer_of(&provider, ask("acme.chat-v1:0", false))
             .await
             .unwrap_err()
             .to_string();
         assert!(error.contains("on-demand throughput"), "{error}");
+        // The log names the request whose words the person reads: the first.
+        let lines = logged.lines("provider refused the request");
+        assert_eq!(lines.len(), 1, "{}", logged.all());
+        assert!(
+            lines[0].contains(" status=400") && lines[0].contains(" request_id=bedrock-step-1"),
+            "{}",
+            lines[0]
+        );
     }
 
     #[tokio::test]
