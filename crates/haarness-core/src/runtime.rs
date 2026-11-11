@@ -6017,7 +6017,11 @@ impl AgentRuntime {
         parent: ThreadId,
         child: Option<ThreadId>,
     ) -> CoreResult<Vec<BackgroundTaskInfo>> {
-        self.repository.get_thread(parent).await?;
+        // A subagent waits for its children: their results are its answer,
+        // and in the background they would reach no one.
+        if self.repository.get_thread(parent).await?.is_subagent {
+            return Ok(Vec::new());
+        }
         let promoted = self
             .background_tasks
             .iter()
@@ -11998,6 +12002,13 @@ impl RunnerTask {
                             && (tool.name != "apply_patch"
                                 || crate::tool_catalog::writes_patches(&model))
                     })
+                    .map(|tool| {
+                        if self.depth > 0 && tool.name == "task" {
+                            foreground_task(tool)
+                        } else {
+                            tool
+                        }
+                    })
                     .collect::<Vec<_>>();
                 // Code Mode reaches only the MCP and browser tools this
                 // agent may use; with none, it is not offered.
@@ -15520,20 +15531,30 @@ impl RunnerTask {
             .and_then(|agent| agent.model.clone());
         let explicit_model = arguments.get("model").and_then(serde_json::Value::as_str);
         // A continued child keeps the model it last ran on, while its
-        // provider can still run it, unless the call names one.
-        let kept = match &resumed_child {
+        // provider is here, unless the call names one; otherwise it goes on
+        // with the parent's, and says so.
+        let recorded = match &resumed_child {
             Some(child) if explicit_model.is_none() => {
                 let last = self.repository.last_turn(child.id).await?;
-                let (provider, model) = last.map_or_else(
+                Some(last.map_or_else(
                     || (child.provider.clone(), child.model.clone()),
                     |turn| (turn.provider, turn.model),
-                );
-                continued_model(self.providers.as_ref(), provider, model)
+                ))
             }
             _ => None,
         };
-        let ((provider, model), notice) = match kept {
-            Some(kept) => (kept, None),
+        let ((provider, model), notice) = match recorded {
+            Some((provider, model)) if self.providers.get(&provider).is_some() => {
+                ((provider, model), None)
+            }
+            Some((provider, model)) => (
+                (self.turn.provider.clone(), self.turn.model.clone()),
+                Some(unavailable_model_notice(
+                    &format!("{provider}/{model}"),
+                    &self.turn.provider,
+                    &self.turn.model,
+                )),
+            ),
             None => subagent_model(
                 self.providers.as_ref(),
                 &self.turn.provider,
@@ -15617,6 +15638,15 @@ impl RunnerTask {
                             },
                         )
                         .await?;
+                    // A subagent's own child stays in the foreground: the
+                    // call that started it still waits for its result.
+                    if self.depth > 0 {
+                        return Ok(existing.envelope(
+                            &existing.info(),
+                            "running",
+                            "The guidance joined the running subagent. Its result comes back to the task call that started it; do not duplicate its work.",
+                        ));
+                    }
                     if existing.promote() {
                         persist_task_state(
                             self.repository.as_ref(),
@@ -16651,19 +16681,25 @@ fn merge_agent_tools(
     *request = Some(merged);
 }
 
-/// The model a continued child last ran on, while it is still there: its
-/// provider is signed in and, when the provider lists its models, lists it.
-fn continued_model(
-    registry: &dyn ProviderRegistry,
-    provider: String,
-    model: String,
-) -> Option<(String, String)> {
-    let available = registry.get(&provider)?;
-    if !available.info().authenticated {
-        return None;
+/// The `task` tool as a subagent sees it: without `background`, since a
+/// subagent's own task always runs in the foreground.
+fn foreground_task(mut tool: crate::ToolDefinition) -> crate::ToolDefinition {
+    if let Some(properties) = tool
+        .input_schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        properties.remove("background");
     }
-    let listed = registry.models(&provider);
-    (listed.is_empty() || listed.iter().any(|entry| entry.id == model)).then_some((provider, model))
+    tool
+}
+
+/// What a subagent's result says when the model it was to run on is not
+/// there and it ran on its parent's instead.
+fn unavailable_model_notice(wanted: &str, parent_provider: &str, parent_model: &str) -> String {
+    format!(
+        "Configured model \"{wanted}\" unavailable. Using parent model \"{parent_provider}/{parent_model}\"."
+    )
 }
 
 fn subagent_model(
@@ -16707,9 +16743,7 @@ fn subagent_model(
             return Ok(((provider, model), None));
         }
     }
-    let notice = format!(
-        "Configured model \"{configured}\" unavailable. Using parent model \"{parent_provider}/{parent_model}\"."
-    );
+    let notice = unavailable_model_notice(configured, parent_provider, parent_model);
     Ok((parent, Some(notice)))
 }
 

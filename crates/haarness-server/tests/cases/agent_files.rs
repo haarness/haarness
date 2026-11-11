@@ -446,6 +446,78 @@ async fn a_subagent_s_own_task_runs_in_the_foreground() {
     assert!(runtime.background_tasks(child).await.unwrap().is_empty());
 }
 
+/// The `task` tool's arguments as `request` offers them.
+fn task_arguments(request: &ProviderRequest) -> Vec<String> {
+    request
+        .tools
+        .iter()
+        .find(|tool| tool.name == "task")
+        .and_then(|tool| tool.input_schema.get("properties"))
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_subagent_s_children_stay_in_the_foreground_and_it_is_not_offered_background() {
+    let fixture = Fixture::new("nested-foreground");
+    let provider = Arc::new(Capturing::default());
+    let mut config = review();
+    config.execution.subagent_depth = 2;
+    let runtime = Arc::new(runtime_with(
+        &fixture,
+        provider.clone(),
+        Arc::new(NativeToolRegistry::new(fixture.0.clone())),
+        config,
+    ));
+    let chat = echo_thread(&runtime).await;
+    let slow = json!({"command": "sleep 1.5; printf GRANDCHILD_DONE"});
+    let nested = json!({"prompt": format!("!tool bash {slow}"), "description": "nested"});
+    let child_prompt = format!("!tool task {nested}");
+    let task = json!({"prompt": child_prompt, "description": "outer"});
+    let parent_prompt = format!("!tool task {task}");
+    let turn = runtime
+        .start_turn(chat.id, turn_request(&parent_prompt))
+        .await
+        .unwrap();
+    // While the grandchild runs, moving the child's work to the background
+    // moves nothing.
+    let child = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let ids = runtime.thread_tree_ids(chat.id).await.unwrap();
+            if ids.len() == 3 {
+                break only_child(&runtime, chat.id).await;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        runtime
+            .promote_subagents(child, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let results = tool_results(&runtime.items(child, None).await.unwrap(), "task");
+    assert!(
+        results.len() == 1 && results[0].0.contains("state=\"completed\""),
+        "{results:?}"
+    );
+    // The chat is offered `background`; its subagent is not.
+    let requests = provider.requests.lock().unwrap().clone();
+    let parent = request_for(&requests, &parent_prompt);
+    assert!(task_arguments(&parent).contains(&"background".to_owned()));
+    let offered = task_arguments(&request_for(&requests, &child_prompt));
+    assert!(offered.contains(&"prompt".to_owned()), "{offered:?}");
+    assert!(!offered.contains(&"background".to_owned()), "{offered:?}");
+}
+
 /// Echo, with a second model to tell runs apart.
 struct TwoModels(Capturing);
 #[async_trait]
@@ -546,4 +618,79 @@ async fn a_continued_subagent_keeps_its_own_agent_and_model() {
     );
     let requests = provider.0.requests.lock().unwrap().clone();
     assert_eq!(request_for(&requests, "FOURTH pass").model, "echo-1");
+
+    // A model its provider does not list (a deployment of its own) is kept
+    // as well, as it was when the child started.
+    let start =
+        json!({"prompt": "OWN deployment", "description": "own", "model": "echo/own-deployment"});
+    let turn = runtime
+        .start_turn(chat.id, turn_request(&format!("!tool task {start}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let mut own = None;
+    for id in runtime.thread_tree_ids(chat.id).await.unwrap() {
+        if id != child && runtime.get_thread(id).await.unwrap().parent_id == Some(chat.id) {
+            own = Some(id);
+        }
+    }
+    let own = own.expect("the second child");
+    let again = json!({"prompt": "OWN again", "task_id": own, "description": "own"});
+    let turn = runtime
+        .start_turn(chat.id, turn_request(&format!("!tool task {again}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let requests = provider.0.requests.lock().unwrap().clone();
+    assert_eq!(request_for(&requests, "OWN again").model, "own-deployment");
+}
+
+#[tokio::test]
+async fn a_continued_subagent_whose_provider_is_gone_says_it_moved_to_the_parent_s_model() {
+    let fixture = Fixture::new("continued-gone");
+    let provider = Arc::new(Capturing::default());
+    let runtime = runtime_with(
+        &fixture,
+        provider.clone(),
+        Arc::new(NativeToolRegistry::new(fixture.0.clone())),
+        review(),
+    );
+    let chat = echo_thread(&runtime).await;
+    // A child whose provider this server no longer has.
+    let child = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Earlier child".into()),
+            parent_id: Some(chat.id),
+            agent: Some("general".into()),
+            provider: Some("retired".into()),
+            model: Some("old-model".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let again = json!({"prompt": "GONE again", "task_id": child.id, "description": "again"});
+    let turn = runtime
+        .start_turn(chat.id, turn_request(&format!("!tool task {again}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let requests = provider.requests.lock().unwrap().clone();
+    assert_eq!(request_for(&requests, "GONE again").model, "echo-1");
+    let results = tool_results(&runtime.items(chat.id, None).await.unwrap(), "task");
+    let (result, _) = results.last().unwrap();
+    assert!(
+        result.contains(
+            "Configured model \"retired/old-model\" unavailable. Using parent model \"echo/echo-1\"."
+        ),
+        "{result}"
+    );
 }
