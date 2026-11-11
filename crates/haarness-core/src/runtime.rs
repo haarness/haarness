@@ -25236,6 +25236,88 @@ mod tests {
         );
     }
 
+    /// Released at the next turn, an ended turn's unplaced steering comes
+    /// after the result its unanswered call is owed, never between the call
+    /// and that result, which providers would refuse.
+    #[test]
+    fn provider_messages_release_unplaced_steering_after_the_results_owed_before_it() {
+        let (ended, next) = (Some(TurnId::new()), Some(TurnId::new()));
+        let at = |turn, sequence, data| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let items = vec![
+            at(ended, 1, message("rename the module", false, false)),
+            at(
+                ended,
+                2,
+                ItemData::ToolCall {
+                    call_id: "cut".into(),
+                    name: "bash".into(),
+                    arguments: json!({"command": "sleep 60"}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            at(ended, 3, message("use the old names", true, false)),
+            at(next, 4, message("now the docs", false, false)),
+        ];
+        let (messages, _) = super::provider_messages_with_origins(items);
+        assert_eq!(
+            said(&messages),
+            [
+                "rename the module",
+                "call cut",
+                "result cut",
+                "use the old names",
+                "now the docs"
+            ]
+        );
+        assert!(matches!(
+            &messages[2],
+            ProviderMessage::ToolResult { output, is_error: true, .. }
+                if output == crate::UNFINISHED_CALL_RESULT
+        ));
+    }
+
+    /// A turn Haarness opens itself (a background result while the chat was
+    /// idle) opens with a synthetic message: the earlier turn's unplaced
+    /// steering is read before it all the same.
+    #[test]
+    fn provider_messages_release_unplaced_steering_before_a_turn_haarness_opened() {
+        let (ended, next) = (Some(TurnId::new()), Some(TurnId::new()));
+        let at = |turn, sequence, data| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let items = vec![
+            at(ended, 1, message("rename the module", false, false)),
+            at(ended, 2, message("use the old names", true, false)),
+            at(
+                next,
+                3,
+                message("<task-result>a child finished</task-result>", false, true),
+            ),
+            at(
+                next,
+                4,
+                ItemData::AssistantMessage {
+                    text: "noted".into(),
+                },
+            ),
+        ];
+        let (messages, origins) = super::provider_messages_with_origins(items);
+        assert_eq!(
+            said(&messages),
+            [
+                "rename the module",
+                "use the old names",
+                "<task-result>a child finished</task-result>",
+                "noted"
+            ]
+        );
+        assert_eq!(origins[1].turn, ended);
+    }
+
     #[test]
     fn provider_messages_say_who_wrote_each_message_and_in_which_turn() {
         let turn = Some(TurnId::new());

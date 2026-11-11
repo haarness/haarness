@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_steer_no_request_received_is_read_once_a_later_turn_answers() {
+    async fn a_steer_no_request_received_is_taken_once_a_later_turn_opens() {
         let store = SqliteStore::in_memory().unwrap();
         let steer = RequestId::new();
         let (thread, turn, item) = steered_chat(&store, steer).await;
@@ -800,20 +800,10 @@ mod tests {
             Some(turn.id)
         );
         undo(false);
-        // Every request of a later turn ends with it, so the model has read
-        // it once one of them is answered.
-        let (later, _, _) = store
-            .start_turn(thread, turn_request(RequestId::new(), "next"))
-            .await
-            .unwrap();
+        // Every later turn reads it where its turn ended, so once one has
+        // opened it is taken, answered or not.
         store
-            .append_item(
-                thread,
-                Some(later.id),
-                ItemData::AssistantMessage {
-                    text: "On it".into(),
-                },
-            )
+            .start_turn(thread, turn_request(RequestId::new(), "next"))
             .await
             .unwrap();
         assert_eq!(

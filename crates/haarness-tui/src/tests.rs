@@ -12243,9 +12243,11 @@ fn the_band_names_the_approval_mode_apart_from_a_review_agent() {
 #[test]
 fn queued_followups_wait_above_the_composer_until_consumed() {
     let thread = fixture_thread();
-    let queued = message_item(
+    let running = TurnId::new();
+    let queued = message_item_for_turn(
         1,
         &thread,
+        running,
         ItemData::UserMessage {
             text: "also add tests".into(),
             attachments: vec![],
@@ -12257,7 +12259,7 @@ fn queued_followups_wait_above_the_composer_until_consumed() {
     );
     let queued_id = queued.id;
     let mut app = App::new(thread.clone(), vec![thread], vec![queued], vec![], vec![]);
-    app.active_turn = Some(TurnId::new());
+    app.active_turn = Some(running);
 
     // The waiting strip owns the message; the transcript does not.
     let transcript: String = crate::view::transcript::transcript_lines(&app, 100)
@@ -12287,6 +12289,54 @@ fn queued_followups_wait_above_the_composer_until_consumed() {
     assert!(transcript.contains("also add tests"), "{transcript}");
     let text = frame_text(&app, (100, 30));
     assert!(!text.contains("Steering ·"), "{text}");
+}
+
+#[test]
+fn steering_an_earlier_turn_left_without_a_marker_is_conversation_not_waiting() {
+    let thread = fixture_thread();
+    let (ended, running) = (TurnId::new(), TurnId::new());
+    let steer = |sequence, turn, text: &str| {
+        message_item_for_turn(
+            sequence,
+            &thread,
+            turn,
+            ItemData::UserMessage {
+                text: text.into(),
+                attachments: vec![],
+                queued: true,
+                synthetic: false,
+                command_line: None,
+                hook: None,
+            },
+        )
+    };
+    let items = vec![
+        steer(1, ended, "keep the public names"),
+        steer(2, running, "also add tests"),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    app.active_turn = Some(running);
+    // Only the running turn's own steering waits in the strip; the earlier
+    // turn's, which the model reads where that turn ended, stays in the
+    // conversation.
+    let waiting: Vec<_> = app
+        .pending_follow_ups()
+        .iter()
+        .map(|item| item.sequence)
+        .collect();
+    assert_eq!(waiting, [2]);
+    let transcript: String = crate::view::transcript::transcript_lines(&app, 100)
+        .lines
+        .iter()
+        .map(|line| line_text(line) + "\n")
+        .collect();
+    assert!(transcript.contains("keep the public names"), "{transcript}");
+    assert!(!transcript.contains("also add tests"), "{transcript}");
+    let text = frame_text(&app, (100, 30));
+    assert!(
+        text.contains("Steering · 1 — joins at the next step"),
+        "{text}"
+    );
 }
 
 #[tokio::test]
@@ -12982,9 +13032,11 @@ async fn concurrent_children_and_serial_parent_tools_have_distinct_statuses() {
 #[test]
 fn queued_messages_use_transient_running_status_instead_of_a_transcript_badge() {
     let thread = fixture_thread();
-    let queued = message_item(
+    let running = haarness_protocol::TurnId::new();
+    let queued = message_item_for_turn(
         1,
         &thread,
+        running,
         ItemData::UserMessage {
             text: "also add tests".into(),
             attachments: vec![],
@@ -12996,7 +13048,7 @@ fn queued_messages_use_transient_running_status_instead_of_a_transcript_badge() 
     );
     let queued_id = queued.id;
     let mut app = App::new(thread.clone(), vec![thread], vec![queued], vec![], vec![]);
-    app.active_turn = Some(haarness_protocol::TurnId::new());
+    app.active_turn = Some(running);
     let text: String = app
         .lines((100, 30))
         .iter()
@@ -13089,9 +13141,11 @@ async fn synthetic_queued_event_does_not_show_user_followup_notice() {
 #[test]
 fn queued_status_yields_before_the_interrupt_shortcut_at_narrow_widths() {
     let thread = fixture_thread();
-    let queued = message_item(
+    let running = haarness_protocol::TurnId::new();
+    let queued = message_item_for_turn(
         1,
         &thread,
+        running,
         ItemData::UserMessage {
             text: "also add tests".into(),
             attachments: vec![],
@@ -13102,7 +13156,7 @@ fn queued_status_yields_before_the_interrupt_shortcut_at_narrow_widths() {
         },
     );
     let mut app = App::new(thread.clone(), vec![thread], vec![queued], vec![], vec![]);
-    app.active_turn = Some(haarness_protocol::TurnId::new());
+    app.active_turn = Some(running);
 
     // Identity is 23 columns (" build   openai/GPT-5.4"); the right side is
     // "thinking   0s" (13), "… steer" (21) or "… follow-up steer" (31), and a
@@ -21839,9 +21893,11 @@ fn queue_strip_header_names_the_working_paused_and_editing_states() {
 #[test]
 fn queue_strip_numbers_three_messages_and_counts_the_rest() {
     let thread = fixture_thread();
-    let steering = message_item(
+    let running = TurnId::new();
+    let steering = message_item_for_turn(
         1,
         &thread,
+        running,
         ItemData::UserMessage {
             text: "keep the public names".into(),
             attachments: vec![],
@@ -21853,7 +21909,7 @@ fn queue_strip_numbers_three_messages_and_counts_the_rest() {
     );
     let mut app = queue_fixture(&["one\nstill one", "two", "three", "four", "five"]);
     app.items = vec![steering];
-    app.active_turn = Some(TurnId::new());
+    app.active_turn = Some(running);
 
     let (steer_header, _) = strip_row(&app, "▎ Steering · 1 — joins at the next step");
     let (steer_row, _) = strip_row(&app, "▎ 1. keep the public names");

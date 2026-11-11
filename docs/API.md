@@ -598,7 +598,8 @@ a person's, sent again under its `requestId`, runs once (see `/turns`). A
 database an older server left with such steering in a turn it no longer runs
 is settled once when this server first opens it, with markers alone. Steering
 of an ended turn still without one (an undo took it away, or an older build
-ran in between) is read where that turn ended, as the next turn opens; a fork
+ran in between) is read where that turn ended, as the next turn opens, and is
+taken from then on, so sending it again returns its turn; a fork
 gives what it copied without its marker one at the end of the copy. Each call such a turn
 left without a result gets an error `tool_result` first, saying it did not
 finish, with `metadata: {"unfinished": true}`; a turn that outlives a graceful

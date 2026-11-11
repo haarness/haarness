@@ -1078,16 +1078,26 @@ impl SqliteStore {
             ItemData::QueueConsumed { item_id } if item_id == message.id => Some(item.sequence),
             _ => None,
         });
-        // Read once the model wrote after it reached a request: where its
-        // marker stands, or without one (the server stopped first) in any
-        // later turn, whose requests all end with it.
-        let read = later.iter().any(|item| {
-            matches!(
-                item.data,
-                ItemData::AssistantMessage { .. } | ItemData::ToolCall { .. }
-            ) && match consumed {
-                Some(at) => item.sequence > at,
-                None => item.turn_id != Some(turn.id),
+        // Read once the model wrote after it reached a request, where its
+        // marker stands. Without one (an older build, or an undo took it
+        // away) it is read where its turn ended, by every later turn: once
+        // one has opened, it is taken.
+        let read = later.iter().any(|item| match consumed {
+            Some(at) => {
+                item.sequence > at
+                    && matches!(
+                        item.data,
+                        ItemData::AssistantMessage { .. } | ItemData::ToolCall { .. }
+                    )
+            }
+            None => {
+                item.turn_id.is_some_and(|other| other != turn.id)
+                    && matches!(
+                        item.data,
+                        ItemData::UserMessage { queued: false, .. }
+                            | ItemData::AssistantMessage { .. }
+                            | ItemData::ToolCall { .. }
+                    )
             }
         });
         Ok(Some(SteerProgress {
