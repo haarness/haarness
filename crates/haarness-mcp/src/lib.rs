@@ -2581,6 +2581,7 @@ fn spawn_worker(
     tokio::spawn(async move {
         let peer = client.peer().clone();
         let apps = client.service().apps.clone();
+        let server = client.service().name.clone();
         let done = client.waiting();
         tokio::pin!(done);
         // The answers being waited for, each on a task of its own.
@@ -2611,6 +2612,7 @@ fn spawn_worker(
                     let request = rmcp::model::ClientRequest::CallToolRequest(
                         rmcp::model::CallToolRequest::new(params),
                     );
+                    let server = server.clone();
                     // A call runs to its end even when nobody waits for it,
                     // as it always has: it may change something.
                     dispatch(
@@ -2620,12 +2622,12 @@ fn spawn_worker(
                         reply,
                         &connection,
                         false,
-                        move |result| match result {
-                            rmcp::model::ServerResult::CallToolResult(result) => match &app {
+                        move |result| match call_result(result, &server, &tool) {
+                            Some(result) => match &app {
                                 Some(app) => app_output(result, &tool, app),
                                 None => to_output(result, &tool),
                             },
-                            _ => Err(mcp_error("unexpected response to tools/call")),
+                            None => Err(mcp_error("unexpected response to tools/call")),
                         },
                     )
                     .await;
@@ -3319,6 +3321,95 @@ fn parse_sse_event(event: &[u8]) -> Option<(String, String)> {
         }
     }
     (!data.is_empty()).then(|| (kind, data.join("\n")))
+}
+
+/// The answer to a call of `server`'s `tool` as a tool result. An answer
+/// rmcp cannot read as one still comes from a tool that ran, and failing the
+/// call would have the model run it again (send a message twice): an empty
+/// answer (`{}`, or `[]`, which rmcp reads alike) is a result with nothing in
+/// it, and each content block that is not valid MCP (an image without its
+/// type, a block of a type MCP does not define) is named in its place, the
+/// rest of the result kept. An `isError` that is not `false` (`"true"`, `1`)
+/// is a failure. `None` for anything else: an answer that is not an object,
+/// one with none of a result's fields (`{"error": "quota exceeded"}`), or
+/// one that says the call has not finished.
+fn call_result(
+    result: rmcp::model::ServerResult,
+    server: &str,
+    tool: &str,
+) -> Option<rmcp::model::CallToolResult> {
+    use rmcp::model::{CallToolResult, ContentBlock, CustomResult, ServerResult};
+    let mut fields = match result {
+        ServerResult::CallToolResult(result) => return Some(result),
+        ServerResult::EmptyResult(_) | ServerResult::TaskAckResult(_) => {
+            return Some(CallToolResult::default());
+        }
+        ServerResult::CustomResult(CustomResult(Value::Object(fields))) => fields,
+        _ => return None,
+    };
+    if fields
+        .get("resultType")
+        .is_some_and(|kind| kind.as_str() != Some("complete"))
+        || ["content", "structuredContent", "isError", "_meta"]
+            .iter()
+            .all(|field| fields.get(*field).is_none_or(Value::is_null))
+    {
+        return None;
+    }
+    let mut left_out = 0;
+    let mut unreadable = |block: &Value| {
+        left_out += 1;
+        ContentBlock::text(unreadable_block(block))
+    };
+    let mut result = CallToolResult::default();
+    result.content = match fields.remove("content") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(blocks)) => blocks
+            .into_iter()
+            .map(|block| {
+                serde_json::from_value(block.clone()).unwrap_or_else(|_| unreadable(&block))
+            })
+            .collect(),
+        Some(Value::String(text)) => vec![ContentBlock::text(text)],
+        Some(other) => vec![unreadable(&other)],
+    };
+    result.structured_content = fields
+        .remove("structuredContent")
+        .filter(|value| !value.is_null());
+    result.is_error = match fields.get("isError") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(failed)) => Some(*failed),
+        Some(Value::String(text)) if text.eq_ignore_ascii_case("false") => Some(false),
+        Some(_) => Some(true),
+    };
+    result.meta = fields
+        .remove("_meta")
+        .and_then(|meta| serde_json::from_value(meta).ok());
+    if left_out > 0 {
+        tracing::warn!(
+            server,
+            tool,
+            blocks = left_out,
+            "an MCP tool answered with content that is not valid MCP; each such block is named in its place"
+        );
+    }
+    Some(result)
+}
+
+/// The line that stands for a content block that is not valid MCP: what
+/// type it gives, when that reads as one, and that it was left out.
+fn unreadable_block(block: &Value) -> String {
+    let kind = block.get("type").and_then(Value::as_str).filter(|kind| {
+        !kind.is_empty()
+            && kind.len() <= 40
+            && kind
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+    });
+    match kind {
+        Some(kind) => format!("[{kind} content, left out: it is not valid MCP content]"),
+        None => "[content left out: it is not valid MCP content]".to_owned(),
+    }
 }
 
 fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<ToolOutput> {
@@ -7052,6 +7143,112 @@ mod tests {
         result.content.clear();
         let error = to_output(result, "deploy").unwrap_err().to_string();
         assert!(error.contains("E42"), "{error}");
+    }
+
+    /// An answer to `tools/call` as rmcp reads it off the wire.
+    fn answered(answer: Value) -> rmcp::model::ServerResult {
+        serde_json::from_value(answer).unwrap()
+    }
+
+    /// A tool that ran and answered with a block that is not valid MCP (an
+    /// image without its type, a type MCP does not define) still gives its
+    /// text, structured content and error flag; each such block is named.
+    #[test]
+    fn a_result_with_content_that_is_not_valid_mcp_keeps_the_rest() {
+        let answer = answered(serde_json::json!({
+            "content": [
+                {"type": "text", "text": "Message sent."},
+                {"type": "image", "data": "AAAA"},
+                {"type": "chart", "points": [1, 2]},
+                {"type": "a\nlong made-up type"}
+            ],
+            "structuredContent": {"id": 7}
+        }));
+        assert!(
+            !matches!(answer, rmcp::model::ServerResult::CallToolResult(_)),
+            "rmcp reads this answer as a result now"
+        );
+        let output = to_output(call_result(answer, "mail", "send").unwrap(), "send").unwrap();
+        assert_eq!(
+            output.text,
+            "Message sent.\n\
+             [image content, left out: it is not valid MCP content]\n\
+             [chart content, left out: it is not valid MCP content]\n\
+             [content left out: it is not valid MCP content]"
+        );
+        assert_eq!(output.metadata, serde_json::json!({"id": 7}));
+        let failed = answered(serde_json::json!({
+            "content": [{"type": "text", "text": "Over quota."}, {"type": "image", "data": "AAAA"}],
+            "isError": true
+        }));
+        let error = to_output(call_result(failed, "mail", "send").unwrap(), "send").unwrap_err();
+        assert!(
+            matches!(&error, CoreError::Tool(text) if text.starts_with("Over quota.\n[image content")),
+            "{error}"
+        );
+    }
+
+    /// An empty answer is a call that ran and said nothing, as a REST API's
+    /// 204 comes back. An answer with none of a result's fields, one that
+    /// says the call has not finished, or one to another request is still
+    /// no result.
+    #[test]
+    fn an_empty_result_is_a_call_with_no_output() {
+        for empty in [
+            serde_json::json!({}),
+            serde_json::json!({"resultType": "complete"}),
+            // rmcp reads an empty list as it reads `{}`.
+            serde_json::json!([]),
+        ] {
+            let result = call_result(answered(empty.clone()), "zoom", "delete")
+                .unwrap_or_else(|| panic!("{empty} is no result"));
+            let output = to_output(result, "delete").unwrap();
+            assert_eq!((output.text.as_str(), &output.metadata), ("", &Value::Null));
+        }
+        for other in [
+            serde_json::json!({"tools": []}),
+            serde_json::json!({"resultType": "pending", "content": [{"type": "image", "data": "AAAA"}]}),
+            serde_json::json!({"error": "quota exceeded", "ok": false}),
+            serde_json::json!({"content": null, "unknown": true}),
+            serde_json::json!("sent"),
+        ] {
+            assert!(
+                call_result(answered(other.clone()), "zoom", "delete").is_none(),
+                "{other}"
+            );
+        }
+    }
+
+    /// An `isError` that is not a boolean still says the call failed, unless
+    /// it says `false`.
+    #[test]
+    fn an_error_flag_that_is_not_a_boolean_still_fails_the_call() {
+        let answer = |flag: Value| {
+            answered(serde_json::json!({
+                "content": [{"type": "text", "text": "Over quota."}],
+                "isError": flag
+            }))
+        };
+        for flag in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!("yes"),
+        ] {
+            let result = call_result(answer(flag.clone()), "mail", "send").unwrap();
+            let error = to_output(result, "send").unwrap_err();
+            assert!(
+                matches!(&error, CoreError::Tool(text) if text == "Over quota."),
+                "{flag}: {error}"
+            );
+        }
+        for flag in [serde_json::json!("false"), serde_json::json!(null)] {
+            let result = call_result(answer(flag.clone()), "mail", "send").unwrap();
+            assert_eq!(
+                to_output(result, "send").unwrap().text,
+                "Over quota.",
+                "{flag}"
+            );
+        }
     }
 }
 
