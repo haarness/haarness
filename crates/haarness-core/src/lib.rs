@@ -104,6 +104,19 @@ pub const TRACE_EVENT_TARGET: &str = "haarness::trace";
 /// that does not match its tool.
 pub const UNREADABLE_TOOL_CALL: &str = "the provider couldn't read a tool call the model wrote: ";
 
+/// The start of the notice a chat gets when a person's steering its turn
+/// took never reached the model before the turn failed or a plain stop ended
+/// it; `: <why the turn ended>` follows. Sending the message again under its
+/// request runs it once.
+pub const UNDELIVERED_INPUT: &str =
+    "Queued input could not be delivered before the turn failed; retry it";
+
+/// What the notice of a turn a restart or a shutdown ended says, in place of
+/// a notice of its own, when the model had not read a message the person
+/// sent while it worked.
+pub const UNREAD_WHILE_WORKING: &str =
+    "before the agent read what you sent while it worked; send that again";
+
 /// Why a chat refuses a new turn while one is running: read by people, from
 /// `haarness run --session` or an editor over ACP sending to a chat busy
 /// elsewhere.

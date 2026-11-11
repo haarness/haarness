@@ -37,8 +37,8 @@ use crate::tool_validation::{unknown_tool, validate_arguments};
 use crate::{
     CoreError, CoreResult, EventBus, ModelProvider, PermissionDecision, PermissionEngine,
     PermissionRule, ProviderEvent, ProviderMessage, ProviderRegistry, ProviderRequest,
-    RuntimeConfig, StrandedTask, SystemPromptContext, ThreadRepository, ToolContext, ToolOutput,
-    ToolRegistry,
+    RuntimeConfig, SteeredInput, StrandedTask, SystemPromptContext, ThreadRepository, ToolContext,
+    ToolOutput, ToolRegistry,
 };
 
 /// Compactions in a row the provider has not answered yet: each one after
@@ -310,7 +310,13 @@ that is done.";
 const STOP_HOOK_CONTINUATIONS: u32 = 8;
 
 /// The transcript line for a turn the runtime had to stop.
-fn stopped_turn_message(reason: &str) -> String {
+fn stopped_turn_message(reason: &str, unread: bool) -> String {
+    if unread {
+        return format!(
+            "{reason} {}. Work already recorded is preserved. Tools are not replayed automatically.",
+            crate::UNREAD_WHILE_WORKING
+        );
+    }
     format!(
         "{reason}. Work already recorded is preserved; send a new message to continue. Tools are not replayed automatically."
     )
@@ -3229,6 +3235,10 @@ pub struct AgentRuntime {
     events: EventBus,
     active: Arc<DashMap<ThreadId, Arc<ActiveTurn>>>,
     turn_admissions: Arc<TurnAdmissionLocks>,
+    /// Each chat whose turn a stop with `resume` ended before the model read
+    /// a person's steering, and the turn, until the continuation that answers
+    /// it has started: the steering is taken meanwhile.
+    answers_owed: Arc<DashMap<ThreadId, TurnId>>,
     title_jobs: Arc<Mutex<HashSet<ThreadId>>>,
     prepared_prompts: Arc<Mutex<crate::side_question::PreparedPrompts>>,
     workspace: PathBuf,
@@ -3406,6 +3416,7 @@ impl AgentRuntime {
             events,
             active: Arc::new(DashMap::new()),
             turn_admissions: Arc::new(DashMap::new()),
+            answers_owed: Arc::new(DashMap::new()),
             title_jobs: Arc::new(Mutex::new(HashSet::new())),
             prepared_prompts: Arc::new(
                 Mutex::new(crate::side_question::PreparedPrompts::default()),
@@ -4088,7 +4099,8 @@ impl AgentRuntime {
         }
         // A background subagent the restart stopped is recorded in the chat
         // that launched it with its final checkpoint, before anything else
-        // here can fail.
+        // here can fail. So is steering a stopped turn never read, settled
+        // as a failed turn settles it; nothing runs it now.
         let (recovered, reported) = self
             .repository
             .recover_interrupted_tasks(&stranded_report)
@@ -4098,7 +4110,11 @@ impl AgentRuntime {
                 Ok(thread) => self.resolve_root(&thread).await,
                 Err(_) => item.thread_id,
             };
-            info!(chat = %item.thread_id, "recorded a background task the restart stopped");
+            if matches!(item.data, ItemData::QueueConsumed { .. }) {
+                info!(chat = %item.thread_id, "settled steering the restart left unread");
+            } else {
+                info!(chat = %item.thread_id, "recorded a background task the restart stopped");
+            }
             self.events.publish_scoped(
                 "item.created",
                 Some(item.thread_id),
@@ -4237,11 +4253,72 @@ impl AgentRuntime {
             .has_input_admission(thread_id, request.request_id)
             .await?
         {
-            return Ok(QueueInputResponse {
-                queued: true,
-                item: None,
-                turn: None,
-            });
+            match self.steered_input(thread_id, request.request_id).await? {
+                // A steer its turn ended without reading, sent again while
+                // nothing runs: it runs once, as a turn of its own made from
+                // the copy the chat holds (see `start_turn_with_ceilings`).
+                // While another turn runs, the message is in what that turn's
+                // model reads already.
+                Some(SteeredInput::Unread { .. }) if !self.active.contains_key(&thread_id) => {
+                    let started = self
+                        .start_turn_with_ceilings(
+                            thread_id,
+                            StartTurnRequest {
+                                request_id: request.request_id,
+                                text: request.text,
+                                attachments: request.attachments,
+                                reasoning_effort: match request.reasoning_effort {
+                                    Some(effort) => Some(effort),
+                                    None => {
+                                        self.chat_turn_settings(thread_id).await.reasoning_effort
+                                    }
+                                },
+                                tools: request
+                                    .preview
+                                    .map(|preview| HashMap::from([("preview".into(), preview)])),
+                                attended: request.attended,
+                                follows_background: request.follows_background,
+                                ..Default::default()
+                            },
+                            Vec::new(),
+                            None,
+                            None,
+                            false,
+                        )
+                        .await;
+                    return match started {
+                        Ok(turn) => Ok(QueueInputResponse {
+                            queued: request.request_id != turn.request_id,
+                            item: None,
+                            turn: (turn.request_id == request.request_id).then_some(turn),
+                        }),
+                        // A turn started meanwhile, whose model reads it.
+                        Err(CoreError::Conflict(message)) if message == crate::CHAT_BUSY => {
+                            Ok(QueueInputResponse {
+                                queued: true,
+                                item: None,
+                                turn: None,
+                            })
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
+                // Run once that way already: its retry finds that turn.
+                Some(SteeredInput::Taken(turn)) if turn.request_id == request.request_id => {
+                    return Ok(QueueInputResponse {
+                        queued: false,
+                        item: None,
+                        turn: Some(turn),
+                    });
+                }
+                _ => {
+                    return Ok(QueueInputResponse {
+                        queued: true,
+                        item: None,
+                        turn: None,
+                    });
+                }
+            }
         }
         // A steer that started a turn: its retry finds that turn instead of
         // joining it as a second message.
@@ -8319,6 +8396,30 @@ impl AgentRuntime {
             .await
     }
 
+    /// What became of request `request` of chat `thread_id` if a person
+    /// steered it into a running turn (see [`SteeredInput`]). One the store
+    /// reads as unread is taken still while a stop with `resume` that ended
+    /// its turn has not started the continuation that answers it.
+    async fn steered_input(
+        &self,
+        thread_id: ThreadId,
+        request: RequestId,
+    ) -> CoreResult<Option<SteeredInput>> {
+        let found = self.repository.steered_input(thread_id, request).await?;
+        if let Some(SteeredInput::Unread { message, .. }) = &found
+            && let Some(turn) = message.turn_id
+            && self
+                .answers_owed
+                .get(&thread_id)
+                .is_some_and(|owed| *owed == turn)
+        {
+            return Ok(Some(SteeredInput::Taken(
+                self.repository.get_turn(turn).await?,
+            )));
+        }
+        Ok(found)
+    }
+
     /// Start a workflow-owned agent turn while retaining the launching
     /// thread's deny boundary. This uses the normal turn/provider/tool path;
     /// the only difference is that a child cannot gain authority by selecting
@@ -8372,6 +8473,27 @@ impl AgentRuntime {
         queue_revision: Option<u64>,
         unattended: bool,
     ) -> CoreResult<Turn> {
+        // A message a person steered into a turn is part of that turn. Sent
+        // again as a turn of its own (a client that lost the first answer),
+        // it returns that turn while it runs and once the model has read it,
+        // and nothing runs twice. One its turn ended without reading runs
+        // once, as this turn, from the copy the chat holds: the hooks, the
+        // keyword and tool checks and the model all read what was stored,
+        // mentions included. The store checks again as it creates the turn.
+        let rerun = match self.steered_input(thread_id, request.request_id).await? {
+            Some(SteeredInput::Taken(turn)) => return Ok(turn),
+            Some(SteeredInput::Unread { message, .. }) => {
+                if let ItemData::UserMessage {
+                    text, attachments, ..
+                } = message.data
+                {
+                    request.text = text;
+                    request.attachments = attachments;
+                }
+                true
+            }
+            None => false,
+        };
         // As `queue_input` refuses it: a blank message would stay in the
         // chat, and Claude refuses whitespace-only text on every later turn.
         // A command expands into its own text.
@@ -8388,8 +8510,8 @@ impl AgentRuntime {
         // the message as the queue holds it. It is not refused now: a file
         // that changed meanwhile, or one an older server queued unchecked,
         // reaches the model as a note (see `attachments::for_model`), and the
-        // queue moves on.
-        if queue_revision.is_none() {
+        // queue moves on. So is a steer run again from its stored copy.
+        if queue_revision.is_none() && !rerun {
             request.attachments = self
                 .admitted_attachments(thread_id, std::mem::take(&mut request.attachments))
                 .await?;
@@ -8521,6 +8643,36 @@ impl AgentRuntime {
             merge_agent_tools(&mut request.tools, &custom.tools);
         }
         let root = self.resolve_root(&thread).await;
+        // A steer its turn ended without reading, sent again: the store runs
+        // it once as this turn, from the copy it holds. A copy no model
+        // request received takes its place in the history first, as a
+        // request would have put it, so this turn's requests do not end with
+        // it a second time.
+        if rerun
+            && let Some(SteeredInput::Unread {
+                message,
+                consumed: false,
+            }) = self.steered_input(thread_id, request.request_id).await?
+        {
+            let marker = self
+                .repository
+                .append_item(
+                    thread_id,
+                    message.turn_id,
+                    ItemData::QueueConsumed {
+                        item_id: message.id,
+                    },
+                )
+                .await?;
+            self.events.publish_scoped(
+                "item.created",
+                Some(thread_id),
+                Some(root),
+                message.turn_id,
+                Some(marker.id),
+                json!(marker),
+            );
+        }
         let stored = StartTurnRequest {
             command: typed_command,
             ..request.clone()
@@ -8704,6 +8856,7 @@ impl AgentRuntime {
             events: self.events.clone(),
             active: self.active.clone(),
             turn_admissions: self.turn_admissions.clone(),
+            answers_owed: self.answers_owed.clone(),
             title_jobs: self.title_jobs.clone(),
             prepared_prompts: self.prepared_prompts.clone(),
             thread,
@@ -8840,6 +8993,8 @@ impl AgentRuntime {
             {
                 tracing::warn!(%error, thread = %thread_id, "could not answer steering after stop");
             }
+            self.answers_owed
+                .remove_if(&thread_id, |_, turn| *turn == task.turn.id);
             return;
         }
         match result {
@@ -9089,8 +9244,23 @@ impl AgentRuntime {
             );
             // Its calls still running end here, as startup recovery ends
             // those of a turn a crash stopped: the turn is marked
-            // interrupted below, which recovery leaves alone.
+            // interrupted below, which recovery leaves alone. So does the
+            // steering no model request received: it takes its place in the
+            // history, as recovery's does, and the notice below asks for a
+            // person's again. Nothing runs it.
+            let mut unread = false;
             if let Ok(items) = self.repository.list_items(*thread_id, None).await {
+                let pending = unconsumed_queued(&items, active_turn.id);
+                unread = items.iter().any(|item| {
+                    pending.contains(&item.id)
+                        && matches!(
+                            item.data,
+                            ItemData::UserMessage {
+                                synthetic: false,
+                                ..
+                            }
+                        )
+                });
                 let turn_items = items
                     .into_iter()
                     .filter(|item| item.turn_id == Some(active_turn.id))
@@ -9105,7 +9275,12 @@ impl AgentRuntime {
                             crate::unfinished_call_result(call_id, name, started.contains(call_id)),
                         ),
                         _ => None,
-                    });
+                    })
+                    .chain(
+                        pending
+                            .into_iter()
+                            .map(|item_id| ItemData::QueueConsumed { item_id }),
+                    );
                 for data in ended {
                     if let Ok(item) = self
                         .repository
@@ -9122,7 +9297,7 @@ impl AgentRuntime {
                     }
                 }
             }
-            let message = stopped_turn_message(reason);
+            let message = stopped_turn_message(reason, unread);
             if let Ok(item) = self
                 .repository
                 .append_item(
@@ -9182,6 +9357,10 @@ struct RunnerTask {
     events: EventBus,
     active: Arc<DashMap<ThreadId, Arc<ActiveTurn>>>,
     turn_admissions: Arc<TurnAdmissionLocks>,
+    /// Each chat whose turn a stop with `resume` ended before the model read
+    /// a person's steering, and the turn, until the continuation that answers
+    /// it has started: the steering is taken meanwhile.
+    answers_owed: Arc<DashMap<ThreadId, TurnId>>,
     title_jobs: Arc<Mutex<HashSet<ThreadId>>>,
     prepared_prompts: Arc<Mutex<crate::side_question::PreparedPrompts>>,
     thread: Thread,
@@ -10659,6 +10838,9 @@ impl RunnerTask {
 
     async fn run_with_cleanup(self: Arc<Self>) -> CoreResult<()> {
         let mut result = Arc::clone(&self).run_contained().await;
+        // A person's steering the runtime's own stop left unread, which that
+        // stop's notice asks for again.
+        let mut unread = false;
         if result.is_err() {
             // Stop new queue writes immediately, but keep the matching active
             // reservation installed until goal state and the durable turn are
@@ -10690,7 +10872,7 @@ impl RunnerTask {
                 if matches!(error_value, CoreError::Cancelled) && self.steer_answer_requested() {
                     self.keep_unanswered_steering().await;
                 } else {
-                    self.mark_unconsumed_queue_failed(error_value).await;
+                    unread = self.mark_unconsumed_queue_failed(error_value).await;
                 }
             }
         }
@@ -10716,14 +10898,7 @@ impl RunnerTask {
             record_span_error(&tracing::Span::current(), error_value);
             // A turn the runtime stopped (server shutdown, upgrade) must not
             // read like the user's own stop.
-            let stop_reason = matches!(error_value, CoreError::Cancelled)
-                .then(|| {
-                    self.active
-                        .get(&self.thread.id)
-                        .filter(|active| active.id == self.turn.id)
-                        .and_then(|active| active.stop_reason.lock().clone())
-                })
-                .flatten();
+            let stop_reason = self.runtime_stop_reason(error_value);
             // A stop is an outcome someone asked for, not a failure; keep
             // ERROR for turns that actually broke.
             if matches!(error_value, CoreError::Cancelled) {
@@ -10743,9 +10918,10 @@ impl RunnerTask {
                     "turn failed"
                 );
             }
-            let visible_error = stop_reason
-                .as_deref()
-                .map_or_else(|| self.visible_error(error_value), stopped_turn_message);
+            let visible_error = stop_reason.as_deref().map_or_else(
+                || self.visible_error(error_value),
+                |reason| stopped_turn_message(reason, unread),
+            );
             if self.depth == 0 {
                 let goal_lock = goal_mutation_lock(&self.goal_mutations, self.thread.id);
                 let goal_guard = goal_lock.lock().await;
@@ -10932,32 +11108,73 @@ impl RunnerTask {
             return;
         };
         let unanswered = unanswered_steering(&items, self.turn.id);
+        // Its steering is taken until the continuation that answers it starts
+        // (see `AgentRuntime::steered_input`), so a retry of it meanwhile does
+        // not run it a second time.
+        if unanswered {
+            self.answers_owed.insert(self.thread.id, self.turn.id);
+        }
         for item_id in unconsumed_queued(&items, self.turn.id) {
             let _ = self.publish_item(ItemData::QueueConsumed { item_id }).await;
         }
         self.answer_steer.store(unanswered, Ordering::SeqCst);
     }
 
-    async fn mark_unconsumed_queue_failed(&self, error_value: &CoreError) {
+    /// Why the runtime stopped this turn (a shutdown, an upgrade), when it
+    /// did rather than a person or a failure.
+    fn runtime_stop_reason(&self, error_value: &CoreError) -> Option<String> {
+        matches!(error_value, CoreError::Cancelled)
+            .then(|| {
+                self.active
+                    .get(&self.thread.id)
+                    .filter(|active| active.id == self.turn.id)
+                    .and_then(|active| active.stop_reason.lock().clone())
+            })
+            .flatten()
+    }
+
+    /// Steering that never reached the model takes its place in the
+    /// history, and a notice asks for a person's again. True when the
+    /// runtime stopped the turn and the notice of that stop is to ask
+    /// instead, so nothing is said twice.
+    async fn mark_unconsumed_queue_failed(&self, error_value: &CoreError) -> bool {
         let Ok(items) = self.repository.list_items(self.thread.id, None).await else {
-            return;
+            return false;
         };
         let pending = unconsumed_queued(&items, self.turn.id);
-        if pending.is_empty() {
-            return;
-        }
+        // A message Haarness steered in (a background result, a stop's
+        // continuation) takes its place too, but there is nothing a person
+        // could send again: the notice is only for theirs.
+        let person = items.iter().any(|item| {
+            pending.contains(&item.id)
+                && matches!(
+                    item.data,
+                    ItemData::UserMessage {
+                        synthetic: false,
+                        ..
+                    }
+                )
+        });
         for item_id in pending {
             let _ = self.publish_item(ItemData::QueueConsumed { item_id }).await;
+        }
+        if !person {
+            return false;
+        }
+        if self.runtime_stop_reason(error_value).is_some() {
+            return true;
         }
         let _ = self
             .publish_item(ItemData::Error {
                 message: format!(
-                    "Queued input could not be delivered before the turn failed; retry it: {}",
+                    "{}: {}",
+                    crate::UNDELIVERED_INPUT,
                     self.visible_error(error_value)
                 ),
                 retryable: true,
             })
             .await;
+        false
     }
 
     /// Notes that call `call_id` of this turn has begun, or (`started` false)
@@ -15820,6 +16037,7 @@ impl RunnerTask {
             events: self.events.clone(),
             active: self.active.clone(),
             turn_admissions: self.turn_admissions.clone(),
+            answers_owed: self.answers_owed.clone(),
             title_jobs: self.title_jobs.clone(),
             prepared_prompts: self.prepared_prompts.clone(),
             thread: child.clone(),
@@ -16179,6 +16397,7 @@ impl RunnerTask {
             events: self.events.clone(),
             active: self.active.clone(),
             turn_admissions: self.turn_admissions.clone(),
+            answers_owed: self.answers_owed.clone(),
             title_jobs: self.title_jobs.clone(),
             prepared_prompts: self.prepared_prompts.clone(),
             workspace: self.runtime_workspace.clone(),
@@ -17256,6 +17475,40 @@ fn provider_messages_with_origins(
             )
         {
             group = Some(TurnId(item.id.0));
+        }
+        // Steering a turn that has ended took and no request received (an
+        // older build left it so, or an undo took away what placed it) is
+        // read where that turn ended, as the next one opens, not at the end
+        // of every request. A running turn's own steering is never released
+        // here: no later turn opens while it runs.
+        if !deferred_order.is_empty()
+            && let ItemData::UserMessage {
+                queued: false,
+                synthetic,
+                ..
+            } = &item.data
+            && (item.turn_id.is_some() || !synthetic)
+        {
+            let opening = item.turn_id.or(group);
+            let mut waiting = Vec::new();
+            for deferred in std::mem::take(&mut deferred_order) {
+                match deferred_queued.get(&deferred) {
+                    Some((_, from)) if from.turn != opening => {
+                        let (message, from) = deferred_queued
+                            .remove(&deferred)
+                            .expect("deferred message checked above");
+                        for (owed, origin) in owed.drain(..) {
+                            messages.push(owed);
+                            origins.push(origin);
+                        }
+                        messages.push(message);
+                        origins.push(from);
+                    }
+                    Some(_) => waiting.push(deferred),
+                    None => {}
+                }
+            }
+            deferred_order = waiting;
         }
         let mut origin = crate::image_budget::Origin {
             turn: item.turn_id.or(group),
@@ -24990,6 +25243,275 @@ mod tests {
         };
         assert_eq!(chat(Some(TurnId::new())), ["design.png", "s5.png"]);
         assert_eq!(chat(None), ["design.png", "s5.png"]);
+    }
+
+    fn said(messages: &[ProviderMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|message| match message {
+                ProviderMessage::Text { content, .. } | ProviderMessage::Media { content, .. } => {
+                    content
+                        .split_once("working:\n")
+                        .map_or(content.as_str(), |(_, steer)| {
+                            steer.split_once('\n').map_or(steer, |(text, _)| text)
+                        })
+                        .to_owned()
+                }
+                ProviderMessage::ToolCall { call_id, .. } => format!("call {call_id}"),
+                ProviderMessage::ToolResult { call_id, .. } => format!("result {call_id}"),
+            })
+            .collect()
+    }
+
+    fn message(text: &str, queued: bool, synthetic: bool) -> ItemData {
+        ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued,
+            synthetic,
+            command_line: None,
+            hook: None,
+        }
+    }
+
+    /// A chat with no steering left behind reads as before: a running turn's
+    /// steering no request has taken yet ends the request, whatever was
+    /// written after it in that turn or outside every turn.
+    #[test]
+    fn provider_messages_keep_a_running_turns_steering_at_the_end() {
+        let (first, running) = (Some(TurnId::new()), Some(TurnId::new()));
+        let at = |turn, sequence, data| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let read = at(first, 3, message("use the old names", true, false));
+        let live = at(running, 9, message("also the footer", true, false));
+        let items = vec![
+            at(first, 1, message("rename the module", false, false)),
+            at(
+                first,
+                2,
+                ItemData::ToolCall {
+                    call_id: "a".into(),
+                    name: "read".into(),
+                    arguments: json!({}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            read.clone(),
+            at(
+                first,
+                4,
+                ItemData::ToolResult {
+                    call_id: "a".into(),
+                    name: "read".into(),
+                    output: "ok".into(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            at(first, 5, ItemData::QueueConsumed { item_id: read.id }),
+            at(
+                first,
+                6,
+                ItemData::AssistantMessage {
+                    text: "renamed".into(),
+                },
+            ),
+            at(running, 7, message("now the docs", false, false)),
+            at(
+                running,
+                8,
+                ItemData::ToolCall {
+                    call_id: "b".into(),
+                    name: "read".into(),
+                    arguments: json!({}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            live,
+            at(
+                running,
+                10,
+                ItemData::ToolResult {
+                    call_id: "b".into(),
+                    name: "read".into(),
+                    output: "ok".into(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            at(
+                running,
+                11,
+                message("<hook-feedback>keep going</hook-feedback>", false, true),
+            ),
+            at(
+                None,
+                12,
+                message("<task-result>a child finished</task-result>", false, true),
+            ),
+        ];
+        let (messages, _) = super::provider_messages_with_origins(items);
+        assert_eq!(
+            said(&messages),
+            [
+                "rename the module",
+                "call a",
+                "result a",
+                "use the old names",
+                "renamed",
+                "now the docs",
+                "call b",
+                "result b",
+                "<hook-feedback>keep going</hook-feedback>",
+                "<task-result>a child finished</task-result>",
+                "also the footer",
+            ]
+        );
+    }
+
+    /// Steering an ended turn took and nothing placed is read where that turn
+    /// ended, once the next turn opens, in a chat and in a fork alike.
+    #[test]
+    fn provider_messages_read_an_ended_turns_unplaced_steering_where_it_ended() {
+        let (ended, next) = (Some(TurnId::new()), Some(TurnId::new()));
+        let at = |turn, sequence, data| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let items = vec![
+            at(ended, 1, message("rename the module", false, false)),
+            at(ended, 2, message("use the old names", true, false)),
+            at(
+                ended,
+                3,
+                ItemData::Error {
+                    message: "Haarness restarted".into(),
+                    retryable: true,
+                },
+            ),
+            at(next, 4, message("now the docs", false, false)),
+            at(
+                next,
+                5,
+                ItemData::AssistantMessage {
+                    text: "documented".into(),
+                },
+            ),
+        ];
+        let (messages, origins) = super::provider_messages_with_origins(items.clone());
+        assert_eq!(
+            said(&messages),
+            [
+                "rename the module",
+                "use the old names",
+                "now the docs",
+                "documented"
+            ]
+        );
+        assert_eq!(origins[1].turn, ended);
+        // A fork's copies have no turn: each message the person wrote opens
+        // one.
+        let fork = items
+            .into_iter()
+            .map(|item| Item {
+                turn_id: None,
+                ..item
+            })
+            .collect();
+        let (messages, _) = super::provider_messages_with_origins(fork);
+        assert_eq!(
+            said(&messages),
+            [
+                "rename the module",
+                "use the old names",
+                "now the docs",
+                "documented"
+            ]
+        );
+    }
+
+    /// Released at the next turn, an ended turn's unplaced steering comes
+    /// after the result its unanswered call is owed, never between the call
+    /// and that result, which providers would refuse.
+    #[test]
+    fn provider_messages_release_unplaced_steering_after_the_results_owed_before_it() {
+        let (ended, next) = (Some(TurnId::new()), Some(TurnId::new()));
+        let at = |turn, sequence, data| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let items = vec![
+            at(ended, 1, message("rename the module", false, false)),
+            at(
+                ended,
+                2,
+                ItemData::ToolCall {
+                    call_id: "cut".into(),
+                    name: "bash".into(),
+                    arguments: json!({"command": "sleep 60"}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            at(ended, 3, message("use the old names", true, false)),
+            at(next, 4, message("now the docs", false, false)),
+        ];
+        let (messages, _) = super::provider_messages_with_origins(items);
+        assert_eq!(
+            said(&messages),
+            [
+                "rename the module",
+                "call cut",
+                "result cut",
+                "use the old names",
+                "now the docs"
+            ]
+        );
+        assert!(matches!(
+            &messages[2],
+            ProviderMessage::ToolResult { output, is_error: true, .. }
+                if output == crate::UNFINISHED_CALL_RESULT
+        ));
+    }
+
+    /// A turn Haarness opens itself (a background result while the chat was
+    /// idle) opens with a synthetic message: the earlier turn's unplaced
+    /// steering is read before it all the same.
+    #[test]
+    fn provider_messages_release_unplaced_steering_before_a_turn_haarness_opened() {
+        let (ended, next) = (Some(TurnId::new()), Some(TurnId::new()));
+        let at = |turn, sequence, data| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let items = vec![
+            at(ended, 1, message("rename the module", false, false)),
+            at(ended, 2, message("use the old names", true, false)),
+            at(
+                next,
+                3,
+                message("<task-result>a child finished</task-result>", false, true),
+            ),
+            at(
+                next,
+                4,
+                ItemData::AssistantMessage {
+                    text: "noted".into(),
+                },
+            ),
+        ];
+        let (messages, origins) = super::provider_messages_with_origins(items);
+        assert_eq!(
+            said(&messages),
+            [
+                "rename the module",
+                "use the old names",
+                "<task-result>a child finished</task-result>",
+                "noted"
+            ]
+        );
+        assert_eq!(origins[1].turn, ended);
     }
 
     #[test]

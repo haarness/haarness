@@ -84,6 +84,7 @@ Primary resources:
 - `GET|POST /v1/ptys`; `GET|PATCH|DELETE /v1/ptys/{id}`; WebSocket `GET /v1/ptys/{id}/connect?cursor=N`
 - `POST /v1/threads/{id}/fork`, `/turns`, `/commands`, `/compact`
   A turn needs text or an attachment: `/turns` refuses text that is empty or only whitespace with neither an attachment nor a `command` (`400`, "text or an attachment is required"), as queued input always did, and the `task` tool refuses a blank `prompt`. Claude refuses whitespace-only text, and a blank message kept in the chat would fail every later turn. For the same reason, a reply that is only whitespace (the line breaks a model can stream before a tool call) is kept in the chat but never sent back to a model, and the Anthropic and Bedrock adapters leave out blank text next to an image or a document (Bedrock, which needs text beside a document, gets `(document attached)`, and an empty tool result reads `(no output)`). A chat that already runs a turn refuses `/turns` with `409 conflict` and the message "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped." (`haarness run --session` and editors over ACP show it as it is); `/input` steers a message into the running turn instead.
+  A `requestId` is taken once per chat, so a client that lost an answer sends the same request again. `/turns` with the `requestId` of one of the chat's turns returns that turn and starts nothing. With the `requestId` of a message `/input` steered into a turn, it returns the turn the message joined (`202`), while that turn runs and once the model has answered after the message reached it; the message does not run twice. If that turn ended before the model read the message (the turn failed, was stopped without `resume=true`, or the server stopped or restarted under it), the message runs once, as a turn of its own made from the copy the chat holds (mentions read then included), when it is sent again through `/turns` or `/input` while nothing runs; later repeats return that turn. While another turn runs, `/turns` answers `409` as for any message and `/input` answers `queued: true`, as that turn's model reads the message already. A message still queued is taken off the queue and runs as the turn; one delivered from the queue into a turn, or removed from it, answers `409`, as does a steer a server before 2026-11-12 recorded.
   A client that shows the conversation to a person with a Stop control sends `attended: true` with `/turns`, `/input` (kept with a queued message until it runs) and `/commands`, as Desktop, the terminal UI and an editor over ACP do: a command's or skill's `` !`…` `` snippet in the turn that starts, and in the subagents it starts, then runs until it finishes or the turn is stopped. Without it (a script, `haarness run`, an SDK call, Haarness Cloud, an older client) a snippet ends at `execution.shell_timeout_ms` as a model's shell call does; a scheduled run keeps that deadline whatever is sent, and so do turns Haarness starts itself (a background result, a goal's next step, a workflow's agent, a `/loop` prompt). The field is optional and changes nothing else; servers before it ignore it.
 - `POST /v1/threads/{id}/input` steers a message into the running turn, or with `delivery: "queue"` keeps it for after; revisioned `GET|POST /v1/threads/{id}/input/queue` lists and changes what is queued (`input-queue.v1`; see [Steer and Queue](INPUT-QUEUE.md#api-and-sdks) for delivery, retries, events and SDK usage)
 - `POST /v1/threads/{id}/btw` asks a side question about the chat without adding to it; `POST /v1/threads/{id}/btw/stream` streams its answer as SSE (`btw.stream.v1`; see [side questions](SIDE-QUESTIONS.md#api))
@@ -587,7 +588,27 @@ The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.
 Startup recovery marks orphaned queued/running turns interrupted and appends a
 retryable transcript notice while preserving prior items; provider streams and
-side-effecting tools are never replayed speculatively. Each call such a turn
+side-effecting tools are never replayed speculatively. Steering such a turn
+took that no model request received gets a `queue_consumed` item, which puts
+each message in the history where the turn stopped, so later requests read it
+there once instead of each ending with it (`item.created` once the server is
+up). When one of them is the person's, the restart notice says so in place of
+a notice of its own: "Haarness restarted while this turn was running, before
+the agent read what you sent while it worked; send that again. …". A turn
+that outlives a graceful shutdown's wait is settled the same way when the
+shutdown marks it interrupted, its notice saying the same ("Haarness stopped
+before the agent read …"); so is one that stops within the wait. A failed turn,
+or one a plain stop ended, keeps its own notice, "Queued input could not be
+delivered before the turn failed; retry it: …", given only when a person's
+message is among them: messages Haarness steered in (a background result, a
+stop's continuation) get the marker alone. Nothing runs any of them by itself;
+a person's, sent again under its `requestId`, runs once (see `/turns`). A
+database an older server left with such steering in a turn it no longer runs
+is settled once when this server first opens it, with markers alone. Steering
+of an ended turn still without one (an undo took it away, or an older build
+ran in between) is read where that turn ended, as the next turn opens, and is
+taken from then on, so sending it again returns its turn; a fork
+gives what it copied without its marker one at the end of the copy. Each call such a turn
 left without a result gets an error `tool_result` first, saying it did not
 finish, with `metadata: {"unfinished": true}`; a turn that outlives a graceful
 shutdown's wait gets the same results before the shutdown marks it interrupted.
@@ -834,7 +855,8 @@ goes away meanwhile does not lose it; a retry with the same `requestId` (a
 turn, a queued message, a message steered into a running turn, or one that
 started a turn, each recorded for this) finds it without reading or
 delivering it again, even when retries race, and one sent while the first is
-still reading waits for it. A published chat's request with `resources` is
+still reading waits for it. A steer whose turn ended unread runs once more
+with what was read when it arrived (see `/turns` above). A published chat's request with `resources` is
 refused (`403`), and its `/v1/info` leaves the capability out. Servers advertise
 `mcp-resource-mentions.v1`; older servers ignore the field, so clients offer
 resources only when it is there. `GET /v1/mcp?threadId=<id>&agent=<agent>` (either one alone works; a named

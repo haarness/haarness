@@ -163,6 +163,20 @@ pub struct StrandedCommand {
 /// What recovery records in the chat of a [`StrandedCommand`].
 pub type StrandedCommandReport<'a> = dyn Fn(&StrandedCommand) -> Vec<ItemData> + Send + Sync + 'a;
 
+/// What became of a message a person steered into a running turn, as
+/// [`ThreadRepository::steered_input`] reads it.
+#[derive(Debug, Clone)]
+pub enum SteeredInput {
+    /// Taken: the turn it joined, while that turn runs or once the model has
+    /// read the message; or, once it was sent again and ran as a turn of its
+    /// own, that turn.
+    Taken(Turn),
+    /// Its turn ended before the model read it (the turn failed, was
+    /// stopped, or the server restarted): the message as stored, and whether
+    /// it already took its place in the history (`QueueConsumed`).
+    Unread { message: Item, consumed: bool },
+}
+
 #[async_trait]
 pub trait ThreadRepository: Send + Sync {
     /// Export one root thread and its complete descendant tree as a portable
@@ -226,6 +240,17 @@ pub trait ThreadRepository: Send + Sync {
     ) -> CoreResult<bool> {
         Ok(false)
     }
+    /// What became of request `request` of chat `id`, when a person steered
+    /// it into a running turn and `append_steered_input` recorded where. A
+    /// store that keeps no such records, and a record an older server kept,
+    /// say nothing.
+    async fn steered_input(
+        &self,
+        _id: ThreadId,
+        _request: haarness_protocol::RequestId,
+    ) -> CoreResult<Option<SteeredInput>> {
+        Ok(None)
+    }
     /// The turn request `request` of chat `id` started, if it started one.
     async fn turn_for_request(
         &self,
@@ -245,9 +270,10 @@ pub trait ThreadRepository: Send + Sync {
         Err(CoreError::Invalid("Deferred input is unavailable".into()))
     }
     /// Appends `data` to running turn `turn` of chat `id` as request
-    /// `request`'s steer, and records the request so `has_input_admission`
-    /// finds a retry of it, both at once. `None`, and nothing appended, when
-    /// the request was already taken. A store that keeps no records appends.
+    /// `request`'s steer, and records the request with where it went so
+    /// `has_input_admission` and `steered_input` find a retry of it, both at
+    /// once. `None`, and nothing appended, when the request was already
+    /// taken. A store that keeps no records appends.
     async fn append_steered_input(
         &self,
         id: ThreadId,
@@ -416,9 +442,12 @@ pub trait ThreadRepository: Send + Sync {
     /// the background subagents whose result it is still owed: `report`'s
     /// items are written with the task's final checkpoint, in one step, so a
     /// crash or failure cannot record one without the other. A chat that
-    /// already holds the result, or is archived, gets none. Returns the items
-    /// written. A repository that does not track task checkpoints records
-    /// none.
+    /// already holds the result, or is archived, gets none. Steering an
+    /// interrupted turn took and no model request received gets a
+    /// `QueueConsumed` marker each, and the turn's restart notice asks for a
+    /// person's again ([`crate::UNREAD_WHILE_WORKING`]). Returns the task
+    /// items and the markers written. A repository that does not track task
+    /// checkpoints records none.
     async fn recover_interrupted_tasks(
         &self,
         _report: &StrandedReport<'_>,

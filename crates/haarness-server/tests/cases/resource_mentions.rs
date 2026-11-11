@@ -785,3 +785,141 @@ async fn a_steer_and_its_retries_deliver_it_once_even_when_they_race() {
     assert_eq!(sent, ["Go", "Steer", "Race"]);
     fixture.handle.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_steer_sent_again_through_turns_returns_the_turn_it_joined_and_runs_once() {
+    let provider = SlowText::default();
+    let fixture = fixture_with(Arc::new(provider.clone())).await;
+    let thread = fixture.thread().await;
+    let post = |path: &'static str, body: Value| {
+        let client = fixture.client.clone();
+        let url = format!("{}/v1/threads/{}/{path}", fixture.base, thread.id);
+        async move { client.post(url).json(&body).send().await.unwrap() }
+    };
+    let first: Turn = post(
+        "turns",
+        json!({"requestId": RequestId::new(), "text": "Go"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), provider.first_started.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let steer = json!({
+        "requestId": RequestId::new(),
+        "text": "Also update the docs",
+        "resources": [{"server": "docs", "uri": "docs://setup", "name": "setup"}],
+    });
+    let steered: QueueInputResponse = post("input", steer.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(steered.queued && steered.item.is_some());
+    // Its answer lost, the client sends it again as a turn: while the turn
+    // it joined runs, the answer is that turn, not a busy chat.
+    let again = post("turns", steer.clone()).await;
+    assert_eq!(again.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(again.json::<Turn>().await.unwrap().id, first.id);
+    provider.release_first.add_permits(1);
+    let sent = user_messages(&fixture.items(&thread).await);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(sent[1].starts_with("Also update the docs"), "{sent:?}");
+    let asked = provider.requests.lock().unwrap().len();
+    // And once it ended: the same turn, finished, and nothing runs again.
+    let after = post("turns", steer).await;
+    assert_eq!(after.status(), reqwest::StatusCode::ACCEPTED);
+    let after: Turn = after.json().await.unwrap();
+    assert_eq!(after.id, first.id);
+    assert_eq!(after.status, TurnStatus::Completed);
+    assert_eq!(user_messages(&fixture.items(&thread).await), sent);
+    assert_eq!(provider.requests.lock().unwrap().len(), asked);
+    assert_eq!(*fixture.docs.reads.lock().unwrap(), ["docs:docs://setup"]);
+    fixture.handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_steer_a_stop_left_unread_runs_once_when_sent_again_through_either_route() {
+    let provider = SlowText::default();
+    let fixture = fixture_with(Arc::new(provider.clone())).await;
+    let thread = fixture.thread().await;
+    let post = |path: &'static str, body: Value| {
+        let client = fixture.client.clone();
+        let url = format!("{}/v1/threads/{}/{path}", fixture.base, thread.id);
+        async move { client.post(url).json(&body).send().await.unwrap() }
+    };
+    let first: Turn = post(
+        "turns",
+        json!({"requestId": RequestId::new(), "text": "Go"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), provider.first_started.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let steer = json!({
+        "requestId": RequestId::new(),
+        "text": "Also update the docs",
+        "resources": [{"server": "docs", "uri": "docs://setup", "name": "setup"}],
+    });
+    post("input", steer.clone())
+        .await
+        .error_for_status()
+        .unwrap();
+    // A plain stop ends the turn before the model reads the steer.
+    post("interrupt", json!({}))
+        .await
+        .error_for_status()
+        .unwrap();
+    let before = user_messages(&fixture.items(&thread).await);
+    assert_eq!(before.len(), 2, "{before:?}");
+    // Its answer lost, the client sends it again: it runs once now, as
+    // stored, mentions read then included.
+    let rerun: QueueInputResponse = post("input", steer.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!rerun.queued);
+    let rerun = rerun.turn.expect("it runs as a turn of its own");
+    assert_ne!(rerun.id, first.id);
+    let items = fixture.items(&thread).await;
+    let sent = user_messages(&items);
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert_eq!(sent[2], before[1]);
+    assert!(sent[2].contains("# docs setup"), "{sent:?}");
+    assert_eq!(replies(&items).last().unwrap(), "Follow-up response");
+    let asked = provider.requests.lock().unwrap().len();
+    // Then each route answers with that turn and runs nothing more.
+    let again: QueueInputResponse = post("input", steer.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again.turn.map(|turn| turn.id), Some(rerun.id));
+    let again = post("turns", steer).await;
+    assert_eq!(again.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(again.json::<Turn>().await.unwrap().id, rerun.id);
+    assert_eq!(user_messages(&fixture.items(&thread).await), sent);
+    assert_eq!(provider.requests.lock().unwrap().len(), asked);
+    assert_eq!(*fixture.docs.reads.lock().unwrap(), ["docs:docs://setup"]);
+    fixture.handle.shutdown().await.unwrap();
+}

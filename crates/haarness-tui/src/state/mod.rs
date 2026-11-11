@@ -3862,27 +3862,31 @@ impl App {
     /// Queued follow-ups the running turn has not consumed yet, oldest first.
     /// These are delivery state, not conversation content: they wait in the
     /// strip above the composer and only join the transcript (at their
-    /// durable position) once a `QueueConsumed` marker lands.
+    /// durable position) once a `QueueConsumed` marker lands. Only the
+    /// running turn's own: one an earlier turn left without a marker is
+    /// conversation, which the model reads where that turn ended.
     pub fn pending_follow_ups(&self) -> Vec<&Item> {
-        if self.active_turn.is_none() {
+        let Some(running) = self.active_turn else {
             return Vec::new();
-        }
+        };
         self.items
             .iter()
             .filter(|item| {
-                matches!(
-                    item.data,
-                    ItemData::UserMessage {
-                        queued: true,
-                        synthetic: false,
-                        ..
-                    }
-                ) && !self.items.iter().any(|candidate| {
-                    matches!(
-                        candidate.data,
-                        ItemData::QueueConsumed { item_id } if item_id == item.id
+                item.turn_id == Some(running)
+                    && matches!(
+                        item.data,
+                        ItemData::UserMessage {
+                            queued: true,
+                            synthetic: false,
+                            ..
+                        }
                     )
-                })
+                    && !self.items.iter().any(|candidate| {
+                        matches!(
+                            candidate.data,
+                            ItemData::QueueConsumed { item_id } if item_id == item.id
+                        )
+                    })
             })
             .collect()
     }
