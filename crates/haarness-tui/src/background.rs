@@ -650,12 +650,13 @@ impl App {
         }
         // A subagent waits for the agent tasks it starts, which never move:
         // say so when this subagent's view shows one running.
-        let own_task_running = self.thread.is_subagent && self.children.values().any(|task| {
-            task.is_active() && task.state != "background" && self.items.iter().any(|item| {
+        let own_task_running = self.thread.is_subagent
+            && self.children.values().any(|task| {
+                task.is_active() && task.state != "background" && self.items.iter().any(|item| {
                 matches!(&item.data, haarness_protocol::ItemData::TaskLink { child_thread_id, .. }
                             if *child_thread_id == task.child_thread_id)
             })
-        });
+            });
         let refused = match (subagents, moved) {
             (0, 0) if commands && waiting_on_command => {
                 Some(self.language.text("Nothing could move to the background"))
