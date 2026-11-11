@@ -793,6 +793,7 @@ impl ModelProvider for OpenAiProvider {
         while !response.status().is_success() {
             let status = response.status();
             let headers = response.headers().clone();
+            let trace = crate::RequestTrace::of(&response);
             let text = crate::sse::within(limits.idle(false), response.text())
                 .await?
                 .unwrap_or_default();
@@ -821,6 +822,7 @@ impl ModelProvider for OpenAiProvider {
                 response = crate::sse::send(post(&body), limits).await?;
                 continue;
             }
+            trace.refused(status);
             // The ChatGPT transport refuses for the plan as well as for the
             // request: its usage limit and a plan without Codex are said in
             // words, with when the limit resets.
@@ -830,7 +832,7 @@ impl ModelProvider for OpenAiProvider {
                 .unwrap_or_else(|| crate::sse::status_error(status, &headers, &text)));
         }
         let plan_headers = subscription.then(|| response.headers().clone());
-        let request_id = crate::request_id(response.headers());
+        let trace = crate::RequestTrace::of(&response);
         let mut events = json_stream(response, cancel.clone(), limits);
         Ok(Box::pin(try_stream! {
             // Reasoning streams as indexed parts, each a self-contained
@@ -892,7 +894,7 @@ impl ModelProvider for OpenAiProvider {
                     "response.completed" | "response.incomplete" => {
                         if let Some(usage) = response_usage(&event) { yield usage; }
                         let reason = event["response"]["incomplete_details"]["reason"].as_str().unwrap_or(if event["type"] == "response.completed" { "completed" } else { "incomplete" });
-                        crate::log_blocked_finish("openai", reason, request_id.as_deref(), event["response"]["id"].as_str());
+                        crate::log_blocked_finish("openai", reason, trace.id(), event["response"]["id"].as_str());
                         yield ProviderEvent::Finished { reason: reason.into() };
                     }
                     // A failed response can still have been billed.
@@ -902,9 +904,12 @@ impl ModelProvider for OpenAiProvider {
                             && let Some(error) = event.pointer("/response/error").or_else(|| event.get("error")).filter(|error| error.is_object())
                             && let Some(refusal) = chatgpt_plan_refusal(headers, &json!({"error": error}).to_string(), unix_millis() / 1000)
                         {
+                            trace.failed(&refusal);
                             Err(refusal)?;
                         }
-                        Err(CoreError::Provider(event.to_string()))?;
+                        let error = CoreError::Provider(event.to_string());
+                        trace.failed(&error);
+                        Err(error)?;
                     }
                     _ => {}
                 }

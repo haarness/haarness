@@ -12,7 +12,7 @@ use std::{
 use async_stream::try_stream;
 use async_trait::async_trait;
 use chrono::Utc;
-use futures::StreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use haarness_core::{
     CoreError, CoreResult, KeyCheck, ModelProvider, ProviderEvent, ProviderMessage,
     ProviderRequest, ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, StreamLimits,
@@ -562,6 +562,7 @@ impl ModelProvider for BedrockProvider {
             }
             let status = response.status();
             let kind = error_type(response.headers());
+            let trace = crate::RequestTrace::of(&response);
             let limit = limits.idle(crate::sse::is_loopback(response.url()));
             let text = crate::sse::within(limit, response.text())
                 .await?
@@ -624,9 +625,11 @@ impl ModelProvider for BedrockProvider {
                     && lower.contains("model identifier is invalid")
                     && let Some(refusal) = first_refusal.take()
                 {
+                    trace.refused(status);
                     return Err(refusal);
                 }
             }
+            trace.refused(status);
             return Err(http_error(status, kind.as_deref(), &text));
         }
     }
@@ -647,8 +650,9 @@ fn converse_whole(
     limits: StreamLimits,
     provider_id: String,
 ) -> ProviderStream {
-    let request_id = crate::request_id(response.headers());
-    Box::pin(try_stream! {
+    let trace = crate::RequestTrace::of(&response);
+    let failed = trace.clone();
+    let stream = try_stream! {
         let body = async {
             match limits.total() {
                 Some(limit) => tokio::time::timeout(limit, response.text())
@@ -673,10 +677,11 @@ fn converse_whole(
         }
         let finished = events.finish()?;
         if let ProviderEvent::Finished { reason } = &finished {
-            crate::log_blocked_finish(&provider_id, reason, request_id.as_deref(), None);
+            crate::log_blocked_finish(&provider_id, reason, trace.id(), None);
         }
         yield finished;
-    })
+    };
+    Box::pin(stream.inspect_err(move |error| failed.failed(error)))
 }
 
 /// A whole Converse answer as the ConverseStream events that would have
@@ -746,8 +751,9 @@ fn converse_stream(
     provider_id: String,
 ) -> ProviderStream {
     let limit = limits.idle(crate::sse::is_loopback(response.url()));
-    let request_id = crate::request_id(response.headers());
-    Box::pin(try_stream! {
+    let trace = crate::RequestTrace::of(&response);
+    let failed = trace.clone();
+    let stream = try_stream! {
         let mut chunks = response.bytes_stream();
         let mut decoder = aws_event_stream::Decoder::default();
         let mut events = ConverseEvents::default();
@@ -787,10 +793,13 @@ fn converse_stream(
         }
         let finished = events.finish()?;
         if let ProviderEvent::Finished { reason } = &finished {
-            crate::log_blocked_finish(&provider_id, reason, request_id.as_deref(), None);
+            crate::log_blocked_finish(&provider_id, reason, trace.id(), None);
         }
         yield finished;
-    })
+    };
+    // An exception Bedrock sends, or a stream that breaks off, names the
+    // request in the log.
+    Box::pin(stream.inspect_err(move |error| failed.failed(error)))
 }
 
 /// Set on a call's metadata when some of its reasoning came after words of

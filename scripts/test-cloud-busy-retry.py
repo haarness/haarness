@@ -8,6 +8,9 @@ the key's requests a minute are used up (`rate_limited`), or when the router its
 failed the turn at once. The stand-in answers each chat request with the refusals a scenario
 lists, exactly as the router words them, then with an answer.
 
+Each refusal carries its own `x-request-id`, as the router's do, and the daemon log names it next
+to the retry, so a failure can be found in Cloud's logs; the chat never shows it.
+
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-cloud-busy-retry.py
 """
 import datetime
@@ -37,6 +40,8 @@ MESSAGES = {
 # Per scenario prompt: the refusals still to send ((code, Retry-After or None), …) and when each
 # chat request arrived.
 plans, arrivals = {}, {}
+# The `x-request-id` of every refusal sent.
+refused_ids = []
 
 
 class Cloud(http.server.BaseHTTPRequestHandler):
@@ -71,7 +76,9 @@ class Cloud(http.server.BaseHTTPRequestHandler):
         if plans[scenario]:
             code, wait = plans[scenario].pop(0)
             envelope = {'error': {'message': MESSAGES[code], 'type': 'rate_limit_error', 'code': code}}
-            return self.reply(429, envelope, [('Retry-After', str(wait))] if wait else [])
+            request_id = f'req_{scenario}_{len(arrivals[scenario])}'
+            refused_ids.append(request_id)
+            return self.reply(429, envelope, [('x-request-id', request_id)] + ([('Retry-After', str(wait))] if wait else []))
         self.answer('BUSY_CLEARED')
 
     def answer(self, text):
@@ -193,6 +200,35 @@ try:
                           "requests in flight. Wait a moment, then try again; if nothing else is running, lower the output "
                           "limit or shorten the conversation."), errors
     print('PASS the cap on requests in flight ends the turn at once in plain words', flush=True)
+    passed += 1
+
+    # Every refusal is named in the daemon log by Cloud's request id, in the same turn as the retry
+    # that follows it; no chat shows an id.
+    def daemon_log():
+        return ''.join(path.read_text(errors='replace') for path in sorted((root / 'data').glob('**/logs/haarness.log*')))
+
+    def refused_line(request_id):
+        return next((line for line in daemon_log().splitlines()
+                     if 'provider refused the request' in line and f'request_id="{request_id}"' in line), None)
+
+    lines = {request_id: until(lambda: refused_line(request_id), f'no log line names {request_id}', 15)
+             for request_id in refused_ids}
+    # The scenarios of each turn's refusals, read from their ids (`req_<scenario>_<n>`).
+    turns = {}
+    for request_id, line in lines.items():
+        assert 'status=429' in line, line
+        turn = line.split('haarness.turn.id=', 1)[1].split()[0]
+        turns.setdefault(turn, []).append(request_id[len('req_'):].rsplit('_', 1)[0])
+    retries = [line for line in daemon_log().splitlines() if 'provider unavailable; retrying' in line]
+    for turn, names in turns.items():
+        assert len(set(names)) == 1, names
+        # Every refusal is retried, except the last of a turn that failed.
+        expected = len(names) - (names[0] in ('still_busy', 'in_flight_cap'))
+        assert sum(f' turn={turn} ' in retry for retry in retries) == expected, (names, retries)
+    assert len(turns) == 6, turns
+    shown = json.dumps([api(f"/threads/{thread['id']}/items") for thread in api('/threads')])
+    assert not any(request_id in shown for request_id in refused_ids), 'a request id reached a chat'
+    print(f'PASS each of the {len(refused_ids)} refusals is named in the daemon log by its request id, next to its retry, and no chat shows one', flush=True)
     passed += 1
     print(f'PASS {passed} Haarness Cloud busy scenarios.', flush=True)
 finally:

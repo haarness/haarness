@@ -730,3 +730,322 @@ async fn chat_completions_notes_audio_and_video_and_refuses_only_the_newest() {
     );
     task.abort();
 }
+
+/// A server that answers every request with what `answer` makes.
+async fn answering<F>(answer: F) -> (String, tokio::task::JoinHandle<()>)
+where
+    F: Fn() -> axum::response::Response + Clone + Send + Sync + 'static,
+{
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let router = Router::new().fallback(move || {
+        let answer = answer.clone();
+        async move { answer() }
+    });
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (base, task)
+}
+
+/// The provider of one wire transport, sending to `base`.
+fn transport(name: &str, base: &str) -> Box<dyn ModelProvider> {
+    match name {
+        "responses" => Box::new(OpenAiProvider::for_test(
+            format!("{base}/responses"),
+            "fixture",
+        )),
+        "compatible" => Box::new(OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            base_url: base.into(),
+            api_key: Some("fixture".into()),
+            models: vec!["fixture-model".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: ProviderHeaders::default(),
+        })),
+        "messages" => Box::new(AnthropicProvider::new(native(
+            base,
+            "fixture",
+            "fixture-model",
+        ))),
+        "gemini" => Box::new(GeminiProvider::new(native(
+            base,
+            "fixture",
+            "fixture-model",
+        ))),
+        "bedrock" => Box::new(BedrockProvider::new(
+            native(base, "fixture", "fixture-model"),
+            None,
+        )),
+        _ => unreachable!(),
+    }
+}
+
+/// The error a request ends with, whether the provider refused it at once or
+/// its reply failed part way.
+async fn failure(provider: &dyn ModelProvider) -> haarness_core::CoreError {
+    match provider
+        .stream(request("fixture-model", None), CancellationToken::new())
+        .await
+    {
+        Err(error) => error,
+        Ok(stream) => stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .find_map(Result::err)
+            .expect("each fixture refuses or breaks the request"),
+    }
+}
+
+/// A refused request names itself in the daemon log, by the id each
+/// provider answers with, so it can be quoted to the provider (or matched
+/// in Haarness Cloud's logs); the error people see does not carry the id
+/// and says what it said before.
+#[tokio::test]
+async fn a_refused_request_is_named_in_the_log_by_its_providers_id() {
+    /// A transport, the status and headers it is refused with, the body and
+    /// the error that refusal reads as.
+    type Refusal = (
+        &'static str,
+        u16,
+        &'static [(&'static str, &'static str)],
+        &'static str,
+        &'static str,
+    );
+    let refusals: [Refusal; 5] = [
+        (
+            "messages",
+            529,
+            &[("request-id", "req_hb529")],
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            "provider error: HTTP 529 <unknown status code>: Overloaded",
+        ),
+        (
+            "responses",
+            429,
+            &[("x-request-id", "rq-rate-31")],
+            r#"{"error":{"message":"Rate limit reached for requests","type":"requests","code":"rate_limit_exceeded"}}"#,
+            "provider error: HTTP 429 Too Many Requests: [rate_limit_exceeded] Rate limit reached for requests",
+        ),
+        (
+            "compatible",
+            503,
+            &[("x-request-id", "edge-503-a")],
+            r#"{"error":{"message":"upstream unavailable"}}"#,
+            "provider error: HTTP 503 Service Unavailable: upstream unavailable",
+        ),
+        (
+            "gemini",
+            503,
+            &[("x-goog-request-id", "g.unavail.2")],
+            r#"{"error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}}"#,
+            "provider error: HTTP 503 Service Unavailable: The model is overloaded.",
+        ),
+        (
+            "bedrock",
+            429,
+            &[
+                ("x-amzn-requestid", "aws-thr-91"),
+                ("x-amzn-errortype", "ThrottlingException"),
+            ],
+            r#"{"message":"Too many requests, please wait before trying again."}"#,
+            "provider error: HTTP 429 Too Many Requests: [ThrottlingException] Too many requests, please wait before trying again.",
+        ),
+    ];
+    for (name, status, headers, body, said) in refusals {
+        let (base, task) = answering(move || {
+            let mut response = axum::response::Response::new(axum::body::Body::from(body));
+            *response.status_mut() = axum::http::StatusCode::from_u16(status).unwrap();
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, "application/json".parse().unwrap());
+            for (header, value) in headers {
+                response
+                    .headers_mut()
+                    .insert(*header, value.parse().unwrap());
+            }
+            response
+        })
+        .await;
+        let (logged, _guard) = crate::log_capture::Logged::start();
+        let error = failure(transport(name, &base).as_ref()).await;
+        let id = headers[0].1;
+        assert_eq!(error.to_string(), said, "{name}");
+        let lines = logged.lines("provider refused the request");
+        assert_eq!(lines.len(), 1, "{name}: {}", logged.all());
+        assert!(
+            lines[0].contains(&format!(" status={status}"))
+                && lines[0].contains(" host=127.0.0.1")
+                && lines[0].contains(&format!(" request_id={id}")),
+            "{name}: {}",
+            lines[0]
+        );
+        assert!(
+            logged.lines("provider's reply failed part way").is_empty(),
+            "{name}: a refusal is logged once: {}",
+            logged.all()
+        );
+        task.abort();
+    }
+}
+
+/// A reply that fails part way, with an error the provider sends inside its
+/// stream or a stream that breaks off, names its request in the log too.
+#[tokio::test]
+async fn a_reply_that_fails_part_way_is_named_in_the_log_by_its_providers_id() {
+    let sse = |events: &[&str]| -> Vec<u8> {
+        use std::fmt::Write as _;
+        events
+            .iter()
+            .fold(String::new(), |mut body, event| {
+                let _ = write!(body, "data: {event}\n\n");
+                body
+            })
+            .into_bytes()
+    };
+    let replies: [(&str, &str, &str, Vec<u8>, bool); 5] = [
+        (
+            "messages",
+            "request-id",
+            "req_hb_mid",
+            sse(&[
+                r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}"#,
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            ]),
+            false,
+        ),
+        (
+            "responses",
+            "x-request-id",
+            "rq-failed-12",
+            sse(&[
+                r#"{"type":"response.output_text.delta","delta":"Hi"}"#,
+                r#"{"type":"response.failed","response":{"id":"resp_1","error":{"code":"server_error","message":"The model failed"}}}"#,
+            ]),
+            false,
+        ),
+        (
+            "compatible",
+            "x-request-id",
+            "edge-502-b",
+            sse(&[
+                r#"{"choices":[{"delta":{"content":"Hi"}}]}"#,
+                r#"{"error":{"code":502,"message":"upstream failed"}}"#,
+            ]),
+            false,
+        ),
+        (
+            "gemini",
+            "x-goog-request-id",
+            "g.cut.3",
+            sse(&[r#"{"candidates":[{"content":{"parts":[{"text":"Hi"}]}}]}"#]),
+            // The connection breaks off after the first event.
+            true,
+        ),
+        (
+            "bedrock",
+            "x-amzn-requestid",
+            "aws-exc-17",
+            crate::aws_event_stream::encode(
+                &[
+                    (":message-type", "exception"),
+                    (":exception-type", "throttlingException"),
+                ],
+                br#"{"message":"Too many requests, please wait before trying again."}"#,
+            ),
+            false,
+        ),
+    ];
+    for (name, header, id, body, broken) in replies {
+        let (base, task) = answering(move || {
+            let mut parts: Vec<Result<Vec<u8>, std::io::Error>> = vec![Ok(body.clone())];
+            if broken {
+                parts.push(Err(std::io::Error::other("link dropped")));
+            }
+            // What comes after the first part waits a moment, so the
+            // response has begun when the connection breaks.
+            let parts = futures::stream::iter(parts.into_iter().enumerate()).then(
+                |(index, part)| async move {
+                    if index > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    part
+                },
+            );
+            let mut response = axum::response::Response::new(axum::body::Body::from_stream(parts));
+            let kind = if name == "bedrock" {
+                "application/vnd.amazon.eventstream"
+            } else {
+                "text/event-stream"
+            };
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, kind.parse().unwrap());
+            response.headers_mut().insert(header, id.parse().unwrap());
+            response
+        })
+        .await;
+        let (logged, _guard) = crate::log_capture::Logged::start();
+        let error = failure(transport(name, &base).as_ref()).await;
+        assert!(!error.to_string().contains(id), "{name}: {error}");
+        let lines = logged.lines("provider's reply failed part way");
+        assert_eq!(lines.len(), 1, "{name}: {}", logged.all());
+        assert!(
+            lines[0].contains(" host=127.0.0.1") && lines[0].contains(&format!(" request_id={id}")),
+            "{name}: {}",
+            lines[0]
+        );
+        assert!(
+            logged.lines("provider refused the request").is_empty(),
+            "{name}: {}",
+            logged.all()
+        );
+        task.abort();
+    }
+}
+
+/// A reply stopped by the person did not fail, and logs nothing.
+#[tokio::test]
+async fn a_stopped_reply_logs_no_failure() {
+    let (base, task) = answering(|| {
+        let first = futures::stream::iter([Ok::<_, std::io::Error>(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}]}\n\n".to_vec(),
+        )]);
+        let mut response = axum::response::Response::new(axum::body::Body::from_stream(
+            first.chain(futures::stream::pending()),
+        ));
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, "text/event-stream".parse().unwrap());
+        response
+            .headers_mut()
+            .insert("x-goog-request-id", "g.stopped.5".parse().unwrap());
+        response
+    })
+    .await;
+    let (logged, _guard) = crate::log_capture::Logged::start();
+    let cancel = CancellationToken::new();
+    let mut stream = transport("gemini", &base)
+        .stream(request("fixture-model", None), cancel.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ProviderEvent::TextDelta(_)))
+    ));
+    cancel.cancel();
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(haarness_core::CoreError::Cancelled))
+    ));
+    assert!(
+        logged.lines("provider's reply failed part way").is_empty(),
+        "{}",
+        logged.all()
+    );
+    task.abort();
+}

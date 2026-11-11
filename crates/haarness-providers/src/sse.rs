@@ -1,5 +1,5 @@
 use async_stream::try_stream;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt as _};
 use haarness_core::{CoreError, CoreResult, StreamLimits, stream_stall};
 use serde_json::Value;
 use std::{pin::Pin, time::Duration};
@@ -103,7 +103,13 @@ fn framed_stream(
     framing: Framing,
 ) -> JsonStream {
     let limit = limits.idle(is_loopback(response.url()));
-    Box::pin(try_stream! {
+    // A refusal, or a reply that fails part way, names its request in the log.
+    let trace = crate::RequestTrace::of(&response);
+    let refused = !response.status().is_success();
+    if refused {
+        trace.refused(response.status());
+    }
+    let stream = try_stream! {
         let response = if response.status().is_success() {
             response
         } else {
@@ -177,7 +183,12 @@ fn framed_stream(
         } else if !yielded && !rest.is_empty() {
             yield whole_reply(&rest)?;
         }
-    })
+    };
+    Box::pin(stream.inspect_err(move |error| {
+        if !refused {
+            trace.failed(error);
+        }
+    }))
 }
 
 /// The JSON in one server-sent event, or `None` for an event with no data
