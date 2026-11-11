@@ -329,8 +329,9 @@ export function createUpdater(options: UpdaterOptions) {
         checkFailures = 0;
         found = next && compareVersions(next.release.version, options.version) > 0 ? next : undefined;
         // A staged version the service no longer offers (it offers an older
-        // one, or none for this computer) was withdrawn.
-        if (staged && (!next || compareVersions(next.release.version, staged.version) < 0)) {
+        // one, or none for this computer) was withdrawn. Not while quitting
+        // to install it: that restart goes on with what it has.
+        if (staged && !installing() && (!next || compareVersions(next.release.version, staged.version) < 0)) {
           options.log(`Haarness update: ${staged.version} was withdrawn; ${next?.release.version ?? "nothing"} is offered`);
           await forget();
         }
@@ -642,11 +643,28 @@ export function createUpdater(options: UpdaterOptions) {
     },
     check,
     download,
-    /** Quits to install the staged version, and opens Haarness again. */
-    restart() {
+    /**
+     * Quits to install the staged version, and opens Haarness again. What an
+     * earlier run staged may since have been passed by a newer version, so
+     * unless this run has asked the service already, it asks now; a newer
+     * version is fetched and installed in its place (the person asked for
+     * the update, not for the version staged days ago). One that cannot be
+     * fetched leaves the staged version to install.
+     */
+    async restart() {
       if (!restartable || !staged || state.status !== "ready") return;
       relaunch = true;
       set({ status: "installing", error: undefined });
+      if (checking || state.checkedAt === undefined) await check();
+      if (installing() && found && staged && compareVersions(found.release.version, staged.version) > 0)
+        await download(false).catch(() => {});
+      // Called off meanwhile (a window kept its edits).
+      if (!installing()) return;
+      if (!staged) {
+        relaunch = false;
+        set({ status: "idle" });
+        return;
+      }
       options.quit();
     },
     /** A window kept its unsaved edits, so Haarness did not quit after all. */
@@ -690,6 +708,9 @@ export function createUpdater(options: UpdaterOptions) {
       downloading?.stop.abort(new Stopped("Haarness is quitting"));
       if (!restartable || !staged) return;
       if (!relaunch && (install.kind === "exe" || shuttingDown)) return;
+      // Nor does a plain quit put in a version a newer one has passed: the
+      // next launch fetches that one instead.
+      if (!relaunch && found && compareVersions(found.release.version, staged.version) > 0) return;
       try {
         options.launch({ staged: staged.path, version: staged.version, relaunch, result });
         options.log(`Haarness update: installing ${staged.version}${relaunch ? " and reopening" : ""}`);

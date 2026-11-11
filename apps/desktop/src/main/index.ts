@@ -1903,7 +1903,8 @@ function installHandlers() {
     if (!updater) return updatesOff;
     if (action === "check") await updater.check();
     else if (action === "download") void updater.download(true);
-    else if (action === "restart") updater.restart();
+    // Answers at once ("Restarting…"); the quit follows once the newest version is in hand.
+    else if (action === "restart") void updater.restart();
     else if (action === "move") updater.move();
     else if (action === "open-installer") await updater.openInstaller();
     else throw new Error("Unknown update operation");

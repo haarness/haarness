@@ -387,6 +387,59 @@ test("a newer release than the one staged downloads behind it; the window keeps 
   await first.cleanup();
 });
 
+test("Restart with a version an earlier run staged asks the service first, and installs a newer version in its place", async () => {
+  const first = await fixture({ version: "9.9.8" });
+  await first.updater.check();
+  await first.settle();
+  // Days later, 9.9.9 is out; the launch has not asked the service yet.
+  const second = await fixture({ version: "9.9.9" }, { dir: first.dir });
+  await second.updater.start();
+  assert.equal(second.updater.state().status, "ready");
+  assert.equal(second.updater.state().version, "9.9.8");
+  await second.updater.restart();
+  assert.equal(second.quits(), 1);
+  second.updater.atExit();
+  assert.deepEqual(second.launched.map((item) => [item.version, item.relaunch]), [["9.9.9", true]]);
+  assert.equal(await stat(join(first.dir, "9.9.8", "Haarness.app")).catch(() => null), null);
+  assert.ok(second.states.slice(-1).every((state) => state.status === "installing"));
+  await first.cleanup();
+});
+
+test("Restart installs the staged version when the newer one cannot be fetched", async () => {
+  const first = await fixture({ version: "9.9.8" });
+  await first.updater.check();
+  await first.settle();
+  const broken = () => new Response("unavailable", { status: 503 });
+  const second = await fixture({ version: "9.9.9", edge: broken, service: broken }, { dir: first.dir });
+  await second.updater.start();
+  await second.updater.restart();
+  assert.equal(second.quits(), 1);
+  second.updater.atExit();
+  assert.deepEqual(second.launched.map((item) => item.version), ["9.9.8"]);
+  await first.cleanup();
+});
+
+test("a plain quit does not install a staged version that a newer one has passed", async () => {
+  const first = await fixture({ version: "9.9.8" });
+  await first.updater.check();
+  await first.settle();
+  const second = await fixture({ version: "9.9.9" }, { dir: first.dir });
+  second.setAutomatic(false);
+  await second.updater.start();
+  await second.updater.check();
+  // The window still offers its restart, which would fetch 9.9.9 first.
+  assert.equal(second.updater.state().status, "ready");
+  second.updater.atExit();
+  assert.deepEqual(second.launched, []);
+  // Nothing newer known: a plain quit installs what is staged, as before.
+  const third = await fixture({ version: "9.9.8" }, { dir: first.dir });
+  await third.updater.start();
+  await third.updater.check();
+  third.updater.atExit();
+  assert.deepEqual(third.launched.map((item) => [item.version, item.relaunch]), [["9.9.8", false]]);
+  await first.cleanup();
+});
+
 test("the next launch cleans up what an install left, and says when it failed", async () => {
   const dir = await mkdtemp(join(tmpdir(), "haarness-updater-"));
   await mkdir(join(dir, "0.1.4"), { recursive: true });
@@ -402,7 +455,7 @@ test("the next launch cleans up what an install left, and says when it failed", 
   // A check does not hide that the install failed; a restart to try again does.
   await f.updater.check();
   assert.equal(f.updater.state().error?.code, "install");
-  f.updater.restart();
+  await f.updater.restart();
   assert.equal(f.updater.state().error, undefined);
   await rm(dir, { recursive: true, force: true });
   // Updated since: the old folders go, and nothing is offered.
