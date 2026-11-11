@@ -833,7 +833,7 @@ impl ModelProvider for OpenAiProvider {
         }
         let plan_headers = subscription.then(|| response.headers().clone());
         let trace = crate::RequestTrace::of(&response);
-        let mut events = json_stream(response, cancel.clone(), limits);
+        let mut events = json_stream(response, &trace, cancel.clone(), limits);
         Ok(Box::pin(try_stream! {
             // Reasoning streams as indexed parts, each a self-contained
             // summary or thought whose deltas carry no trailing break. Passed
@@ -894,6 +894,7 @@ impl ModelProvider for OpenAiProvider {
                     "response.completed" | "response.incomplete" => {
                         if let Some(usage) = response_usage(&event) { yield usage; }
                         let reason = event["response"]["incomplete_details"]["reason"].as_str().unwrap_or(if event["type"] == "response.completed" { "completed" } else { "incomplete" });
+                        trace.mark_finished();
                         crate::log_blocked_finish("openai", reason, trace.id(), event["response"]["id"].as_str());
                         yield ProviderEvent::Finished { reason: reason.into() };
                     }

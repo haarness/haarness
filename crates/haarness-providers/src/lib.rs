@@ -162,11 +162,13 @@ pub(crate) fn request_id(headers: &HeaderMap) -> Option<String> {
 /// Where one model request went and the id its provider answered with, for
 /// the daemon log: a failure names them, so it can be found in the
 /// provider's own records or in Haarness Cloud's. Only the log carries
-/// them; the error people see stays as it is.
+/// them; the error people see stays as it is. Clones share whether the
+/// reply finished.
 #[derive(Clone)]
 pub(crate) struct RequestTrace {
     host: Option<String>,
     id: Option<String>,
+    finished: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RequestTrace {
@@ -174,11 +176,20 @@ impl RequestTrace {
         Self {
             host: response.url().host_str().map(str::to_owned),
             id: request_id(response.headers()),
+            finished: Arc::default(),
         }
     }
 
     pub(crate) fn id(&self) -> Option<&str> {
         self.id.as_deref()
+    }
+
+    /// The provider said its reply is complete (a finish reason, a stop
+    /// event): a connection that breaks or goes silent after this loses
+    /// nothing, and the turn keeps the reply.
+    pub(crate) fn mark_finished(&self) {
+        self.finished
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The provider answered the request with `status` instead of a reply.
@@ -191,8 +202,24 @@ impl RequestTrace {
         );
     }
 
-    /// The reply failed part way: the provider sent an error, or its stream
-    /// broke off or went silent. A stop is no failure and logs nothing.
+    /// The reader of the reply's stream failed: its connection broke off or
+    /// went silent, or what it carried could not be read. A cut after the
+    /// reply finished loses nothing, since the turn keeps the reply as it
+    /// is, and logs nothing.
+    pub(crate) fn cut_off(&self, error: &haarness_core::CoreError) {
+        if self.finished.load(std::sync::atomic::Ordering::Relaxed)
+            && haarness_core::is_stream_cut(error)
+        {
+            return;
+        }
+        self.failed(error);
+    }
+
+    /// The reply failed part way: the provider sent an error in its stream,
+    /// even one after its finish (a Haarness router's word that the model
+    /// behind it fell silent reads like a cut, but the turn does not keep
+    /// the reply for it), or the stream broke off or went silent. A stop is
+    /// no failure and logs nothing.
     pub(crate) fn failed(&self, error: &haarness_core::CoreError) {
         if matches!(error, haarness_core::CoreError::Cancelled) {
             return;

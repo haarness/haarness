@@ -2889,9 +2889,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         .flatten()
                         .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
                         .collect();
-                    ollama::chat_chunks(json_lines_stream(response, cancel, limits), tools)
+                    ollama::chat_chunks(json_lines_stream(response, &trace, cancel, limits), tools)
                 } else {
-                    json_stream(response, cancel, limits)
+                    json_stream(response, &trace, cancel, limits)
                 }
             }
             Err(error) => Box::pin(futures::stream::once(std::future::ready(Err(error)))),
@@ -3080,7 +3080,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 }
                 // Some gateways put an empty reason on every chunk, the last
                 // one after the real reason among them.
-                if let Some(reason)=event["choices"][0]["finish_reason"].as_str().filter(|reason| !reason.is_empty()){finish_reason = Some(reason.to_owned());}
+                if let Some(reason)=event["choices"][0]["finish_reason"].as_str().filter(|reason| !reason.is_empty()){finish_reason = Some(reason.to_owned()); trace.mark_finished();}
                 if response_id.is_none() { response_id = event["id"].as_str().map(str::to_owned); }
             }
             let mut provider_metadata = json!({});

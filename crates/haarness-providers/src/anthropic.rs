@@ -567,7 +567,7 @@ impl ModelProvider for AnthropicProvider {
         .await?;
         let trace = crate::RequestTrace::of(&response);
         let provider_id = self.id.clone();
-        let mut events = json_stream(response, cancel, limits);
+        let mut events = json_stream(response, &trace, cancel, limits);
         Ok(Box::pin(try_stream! {
             let mut tool: Option<(String,String,String,Value)> = None;
             // message_delta carries why the response ended; message_stop reports it.
@@ -704,6 +704,7 @@ impl ModelProvider for AnthropicProvider {
                         // `refusal` is a stop like `end_turn` on the wire; the
                         // runtime fails the turn on it and keeps the partial text.
                         let reason = stop_reason.take().unwrap_or_else(|| "completed".into());
+                        trace.mark_finished();
                         crate::log_blocked_finish(&provider_id, &reason, trace.id(), message_id.as_deref());
                         yield ProviderEvent::Finished { reason };
                     },

@@ -1049,3 +1049,145 @@ async fn a_stopped_reply_logs_no_failure() {
     );
     task.abort();
 }
+
+/// A reply the provider said was complete, whose connection then breaks,
+/// lost nothing: the turn keeps it, and the log says no failure.
+#[tokio::test]
+async fn a_cut_after_the_reply_finished_logs_no_failure() {
+    let finished: [(&str, &str, &str); 4] = [
+        (
+            "messages",
+            "request-id",
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"Done"}}
+
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+
+data: {"type":"message_stop"}"#,
+        ),
+        (
+            "responses",
+            "x-request-id",
+            r#"{"type":"response.output_text.delta","delta":"Done"}
+
+data: {"type":"response.completed","response":{"id":"resp_done_4","usage":{"input_tokens":3,"output_tokens":1}}}"#,
+        ),
+        (
+            "compatible",
+            "x-request-id",
+            r#"{"choices":[{"delta":{"content":"Done"},"finish_reason":"stop"}]}"#,
+        ),
+        (
+            "gemini",
+            "x-goog-request-id",
+            r#"{"candidates":[{"content":{"parts":[{"text":"Done"}]},"finishReason":"STOP"}]}"#,
+        ),
+    ];
+    for (name, header, events) in finished {
+        let (base, task) = answering(move || {
+            let parts = futures::stream::iter([
+                Ok::<_, std::io::Error>(format!("data: {events}\n\n").into_bytes()),
+                Err(std::io::Error::other("link dropped")),
+            ])
+            .enumerate()
+            .then(|(index, part)| async move {
+                // The break comes once the finished reply has been read.
+                if index > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                part
+            });
+            let mut response = axum::response::Response::new(axum::body::Body::from_stream(parts));
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, "text/event-stream".parse().unwrap());
+            response
+                .headers_mut()
+                .insert(header, "after-finish-6".parse().unwrap());
+            response
+        })
+        .await;
+        let (logged, _guard) = crate::log_capture::Logged::start();
+        let received = transport(name, &base)
+            .stream(request("fixture-model", None), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            received.iter().any(|event| matches!(
+                event,
+                Ok(ProviderEvent::Finished { reason }) if ProviderEvent::finish_error(reason).is_none()
+            )),
+            "{name}: {received:?}"
+        );
+        // The break reached the stream: only the log line is left out.
+        assert!(received.iter().any(Result::is_err), "{name}: {received:?}");
+        assert!(
+            logged.lines("provider's reply failed part way").is_empty(),
+            "{name}: {}",
+            logged.all()
+        );
+        task.abort();
+    }
+}
+
+/// An error the provider sends in its stream after the finish is no harmless
+/// cut and is logged: Anthropic's `error` event after `message_stop`, and a
+/// Haarness router's word, after the finish reason, that the model behind it
+/// fell silent, which reads like a cut but leaves the reply unfinished.
+#[tokio::test]
+async fn an_error_sent_after_the_finish_is_still_logged() {
+    let late: [(&str, &str, &str, &str); 2] = [
+        (
+            "messages",
+            "request-id",
+            "req_hb_late",
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Done"}}
+
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+
+data: {"type":"message_stop"}
+
+data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+
+"#,
+        ),
+        (
+            "compatible",
+            "x-request-id",
+            "req_cloud_idle_4",
+            r#"data: {"choices":[{"delta":{"content":"Done"},"finish_reason":"stop"}]}
+
+data: {"error":{"message":"upstream stream became idle","type":"timeout_error","code":"upstream_timeout"}}
+
+"#,
+        ),
+    ];
+    for (name, header, id, body) in late {
+        let (base, task) = answering(move || {
+            let mut response = axum::response::Response::new(axum::body::Body::from(body));
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, "text/event-stream".parse().unwrap());
+            response.headers_mut().insert(header, id.parse().unwrap());
+            response
+        })
+        .await;
+        let (logged, _guard) = crate::log_capture::Logged::start();
+        let received = transport(name, &base)
+            .stream(request("fixture-model", None), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(received.iter().any(Result::is_err), "{name}: {received:?}");
+        let lines = logged.lines("provider's reply failed part way");
+        assert_eq!(lines.len(), 1, "{name}: {}", logged.all());
+        assert!(
+            lines[0].contains(&format!(" request_id={id}")),
+            "{name}: {}",
+            lines[0]
+        );
+        task.abort();
+    }
+}
