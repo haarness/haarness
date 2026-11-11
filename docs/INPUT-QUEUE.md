@@ -17,6 +17,7 @@ Queued prompts remain outside the conversation transcript until delivery. They r
 
 - **Stop** cancels the current work and dismisses its approval prompts in connected clients. In Desktop, Esc in the empty message box and **File → Stop response** (Cmd+. on macOS, Ctrl+. elsewhere) do the same. If you sent steering the agent has not answered yet, the agent answers it next instead of dropping it.
 - After Stop the queue **pauses**, even once that steering has been answered. It also stays idle after a daemon restart.
+- Steering the agent never read because its turn failed, was stopped without an answer (a script's stop), or the daemon restarted under it stays in the chat with a notice to send it again. Nothing runs it by itself; sent again under the same request ID, it runs once.
 - If a turn **fails**, prompts queued behind it still run. If a queued prompt's own turn fails, the rest of the queue pauses.
 - Resume a paused queue in either of two ways:
   - Choose **Send now** on a pending prompt. That prompt runs, then the rest continue in order.

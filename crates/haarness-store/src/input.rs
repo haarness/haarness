@@ -864,6 +864,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_settles_steering_no_request_took_as_a_failed_turn_does() {
+        let store = SqliteStore::in_memory().unwrap();
+        let steer = RequestId::new();
+        let (thread, turn, unread) = steered_chat(&store, steer).await;
+        // A second steer a request already took is left as it is.
+        let read = store
+            .append_steered_input(
+                thread,
+                turn.id,
+                RequestId::new(),
+                ItemData::UserMessage {
+                    text: "read already".into(),
+                    attachments: Vec::new(),
+                    queued: true,
+                    synthetic: false,
+                    command_line: None,
+                    hook: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .append_item(
+                thread,
+                Some(turn.id),
+                ItemData::QueueConsumed { item_id: read.id },
+            )
+            .await
+            .unwrap();
+        // A chat stopped without steering gets no such notice.
+        let quiet = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        store
+            .start_turn(quiet.id, turn_request(RequestId::new(), "quiet"))
+            .await
+            .unwrap();
+        let (recovered, written) = store
+            .recover_interrupted_tasks(&|_| Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(recovered, 2);
+        let notice = format!(
+            "{}: server restarted during active turn",
+            haarness_core::UNDELIVERED_INPUT
+        );
+        // Clients hear the marker and the notice; both come before the
+        // restart's own notice in the chat.
+        assert_eq!(written.len(), 2, "{written:#?}");
+        assert!(
+            matches!(written[0].data, ItemData::QueueConsumed { item_id } if item_id == unread.id)
+        );
+        assert!(
+            matches!(&written[1].data, ItemData::Error { message, retryable: true } if *message == notice)
+        );
+        let items = store.list_items(thread, None).await.unwrap();
+        let markers = |id: ItemId| {
+            items
+                .iter()
+                .filter(|item| matches!(item.data, ItemData::QueueConsumed { item_id } if item_id == id))
+                .count()
+        };
+        assert_eq!((markers(unread.id), markers(read.id)), (1, 1));
+        let tail: Vec<_> = items.iter().rev().take(2).map(|item| &item.data).collect();
+        assert!(
+            matches!(tail[0], ItemData::Error { message, .. } if message == RECOVERED_TURN_MESSAGE)
+        );
+        assert!(matches!(tail[1], ItemData::Error { message, .. } if *message == notice));
+        assert!(!store.list_items(quiet.id, None).await.unwrap().iter().any(
+            |item| matches!(&item.data, ItemData::Error { message, .. } if *message == notice)
+        ));
+        // Nothing runs it; sent again, it runs once.
+        assert!(matches!(
+            store.steered_input(thread, steer).await.unwrap(),
+            Some(SteeredInput::Unread { consumed: true, .. })
+        ));
+        let (rerun, _, created) = store
+            .start_turn(thread, turn_request(steer, "Also update the docs"))
+            .await
+            .unwrap();
+        assert!(created && rerun.request_id == steer);
+        // Another restart (under that turn) settles nothing again.
+        assert!(
+            store
+                .recover_interrupted_tasks(&|_| Vec::new())
+                .await
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        let items = store.list_items(thread, None).await.unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(item.data, ItemData::QueueConsumed { item_id } if item_id == unread.id))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn a_queued_message_sent_again_as_a_turn_runs_once() {
         let store = SqliteStore::in_memory().unwrap();
         let thread = store

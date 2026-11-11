@@ -580,7 +580,13 @@ The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.
 Startup recovery marks orphaned queued/running turns interrupted and appends a
 retryable transcript notice while preserving prior items; provider streams and
-side-effecting tools are never replayed speculatively. Each call such a turn
+side-effecting tools are never replayed speculatively. Steering such a turn
+took that no model request received is settled as a failed turn settles it: a
+`queue_consumed` item puts each message in the history where the turn
+stopped, so later requests read it there once, and a retryable notice starting
+"Queued input could not be delivered before the turn failed; retry it" says
+so, with `item.created` events once the server is up. Nothing runs it by
+itself; sent again under its `requestId`, it runs once (see `/turns`). Each call such a turn
 left without a result gets an error `tool_result` first, saying it did not
 finish, with `metadata: {"unfinished": true}`; a turn that outlives a graceful
 shutdown's wait gets the same results before the shutdown marks it interrupted.

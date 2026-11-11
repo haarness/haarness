@@ -4086,7 +4086,8 @@ impl AgentRuntime {
         }
         // A background subagent the restart stopped is recorded in the chat
         // that launched it with its final checkpoint, before anything else
-        // here can fail.
+        // here can fail. So is steering a stopped turn never read, settled
+        // as a failed turn settles it; nothing runs it now.
         let (recovered, reported) = self
             .repository
             .recover_interrupted_tasks(&stranded_report)
@@ -4096,7 +4097,16 @@ impl AgentRuntime {
                 Ok(thread) => self.resolve_root(&thread).await,
                 Err(_) => item.thread_id,
             };
-            info!(chat = %item.thread_id, "recorded a background task the restart stopped");
+            match &item.data {
+                ItemData::QueueConsumed { .. } => {
+                    info!(chat = %item.thread_id, "settled steering the restart left unread");
+                }
+                ItemData::Error { message, .. }
+                    if message.starts_with(crate::UNDELIVERED_INPUT) => {}
+                _ => {
+                    info!(chat = %item.thread_id, "recorded a background task the restart stopped")
+                }
+            }
             self.events.publish_scoped(
                 "item.created",
                 Some(item.thread_id),
@@ -10980,7 +10990,8 @@ impl RunnerTask {
         let _ = self
             .publish_item(ItemData::Error {
                 message: format!(
-                    "Queued input could not be delivered before the turn failed; retry it: {}",
+                    "{}: {}",
+                    crate::UNDELIVERED_INPUT,
                     self.visible_error(error_value)
                 ),
                 retryable: true,

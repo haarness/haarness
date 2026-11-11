@@ -144,6 +144,54 @@ impl SqliteStore {
             .collect())
     }
 
+    /// The queued messages (steering) turn `turn` took that no model request
+    /// received: no `QueueConsumed` marker names them.
+    fn unconsumed_turn_input(
+        tx: &rusqlite::Transaction<'_>,
+        thread: &str,
+        turn: &str,
+    ) -> CoreResult<Vec<ItemId>> {
+        let mut statement = tx
+            .prepare(
+                "SELECT id,turn_id,data_json FROM items
+                 WHERE thread_id=?1 AND deleted=0 AND sequence>=(
+                   SELECT COALESCE(MIN(sequence),0) FROM items WHERE thread_id=?1 AND turn_id=?2)
+                 ORDER BY sequence",
+            )
+            .map_err(storage)?;
+        let mut queued = Vec::new();
+        let mut consumed = HashSet::new();
+        for row in statement
+            .query_map(params![thread, turn], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(storage)?
+        {
+            let (id, item_turn, data) = row.map_err(storage)?;
+            // An item this version cannot read is no message of its own.
+            match serde_json::from_str::<ItemData>(&data) {
+                Ok(ItemData::UserMessage { queued: true, .. })
+                    if item_turn.as_deref() == Some(turn) =>
+                {
+                    queued.push(id);
+                }
+                Ok(ItemData::QueueConsumed { item_id }) => {
+                    consumed.insert(item_id.to_string());
+                }
+                _ => {}
+            }
+        }
+        queued
+            .into_iter()
+            .filter(|id| !consumed.contains(id))
+            .map(|id| item_id(&id))
+            .collect()
+    }
+
     /// Reconcile parent-side task checkpoints with terminal child turns.
     ///
     /// Background-task runners are process-local, while their threads, turns,
@@ -1966,6 +2014,8 @@ impl ThreadRepository for SqliteStore {
         let now = Utc::now();
         let updated_at = time(now);
         let error = "server restarted during active turn";
+        // Items clients hear of once the server is up.
+        let mut written = Vec::new();
         for (raw_turn_id, raw_thread_id) in &orphaned {
             let turn_id = turn_id(raw_turn_id)?;
             let thread_id = thread_id(raw_thread_id)?;
@@ -1996,25 +2046,54 @@ impl ThreadRepository for SqliteStore {
                     haarness_core::unfinished_call_result(&call_id, &name, position == 0)
                 })
                 .collect::<Vec<_>>();
+            let cut = ended.len();
+            // Steering the turn took and no model request received is settled
+            // as a failed turn settles it: it takes its place in the history,
+            // where later requests read it once instead of each ending with
+            // it, and a notice says to send it again, which runs it once.
+            // Nothing runs it now.
+            let unread = Self::unconsumed_turn_input(&tx, raw_thread_id, raw_turn_id)?;
+            if !unread.is_empty() {
+                ended.extend(
+                    unread
+                        .into_iter()
+                        .map(|item_id| ItemData::QueueConsumed { item_id }),
+                );
+                ended.push(ItemData::Error {
+                    message: format!("{}: {error}", haarness_core::UNDELIVERED_INPUT),
+                    retryable: true,
+                });
+            }
+            let settled = ended.len();
             ended.push(ItemData::Error {
                 message: RECOVERED_TURN_MESSAGE.into(),
                 retryable: true,
             });
-            for data in ended {
-                let sequence = Self::next_sequence(&tx, thread_id)?;
+            for (index, data) in ended.into_iter().enumerate() {
+                let item = Item {
+                    id: ItemId::new(),
+                    thread_id,
+                    turn_id: Some(turn_id),
+                    sequence: Self::next_sequence(&tx, thread_id)?,
+                    data,
+                    created_at: now,
+                };
                 tx.execute(
                     "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at)
                      VALUES(?1,?2,?3,?4,?5,?6)",
                     params![
-                        ItemId::new().to_string(),
+                        item.id.to_string(),
                         raw_thread_id,
                         raw_turn_id,
-                        i64::try_from(sequence).map_err(storage)?,
-                        serde_json::to_string(&data).map_err(storage)?,
+                        i64::try_from(item.sequence).map_err(storage)?,
+                        serde_json::to_string(&item.data).map_err(storage)?,
                         updated_at,
                     ],
                 )
                 .map_err(storage)?;
+                if (cut..settled).contains(&index) {
+                    written.push(item);
+                }
             }
             tx.execute(
                 "UPDATE threads SET updated_at=?2 WHERE id=?1",
@@ -2022,7 +2101,7 @@ impl ThreadRepository for SqliteStore {
             )
             .map_err(storage)?;
         }
-        let written = Self::reconcile_task_states(&tx, &updated_at, report)?;
+        written.extend(Self::reconcile_task_states(&tx, &updated_at, report)?);
         tx.commit().map_err(storage)?;
         Ok((u64::try_from(orphaned.len()).map_err(storage)?, written))
     }

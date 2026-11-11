@@ -442,9 +442,11 @@ pub trait ThreadRepository: Send + Sync {
     /// the background subagents whose result it is still owed: `report`'s
     /// items are written with the task's final checkpoint, in one step, so a
     /// crash or failure cannot record one without the other. A chat that
-    /// already holds the result, or is archived, gets none. Returns the items
-    /// written. A repository that does not track task checkpoints records
-    /// none.
+    /// already holds the result, or is archived, gets none. Steering an
+    /// interrupted turn took and no model request received is settled as a
+    /// failed turn settles it: a `QueueConsumed` marker for each message and
+    /// one [`crate::UNDELIVERED_INPUT`] notice. Returns the items written for
+    /// both. A repository that does not track task checkpoints records none.
     async fn recover_interrupted_tasks(
         &self,
         _report: &StrandedReport<'_>,

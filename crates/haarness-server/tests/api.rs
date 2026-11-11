@@ -15082,18 +15082,24 @@ async fn a_steer_a_stop_left_unread_runs_once_when_sent_again() {
     assert_eq!(copies(&items, "keep the public names"), 2);
 }
 
-#[tokio::test]
-async fn a_steer_a_restart_left_unread_runs_once_and_its_first_copy_is_not_read_again() {
-    let store = Arc::new(SqliteStore::in_memory().unwrap());
-    let provider = DeferredGate::default();
-    let runtime = deferred_runtime(provider.clone(), store.clone());
-    let thread = echo_thread(&runtime).await;
-    // The server stopped under a turn holding a steer no request took yet.
+/// A chat whose running turn the server stopped under (as `store` holds it
+/// before recovery), with a steer no request took yet.
+async fn stopped_under_a_steer(
+    runtime: &AgentRuntime,
+    store: &SqliteStore,
+    text: &str,
+) -> (
+    Thread,
+    Turn,
+    haarness_protocol::QueueInputRequest,
+    haarness_protocol::Item,
+) {
+    let thread = echo_thread(runtime).await;
     let (turn, _, _) = store
         .start_turn(thread.id, turn_request("long refactor"))
         .await
         .unwrap();
-    let mut steer = deferred_request("keep the public names");
+    let mut steer = deferred_request(text);
     steer.delivery = haarness_protocol::InputDelivery::Steer;
     let first = store
         .append_steered_input(
@@ -15101,7 +15107,7 @@ async fn a_steer_a_restart_left_unread_runs_once_and_its_first_copy_is_not_read_
             turn.id,
             steer.request_id,
             haarness_protocol::ItemData::UserMessage {
-                text: "keep the public names".into(),
+                text: text.into(),
                 attachments: Vec::new(),
                 queued: true,
                 synthetic: false,
@@ -15112,7 +15118,105 @@ async fn a_steer_a_restart_left_unread_runs_once_and_its_first_copy_is_not_read_
         .await
         .unwrap()
         .unwrap();
-    store.recover_interrupted().await.unwrap();
+    (thread, turn, steer, first)
+}
+
+fn heard_settled(runtime: &AgentRuntime, item: &haarness_protocol::Item) -> bool {
+    runtime
+        .events()
+        .subscribe(Some(0))
+        .replay
+        .into_iter()
+        .any(|event| {
+            event.event_type == "item.created"
+                && event.payload["data"]["type"] == "queue_consumed"
+                && event.payload["data"]["item_id"] == serde_json::json!(item.id)
+        })
+}
+
+#[tokio::test]
+async fn a_restart_settles_steering_no_request_took_and_runs_nothing_until_it_is_sent_again() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(provider.clone(), store.clone());
+    let (thread, _, _, first) =
+        stopped_under_a_steer(&runtime, &store, "keep the public names").await;
+    let (other, _, steer, second) =
+        stopped_under_a_steer(&runtime, &store, "rename the flag").await;
+    runtime.recover().await.unwrap();
+    // Settled as a failed turn settles its steering, and clients hear it.
+    for (chat, message) in [(&thread, &first), (&other, &second)] {
+        assert!(heard_settled(&runtime, message), "{message:?}");
+        let items = runtime.items(chat.id, None).await.unwrap();
+        let notices = items
+            .iter()
+            .filter(|item| matches!(&item.data, haarness_protocol::ItemData::Error { message, .. } if message.starts_with(haarness_core::UNDELIVERED_INPUT)))
+            .count();
+        assert_eq!(notices, 1, "{items:#?}");
+    }
+    // Nothing runs by itself.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
+    assert!(runtime.active_turn(other.id).await.unwrap().is_none());
+    assert!(provider.requests.lock().unwrap().is_empty());
+    // The chat's next message: its requests read the old steer once, where
+    // it stands, and end with the new message.
+    let next = runtime
+        .start_turn(thread.id, turn_request("next task"))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        provider.wait().await;
+        let request = provider.requests.lock().unwrap().last().unwrap().clone();
+        assert!(request.ends_with("next task"), "{request}");
+        assert_eq!(request.matches("keep the public names").count(), 1);
+        provider.next();
+    }
+    assert_eq!(
+        wait_done(&runtime, &next).await.status,
+        TurnStatus::Completed
+    );
+    // In the other chat the steer, sent again, still runs once.
+    let rerun = runtime
+        .queue_input(other.id, steer.clone())
+        .await
+        .unwrap()
+        .turn
+        .expect("it runs as a turn of its own");
+    provider.wait().await;
+    let request = provider.requests.lock().unwrap().last().unwrap().clone();
+    assert!(request.ends_with("rename the flag"), "{request}");
+    assert_eq!(request.matches("rename the flag").count(), 2);
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &rerun).await.status,
+        TurnStatus::Completed
+    );
+    wait_idle(&runtime, other.id).await;
+    assert_eq!(
+        runtime
+            .queue_input(other.id, steer)
+            .await
+            .unwrap()
+            .turn
+            .map(|turn| turn.id),
+        Some(rerun.id)
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_steer_an_older_restart_left_unmarked_runs_once_and_is_not_read_again() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(provider.clone(), store.clone());
+    // An older server's recovery ended the turn and left the steer as it was.
+    let (thread, turn, steer, first) =
+        stopped_under_a_steer(&runtime, &store, "keep the public names").await;
+    store
+        .set_turn_status(turn.id, TurnStatus::Interrupted, None)
+        .await
+        .unwrap();
     let rerun = runtime
         .queue_input(thread.id, steer.clone())
         .await
@@ -15125,17 +15229,10 @@ async fn a_steer_a_restart_left_unread_runs_once_and_its_first_copy_is_not_read_
     let request = provider.requests.lock().unwrap()[0].clone();
     assert!(request.ends_with("keep the public names"), "{request}");
     assert_eq!(request.matches("keep the public names").count(), 2);
-    let marked = runtime
-        .events()
-        .subscribe(Some(0))
-        .replay
-        .into_iter()
-        .any(|event| {
-            event.event_type == "item.created"
-                && event.payload["data"]["type"] == "queue_consumed"
-                && event.payload["data"]["item_id"] == serde_json::json!(first.id)
-        });
-    assert!(marked, "clients hear the first copy took its place");
+    assert!(
+        heard_settled(&runtime, &first),
+        "clients hear the first copy took its place"
+    );
     provider.next();
     provider.wait().await;
     let request = provider.requests.lock().unwrap()[1].clone();
