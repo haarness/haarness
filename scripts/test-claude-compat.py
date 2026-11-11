@@ -51,6 +51,7 @@ write(workspace/'.haarness/skills/standalone/SKILL.md','---\nname: standalone\nd
 write(plugins/'a/agents/turns.md','---\ndescription: One step\nmaxTurns: 1\n---\nTake one step.\n')
 write(plugins/'a/agents/runner.md','---\ndescription: Shell runner\ntools: Bash, Read\n---\nRun commands.\n')
 write(plugins/'a/agents/printer.md','---\ndescription: Printer\ntools: Read, Bash(printf:*)\n---\nPrint only.\n')
+write(plugins/'a/agents/mdreader.md','---\ndescription: Markdown reader\ntools: Read(./*.md)\n---\nRead notes.\n')
 # A plugin skill with a fenced block and its data folder, and one whose command needs approval.
 write(plugins/'a/skills/fenced/SKILL.md','---\nname: fenced\ndescription: Fenced context\n---\nDATA ${CLAUDE_PLUGIN_DATA}\n```!\nprintf FENCE_ONE\nprintf FENCE_TWO\n```\nFENCE_END\n')
 write(plugins/'a/skills/asking/SKILL.md','---\nname: asking\ndescription: Needs approval\n---\nASKING !`printf ASKED_OUTPUT` DENIED !`rm -f keep.txt` AFTER\n')
@@ -119,6 +120,8 @@ try:
  check('a tools pattern allows what it names','PATTERN_OK' in result['out'],result)
  result=cli('--yolo','run','!tool bash {"command":"printf x && touch pattern-breach"}','--provider','echo','--model','echo-1','--agent','a:printer')
  check('a tools pattern refuses the rest even in Yolo',not (workspace/'pattern-breach').exists() and 'bash:*' in result['out']+result['err'],result)
+ result=run('!tool read {"path":"keep.txt"}','--agent','a:mdreader')
+ check('a pattern on another tool gives the whole tool','kept' in result['out'] and 'denied' not in result['out']+result['err'],result)
  result=run('!tool skill {"name":"a:fenced"}')
  check('a fenced block runs line by line in a plugin skill','FENCE_ONE\nFENCE_TWO\nFENCE_END' in result['out'] and 'DATA '+str(plugins/'a'/'.data') in result['out'],result)
  result=run('!tool skill {"name":"a:asking"}')

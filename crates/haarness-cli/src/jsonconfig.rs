@@ -2115,7 +2115,7 @@ fn discover_agents_with(
                 variant: front.get("variant").cloned(),
                 project,
                 plugin: plugin.map(str::to_owned),
-                ceiling: markdown_agent_ceiling(&front),
+                ceiling: markdown_agent_ceiling(&front, &path, notices),
                 skills: haarness_core::definitions::list(front.get("skills")),
                 preloaded: String::new(),
             },
@@ -2124,7 +2124,7 @@ fn discover_agents_with(
 }
 
 /// Agent colour: a `#rrggbb` value or Haarness theme name passes through;
-/// Claude Code colour names map onto the theme names (config/claude.ts).
+/// Claude Code's colour names map onto the nearest theme names.
 fn agent_color(raw: &str) -> Option<String> {
     let value = raw.trim().to_ascii_lowercase();
     if value.is_empty() {
@@ -2191,11 +2191,17 @@ fn agent_skills(value: Option<&Value>) -> Vec<String> {
     }
 }
 
-/// The limit a markdown agent's `tools` list sets with entries that carry a
-/// pattern: `Bash(git diff:*)` keeps the shell to `git diff`, read as a
-/// skill's `allowed-tools` reads the same entry. Each such tool is denied
-/// but for its patterns; a tool the list also names bare keeps all of it.
-fn markdown_agent_ceiling(front: &BTreeMap<String, String>) -> Vec<PermissionRule> {
+/// The limit a markdown agent's `tools` list sets with `Bash` entries that
+/// carry a pattern: `Bash(git diff:*)` keeps the shell to `git diff`, read as
+/// a skill's `allowed-tools` reads the same entry. The shell is denied but
+/// for its patterns, unless the list also names `Bash` bare. Another tool
+/// with a pattern (`Read(./*.md)`, `WebFetch(domain:…)`) gets the whole tool,
+/// as the pattern was never read, and a notice says so.
+fn markdown_agent_ceiling(
+    front: &BTreeMap<String, String>,
+    path: &Path,
+    notices: &mut Vec<String>,
+) -> Vec<PermissionRule> {
     let Some(raw) = front.get("tools") else {
         return Vec::new();
     };
@@ -2209,37 +2215,33 @@ fn markdown_agent_ceiling(front: &BTreeMap<String, String>) -> Vec<PermissionRul
             .map(|(_, pattern)| pattern.trim_end_matches(')').trim().to_owned())
             .filter(|pattern| !pattern.is_empty() && pattern != "*")
     };
-    let whole: HashSet<String> = entries
-        .iter()
-        .filter(|entry| pattern(entry).is_none())
-        .flat_map(|entry| haarness_core::definitions::tool_names(entry))
-        .collect();
-    let mut limited: Vec<(String, Vec<PermissionRule>)> = Vec::new();
-    for entry in entries.iter().filter(|entry| pattern(entry).is_some()) {
-        for rule in haarness_core::definitions::approval_rules(std::slice::from_ref(entry)) {
-            let Some((tool, _)) = rule.pattern.split_once(':') else {
-                continue;
-            };
-            if whole.contains(tool) {
-                continue;
+    let shell = |entry: &str| haarness_core::definitions::tool_names(entry) == ["bash"];
+    let mut allows = Vec::new();
+    let mut whole = false;
+    for entry in &entries {
+        match (shell(entry), pattern(entry)) {
+            (true, None) => whole = true,
+            (true, Some(_)) => {
+                allows.extend(haarness_core::definitions::approval_rules(
+                    std::slice::from_ref(entry),
+                ));
             }
-            let tool = tool.to_owned();
-            match limited.iter_mut().find(|(name, _)| *name == tool) {
-                Some((_, allows)) => allows.push(rule),
-                None => limited.push((tool, vec![rule])),
-            }
+            (false, Some(_)) => notices.push(format!(
+                "agent {}: tools entry {entry} gives the whole tool; only Bash entries take a pattern",
+                path.display()
+            )),
+            (false, None) => {}
         }
     }
-    limited
-        .into_iter()
-        .flat_map(|(tool, allows)| {
-            std::iter::once(PermissionRule {
-                pattern: format!("{tool}:*"),
-                decision: PermissionDecision::Deny,
-            })
-            .chain(allows)
-        })
-        .collect()
+    if whole || allows.is_empty() {
+        return Vec::new();
+    }
+    std::iter::once(PermissionRule {
+        pattern: "bash:*".into(),
+        decision: PermissionDecision::Deny,
+    })
+    .chain(allows)
+    .collect()
 }
 
 fn markdown_agent_tools(front: &BTreeMap<String, String>) -> HashMap<String, bool> {
@@ -4497,6 +4499,10 @@ mod tests {
             ("follower", "tools: Bash, BashOutput, KillShell"),
             ("differ", "tools: Read, Bash(git diff:*), Bash(git log:*)"),
             ("whole", "tools: Bash(git diff:*), Bash"),
+            (
+                "fetcher",
+                "tools: Read(./*.md), WebFetch(domain:example.test)",
+            ),
             ("starter", "skills:\n  - checklist\n  - style"),
             ("one-line", "skills: checklist, style"),
         ] {
@@ -4551,6 +4557,19 @@ mod tests {
         );
         assert_eq!(agent("differ").tools.get("bash"), Some(&true));
         assert!(agent("whole").ceiling.is_empty());
+        // A pattern on another tool is not read: the tool is whole, as it
+        // always was, and the log says so.
+        let fetcher = agent("fetcher");
+        assert!(fetcher.ceiling.is_empty());
+        assert_eq!(fetcher.tools.get("read"), Some(&true));
+        assert_eq!(fetcher.tools.get("webfetch"), Some(&true));
+        for entry in ["Read(./*.md)", "WebFetch(domain:example.test)"] {
+            assert!(
+                notices.iter().any(|notice| notice.contains("fetcher.md")
+                    && notice.contains(&format!("tools entry {entry} gives the whole tool"))),
+                "{entry}: {notices:?}"
+            );
+        }
         assert_eq!(agent("starter").skills, ["checklist", "style"]);
         assert_eq!(agent("one-line").skills, ["checklist", "style"]);
 
