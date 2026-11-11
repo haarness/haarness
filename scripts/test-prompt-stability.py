@@ -25,7 +25,7 @@ daemon in a private data folder shows that:
 7. a chat whose model loaded every deferred tool (what is left would no longer pay for the
    loader, so Auto decided afresh would send every schema) keeps its tool list, the loader
    included, after a restart;
-8. an agent whose file lists `skills` sends their text after its own prompt, with the skill's
+9. an agent whose file lists `skills` sends their text after its own prompt, with the skill's
    folder and the chat's id filled in and its command named rather than run, leaves out a
    manual-only and a missing skill, and sends a byte-identical system prompt on the next turn.
 
@@ -495,7 +495,7 @@ try:
                                       'byte-identical after a restart']})
     print(f'PASS Auto keeps deferring after the loads and a restart ({len(names(last))} tools)', flush=True)
 
-    # 8. An agent that lists `skills` starts with their text in its system prompt, unchanged from
+    # 9. An agent that lists `skills` starts with their text in its system prompt, unchanged from
     # one request of the chat to the next, and none of their commands runs.
     skills_workspace = root / 'skills-workspace'
     (skills_workspace / '.haarness/agents').mkdir(parents=True, exist_ok=True)
