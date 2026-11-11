@@ -30,7 +30,7 @@
   not the url.
 - A tool listed without an `inputSchema` is left out by name and the server's other tools work.
 - A server configured through the API (as an editor's session or an SDK does) stays connected through a reload a new
-  skill causes, without starting again, and one disconnected stays disconnected.
+  skill causes, without starting again, and one disconnected stays disconnected; configured off, it is gone at once.
 - A 20 MB tool result reaches the model cut to 50 KiB with the whole saved to a file; base64 text and an image in
   capitals read from a resource come back as text and as an attachment.
 - An HTTP server that restarted and forgot its sessions, answering the session a request names with a 400 as servers
@@ -562,6 +562,9 @@ try:
     assert api('/mcp/extra/reconnect', {})['status'] == 'connected'
     check('a server configured through the API stays connected through a reload without starting again, its tool answers, '
           'and one disconnected stays disconnected')
+    api('/mcp/extra', {'transport': 'stdio', 'command': python, 'args': [str(fixtures/'recovery.py')], 'enabled': False})
+    assert 'extra' not in servers() and not any(tool['id'].startswith('mcp__extra__') for tool in api(f'/tools?threadId={thread}')['tools'])
+    check('a server configured through the API and then configured off is gone at once, with its tools')
 
     # --- TUI rows
     command = e2e_tmux.pane_command(env, [binary, '--workspace', workspace, '--trust-project'])

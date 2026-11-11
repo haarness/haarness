@@ -345,15 +345,16 @@ request to a server that is starting (its tools, a tool call, a resource or
 prompt request) waits for that start too.
 
 A server configured through `POST /v1/mcp/{name}` (as an editor's ACP
-session or an SDK's `configureMcp` does) is in no configuration file, and a
-reload keeps it as it is: connected, still starting, or disconnected by the
-person. One configured under the name of a server in the configuration keeps
-that name while the configuration's entry stays as it was; once the entry is
-edited or removed, the configuration's entry applies again. One configured
-with `enabled: false` under a name the configuration does not hold is let go
-at the next reload, as `haarness mcp remove` turns a server off before
-removing its entry. A restart of the server forgets them; ACP sets its
-sessions' servers up again (see below).
+session or an SDK's `configureMcp` does) is in no configuration file. It
+lives as long as the project's server, until its client configures it again
+with `enabled: false`, which removes it at once with its process and its
+tools: a reload keeps it as it is (connected, still starting, or
+disconnected by the person), and a restart of the server forgets it. While
+it lives, every chat of the project is offered its tools. One configured
+under the name of a server in the configuration keeps that name while the
+configuration's entry stays as it was; configured off, it stays off there
+(as `haarness mcp disable` does); once the entry is edited or removed, the
+configuration's entry applies again.
 
 Such a server holds up no turn while it starts: its client waits for it. ACP
 takes a server still starting (or needing authorization) after 2 seconds as

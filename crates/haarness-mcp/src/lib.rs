@@ -982,6 +982,13 @@ impl NativeMcpRegistry {
         if let Some(replaced) = servers.get_mut(name) {
             replaced.stop_start();
         }
+        // Turned off by its client, a server that stands in for no entry of
+        // the configuration is gone at once: nothing is left to show or
+        // reconnect, and its process (if any) ends with the entry.
+        if added.as_ref().is_some_and(|added| added.shadowed.is_none()) && !config.enabled {
+            servers.remove(name);
+            return Ok(info);
+        }
         servers.insert(
             name.into(),
             Entry {
@@ -1246,9 +1253,7 @@ impl NativeMcpRegistry {
     /// stands in for none. Otherwise the candidate's entry applies, or the
     /// name goes: the configuration's entry was edited or removed, or the
     /// configuration now has one (`haarness mcp add` saves the entry and
-    /// configures the server, in either order with a reload). One turned
-    /// off that stands in for no entry is let go, as `haarness mcp remove`
-    /// turns a server off before it removes the entry.
+    /// configures the server, in either order with a reload).
     pub fn replace_from(&self, candidate: &Self) {
         // Held to the end: a start that finishes meanwhile writes into the
         // candidate before its entries are copied, or into this registry
@@ -1260,7 +1265,7 @@ impl NativeMcpRegistry {
             .filter(|(name, live)| {
                 live.added.as_ref().is_some_and(|added| {
                     match (&added.shadowed, staged.get(*name)) {
-                        (None, None) => live.config.enabled,
+                        (None, None) => true,
                         (Some(shadowed), Some(configured)) => {
                             same_effective_config(shadowed, &configured.config)
                         }
@@ -6071,8 +6076,8 @@ mod tests {
     #[tokio::test]
     async fn disabled_server_stays_disabled() {
         let registry = NativeMcpRegistry::default();
-        let info = registry
-            .configure(
+        let (info, start) = registry
+            .prepare(
                 "fixture",
                 McpConfigureRequest {
                     transport: "stdio".into(),
@@ -6091,8 +6096,8 @@ mod tests {
                     apps: None,
                 },
             )
-            .await
             .unwrap();
+        assert!(start.is_none());
         assert_eq!(info.status, "disabled");
         assert!(registry.tools("fixture").await.unwrap().is_empty());
     }
@@ -6116,9 +6121,9 @@ mod tests {
             apps: None,
         };
         let live = NativeMcpRegistry::default();
-        live.configure("old", config.clone()).await.unwrap();
+        live.prepare("old", config.clone()).unwrap();
         let candidate = NativeMcpRegistry::default();
-        candidate.configure("new", config).await.unwrap();
+        candidate.prepare("new", config).unwrap();
 
         assert_eq!(live.list().await.unwrap()[0].name, "old");
         live.replace_from(&candidate);
@@ -6242,9 +6247,7 @@ mod tests {
         }))
         .unwrap();
         config.enabled = false;
-        local()
-            .block_on(registry.configure("idle", config))
-            .unwrap();
+        registry.prepare("idle", config).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         std::thread::spawn({
             let (registry, stop) = (registry.clone(), stop.clone());
@@ -8311,8 +8314,8 @@ mod recovery_tests {
 
     /// A reload (a skill added, a memory written) keeps the servers a client
     /// configured (an editor's session, an SDK), as they were: connected
-    /// without starting again, or disconnected by the person. One turned off
-    /// that no entry of the configuration names is let go.
+    /// without starting again, or disconnected by the person. One its client
+    /// turns off is gone at once, with its tools.
     #[tokio::test]
     async fn a_reload_keeps_a_server_a_client_configured() {
         let root = scratch("added");
@@ -8325,15 +8328,27 @@ mod recovery_tests {
             .await
             .unwrap();
         live.disconnect("off").await.unwrap();
-        let mut disabled = launched_as(&root, "disabled");
-        disabled.enabled = false;
-        live.configure("disabled", disabled).await.unwrap();
+        live.configure("released", launched_as(&root, "released"))
+            .await
+            .unwrap();
+        let mut released = launched_as(&root, "released");
+        released.enabled = false;
+        let info = live.configure("released", released.clone()).await.unwrap();
+        assert_eq!(info.status, "disabled");
+        assert!(!statuses(&live).await.contains_key("released"));
+        assert!(
+            !live
+                .tool_snapshot()
+                .iter()
+                .any(|tool| tool.name == "mcp__released__ping")
+        );
+        live.configure("never", released).await.unwrap();
+        assert!(!statuses(&live).await.contains_key("never"));
 
         reload_with(&live, &[("configured", &configured)]).await;
         let listed = statuses(&live).await;
         assert_eq!(listed.get("added").map(String::as_str), Some("connected"));
         assert_eq!(listed.get("off").map(String::as_str), Some("disconnected"));
-        assert!(!listed.contains_key("disabled"), "{listed:?}");
         assert_eq!(
             launches(&root.join("added")),
             1,
@@ -8464,6 +8479,65 @@ mod recovery_tests {
         assert_eq!(launches(&root.join("configured")), 3);
         reload_with(&live, &[]).await;
         assert!(statuses(&live).await.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A client configures a server while a reload waits to apply (it was
+    /// composed before, and waits for the chats to be idle): the reload
+    /// keeps it, both under a new name and in place of an entry of the
+    /// configuration, which then does not start.
+    #[tokio::test]
+    async fn a_server_configured_while_a_reload_waits_is_kept() {
+        let root = scratch("waiting");
+        let configured = launched_as(&root, "configured");
+        let live = NativeMcpRegistry::default();
+        reload_with(&live, &[("fixture", &configured)]).await;
+        let candidate = NativeMcpRegistry::default().following(&live);
+        let (_, started) = candidate
+            .prepare_reusing(&live, "fixture", configured.clone())
+            .unwrap();
+        assert!(started.is_none());
+        live.configure("added", launched_as(&root, "added"))
+            .await
+            .unwrap();
+        live.configure("fixture", launched_as(&root, "client"))
+            .await
+            .unwrap();
+        live.replace_from(&candidate);
+        drop(candidate);
+        let listed = statuses(&live).await;
+        assert_eq!(listed["added"], "connected");
+        assert_eq!(listed["fixture"], "connected");
+        assert_eq!(launches(&root.join("configured")), 1);
+        assert_eq!(launches(&root.join("client")), 1);
+        let ping = live.call("fixture", "ping", serde_json::json!({})).await;
+        assert_eq!(ping.unwrap().text, "pong");
+        for name in ["added", "fixture"] {
+            live.disconnect(name).await.unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A reload while a client's server is still starting keeps that start:
+    /// it ends connected, started once, and the client waiting for it gets
+    /// its answer.
+    #[tokio::test]
+    async fn a_reload_keeps_a_clients_server_that_is_still_starting() {
+        let root = scratch("kept-starting");
+        let mut slow = launched_as(&root, "slow");
+        slow.env.insert("INIT_DELAY".into(), "0.8".into());
+        let live = NativeMcpRegistry::default();
+        let configured = tokio::spawn({
+            let live = live.clone();
+            async move { live.configure("slow", slow).await }
+        });
+        status(&live, "connecting").await;
+        reload_with(&live, &[]).await;
+        assert_eq!(statuses(&live).await["slow"], "connecting");
+        assert_eq!(configured.await.unwrap().unwrap().status, "connected");
+        assert_eq!(statuses(&live).await["slow"], "connected");
+        assert_eq!(launches(&root.join("slow")), 1);
+        live.disconnect("slow").await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

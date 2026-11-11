@@ -10892,7 +10892,14 @@ async fn oauth_registry(
         NativeMcpRegistry::with_auth_dir(paths.data.join("mcp-oauth")).in_folder(workspace);
     let mut staged = entry.clone();
     staged.enabled = probe;
-    registry.configure(name, staged).await?;
+    if probe {
+        registry.configure(name, staged).await?;
+    } else {
+        // Recorded as the configuration records it: configured off as a
+        // client configures it, a server no file names is removed at once,
+        // and signing out needs it there.
+        registry.prepare(name, staged)?;
+    }
     Ok(registry)
 }
 

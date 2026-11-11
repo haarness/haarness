@@ -3913,10 +3913,7 @@ mod tests {
         );
         assert_eq!(fs::read(&target).unwrap(), before);
         assert_eq!(
-            mcp.configure("fixture-mcp", persisted)
-                .await
-                .unwrap()
-                .status,
+            mcp.prepare("fixture-mcp", persisted).unwrap().0.status,
             "disabled"
         );
         let logout = service
