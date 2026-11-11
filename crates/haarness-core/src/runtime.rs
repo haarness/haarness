@@ -15378,10 +15378,14 @@ impl RunnerTask {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map_or_else(|| subagent_title(&prompt, "task"), str::to_owned);
-        let background = arguments
-            .get("background")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        // A subagent's own `task` runs in the foreground: nothing would take
+        // a background result for it, since the subagent's answer is its
+        // parent's tool result once it ends.
+        let background = self.depth == 0
+            && arguments
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
         let requested_child = arguments
             .get("task_id")
             .or_else(|| arguments.get("taskId"))
@@ -15419,10 +15423,24 @@ impl RunnerTask {
         } else {
             None
         };
-        let agent = arguments
+        let named_agent = arguments
             .get("agent")
             .or_else(|| arguments.get("subagent_type"))
             .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|agent| !agent.is_empty());
+        // A child continues as the agent it is: its history was written by
+        // that agent's prompt and tools.
+        if let (Some(child), Some(named)) = (&resumed_child, named_agent)
+            && named != child.agent
+        {
+            return Err(CoreError::Invalid(format!(
+                "task_id {} is a \"{}\" subagent and continues as one. Leave agent out to \
+                 continue it, or leave task_id out to start a new \"{named}\" subagent.",
+                child.id, child.agent
+            )));
+        }
+        let agent = named_agent
             .or_else(|| resumed_child.as_ref().map(|child| child.agent.as_str()))
             .unwrap_or("general")
             .to_owned();
@@ -15442,13 +15460,30 @@ impl RunnerTask {
             .custom
             .as_ref()
             .and_then(|agent| agent.model.clone());
-        let ((provider, model), notice) = subagent_model(
-            self.providers.as_ref(),
-            &self.turn.provider,
-            &self.turn.model,
-            arguments.get("model").and_then(serde_json::Value::as_str),
-            configured.as_deref(),
-        )?;
+        let explicit_model = arguments.get("model").and_then(serde_json::Value::as_str);
+        // A continued child keeps the model it last ran on, while its
+        // provider can still run it, unless the call names one.
+        let kept = match &resumed_child {
+            Some(child) if explicit_model.is_none() => {
+                let last = self.repository.last_turn(child.id).await?;
+                let (provider, model) = last.map_or_else(
+                    || (child.provider.clone(), child.model.clone()),
+                    |turn| (turn.provider, turn.model),
+                );
+                continued_model(self.providers.as_ref(), provider, model)
+            }
+            _ => None,
+        };
+        let ((provider, model), notice) = match kept {
+            Some(kept) => (kept, None),
+            None => subagent_model(
+                self.providers.as_ref(),
+                &self.turn.provider,
+                &self.turn.model,
+                explicit_model,
+                configured.as_deref(),
+            )?,
+        };
 
         let title = subagent_title(&prompt, &agent);
         let child = if let Some(child) = resumed_child {
@@ -16547,6 +16582,21 @@ fn merge_agent_tools(
         merged.insert(name.clone(), permitted);
     }
     *request = Some(merged);
+}
+
+/// The model a continued child last ran on, while it is still there: its
+/// provider is signed in and, when the provider lists its models, lists it.
+fn continued_model(
+    registry: &dyn ProviderRegistry,
+    provider: String,
+    model: String,
+) -> Option<(String, String)> {
+    let available = registry.get(&provider)?;
+    if !available.info().authenticated {
+        return None;
+    }
+    let listed = registry.models(&provider);
+    (listed.is_empty() || listed.iter().any(|entry| entry.id == model)).then_some((provider, model))
 }
 
 fn subagent_model(

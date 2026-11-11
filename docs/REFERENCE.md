@@ -391,8 +391,13 @@ The `task` tool creates a durable child session. It inherits the parent model,
 reasoning mode, automatic-approval setting, and permission ceilings unless a
 configured child agent pins a model or narrows tools. Calls are foreground by
 default. Passing `background: true` returns a child ID immediately; pass that
-ID back as `task_id` to continue the same child context. If it is still
-running, the follow-up is queued without another child or completion watcher. The same
+ID back as `task_id` to continue the same child context. A continued child
+keeps its agent and the model of its last run (a `model` in the call moves it);
+naming another agent with its `task_id` is refused. If it is still
+running, the follow-up is queued without another child or completion watcher. A
+subagent's own `task` call (with `execution.subagent_depth` of 2 or more)
+always runs in the foreground, since its result belongs in the subagent's
+answer. The same
 child continues on the server and its terminal result is injected into the
 parent automatically. `/background [id]` (**Ctrl+X** in the TUI) promotes an
 already-running foreground child, and the shell commands the agent waits on,
