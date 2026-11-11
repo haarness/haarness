@@ -222,6 +222,10 @@ const TIGHT_RESIDENT: [&str; 8] = [
     "bash",
 ];
 
+fn tight(context_window: Option<u64>) -> bool {
+    context_window.is_some_and(|window| window > 0 && window <= TIGHT_WINDOW)
+}
+
 /// [`classify`] for a model with `context_window`: the browser's tools are
 /// optional in a small window, and all but the project's own in a tight one.
 fn classify_in(name: &str, context_window: Option<u64>) -> Classification {
@@ -236,16 +240,165 @@ fn classify_in(name: &str, context_window: Option<u64>) -> Classification {
     let classification = classify(name);
     // Computer use's tools are offered only while it is on; then they are
     // the point.
-    if window.is_some_and(|window| window <= TIGHT_WINDOW)
-        && !TIGHT_RESIDENT.contains(&name)
-        && !name.starts_with("mac_")
-    {
+    if tight(context_window) && !TIGHT_RESIDENT.contains(&name) && !name.starts_with("mac_") {
         return Classification {
             essential: false,
             ..classification
         };
     }
     classification
+}
+
+/// [`classify_in`] for `tool` itself: the skill tool goes with every
+/// request while it lists skills, as the list is the only place the model
+/// learns that they exist (deferred, the tool and its list wait behind a
+/// loader whose description names neither). Without skills it waits like
+/// the other optional tools, and so it does in a tight window.
+fn classify_tool(tool: &ToolDefinition, context_window: Option<u64>) -> Classification {
+    let classification = classify_in(&tool.name, context_window);
+    if lists_skills(tool) && !tight(context_window) {
+        return Classification {
+            essential: true,
+            ..classification
+        };
+    }
+    classification
+}
+
+/// The tool that loads a skill by its name. Its description ends with the
+/// list [`skill_list`] writes.
+pub const SKILL_TOOL_NAME: &str = "skill";
+
+/// The words the skill list opens with.
+const SKILL_LIST_OPENING: &str = " Available skills:";
+
+/// The words before the skills the list names without a description.
+const SKILL_NAMES_OPENING: &str = " More skills:";
+
+/// What follows the names when some are only counted: how the model finds
+/// one of those.
+const SKILL_NAMES_ROUTE: &str =
+    " Called with an unknown name, the skill tool answers with the closest ones.";
+
+/// The most bytes the skill list may take (about 2K tokens). A longer list
+/// is made to fit: shorter descriptions, then names alone, then a count.
+pub const SKILL_LIST_BUDGET: usize = 8 * 1024;
+
+/// The most characters of a skill's description a list over
+/// [`SKILL_LIST_BUDGET`] keeps.
+pub const SKILL_DESCRIPTION_LIMIT: usize = 250;
+
+/// Whether `tool` is the skill tool with at least one skill in its list.
+fn lists_skills(tool: &ToolDefinition) -> bool {
+    tool.name == SKILL_TOOL_NAME
+        && tool
+            .description
+            .split_once(SKILL_LIST_OPENING)
+            .is_some_and(|(_, skills)| !skills.is_empty())
+}
+
+/// The list of `skills` (each a name and a description, in the order given)
+/// the skill tool's description ends with. A list that fits
+/// [`SKILL_LIST_BUDGET`] holds every description whole. A longer one, which
+/// would make every request pay for many skills or very long descriptions,
+/// puts the person's own skills ahead of plugins' (named `plugin:skill`),
+/// shortens each description to [`SKILL_DESCRIPTION_LIMIT`] characters,
+/// describes the skills in that order while they fit, and names the rest
+/// in at most half the budget. Names that would not fit there are only
+/// counted, and the model is told how to reach those skills.
+#[must_use]
+pub fn skill_list(skills: &[(&str, &str)]) -> String {
+    use std::fmt::Write as _;
+    let mut whole = String::from(SKILL_LIST_OPENING);
+    for (name, description) in skills {
+        let _ = write!(whole, " {name} ({description}).");
+    }
+    if whole.len() <= SKILL_LIST_BUDGET {
+        return whole;
+    }
+    // Stable: each group keeps the order given.
+    let mut ranked = skills.iter().collect::<Vec<_>>();
+    ranked.sort_by_key(|(name, _)| name.contains(':'));
+    let described = ranked
+        .iter()
+        .map(|(name, description)| format!(" {name} ({}).", shortened(description)))
+        .collect::<Vec<_>>();
+    let mut sizes = vec![SKILL_LIST_OPENING.len(); ranked.len() + 1];
+    for (index, entry) in described.iter().enumerate() {
+        sizes[index + 1] = sizes[index] + entry.len();
+    }
+    let named = |count: usize| {
+        let rest = ranked[count..]
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        if rest.is_empty() {
+            return String::new();
+        }
+        let room = SKILL_LIST_BUDGET / 2;
+        // As `some_names` decides whether to count some.
+        let route = if rest.join(", ").len() > room {
+            SKILL_NAMES_ROUTE
+        } else {
+            ""
+        };
+        format!("{SKILL_NAMES_OPENING} {}.{route}", some_names(&rest, room))
+    };
+    // The most skills described that leave room to name the rest. None
+    // described always fits, as the names take at most half the budget.
+    let count = (1..=ranked.len())
+        .rev()
+        .find(|count| {
+            sizes[*count] <= SKILL_LIST_BUDGET
+                && sizes[*count] + named(*count).len() <= SKILL_LIST_BUDGET
+        })
+        .unwrap_or(0);
+    let mut text = String::from(SKILL_LIST_OPENING);
+    for entry in &described[..count] {
+        text.push_str(entry);
+    }
+    text.push_str(&named(count));
+    text
+}
+
+/// `names` joined by commas, as many as fit `room` bytes, and the count of
+/// the others after them: `a, b and 3 more`.
+#[must_use]
+pub fn some_names(names: &[&str], room: usize) -> String {
+    let all = names.join(", ");
+    if all.len() <= room {
+        return all;
+    }
+    let mut text = String::new();
+    let mut shown = 0;
+    for (index, name) in names.iter().enumerate() {
+        let separator = if index == 0 { "" } else { ", " };
+        // What it reads with this name in: the others counted after it.
+        let more = format!(" and {} more", names.len() - index - 1);
+        if text.len() + separator.len() + name.len() + more.len() > room {
+            break;
+        }
+        text.push_str(separator);
+        text.push_str(name);
+        shown += 1;
+    }
+    if shown == 0 {
+        return format!("{} more", names.len());
+    }
+    format!("{text} and {} more", names.len() - shown)
+}
+
+/// `description` cut to [`SKILL_DESCRIPTION_LIMIT`] characters, ending
+/// with an ellipsis where it was cut.
+fn shortened(description: &str) -> std::borrow::Cow<'_, str> {
+    if description.chars().count() <= SKILL_DESCRIPTION_LIMIT {
+        return description.into();
+    }
+    let kept = description
+        .chars()
+        .take(SKILL_DESCRIPTION_LIMIT - 1)
+        .collect::<String>();
+    format!("{}…", kept.trim_end()).into()
 }
 
 #[must_use]
@@ -370,7 +523,7 @@ where
     let deferred_tokens = definitions
         .iter()
         .filter(|tool| {
-            let classification = classify_in(&tool.name, context_window);
+            let classification = classify_tool(tool, context_window);
             effective_enabled(configured, live, &tool.name)
                 && !classification.essential
                 && !pinned(settings, &tool.name)
@@ -398,7 +551,7 @@ where
     let mut total = 0_u64;
     let mut visible = 0_u64;
     for tool in definitions {
-        let classification = classify_in(&tool.name, context_window);
+        let classification = classify_tool(&tool, context_window);
         let enabled = effective_enabled(configured, live, &tool.name);
         let loaded = promoted.contains(&tool.name);
         let is_advertised = enabled
@@ -1076,8 +1229,16 @@ mod tests {
 
     #[test]
     fn natural_tool_queries_find_skills_without_tool_in_the_description() {
+        // A tight window, where the skill tool waits behind the loader even
+        // with skills to list.
         let definitions = vec![
-            definition("skill", "Load a specialized Agent Skill"),
+            definition(
+                "skill",
+                &format!(
+                    "Load a specialized Agent Skill.{}",
+                    skill_list(&[("release-check", "Check a release is ready")])
+                ),
+            ),
             definition("mcp__docs__search", "Search documentation"),
         ];
         let selection = select_tools(
@@ -1089,7 +1250,7 @@ mod tests {
                 ..LazyToolSettings::default()
             },
             &HashSet::new(),
-            None,
+            Some(TIGHT_WINDOW),
             false,
         );
         for query in ["skill tool", "skill tools", "skill"] {
@@ -1106,6 +1267,297 @@ mod tests {
             ),
             ["mcp__docs__search"]
         );
+    }
+
+    fn skill_tool(skills: &[(&str, &str)]) -> ToolDefinition {
+        definition(
+            SKILL_TOOL_NAME,
+            &format!("Load a specialized Agent Skill.{}", skill_list(skills)),
+        )
+    }
+
+    /// Lazy loading on, as with an MCP server: the skill tool and its list
+    /// go with every request while there are skills, so the model knows
+    /// them without a load; with none, or in a tight window, it waits.
+    #[test]
+    fn the_skill_tool_stays_at_hand_while_it_lists_skills() {
+        let mut definitions: Vec<_> = (0..12)
+            .map(|index| {
+                definition(
+                    &format!("mcp__docs__tool_{index}"),
+                    &"a long description of a documentation tool ".repeat(40),
+                )
+            })
+            .collect();
+        definitions.push(definition("read", "read a file"));
+        definitions.push(definition("skill_manage", "Create or edit Agent Skills"));
+        let with = |skill: ToolDefinition| {
+            let mut tools = definitions.clone();
+            tools.push(skill);
+            tools
+        };
+        let select = |tools: &[ToolDefinition], mode, window, promoted: &[&str]| {
+            select_tools(
+                tools.to_vec(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &LazyToolSettings {
+                    mode,
+                    ..LazyToolSettings::default()
+                },
+                &promoted
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<HashSet<_>>(),
+                Some(window),
+                false,
+            )
+        };
+        let listed = with(skill_tool(&[
+            ("release-check", "Check a release is ready"),
+            ("review", "Review a change"),
+        ]));
+        for mode in [LazyToolMode::Auto, LazyToolMode::Always] {
+            let selection = select(&listed, mode, 200_000, &[]);
+            assert!(selection.response.lazy_active, "{mode:?}");
+            assert_eq!(
+                names(&selection.advertised),
+                ["read", SKILL_TOOL_NAME, LOAD_TOOL_NAME],
+                "{mode:?}"
+            );
+            let entry = selection
+                .response
+                .tools
+                .iter()
+                .find(|entry| entry.id == SKILL_TOOL_NAME)
+                .unwrap();
+            assert!(entry.essential && entry.advertised, "{entry:?}");
+            assert_eq!(entry.group, "extensions");
+            // The loader says the skill tool is there already, and loads
+            // the manager whose id extends its name.
+            for query in ["skill", "Skill"] {
+                assert_eq!(
+                    search_deferred_tools(&listed, &selection.response, &[query.into()]),
+                    ["skill_manage"]
+                );
+                assert_eq!(
+                    already_available(&listed, &selection.response, &[query.into()]),
+                    [SKILL_TOOL_NAME]
+                );
+            }
+            assert_eq!(
+                search_deferred_tools(&listed, &selection.response, &["skills".into()]),
+                ["skill_manage"]
+            );
+        }
+        // Without lazy loading the list is sent as before.
+        let off = select(&listed, LazyToolMode::Off, 200_000, &[]);
+        assert_eq!(off.advertised.len(), listed.len());
+
+        // No skills (or only ones a person starts): nothing to tell the
+        // model, so the tool waits behind the loader as it did.
+        for empty in [
+            definition(SKILL_TOOL_NAME, "Load a specialized Agent Skill."),
+            skill_tool(&[]),
+        ] {
+            let tools = with(empty);
+            let selection = select(&tools, LazyToolMode::Auto, 200_000, &[]);
+            assert_eq!(names(&selection.advertised), ["read", LOAD_TOOL_NAME]);
+            assert_eq!(
+                search_deferred_tools(&tools, &selection.response, &["skill".into()]),
+                [SKILL_TOOL_NAME, "skill_manage"]
+            );
+        }
+
+        // A tight window keeps only the project's own tools: the loader
+        // finds the skill tool, and once loaded it stays.
+        let tight = select(&listed, LazyToolMode::Auto, TIGHT_WINDOW, &[]);
+        assert_eq!(names(&tight.advertised), ["read", LOAD_TOOL_NAME]);
+        assert_eq!(
+            search_deferred_tools(&listed, &tight.response, &["skill".into()]),
+            [SKILL_TOOL_NAME, "skill_manage"]
+        );
+        let loaded = select(
+            &listed,
+            LazyToolMode::Auto,
+            TIGHT_WINDOW,
+            &[SKILL_TOOL_NAME],
+        );
+        assert!(names(&loaded.advertised).contains(&SKILL_TOOL_NAME));
+    }
+
+    #[test]
+    fn a_short_skill_list_is_written_as_it_always_was() {
+        assert_eq!(
+            skill_list(&[
+                ("release-check", "Check a release is ready"),
+                ("review", "Review a change"),
+            ]),
+            " Available skills: release-check (Check a release is ready). review (Review a change)."
+        );
+        assert_eq!(skill_list(&[]), " Available skills:");
+        // Long descriptions stay whole while the list fits.
+        let long = "word ".repeat(300);
+        let list = skill_list(&[("one", long.as_str())]);
+        assert!(list.len() < SKILL_LIST_BUDGET);
+        assert_eq!(list, format!(" Available skills: one ({long})."));
+    }
+
+    #[test]
+    fn a_long_skill_list_stays_within_its_budget() {
+        let described = |list: &str| {
+            list.strip_prefix(SKILL_LIST_OPENING)
+                .unwrap()
+                .split(SKILL_NAMES_OPENING)
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        let listed_by_name = |list: &str| {
+            list.split_once(SKILL_NAMES_OPENING)
+                .map(|(_, names)| {
+                    names
+                        .trim()
+                        .trim_end_matches('.')
+                        .split(", ")
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+
+        // Many skills with long descriptions.
+        let names = (0..120)
+            .map(|index| format!("skill-{index:03}"))
+            .collect::<Vec<_>>();
+        let description = format!("Does one careful thing. {}", "More detail. ".repeat(60));
+        let skills = names
+            .iter()
+            .map(|name| (name.as_str(), description.as_str()))
+            .collect::<Vec<_>>();
+        let list = skill_list(&skills);
+        assert!(list.len() <= SKILL_LIST_BUDGET, "{}", list.len());
+        let shown = described(&list);
+        let rest = listed_by_name(&list);
+        assert!(
+            !rest.is_empty() && rest.len() < names.len(),
+            "{}",
+            rest.len()
+        );
+        // The first skills are described, in order, each description cut
+        // to the limit; the others follow by name, in order.
+        let count = names.len() - rest.len();
+        for (index, name) in names.iter().enumerate() {
+            let entry = format!(" {name} (");
+            assert_eq!(shown.contains(&entry), index < count, "{name}");
+        }
+        assert_eq!(rest, names[count..]);
+        let first = shown
+            .strip_prefix(" skill-000 (")
+            .unwrap()
+            .split(").")
+            .next()
+            .unwrap();
+        assert_eq!(first.chars().count(), SKILL_DESCRIPTION_LIMIT);
+        assert!(first.ends_with('…') && first.starts_with("Does one careful thing."));
+
+        // One skill whose description alone passes the budget: cut, and
+        // nothing named.
+        let huge = "x".repeat(SKILL_LIST_BUDGET * 2);
+        let list = skill_list(&[("big", huge.as_str()), ("small", "Small")]);
+        assert!(listed_by_name(&list).is_empty());
+        assert!(list.ends_with(" small (Small)."), "{list}");
+        assert!(list.len() < 400);
+
+        // Text of several bytes a character is cut between characters.
+        let wide = "日本語の説明".repeat(600);
+        let list = skill_list(&[("wide", wide.as_str())]);
+        let kept = list
+            .strip_prefix(" Available skills: wide (")
+            .unwrap()
+            .strip_suffix(").")
+            .unwrap();
+        assert_eq!(kept.chars().count(), SKILL_DESCRIPTION_LIMIT);
+
+        // More names than half the budget holds: the first are described,
+        // the next named, and the rest counted, all within the budget, with
+        // the way to reach the counted ones.
+        let many = (0..1_000)
+            .map(|index| format!("plugin-name:skill-{index:04}"))
+            .collect::<Vec<_>>();
+        let skills = many
+            .iter()
+            .map(|name| (name.as_str(), "A skill"))
+            .collect::<Vec<_>>();
+        let list = skill_list(&skills);
+        assert!(list.len() <= SKILL_LIST_BUDGET, "{}", list.len());
+        let (_, section) = list.split_once(SKILL_NAMES_OPENING).unwrap();
+        let section = section.strip_suffix(SKILL_NAMES_ROUTE).unwrap();
+        assert!(
+            section.len() <= SKILL_LIST_BUDGET / 2 + 2,
+            "{}",
+            section.len()
+        );
+        let shown = described(&list).matches(" (A skill).").count();
+        let (listed, counted) = section.trim_end_matches('.').rsplit_once(" and ").unwrap();
+        let listed = listed.trim().split(", ").collect::<Vec<_>>();
+        assert!(shown > 0 && listed.len() > 100, "{shown} {}", listed.len());
+        assert_eq!(listed, many[shown..shown + listed.len()]);
+        assert_eq!(
+            counted,
+            format!("{} more", many.len() - shown - listed.len())
+        );
+    }
+
+    /// Past the budget, the person's own skills are described ahead of the
+    /// plugins' that sort before them; under it, the list is as given.
+    #[test]
+    fn a_long_skill_list_describes_the_persons_own_skills_first() {
+        let long = "Explains a plugin procedure at length. ".repeat(8);
+        let mut ids = (0..60)
+            .map(|index| format!("aaa-plugin:helper-{index:02}"))
+            .collect::<Vec<_>>();
+        ids.extend(["release-check", "zz-review"].map(String::from));
+        let mut skills = ids
+            .iter()
+            .map(|name| (name.as_str(), long.as_str()))
+            .collect::<Vec<_>>();
+        skills[60].1 = "Check a release is ready";
+        skills[61].1 = "Review a change";
+        let list = skill_list(&skills);
+        assert!(list.len() <= SKILL_LIST_BUDGET);
+        assert!(
+            list.starts_with(
+                " Available skills: release-check (Check a release is ready). zz-review (Review a change). aaa-plugin:helper-00 ("
+            ),
+            "{}",
+            &list[..200]
+        );
+        let (_, section) = list.split_once(SKILL_NAMES_OPENING).unwrap();
+        assert!(section.contains("aaa-plugin:helper-59") && !section.contains("release-check"));
+        // Every name fits: nothing counted, so no word on reaching them.
+        assert!(section.ends_with("aaa-plugin:helper-59."), "{section}");
+
+        let short = [("aaa-plugin:helper", "Help"), ("release-check", "Check")];
+        assert_eq!(
+            skill_list(&short),
+            " Available skills: aaa-plugin:helper (Help). release-check (Check)."
+        );
+    }
+
+    #[test]
+    fn some_names_counts_the_names_past_the_room() {
+        let names = ["alpha", "beta", "gamma", "delta"];
+        assert_eq!(some_names(&names, 100), "alpha, beta, gamma, delta");
+        assert_eq!(some_names(&names, 25), "alpha, beta, gamma, delta");
+        assert_eq!(some_names(&names, 24), "alpha, beta and 2 more");
+        assert_eq!(some_names(&names, 21), "alpha and 3 more");
+        assert_eq!(some_names(&names, 5), "4 more");
+        assert_eq!(some_names(&[], 5), "");
+        for room in 0..40 {
+            let text = some_names(&names, room);
+            assert!(text.len() <= room.max("4 more".len()), "{room}: {text}");
+        }
     }
 
     fn names(tools: &[ToolDefinition]) -> Vec<&str> {
@@ -1451,6 +1903,38 @@ mod tests {
             search_deferred_tools(&definitions, &tight.response, &["workspaces".into()]),
             ["cloud_workspace"]
         );
+    }
+
+    /// The skill tool goes with every request while it lists skills: asked
+    /// for it, the loader says so and brings the manager named after it.
+    #[test]
+    fn asked_for_the_skill_tool_the_loader_brings_its_manager() {
+        let definitions = vec![
+            definition("read", "read a file"),
+            skill_tool(&[("release-check", "Check a release is ready")]),
+            definition("skill_manage", "Create or edit Agent Skills"),
+            definition("cloud_workspace", "Remote workspaces hold skills"),
+        ];
+        let selection = select_tools(
+            definitions.clone(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::new(),
+            Some(200_000),
+            false,
+        );
+        let queries = ["skill".to_owned()];
+        let loaded = search_deferred_tools(&definitions, &selection.response, &queries);
+        let already = already_available(&definitions, &selection.response, &queries);
+        assert_eq!(loaded, ["skill_manage"]);
+        assert_eq!(already, [SKILL_TOOL_NAME]);
+        let result = load_tool_result(&loaded, &already, &[], &selection.response);
+        assert_eq!(result["loaded"][0]["id"], "skill_manage");
+        assert_eq!(result["available"], json!([SKILL_TOOL_NAME]));
     }
 
     #[test]

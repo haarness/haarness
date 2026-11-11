@@ -24,7 +24,12 @@ daemon in a private data folder shows that:
    request's before, so the cached prefix holds;
 7. a chat whose model loaded every deferred tool (what is left would no longer pay for the
    loader, so Auto decided afresh would send every schema) keeps its tool list, the loader
-   included, after a restart.
+   included, after a restart;
+8. with skills and an MCP server whose tools wait behind `load_tool`, the `skill` tool goes with
+   the first request and names every skill the model may load (a long list cut to its budget,
+   person-only skills left out), `load_tool` asked for it says it is already there and
+   loads `skill_manage`, a skill name that is no skill is answered with the names, and the
+   chat's requests send byte-identical tools before that load and after it.
 
 With --system-folder the daemon also starts with a system configuration folder
 (HAARNESS_SYSTEM_CONFIG_DIR) whose prompt files add to the main instructions and the
@@ -139,6 +144,10 @@ class Anthropic(http.server.BaseHTTPRequestHandler):
             return self.task(body, 'CHILD_FROM_' + dispatch.split('_')[1] + ' list the project files')
         if 'LOAD_A_TOOL' in prompt and not answered:
             return self.call('load_tool', {'queries': [LOADED]})
+        if 'ASK_FOR_SKILLS' in prompt and not answered:
+            return self.call('load_tool', {'queries': ['skill']})
+        if 'WRONG_SKILL' in prompt and not answered:
+            return self.call('skill', {'name': 'fixture-procedure'})
         # Load every deferred tool, twenty a call, until a load finds none.
         if 'LOAD_EVERY_TOOL' in last_typed(body) and (not answered or loaded_last(body)):
             return self.call('load_tool', {'queries': ['*']})
@@ -491,6 +500,93 @@ try:
     checks.append({'kept deferring': [f'{len(sent) - 1} loads, {len(names(last))} tools with the loader',
                                       'byte-identical after a restart']})
     print(f'PASS Auto keeps deferring after the loads and a restart ({len(names(last))} tools)', flush=True)
+
+    # 8. Skills stay listed while lazy loading defers an MCP server's tools.
+    skills_workspace = root / 'skills-workspace'
+    (skills_workspace / '.haarness').mkdir(parents=True, exist_ok=True)
+    (skills_workspace / '.haarness/config.toml').write_text(
+        f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\n[lsp]\nenabled=false\n')
+    server = root / 'mcp-fixture.py'
+    server.write_text("""import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    if request["method"] == "initialize":
+        result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "fixture", "version": "1"}}
+    elif request["method"] == "tools/list":
+        result = {"tools": [{"name": f"lookup_{i}", "description": "Look up a fixture record by its key and return it",
+                             "inputSchema": {"type": "object", "properties": {"key": {"type": "string"}}}} for i in range(10)]}
+    else:
+        result = {"content": [{"type": "text", "text": "fixture"}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+""")
+    (skills_workspace / '.haarness/haarness.json').write_text(
+        json.dumps({'mcp': {'fixture': {'type': 'local', 'command': [sys.executable, str(server)]}}}))
+    skill_names = [f'fixture-skill-{index:02d}' for index in range(40)]
+    for name in skill_names:
+        (skills_workspace / f'.haarness/skills/{name}').mkdir(parents=True, exist_ok=True)
+        (skills_workspace / f'.haarness/skills/{name}/SKILL.md').write_text(
+            f'---\nname: {name}\ndescription: {name} explains a careful procedure. ' + 'Further detail. ' * 30
+            + '\n---\nFollow the fixture procedure.\n')
+    (skills_workspace / '.haarness/skills/person-only').mkdir(parents=True, exist_ok=True)
+    (skills_workspace / '.haarness/skills/person-only/SKILL.md').write_text(
+        '---\nname: person-only\ndescription: PERSON_ONLY_SKILL\ndisable-model-invocation: true\n---\nBody\n')
+    run(['git', 'init', '-q', str(skills_workspace)])
+    skills_args = [str(BINARY), '--workspace', str(skills_workspace), '--trust-project']
+    first_connection = connection
+    try:
+        connection = json.loads(run(skills_args + ['desktop'], input='{"action":"connect"}', env=env, timeout=120))
+        until(lambda: any(item['name'] == 'fixture' and item['status'] == 'connected' for item in api('/mcp')),
+              'the MCP fixture did not connect')
+        listed = chat('Skill list fixture')
+        offset = len(REQUESTS)
+        assert turn(listed, 'FIRST skills turn')['status'] == 'completed'
+        assert turn(listed, 'WRONG_SKILL please')['status'] == 'completed'
+        assert turn(listed, 'ASK_FOR_SKILLS please')['status'] == 'completed'
+        assert turn(listed, 'LAST skills turn')['status'] == 'completed'
+        sent = tool_requests(offset)
+        assert len(sent) == 6, [names(body) for body in sent]
+        first = sent[0]
+        catalog = api(f'/tools?threadId={listed}')
+        deferred = [entry['id'] for entry in catalog['tools'] if entry['enabled'] and not entry['advertised']]
+        assert catalog['lazyActive'] and 'load_tool' in names(first), names(first)
+        assert any(name.startswith('mcp__fixture__') for name in deferred), deferred
+        assert not any(name.startswith('mcp__') for name in names(first)), names(first)
+        assert 'skill' in names(first), names(first)
+        description = next(tool['description'] for tool in first['tools'] if tool['name'] == 'skill')
+        missing = [name for name in skill_names if name not in description]
+        assert not missing, missing
+        assert 'person-only' not in description and 'PERSON_ONLY_SKILL' not in description, description
+        assert ' More skills: ' in description, description[-400:]
+        listing = description[description.index(' Available skills:'):]
+        assert len(listing.encode()) <= 8 * 1024, len(listing.encode())
+        def answer(body):
+            block = next(block for block in body['messages'][-1]['content'] if block.get('type') == 'tool_result')
+            content = block['content']
+            return content if isinstance(content, str) else ''.join(part.get('text', '') for part in content)
+        wrong = answer(sent[2])
+        assert 'not found: skill fixture-procedure.' in wrong and 'fixture-skill-00' in wrong, wrong
+        assert 'person-only' not in wrong and 'load_tool' not in wrong, wrong
+        loaded = json.loads(answer(sent[4]))
+        assert 'Already in your tool list' in loaded['message'] and loaded['available'] == ['skill'], loaded
+        assert [tool['id'] for tool in loaded['loaded']] == ['skill_manage'], loaded
+        for body in sent[1:4]:
+            assert json.dumps(body['tools']) == json.dumps(first['tools']), \
+                f'the tools changed in the chat: {sorted(set(names(first)) ^ set(names(body)))}'
+        # The load adds skill_manage on the next round, and it stays.
+        for body in sent[4:]:
+            assert names(body) == sorted(names(first)[:-1] + ['skill_manage']) + ['load_tool'], names(body)
+        assert json.dumps(sent[5]['tools']) == json.dumps(sent[4]['tools']), 'the tools changed after the load'
+        (EVIDENCE / 'skill-list-requests.json').write_text(json.dumps(sent, indent=2))
+    finally:
+        subprocess.run(skills_args + ['serve', '--stop'], env=env, capture_output=True, timeout=60)
+        connection = first_connection
+    checks.append({'skill list': [f'{len(skill_names)} skills named with MCP tools deferred', 'person-only skill left out',
+                                  f'list {len(listing.encode())} bytes', 'an unknown skill name answered with the names',
+                                  'load_tool says skill is there and loads skill_manage',
+                                  '4 requests with byte-identical tools before that load, 2 after']})
+    print(f'PASS the skill tool lists {len(skill_names)} skills while lazy loading defers MCP tools', flush=True)
     (EVIDENCE / 'results.json').write_text(json.dumps(checks, indent=2))
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)
