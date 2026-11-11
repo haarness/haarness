@@ -67,11 +67,47 @@ pub fn tab_span(template: &Span, cells: usize) -> Span {
     span
 }
 
+/// Whether `text` holds only printable ASCII, tabs and line breaks: there,
+/// once the line breaks read as spaces, each byte is a grapheme of one cell
+/// but a tab, which reaches its stop. The common case reads it byte by byte.
+fn plain_ascii(text: &str) -> bool {
+    text.bytes()
+        .all(|byte| matches!(byte, b'\t' | b'\n' | b'\r' | 0x20..=0x7e))
+}
+
+/// Cells a byte of [`plain_ascii`] text takes at `column`.
+const fn ascii_cells(column: usize, byte: u8, stops: usize) -> usize {
+    if byte == b'\t' {
+        tab_cells(column, stops)
+    } else {
+        1
+    }
+}
+
 /// [`single_line`] for a line whose tabs [`expand_tabs`] draws: its tabs
 /// stay, each measured to the next of the `stops`.
 pub fn single_code_line(value: &str, width: usize, stops: usize) -> String {
     if !value.contains('\t') {
         return single_line(value, width);
+    }
+    if plain_ascii(value) {
+        let mut used = 0;
+        let mut end = None;
+        let budget = width.saturating_sub(1);
+        for (index, byte) in value.bytes().enumerate() {
+            let cells = ascii_cells(used, byte, stops);
+            if end.is_none() && used + cells > budget {
+                end = Some(index);
+            }
+            used += cells;
+        }
+        let value = value.replace(['\n', '\r'], " ");
+        return match end {
+            _ if used <= width => value,
+            _ if width == 0 => String::new(),
+            Some(end) => format!("{}…", &value[..end]),
+            None => value,
+        };
     }
     let value = value.replace(['\n', '\r'], " ");
     let total = value
@@ -122,9 +158,23 @@ pub fn code_line_spans(
         );
     }
     let text = text.replace(['\n', '\r'], " ");
-    let total = text.graphemes(true).fold(0, |used, grapheme| {
-        used + code_cells(column + used, grapheme, stops)
-    });
+    // Plain ASCII is read byte by byte, each byte one grapheme.
+    let ascii = plain_ascii(&text);
+    let units = || -> Box<dyn Iterator<Item = &str> + '_> {
+        if ascii {
+            Box::new((0..text.len()).map(|index| &text[index..=index]))
+        } else {
+            Box::new(text.graphemes(true))
+        }
+    };
+    let cells_at = |at: usize, unit: &str| {
+        if ascii {
+            ascii_cells(at, unit.as_bytes()[0], stops)
+        } else {
+            code_cells(at, unit, stops)
+        }
+    };
+    let total = units().fold(0, |used, unit| used + cells_at(column + used, unit));
     let fits = total <= width;
     if !fits && width == 0 {
         return (Vec::new(), 0);
@@ -136,8 +186,8 @@ pub fn code_line_spans(
         span
     };
     let (mut spans, mut run, mut used) = (Vec::new(), String::new(), 0);
-    for grapheme in text.graphemes(true) {
-        let cells = code_cells(column + used, grapheme, stops);
+    for grapheme in units() {
+        let cells = cells_at(column + used, grapheme);
         if used + cells > budget {
             break;
         }
@@ -170,13 +220,15 @@ pub fn expand_tabs(spans: Vec<Span>, stops: usize) -> Vec<Span> {
     }
     let mut column = 0;
     let mut opened = Vec::with_capacity(spans.len() + 2);
-    for span in spans {
+    for mut span in spans {
         if !span.text.contains('\t') {
             column += span.width();
             opened.push(span);
             continue;
         }
-        for (index, piece) in span.text.split('\t').enumerate() {
+        // The span, its text taken out, is the style each piece is made from.
+        let text = std::mem::take(&mut span.text);
+        for (index, piece) in text.split('\t').enumerate() {
             if index > 0 {
                 let cells = tab_cells(column, stops);
                 opened.push(tab_span(&span, cells));
@@ -185,7 +237,11 @@ pub fn expand_tabs(spans: Vec<Span>, stops: usize) -> Vec<Span> {
             if !piece.is_empty() {
                 let mut part = span.clone();
                 piece.clone_into(&mut part.text);
-                column += part.width();
+                column += if piece.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
+                    piece.len()
+                } else {
+                    part.width()
+                };
                 opened.push(part);
             }
         }
