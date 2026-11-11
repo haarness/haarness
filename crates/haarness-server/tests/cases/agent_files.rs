@@ -1,8 +1,11 @@
-//! Subagents as Claude Code runs them: a subagent's own `task` runs in the
-//! foreground, and a continued subagent keeps its agent and model.
+//! Agent files as Claude Code writes them: an agent that lists `Bash`
+//! follows its own commands, a `tools` pattern limits the agent, a
+//! subagent's own `task` runs in the foreground, and a continued subagent
+//! keeps its agent and model.
 use super::*;
 use haarness_protocol::ItemData;
 use serde_json::json;
+use std::collections::HashMap;
 
 struct Fixture(std::path::PathBuf);
 impl Fixture {
@@ -41,6 +44,16 @@ fn review() -> RuntimeConfig {
     RuntimeConfig {
         approval_mode: haarness_protocol::ApprovalMode::Review,
         ..RuntimeConfig::default()
+    }
+}
+
+fn rule(
+    pattern: &str,
+    decision: haarness_core::PermissionDecision,
+) -> haarness_core::PermissionRule {
+    haarness_core::PermissionRule {
+        pattern: pattern.into(),
+        decision,
     }
 }
 
@@ -85,6 +98,114 @@ async fn only_child(
     }
     assert_eq!(children.len(), 1, "{children:?}");
     children[0]
+}
+
+#[tokio::test]
+async fn an_agent_that_lists_bash_can_follow_and_stop_its_commands() {
+    let fixture = Fixture::new("agent-bash-follow");
+    let provider = Arc::new(Capturing::default());
+    let mut config = review();
+    config.custom_agents.push(haarness_core::CustomAgent {
+        id: "runner".into(),
+        prompt: "Run things.".into(),
+        mode: Some("subagent".into()),
+        // `tools: Bash, Read` in a Claude Code agent file.
+        tools: HashMap::from([
+            ("*".into(), false),
+            ("bash".into(), true),
+            ("read".into(), true),
+        ]),
+        ..Default::default()
+    });
+    let runtime = runtime_with(
+        &fixture,
+        provider.clone(),
+        Arc::new(NativeToolRegistry::new(fixture.0.clone())),
+        config,
+    );
+    let chat = echo_thread(&runtime).await;
+    let task = json!({"prompt": "RUNNER_CHILD go", "agent": "runner", "description": "run"});
+    let turn = runtime
+        .start_turn(chat.id, turn_request(&format!("!tool task {task}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let requests = provider.requests.lock().unwrap().clone();
+    let names: Vec<String> = request_for(&requests, "RUNNER_CHILD")
+        .tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect();
+    for listed in ["bash", "bash_output", "bash_stop", "read"] {
+        assert!(names.contains(&listed.to_owned()), "{listed}: {names:?}");
+    }
+    assert!(!names.contains(&"grep".to_owned()), "{names:?}");
+}
+
+#[tokio::test]
+async fn a_tools_pattern_limits_the_agent_even_when_every_ask_is_approved() {
+    let fixture = Fixture::new("agent-tool-pattern");
+    let mut config = review();
+    config.custom_agents.push(haarness_core::CustomAgent {
+        id: "echoer".into(),
+        prompt: "Echo things.".into(),
+        mode: Some("subagent".into()),
+        // `tools: Bash(printf:*)` in a Claude Code agent file.
+        tools: HashMap::from([("*".into(), false), ("bash".into(), true)]),
+        ceiling: vec![
+            rule("bash:*", haarness_core::PermissionDecision::Deny),
+            rule("bash:printf *", haarness_core::PermissionDecision::Allow),
+        ],
+        ..Default::default()
+    });
+    let runtime = runtime_with(
+        &fixture,
+        Arc::new(Capturing::default()),
+        Arc::new(NativeToolRegistry::new(fixture.0.clone())),
+        config,
+    );
+    let chat = echo_thread(&runtime).await;
+    for command in [
+        "printf LIMITED_OK",
+        "printf x && touch breach.txt",
+        "touch breach.txt",
+    ] {
+        let bash = json!({ "command": command });
+        let task = json!({"prompt": format!("!tool bash {bash}"), "agent": "echoer", "description": "echo"});
+        let mut request = turn_request(&format!("!tool task {task}"));
+        request.auto_approve = true;
+        let turn = runtime.start_turn(chat.id, request).await.unwrap();
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+    }
+    assert!(!fixture.0.join("breach.txt").exists());
+    let mut results = Vec::new();
+    for child in runtime.thread_tree_ids(chat.id).await.unwrap() {
+        results.extend(tool_results(
+            &runtime.items(child, None).await.unwrap(),
+            "bash",
+        ));
+    }
+    assert!(
+        results
+            .iter()
+            .any(|(output, failed)| !failed && output.contains("LIMITED_OK")),
+        "{results:?}"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(output, failed)| *failed && output.contains("bash:*"))
+            .count(),
+        2,
+        "{results:?}"
+    );
+    assert!(runtime.pending_permissions().is_empty());
 }
 
 #[tokio::test]

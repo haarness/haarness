@@ -40,6 +40,11 @@ pub struct CustomAgent {
     /// folders or its local plugins) rather than by the person or the
     /// system folder: its rules never reopen what their rules deny.
     pub project: bool,
+    /// The limits a `tools` entry with a pattern sets (`Bash(git diff:*)`):
+    /// that tool is denied except for the pattern. A ceiling, so no rule,
+    /// Always answer or Yolo reopens the rest, and the agent's children
+    /// inherit it.
+    pub ceiling: Vec<PermissionRule>,
 }
 
 impl CustomAgent {
@@ -47,12 +52,18 @@ impl CustomAgent {
     /// agent the person or the system folder defines join the floor too, so
     /// its allow still lifts their deny for this agent, as it always did; a
     /// project's agent's rules never do (see `PermissionEngine::set_floor`).
+    /// The limits its patterned `tools` entries set bound the engine.
     pub fn apply_permissions(&self, engine: &mut crate::PermissionEngine) {
         for rule in &self.permissions {
             if !self.project {
                 engine.add_floor_rule(rule.clone());
             }
             engine.add_rule(rule.clone());
+        }
+        // A ruleset of its own, so its allow never reopens what another
+        // ceiling denies (the plan agent's on edits).
+        if !self.ceiling.is_empty() {
+            engine.add_inherited_ceiling([self.ceiling.clone()]);
         }
     }
 }

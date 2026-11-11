@@ -16322,6 +16322,15 @@ fn task_envelope_for(child: ThreadId, description: &str, state: &str, text: &str
 }
 
 fn turn_tool_enabled(overrides: Option<&HashMap<String, bool>>, name: &str) -> bool {
+    // Following and stopping commands goes with running them: a list that
+    // keeps `bash` and turns the rest off (`*: false`, an agent's `tools`)
+    // keeps them too, unless it names them itself.
+    if matches!(name, "bash_output" | "bash_stop") {
+        return overrides
+            .and_then(|tools| tools.get(name))
+            .copied()
+            .unwrap_or(true);
+    }
     overrides
         .and_then(|tools| crate::definitions::tool_override(tools, name))
         .unwrap_or(true)
@@ -22426,6 +22435,23 @@ mod tests {
             "unspecified tools retain their normal availability"
         );
         assert!(super::turn_tool_enabled(None, "bash"));
+    }
+
+    #[test]
+    fn an_allowlist_that_keeps_bash_keeps_following_and_stopping_commands() {
+        let allowlist = HashMap::from([
+            ("*".to_owned(), false),
+            ("bash".to_owned(), true),
+            ("read".to_owned(), true),
+        ]);
+        assert!(super::turn_tool_enabled(Some(&allowlist), "bash_output"));
+        assert!(super::turn_tool_enabled(Some(&allowlist), "bash_stop"));
+        assert!(!super::turn_tool_enabled(Some(&allowlist), "grep"));
+        // An entry of their own still turns them off.
+        let mut named = allowlist;
+        named.insert("bash_stop".into(), false);
+        assert!(super::turn_tool_enabled(Some(&named), "bash_output"));
+        assert!(!super::turn_tool_enabled(Some(&named), "bash_stop"));
     }
 
     #[test]

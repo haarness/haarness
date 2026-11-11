@@ -1284,6 +1284,7 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
                     steps: entry
                         .get("steps")
                         .or_else(|| entry.get("maxSteps"))
+                        .or_else(|| entry.get("maxTurns"))
                         .and_then(Value::as_u64)
                         .and_then(|value| u32::try_from(value).ok())
                         .filter(|value| *value > 0),
@@ -1294,6 +1295,7 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
                         .and_then(Value::as_str)
                         .map(str::to_owned),
                     project: layers.project,
+                    ceiling: Vec::new(),
                 },
             );
         }
@@ -2097,15 +2099,19 @@ fn discover_agents_with(
                     }),
                 hidden: front.get("hidden").is_some_and(|value| value == "true"),
                 color: front.get("color").map(String::as_str).and_then(agent_color),
+                // Claude Code's `maxTurns` counts the same rounds; `steps`
+                // or `maxSteps` decide when the file sets either.
                 steps: front
                     .get("steps")
                     .or_else(|| front.get("maxSteps"))
+                    .or_else(|| front.get("maxTurns"))
                     .and_then(|raw| raw.trim().parse::<u32>().ok())
                     .filter(|value| *value > 0),
                 temperature: number("temperature"),
                 top_p: number("top_p"),
                 variant: front.get("variant").cloned(),
                 project,
+                ceiling: markdown_agent_ceiling(&front),
             },
         );
     }
@@ -2163,6 +2169,57 @@ fn scoped_agent_name(plugin: &str, relative: &str, explicit: Option<&str>) -> St
         *leaf = explicit;
     }
     format!("{plugin}:{}", parts.join(":"))
+}
+
+/// The limit a markdown agent's `tools` list sets with entries that carry a
+/// pattern: `Bash(git diff:*)` keeps the shell to `git diff`, read as a
+/// skill's `allowed-tools` reads the same entry. Each such tool is denied
+/// but for its patterns; a tool the list also names bare keeps all of it.
+fn markdown_agent_ceiling(front: &BTreeMap<String, String>) -> Vec<PermissionRule> {
+    let Some(raw) = front.get("tools") else {
+        return Vec::new();
+    };
+    if matches!(serde_json::from_str::<Value>(raw), Ok(Value::Object(_))) {
+        return Vec::new();
+    }
+    let entries = haarness_core::definitions::list(Some(raw));
+    let pattern = |entry: &str| {
+        entry
+            .split_once('(')
+            .map(|(_, pattern)| pattern.trim_end_matches(')').trim().to_owned())
+            .filter(|pattern| !pattern.is_empty() && pattern != "*")
+    };
+    let whole: HashSet<String> = entries
+        .iter()
+        .filter(|entry| pattern(entry).is_none())
+        .flat_map(|entry| haarness_core::definitions::tool_names(entry))
+        .collect();
+    let mut limited: Vec<(String, Vec<PermissionRule>)> = Vec::new();
+    for entry in entries.iter().filter(|entry| pattern(entry).is_some()) {
+        for rule in haarness_core::definitions::approval_rules(std::slice::from_ref(entry)) {
+            let Some((tool, _)) = rule.pattern.split_once(':') else {
+                continue;
+            };
+            if whole.contains(tool) {
+                continue;
+            }
+            let tool = tool.to_owned();
+            match limited.iter_mut().find(|(name, _)| *name == tool) {
+                Some((_, allows)) => allows.push(rule),
+                None => limited.push((tool, vec![rule])),
+            }
+        }
+    }
+    limited
+        .into_iter()
+        .flat_map(|(tool, allows)| {
+            std::iter::once(PermissionRule {
+                pattern: format!("{tool}:*"),
+                decision: PermissionDecision::Deny,
+            })
+            .chain(allows)
+        })
+        .collect()
 }
 
 fn markdown_agent_tools(front: &BTreeMap<String, String>) -> HashMap<String, bool> {
@@ -4403,6 +4460,117 @@ mod tests {
         assert_eq!(quiet.steps, Some(12));
         assert_eq!(quiet.variant.as_deref(), Some("fast"));
         assert_eq!(agent_color("lime"), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_code_agent_turns_and_tool_patterns_mean_what_they_say() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-claude-agents-{}", uuid::Uuid::now_v7()));
+        let agents_dir = root.join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+        for (name, front) in [
+            ("turns", "maxTurns: 3"),
+            ("steps-win", "steps: 5\nmaxTurns: 3"),
+            ("max-steps-win", "maxSteps: 7\nmaxTurns: 3"),
+            ("runner", "tools: Bash, Read"),
+            ("follower", "tools: Bash, BashOutput, KillShell"),
+            ("differ", "tools: Read, Bash(git diff:*), Bash(git log:*)"),
+            ("whole", "tools: Bash(git diff:*), Bash"),
+        ] {
+            fs::write(
+                agents_dir.join(format!("{name}.md")),
+                format!("---\ndescription: {name}\n{front}\n---\nWork."),
+            )
+            .unwrap();
+        }
+        let mut agents = Vec::new();
+        let mut notices = Vec::new();
+        discover_agents_with(
+            &mut agents,
+            &mut notices,
+            &agents_dir,
+            &agents_dir,
+            Some("kit"),
+            true,
+            false,
+        );
+        let agent = |name: &str| {
+            agents
+                .iter()
+                .find(|agent| agent.id == format!("kit:{name}"))
+                .unwrap_or_else(|| panic!("{name}: {notices:?}"))
+        };
+        assert_eq!(agent("turns").steps, Some(3));
+        assert_eq!(agent("steps-win").steps, Some(5));
+        assert_eq!(agent("max-steps-win").steps, Some(7));
+        let runner = agent("runner");
+        assert_eq!(runner.tools.get("*"), Some(&false));
+        assert_eq!(runner.tools.get("bash"), Some(&true));
+        assert!(runner.ceiling.is_empty());
+        let follower = agent("follower");
+        assert_eq!(follower.tools.get("bash_output"), Some(&true));
+        assert_eq!(follower.tools.get("bash_stop"), Some(&true));
+        let patterns = |agent: &CustomAgent| {
+            agent
+                .ceiling
+                .iter()
+                .map(|rule| (rule.pattern.clone(), rule.decision))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            patterns(agent("differ")),
+            [
+                ("bash:*".to_owned(), PermissionDecision::Deny),
+                ("bash:git diff *".to_owned(), PermissionDecision::Allow),
+                ("bash:git log *".to_owned(), PermissionDecision::Allow),
+            ]
+        );
+        assert_eq!(agent("differ").tools.get("bash"), Some(&true));
+        assert!(agent("whole").ceiling.is_empty());
+
+        // The limit holds in the agent's rules, however wide the rules
+        // around it are: it never grants, and nothing reopens it.
+        let mut engine = haarness_core::PermissionEngine::build_defaults();
+        engine.add_rule(rule("bash:*", PermissionDecision::Allow));
+        engine.approve_always("bash:rm *");
+        agent("differ").apply_permissions(&mut engine);
+        for (operation, decision) in [
+            ("bash:git diff HEAD", PermissionDecision::Allow),
+            ("bash:git diff", PermissionDecision::Allow),
+            ("bash:git log -3", PermissionDecision::Allow),
+            ("bash:rm x", PermissionDecision::Deny),
+            ("bash:git push", PermissionDecision::Deny),
+            ("read:src/lib.rs", PermissionDecision::Allow),
+        ] {
+            assert_eq!(engine.evaluate(operation), decision, "{operation}");
+        }
+        // Its children inherit it.
+        let mut child = haarness_core::PermissionEngine::build_defaults();
+        child.add_inherited_ceiling(engine.boundary());
+        assert_eq!(child.evaluate("bash:rm x"), PermissionDecision::Deny);
+        assert_eq!(
+            child.evaluate("bash:git diff HEAD"),
+            PermissionDecision::Allow
+        );
+
+        // A JSON entry reads `maxTurns` too.
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            workspace.join("haarness.json"),
+            serde_json::json!({"agent": {
+                "listed": {"prompt": "P", "maxTurns": 4},
+                "named": {"prompt": "P", "steps": 2, "maxTurns": 4}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let layers = load_layers(&root.join("config"), None, &workspace, true, &[]);
+        let listed = layers.agents.iter().find(|a| a.id == "listed").unwrap();
+        assert_eq!(listed.steps, Some(4));
+        let named = layers.agents.iter().find(|a| a.id == "named").unwrap();
+        assert_eq!(named.steps, Some(2));
         fs::remove_dir_all(root).unwrap();
     }
 

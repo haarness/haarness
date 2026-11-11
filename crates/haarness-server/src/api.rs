@@ -1782,33 +1782,37 @@ async fn start_turn(
             .runtime
             .message_agent(request.agent.as_deref(), request.command.as_deref()),
     ];
-    let turn = admit(resources.is_empty(), async move {
-        let _reading = read_mentions(
-            &state,
-            &headers,
-            Mentioning {
-                chat: id,
-                request: request.request_id,
-                agents,
-            },
-            resources,
-            &mut request.text,
-            &mut request.attachments,
-        )
-        .await?;
-        state
-            .runtime
-            .start_turn(id, request)
-            .await
-            .map_err(|error| match error {
-                // A chat busy elsewhere is said as a sentence, without the
-                // category the error type adds ("conflict: …").
-                CoreError::Conflict(message) => {
-                    ApiFailure(CoreError::Conflict(message.clone()), Some(message))
-                }
-                other => other.into(),
-            })
-    })
+    // Boxed: a turn's start is a large future too.
+    let turn = admit(
+        resources.is_empty(),
+        Box::pin(async move {
+            let _reading = read_mentions(
+                &state,
+                &headers,
+                Mentioning {
+                    chat: id,
+                    request: request.request_id,
+                    agents,
+                },
+                resources,
+                &mut request.text,
+                &mut request.attachments,
+            )
+            .await?;
+            state
+                .runtime
+                .start_turn(id, request)
+                .await
+                .map_err(|error| match error {
+                    // A chat busy elsewhere is said as a sentence, without the
+                    // category the error type adds ("conflict: …").
+                    CoreError::Conflict(message) => {
+                        ApiFailure(CoreError::Conflict(message.clone()), Some(message))
+                    }
+                    other => other.into(),
+                })
+        }),
+    )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(turn)))
 }

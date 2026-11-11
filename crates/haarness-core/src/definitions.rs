@@ -441,6 +441,10 @@ pub fn tool_names(name: &str) -> Vec<String> {
         "Write" => vec!["write"],
         "Edit" | "MultiEdit" | "NotebookEdit" => vec!["edit", "apply_patch"],
         "Bash" => vec!["bash"],
+        // Claude Code's names, old and new, for reading and stopping a
+        // command in the background.
+        "BashOutput" | "TaskOutput" => vec!["bash_output"],
+        "KillShell" | "KillBash" | "TaskStop" => vec!["bash_stop"],
         "Grep" => vec!["grep"],
         "Glob" => vec!["glob"],
         "LS" => vec!["list"],
@@ -1777,5 +1781,15 @@ mod tests {
         assert!(text.contains("note body"));
         assert!(!text.contains("task tool"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_code_background_command_tools_have_haarness_names() {
+        for name in ["BashOutput", "TaskOutput"] {
+            assert_eq!(tool_names(name), ["bash_output"], "{name}");
+        }
+        for name in ["KillShell", "KillBash", "TaskStop"] {
+            assert_eq!(tool_names(name), ["bash_stop"], "{name}");
+        }
     }
 }

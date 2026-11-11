@@ -47,6 +47,11 @@ write(plugins/'a/skills/readonly/SKILL.md','---\nname: readonly\ndescription: Re
 write(plugins/'a/commands/named.md','---\narguments: [file, target, missing]\n---\nNAMED $file to $target ($missing) MISSING $5\nPROJECT ${CLAUDE_PROJECT_DIR}\n')
 write(plugins/'a/commands/failed-context.md','---\ndescription: Failed context\n---\nNEVER_RENDER !`exit 2`\n')
 write(workspace/'.haarness/skills/standalone/SKILL.md','---\nname: standalone\ndescription: Local skill\n---\nSTANDALONE_BODY $ARGUMENTS\n')
+# Claude Code agent fields: a turn limit, a shell agent that follows its commands, a tool kept to a pattern.
+write(plugins/'a/agents/turns.md','---\ndescription: One step\nmaxTurns: 1\n---\nTake one step.\n')
+write(plugins/'a/agents/runner.md','---\ndescription: Shell runner\ntools: Bash, Read\n---\nRun commands.\n')
+write(plugins/'a/agents/printer.md','---\ndescription: Printer\ntools: Read, Bash(printf:*)\n---\nPrint only.\n')
+write(workspace/'keep.txt','kept')
 # Projects whose folder names hold shell syntax and a snippet: the names must stay plain text.
 odd=root/'odd $(printf INJECTED) folder';odd_snippet=root/'w !`printf SNIPPET`'
 write(odd/'.haarness/commands/where.md','---\ndescription: Folder in a snippet\n---\nWHERE !`printf \'[%s]\' "${CLAUDE_PROJECT_DIR}" \'${CLAUDE_PROJECT_DIR}\' "$(dirname "${CLAUDE_PROJECT_DIR}")"`\n')
@@ -100,6 +105,16 @@ try:
  check('a folder name in the text never starts a snippet',f'PROJECT {odd_snippet}' in result['out'],result)
  result=run('','--command','a:failed-context')
  check('failed context aborts invocation',result['code']!=0 and 'NEVER_RENDER' not in result['out'],result)
+ result=run('!tool read {"path":"keep.txt"}','--agent','a:turns')
+ check('maxTurns is the agent step limit','maximum number of tool steps' in result['out'],result)
+ result=run('!tool bash_output {"id":"cmd_missing"}','--agent','a:runner')
+ check('an agent that lists Bash keeps bash_output',result['code']==0 and 'disabled' not in result['out']+result['err'] and 'unknown tool' not in result['out']+result['err'],result)
+ result=run('!tool bash_output {"id":"cmd_missing"}','--agent','a:restricted')
+ check('an agent without Bash has no bash_output','disabled' in result['out']+result['err'] or 'unknown tool' in result['out']+result['err'],result)
+ result=run('!tool bash {"command":"printf PATTERN_OK"}','--agent','a:printer')
+ check('a tools pattern allows what it names','PATTERN_OK' in result['out'],result)
+ result=cli('--yolo','run','!tool bash {"command":"printf x && touch pattern-breach"}','--provider','echo','--model','echo-1','--agent','a:printer')
+ check('a tools pattern refuses the rest even in Yolo',not (workspace/'pattern-breach').exists() and 'bash:*' in result['out']+result['err'],result)
  result=run('!tool write {"path":"unknown-breach.txt","content":"bad"}','--agent','a:missing')
  check('unknown agents fail closed',result['code']!=0 and not (workspace/'unknown-breach.txt').exists(),result)
  before={t['id'] for t in api('/threads')};result=run('research','--command','a:forked')
