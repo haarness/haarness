@@ -8,7 +8,11 @@ use haarness_core::{
 use haarness_protocol::{ModelInfo, ModelPricing, ProviderInfo};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -39,6 +43,10 @@ pub struct OpenAiProvider {
     /// Every slug the ChatGPT transport accepts for this account, including
     /// hidden and retiring models that existing threads may still use.
     chatgpt_accepted: std::sync::RwLock<Option<HashSet<String>>>,
+    /// Reasoning levels the provider refused for a model, by wire model and
+    /// level asked for, with the level it took instead (see
+    /// [`fitted_effort`]).
+    refused_efforts: std::sync::Mutex<HashMap<(String, String), String>>,
 }
 
 /// What a ChatGPT account may run, read from its own catalog.
@@ -63,6 +71,7 @@ impl OpenAiProvider {
             live_models: crate::live_models::LiveModels::default(),
             chatgpt_models: crate::live_models::LiveModels::default(),
             chatgpt_accepted: std::sync::RwLock::default(),
+            refused_efforts: std::sync::Mutex::default(),
             models: preferred_models(),
         }
     }
@@ -213,6 +222,7 @@ impl OpenAiProvider {
             live_models: crate::live_models::LiveModels::default(),
             chatgpt_models: crate::live_models::LiveModels::default(),
             chatgpt_accepted: std::sync::RwLock::default(),
+            refused_efforts: std::sync::Mutex::default(),
             models: preferred_models(),
         }
     }
@@ -237,6 +247,7 @@ impl OpenAiProvider {
             live_models: crate::live_models::LiveModels::default(),
             chatgpt_models: crate::live_models::LiveModels::default(),
             chatgpt_accepted: std::sync::RwLock::default(),
+            refused_efforts: std::sync::Mutex::default(),
             models: preferred_models(),
         }
     }
@@ -315,6 +326,26 @@ impl OpenAiProvider {
         request_auth_from_credential(&credential, &self.oauth)
     }
 
+    /// The level to send for `effort` on `model`: the one the provider took
+    /// when it last refused `effort` for it, else `effort`.
+    fn remembered_effort(&self, model: &str, effort: String) -> String {
+        self.refused_efforts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(model.to_owned(), effort.clone()))
+            .cloned()
+            .unwrap_or(effort)
+    }
+
+    fn remember_effort(&self, model: &str, asked: &str, level: &str) {
+        if asked != level {
+            self.refused_efforts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert((model.to_owned(), asked.to_owned()), level.to_owned());
+        }
+    }
+
     fn uses_chatgpt_oauth(&self) -> bool {
         self.api_key.is_none()
             && self.auth_store.as_ref().is_some_and(|store| {
@@ -381,6 +412,15 @@ fn effort_rank(level: &str) -> usize {
         .unwrap_or(haarness_protocol::REASONING_EFFORTS.len())
 }
 
+/// Levels the ChatGPT catalog lists that are modes of Codex's own client, not
+/// reasoning efforts its transport takes. `ultra` is "maximum reasoning with
+/// automatic task delegation": `max`, with Codex handing parts of the task to
+/// agents of its own. Sent as an effort it fails every request ("Invalid
+/// value: 'ultra'"), so a person who chose the strongest level offered had
+/// every turn fail. Haarness's `max` is the same reasoning, and ultracode its
+/// own way to hand work out.
+const CODEX_MODES: [&str; 1] = ["ultra"];
+
 /// Parse the ChatGPT account catalog. Hidden entries and models carrying a
 /// retirement notice stay out of the advertised list but remain accepted, so
 /// a thread already on one keeps working until the backend itself says no.
@@ -400,7 +440,7 @@ fn chatgpt_catalog(body: &Value) -> Option<ChatGptCatalog> {
             continue;
         }
         // Every level the account lists is kept, in its order, including
-        // ones newer than the shared scale.
+        // ones newer than the shared scale, except Codex's own modes.
         let efforts: Vec<String> = entry["supported_reasoning_levels"]
             .as_array()
             .map(|levels| {
@@ -408,6 +448,7 @@ fn chatgpt_catalog(body: &Value) -> Option<ChatGptCatalog> {
                     .iter()
                     .filter_map(|level| level["effort"].as_str())
                     .filter(|effort| !effort.trim().is_empty())
+                    .filter(|effort| !CODEX_MODES.contains(effort))
                     .map(str::to_owned)
                     .collect()
             })
@@ -538,12 +579,31 @@ impl ModelProvider for OpenAiProvider {
     }
 
     fn info(&self) -> ProviderInfo {
-        let models = if self.uses_chatgpt_oauth() {
+        let subscription = self.uses_chatgpt_oauth();
+        let mut models = if subscription {
             self.chatgpt_models
                 .get(&chatgpt_fallback_models(&self.models))
         } else {
             self.live_models.get(&self.models)
         };
+        // A level the provider refused for a model is not offered again.
+        let refused = self
+            .refused_efforts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !refused.is_empty() {
+            for model in &mut models {
+                let wire = if subscription {
+                    chatgpt_alias(&model.id)
+                } else {
+                    &model.id
+                };
+                model
+                    .reasoning_efforts
+                    .retain(|level| !refused.contains_key(&(wire.to_owned(), level.clone())));
+            }
+        }
+        drop(refused);
         ProviderInfo {
             id: "openai".into(),
             name: "OpenAI".into(),
@@ -667,8 +727,13 @@ impl ModelProvider for OpenAiProvider {
         if structured_output.is_some() {
             body["tool_choice"] = json!("required");
         }
-        let sampling_allowed = sampling_allowed(model, request.reasoning_effort.as_deref());
-        if let Some(effort) = request.reasoning_effort {
+        // A level this provider refused for the model before goes as the
+        // level it took then.
+        let effort = request
+            .reasoning_effort
+            .map(|effort| self.remembered_effort(model, effort));
+        let sampling = sampling_allowed(model, effort.as_deref());
+        if let Some(effort) = &effort {
             body["reasoning"] = json!({"effort": effort, "summary": "auto"});
         }
         let parameters = request.parameters;
@@ -681,53 +746,87 @@ impl ModelProvider for OpenAiProvider {
             if let Some(limit) = parameters.max_output_tokens.filter(|limit| *limit > 0) {
                 body["max_output_tokens"] = json!(limit);
             }
-            if let Some(temperature) = parameters.temperature.filter(|_| sampling_allowed) {
+            if let Some(temperature) = parameters.temperature.filter(|_| sampling) {
                 body["temperature"] = json!(temperature);
             }
-            if let Some(top_p) = parameters.top_p.filter(|_| sampling_allowed) {
+            if let Some(top_p) = parameters.top_p.filter(|_| sampling) {
                 body["top_p"] = json!(top_p);
             }
         }
-        let mut request = match &auth {
-            RequestAuth::Api(key) => self.client.post(&self.endpoint).bearer_auth(key),
-            RequestAuth::OAuth {
-                access,
-                account_id,
-                residency,
-                endpoint,
-            } => {
-                let mut request = self.client.post(endpoint).bearer_auth(access);
-                if let Some(account_id) = account_id {
-                    request = request.header("ChatGPT-Account-Id", account_id);
+        let post = |body: &Value| {
+            let mut request = match &auth {
+                RequestAuth::Api(key) => self.client.post(&self.endpoint).bearer_auth(key),
+                RequestAuth::OAuth {
+                    access,
+                    account_id,
+                    residency,
+                    endpoint,
+                } => {
+                    let mut request = self.client.post(endpoint).bearer_auth(access);
+                    if let Some(account_id) = account_id {
+                        request = request.header("ChatGPT-Account-Id", account_id);
+                    }
+                    if let Some(residency) = residency {
+                        request = request.header("x-openai-internal-codex-residency", residency);
+                    }
+                    // The backend routes a conversation to its cache by this header;
+                    // `prompt_cache_key` alone hits only now and then.
+                    if let Some(key) = &parameters.cache_key {
+                        request = request.header("session_id", key);
+                    }
+                    request
                 }
-                if let Some(residency) = residency {
-                    request = request.header("x-openai-internal-codex-residency", residency);
-                }
-                // The backend routes a conversation to its cache by this header;
-                // `prompt_cache_key` alone hits only now and then.
-                if let Some(key) = &parameters.cache_key {
-                    request = request.header("session_id", key);
-                }
-                request
+            };
+            if !parameters.headers.is_empty() {
+                let mut headers = reqwest::header::HeaderMap::new();
+                crate::apply_request_headers(&mut headers, &parameters.headers);
+                request = request.headers(headers);
             }
+            request.json(body)
         };
-        if !parameters.headers.is_empty() {
-            let mut headers = reqwest::header::HeaderMap::new();
-            crate::apply_request_headers(&mut headers, &parameters.headers);
-            request = request.headers(headers);
-        }
-        request = request.json(&body);
-        let response = crate::sse::send(request, limits).await?;
-        // The ChatGPT transport refuses for the plan as well as for the
-        // request: its usage limit and a plan without Codex are said in
-        // words, with when the limit resets.
-        if subscription && !response.status().is_success() {
+        let mut response = crate::sse::send(post(&body), limits).await?;
+        // A reasoning level the model does not take is refused before it
+        // runs, with the levels it does: the request goes again at the
+        // nearest of those, twice at most (a level no model takes is first
+        // refused with every level any model takes, then the model's own).
+        let mut refits = 0;
+        while !response.status().is_success() {
             let status = response.status();
             let headers = response.headers().clone();
             let text = crate::sse::within(limits.idle(false), response.text())
                 .await?
                 .unwrap_or_default();
-            return Err(chatgpt_plan_refusal(&headers, &text, unix_millis() / 1000)
+            if refits < 2
+                && let Some(asked) = body["reasoning"]["effort"].as_str().map(str::to_owned)
+                && let Some(level) = fitted_effort(&text, &asked)
+            {
+                refits += 1;
+                tracing::info!(
+                    model,
+                    asked,
+                    level,
+                    "OpenAI refused a reasoning level for this model; sending the nearest it takes"
+                );
+                self.remember_effort(model, &asked, &level);
+                if let Some(first) = &effort {
+                    self.remember_effort(model, first, &level);
+                }
+                if !sampling_allowed(model, Some(&level)) {
+                    if let Some(body) = body.as_object_mut() {
+                        body.remove("temperature");
+                        body.remove("top_p");
+                    }
+                }
+                body["reasoning"]["effort"] = json!(level);
+                response = crate::sse::send(post(&body), limits).await?;
+                continue;
+            }
+            // The ChatGPT transport refuses for the plan as well as for the
+            // request: its usage limit and a plan without Codex are said in
+            // words, with when the limit resets.
+            return Err(subscription
+                .then(|| chatgpt_plan_refusal(&headers, &text, unix_millis() / 1000))
+                .flatten()
                 .unwrap_or_else(|| crate::sse::status_error(status, &headers, &text)));
         }
         let plan_headers = subscription.then(|| response.headers().clone());
@@ -1118,6 +1217,33 @@ fn in_about(seconds: u64) -> String {
     format!("in about {} days", (hours + 12) / 24)
 }
 
+/// The level to send instead of `asked` when the provider refused it for the
+/// model: OpenAI answers a level the model does not take with 400 on
+/// `reasoning.effort`, naming the ones it does ("Unsupported value: 'none' is
+/// not supported with the 'gpt-6.1-sol' model. Supported values are: 'low',
+/// 'medium', 'high', 'xhigh', and 'max'."). The nearest of those, the
+/// stronger on a tie; `None` for any other refusal.
+fn fitted_effort(body: &str, asked: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body.trim()).ok()?;
+    let error = value.get("error")?;
+    if error["param"].as_str() != Some("reasoning.effort") {
+        return None;
+    }
+    let message = error["message"].as_str()?;
+    let (_, listed) = message.split_once("Supported values are:")?;
+    let levels: Vec<String> = listed
+        .split('\'')
+        .skip(1)
+        .step_by(2)
+        .filter(|level| haarness_protocol::is_reasoning_level(level))
+        .map(str::to_owned)
+        .collect();
+    if levels.iter().any(|level| level == asked) {
+        return None;
+    }
+    haarness_protocol::nearest_reasoning_effort(&levels, asked).map(str::to_owned)
+}
+
 /// Like the other providers' errors, this one says how to connect.
 fn not_authenticated() -> CoreError {
     CoreError::Provider(
@@ -1406,7 +1532,7 @@ mod tests {
             };
             Json(json!({"models": [
                 {"slug":"gpt-5.6-luna","display_name":"GPT-5.6-Luna","visibility":"list","priority":8,"context_window":272_000,"input_modalities":["text","image"],"supported_reasoning_levels":levels(&["low","medium","high","xhigh","max"]),"upgrade":null},
-                {"slug":"gpt-6-astra","display_name":"GPT-6-Astra","visibility":"list","priority":1,"context_window":272_000,"input_modalities":["text","image"],"supported_reasoning_levels":levels(&["low","medium","high","xhigh","max","ultra"]),"upgrade":null},
+                {"slug":"gpt-6-astra","display_name":"GPT-6-Astra","visibility":"list","priority":1,"context_window":272_000,"input_modalities":["text","image"],"supported_reasoning_levels":levels(&["low","medium","high","xhigh","max","ultra","boundless"]),"upgrade":null},
                 {"slug":"gpt-reserve","display_name":"GPT-Reserve","visibility":"hide","priority":3,"supported_reasoning_levels":levels(&["low"])},
                 {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","priority":4,"context_window":272_000,"input_modalities":["text","image"],"supported_reasoning_levels":levels(&["low","medium","high","xhigh","max","ultra"]),"upgrade":null},
                 {"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list","priority":12,"context_window":272_000,"input_modalities":["text"],"supported_reasoning_levels":levels(&["low","medium","high","xhigh"]),"upgrade":{"model":"gpt-5.6-sol","retirement_at":"2026-10-14T19:00:00Z"}},
@@ -1474,8 +1600,12 @@ mod tests {
         assert_eq!(super::tidy_catalog_name("Team model"), "Team model");
         assert_eq!(
             astra.reasoning_efforts,
-            ["low", "medium", "high", "xhigh", "max", "ultra"],
-            "every level the account lists is kept, a new one included"
+            ["low", "medium", "high", "xhigh", "max", "boundless"],
+            "every level the account lists is kept, a new one included, but not Codex's ultra mode"
+        );
+        assert_eq!(
+            models[1].reasoning_efforts,
+            ["low", "medium", "high", "xhigh", "max"]
         );
         assert_eq!(astra.context_window, Some(272_000));
         assert!(astra.images && !astra.video && astra.reasoning);
@@ -2468,5 +2598,191 @@ mod tests {
         );
         assert_eq!(state.requests.lock().len(), 1);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_refused_reasoning_level_is_fitted_to_the_nearest_one_the_model_takes() {
+        use super::fitted_effort;
+        // The ChatGPT transport's answers, as given on 2026-11-11.
+        let any_model = r#"{
+  "error": {
+    "message": "Invalid value: 'ultra'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.",
+    "type": "invalid_request_error",
+    "param": "reasoning.effort",
+    "code": "invalid_value"
+  }
+}"#;
+        let this_model = r#"{"error":{"message":"Unsupported value: 'none' is not supported with the 'gpt-6.1-sol' model. Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'.","type":"invalid_request_error","param":"reasoning.effort","code":"unsupported_value"}}"#;
+        assert_eq!(fitted_effort(any_model, "ultra").as_deref(), Some("max"));
+        assert_eq!(fitted_effort(this_model, "none").as_deref(), Some("low"));
+        assert_eq!(fitted_effort(this_model, "minimal").as_deref(), Some("low"));
+        // A level it lists, another parameter, or no list: not this refusal.
+        assert_eq!(fitted_effort(this_model, "max"), None);
+        assert_eq!(
+            fitted_effort(
+                r#"{"error":{"message":"Unsupported parameter: temperature. Supported values are: 'low'.","param":"temperature"}}"#,
+                "none"
+            ),
+            None
+        );
+        assert_eq!(
+            fitted_effort(
+                r#"{"error":{"message":"Bad effort","param":"reasoning.effort"}}"#,
+                "none"
+            ),
+            None
+        );
+        assert_eq!(fitted_effort("<html>Bad Request</html>", "none"), None);
+    }
+
+    /// A model refusing the reasoning level asked for (a level no model takes,
+    /// then one this model does not) runs at the nearest it takes, on the
+    /// public API and on the ChatGPT transport alike, and the level is not
+    /// offered or sent again.
+    #[tokio::test]
+    async fn a_reasoning_level_the_model_refuses_runs_at_the_nearest_it_takes() {
+        async fn picky(
+            State(state): State<FixtureState>,
+            Json(request): Json<Value>,
+        ) -> Response<Body> {
+            let effort = request["reasoning"]["effort"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            state.requests.lock().push(request);
+            let refusal = |message: String, code: &str| {
+                Response::builder()
+                    .status(400)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"error": {"message": message, "type": "invalid_request_error", "param": "reasoning.effort", "code": code}}).to_string(),
+                    ))
+                    .unwrap()
+            };
+            if !haarness_protocol::REASONING_EFFORTS.contains(&effort.as_str()) {
+                return refusal(
+                    format!(
+                        "Invalid value: '{effort}'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'."
+                    ),
+                    "invalid_value",
+                );
+            }
+            if !["low", "medium", "high", "xhigh"].contains(&effort.as_str()) {
+                return refusal(
+                    format!(
+                        "Unsupported value: '{effort}' is not supported with the 'gpt-6.1-sol' model. Supported values are: 'low', 'medium', 'high', and 'xhigh'."
+                    ),
+                    "unsupported_value",
+                );
+            }
+            Response::builder()
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(Body::from(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+                ))
+                .unwrap()
+        }
+        for subscription in [false, true] {
+            let state = FixtureState::default();
+            let router = Router::new()
+                .route("/responses", post(picky))
+                .with_state(state.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let root = std::env::temp_dir().join(format!(
+                "haarness-openai-effort-{}-{}-{subscription}",
+                std::process::id(),
+                crate::auth::unix_millis()
+            ));
+            let provider = if subscription {
+                let store = Arc::new(crate::auth::CredentialStore::new(root.join("auth.json")));
+                store
+                    .set(
+                        "openai",
+                        &crate::auth::Credential::oauth(
+                            "live-token".into(),
+                            "refresh-1".into(),
+                            crate::auth::unix_millis() + 3_600_000,
+                            Some("account-1".into()),
+                        ),
+                    )
+                    .unwrap();
+                OpenAiProvider::for_oauth_test(
+                    format!("http://{address}/responses"),
+                    format!("http://{address}"),
+                    store,
+                )
+            } else {
+                OpenAiProvider::for_test(format!("http://{address}/responses"), "test")
+            };
+            let request = |effort: &str| ProviderRequest {
+                model: "gpt-6.1-sol".into(),
+                system: "sys".into(),
+                messages: vec![ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "go".into(),
+                }],
+                tools: Vec::new(),
+                reasoning_effort: Some(effort.into()),
+                parameters: haarness_core::RequestParameters {
+                    temperature: Some(0.3),
+                    ..haarness_core::RequestParameters::default()
+                },
+                output_schema: None,
+            };
+            let events: Vec<_> = provider
+                .stream(request("ultra"), CancellationToken::new())
+                .await
+                .expect("the request runs at a level the model takes")
+                .collect()
+                .await;
+            assert!(
+                events.iter().any(
+                    |event| matches!(event, Ok(ProviderEvent::TextDelta(text)) if text == "ok")
+                ),
+                "{events:?}"
+            );
+            let sent = |requests: &[Value]| -> Vec<String> {
+                requests
+                    .iter()
+                    .map(|request| request["reasoning"]["effort"].as_str().unwrap().to_owned())
+                    .collect()
+            };
+            assert_eq!(sent(&state.requests.lock()), ["ultra", "max", "xhigh"]);
+            // The level is remembered: the next request goes at once, and
+            // neither refused level is offered for the model.
+            provider
+                .stream(request("ultra"), CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            provider
+                .stream(request("none"), CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let requests = state.requests.lock().clone();
+            assert_eq!(sent(&requests[3..]), ["xhigh", "none", "low"]);
+            // Sampling goes with reasoning off only, and never to ChatGPT.
+            assert_eq!(requests[4].get("temperature").is_some(), !subscription);
+            assert!(requests[5].get("temperature").is_none());
+            let sol = provider
+                .info()
+                .models
+                .into_iter()
+                .find(|model| model.id == "gpt-6.1-sol")
+                .unwrap();
+            assert!(
+                !sol.reasoning_efforts
+                    .iter()
+                    .any(|level| ["max", "ultra", "none"].contains(&level.as_str())),
+                "{:?}",
+                sol.reasoning_efforts
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }
