@@ -586,17 +586,20 @@ each message in the history where the turn stopped, so later requests read it
 there once instead of each ending with it (`item.created` once the server is
 up). When one of them is the person's, the restart notice says so in place of
 a notice of its own: "Haarness restarted while this turn was running, before
-the agent read what you sent while it worked; send that again to have it
-answered. …". A turn that outlives a graceful shutdown's wait is settled the
-same way when the shutdown marks it interrupted, its "Haarness stopped, …"
-notice saying the same; so is one that stops within the wait. A failed turn,
+the agent read what you sent while it worked; send that again. …". A turn
+that outlives a graceful shutdown's wait is settled the same way when the
+shutdown marks it interrupted, its notice saying the same ("Haarness stopped
+before the agent read …"); so is one that stops within the wait. A failed turn,
 or one a plain stop ended, keeps its own notice, "Queued input could not be
 delivered before the turn failed; retry it: …", given only when a person's
 message is among them: messages Haarness steered in (a background result, a
 stop's continuation) get the marker alone. Nothing runs any of them by itself;
 a person's, sent again under its `requestId`, runs once (see `/turns`). A
 database an older server left with such steering in a turn it no longer runs
-is settled once when this server first opens it, with markers alone. Each call such a turn
+is settled once when this server first opens it, with markers alone. Steering
+of an ended turn still without one (an undo took it away, or an older build
+ran in between) is read where that turn ended, as the next turn opens; a fork
+gives what it copied without its marker one at the end of the copy. Each call such a turn
 left without a result gets an error `tool_result` first, saying it did not
 finish, with `metadata: {"unfinished": true}`; a turn that outlives a graceful
 shutdown's wait gets the same results before the shutdown marks it interrupted.

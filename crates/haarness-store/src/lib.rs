@@ -38,7 +38,7 @@ fn recovered_turn_message(unread: bool) -> String {
         return RECOVERED_TURN_MESSAGE.into();
     }
     format!(
-        "Haarness restarted while this turn was running, {}. Work already recorded in this session is preserved. In-flight tool calls were not replayed automatically; retry or continue when ready.",
+        "Haarness restarted while this turn was running, {}. Work already recorded in this session is preserved. In-flight tool calls were not replayed automatically.",
         haarness_core::UNREAD_WHILE_WORKING
     )
 }
@@ -221,6 +221,8 @@ impl SqliteStore {
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage)?;
+        // The markers are read in one pass: one lookup per steer would read
+        // the rest of its chat each time.
         let unread = {
             let mut statement = tx
                 .prepare(
@@ -228,10 +230,9 @@ impl SqliteStore {
                      WHERE i.deleted=0 AND t.status NOT IN ('queued','running')
                        AND json_extract(i.data_json,'$.type')='user_message'
                        AND json_extract(i.data_json,'$.queued')=1
-                       AND NOT EXISTS (SELECT 1 FROM items m
-                         WHERE m.thread_id=i.thread_id AND m.sequence>i.sequence AND m.deleted=0
-                           AND json_extract(m.data_json,'$.type')='queue_consumed'
-                           AND json_extract(m.data_json,'$.item_id')=i.id)
+                       AND i.id NOT IN (SELECT json_extract(m.data_json,'$.item_id') FROM items m
+                         WHERE m.deleted=0 AND json_extract(m.data_json,'$.type')='queue_consumed'
+                           AND json_extract(m.data_json,'$.item_id') IS NOT NULL)
                      ORDER BY i.thread_id,i.sequence",
                 )
                 .map_err(storage)?;
@@ -1747,10 +1748,25 @@ impl ThreadRepository for SqliteStore {
                 sequence: 0,
                 item_id: None,
             };
+            // Steering copied without the marker that placed it in the
+            // history: the fork runs none of the source's turns, so nothing
+            // would ever place it, and every request would end with it.
+            let mut steers = Vec::new();
+            let mut placed = HashSet::new();
+            let mut last = 0;
             for (index, (old_id, sequence, mut data, created_at)) in copied.into_iter().enumerate()
             {
                 if left_out.contains(&index) {
                     continue;
+                }
+                match &data {
+                    ItemData::UserMessage { queued: true, .. } => steers.push(id_map[&old_id]),
+                    ItemData::QueueConsumed { item_id } => {
+                        if let Some(copy) = id_map.get(item_id) {
+                            placed.insert(*copy);
+                        }
+                    }
+                    _ => {}
                 }
                 // The fork runs none of its source's commands: a checkpoint
                 // of one still running is left out (the copied call's result
@@ -1780,6 +1796,23 @@ impl ThreadRepository for SqliteStore {
                 .map_err(storage)?;
                 origin.sequence = u64::try_from(sequence).map_err(storage)?;
                 origin.item_id = Some(old_id);
+                last = sequence;
+            }
+            for item_id in steers.into_iter().filter(|copy| !placed.contains(copy)) {
+                last += 1;
+                tx.execute(
+                    "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at)
+                     VALUES(?1,?2,NULL,?3,?4,?5)",
+                    params![
+                        ItemId::new().to_string(),
+                        fork.id.to_string(),
+                        last,
+                        serde_json::to_string(&ItemData::QueueConsumed { item_id })
+                            .map_err(storage)?,
+                        time(now)
+                    ],
+                )
+                .map_err(storage)?;
             }
             tx.execute(
                 "UPDATE threads SET fork_origin_json=?2 WHERE id=?1",

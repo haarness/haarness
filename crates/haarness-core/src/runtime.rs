@@ -311,13 +311,14 @@ const STOP_HOOK_CONTINUATIONS: u32 = 8;
 
 /// The transcript line for a turn the runtime had to stop.
 fn stopped_turn_message(reason: &str, unread: bool) -> String {
-    let unread = if unread {
-        format!(", {}", crate::UNREAD_WHILE_WORKING)
-    } else {
-        String::new()
-    };
+    if unread {
+        return format!(
+            "{reason} {}. Work already recorded is preserved. Tools are not replayed automatically.",
+            crate::UNREAD_WHILE_WORKING
+        );
+    }
     format!(
-        "{reason}{unread}. Work already recorded is preserved; send a new message to continue. Tools are not replayed automatically."
+        "{reason}. Work already recorded is preserved; send a new message to continue. Tools are not replayed automatically."
     )
 }
 
@@ -17296,6 +17297,40 @@ fn provider_messages_with_origins(
         {
             group = Some(TurnId(item.id.0));
         }
+        // Steering a turn that has ended took and no request received (an
+        // older build left it so, or an undo took away what placed it) is
+        // read where that turn ended, as the next one opens, not at the end
+        // of every request. A running turn's own steering is never released
+        // here: no later turn opens while it runs.
+        if !deferred_order.is_empty()
+            && let ItemData::UserMessage {
+                queued: false,
+                synthetic,
+                ..
+            } = &item.data
+            && (item.turn_id.is_some() || !synthetic)
+        {
+            let opening = item.turn_id.or(group);
+            let mut waiting = Vec::new();
+            for deferred in std::mem::take(&mut deferred_order) {
+                match deferred_queued.get(&deferred) {
+                    Some((_, from)) if from.turn != opening => {
+                        let (message, from) = deferred_queued
+                            .remove(&deferred)
+                            .expect("deferred message checked above");
+                        for (owed, origin) in owed.drain(..) {
+                            messages.push(owed);
+                            origins.push(origin);
+                        }
+                        messages.push(message);
+                        origins.push(from);
+                    }
+                    Some(_) => waiting.push(deferred),
+                    None => {}
+                }
+            }
+            deferred_order = waiting;
+        }
         let mut origin = crate::image_budget::Origin {
             turn: item.turn_id.or(group),
             person: matches!(
@@ -25012,6 +25047,193 @@ mod tests {
         };
         assert_eq!(chat(Some(TurnId::new())), ["design.png", "s5.png"]);
         assert_eq!(chat(None), ["design.png", "s5.png"]);
+    }
+
+    fn said(messages: &[ProviderMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|message| match message {
+                ProviderMessage::Text { content, .. } | ProviderMessage::Media { content, .. } => {
+                    content
+                        .split_once("working:\n")
+                        .map_or(content.as_str(), |(_, steer)| {
+                            steer.split_once('\n').map_or(steer, |(text, _)| text)
+                        })
+                        .to_owned()
+                }
+                ProviderMessage::ToolCall { call_id, .. } => format!("call {call_id}"),
+                ProviderMessage::ToolResult { call_id, .. } => format!("result {call_id}"),
+            })
+            .collect()
+    }
+
+    fn message(text: &str, queued: bool, synthetic: bool) -> ItemData {
+        ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued,
+            synthetic,
+            command_line: None,
+            hook: None,
+        }
+    }
+
+    /// A chat with no steering left behind reads as before: a running turn's
+    /// steering no request has taken yet ends the request, whatever was
+    /// written after it in that turn or outside every turn.
+    #[test]
+    fn provider_messages_keep_a_running_turns_steering_at_the_end() {
+        let (first, running) = (Some(TurnId::new()), Some(TurnId::new()));
+        let at = |turn, sequence, data| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let read = at(first, 3, message("use the old names", true, false));
+        let live = at(running, 9, message("also the footer", true, false));
+        let items = vec![
+            at(first, 1, message("rename the module", false, false)),
+            at(
+                first,
+                2,
+                ItemData::ToolCall {
+                    call_id: "a".into(),
+                    name: "read".into(),
+                    arguments: json!({}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            read.clone(),
+            at(
+                first,
+                4,
+                ItemData::ToolResult {
+                    call_id: "a".into(),
+                    name: "read".into(),
+                    output: "ok".into(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            at(first, 5, ItemData::QueueConsumed { item_id: read.id }),
+            at(
+                first,
+                6,
+                ItemData::AssistantMessage {
+                    text: "renamed".into(),
+                },
+            ),
+            at(running, 7, message("now the docs", false, false)),
+            at(
+                running,
+                8,
+                ItemData::ToolCall {
+                    call_id: "b".into(),
+                    name: "read".into(),
+                    arguments: json!({}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            live,
+            at(
+                running,
+                10,
+                ItemData::ToolResult {
+                    call_id: "b".into(),
+                    name: "read".into(),
+                    output: "ok".into(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            at(
+                running,
+                11,
+                message("<hook-feedback>keep going</hook-feedback>", false, true),
+            ),
+            at(
+                None,
+                12,
+                message("<task-result>a child finished</task-result>", false, true),
+            ),
+        ];
+        let (messages, _) = super::provider_messages_with_origins(items);
+        assert_eq!(
+            said(&messages),
+            [
+                "rename the module",
+                "call a",
+                "result a",
+                "use the old names",
+                "renamed",
+                "now the docs",
+                "call b",
+                "result b",
+                "<hook-feedback>keep going</hook-feedback>",
+                "<task-result>a child finished</task-result>",
+                "also the footer",
+            ]
+        );
+    }
+
+    /// Steering an ended turn took and nothing placed is read where that turn
+    /// ended, once the next turn opens, in a chat and in a fork alike.
+    #[test]
+    fn provider_messages_read_an_ended_turns_unplaced_steering_where_it_ended() {
+        let (ended, next) = (Some(TurnId::new()), Some(TurnId::new()));
+        let at = |turn, sequence, data| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let items = vec![
+            at(ended, 1, message("rename the module", false, false)),
+            at(ended, 2, message("use the old names", true, false)),
+            at(
+                ended,
+                3,
+                ItemData::Error {
+                    message: "Haarness restarted".into(),
+                    retryable: true,
+                },
+            ),
+            at(next, 4, message("now the docs", false, false)),
+            at(
+                next,
+                5,
+                ItemData::AssistantMessage {
+                    text: "documented".into(),
+                },
+            ),
+        ];
+        let (messages, origins) = super::provider_messages_with_origins(items.clone());
+        assert_eq!(
+            said(&messages),
+            [
+                "rename the module",
+                "use the old names",
+                "now the docs",
+                "documented"
+            ]
+        );
+        assert_eq!(origins[1].turn, ended);
+        // A fork's copies have no turn: each message the person wrote opens
+        // one.
+        let fork = items
+            .into_iter()
+            .map(|item| Item {
+                turn_id: None,
+                ..item
+            })
+            .collect();
+        let (messages, _) = super::provider_messages_with_origins(fork);
+        assert_eq!(
+            said(&messages),
+            [
+                "rename the module",
+                "use the old names",
+                "now the docs",
+                "documented"
+            ]
+        );
     }
 
     #[test]

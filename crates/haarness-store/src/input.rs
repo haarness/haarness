@@ -1025,6 +1025,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_fork_places_steering_whose_marker_it_did_not_copy() {
+        let store = SqliteStore::in_memory().unwrap();
+        let (thread, turn, first) = steered_chat(&store, RequestId::new()).await;
+        store
+            .append_item(
+                thread,
+                Some(turn.id),
+                ItemData::QueueConsumed { item_id: first.id },
+            )
+            .await
+            .unwrap();
+        let second = store
+            .append_steered_input(
+                thread,
+                turn.id,
+                RequestId::new(),
+                steer_data("and the changelog", false),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .append_item(
+                thread,
+                Some(turn.id),
+                ItemData::QueueConsumed { item_id: second.id },
+            )
+            .await
+            .unwrap();
+        let copies = |items: &[Item], text: &str| {
+            items
+                .iter()
+                .find(|item| matches!(&item.data, ItemData::UserMessage { text: sent, .. } if sent == text))
+                .map(|item| item.id)
+                .unwrap()
+        };
+        // Forked at the second steer: its marker is left behind, so the fork
+        // places it itself, after what it copied.
+        let fork = store
+            .fork_thread(thread, None, Some(second.sequence))
+            .await
+            .unwrap();
+        let items = store.list_items(fork.id, None).await.unwrap();
+        let (first_copy, second_copy) = (
+            copies(&items, "Also update the docs"),
+            copies(&items, "and the changelog"),
+        );
+        assert_eq!(
+            (markers(&items, first_copy), markers(&items, second_copy)),
+            (1, 1),
+            "{items:#?}"
+        );
+        assert!(matches!(
+            items.last().map(|item| &item.data),
+            Some(ItemData::QueueConsumed { item_id }) if *item_id == second_copy
+        ));
+        assert_eq!(
+            fork.fork_origin.map(|origin| origin.sequence),
+            Some(second.sequence)
+        );
+        // Forked whole, every marker comes along and none is added.
+        let whole = store.fork_thread(thread, None, None).await.unwrap();
+        let items = store.list_items(whole.id, None).await.unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(item.data, ItemData::QueueConsumed { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_an_older_database_with_many_steers_in_a_long_chat_stays_quick() {
+        let scratch = Scratch::new("steering-heal-many");
+        let path = scratch.database();
+        let store = SqliteStore::open(&path).unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let (turn, _, _) = store
+            .start_turn(thread.id, turn_request(RequestId::new(), "long work"))
+            .await
+            .unwrap();
+        store
+            .set_turn_status(turn.id, TurnStatus::Interrupted, None)
+            .await
+            .unwrap();
+        // 300 steers, then 20,000 replies of 2 KB, then markers for every
+        // other steer: each steer without one would have read the whole
+        // chat after it.
+        let steers: Vec<ItemId> = (0..300).map(|_| ItemId::new()).collect();
+        {
+            let mut connection = store.connection.lock();
+            let tx = connection.transaction().unwrap();
+            let mut sequence = SqliteStore::next_sequence(&tx, thread.id).unwrap();
+            let mut insert = |id: ItemId, data: ItemData| {
+                tx.execute(
+                    "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+                    params![
+                        id.to_string(),
+                        thread.id.to_string(),
+                        turn.id.to_string(),
+                        i64::try_from(sequence).unwrap(),
+                        serde_json::to_string(&data).unwrap(),
+                        time(Utc::now())
+                    ],
+                )
+                .unwrap();
+                sequence += 1;
+            };
+            for (index, id) in steers.iter().enumerate() {
+                insert(*id, steer_data(&format!("steer {index}"), false));
+            }
+            for _ in 0..20_000 {
+                insert(
+                    ItemId::new(),
+                    ItemData::AssistantMessage {
+                        text: "x".repeat(2_048),
+                    },
+                );
+            }
+            for id in steers.iter().step_by(2) {
+                insert(ItemId::new(), ItemData::QueueConsumed { item_id: *id });
+            }
+            tx.execute("DELETE FROM schema_migrations WHERE version=13", [])
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        drop(store);
+        let started = std::time::Instant::now();
+        let store = SqliteStore::open(&path).unwrap();
+        let took = started.elapsed();
+        let items = store.list_items(thread.id, None).await.unwrap();
+        for (index, id) in steers.iter().enumerate() {
+            assert_eq!(markers(&items, *id), 1, "steer {index}");
+        }
+        assert!(
+            took < std::time::Duration::from_secs(4),
+            "opening took {took:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn opening_an_older_database_settles_steering_its_ended_turns_left_unread_once() {
         let scratch = Scratch::new("steering-heal");
         let path = scratch.database();

@@ -114,7 +114,7 @@ pub const UNDELIVERED_INPUT: &str =
 /// a notice of its own, when the model had not read a message the person
 /// sent while it worked.
 pub const UNREAD_WHILE_WORKING: &str =
-    "before the agent read what you sent while it worked; send that again to have it answered";
+    "before the agent read what you sent while it worked; send that again";
 
 /// Why a chat refuses a new turn while one is running: read by people, from
 /// `haarness run --session` or an editor over ACP sending to a chat busy

@@ -15366,7 +15366,7 @@ async fn a_shutdown_the_turn_stops_in_says_once_what_it_did_not_read() {
     assert_eq!(notices.len(), 1, "{items:#?}");
     assert!(
         notices[0].starts_with(&format!(
-            "Haarness stopped, {}. ",
+            "Haarness stopped {}. Work already recorded is preserved. Tools are not replayed automatically.",
             haarness_core::UNREAD_WHILE_WORKING
         )),
         "{notices:?}"
@@ -15439,6 +15439,66 @@ async fn a_steer_run_again_takes_its_stored_copy_as_checked_when_it_arrived() {
         wait_done(&runtime, &rerun).await.status,
         TurnStatus::Completed
     );
+}
+
+/// A steer run again after its turn ended unread is the stored message to
+/// the runner too: a `UserPromptSubmit` hook reads what was stored, not the
+/// words the retry carried.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_steer_run_again_is_the_stored_message_to_a_prompt_hook() {
+    let folder = std::env::temp_dir().join(format!("haarness-rerun-hook-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let log = folder.join("prompts.log");
+    let record = format!("cat >> '{log}'; echo >> '{log}'", log = log.display());
+    let hooks = haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(&serde_json::json!({
+            "UserPromptSubmit": [{"hooks": [{"command": record}]}],
+        })),
+        folder.clone(),
+    );
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(
+        provider.clone(),
+        Arc::new(SqliteStore::in_memory().unwrap()),
+    )
+    .with_hooks(Arc::new(hooks));
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("long refactor"))
+        .await
+        .unwrap();
+    provider.wait().await;
+    let mut steer = deferred_request("keep the public names");
+    steer.delivery = haarness_protocol::InputDelivery::Steer;
+    runtime.queue_input(thread.id, steer.clone()).await.unwrap();
+    runtime.interrupt_thread_tree(thread.id).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    wait_idle(&runtime, thread.id).await;
+    let mut resend = steer;
+    resend.text = "words a retry changed".into();
+    let rerun = runtime
+        .queue_input(thread.id, resend)
+        .await
+        .unwrap()
+        .turn
+        .expect("it runs as a turn of its own");
+    provider.wait().await;
+    let prompts = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["prompt"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prompts,
+        [
+            serde_json::json!("long refactor"),
+            serde_json::json!("keep the public names")
+        ]
+    );
+    provider.next();
+    wait_done(&runtime, &rerun).await;
+    std::fs::remove_dir_all(&folder).unwrap();
 }
 
 #[tokio::test]

@@ -816,7 +816,7 @@ async fn steering_a_turn_the_shutdown_outlived_never_read_is_settled_with_it() {
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert!(
         notices[0].starts_with(&format!(
-            "Haarness stopped, {}. ",
+            "Haarness stopped {}. Work already recorded is preserved. Tools are not replayed automatically.",
             haarness_core::UNREAD_WHILE_WORKING
         )),
         "{notices:?}"
