@@ -354,7 +354,8 @@ it lives, every chat of the project is offered its tools. One configured
 under the name of a server in the configuration keeps that name while the
 configuration's entry stays as it was; configured off, it stays off there
 (as `haarness mcp disable` does); once the entry is edited or removed, the
-configuration's entry applies again.
+configuration's entry applies again. `haarness acp` lets its sessions'
+servers go when the editor closes a session or quits (see below).
 
 Such a server holds up no turn while it starts: its client waits for it. ACP
 takes a server still starting (or needing authorization) after 2 seconds as
@@ -365,15 +366,23 @@ that wait and runs after it. Cancel reaches only the prompt that is running
 (ending its wait or its turn); the session's prompts queued behind it then
 run in order. A server that did not start is told to the editor in that
 prompt's reply and logged; the prompt goes on without it, and the server is
-left disconnected for the session's next load to configure again. One still
-starting after 150 seconds is told too, and the next prompt waits for it
-again. One that fails within the 2 seconds fails the session and is left
-disconnected too. Each prompt first makes sure it reaches the project's
-server: one an update replaced is followed to its successor, and one that
-stopped is started again, as the TUI does. A session's server the project's
-server no longer lists (it restarted, or an older build let it go on a
-reload) is then configured again and waited for like a new session's; one
-the person disconnected is still listed and stays disconnected.
+let go for the session's next load to configure again. One still starting
+after 150 seconds is told too, and the next prompt waits for it again. One
+that fails within the 2 seconds fails the session and is let go too. Each
+prompt first makes sure it reaches the project's server: one an update
+replaced is followed to its successor, and one that stopped is started
+again, as the TUI does; when that fails, the prompt fails saying why. A new
+server (a restart, an update) does not have the session's servers yet: they
+are configured there again and waited for like a new session's. One the
+person disconnected is still listed and stays disconnected; one turned off
+(configured with `enabled: false`) is gone and stays gone for the session,
+a later restart included. Sessions of one `haarness acp` process made
+within a minute or so share a server of the same name, which is set up once
+for them and waited for by each; another process (the same session open in a
+second window) has servers of its own. ACP lets a session's
+servers go when the editor closes the session (`session/close`), unless
+another open session shares them, and lets every one go when the editor
+closes the connection or stops `haarness acp` with a signal.
 
 Every start runs on its own: a client that gives up on `configure` or
 `reconnect` leaves it running. A `reconnect` during a start that has run

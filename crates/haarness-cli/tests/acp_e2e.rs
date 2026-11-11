@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -545,6 +546,12 @@ async fn subagent_requests_and_tool_calls_reach_the_client_named_after_the_subag
 
 /// The workspace server the ACP agent started, as its discovery file names it.
 fn daemon_api(data: &Path) -> (String, String) {
+    running_daemon_api(data).expect("the workspace server's runtime.json")
+}
+
+/// [`daemon_api`], or `None` while no workspace server has written one (it
+/// is starting again).
+fn running_daemon_api(data: &Path) -> Option<(String, String)> {
     fn find(directory: &Path) -> Option<PathBuf> {
         for entry in std::fs::read_dir(directory).ok()?.flatten() {
             let path = entry.path();
@@ -558,12 +565,11 @@ fn daemon_api(data: &Path) -> (String, String) {
         }
         None
     }
-    let path = find(data).expect("the workspace server's runtime.json");
-    let runtime: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    (
-        runtime["url"].as_str().unwrap().to_owned(),
-        runtime["token"].as_str().unwrap().to_owned(),
-    )
+    let runtime: Value = serde_json::from_slice(&std::fs::read(find(data)?).ok()?).ok()?;
+    Some((
+        runtime["url"].as_str()?.to_owned(),
+        runtime["token"].as_str()?.to_owned(),
+    ))
 }
 
 async fn daemon(
@@ -590,6 +596,30 @@ async fn daemon(
     } else {
         serde_json::from_slice(&bytes).unwrap()
     }
+}
+
+/// The names the project's server knows the editor's server `shown` of
+/// `session` by, one for each `haarness acp` process that set it up: each
+/// puts a token of its own in the name.
+async fn editor_servers(api: &(String, String), session: &str, shown: &str) -> Vec<String> {
+    let start = format!("acp-{}-", &session[..8]);
+    let end = format!("-{shown}");
+    daemon(api, reqwest::Method::GET, "/mcp", None)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|server| server["name"].as_str())
+        .filter(|name| name.starts_with(&start) && name.ends_with(&end))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The one name the project's server knows `shown` of `session` by.
+async fn editor_server(api: &(String, String), session: &str, shown: &str) -> String {
+    let names = editor_servers(api, session, shown).await;
+    assert_eq!(names.len(), 1, "{names:?}");
+    names[0].clone()
 }
 
 /// An ACP agent on a workspace whose writes ask, with an open session.
@@ -1122,8 +1152,8 @@ fn python3() -> PathBuf {
 /// waiting: the server goes on starting and the first prompt waits for it.
 /// One that fails once the session is set up is told to the editor at the
 /// next prompt, which goes on without it. One that cannot start fails the
-/// session; either is left stopped, so an editor retrying does not leave a
-/// server behind for every chat.
+/// session; either is let go, so an editor retrying does not leave a server
+/// behind for every chat.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
     let directory = TestDirectory::new();
@@ -1160,7 +1190,10 @@ async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
         .as_str()
         .unwrap_or_else(|| panic!("{created}"))
         .to_owned();
-    let tool = format!("mcp__acp-{}-slow__ping", &session[..8]);
+    let tool = format!(
+        "mcp__{}__ping",
+        editor_server(&daemon_api(&data), &session, "slow").await
+    );
     send(
         &mut stdin,
         json!({"jsonrpc":"2.0", "id":11, "method":"session/prompt",
@@ -1210,11 +1243,7 @@ async fn a_session_with_a_server_slow_to_start_is_set_up_at_once() {
         .expect("list MCP servers");
     let listed = String::from_utf8_lossy(&listed.stdout);
     for name in ["-broken\t", "-late\t"] {
-        let line = listed
-            .lines()
-            .find(|line| line.contains(name))
-            .unwrap_or_else(|| panic!("{listed}"));
-        assert!(line.contains("\tdisconnected"), "{line}");
+        assert!(!listed.contains(name), "{listed}");
     }
 
     drop(stdin);
@@ -1342,7 +1371,9 @@ async fn prompts_sent_while_a_server_starts_keep_their_order() {
 /// project's server has stopped (an update replaces it, it is stopped), the
 /// next prompt reaches the one that serves the project now and sets them up
 /// there again. One the person disconnected stays disconnected through the
-/// reload; a new server starts it again, as it starts a configured one.
+/// reload; a new server starts it again, as it starts a configured one. One
+/// turned off through the API stays gone, a restart after included, and the
+/// editor quitting lets the rest go.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sessions_mcp_servers_outlast_a_reload_and_a_restart_of_the_server() {
     let directory = TestDirectory::new();
@@ -1370,8 +1401,12 @@ async fn a_sessions_mcp_servers_outlast_a_reload_and_a_restart_of_the_server() {
         .as_str()
         .unwrap_or_else(|| panic!("{created}"))
         .to_owned();
-    let tool = format!("mcp__acp-{}-editor__ping", &session[..8]);
-    let spare = format!("acp-{}-spare", &session[..8]);
+    let api = daemon_api(&data);
+    let tool = format!(
+        "mcp__{}__ping",
+        editor_server(&api, &session, "editor").await
+    );
+    let spare = editor_server(&api, &session, "spare").await;
     let launched = || std::fs::read_to_string(&launch_log).map_or(0, |text| text.lines().count());
     assert_eq!(launched(), 2);
     let mut prompt = async |id: u64| {
@@ -1440,11 +1475,158 @@ async fn a_sessions_mcp_servers_outlast_a_reload_and_a_restart_of_the_server() {
     daemon_guard.stopped = false;
     prompt(33).await;
     assert_eq!(launched(), 4);
-    assert_ne!(
-        daemon_api(&data),
-        api,
-        "the prompt reached the stopped server"
+    let restarted = daemon_api(&data);
+    assert_ne!(restarted, api, "the prompt reached the stopped server");
+    let api = restarted;
+
+    // Turned off through the API, it is gone at once, and neither the next
+    // prompt nor a later restart brings it back.
+    daemon(
+        &api,
+        reqwest::Method::POST,
+        &format!("/mcp/{spare}"),
+        Some(json!({"transport": "stdio", "command": python3(), "args": [fixture], "enabled": false})),
+    )
+    .await;
+    prompt(34).await;
+    daemon_guard.stop().await;
+    daemon_guard.stopped = false;
+    prompt(35).await;
+    assert_eq!(launched(), 5, "a server turned off was set up again");
+    let api = daemon_api(&data);
+    let named = |listed: &Value, name: &str| {
+        listed.as_array().unwrap().iter().any(|server| {
+            server["name"]
+                .as_str()
+                .is_some_and(|named| named.starts_with(name))
+        })
+    };
+    let listed = daemon(&api, reqwest::Method::GET, "/mcp", None).await;
+    assert!(!named(&listed, &spare), "{listed}");
+
+    // The editor quits: the session's servers go with it.
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    let listed = daemon(&api, reqwest::Method::GET, "/mcp", None).await;
+    assert!(!named(&listed, "acp-"), "{listed}");
+    daemon_guard.stop().await;
+}
+
+/// Two sessions made within a minute share an editor's server of the same
+/// name: after a restart, their prompts sent together set it up once and
+/// both get its tools. Closing one session lets go only the servers no
+/// other open session has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sessions_sharing_an_editors_server_set_it_up_once_and_a_close_lets_go_only_their_own() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, _) =
+        acp_session(&directory).await;
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
     );
+    let server = |name: &str| {
+        json!({"name": name, "command": python3(), "args": [fixture],
+               "env": [{"name": "LAUNCH_LOG", "value": directory.0.join(name)},
+                       {"name": "CALL_LOG", "value": directory.0.join("calls")}]})
+    };
+    let launched = |name: &str| {
+        std::fs::read_to_string(directory.0.join(name)).map_or(0, |text| text.lines().count())
+    };
+    // A chat id starts with its time in units of 65.536 s: both sessions are
+    // made well inside one.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let left = 65_536 - (now % 65_536);
+    if left < 10_000 {
+        tokio::time::sleep(Duration::from_millis(u64::try_from(left).unwrap() + 100)).await;
+    }
+    let mut sessions = Vec::new();
+    for (id, servers) in [
+        (40, json!([server("shared")])),
+        (41, json!([server("shared"), server("own")])),
+    ] {
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0", "id":id, "method":"session/new",
+                   "params":{"cwd":workspace, "mcpServers":servers}}),
+        )
+        .await;
+        let mut messages = Vec::new();
+        let created = receive_response(&mut lines, &mut stdin, id, &mut messages).await;
+        sessions.push(
+            created["result"]["sessionId"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{created}"))
+                .to_owned(),
+        );
+    }
+    assert_eq!(sessions[0][..8], sessions[1][..8]);
+    assert_eq!((launched("shared"), launched("own")), (1, 1));
+    let shared = editor_server(&daemon_api(&data), &sessions[0], "shared").await;
+    let tool = format!("mcp__{shared}__ping");
+
+    daemon_guard.stop().await;
+    daemon_guard.stopped = false;
+    for (id, session) in [(42, &sessions[0]), (43, &sessions[1])] {
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0", "id":id, "method":"session/prompt",
+                   "params":{"sessionId":session,
+                             "prompt":[{"type":"text", "text":format!("!tool {tool} {{}}")}]}}),
+        )
+        .await;
+    }
+    let mut answered = Vec::new();
+    let mut got = HashSet::new();
+    while answered.len() < 2 {
+        let message = receive(&mut lines).await;
+        if let Some(id) = message["id"]
+            .as_u64()
+            .filter(|_| message.get("method").is_none())
+        {
+            assert_eq!(message["result"]["stopReason"], "end_turn", "{message}");
+            answered.push(id);
+        } else if update_text(&message, "agent_message_chunk")
+            .is_some_and(|text| text == format!("Tool {tool} => pong"))
+        {
+            got.insert(message["params"]["sessionId"].as_str().unwrap().to_owned());
+        }
+    }
+    assert_eq!(got.len(), 2, "a session did not get the shared tool");
+    assert_eq!(
+        (launched("shared"), launched("own")),
+        (2, 2),
+        "a server was set up twice"
+    );
+
+    let api = daemon_api(&data);
+    let names = async || -> Vec<String> {
+        daemon(&api, reqwest::Method::GET, "/mcp", None)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|server| server["name"].as_str().map(str::to_owned))
+            .filter(|name| name.starts_with("acp-"))
+            .collect()
+    };
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":44, "method":"session/close",
+               "params":{"sessionId":sessions[1]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let closed = receive_response(&mut lines, &mut stdin, 44, &mut messages).await;
+    assert!(closed.get("error").is_none(), "{closed}");
+    assert_eq!(names().await, [shared]);
 
     drop(stdin);
     let status = timeout(Duration::from_secs(20), child.wait())
@@ -1452,6 +1634,292 @@ async fn a_sessions_mcp_servers_outlast_a_reload_and_a_restart_of_the_server() {
         .expect("Haarness ACP agent did not exit after stdin closed")
         .expect("wait for Haarness ACP agent");
     assert!(status.success(), "Haarness ACP process failed");
+    assert!(names().await.is_empty());
+    daemon_guard.stop().await;
+}
+
+/// An editor stopping `haarness acp` with a signal (as one quitting may)
+/// lets its sessions' servers go too.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_acp_agent_lets_its_sessions_servers_go() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, _) =
+        acp_session(&directory).await;
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":50, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[
+                   {"name": "editor", "command": python3(), "args": [fixture],
+                    "env": [{"name": "CALL_LOG", "value": directory.0.join("calls")}]}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let created = receive_response(&mut lines, &mut stdin, 50, &mut messages).await;
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let api = daemon_api(&data);
+    let listed = async || {
+        daemon(&api, reqwest::Method::GET, "/mcp", None)
+            .await
+            .to_string()
+    };
+    let name = editor_server(&api, &session, "editor").await;
+    let pid = child.id().expect("the ACP agent's process").to_string();
+    let signalled = std::process::Command::new("kill")
+        .args(["-TERM", &pid])
+        .status()
+        .expect("signal the ACP agent");
+    assert!(signalled.success());
+    timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after SIGTERM")
+        .expect("wait for Haarness ACP agent");
+    assert!(!listed().await.contains(&name), "{}", listed().await);
+    drop(stdin);
+    daemon_guard.stop().await;
+}
+
+/// Another `haarness acp` on the workspace, initialized: a second editor
+/// window, or an editor that reconnected.
+async fn second_agent(
+    workspace: &Path,
+    data: &Path,
+    home: &Path,
+) -> (
+    tokio::process::Child,
+    tokio::process::ChildStdin,
+    Lines<BufReader<ChildStdout>>,
+) {
+    let mut command = base_command(workspace, data, home);
+    command
+        .args(["acp", "--provider", "echo", "--model", "echo-1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn().expect("launch a second Haarness ACP agent");
+    let mut stdin = child.stdin.take().expect("ACP stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("ACP stdout")).lines();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":1, "method":"initialize",
+               "params":{"protocolVersion":1, "clientCapabilities":{}}}),
+    )
+    .await;
+    assert_eq!(receive(&mut lines).await["id"], 1);
+    (child, stdin, lines)
+}
+
+/// Send a prompt that calls `tool` and check that it answered.
+async fn prompt_calls(
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    id: u64,
+    session: &str,
+    tool: &str,
+) {
+    send(
+        stdin,
+        json!({"jsonrpc":"2.0", "id":id, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool {tool} {{}}")}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let answered = receive_response(lines, stdin, id, &mut messages).await;
+    assert_eq!(answered["result"]["stopReason"], "end_turn", "{answered}");
+    assert!(
+        messages
+            .iter()
+            .filter_map(|message| update_text(message, "agent_message_chunk"))
+            .any(|text| text == format!("Tool {tool} => pong")),
+        "prompt {id} did not get {tool}: {messages:?}"
+    );
+}
+
+/// The same session open in two editor windows, or an editor that
+/// reconnects and loads the session before its old `haarness acp` has
+/// exited, runs two agents on the project. Each sets the session's servers
+/// up under a name of its own, so the first one quitting leaves the
+/// second one's running and its prompts keep their tools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_acp_agent_keeps_its_servers_when_the_first_quits() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, _) =
+        acp_session(&directory).await;
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    let server = json!({"name": "editor", "command": python3(), "args": [fixture],
+                        "env": [{"name": "CALL_LOG", "value": directory.0.join("calls")}]});
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":60, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[server.clone()]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let created = receive_response(&mut lines, &mut stdin, 60, &mut messages).await;
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let api = daemon_api(&data);
+    let first = editor_server(&api, &session, "editor").await;
+
+    let (mut second, mut second_in, mut second_lines) =
+        second_agent(&workspace, &data, &directory.0.join("home")).await;
+    send(
+        &mut second_in,
+        json!({"jsonrpc":"2.0", "id":61, "method":"session/load",
+               "params":{"sessionId":session, "cwd":workspace, "mcpServers":[server]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let loaded = receive_response(&mut second_lines, &mut second_in, 61, &mut messages).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let both = editor_servers(&api, &session, "editor").await;
+    assert_eq!(both.len(), 2, "{both:?}");
+    let own = both.into_iter().find(|name| *name != first).unwrap();
+
+    drop(stdin);
+    timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("the first ACP agent did not exit")
+        .expect("wait for the first ACP agent");
+    assert_eq!(
+        editor_servers(&api, &session, "editor").await,
+        std::slice::from_ref(&own)
+    );
+    let tool = format!("mcp__{own}__ping");
+    for id in [62, 63] {
+        prompt_calls(&mut second_in, &mut second_lines, id, &session, &tool).await;
+    }
+    assert_eq!(editor_servers(&api, &session, "editor").await, [own]);
+
+    drop(second_in);
+    timeout(Duration::from_secs(20), second.wait())
+        .await
+        .expect("the second ACP agent did not exit")
+        .expect("wait for the second ACP agent");
+    assert!(editor_servers(&api, &session, "editor").await.is_empty());
+    daemon_guard.stop().await;
+}
+
+/// Two sessions of one agent share a server slow to start (a first `npx
+/// -y` download). Once the project's server has restarted, the first
+/// session's prompt sets it up again; the second session's prompt, sent
+/// while that start runs, waits for it rather than running without its
+/// tools, and the server is set up once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_waits_for_a_shared_server_another_session_sets_up_again() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, _) =
+        acp_session(&directory).await;
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    let launch_log = directory.0.join("launches");
+    let server = json!({"name": "slow", "command": python3(), "args": [fixture],
+                        "env": [{"name": "INIT_DELAY", "value": "3"},
+                                {"name": "LAUNCH_LOG", "value": launch_log},
+                                {"name": "CALL_LOG", "value": directory.0.join("calls")}]});
+    let launched = || std::fs::read_to_string(&launch_log).map_or(0, |text| text.lines().count());
+    // A chat id starts with its time in units of 65.536 s: both sessions are
+    // made well inside one.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let left = 65_536 - (now % 65_536);
+    if left < 15_000 {
+        tokio::time::sleep(Duration::from_millis(u64::try_from(left).unwrap() + 100)).await;
+    }
+    let mut sessions = Vec::new();
+    for id in [70, 71] {
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0", "id":id, "method":"session/new",
+                   "params":{"cwd":workspace, "mcpServers":[server.clone()]}}),
+        )
+        .await;
+        let mut messages = Vec::new();
+        let created = receive_response(&mut lines, &mut stdin, id, &mut messages).await;
+        sessions.push(created["result"]["sessionId"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(sessions[0][..8], sessions[1][..8]);
+    let api = daemon_api(&data);
+    let name = editor_server(&api, &sessions[0], "slow").await;
+    let tool = format!("mcp__{name}__ping");
+    let ask = |id: u64, session: &str| {
+        json!({"jsonrpc":"2.0", "id":id, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool {tool} {{}}")}]}})
+    };
+
+    daemon_guard.stop().await;
+    daemon_guard.stopped = false;
+    send(&mut stdin, ask(72, &sessions[0])).await;
+    // The second prompt goes once the new server lists the server starting.
+    let started = timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(next) = running_daemon_api(&data).filter(|next| *next != api) {
+                let listed = reqwest::Client::new()
+                    .get(format!("{}/v1/mcp", next.0))
+                    .bearer_auth(&next.1)
+                    .send()
+                    .await;
+                if let Ok(listed) = listed
+                    && let Ok(listed) = listed.json::<Value>().await
+                    && listed.as_array().is_some_and(|servers| {
+                        servers.iter().any(|server| {
+                            server["name"] == name.as_str() && server["status"] == "connecting"
+                        })
+                    })
+                {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        started.is_ok(),
+        "the first prompt never set the server up again"
+    );
+    send(&mut stdin, ask(73, &sessions[1])).await;
+    let mut answered = Vec::new();
+    let mut got = HashSet::new();
+    while answered.len() < 2 {
+        let message = receive(&mut lines).await;
+        if let Some(id) = message["id"]
+            .as_u64()
+            .filter(|_| message.get("method").is_none())
+        {
+            assert_eq!(message["result"]["stopReason"], "end_turn", "{message}");
+            answered.push(id);
+        } else if update_text(&message, "agent_message_chunk")
+            .is_some_and(|text| text == format!("Tool {tool} => pong"))
+        {
+            got.insert(message["params"]["sessionId"].as_str().unwrap().to_owned());
+        }
+    }
+    assert_eq!(
+        got.len(),
+        2,
+        "a session ran without the shared server's tool"
+    );
+    assert_eq!(launched(), 2, "the shared server was set up twice");
+
+    drop(stdin);
+    timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
     daemon_guard.stop().await;
 }
 
