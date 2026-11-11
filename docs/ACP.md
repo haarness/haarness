@@ -52,8 +52,10 @@ version 1.
   the one serving the project now, starting it if needed, and sets the session's servers up there again.
   They are let go when the editor closes the session (`session/close`) or the connection, or stops
   `haarness acp` with SIGTERM, SIGINT or SIGHUP; killed with SIGKILL (Zed stops its agents so), the
-  process cannot say so, and the project's server lets them go once it sees the process has ended, within
-  30 seconds or at the next listing of its servers. One turned off through the API stays off (see
+  process cannot say so, and on macOS and Linux the project's server lets them go once it sees the process
+  has ended, within 30 seconds or at the next listing of its servers. On Windows, and for an editor whose
+  agent runs in another pid namespace (a Flatpak sandbox), it cannot see that, and a killed agent's
+  servers stay until the project's server stops. One turned off through the API stays off (see
   [MCP servers in the API](API.md)).
 - **Approvals** offer *Allow once*, *Allow while Haarness is running* (only when the request allows
   more than once; *Allow in this chat* for a site in the user's Chrome) and *Reject*. The editor is

@@ -321,7 +321,16 @@ async fn on_this_computer(owner: &McpOwner) -> bool {
 fn owner_ended(owner: &McpOwner, thorough: bool) -> bool {
     use haarness_core::process_groups::{process_ended, process_start};
     process_ended(owner.pid)
-        || (thorough && process_start(owner.pid).is_some_and(|start| start != owner.started))
+        || (thorough
+            && well_formed_start(&owner.started)
+            && process_start(owner.pid)
+                .is_some_and(|start| well_formed_start(&start) && start != owner.started))
+}
+/// Whether `start` is a start time as it reads in full: one read in part (a
+/// Linux boot id that could not be read leaves `:<ticks>`) differs from the
+/// full one of the same process, which would be taken for another.
+fn well_formed_start(start: &str) -> bool {
+    !start.trim().is_empty() && !start.starts_with(':') && !start.ends_with(':')
 }
 /// The owners on this computer of the servers in `servers` that have ended.
 fn ended_owners(servers: &RwLock<BTreeMap<String, Entry>>, thorough: bool) -> Vec<McpOwner> {
@@ -1128,7 +1137,8 @@ impl NativeMcpRegistry {
             }
             if let Some(live) = live.filter(|live| {
                 same_effective_config(&live.config, &config)
-                    && (live.info.status == "connected" || live.pending().is_some())
+                    && (matches!(live.info.status.as_str(), "connected" | "needs_auth")
+                        || live.pending().is_some())
             }) {
                 // Another owner of the server as it runs.
                 live.added
@@ -8937,6 +8947,28 @@ mod recovery_tests {
         owner.kill().unwrap();
         owner.wait().unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A start time read in part (a Linux boot id that could not be read) is
+    /// never taken for another process's: the owner runs on.
+    #[test]
+    fn an_owner_whose_start_was_read_in_part_is_not_taken_for_ended() {
+        let pid = std::process::id();
+        for started in [":987654", "", "boot-1:"] {
+            let owner = McpOwner {
+                pid,
+                started: started.into(),
+            };
+            assert!(!owner_ended(&owner, true), "{started:?}");
+        }
+        if let Some(started) = haarness_core::process_groups::process_start(pid) {
+            let elsewhere = McpOwner {
+                pid,
+                started: format!("{started} 1"),
+            };
+            assert!(owner_ended(&elsewhere, true));
+            assert!(!owner_ended(&elsewhere, false));
+        }
     }
 
     /// Without `timeout_ms`, a local server's start gets 2 minutes and

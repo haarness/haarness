@@ -914,10 +914,12 @@ impl Service {
         true
     }
 
-    /// Before a prompt, configure again each of the session's MCP servers
-    /// that a new server (`on`, a restart or an update) does not have yet.
-    /// One still starting, configured again here or by a session sharing it,
-    /// is waited for and told to the editor as a new session's are (see
+    /// Before a prompt, configure each of the session's MCP servers on a new
+    /// server (`on`, a restart or an update) this process has not configured
+    /// it on yet: again when the server does not have it, and to become one
+    /// of its owners when another process on the chat set it up there. One
+    /// still starting, configured again here or by a session sharing it, is
+    /// waited for and told to the editor as a new session's are (see
     /// `Service::await_mcp`). One the server it was configured on no longer
     /// lists was turned off there (by the person, or through the API): the
     /// sessions let it go, and a later restart does not bring it back. One
@@ -956,7 +958,7 @@ impl Service {
                 .iter()
                 .find(|listed| listed.name == name)
                 .map(|listed| listed.status.clone());
-            let (shown, config) = {
+            let (shown, config, wait) = {
                 let mut known = self
                     .mcp
                     .lock()
@@ -964,35 +966,46 @@ impl Service {
                 let Some(server) = known.get_mut(&name) else {
                     continue;
                 };
-                let configured_since = server.on == on && server.since > asked;
+                // Configured by this process on this server (or seen there).
+                let ours = server.on == on;
+                let configured_since = ours && server.since > asked;
                 match status.as_deref() {
+                    // Set up there by another process on the chat (the same
+                    // chat open in another window, after a restart): this one
+                    // becomes an owner too, so the server stays when that one
+                    // ends.
+                    Some(status @ ("connected" | "connecting" | "needs_auth")) if !ours => (
+                        server.shown.clone(),
+                        Some(server.config.clone()),
+                        status == "connecting",
+                    ),
                     Some(status) => {
                         server.on = on;
                         if status != "connecting" {
                             continue;
                         }
-                        (server.shown.clone(), None)
+                        (server.shown.clone(), None, true)
                     }
-                    // Configured after the listing was read, here or for a
-                    // session sharing it.
-                    None if configured_since => (server.shown.clone(), None),
-                    None if server.on == on => {
+                    // Configured after the listing was read, for a session of
+                    // this process sharing it.
+                    None if configured_since => (server.shown.clone(), None, true),
+                    None if ours => {
                         tracing::info!(server = %name, "an editor's MCP server was turned off; its sessions let it go");
                         known.remove(&name);
                         continue;
                     }
-                    None => (server.shown.clone(), Some(server.config.clone())),
+                    None => (server.shown.clone(), Some(server.config.clone()), false),
                 }
             };
             if let Some(config) = config {
-                tracing::info!(server = %name, "configuring an editor's MCP server again on a new Haarness server");
+                tracing::info!(server = %name, "configuring an editor's MCP server on a new Haarness server");
                 restore_delay().await;
                 let started = self.start_mcp(&name, &config).await;
                 if !self.configured(&name, on) {
                     self.release_mcp(&name, config).await;
                     continue;
                 }
-                if matches!(started, Ok(false)) {
+                if matches!(started, Ok(false)) && !wait {
                     continue;
                 }
             }

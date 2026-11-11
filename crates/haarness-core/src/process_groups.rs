@@ -358,8 +358,14 @@ fn probe(pid: i32) -> Probe {
     parse_proc_stat(&stat, boot.trim()).unwrap_or(Probe::Unknown)
 }
 
+/// `None` without the boot's id too (it could not be read): a start time
+/// without it would differ from the one read before, and a process that runs
+/// on would be taken for another.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_proc_stat(stat: &str, boot: &str) -> Option<Probe> {
+    if boot.is_empty() {
+        return None;
+    }
     // The command name is in parentheses and may hold spaces or `)`.
     let fields: Vec<&str> = stat
         .get(stat.rfind(')')? + 1..)?
@@ -446,6 +452,8 @@ mod tests {
             })
         );
         assert_eq!(parse_ps_line("   \n"), None);
+        // Without the boot's id the start time cannot be told.
+        assert_eq!(parse_proc_stat(stat, ""), None);
     }
 
     fn temporary_record(text: &str) -> PathBuf {

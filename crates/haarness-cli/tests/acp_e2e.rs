@@ -1812,6 +1812,78 @@ async fn agents_sharing_a_chat_share_its_servers_until_the_last_ends() {
     daemon_guard.stop().await;
 }
 
+/// Two agent processes on one chat (the same session open in two windows)
+/// while the project's server restarts (an update): the first one's prompt
+/// sets the chat's server up on the new server, and the second one's makes
+/// it an owner there too, so the server stays for it once the first quits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_sharing_a_chat_both_own_its_server_after_a_restart() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, _) =
+        acp_session(&directory).await;
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    let launch_log = directory.0.join("launches");
+    let launched = || std::fs::read_to_string(&launch_log).map_or(0, |text| text.lines().count());
+    let server = json!({"name": "editor", "command": python3(), "args": [fixture],
+                        "env": [{"name": "LAUNCH_LOG", "value": launch_log},
+                                {"name": "CALL_LOG", "value": directory.0.join("calls")}]});
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":90, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[server.clone()]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let created = receive_response(&mut lines, &mut stdin, 90, &mut messages).await;
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let name = editor_server(&daemon_api(&data), &session, "editor").await;
+    let tool = format!("mcp__{name}__ping");
+    let (mut second, mut second_in, mut second_lines) =
+        second_agent(&workspace, &data, &directory.0.join("home")).await;
+    send(
+        &mut second_in,
+        json!({"jsonrpc":"2.0", "id":91, "method":"session/load",
+               "params":{"sessionId":session, "cwd":workspace, "mcpServers":[server]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let loaded = receive_response(&mut second_lines, &mut second_in, 91, &mut messages).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    assert_eq!(launched(), 1);
+
+    daemon_guard.stop().await;
+    daemon_guard.stopped = false;
+    prompt_calls(&mut stdin, &mut lines, 92, &session, &tool).await;
+    prompt_calls(&mut second_in, &mut second_lines, 93, &session, &tool).await;
+    assert_eq!(launched(), 2, "the second agent started the server again");
+
+    drop(stdin);
+    timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("the first ACP agent did not exit")
+        .expect("wait for the first ACP agent");
+    let api = daemon_api(&data);
+    assert_eq!(
+        editor_servers(&api, &session, "editor").await,
+        std::slice::from_ref(&name)
+    );
+    for id in [94, 95] {
+        prompt_calls(&mut second_in, &mut second_lines, id, &session, &tool).await;
+    }
+    assert_eq!(launched(), 2);
+
+    drop(second_in);
+    timeout(Duration::from_secs(20), second.wait())
+        .await
+        .expect("the second ACP agent did not exit")
+        .expect("wait for the second ACP agent");
+    assert!(editor_servers(&api, &session, "editor").await.is_empty());
+    daemon_guard.stop().await;
+}
+
 /// Send a prompt that calls `tool`, answer each request it raises with
 /// `answer`, and say how many it raised.
 async fn asked(

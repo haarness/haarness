@@ -356,15 +356,18 @@ of the project is offered its tools. How long it lives depends on `owner`:
 - Configured with one (`{"pid", "started"}`, the process that uses it, as
   `haarness acp` sends), it lives while it has an owner. Each configure adds
   its owner, and one with the settings the server already runs with leaves
-  it running rather than starting it again; a configure with
-  `enabled: false` from an owner takes that owner off, and the server goes
-  with its last owner. An owner whose process runs on the server's computer
+  it running rather than starting it again; one with other settings starts
+  it again with those, for every owner, and they stay after that owner has
+  gone (the last configure wins). A configure with `enabled: false` from an
+  owner takes that owner off, and the server goes with its last owner. An owner whose process runs on the server's computer
   (its pid and start time found there when it configured the server) is
   also taken off once that process has ended: Haarness looks when a server
   is configured or listed, on every reload, and every 30 seconds, so a
   process that was killed and said nothing is noticed within that time. An
-  owner Haarness cannot find there (another computer's, or one on Windows)
-  stays until it lets the server go.
+  owner Haarness cannot find there stays until it lets the server go: one on
+  another computer, one in another pid namespace (an editor in a Flatpak
+  sandbox), and any on Windows, where Haarness does not read a process's
+  start time.
 
 One configured under the name of a server in the configuration keeps that
 name while the configuration's entry stays as it was; configured off, it
