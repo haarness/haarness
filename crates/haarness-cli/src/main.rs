@@ -1171,12 +1171,14 @@ enum WorkspaceCommand {
 #[derive(Subcommand)]
 enum PluginCommand {
     /// Register a marketplace: a git URL, owner/repo, or local directory
-    /// holding .claude-plugin/marketplace.json. `marketplace update [name]`
-    /// fetches registered Git marketplaces again and updates their installed
-    /// plugins; `marketplace auto-update <name> [--off]` says whether one is
-    /// fetched again in the background.
+    /// holding .claude-plugin/marketplace.json. A Git address may end in
+    /// #<branch or tag> to follow that ref instead of the default branch.
+    /// `marketplace update [name]` fetches registered Git marketplaces again
+    /// and updates their installed plugins; `marketplace auto-update <name>
+    /// [--off]` says whether one is fetched again in the background.
     Marketplace {
-        /// Git URL, owner/repo, or local folder; or `add`, `update` or `auto-update`.
+        /// Git URL or owner/repo, either with an optional #<branch or tag>, or
+        /// a local folder; or `add`, `update` or `auto-update`.
         source: String,
         /// The source after `add`, or the marketplace after `update` or `auto-update`.
         compatibility_source: Option<String>,

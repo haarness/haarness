@@ -73,6 +73,9 @@ Checks that found real bugs and must stay covered:
 - A registered Git marketplace (a real one such as `anthropics/claude-plugins-official` too) answers
   `haarness plugin marketplace update` with "up to date"; reset its clone a commit back, or change the
   commit in `marketplace-sources.json`, and the same command fetches it and updates changed plugins.
+- A Git marketplace added as `<address>#<branch>` or `#<tag>` follows only that ref: push to the default
+  branch and update says "up to date"; push to the branch (or move the tag) and it updates; listings show
+  the address with its `#<ref>`.
 - `@agent` offers Claude-format agents (no `mode`) in the TUI; profiles carry `config/plugins/local`.
 
 Open gaps: Desktop's plugin install form asks for plugin and marketplace names instead of listing a registered

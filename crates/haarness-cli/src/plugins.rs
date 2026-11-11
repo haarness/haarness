@@ -10,8 +10,9 @@
 //! State lives under `<data>/plugins/`:
 //! - `marketplaces.json` — name → local path (clone or original dir)
 //! - `marketplace-sources.json` — name → where a Git marketplace's clone came
-//!   from, its commit and whether it follows new commits (beside the first
-//!   file, which keeps the shape older versions read)
+//!   from (with `#<ref>` when it follows a branch or tag), its commit and
+//!   whether it follows new commits (beside the first file, which keeps the
+//!   shape older versions read)
 //! - `installed.json`    — name → { marketplace, path, enabled }
 //! - `marketplaces/<name>/`, `cache/<name>/` — cloned content
 
@@ -93,7 +94,11 @@ fn sources_file(data: &Path) -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketplaceSource {
-    /// The Git address as registered (after `owner/repo` became a URL).
+    /// The Git address as registered (after `owner/repo` became a URL),
+    /// ending in `#<ref>` when it follows that branch or tag instead of the
+    /// default branch. The ref stays in this one string so a Haarness from
+    /// before refs fails to fetch the address rather than following the
+    /// default branch, and rewriting the file keeps it.
     pub source: String,
     /// Fetched again by the background refresh.
     #[serde(default)]
@@ -104,6 +109,28 @@ pub struct MarketplaceSource {
     /// When the clone was last replaced (RFC 3339).
     #[serde(default)]
     pub updated_at: Option<String>,
+}
+
+/// A recorded marketplace address's repository URL and the branch or tag
+/// it follows (`None`: the default branch).
+fn followed(source: &str) -> (&str, Option<&str>) {
+    match source.split_once('#') {
+        Some((url, reference)) => (url, Some(reference)),
+        None => (source, None),
+    }
+}
+
+impl MarketplaceSource {
+    /// The address as people see it: any credential in the URL hidden,
+    /// then `#<ref>`.
+    pub fn shown(&self) -> String {
+        let (url, reference) = followed(&self.source);
+        let url = haarness_core::redact::url(url);
+        match reference {
+            Some(reference) => format!("{url}#{reference}"),
+            None => url.into_owned(),
+        }
+    }
 }
 
 pub fn marketplace_sources(data: &Path) -> BTreeMap<String, MarketplaceSource> {
@@ -542,6 +569,59 @@ fn git_url(source: &str) -> String {
         return format!("https://github.com/{source}.git");
     }
     source.to_owned()
+}
+
+/// GitHub's `owner/repo`, nothing more: one `/` between two names of
+/// letters, digits, `-`, `_` and `.`.
+fn github_shorthand(source: &str) -> bool {
+    let name = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    source
+        .split_once('/')
+        .is_some_and(|(owner, repo)| name(owner) && name(repo))
+}
+
+/// A Git marketplace address as it is recorded: the repository's URL
+/// (`owner/repo` becomes GitHub's), then `#<ref>` when the address names
+/// the branch or tag to follow. Both of Claude Code's spellings are read:
+/// `#<ref>` after any address, and `@<ref>` after `owner/repo`.
+fn marketplace_address(source: &str) -> Result<String> {
+    let (address, reference) = match source.split_once('#') {
+        Some((address, reference)) => (address, Some(reference)),
+        None => match source.split_once('@') {
+            Some((repository, reference)) if github_shorthand(repository) => {
+                (repository, Some(reference))
+            }
+            _ => (source, None),
+        },
+    };
+    let url = git_url(address);
+    let Some(reference) = reference else {
+        return Ok(url);
+    };
+    followable_ref(reference)?;
+    Ok(format!("{url}#{reference}"))
+}
+
+/// A ref a marketplace can follow: a branch or tag, as `git clone --branch`
+/// reads it. A full commit id is refused, since it never moves.
+fn followable_ref(reference: &str) -> Result<()> {
+    if reference.is_empty() {
+        bail!(
+            "nothing follows the # in the address: name a branch or tag after it, or leave it out"
+        );
+    }
+    checked_git_value(reference, "ref")?;
+    if reference.len() == 40 && reference.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!(
+            "{reference} is a commit, which never moves: name a branch or tag for the marketplace to follow"
+        );
+    }
+    Ok(())
 }
 
 /// The revision a git plugin source pins: `ref` is a branch or tag, `sha` an
@@ -1085,8 +1165,10 @@ fn swap_into(staging: &Path, destination: &Path) -> Result<()> {
 }
 
 /// Register a marketplace from a git URL or a local directory. A Git one
-/// follows new commits of its repository from then on. The clone is made
-/// before the registrations are locked, so a slow host holds nobody up.
+/// follows new commits of its repository from then on: of the branch or tag
+/// its address ends in (`…#release`), else of the default branch. Adding it
+/// again with another ref, or none, moves it. The clone is made before the
+/// registrations are locked, so a slow host holds nobody up.
 pub fn marketplace_add(data: &Path, source: &str) -> Result<String> {
     let local = local_path(source).unwrap_or_else(|| PathBuf::from(source));
     if local.exists() {
@@ -1104,14 +1186,25 @@ pub fn marketplace_add(data: &Path, source: &str) -> Result<String> {
         return Ok(manifest.name);
     }
     if local_path(source).is_some() {
+        // A folder is taken as written, so a `#` in it is part of its name.
+        if source.contains('#') {
+            bail!(
+                "{source} does not exist; a folder is read as it is, so to follow a branch of a repository on this computer, add its file:// address with #<branch>"
+            );
+        }
         bail!("{source} does not exist");
     }
-    // Normalize owner/repo shorthand to a GitHub URL.
-    let url = git_url(source);
+    // owner/repo becomes a GitHub URL; a trailing #ref stays on it.
+    let address = marketplace_address(source)?;
+    let (url, reference) = followed(&address);
     let staging = plugins_root(data)
         .join("marketplaces")
         .join(format!(".add-{}", short_nonce()));
-    let checked = git_clone(&url, &staging).and_then(|()| {
+    let revision = GitRevision {
+        reference,
+        sha: None,
+    };
+    let checked = git_checkout(url, &revision, &staging).and_then(|()| {
         let manifest = manifest_of(&staging)?;
         safe_name(&manifest.name, "marketplace")?;
         let commit = head_commit(&staging).ok();
@@ -1135,7 +1228,7 @@ pub fn marketplace_add(data: &Path, source: &str) -> Result<String> {
     sources.insert(
         name.clone(),
         MarketplaceSource {
-            source: url,
+            source: address,
             auto_update: true,
             commit,
             updated_at: Some(now()),
@@ -1292,8 +1385,12 @@ pub fn marketplace_update(data: &Path, name: &str) -> Result<MarketplaceRefresh>
         recover_clone(data, name)?;
     }
     let found = source_of(data, name)?;
+    let (url, reference) = followed(&found.source);
+    if let Some(reference) = reference {
+        followable_ref(reference)?;
+    }
     let current = head_commit(&clone).ok();
-    let remote = remote_commit(&found.source, None)?;
+    let remote = remote_commit(url, reference)?;
     // Unchanged only when the clone and the record both hold the remote's
     // commit; a record that disagrees is put right by fetching again.
     if current.as_deref() == Some(remote.as_str())
@@ -1314,7 +1411,11 @@ pub fn marketplace_update(data: &Path, name: &str) -> Result<MarketplaceRefresh>
     }
     let parent = plugins_root(data).join("marketplaces");
     let staging = parent.join(format!(".{name}.refresh-{}", short_nonce()));
-    let fetched = git_clone(&found.source, &staging).and_then(|()| {
+    let revision = GitRevision {
+        reference,
+        sha: None,
+    };
+    let fetched = git_checkout(url, &revision, &staging).and_then(|()| {
         let manifest = manifest_of(&staging)?;
         if manifest.name != name {
             bail!(
@@ -2260,7 +2361,7 @@ pub fn marketplace_catalog(data: &Path) -> serde_json::Value {
                 } else if let Some(source) = sources.get(&name) {
                     serde_json::json!({
                         "type": "git",
-                        "source": haarness_core::redact::url(&source.source),
+                        "source": source.shown(),
                         "autoUpdate": source.auto_update,
                         "commit": source.commit,
                         "updatedAt": source.updated_at,
@@ -2872,35 +2973,69 @@ mod tests {
         }
 
         fn commit(&self, files: &[(&str, &str)], message: &str) -> String {
+            self.commit_to("main", files, message)
+        }
+
+        /// Commits on `branch`, which starts from the working copy's
+        /// commit when it is new, and pushes it.
+        fn commit_to(&self, branch: &str, files: &[(&str, &str)], message: &str) -> String {
+            let on = git_output([
+                "-C",
+                self.work.to_str().unwrap(),
+                "symbolic-ref",
+                "--short",
+                "HEAD",
+            ])
+            .unwrap();
+            if on.trim() != branch {
+                let exists = self.git_succeeds(&[
+                    "rev-parse",
+                    "--verify",
+                    "-q",
+                    &format!("refs/heads/{branch}"),
+                ]);
+                if exists {
+                    self.git(&["checkout", "-q", branch]);
+                } else {
+                    self.git(&["checkout", "-q", "-b", branch]);
+                }
+            }
             for (path, body) in files {
                 let path = self.work.join(path);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 fs::write(path, body).unwrap();
             }
-            for args in [
-                vec!["add", "-A"],
-                vec![
+            self.git(&["add", "-A"]);
+            self.git(&["commit", "-qm", message]);
+            self.git(&["push", "-q", "origin", &format!("HEAD:refs/heads/{branch}")]);
+            head_commit(&self.work).unwrap()
+        }
+
+        /// Puts the annotated tag `name` on the working copy's commit,
+        /// moving it there if it exists, and pushes it.
+        fn tag(&self, name: &str) {
+            self.git(&["tag", "-f", "-a", name, "-m", name]);
+            self.git(&["push", "-q", "-f", "origin", &format!("refs/tags/{name}")]);
+        }
+
+        fn git_succeeds(&self, args: &[&str]) -> bool {
+            Command::new("git")
+                .args([
                     "-c",
                     "user.name=Haarness Test",
                     "-c",
                     "user.email=test@example.invalid",
-                    "commit",
-                    "-qm",
-                    message,
-                ],
-                vec!["push", "-q", "origin", "HEAD:main"],
-            ] {
-                assert!(
-                    Command::new("git")
-                        .args(&args)
-                        .current_dir(&self.work)
-                        .status()
-                        .unwrap()
-                        .success(),
-                    "{args:?}"
-                );
-            }
-            head_commit(&self.work).unwrap()
+                ])
+                .args(args)
+                .current_dir(&self.work)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        }
+
+        fn git(&self, args: &[&str]) {
+            assert!(self.git_succeeds(args), "{args:?}");
         }
     }
 
@@ -3176,6 +3311,303 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("unknown marketplace missing")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_marketplace_address_may_end_in_the_branch_or_tag_to_follow() {
+        for (written, recorded) in [
+            (
+                "https://git.example.com/team/market.git",
+                "https://git.example.com/team/market.git",
+            ),
+            (
+                "https://git.example.com/team/market.git#release",
+                "https://git.example.com/team/market.git#release",
+            ),
+            ("team/market", "https://github.com/team/market.git"),
+            (
+                "team/market#v1.2.0",
+                "https://github.com/team/market.git#v1.2.0",
+            ),
+            // Claude Code also reads owner/repo@ref.
+            (
+                "team/market@v1.2.0",
+                "https://github.com/team/market.git#v1.2.0",
+            ),
+            (
+                "git@github.com:team/market.git#release/2026-11",
+                "git@github.com:team/market.git#release/2026-11",
+            ),
+            // An `@` anywhere but after owner/repo belongs to the address.
+            (
+                "git@github.com:team/market.git",
+                "git@github.com:team/market.git",
+            ),
+            (
+                "ssh://git@git.example.com/team/market.git",
+                "ssh://git@git.example.com/team/market.git",
+            ),
+            // A short commit id is a name like any other; the repository
+            // says whether it has a branch or tag by it.
+            (
+                "team/market#0123abc",
+                "https://github.com/team/market.git#0123abc",
+            ),
+        ] {
+            assert_eq!(marketplace_address(written).unwrap(), recorded, "{written}");
+        }
+        assert_eq!(
+            followed("https://git.example.com/team/market.git#release/2026-11"),
+            (
+                "https://git.example.com/team/market.git",
+                Some("release/2026-11")
+            )
+        );
+        assert_eq!(
+            followed("https://git.example.com/team/market.git"),
+            ("https://git.example.com/team/market.git", None)
+        );
+        for (written, says) in [
+            ("team/market#", "nothing follows the #"),
+            (
+                "https://git.example.com/team/market.git#--upload-pack=touch",
+                "invalid git ref",
+            ),
+            ("team/market#two words", "invalid git ref"),
+            (
+                "team/market#0123456789abcdef0123456789ABCDEF01234567",
+                "is a commit, which never moves",
+            ),
+        ] {
+            let error = marketplace_address(written).unwrap_err().to_string();
+            assert!(error.contains(says), "{written}: {error}");
+        }
+        // Shown with a credential hidden and the ref kept.
+        let source = MarketplaceSource {
+            source: "https://fixture:PRIVATE@git.example.com/team/market.git#release".into(),
+            auto_update: true,
+            commit: None,
+            updated_at: None,
+        };
+        assert_eq!(
+            source.shown(),
+            "https://<redacted>@git.example.com/team/market.git#release"
+        );
+
+        // A folder is read as written, `#` and all.
+        let root = std::env::temp_dir().join(format!("haarness-hash-{}", uuid::Uuid::now_v7()));
+        let data = root.join("data");
+        let folder = root.join("market#1");
+        fs::create_dir_all(folder.join(".claude-plugin")).unwrap();
+        fs::write(
+            folder.join(".claude-plugin/marketplace.json"),
+            market_manifest("hashed", &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            marketplace_add(&data, folder.to_str().unwrap()).unwrap(),
+            "hashed"
+        );
+        assert_eq!(
+            marketplace_catalog(&data)[0]["type"],
+            "folder",
+            "a folder has no ref to follow"
+        );
+        let missing = root.join("missing#release");
+        let error = marketplace_add(&data, missing.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(&format!("{} does not exist", missing.display()))
+                && error.contains("file:// address with #<branch>"),
+            "{error}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_git_marketplace_follows_the_branch_or_tag_its_address_names() {
+        let root = std::env::temp_dir().join(format!("haarness-followed-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let data = root.join("data");
+        let upstream = Upstream::new(&root);
+        let manifest = market_manifest("team", &["kit"]);
+        let main_one = upstream.commit(
+            &[
+                files(&[plugin_files("kit", "Main one")]),
+                vec![(".claude-plugin/marketplace.json", manifest.as_str())],
+            ]
+            .concat(),
+            "main one",
+        );
+        let release_one = upstream.commit_to(
+            "release",
+            &files(&[plugin_files("kit", "Release one")]),
+            "release one",
+        );
+
+        // Registered at the branch: the clone, the record and the listing
+        // all say so.
+        let at_release = format!("{}#release", upstream.url);
+        assert_eq!(marketplace_add(&data, &at_release).unwrap(), "team");
+        let clone = owned_clone(&data, "team");
+        assert_eq!(head_commit(&clone).unwrap(), release_one);
+        let source = &marketplace_sources(&data)["team"];
+        assert_eq!(source.source, at_release);
+        assert_eq!(source.commit.as_deref(), Some(release_one.as_str()));
+        assert!(source.auto_update);
+        assert_eq!(marketplace_catalog(&data)[0]["source"], at_release);
+        let command = install(&data, "kit@team")
+            .unwrap()
+            .path
+            .join("commands/run.md");
+        let read = || fs::read_to_string(&command).unwrap();
+        assert_eq!(read(), "Release one");
+
+        // New commits on the default branch are none of its business.
+        upstream.commit(&files(&[plugin_files("kit", "Main two")]), "main two");
+        let refresh = marketplace_update(&data, "team").unwrap();
+        assert_eq!(refresh.status, "unchanged");
+        assert_eq!(refresh.commit.as_deref(), Some(release_one.as_str()));
+        assert_eq!(read(), "Release one");
+
+        // A new commit on the branch is fetched, and its plugin follows.
+        let release_two = upstream.commit_to(
+            "release",
+            &files(&[plugin_files("kit", "Release two")]),
+            "release two",
+        );
+        let refreshed = marketplace_update_all(&data, true);
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].status, "updated");
+        assert_eq!(refreshed[0].previous.as_deref(), Some(release_one.as_str()));
+        assert_eq!(refreshed[0].commit.as_deref(), Some(release_two.as_str()));
+        assert_eq!(refreshed[0].plugins, ["kit"]);
+        assert_eq!(read(), "Release two");
+        let source = &marketplace_sources(&data)["team"];
+        assert_eq!(source.source, at_release, "an update keeps the ref");
+        assert_eq!(source.commit.as_deref(), Some(release_two.as_str()));
+
+        // A ref the repository lacks, or a commit id, is refused before
+        // anything changes.
+        for (address, says) in [
+            (format!("{}#missing", upstream.url), "missing"),
+            (format!("{}#{main_one}", upstream.url), "is a commit"),
+        ] {
+            let error = format!("{:#}", marketplace_add(&data, &address).unwrap_err());
+            assert!(error.contains(says), "{address}: {error}");
+            assert_eq!(marketplace_sources(&data)["team"].source, at_release);
+            assert_eq!(head_commit(&clone).unwrap(), release_two);
+        }
+
+        // Once the branch is gone upstream, updating says so and keeps the
+        // clone it has.
+        upstream.git(&["push", "-q", "origin", "--delete", "release"]);
+        let error = format!("{:#}", marketplace_update(&data, "team").unwrap_err());
+        assert!(error.contains("has no release"), "{error}");
+        assert_eq!(head_commit(&clone).unwrap(), release_two);
+        assert_eq!(read(), "Release two");
+
+        // Added again at a tag, it moves there, and moves on only when the
+        // tag does.
+        let main_three = upstream.commit(&files(&[plugin_files("kit", "Main three")]), "three");
+        upstream.tag("v1");
+        let at_tag = format!("{}#v1", upstream.url);
+        assert_eq!(marketplace_add(&data, &at_tag).unwrap(), "team");
+        assert_eq!(head_commit(&clone).unwrap(), main_three);
+        assert_eq!(marketplace_sources(&data)["team"].source, at_tag);
+        let main_four = upstream.commit(&files(&[plugin_files("kit", "Main four")]), "four");
+        assert_eq!(
+            marketplace_update(&data, "team").unwrap().status,
+            "unchanged"
+        );
+        upstream.tag("v1");
+        let refresh = marketplace_update(&data, "team").unwrap();
+        assert_eq!(refresh.status, "updated");
+        assert_eq!(refresh.commit.as_deref(), Some(main_four.as_str()));
+        assert_eq!(refresh.plugins, ["kit"]);
+        assert_eq!(read(), "Main four");
+
+        // Added again without a ref, it follows the default branch.
+        assert_eq!(marketplace_add(&data, &upstream.url).unwrap(), "team");
+        assert_eq!(marketplace_sources(&data)["team"].source, upstream.url);
+        let main_five = upstream.commit(&files(&[plugin_files("kit", "Main five")]), "five");
+        let refresh = marketplace_update(&data, "team").unwrap();
+        assert_eq!(refresh.commit.as_deref(), Some(main_five.as_str()));
+        assert_eq!(read(), "Main five");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sources_saved_before_refs_still_read_and_older_readers_never_follow_another_branch() {
+        /// `marketplace-sources.json` as versions before refs read and wrote it.
+        #[derive(Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Older {
+            source: String,
+            auto_update: bool,
+            commit: Option<String>,
+            updated_at: Option<String>,
+        }
+        let root = std::env::temp_dir().join(format!("haarness-older-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let data = root.join("data");
+        let upstream = Upstream::new(&root);
+        let manifest = market_manifest("team", &["kit"]);
+        let first = upstream.commit(
+            &[
+                files(&[plugin_files("kit", "Main one")]),
+                vec![(".claude-plugin/marketplace.json", manifest.as_str())],
+            ]
+            .concat(),
+            "one",
+        );
+        upstream.commit_to(
+            "release",
+            &files(&[plugin_files("kit", "Release one")]),
+            "release one",
+        );
+        // As an older Haarness left it, written out by hand.
+        let clone = owned_clone(&data, "team");
+        git_clone(&upstream.url, &clone).unwrap();
+        write_map(
+            &marketplaces_file(&data),
+            &BTreeMap::from([("team".to_owned(), clone.clone())]),
+        )
+        .unwrap();
+        fs::write(
+            sources_file(&data),
+            format!(
+                r#"{{"team": {{"source": "{}", "autoUpdate": true, "commit": "{first}", "updatedAt": "2026-11-01T09:41:00Z"}}}}"#,
+                upstream.url
+            ),
+        )
+        .unwrap();
+        let source = &marketplace_sources(&data)["team"];
+        assert_eq!(source.source, upstream.url);
+        assert!(source.auto_update);
+        assert_eq!(marketplace_catalog(&data)[0]["source"], upstream.url);
+        // It follows the default branch, as it did.
+        let second = upstream.commit(&files(&[plugin_files("kit", "Main two")]), "two");
+        assert_eq!(
+            marketplace_update(&data, "team").unwrap().commit.as_deref(),
+            Some(second.as_str())
+        );
+
+        // Moved to a branch, the file still has the shape older versions
+        // read, and what they read is an address they cannot fetch, so they
+        // never follow the default branch in its place. Writing it back, as
+        // they do when they change another marketplace, keeps the ref.
+        marketplace_add(&data, &format!("{}#release", upstream.url)).unwrap();
+        let older: BTreeMap<String, Older> = read_map(&sources_file(&data));
+        assert_eq!(older["team"].source, format!("{}#release", upstream.url));
+        assert!(remote_commit(&older["team"].source, None).is_err());
+        write_map(&sources_file(&data), &older).unwrap();
+        assert_eq!(
+            followed(&marketplace_sources(&data)["team"].source),
+            (upstream.url.as_str(), Some("release"))
         );
         fs::remove_dir_all(root).unwrap();
     }

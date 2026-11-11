@@ -211,7 +211,7 @@ impl ManagementService {
             .await??;
             return Ok(json!({
                 "name": input["name"],
-                "source": haarness_core::redact::url(&source.source),
+                "source": source.shown(),
                 "autoUpdate": source.auto_update,
                 "commit": source.commit,
                 "updatedAt": source.updated_at,
