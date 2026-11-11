@@ -13168,17 +13168,32 @@ fn plugin_command(
                     "use 'plugin marketplace <source>' or 'plugin marketplace add <source>'"
                 ),
             };
-            let name = plugins::marketplace_add(&paths.data, source)?;
+            let added = plugins::marketplace_add(&paths.data, source)?;
+            let name = &added.name;
             println!(
                 "Marketplace '{name}' registered. Install with: haarness plugin install <plugin>@{name}"
             );
+            // It took the place of a clone of the same name: what its
+            // installed plugins did, under the line above.
+            if let Some(refresh) = &added.refresh {
+                for line in marketplace_refresh_lines(refresh).into_iter().skip(1) {
+                    println!("{line}");
+                }
+            }
             if plugins::marketplace_sources(&paths.data)
-                .get(&name)
+                .get(name)
                 .is_some_and(|source| source.auto_update)
             {
                 println!(
                     "It updates automatically; `haarness plugin marketplace auto-update {name} --off` stops that."
                 );
+            }
+            if added
+                .refresh
+                .as_ref()
+                .is_some_and(|refresh| !refresh.failed.is_empty())
+            {
+                anyhow::bail!("Some plugins were not updated");
             }
         }
         PluginCommand::Install { spec } => {
