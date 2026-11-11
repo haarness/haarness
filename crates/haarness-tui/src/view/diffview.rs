@@ -777,15 +777,13 @@ fn content_spans(
     }
     let reviewed = viewer.is_reviewed(file);
     let language = viewer
-        .files
+        .rows
         .get(file)
-        .and_then(|file| file.file.rsplit_once('.'))
-        .map(|(_, extension)| extension.to_owned())
-        .unwrap_or_default();
+        .map_or("", |rows| rows.language.as_str());
     let base: Vec<Span> = if reviewed || language.is_empty() {
         vec![Span::new(text.clone(), theme.muted)]
     } else {
-        crate::highlight::highlight_block_transparent(&text, &language, theme)
+        crate::highlight::highlight_block_transparent(&text, language, theme)
             .into_iter()
             .next()
             .unwrap_or_else(|| vec![Span::new(text.clone(), theme.text)])

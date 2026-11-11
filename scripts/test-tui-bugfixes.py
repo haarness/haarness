@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Real tmux regressions for TUI drafts, input integrity, shortcuts and selectors."""
+"""Real tmux regressions for TUI drafts, input integrity, shortcuts, selectors and code colours."""
 import concurrent.futures
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import tempfile
@@ -60,6 +61,43 @@ def pane():
     return tmux('capture-pane', '-p', '-t', session)
 
 
+def cells(row):
+    """The characters of a row captured with `-e`, each with the foreground it is drawn in."""
+    result, colour = [], None
+    for part in re.split(r'(\x1b\[[0-9;]*m)', row):
+        if not part.startswith('\x1b['):
+            result += [(character, colour) for character in part]
+            continue
+        codes, index = (part[2:-1] or '0').split(';'), 0
+        while index < len(codes):
+            if codes[index] in ('38', '48') and codes[index + 1:index + 2] in (['2'], ['5']):
+                step = 5 if codes[index + 1] == '2' else 3
+                if codes[index] == '38':
+                    colour = tuple(codes[index + 2:index + step])
+                index += step
+                continue
+            if codes[index] in ('0', '39'):
+                colour = None
+            index += 1
+    return result
+
+
+def code_row(needle):
+    """The drawn row holding `needle` outside a sent prompt, as (text, foreground of each character)."""
+    for row in tmux('capture-pane', '-p', '-e', '-t', session).splitlines():
+        drawn = cells(row)
+        plain = ''.join(character for character, _ in drawn)
+        if needle in plain and not plain.lstrip().startswith('▎'):
+            return plain, [colour for _, colour in drawn]
+    return None
+
+
+def colour_of(row, needle):
+    """The foreground of `needle`'s last place on `row`: in a side-by-side diff, the new side."""
+    plain, colours = row
+    return colours[plain.rindex(needle)]
+
+
 def keys(*values):
     tmux('send-keys', '-t', session, *values)
     time.sleep(.12)
@@ -99,6 +137,7 @@ def submit(thread):
 
 def check(name, success):
     (root / (name + '.txt')).write_text(pane())
+    (root / (name + '.ansi')).write_text(tmux('capture-pane', '-p', '-e', '-t', session))
     checks.append({'name': name, 'passed': bool(success)})
     (root / 'results.json').write_text(json.dumps(checks, indent=2))
     assert success, name
@@ -180,6 +219,46 @@ try:
     until(lambda: '-TAIL▌' in pane(), 'search suffix and caret')
     check('search-cursor-visible', '-TAIL▌' in pane())
     keys('Escape')
+    # PHP without its `<?php` tag is coloured as PHP: a reply's code fence, and
+    # the rows of a `.php` file in /diff, which are drawn one at a time. A
+    # template's rows keep reading as markup, so its words stay plain.
+    php = project / 'greet.php'
+    php.write_text('<?php\n\nfunction greet(string $who): string\n{\n    return $who;\n}\n')
+    view = project / 'home.blade.php'
+    view.write_text("@extends('layouts.app')\n\n@section('content')\n<div class=\"card\">\n"
+                    "    Welcome back, {{ $user->name }}! Don't forget your notes.\n"
+                    "    <a href=\"/notes\"\n       class=\"link\">Open your notes</a>\n</div>\n@endsection\n")
+    run('git', '-C', str(project), 'add', 'greet.php', 'home.blade.php')
+    run('git', '-C', str(project), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-q', '-m', 'PHP fixture')
+    php.write_text(php.read_text().replace('    return $who;', '    // Greet by name.\n    return "Hello, " . $who;'))
+    view.write_text(view.read_text().replace('Welcome back', 'Welcome home').replace('Open your notes', 'Open the notes'))
+    thread = api('/threads', {'title': 'php-highlight', 'provider': 'echo', 'model': 'echo-1'})['id']
+    subprocess.run(['tmux', '-L', socket, 'kill-session', '-t', session], capture_output=True)
+    tmux('new-session', '-d', '-x', '120', '-y', '36', '-s', session,
+         e2e_tmux.pane_command({**env, 'COLORTERM': 'truecolor'}, [*args, '--thread', thread]))
+    until(lambda: 'h a a r n e s s' in pane(), 'TUI did not launch')
+    paste('PHP:\n```php\n$name = strlen("x"); // why\nreturn "ok";\n```')
+    submit(thread)
+    row = until(lambda: code_row('return "ok";'), "the reply's code block did not show")
+    other = code_row('$name = strlen')
+    check('php-fence-coloured',
+          len({colour_of(row, 'return'), colour_of(row, '"ok"'), colour_of(row, ';')}) == 3
+          and colour_of(other, '// why') not in (colour_of(other, '$name'), colour_of(other, '"x"')))
+    text('/diff')
+    keys('Enter')
+    row = until(lambda: code_row('return "Hello, "'), '/diff did not show the PHP change')
+    comment = code_row('// Greet by name.')
+    check('php-diff-rows-coloured',
+          len({colour_of(row, 'return'), colour_of(row, '"Hello, "'), colour_of(row, '$who')}) == 3
+          and colour_of(comment, '// Greet') != colour_of(row, '$who'))
+
+    def one_colour(needle):
+        plain, colours = until(lambda: code_row(needle), f'/diff did not show {needle!r}')
+        start = plain.rindex(needle)
+        return len(set(colours[start:start + len(needle)])) == 1
+    check('php-template-rows-plain', all(one_colour(needle) for needle in (
+        'Welcome home, {{ $user->name }}!', 'class="link">Open the notes</a>', '@endsection')))
+    keys('q')
     # Both clients load before either saves. Exit concurrently to exercise the lock.
     session = 'a'
     a = new('parallel-a')
