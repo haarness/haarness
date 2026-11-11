@@ -1447,6 +1447,14 @@ pub trait SkillRegistry: Send + Sync {
             .find(|s| s.name == name)
             .ok_or_else(|| crate::CoreError::NotFound(format!("skill {name}")))
     }
+    /// The skill `name` names and its file's text, read at once and without
+    /// counting it as loaded, for an agent that starts with it (see
+    /// [`crate::definitions::preload_skills`]). `None` when no skill has that
+    /// name, it is turned off, or it is a project's skill and the project's
+    /// files are not trusted; a registry that cannot answer at once has none.
+    fn peek(&self, _name: &str) -> Option<(SkillInfo, String)> {
+        None
+    }
 }
 
 /// Explicit grants shared by linked worktrees of one local Git repository.

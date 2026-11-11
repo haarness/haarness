@@ -8880,6 +8880,42 @@ struct ComposedRuntimeSources {
     runtime_config: haarness_core::RuntimeConfig,
 }
 
+/// Fills in the text of the skills each agent starts with (`skills`) from
+/// `skills`, leaving out any that `rules(agent)`, the rules the agent's
+/// calls meet, refuse by name (see
+/// [`haarness_core::definitions::preload_skills`]). Every place that hands
+/// agents to the runtime does this, so an agent reads the same however its
+/// definitions were last loaded.
+pub(crate) fn preload_agent_skills(
+    agents: &mut [haarness_core::CustomAgent],
+    skills: &dyn SkillRegistry,
+    rules: &dyn Fn(&haarness_core::CustomAgent) -> haarness_core::PermissionEngine,
+) {
+    for agent in agents {
+        let rules = rules(agent);
+        // A fault reading one agent's skills (a bug, not a bad file) leaves
+        // that agent without them, never the server without its agents.
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            haarness_core::definitions::preload_skills(agent, skills, &rules);
+        }));
+        if read.is_err() {
+            agent.preloaded.clear();
+            tracing::error!(agent = %agent.id, "the skills this agent lists could not be read; it starts without them");
+        }
+    }
+}
+
+/// [`preload_agent_skills`] for the agents of `config`, judged by its rules
+/// as its turns are.
+fn preload_configured_agents(
+    config: &mut haarness_core::RuntimeConfig,
+    skills: &dyn SkillRegistry,
+) {
+    let mut agents = std::mem::take(&mut config.custom_agents);
+    preload_agent_skills(&mut agents, skills, &|agent| config.agent_rules(agent));
+    config.custom_agents = agents;
+}
+
 fn compose_runtime_sources(
     paths: &Paths,
     workspace: &Path,
@@ -9155,7 +9191,7 @@ impl HotReloadController {
         )
         .await
         .unwrap_or_default();
-        let sources = compose_runtime_sources(
+        let mut sources = compose_runtime_sources(
             &self.paths,
             &self.workspace,
             self.trust,
@@ -9202,6 +9238,7 @@ impl HotReloadController {
         let disabled_skills =
             capability_state::disabled(&self.paths, &self.workspace, self.trust, "skill")?;
         candidate_skills.set_disabled(disabled_skills.clone());
+        preload_configured_agents(&mut sources.runtime_config, &candidate_skills);
         let skill_infos = candidate_skills.discover().await.unwrap_or_default();
         let tools: Arc<dyn ToolRegistry> = Arc::new(
             NativeToolRegistry::with_workflows_and_scheduler(
@@ -9395,7 +9432,24 @@ impl HotReloadController {
                     settle_since = None;
                     continue;
                 }
-                match self.candidate().await {
+                // A fault while composing (a bug, not a bad file) rejects the
+                // generation as an invalid one would: the live one stays and
+                // the next edit is read again. The panic hook logged where.
+                let composed = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                    self.candidate(),
+                ))
+                .await
+                .unwrap_or_else(|panic| {
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or("no message");
+                    Err(anyhow::anyhow!(
+                        "composing the configuration stopped on an internal error ({message})"
+                    ))
+                });
+                match composed {
                     Ok(candidate) => pending = Some(candidate),
                     Err(error) => {
                         tracing::warn!(%error, "configuration hot reload rejected; retaining last-known-good generation");
@@ -9965,7 +10019,7 @@ async fn application_at(
         skill_roots,
         workflow_catalog,
         project_context,
-        runtime_config,
+        mut runtime_config,
     } = sources;
     for notice in migration_notices.iter().chain(&json_layers.notices) {
         tracing::info!("config: {notice}");
@@ -10000,6 +10054,7 @@ async fn application_at(
     skills.set_disabled(capability_state::disabled(
         paths, workspace, trust, "skill",
     )?);
+    preload_configured_agents(&mut runtime_config, skills.as_ref());
     let events = EventBus::new(2048);
     let workflow_host = WorkflowRuntimeAdapter::new();
     let workflows = Arc::new(WorkflowCoordinator::new(
@@ -15267,6 +15322,129 @@ mod tests {
         std::fs::write(memory.join("settings.json"), r#"{"enabled": false,}"#).unwrap();
         assert_eq!(compose(), Ok(Some(false)));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A registry that fails while one agent's skills are read.
+    struct Faulty;
+    #[async_trait::async_trait]
+    impl haarness_core::SkillRegistry for Faulty {
+        async fn discover(&self) -> haarness_core::CoreResult<Vec<haarness_protocol::SkillInfo>> {
+            Ok(Vec::new())
+        }
+        async fn load(&self, _: &str) -> haarness_core::CoreResult<String> {
+            Ok(String::new())
+        }
+        fn peek(&self, name: &str) -> Option<(haarness_protocol::SkillInfo, String)> {
+            assert_ne!(name, "faulty", "a fault reading this skill");
+            (name == "real").then(|| {
+                (
+                    haarness_protocol::SkillInfo {
+                        execution: haarness_protocol::DefinitionExecution::default(),
+                        name: "real".into(),
+                        description: String::new(),
+                        path: "/skills/real/SKILL.md".into(),
+                        trusted: true,
+                        loaded: false,
+                    },
+                    "---\nname: real\n---\nREAL_BODY\n".into(),
+                )
+            })
+        }
+    }
+
+    #[test]
+    fn a_fault_reading_one_agent_s_skills_leaves_the_other_agents_whole() {
+        let mut agents = vec![
+            haarness_core::CustomAgent {
+                id: "broken".into(),
+                skills: vec!["real".into(), "faulty".into()],
+                ..Default::default()
+            },
+            haarness_core::CustomAgent {
+                id: "fine".into(),
+                skills: vec!["real".into()],
+                ..Default::default()
+            },
+        ];
+        super::preload_agent_skills(&mut agents, &Faulty, &|_| {
+            haarness_core::PermissionEngine::build_defaults()
+        });
+        assert_eq!(agents.len(), 2);
+        // The faulty agent starts with none of its skills, the next one with
+        // its own.
+        assert!(agents[0].preloaded.is_empty(), "{}", agents[0].preloaded);
+        assert!(
+            agents[1].preloaded.contains("REAL_BODY"),
+            "{}",
+            agents[1].preloaded
+        );
+    }
+
+    /// The skills an agent starts with are judged by the rules its calls
+    /// meet, as composition builds them: a TOML rule counts, and the
+    /// person's deny holds over a project agent's own allow.
+    #[test]
+    fn an_agent_starts_without_the_skills_the_person_denies_wherever_the_rule_is_written() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-preload-rules-{}", uuid::Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let workspace = root.join("workspace");
+        let config = paths.config.parent().unwrap().to_path_buf();
+        for (name, body) in [
+            ("preload-open", "OPEN_BODY in ${CLAUDE_PROJECT_DIR}"),
+            ("preload-toml-secret", "TOML_SECRET_BODY"),
+            ("preload-json-secret", "JSON_SECRET_BODY"),
+        ] {
+            let folder = paths.skills.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(
+                folder.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Fixture\n---\n{body}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            &paths.config,
+            "[permissions.skill]\n\"preload-toml-secret\" = \"deny\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config.join("haarness.json"),
+            r#"{"permission": {"skill": {"preload-json-secret": "deny"}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(workspace.join(".haarness/agents")).unwrap();
+        std::fs::write(
+            workspace.join(".haarness/agents/lister.md"),
+            "---\ndescription: Lists skills\nskills: [preload-open, preload-toml-secret, preload-json-secret]\n\
+             permission: {\"skill\": {\"preload-json-secret\": \"allow\"}}\n---\nList.\n",
+        )
+        .unwrap();
+        let sources =
+            super::compose_runtime_sources(&paths, &workspace, true, false, Vec::new(), false)
+                .unwrap();
+        let mut runtime_config = sources.runtime_config;
+        let skills = haarness_server::FilesystemSkillRegistry::new_scoped(sources.skill_roots);
+        super::preload_configured_agents(&mut runtime_config, &skills);
+        let lister = runtime_config
+            .custom_agent("lister")
+            .expect("the project agent");
+        assert!(lister.project);
+        let text = &lister.preloaded;
+        // The chat's folder is filled in for each chat.
+        assert!(
+            text.contains("OPEN_BODY in ${CLAUDE_PROJECT_DIR}"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("TOML_SECRET_BODY"),
+            "a TOML rule counts: {text}"
+        );
+        assert!(
+            !text.contains("JSON_SECRET_BODY"),
+            "the person's deny is a floor: {text}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -548,6 +548,62 @@ async fn background_with_a_command_id_moves_that_command_or_says_why_not() {
 }
 
 #[tokio::test]
+async fn background_in_a_working_subagent_s_view_says_its_own_tasks_stay() {
+    let root = fixture_thread();
+    let child = Thread {
+        id: ThreadId::new(),
+        parent_id: Some(root.id),
+        is_subagent: true,
+        ..fixture_thread()
+    };
+    // The subagent's view shows the agent task it started.
+    let grandchild = ThreadId::new();
+    let link = message_item(
+        1,
+        &child,
+        ItemData::TaskLink {
+            call_id: "call-inner".into(),
+            child_thread_id: grandchild,
+        },
+    );
+    // The server moves nothing: a subagent's work stays in the foreground.
+    let (client, _seen) = recording_server(|_, _| ("200 OK", "[]".into())).await;
+    let mut app = App::new(
+        child.clone(),
+        vec![root.clone(), child.clone()],
+        vec![link],
+        vec![],
+        vec![],
+    );
+    app.server_info = Some(side_server_info(vec![
+        haarness_protocol::BACKGROUND_COMMANDS_CAPABILITY.into(),
+    ]));
+    app.active_turn = Some(TurnId::new());
+    let set = |app: &mut App, state: &str| {
+        let task = app
+            .children
+            .values_mut()
+            .find(|task| task.child_thread_id == grandchild)
+            .expect("the row of the agent task it started");
+        task.state = state.into();
+    };
+    set(&mut app, "running");
+    app.execute_command("/background", &client).await.unwrap();
+    assert_eq!(
+        app.notice,
+        "A subagent's own agent tasks stay in the foreground"
+    );
+    // Working with no agent task running (its task done): the usual words.
+    set(&mut app, "done");
+    app.execute_command("/background", &client).await.unwrap();
+    assert_eq!(app.notice, "Nothing is running in the foreground");
+    // An agent task in the background is not one it waits on.
+    set(&mut app, "background");
+    app.execute_command("/background", &client).await.unwrap();
+    assert_eq!(app.notice, "Nothing is running in the foreground");
+}
+
+#[tokio::test]
 async fn this_client_says_it_follows_background_work_and_scripts_do_not() {
     let thread = fixture_thread();
     let turn = serde_json::to_string(&fixture_running_turn(thread.id)).unwrap();

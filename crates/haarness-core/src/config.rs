@@ -40,6 +40,21 @@ pub struct CustomAgent {
     /// folders or its local plugins) rather than by the person or the
     /// system folder: its rules never reopen what their rules deny.
     pub project: bool,
+    /// The plugin the agent comes from, whose skills its `skills` names
+    /// first.
+    pub plugin: Option<String>,
+    /// The limits a `tools` entry with a pattern sets (`Bash(git diff:*)`):
+    /// that tool is denied except for the pattern. A ceiling, so no rule,
+    /// Always answer or Yolo reopens the rest, and the agent's children
+    /// inherit it.
+    pub ceiling: Vec<PermissionRule>,
+    /// Skills the agent starts with (`skills`), by name, as listed.
+    pub skills: Vec<String>,
+    /// Their text, filled in by the composition root (see
+    /// [`crate::definitions::preload_skills`]); empty when none is listed or
+    /// found. It follows the prompt in every request (see
+    /// [`CustomAgent::instructions`]).
+    pub preloaded: String,
 }
 
 impl CustomAgent {
@@ -47,6 +62,7 @@ impl CustomAgent {
     /// agent the person or the system folder defines join the floor too, so
     /// its allow still lifts their deny for this agent, as it always did; a
     /// project's agent's rules never do (see `PermissionEngine::set_floor`).
+    /// The limits its patterned `tools` entries set bound the engine.
     pub fn apply_permissions(&self, engine: &mut crate::PermissionEngine) {
         for rule in &self.permissions {
             if !self.project {
@@ -54,6 +70,29 @@ impl CustomAgent {
             }
             engine.add_rule(rule.clone());
         }
+        // A ruleset of its own, so its allow never reopens what another
+        // ceiling denies (the plan agent's on edits).
+        if !self.ceiling.is_empty() {
+            engine.add_inherited_ceiling([self.ceiling.clone()]);
+        }
+    }
+
+    /// The agent's instructions in chat `session`, working in `folder`: its
+    /// prompt, then the skills it starts with, which name that chat and its
+    /// folder where they say `${CLAUDE_SESSION_ID}` and
+    /// `${CLAUDE_PROJECT_DIR}`. Without such skills the prompt as written.
+    #[must_use]
+    pub fn instructions(&self, session: &str, folder: &str) -> std::borrow::Cow<'_, str> {
+        if self.preloaded.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.prompt);
+        }
+        std::borrow::Cow::Owned(format!(
+            "{}\n\n{}",
+            self.prompt.trim_end(),
+            self.preloaded
+                .replace(crate::definitions::SESSION_PLACEHOLDER, session)
+                .replace(crate::definitions::PROJECT_PLACEHOLDER, folder)
+        ))
     }
 }
 
@@ -155,6 +194,22 @@ impl RuntimeConfig {
                 });
             }
         }
+        engine
+    }
+    /// The rules `agent`'s calls meet before anything one chat adds (its
+    /// Always answers, the boundary of the chat that started it): Haarness's
+    /// defaults, the configured rules with the person's as their floor, the
+    /// workspace's remembered answers, then the agent's own.
+    #[must_use]
+    pub fn agent_rules(&self, agent: &CustomAgent) -> crate::PermissionEngine {
+        let mut engine = self.permission_defaults(&agent.id, "");
+        for rule in &self.base_rules {
+            engine.add_rule(rule.clone());
+        }
+        for rule in &self.granted_rules {
+            engine.add_grant(rule.clone());
+        }
+        agent.apply_permissions(&mut engine);
         engine
     }
     /// Resolve one configured agent by its exact id.

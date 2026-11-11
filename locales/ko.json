@@ -1,5 +1,6 @@
 {
   "...": "...",
+  "A subagent's own agent tasks stay in the foreground": "하위 에이전트가 시작한 에이전트 작업은 포그라운드에 남습니다",
   "API error": "API 오류",
   "API key": "API 키",
   "About": "정보",

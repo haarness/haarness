@@ -120,6 +120,25 @@ impl SkillRegistry for FilesystemSkillRegistry {
         self.loaded.write().await.insert(canonical);
         Ok(body)
     }
+    fn peek(&self, name: &str) -> Option<(SkillInfo, String)> {
+        let (path, trusted, body) = self.locate(name)?;
+        if !trusted {
+            return None;
+        }
+        let catalog = self.catalog.read();
+        let (canonical, skill) = catalog.iter().find(|(_, entry)| entry.path == path)?;
+        Some((
+            SkillInfo {
+                execution: skill.execution.clone(),
+                name: canonical.clone(),
+                description: skill.description.clone(),
+                path: path.display().to_string(),
+                trusted,
+                loaded: false,
+            },
+            body,
+        ))
+    }
 }
 
 fn catalog_for_roots(roots: &[(PathBuf, bool, Option<PathBuf>)]) -> BTreeMap<String, CachedSkill> {

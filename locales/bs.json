@@ -1,5 +1,6 @@
 {
   "...": "...",
+  "A subagent's own agent tasks stay in the foreground": "Zadaci agenta koje podagent pokrene ostaju u prvom planu",
   "API error": "API greška",
   "API key": "API ključ",
   "About": "O aplikaciji",

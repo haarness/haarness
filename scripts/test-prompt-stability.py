@@ -29,7 +29,10 @@ daemon in a private data folder shows that:
    the first request and names every skill the model may load (a long list cut to its budget,
    person-only skills left out), `load_tool` asked for it says it is already there and
    loads `skill_manage`, a skill name that is no skill is answered with the names, and the
-   chat's requests send byte-identical tools before that load and after it.
+   chat's requests send byte-identical tools before that load and after it;
+9. an agent whose file lists `skills` sends their text after its own prompt, with the skill's
+   folder and the chat's id filled in and its command named rather than run, leaves out a
+   manual-only and a missing skill, and sends a byte-identical system prompt on the next turn.
 
 With --system-folder the daemon also starts with a system configuration folder
 (HAARNESS_SYSTEM_CONFIG_DIR) whose prompt files add to the main instructions and the
@@ -587,6 +590,48 @@ for line in sys.stdin:
                                   'load_tool says skill is there and loads skill_manage',
                                   '4 requests with byte-identical tools before that load, 2 after']})
     print(f'PASS the skill tool lists {len(skill_names)} skills while lazy loading defers MCP tools', flush=True)
+
+    # 9. An agent that lists `skills` starts with their text in its system prompt, unchanged from
+    # one request of the chat to the next, and none of their commands runs.
+    agent_skills_workspace = root / 'agent-skills-workspace'
+    (agent_skills_workspace / '.haarness/agents').mkdir(parents=True, exist_ok=True)
+    (agent_skills_workspace / '.haarness/config.toml').write_text(
+        f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\n[lsp]\nenabled=false\n')
+    notes = agent_skills_workspace / '.haarness/skills/house-notes'
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / 'SKILL.md').write_text('---\nname: house-notes\ndescription: House notes\n---\n'
+                                    'HOUSE_NOTES in ${CLAUDE_SKILL_DIR} for ${CLAUDE_SESSION_ID} at ${CLAUDE_PROJECT_DIR}\n!`touch never-ran.txt`\n')
+    manual = agent_skills_workspace / '.haarness/skills/by-hand'
+    manual.mkdir(parents=True, exist_ok=True)
+    (manual / 'SKILL.md').write_text('---\nname: by-hand\ndescription: By hand\ndisable-model-invocation: true\n---\nBY_HAND_ONLY\n')
+    (agent_skills_workspace / '.haarness/agents/noted.md').write_text(
+        '---\ndescription: Starts with the house notes\nmode: all\nskills: [house-notes, by-hand, nowhere]\n---\nFollow the notes.\n')
+    run(['git', 'init', '-q', str(agent_skills_workspace)])
+    agent_skills_args = [str(BINARY), '--workspace', str(agent_skills_workspace), '--trust-project']
+    first_connection = connection
+    try:
+        connection = json.loads(run(agent_skills_args + ['desktop'], input='{"action":"connect"}', env=env, timeout=120))
+        noted = api('/threads', {'title': 'Noted', 'provider': 'anthropic', 'model': MODEL, 'agent': 'noted'})['id']
+        offset = len(REQUESTS)
+        assert turn(noted, 'FIRST noted turn')['status'] == 'completed'
+        assert turn(noted, 'SECOND noted turn')['status'] == 'completed'
+        sent = [body for body in REQUESTS[offset:] if body.get('tools')]
+        first, second = sent[0], sent[1]
+        system = system_text(first)
+        assert f'Follow the notes.\n\nThese skills are already loaded' in system, system[:3000]
+        assert f'HOUSE_NOTES in {notes} for {noted} at {agent_skills_workspace}' in system, system[:3000]
+        assert '(skipped: `touch never-ran.txt` does not run for a skill an agent starts with' in system, system[:3000]
+        assert 'BY_HAND_ONLY' not in system and 'nowhere' not in system, system[:3000]
+        assert json.dumps(first['system']) == json.dumps(second['system']), 'the preloaded skills changed between turns'
+        assert not (agent_skills_workspace / 'never-ran.txt').exists(), 'a preloaded skill ran its command'
+        (EVIDENCE / 'preloaded-skill-requests.json').write_text(json.dumps([first, second], indent=2))
+    finally:
+        subprocess.run(agent_skills_args + ['serve', '--stop'], env=env, capture_output=True, timeout=60)
+        connection = first_connection
+    checks.append({'preloaded skills': ['skill text after the agent prompt', 'folder and chat id filled in',
+                                        'its command named, not run', 'manual-only and missing left out',
+                                        'system byte-identical across turns']})
+    print('PASS an agent starts with the skills it lists, the same on every request', flush=True)
     (EVIDENCE / 'results.json').write_text(json.dumps(checks, indent=2))
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)

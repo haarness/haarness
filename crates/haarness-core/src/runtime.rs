@@ -5135,7 +5135,12 @@ impl AgentRuntime {
                         &context,
                     )
                 },
-                |custom| custom_system_prompt_with_context(&custom.prompt, &context),
+                |custom| {
+                    custom_system_prompt_with_context(
+                        &custom.instructions(&thread.id.to_string(), &workspace.to_string_lossy()),
+                        &context,
+                    )
+                },
             );
             let ultracode = if let Some(turn) = turn_id {
                 self.repository.get_turn(turn).await?.ultracode
@@ -6014,7 +6019,11 @@ impl AgentRuntime {
         parent: ThreadId,
         child: Option<ThreadId>,
     ) -> CoreResult<Vec<BackgroundTaskInfo>> {
-        self.repository.get_thread(parent).await?;
+        // A subagent waits for its children: their results are its answer,
+        // and in the background they would reach no one.
+        if self.repository.get_thread(parent).await?.is_subagent {
+            return Ok(Vec::new());
+        }
         let promoted = self
             .background_tasks
             .iter()
@@ -8200,6 +8209,13 @@ impl AgentRuntime {
         *self.live_commands.write() = commands;
     }
 
+    /// The rules `agent`'s calls meet under the live configuration, before
+    /// anything one chat adds (see [`crate::RuntimeConfig::agent_rules`]).
+    #[must_use]
+    pub fn agent_rules(&self, agent: &crate::CustomAgent) -> PermissionEngine {
+        self.components().config.agent_rules(agent)
+    }
+
     /// Refresh configured agent profiles after agent/plugin changes.
     pub fn replace_custom_agents(&self, agents: Vec<crate::CustomAgent>) {
         *self.live_agents.write() = agents;
@@ -9287,6 +9303,13 @@ struct TurnToolInvoker {
     agent: String,
     parent_call_id: String,
     sequence: std::sync::atomic::AtomicUsize,
+    /// Whether a definition's `!` snippet it runs may ask: a person's own
+    /// `/command` asks as any call does. A skill the model loads raises no
+    /// card and no Auto review (its `PermissionRequest` hooks still answer):
+    /// a snippet that would ask, or that the rules or a hook refuse, comes
+    /// back marked so (`held`, `refused`) and is named in the skill's text in
+    /// its place.
+    snippets_ask: bool,
 }
 
 /// `rules` bounded by an active skill's: what its `disallowed-tools` denies
@@ -9325,11 +9348,13 @@ impl crate::ToolInvoker for DirectRules {
 }
 
 /// A definition's `!` snippet on its way to the shell tool: the text its
-/// permissions are judged on, the text that runs, and that text's values.
+/// permissions are judged on, the text that runs, that text's values, and
+/// whether it may ask (see [`TurnToolInvoker::snippets_ask`]).
 pub(crate) struct DefinitionShell<'a> {
     shown: &'a str,
     run: &'a str,
     env: &'a std::collections::BTreeMap<String, String>,
+    ask: bool,
 }
 
 #[async_trait::async_trait]
@@ -9395,7 +9420,8 @@ impl crate::ToolInvoker for TurnToolInvoker {
         env: std::collections::BTreeMap<String, String>,
     ) -> CoreResult<ToolOutput> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        self.runner
+        let result = self
+            .runner
             .execute_call_inner(
                 &self.agent,
                 &format!("{}:{sequence}", self.parent_call_id),
@@ -9406,9 +9432,22 @@ impl crate::ToolInvoker for TurnToolInvoker {
                     shown: &shown,
                     run: &run,
                     env: &env,
+                    ask: self.snippets_ask,
                 }),
             )
-            .await
+            .await;
+        match result {
+            Err(
+                CoreError::PermissionDenied(_)
+                | CoreError::PermissionRejected(_)
+                | CoreError::HookRefused { .. }
+                | CoreError::ReviewBlocked(_),
+            ) if !self.snippets_ask => Ok(ToolOutput {
+                text: String::new(),
+                metadata: json!({"refused": true}),
+            }),
+            result => result,
+        }
     }
     fn resolve_name(&self, name: &str) -> String {
         self.runner.resolve_tool_name(name)
@@ -10523,6 +10562,10 @@ enum AnsweredBy {
     Hook,
     /// A hook could not answer it, which refuses it: `feedback` is why.
     HookFailure,
+    /// It was put to no person and no reviewer, since its caller may not ask
+    /// (a skill's snippet the model loaded), and no hook answered it: not an
+    /// answer, and nothing ran.
+    NotAsked,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11466,6 +11509,7 @@ impl RunnerTask {
                     agent: agent.into(),
                     parent_call_id: format!("command-{}", self.turn.id),
                     sequence: std::sync::atomic::AtomicUsize::new(0),
+                    snippets_ask: true,
                 };
                 crate::ToolInvoker::activate_skill_permissions(&invoker, &command.execution);
                 let text = crate::definitions::prepare(
@@ -11888,7 +11932,10 @@ impl RunnerTask {
                     // Custom bodies replace only the role-specific guidance;
                     // the runtime/environment contract remains universal.
                     custom_system_prompt_with_context(
-                        &custom.prompt,
+                        &custom.instructions(
+                            &self.thread.id.to_string(),
+                            &self.workspace.to_string_lossy(),
+                        ),
                         &SystemPromptContext {
                             provider: provider_id,
                             model: &model,
@@ -11968,6 +12015,13 @@ impl RunnerTask {
                             // its format; every model has edit and write.
                             && (tool.name != "apply_patch"
                                 || crate::tool_catalog::writes_patches(&model))
+                    })
+                    .map(|tool| {
+                        if self.depth > 0 && tool.name == "task" {
+                            foreground_task(tool)
+                        } else {
+                            tool
+                        }
                     })
                     .collect::<Vec<_>>();
                 // Code Mode reaches only the MCP and browser tools this
@@ -14291,13 +14345,25 @@ impl RunnerTask {
                     agent,
                     &plan,
                     &arguments,
-                    (forced, yolo_answers),
+                    (
+                        forced,
+                        yolo_answers,
+                        definition_shell.is_none_or(|snippet| snippet.ask),
+                    ),
                     explicit,
                     reviewable,
                     (name, call_id),
                     &AskWhy::of(&plan, &causes),
                 )
                 .await?;
+            // Nobody was asked (a model-loaded skill's snippet): the skill
+            // names the command instead of its output.
+            if resolution.answered_by == AnsweredBy::NotAsked {
+                return Ok(ToolOutput {
+                    text: String::new(),
+                    metadata: json!({"held": true}),
+                });
+            }
             if let Some(review) = resolution.review {
                 return Err(CoreError::ReviewBlocked(Box::new(review)));
             }
@@ -14426,6 +14492,7 @@ impl RunnerTask {
                             agent: agent.to_owned(),
                             parent_call_id: call_id.to_owned(),
                             sequence: std::sync::atomic::AtomicUsize::new(0),
+                            snippets_ask: false,
                         })),
                     },
                 )
@@ -14600,8 +14667,11 @@ impl RunnerTask {
     /// `reviewable`: Auto's reviewer may answer it (no asked pattern is one
     /// a person configured an ask for). `tool`: the tool and call that raise
     /// it.
-    /// `asks`: whether the request asks every time, and whether Yolo answers
-    /// it all the same (see [`crate::Tool::yolo_answers`]). `why`: why it
+    /// `asks`: whether the request asks every time, whether Yolo answers
+    /// it all the same (see [`crate::Tool::yolo_answers`]), and whether
+    /// anyone may be asked: when not, only Yolo (or `--yolo`) and the
+    /// `PermissionRequest` hooks answer, and what would go to Auto's
+    /// reviewer or a card comes back [`AnsweredBy::NotAsked`]. `why`: why it
     /// asks, for the log lines.
     #[allow(clippy::too_many_arguments)]
     async fn ask_permission(
@@ -14609,13 +14679,13 @@ impl RunnerTask {
         agent: &str,
         plan: &AskPlan,
         detail: &serde_json::Value,
-        asks: (bool, bool),
+        asks: (bool, bool, bool),
         explicit_operations: Vec<String>,
         reviewable: bool,
         tool: (&str, &str),
         why: &AskWhy,
     ) -> CoreResult<PermissionResolution> {
-        let (forced, yolo_answers) = asks;
+        let (forced, yolo_answers, may_ask) = asks;
         let operation = plan.describe(&plan.patterns);
         let always_rules = plan.always_rules();
         let remembered = plan.remembered_rules();
@@ -14728,6 +14798,19 @@ impl RunnerTask {
                 }
                 HookAnswer::Allowed { .. } | HookAnswer::Open => {}
             }
+        }
+        // A hook may answer it; no one else is asked.
+        if !may_ask {
+            tracing::info!(
+                thread = %self.thread.id,
+                operation = ?operation_for_log(&operation),
+                cause = %why.cause,
+                "not asked (a skill's snippet the model loaded)"
+            );
+            return Ok(PermissionResolution {
+                answered_by: AnsweredBy::NotAsked,
+                ..PermissionResolution::rejected(None)
+            });
         }
         let detail = &plan.card_detail(detail, &plan.patterns);
         // A shell command's card, whatever it asks about (under the default
@@ -15380,10 +15463,14 @@ impl RunnerTask {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map_or_else(|| subagent_title(&prompt, "task"), str::to_owned);
-        let background = arguments
-            .get("background")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        // A subagent's own `task` runs in the foreground: nothing would take
+        // a background result for it, since the subagent's answer is its
+        // parent's tool result once it ends.
+        let background = self.depth == 0
+            && arguments
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
         let requested_child = arguments
             .get("task_id")
             .or_else(|| arguments.get("taskId"))
@@ -15421,10 +15508,24 @@ impl RunnerTask {
         } else {
             None
         };
-        let agent = arguments
+        let named_agent = arguments
             .get("agent")
             .or_else(|| arguments.get("subagent_type"))
             .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|agent| !agent.is_empty());
+        // A child continues as the agent it is: its history was written by
+        // that agent's prompt and tools.
+        if let (Some(child), Some(named)) = (&resumed_child, named_agent)
+            && named != child.agent
+        {
+            return Err(CoreError::Invalid(format!(
+                "task_id {} is a \"{}\" subagent and continues as one. Leave agent out to \
+                 continue it, or leave task_id out to start a new \"{named}\" subagent.",
+                child.id, child.agent
+            )));
+        }
+        let agent = named_agent
             .or_else(|| resumed_child.as_ref().map(|child| child.agent.as_str()))
             .unwrap_or("general")
             .to_owned();
@@ -15444,13 +15545,40 @@ impl RunnerTask {
             .custom
             .as_ref()
             .and_then(|agent| agent.model.clone());
-        let ((provider, model), notice) = subagent_model(
-            self.providers.as_ref(),
-            &self.turn.provider,
-            &self.turn.model,
-            arguments.get("model").and_then(serde_json::Value::as_str),
-            configured.as_deref(),
-        )?;
+        let explicit_model = arguments.get("model").and_then(serde_json::Value::as_str);
+        // A continued child keeps the model it last ran on, while its
+        // provider is here, unless the call names one; otherwise it goes on
+        // with the parent's, and says so.
+        let recorded = match &resumed_child {
+            Some(child) if explicit_model.is_none() => {
+                let last = self.repository.last_turn(child.id).await?;
+                Some(last.map_or_else(
+                    || (child.provider.clone(), child.model.clone()),
+                    |turn| (turn.provider, turn.model),
+                ))
+            }
+            _ => None,
+        };
+        let ((provider, model), notice) = match recorded {
+            Some((provider, model)) if self.providers.get(&provider).is_some() => {
+                ((provider, model), None)
+            }
+            Some((provider, model)) => (
+                (self.turn.provider.clone(), self.turn.model.clone()),
+                Some(unavailable_model_notice(
+                    &format!("{provider}/{model}"),
+                    &self.turn.provider,
+                    &self.turn.model,
+                )),
+            ),
+            None => subagent_model(
+                self.providers.as_ref(),
+                &self.turn.provider,
+                &self.turn.model,
+                explicit_model,
+                configured.as_deref(),
+            )?,
+        };
 
         let title = subagent_title(&prompt, &agent);
         let child = if let Some(child) = resumed_child {
@@ -15526,6 +15654,15 @@ impl RunnerTask {
                             },
                         )
                         .await?;
+                    // A subagent's own child stays in the foreground: the
+                    // call that started it still waits for its result.
+                    if self.depth > 0 {
+                        return Ok(existing.envelope(
+                            &existing.info(),
+                            "running",
+                            "The guidance joined the running subagent. Its result comes back to the task call that started it; do not duplicate its work.",
+                        ));
+                    }
                     if existing.promote() {
                         persist_task_state(
                             self.repository.as_ref(),
@@ -16289,6 +16426,15 @@ fn task_envelope_for(child: ThreadId, description: &str, state: &str, text: &str
 }
 
 fn turn_tool_enabled(overrides: Option<&HashMap<String, bool>>, name: &str) -> bool {
+    // Following and stopping commands goes with running them: a list that
+    // keeps `bash` and turns the rest off (`*: false`, an agent's `tools`)
+    // keeps them too, unless it names them itself.
+    if matches!(name, "bash_output" | "bash_stop") {
+        return overrides
+            .and_then(|tools| tools.get(name))
+            .copied()
+            .unwrap_or(true);
+    }
     overrides
         .and_then(|tools| crate::definitions::tool_override(tools, name))
         .unwrap_or(true)
@@ -16551,6 +16697,39 @@ fn merge_agent_tools(
     *request = Some(merged);
 }
 
+/// What the `task` tool says to a subagent, whose own tasks always run in
+/// the foreground: the sentences of the chat's description that do not
+/// advise on working in the background (a test in the tool registry keeps
+/// them the same), with two of its own on waiting and continuing.
+pub const SUBAGENT_TASK_DESCRIPTION: &str = "Create or continue a durable child-agent task. \
+The call waits for the child's result. \
+Usage rules: (1) Multiple task calls emitted in one assistant response already start concurrently, including foreground tasks. \
+(2) Once work is delegated, the parent must not duplicate it. For concurrent sibling tasks, define mutually exclusive file/topic boundaries and tell each child to stay within its assigned scope; if cross-scope evidence is needed, the child should report that dependency for the parent to reconcile instead of auditing a sibling's scope. For a broad audit, split distinct scopes across foreground task calls in one response, wait for their concurrently produced results, and synthesize directly from those reports. After children return, do not re-read every delegated file or repeat their searches merely for reassurance. Inspect a specific delegated location only when a report lacks evidence required for the answer or two reports conflict, and keep that validation narrowly targeted. Cross-cutting tests that validate the combined conclusion are allowed. \
+Omit task_id for each independent assignment, including separate scopes in a parallel audit. Reusing one task_id never creates separate agents: pass it only to continue that exact child session; when it is still running, the new prompt joins it.";
+
+/// The `task` tool as a subagent sees it: without `background`, and with a
+/// description that does not offer it, since a subagent's own task always
+/// runs in the foreground.
+fn foreground_task(mut tool: crate::ToolDefinition) -> crate::ToolDefinition {
+    if let Some(properties) = tool
+        .input_schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        properties.remove("background");
+    }
+    SUBAGENT_TASK_DESCRIPTION.clone_into(&mut tool.description);
+    tool
+}
+
+/// What a subagent's result says when the model it was to run on is not
+/// there and it ran on its parent's instead.
+fn unavailable_model_notice(wanted: &str, parent_provider: &str, parent_model: &str) -> String {
+    format!(
+        "Configured model \"{wanted}\" unavailable. Using parent model \"{parent_provider}/{parent_model}\"."
+    )
+}
+
 fn subagent_model(
     registry: &dyn ProviderRegistry,
     parent_provider: &str,
@@ -16592,9 +16771,7 @@ fn subagent_model(
             return Ok(((provider, model), None));
         }
     }
-    let notice = format!(
-        "Configured model \"{configured}\" unavailable. Using parent model \"{parent_provider}/{parent_model}\"."
-    );
+    let notice = unavailable_model_notice(configured, parent_provider, parent_model);
     Ok((parent, Some(notice)))
 }
 
@@ -22378,6 +22555,23 @@ mod tests {
             "unspecified tools retain their normal availability"
         );
         assert!(super::turn_tool_enabled(None, "bash"));
+    }
+
+    #[test]
+    fn an_allowlist_that_keeps_bash_keeps_following_and_stopping_commands() {
+        let allowlist = HashMap::from([
+            ("*".to_owned(), false),
+            ("bash".to_owned(), true),
+            ("read".to_owned(), true),
+        ]);
+        assert!(super::turn_tool_enabled(Some(&allowlist), "bash_output"));
+        assert!(super::turn_tool_enabled(Some(&allowlist), "bash_stop"));
+        assert!(!super::turn_tool_enabled(Some(&allowlist), "grep"));
+        // An entry of their own still turns them off.
+        let mut named = allowlist;
+        named.insert("bash_stop".into(), false);
+        assert!(super::turn_tool_enabled(Some(&named), "bash_output"));
+        assert!(!super::turn_tool_enabled(Some(&named), "bash_stop"));
     }
 
     #[test]

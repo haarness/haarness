@@ -389,8 +389,16 @@ Servers advertise this contract as `configuration-hot-reload.v1` in
 The `task` tool accepts `prompt`, optional `agent` and `description`, and an
 optional `background` boolean. A new call creates one durable child thread and
 turn; `task_id` continues an existing child belonging to that parent, and queues
-new context when that child is still running. Foreground calls wait for that child; background calls return a running
-envelope immediately. A foreground child can be promoted through the
+new context when that child is still running. A continued child stays the agent
+it was started as, and runs on the model of its last run unless the call names
+a `model`; when that model's provider is gone it runs on the parent's model,
+and the result says so as for an agent's configured model. A call whose `agent`
+differs from the child's is refused and the child does not run. Foreground calls wait for that child; background calls return a running
+envelope immediately. A subagent waits for its own children: its `task` tool
+offers no `background`, a `background` it sends anyway is ignored, `POST
+/threads/{id}/background` for a subagent's chat moves nothing, and new context
+for one of its running children joins it without moving it, since the
+subagent's answer is already its parent's tool result. A foreground child can be promoted through the
 `/background` endpoint without cancellation or restart. `GET /background`
 lists both promotable foreground children and already-background children.
 Terminal state is persisted as a `TaskState` transcript item and a background

@@ -4359,6 +4359,7 @@ impl Tool for BuiltinTool {
                 let Some(invoker) = context.invoker.as_ref() else {
                     if info.execution.fork
                         || body.contains("!`")
+                        || haarness_core::definitions::has_snippets(body)
                         || !info.execution.allowed_tools.is_empty()
                         || !info.execution.disallowed_tools.is_empty()
                     {
@@ -7815,6 +7816,54 @@ export default workflow({
             .await;
         assert!(matches!(escaped, Err(CoreError::PermissionDenied(_))));
         tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    /// A subagent's `task` text is the chat's without its advice on the
+    /// background: a sentence edited or added in one must be in the other.
+    #[test]
+    fn a_subagent_s_task_text_keeps_the_chat_s_sentences_but_the_background_ones() {
+        let sentences = |text: &str| -> Vec<String> {
+            text.split(". ")
+                .map(|sentence| {
+                    let sentence = sentence.trim().trim_end_matches('.');
+                    let sentence = sentence.strip_prefix("Usage rules: ").unwrap_or(sentence);
+                    // A rule's number is its place in its own list.
+                    match sentence.split_once(") ") {
+                        Some((number, rest))
+                            if number.starts_with('(')
+                                && number[1..].chars().all(|c| c.is_ascii_digit()) =>
+                        {
+                            rest.to_owned()
+                        }
+                        _ => sentence.to_owned(),
+                    }
+                })
+                .filter(|sentence| !sentence.is_empty())
+                .collect()
+        };
+        let chat = sentences(TASK_DESCRIPTION);
+        let subagent = sentences(haarness_core::SUBAGENT_TASK_DESCRIPTION);
+        // Its own: the call waits, and a continuation joins a running child.
+        let own = [
+            "The call waits for the child's result",
+            "Reusing one task_id never creates separate agents: pass it only to continue that exact child session; when it is still running, the new prompt joins it",
+        ];
+        for sentence in &subagent {
+            assert!(
+                own.contains(&sentence.as_str()) || chat.contains(sentence),
+                "{sentence}"
+            );
+        }
+        for sentence in chat.iter().filter(|sentence| !subagent.contains(sentence)) {
+            let lower = sentence.to_lowercase();
+            assert!(
+                lower.contains("background")
+                    || lower.contains("foreground")
+                    || sentence
+                        == "Do not sleep, poll, or claim the dependent work is complete before delivery",
+                "{sentence}"
+            );
+        }
     }
 
     #[test]

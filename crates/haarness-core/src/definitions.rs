@@ -441,6 +441,10 @@ pub fn tool_names(name: &str) -> Vec<String> {
         "Write" => vec!["write"],
         "Edit" | "MultiEdit" | "NotebookEdit" => vec!["edit", "apply_patch"],
         "Bash" => vec!["bash"],
+        // Claude Code's names, old and new, for reading and stopping a
+        // command in the background.
+        "BashOutput" | "TaskOutput" => vec!["bash_output"],
+        "KillShell" | "KillBash" | "TaskStop" => vec!["bash_stop"],
         "Grep" => vec!["grep"],
         "Glob" => vec!["glob"],
         "LS" => vec!["list"],
@@ -561,8 +565,160 @@ fn expand_arguments(
     }
 }
 
+/// One `!` snippet of a definition: the part of the text it takes, what
+/// stays before its output (the space or line break before an inline `!`),
+/// and its commands in order, whose outputs go one to a line.
+struct Snippet<'t> {
+    span: std::ops::Range<usize>,
+    lead: &'t str,
+    commands: Vec<String>,
+}
+
+/// The `!` snippets of `template`, in order. An inline one is
+/// `` !`command` `` where a line starts or after a space or tab. A block is
+/// a code fence whose info string is `!` and nothing else, outside any other
+/// fence (one shown as an example inside a longer fence stays text), and
+/// ends at a fence of at least as many backticks; one never closed is text.
+/// Each line of a block is a command: a line ending in `\` goes on with the
+/// next when the shell is a `posix` one (cmd.exe reads `\` as a path's),
+/// and blank lines and `#` comments are left out. An inline one that runs
+/// into a block (its closing backtick missing) is text. No two overlap.
+fn snippets(template: &str, posix: bool) -> Vec<Snippet<'_>> {
+    static INLINE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?m)(?:^|[ \t\r\n])!`([^`]+)`").expect("constant regex")
+    });
+    // A fence: its character, its length and whether it is a `!` block,
+    // where it starts and the lines inside it.
+    let mut open: Option<(char, usize, bool, usize, Vec<&str>)> = None;
+    let mut blocks = Vec::new();
+    let mut offset = 0;
+    for line in template.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let text = line.trim_end_matches('\n');
+        let content = text.trim_end_matches('\r');
+        let trimmed = content.trim_start_matches([' ', '\t']);
+        let fence = trimmed
+            .chars()
+            .next()
+            .filter(|mark| matches!(mark, '`' | '~'))
+            .map(|mark| (mark, trimmed.chars().take_while(|c| *c == mark).count()))
+            .filter(|(_, length)| *length >= 3);
+        match &mut open {
+            None => {
+                if let Some((mark, length)) = fence {
+                    let info = trimmed[length..].trim();
+                    // A backtick fence's info string holds no backtick.
+                    if mark == '~' || !info.contains('`') {
+                        open = Some((mark, length, mark == '`' && info == "!", start, Vec::new()));
+                    }
+                }
+            }
+            Some((mark, length, runs, begin, lines)) => {
+                let closes = fence.is_some_and(|(found, found_length)| {
+                    found == *mark
+                        && found_length >= *length
+                        && trimmed[found_length..].trim().is_empty()
+                });
+                if !closes {
+                    lines.push(content);
+                    continue;
+                }
+                if *runs {
+                    blocks.push(Snippet {
+                        span: *begin..start + text.len(),
+                        lead: "",
+                        commands: block_commands(lines, posix),
+                    });
+                }
+                open = None;
+            }
+        }
+    }
+    let mut found: Vec<Snippet<'_>> = INLINE
+        .captures_iter(template)
+        .filter_map(|capture| {
+            let whole = capture.get(0)?;
+            if blocks
+                .iter()
+                .any(|block| block.span.start < whole.end() && whole.start() < block.span.end)
+            {
+                return None;
+            }
+            Some(Snippet {
+                span: whole.range(),
+                lead: whole.as_str().split_once("!`").map_or("", |(lead, _)| lead),
+                commands: vec![capture.get(1)?.as_str().to_owned()],
+            })
+        })
+        .collect();
+    found.extend(blocks);
+    found.sort_by_key(|snippet| snippet.span.start);
+    found
+}
+
+/// A block's commands: its lines, a line ending in an odd number of `\`
+/// joined to the next in a `posix` shell, without blank lines and `#`
+/// comments.
+fn block_commands(lines: &[&str], posix: bool) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut current = String::new();
+    for line in lines {
+        if current.is_empty() && line.trim_start().starts_with('#') {
+            continue;
+        }
+        let escapes = line.len() - line.trim_end_matches('\\').len();
+        if posix && escapes % 2 == 1 {
+            current.push_str(&line[..line.len() - 1]);
+            continue;
+        }
+        current.push_str(line);
+        let command = current.trim();
+        if !command.is_empty() {
+            commands.push(command.to_owned());
+        }
+        current.clear();
+    }
+    let rest = current.trim();
+    if !rest.is_empty() {
+        commands.push(rest.to_owned());
+    }
+    commands
+}
+
+/// Whether `template` has a `!` snippet, inline or a block.
+#[must_use]
+pub fn has_snippets(template: &str) -> bool {
+    !snippets(template, true).is_empty()
+}
+
+/// In place of a snippet of a skill the model loaded that would have asked
+/// for approval: loading a skill raises no card, so the model may run it.
+fn held_note(command: &str) -> String {
+    format!(
+        "(skipped: `{command}` asks for approval, which loading a skill never does; call bash with it to run it)"
+    )
+}
+
+/// In place of a snippet of a skill the model loaded that the rules refuse.
+fn refused_note(command: &str) -> String {
+    format!("(skipped: `{command}` is not permitted)")
+}
+
+/// In place of a snippet of a skill an agent starts with: nobody asked for
+/// that skill, so none of its commands runs.
+fn preloaded_note(command: &str) -> String {
+    format!(
+        "(skipped: `{command}` does not run for a skill an agent starts with; call bash with it to run it)"
+    )
+}
+
 /// Shell snippets are parsed from trusted definition text before argument
 /// substitution, so an argument containing !`...` cannot introduce a command.
+/// Each command of a snippet runs in order, a fenced block's one line at a
+/// time. A command the invoker holds back for approval or refuses (a skill
+/// the model loads, see [`crate::ToolInvoker::definition_shell`]) is named
+/// in a note instead, and the text around it still loads.
 pub async fn prepare(
     template: &str,
     input: &str,
@@ -579,61 +735,27 @@ pub async fn prepare(
         session,
         workspace: &workspace,
     };
-    let snippets = regex::Regex::new(r"(?m)(?:^|[ \t\r\n])!`([^`]+)`").expect("constant regex");
     let mut prepared = String::new();
     let mut last = 0;
-    for capture in snippets.captures_iter(template) {
-        let whole = capture.get(0).expect("whole match");
+    for snippet in snippets(template, crate::agent_shell::current().posix()) {
+        // Snippets never overlap; one that would is text, so no input can
+        // cut the text out of order.
+        if snippet.span.start < last {
+            continue;
+        }
         prepared.push_str(&substitutions(
-            &template[last..whole.start()],
+            &template[last..snippet.span.start],
             &context,
             false,
             false,
         ));
-        prepared.push_str(whole.as_str().split_once("!`").unwrap().0);
-        // Permissions judge the snippet with its folders filled in (what
-        // the person reads on the card and what rules name); it runs with
-        // its references kept for the shell to read from its environment.
-        let shown = substitutions(&capture[1], &context, true, false);
-        let run = substitutions(&capture[1], &context, true, cfg!(not(windows)));
-        let result = invoker
-            .definition_shell(
-                shown,
-                run,
-                snippet_environment(execution, session, &workspace),
-            )
-            .await?;
-        if result
-            .metadata
-            .get("exit")
-            .and_then(Value::as_i64)
-            .is_some_and(|code| code != 0)
-        {
-            return Err(CoreError::Tool(format!(
-                "Definition context command failed: {}",
-                result.text
-            )));
+        prepared.push_str(snippet.lead);
+        let mut outputs = Vec::with_capacity(snippet.commands.len());
+        for command in &snippet.commands {
+            outputs.push(run_snippet(command, &context, invoker).await?);
         }
-        prepared.push_str(
-            result
-                .metadata
-                .get("stdout")
-                .and_then(Value::as_str)
-                .unwrap_or(&result.text)
-                .trim_end(),
-        );
-        // Only the end of a long output is kept: the model is told, so it
-        // does not take the part it reads for the whole.
-        if result.metadata.get("stdoutCut").and_then(Value::as_bool) == Some(true) {
-            prepared.push_str(&snippet_cut_note(
-                result.metadata.get("outputPath").and_then(Value::as_str),
-                result
-                    .metadata
-                    .get("outputSavedBytes")
-                    .and_then(Value::as_u64),
-            ));
-        }
-        last = whole.end();
+        prepared.push_str(&outputs.join("\n"));
+        last = snippet.span.end;
     }
     prepared.push_str(&substitutions(&template[last..], &context, false, false));
     // Append implicit arguments once, not once per text segment.
@@ -649,6 +771,223 @@ pub async fn prepare(
         prepared.push_str(input);
     }
     expand_references_aside(prepared, invoker).await
+}
+
+/// Runs one command of a snippet and gives what takes its place: its output,
+/// or a note when the invoker held it back or refused it.
+async fn run_snippet(
+    command: &str,
+    context: &SubstitutionContext<'_>,
+    invoker: &dyn crate::ToolInvoker,
+) -> CoreResult<String> {
+    // Permissions judge the snippet with its folders filled in (what
+    // the person reads on the card and what rules name); it runs with
+    // its references kept for the shell to read from its environment.
+    let shown = substitutions(command, context, true, false);
+    let run = substitutions(command, context, true, cfg!(not(windows)));
+    let result = invoker
+        .definition_shell(
+            shown.clone(),
+            run,
+            snippet_environment(context.execution, context.session, context.workspace),
+        )
+        .await?;
+    let flag = |name: &str| result.metadata.get(name).and_then(Value::as_bool) == Some(true);
+    if flag("held") {
+        return Ok(held_note(&shown));
+    }
+    if flag("refused") {
+        return Ok(refused_note(&shown));
+    }
+    if result
+        .metadata
+        .get("exit")
+        .and_then(Value::as_i64)
+        .is_some_and(|code| code != 0)
+    {
+        return Err(CoreError::Tool(format!(
+            "Definition context command failed: {}",
+            result.text
+        )));
+    }
+    let mut output = result
+        .metadata
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or(&result.text)
+        .trim_end()
+        .to_owned();
+    // Only the end of a long output is kept: the model is told, so it
+    // does not take the part it reads for the whole.
+    if flag("stdoutCut") {
+        output.push_str(&snippet_cut_note(
+            result.metadata.get("outputPath").and_then(Value::as_str),
+            result
+                .metadata
+                .get("outputSavedBytes")
+                .and_then(Value::as_u64),
+        ));
+    }
+    Ok(output)
+}
+
+/// What [`preloaded_text`] keeps of `${CLAUDE_SESSION_ID}` and
+/// `${CLAUDE_PROJECT_DIR}`: each chat fills in its own id and folder (see
+/// [`crate::CustomAgent::instructions`]).
+pub const SESSION_PLACEHOLDER: &str = "${CLAUDE_SESSION_ID}";
+pub const PROJECT_PLACEHOLDER: &str = "${CLAUDE_PROJECT_DIR}";
+
+/// How much of one skill an agent starts with: as much as the `skill` tool
+/// gives the model of a skill it loads.
+const PRELOAD_SKILL_LINES: usize = 2_000;
+const PRELOAD_SKILL_BYTES: usize = 50 * 1_024;
+
+/// A skill's text as it reaches an agent whose `skills` field names it: its
+/// placeholders filled in, the chat's id and folder left for each chat, and
+/// each `!` snippet's commands named in notes instead. Nothing runs and
+/// no file is read: the agent is handed the skill's text, the skill itself
+/// was never run. `$ARGUMENTS` and `@path` references stay as written.
+#[must_use]
+pub fn preloaded_text(template: &str, execution: &DefinitionExecution) -> String {
+    let values = placeholder_values(execution, SESSION_PLACEHOLDER, PROJECT_PLACEHOLDER);
+    let mut text = String::new();
+    let mut last = 0;
+    for snippet in snippets(template, crate::agent_shell::current().posix()) {
+        if snippet.span.start < last {
+            continue;
+        }
+        text.push_str(&fill_placeholders(
+            &template[last..snippet.span.start],
+            &values,
+        ));
+        text.push_str(snippet.lead);
+        text.push_str(
+            &snippet
+                .commands
+                .iter()
+                .map(|command| preloaded_note(&fill_placeholders(command, &values)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        last = snippet.span.end;
+    }
+    text.push_str(&fill_placeholders(&template[last..], &values));
+    text
+}
+
+/// `text` cut to [`PRELOAD_SKILL_LINES`] whole lines and
+/// [`PRELOAD_SKILL_BYTES`], with a line naming `file`, where the rest is,
+/// when anything was left out.
+fn preload_cut(text: &str, file: &str) -> String {
+    if text.lines().count() <= PRELOAD_SKILL_LINES && text.len() <= PRELOAD_SKILL_BYTES {
+        return text.to_owned();
+    }
+    let mut kept = String::new();
+    for line in text.lines().take(PRELOAD_SKILL_LINES) {
+        if kept.len() + line.len() + 1 > PRELOAD_SKILL_BYTES {
+            if kept.is_empty() {
+                let mut end = PRELOAD_SKILL_BYTES;
+                while !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                kept.push_str(&line[..end]);
+            }
+            break;
+        }
+        if !kept.is_empty() {
+            kept.push('\n');
+        }
+        kept.push_str(line);
+    }
+    format!("{kept}\n(this skill is longer than shown here; the rest is in {file})")
+}
+
+/// The most skills one agent starts with, as in Claude Code.
+pub const PRELOAD_LIMIT: usize = 32;
+
+/// Sets `agent.preloaded` to the text of the skills its `skills` field
+/// lists, the first [`PRELOAD_LIMIT`] names only: each as
+/// [`preloaded_text`] gives it, cut as the `skill` tool cuts a skill, and
+/// those that name the chat's id last, so the chats of one agent share as
+/// much of their prompt as they can. A bare name of a plugin's agent is
+/// looked for in that plugin first. A listed skill is left out, with a line
+/// in the log, when no skill has that name (or it is turned off, or the
+/// project's files are not trusted), when it is marked
+/// `disable-model-invocation`, or when `rules` (the agent's rules as its
+/// calls meet them, the person's floor included) settle `skill:<name>` with
+/// a rule written for that skill that does not allow it, an ask counting as
+/// no, since no one is there to answer it while the prompt is composed. A
+/// rule for every skill (`skill:*`, `*`) governs calls of the skill tool, and
+/// starting with a skill is no call. An agent that lists none keeps its
+/// prompt as it is.
+pub fn preload_skills(
+    agent: &mut crate::CustomAgent,
+    registry: &dyn crate::SkillRegistry,
+    rules: &crate::PermissionEngine,
+) {
+    agent.preloaded.clear();
+    if agent.skills.is_empty() {
+        return;
+    }
+    let refused = |name: &str| {
+        let evaluation = rules.evaluate_detailed(&format!("skill:{name}"));
+        evaluation.decision != crate::PermissionDecision::Allow
+            && evaluation.matched.as_deref().is_some_and(|rule| {
+                rule.strip_prefix("skill:")
+                    .is_some_and(|target| target != "*")
+            })
+    };
+    let mut listed: Vec<&str> = Vec::new();
+    for name in agent.skills.iter().map(|name| name.trim()) {
+        if !name.is_empty() && !listed.contains(&name) {
+            listed.push(name);
+        }
+    }
+    listed.truncate(PRELOAD_LIMIT);
+    let mut paths = Vec::new();
+    let mut blocks = Vec::new();
+    for name in listed {
+        let own = agent
+            .plugin
+            .as_deref()
+            .filter(|_| !name.contains(':'))
+            .and_then(|plugin| registry.peek(&format!("{plugin}:{name}")));
+        let Some((info, content)) = own.or_else(|| registry.peek(name)) else {
+            tracing::warn!(agent = %agent.id, skill = name, "a skill this agent lists is not in its instructions: no skill has that name");
+            continue;
+        };
+        if info.execution.disable_model_invocation {
+            tracing::warn!(agent = %agent.id, skill = name, "a skill this agent lists is not in its instructions: only a person may start it");
+            continue;
+        }
+        if refused(name) || refused(&info.name) {
+            tracing::warn!(agent = %agent.id, skill = name, "a skill this agent lists is not in its instructions: a permission rule does not allow it");
+            continue;
+        }
+        if paths.contains(&info.path) {
+            continue;
+        }
+        let body = markdown(&content).map_or(content.as_str(), |(_, body)| body);
+        let text = preload_cut(
+            preloaded_text(body.trim(), &info.execution).trim(),
+            &info.path,
+        );
+        blocks.push(format!(
+            "<skill name=\"{}\">\nSkill directory: {}\n\n{text}\n</skill>",
+            info.name,
+            info.execution.directory.as_deref().unwrap_or(""),
+        ));
+        paths.push(info.path);
+    }
+    // Stable: the skills that name the chat's id keep their order, after
+    // the rest.
+    blocks.sort_by_key(|block| block.contains(SESSION_PLACEHOLDER));
+    if !blocks.is_empty() {
+        agent.preloaded = format!(
+            "These skills are already loaded; follow them where they apply, without loading them again:\n\n{}",
+            blocks.join("\n\n")
+        );
+    }
 }
 
 /// Bounds for `@path` expansion in command templates.
@@ -837,13 +1176,15 @@ fn delegation_hint(agent: &str) -> String {
     )
 }
 /// The values a definition's placeholders stand for, by variable name: the
-/// session, the project folder, the skill's folder and the plugin's root.
-fn placeholder_values<'a>(
-    execution: &'a DefinitionExecution,
-    session: &'a str,
-    workspace: &'a str,
-) -> Vec<(&'static str, &'a str)> {
+/// session, the project folder, the skill's folder, the plugin's root and
+/// the plugin's data folder (`<root>/.data`, the one its hooks get).
+fn placeholder_values(
+    execution: &DefinitionExecution,
+    session: &str,
+    workspace: &str,
+) -> Vec<(&'static str, String)> {
     let root = execution.plugin_root.as_deref();
+    let data = root.map(|root| Path::new(root).join(".data").to_string_lossy().into_owned());
     [
         ("CLAUDE_SESSION_ID", Some(session)),
         ("CLAUDE_PROJECT_DIR", Some(workspace)),
@@ -851,9 +1192,11 @@ fn placeholder_values<'a>(
         ("CLAUDE_PLUGIN_ROOT", root),
         ("HAARNESS_PLUGIN_ROOT", root),
         ("OPENCODE_PLUGIN_ROOT", root),
+        ("CLAUDE_PLUGIN_DATA", data.as_deref()),
+        ("HAARNESS_PLUGIN_DATA", data.as_deref()),
     ]
     .into_iter()
-    .filter_map(|(name, value)| Some((name, value?)))
+    .filter_map(|(name, value)| Some((name, value?.to_owned())))
     .collect()
 }
 
@@ -888,7 +1231,7 @@ fn snippet_environment(
 ) -> std::collections::BTreeMap<String, String> {
     placeholder_values(execution, session, workspace)
         .into_iter()
-        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .map(|(name, value)| (name.to_owned(), value))
         .collect()
 }
 
@@ -915,18 +1258,6 @@ fn substitutions(
     } = *context;
     // Do not let supplied arguments be reinterpreted as template substitutions.
     let values = placeholder_values(execution, session, workspace);
-    let find = |rest: &str| {
-        values
-            .iter()
-            .find(|(name, _)| rest.starts_with(&format!("${{{name}}}")))
-            .map(|(name, _)| name.len() + 3)
-    };
-    let value = |name: &str| {
-        values
-            .iter()
-            .find(|(candidate, _)| *candidate == name)
-            .map_or_else(String::new, |(_, value)| (*value).to_owned())
-    };
     // The text a snippet runs (`sh` here; `cmd` on Windows gets the values
     // filled in) keeps its placeholders as written, and the shell reads them
     // from the snippet's environment, so a folder named `a b` or
@@ -936,28 +1267,11 @@ fn substitutions(
         crate::shell_text::place_placeholders(
             crate::shell_text::ShellKind::Posix,
             template,
-            &find,
-            &value,
+            &|rest: &str| placeholder_at(&values, rest),
+            &|name: &str| placeholder_value(&values, name),
         )
     } else {
-        let mut filled = String::with_capacity(template.len());
-        let mut rest = template;
-        while let Some(start) = rest.find("${") {
-            filled.push_str(&rest[..start]);
-            rest = &rest[start..];
-            match find(rest) {
-                Some(length) => {
-                    filled.push_str(&value(&rest[2..length - 1]));
-                    rest = &rest[length..];
-                }
-                None => {
-                    filled.push_str("${");
-                    rest = &rest[2..];
-                }
-            }
-        }
-        filled.push_str(rest);
-        filled
+        fill_placeholders(template, &values)
     };
     // arguments() has legacy implicit-tail behavior; suppress it for segments.
     if regex::Regex::new(r"\$ARGUMENTS|\$\d+")
@@ -979,12 +1293,52 @@ fn substitutions(
         template
     }
 }
+
+/// The length of the placeholder of `values` that `rest` starts with.
+fn placeholder_at(values: &[(&'static str, String)], rest: &str) -> Option<usize> {
+    values
+        .iter()
+        .find(|(name, _)| rest.starts_with(&format!("${{{name}}}")))
+        .map(|(name, _)| name.len() + 3)
+}
+
+fn placeholder_value(values: &[(&'static str, String)], name: &str) -> String {
+    values
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .map_or_else(String::new, |(_, value)| value.clone())
+}
+
+/// `template` with each placeholder of `values` replaced by its value; any
+/// other `${…}` stays as written.
+fn fill_placeholders(template: &str, values: &[(&'static str, String)]) -> String {
+    let mut filled = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("${") {
+        filled.push_str(&rest[..start]);
+        rest = &rest[start..];
+        match placeholder_at(values, rest) {
+            Some(length) => {
+                filled.push_str(&placeholder_value(values, &rest[2..length - 1]));
+                rest = &rest[length..];
+            }
+            None => {
+                filled.push_str("${");
+                rest = &rest[2..];
+            }
+        }
+    }
+    filled.push_str(rest);
+    filled
+}
 /// The rules a skill's or command's `allowed-tools` and `disallowed-tools`
-/// add for its turn, with `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SKILL_DIR}` and
-/// `${CLAUDE_PLUGIN_ROOT}` filled in. Snippets are judged with their folders
-/// filled in, as the model writes them, so an allowance names the real paths
-/// only: one that kept the `${CLAUDE_PLUGIN_ROOT}` spelling would cover a
-/// command that sets that variable itself. A deny counts in both spellings.
+/// add for its turn, with `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SKILL_DIR}`
+/// and the plugin's root and data folder (`${CLAUDE_PLUGIN_ROOT}`,
+/// `${CLAUDE_PLUGIN_DATA}` and their `HAARNESS_` spellings) filled in.
+/// Snippets are judged with their folders filled in, as the model writes
+/// them, so an allowance names the real paths only: one that kept the
+/// `${CLAUDE_PLUGIN_ROOT}` spelling would cover a command that sets that
+/// variable itself. A deny counts in both spellings.
 #[must_use]
 pub fn skill_rules(execution: &DefinitionExecution, workspace: &str) -> Vec<crate::PermissionRule> {
     let expand = |entry: &String| {
@@ -993,7 +1347,16 @@ pub fn skill_rules(execution: &DefinitionExecution, workspace: &str) -> Vec<crat
             value = value.replace("${CLAUDE_SKILL_DIR}", directory);
         }
         if let Some(root) = &execution.plugin_root {
-            value = value.replace("${CLAUDE_PLUGIN_ROOT}", root);
+            let data = Path::new(root).join(".data");
+            let data = data.to_string_lossy();
+            for (name, value_of) in [
+                ("CLAUDE_PLUGIN_ROOT", root.as_str()),
+                ("HAARNESS_PLUGIN_ROOT", root.as_str()),
+                ("CLAUDE_PLUGIN_DATA", &data),
+                ("HAARNESS_PLUGIN_DATA", &data),
+            ] {
+                value = value.replace(&format!("${{{name}}}"), value_of);
+            }
         }
         value
     };
@@ -1777,5 +2140,580 @@ mod tests {
         assert!(text.contains("note body"));
         assert!(!text.contains("task tool"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_code_background_command_tools_have_haarness_names() {
+        for name in ["BashOutput", "TaskOutput"] {
+            assert_eq!(tool_names(name), ["bash_output"], "{name}");
+        }
+        for name in ["KillShell", "KillBash", "TaskStop"] {
+            assert_eq!(tool_names(name), ["bash_stop"], "{name}");
+        }
+    }
+
+    /// Answers each `!` snippet from a script of outcomes, keyed by the text
+    /// a person would read, and records the order the snippets ran in.
+    struct Scripted {
+        answers: std::collections::HashMap<&'static str, Value>,
+        ran: parking_lot::Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
+    }
+    impl Scripted {
+        fn new(answers: &[(&'static str, Value)]) -> Self {
+            Self {
+                answers: answers.iter().cloned().collect(),
+                ran: parking_lot::Mutex::default(),
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::ToolInvoker for Scripted {
+        fn workspace(&self) -> Option<String> {
+            Some("/work/project".into())
+        }
+        async fn definition_shell(
+            &self,
+            shown: String,
+            _run: String,
+            env: std::collections::BTreeMap<String, String>,
+        ) -> CoreResult<crate::ToolOutput> {
+            let metadata = self.answers.get(shown.as_str()).cloned().unwrap_or_else(
+                || serde_json::json!({"exit": 0, "stdout": format!("<{shown}>\n")}),
+            );
+            self.ran.lock().push((shown, env));
+            Ok(crate::ToolOutput {
+                text: String::new(),
+                metadata,
+            })
+        }
+        async fn invoke(&self, _: &str, _: Value) -> CoreResult<crate::ToolOutput> {
+            Err(CoreError::Tool("unused".into()))
+        }
+        fn side_effectful_for(&self, _: &str, _: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fenced_block_runs_each_line_in_order_and_reads_as_their_outputs() {
+        let invoker = Scripted::new(&[]);
+        let template = "## Environment\n```!\nnode --version\n\n  git status --short  \n```\nThen: !`date` done.\n```bash\n!echo not a block\n```";
+        let text = prepare(template, "", &DefinitionExecution::default(), "s", &invoker)
+            .await
+            .unwrap();
+        assert_eq!(
+            text,
+            "## Environment\n<node --version>\n<git status --short>\nThen: <date> done.\n```bash\n!echo not a block\n```"
+        );
+        let ran: Vec<String> = invoker
+            .ran
+            .lock()
+            .iter()
+            .map(|(shown, _)| shown.clone())
+            .collect();
+        assert_eq!(ran, ["node --version", "git status --short", "date"]);
+        // Written with Windows line ends, and opened with spaces after `!`.
+        let invoker = Scripted::new(&[]);
+        let text = prepare(
+            "A\r\n```! \r\npwd\r\nls\r\n```\r\nB",
+            "",
+            &DefinitionExecution::default(),
+            "s",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(text, "A\r\n<pwd>\n<ls>\nB");
+        assert!(has_snippets("```!\nls\n```") && has_snippets("Run !`ls`"));
+        assert!(!has_snippets("KEY=!`ls`") && !has_snippets("```!\nls"));
+    }
+
+    #[tokio::test]
+    async fn a_plugin_skill_names_its_data_folder() {
+        let execution = DefinitionExecution {
+            plugin_root: Some("/plugins/kit".into()),
+            directory: Some("/plugins/kit/skills/lint".into()),
+            allowed_tools: vec!["Bash(${CLAUDE_PLUGIN_DATA}/cache.sh:*)".into()],
+            ..DefinitionExecution::default()
+        };
+        let invoker = Scripted::new(&[]);
+        let text = prepare(
+            "Data ${CLAUDE_PLUGIN_DATA} and ${HAARNESS_PLUGIN_DATA}: !`ls ${CLAUDE_PLUGIN_DATA}`",
+            "",
+            &execution,
+            "s",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            text,
+            "Data /plugins/kit/.data and /plugins/kit/.data: <ls /plugins/kit/.data>"
+        );
+        let (_, env) = invoker.ran.lock()[0].clone();
+        assert_eq!(env["CLAUDE_PLUGIN_DATA"], "/plugins/kit/.data");
+        assert_eq!(env["HAARNESS_PLUGIN_DATA"], "/plugins/kit/.data");
+        assert!(
+            skill_rules(&execution, "/work/project")
+                .iter()
+                .any(|rule| rule.pattern == "bash:/plugins/kit/.data/cache.sh *")
+        );
+        // Outside a plugin there is no data folder: the text stays as written.
+        let text = prepare(
+            "Data ${CLAUDE_PLUGIN_DATA}",
+            "",
+            &DefinitionExecution::default(),
+            "s",
+            &Scripted::new(&[]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(text, "Data ${CLAUDE_PLUGIN_DATA}");
+    }
+
+    #[tokio::test]
+    async fn a_snippet_held_back_or_refused_is_named_and_the_rest_loads() {
+        let invoker = Scripted::new(&[
+            ("git push", serde_json::json!({"held": true})),
+            ("rm -rf build", serde_json::json!({"refused": true})),
+        ]);
+        let text = prepare(
+            "Branch: !`git branch` Push: !`git push`\n```!\nrm -rf build\nls\n```\nEnd",
+            "",
+            &DefinitionExecution::default(),
+            "s",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            text,
+            "Branch: <git branch> Push: (skipped: `git push` asks for approval, which loading a skill never does; call bash with it to run it)\n(skipped: `rm -rf build` is not permitted)\n<ls>\nEnd"
+        );
+        // A failing command still fails the whole definition.
+        let failing = Scripted::new(&[("false", serde_json::json!({"exit": 1, "stdout": ""}))]);
+        assert!(
+            prepare(
+                "!`false`",
+                "",
+                &DefinitionExecution::default(),
+                "s",
+                &failing
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_preloaded_skill_fills_its_folders_and_runs_nothing() {
+        let execution = DefinitionExecution {
+            plugin_root: Some("/plugins/kit".into()),
+            directory: Some("/plugins/kit/skills/style".into()),
+            ..DefinitionExecution::default()
+        };
+        let text = preloaded_text(
+            "Read ${CLAUDE_SKILL_DIR}/guide.md in ${CLAUDE_PROJECT_DIR} for ${CLAUDE_SESSION_ID}.\nBranch: !`git -C ${CLAUDE_PROJECT_DIR} branch`\n```!\nls ${CLAUDE_PLUGIN_DATA}\npwd\n```\nArgs $ARGUMENTS and @notes.md",
+            &execution,
+        );
+        // The chat's id and folder stay for each chat to fill in.
+        assert_eq!(
+            text,
+            "Read /plugins/kit/skills/style/guide.md in ${CLAUDE_PROJECT_DIR} for ${CLAUDE_SESSION_ID}.\nBranch: (skipped: `git -C ${CLAUDE_PROJECT_DIR} branch` does not run for a skill an agent starts with; call bash with it to run it)\n(skipped: `ls /plugins/kit/.data` does not run for a skill an agent starts with; call bash with it to run it)\n(skipped: `pwd` does not run for a skill an agent starts with; call bash with it to run it)\nArgs $ARGUMENTS and @notes.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_block_skips_comments_joins_continued_lines_and_examples_stay_text() {
+        let invoker = Scripted::new(&[]);
+        let template = "```!\n# what follows\n\ngit log \\\n  --oneline\n  # indented note\nls\n```\n````markdown\nAn example:\n```!\nnever run\n```\n````\n~~~\n```!\nnor this\n```\n~~~\n```!\nunclosed";
+        let text = prepare(template, "", &DefinitionExecution::default(), "s", &invoker)
+            .await
+            .unwrap();
+        let ran: Vec<String> = invoker
+            .ran
+            .lock()
+            .iter()
+            .map(|(shown, _)| shown.clone())
+            .collect();
+        assert_eq!(ran, ["git log   --oneline", "ls"]);
+        assert!(
+            text.starts_with(
+                "<git log   --oneline>\n<ls>\n````markdown\nAn example:\n```!\nnever run\n```\n````"
+            ),
+            "{text}"
+        );
+        assert!(text.ends_with("```!\nunclosed"), "{text}");
+        assert!(!has_snippets("````md\n```!\nls\n```\n````"));
+        // A block of comments alone runs nothing and reads as nothing.
+        let invoker = Scripted::new(&[]);
+        let text = prepare(
+            "A\n```!\n# only a note\n```\nB",
+            "",
+            &DefinitionExecution::default(),
+            "s",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert!(invoker.ran.lock().is_empty());
+        assert_eq!(text, "A\n\nB");
+    }
+
+    /// Skills by name, as the filesystem registry reads them.
+    struct Catalog(Vec<(&'static str, String, DefinitionExecution)>);
+    #[async_trait::async_trait]
+    impl crate::SkillRegistry for Catalog {
+        async fn discover(&self) -> CoreResult<Vec<haarness_protocol::SkillInfo>> {
+            Ok(Vec::new())
+        }
+        async fn load(&self, _: &str) -> CoreResult<String> {
+            Err(CoreError::Tool("unused".into()))
+        }
+        fn peek(&self, name: &str) -> Option<(haarness_protocol::SkillInfo, String)> {
+            let (canonical, content, execution) = self.0.iter().find(|(canonical, _, _)| {
+                *canonical == name || canonical.rsplit(':').next() == Some(name)
+            })?;
+            Some((
+                haarness_protocol::SkillInfo {
+                    execution: execution.clone(),
+                    name: (*canonical).to_owned(),
+                    description: String::new(),
+                    path: format!("/skills/{canonical}/SKILL.md"),
+                    trusted: true,
+                    loaded: false,
+                },
+                content.clone(),
+            ))
+        }
+    }
+
+    fn skill(directory: &str) -> DefinitionExecution {
+        DefinitionExecution {
+            directory: Some(directory.into()),
+            ..DefinitionExecution::default()
+        }
+    }
+
+    fn rule(pattern: &str, decision: crate::PermissionDecision) -> crate::PermissionRule {
+        crate::PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        }
+    }
+
+    #[test]
+    fn an_agent_starts_with_the_skills_it_lists_that_it_may_load() {
+        let catalog = Catalog(vec![
+            (
+                "checklist",
+                "---\nname: checklist\n---\nCHECK ${CLAUDE_SKILL_DIR}\n".into(),
+                skill("/s/checklist"),
+            ),
+            (
+                "kit:style",
+                "---\nname: style\n---\nKIT_STYLE !`ls`\n".into(),
+                DefinitionExecution {
+                    plugin_root: Some("/plugins/kit".into()),
+                    ..skill("/plugins/kit/skills/style")
+                },
+            ),
+            ("style", "STYLE\n".into(), skill("/s/style")),
+            (
+                "manual",
+                "MANUAL\n".into(),
+                DefinitionExecution {
+                    disable_model_invocation: true,
+                    ..skill("/s/manual")
+                },
+            ),
+            ("secret", "SECRET\n".into(), skill("/s/secret")),
+            ("asked", "ASKED\n".into(), skill("/s/asked")),
+            (
+                "chat",
+                "CHAT ${CLAUDE_SESSION_ID}\n".into(),
+                skill("/s/chat"),
+            ),
+        ]);
+        let deny = crate::PermissionDecision::Deny;
+        let mut agent = crate::CustomAgent {
+            id: "kit:reviewer".into(),
+            prompt: "Review.".into(),
+            plugin: Some("kit".into()),
+            skills: [
+                "chat",
+                "checklist",
+                "style",
+                "missing",
+                "manual",
+                "secret",
+                "asked",
+                "checklist",
+                "style",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            permissions: vec![rule("skill:secret", deny)],
+            ..crate::CustomAgent::default()
+        };
+        // A rule for the skill tool as a whole does not decide a preload; one
+        // that names the skill does, ask included.
+        let config = crate::RuntimeConfig {
+            base_rules: vec![
+                rule("skill:*", deny),
+                rule("skill:ask*", crate::PermissionDecision::Ask),
+            ],
+            ..crate::RuntimeConfig::default()
+        };
+        let rules = config.agent_rules(&agent);
+        preload_skills(&mut agent, &catalog, &rules);
+        let text = agent.preloaded.clone();
+        assert!(
+            text.contains("<skill name=\"checklist\">\nSkill directory: /s/checklist\n\nCHECK /s/checklist\n</skill>"),
+            "{text}"
+        );
+        // The plugin's own skill comes first, and its command does not run.
+        assert!(text.contains("<skill name=\"kit:style\">"), "{text}");
+        assert!(
+            text.contains("KIT_STYLE (skipped: `ls` does not run"),
+            "{text}"
+        );
+        assert!(!text.contains("\nSTYLE"), "{text}");
+        for left_out in ["MANUAL", "SECRET", "ASKED", "missing"] {
+            assert!(!text.contains(left_out), "{left_out}: {text}");
+        }
+        assert_eq!(text.matches("<skill ").count(), 3, "{text}");
+        // In the order listed, but the one that names the chat comes last.
+        let at = |name: &str| text.find(&format!("<skill name=\"{name}\">")).unwrap();
+        assert!(at("checklist") < at("kit:style") && at("kit:style") < at("chat"));
+        let instructions = agent.instructions("thread-1", "/work");
+        assert!(instructions.starts_with("Review.\n\nThese skills are already loaded"));
+        assert!(instructions.contains("CHAT thread-1"));
+
+        // Only the first 32 names count.
+        let mut many = crate::CustomAgent {
+            skills: (0..40)
+                .map(|index| format!("n{index}"))
+                .chain(["checklist".into()])
+                .collect(),
+            ..crate::CustomAgent::default()
+        };
+        let open = crate::PermissionEngine::build_defaults();
+        preload_skills(&mut many, &catalog, &open);
+        assert!(many.preloaded.is_empty());
+        many.skills.insert(31, "checklist".into());
+        preload_skills(&mut many, &catalog, &open);
+        assert!(many.preloaded.contains("CHECK /s/checklist"));
+    }
+
+    #[test]
+    fn a_project_agent_cannot_preload_a_skill_the_person_denies() {
+        let catalog = Catalog(vec![("secret", "SECRET\n".into(), skill("/s/secret"))]);
+        let allow = rule("skill:secret", crate::PermissionDecision::Allow);
+        let deny = rule("skill:secret", crate::PermissionDecision::Deny);
+        let config = crate::RuntimeConfig {
+            base_rules: vec![deny.clone()],
+            global_rules: vec![deny],
+            ..crate::RuntimeConfig::default()
+        };
+        let mut project = crate::CustomAgent {
+            id: "reviewer".into(),
+            skills: vec!["secret".into()],
+            permissions: vec![allow.clone()],
+            project: true,
+            ..crate::CustomAgent::default()
+        };
+        let rules = config.agent_rules(&project);
+        preload_skills(&mut project, &catalog, &rules);
+        assert!(project.preloaded.is_empty());
+        // The person's own agent may lift the person's deny, as its calls may.
+        let mut own = crate::CustomAgent {
+            project: false,
+            ..project
+        };
+        let rules = config.agent_rules(&own);
+        preload_skills(&mut own, &catalog, &rules);
+        assert!(own.preloaded.contains("SECRET"));
+    }
+
+    #[test]
+    fn a_long_preloaded_skill_is_cut_and_names_its_file() {
+        let long = (0..3_000)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let catalog = Catalog(vec![("long", long, skill("/s/long"))]);
+        let mut agent = crate::CustomAgent {
+            skills: vec!["long".into()],
+            ..crate::CustomAgent::default()
+        };
+        preload_skills(
+            &mut agent,
+            &catalog,
+            &crate::PermissionEngine::build_defaults(),
+        );
+        let text = &agent.preloaded;
+        assert!(text.contains("line 1999\n(this skill is longer than shown here; the rest is in /skills/long/SKILL.md)"), "{}", &text[text.len() - 300..]);
+        assert!(!text.contains("line 2000"));
+        // One line too long to show whole shows its start.
+        let catalog = Catalog(vec![("wide", "x".repeat(60 * 1_024), skill("/s/wide"))]);
+        let mut agent = crate::CustomAgent {
+            skills: vec!["wide".into()],
+            ..crate::CustomAgent::default()
+        };
+        preload_skills(
+            &mut agent,
+            &catalog,
+            &crate::PermissionEngine::build_defaults(),
+        );
+        assert!(agent.preloaded.contains(&format!(
+            "{}\n(this skill is longer",
+            "x".repeat(50 * 1_024)
+        )));
+    }
+
+    #[test]
+    fn an_agent_without_preloaded_skills_keeps_its_prompt_as_written() {
+        let agent = crate::CustomAgent {
+            prompt: "Review.\n\n".into(),
+            ..crate::CustomAgent::default()
+        };
+        assert!(matches!(
+            agent.instructions("t", "/w"),
+            std::borrow::Cow::Borrowed("Review.\n\n")
+        ));
+        let agent = crate::CustomAgent {
+            prompt: "Review.".into(),
+            preloaded: "Chat ${CLAUDE_SESSION_ID} in ${CLAUDE_PROJECT_DIR}.".into(),
+            ..crate::CustomAgent::default()
+        };
+        assert_eq!(
+            agent.instructions("t-9", "/home/chats/a"),
+            "Review.\n\nChat t-9 in /home/chats/a."
+        );
+    }
+
+    #[test]
+    fn plugin_data_and_root_in_both_spellings_reach_allowed_tools() {
+        let execution = DefinitionExecution {
+            plugin_root: Some("/plugins/kit".into()),
+            allowed_tools: vec![
+                "Bash(${HAARNESS_PLUGIN_DATA}/cache.sh:*)".into(),
+                "Bash(${HAARNESS_PLUGIN_ROOT}/run.sh)".into(),
+            ],
+            ..DefinitionExecution::default()
+        };
+        let allowed: Vec<String> = skill_rules(&execution, "/work")
+            .into_iter()
+            .map(|rule| rule.pattern)
+            .collect();
+        assert_eq!(
+            allowed,
+            [
+                "bash:/plugins/kit/.data/cache.sh *",
+                "bash:/plugins/kit/run.sh"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_inline_snippet_left_open_before_a_block_is_text_and_the_block_runs() {
+        // The inline snippet's closing backtick is missing: its match would
+        // run into the block's fence.
+        let template = "A !`echo one\n```!\necho two\n```\nB";
+        let invoker = Scripted::new(&[]);
+        let text = prepare(template, "", &DefinitionExecution::default(), "s", &invoker)
+            .await
+            .unwrap();
+        assert_eq!(text, "A !`echo one\n<echo two>\nB");
+        let ran: Vec<String> = invoker
+            .ran
+            .lock()
+            .iter()
+            .map(|(shown, _)| shown.clone())
+            .collect();
+        assert_eq!(ran, ["echo two"]);
+        assert_eq!(
+            preloaded_text(template, &DefinitionExecution::default()),
+            "A !`echo one\n(skipped: `echo two` does not run for a skill an agent starts with; call bash with it to run it)\nB"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_text_of_backticks_fences_and_bangs_breaks_reading_snippets() {
+        // Single marks, and whole fence lines so that blocks do form.
+        const PIECES: [&str; 28] = [
+            "`",
+            "``",
+            "```",
+            "````",
+            "!",
+            "!`",
+            "~~~",
+            "\n",
+            "\r\n",
+            " ",
+            "\t",
+            "echo x",
+            "#",
+            "\\",
+            "é",
+            "${CLAUDE_PROJECT_DIR}",
+            "\n```!\n",
+            "\n```\n",
+            "\n````!\n",
+            "\n````\n",
+            "\n````markdown\n",
+            "\n~~~\n",
+            " !`echo y",
+            " !`echo z`",
+            "\n# note\n",
+            "echo a \\\n",
+            "\r\n```!\r\n",
+            "\r\n```\r\n",
+        ];
+        // A fixed sequence of pseudo-random choices, the same on every run.
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..6_000 {
+            let length = usize::try_from(next() % 16).unwrap();
+            let template: String = (0..length)
+                .map(|_| PIECES[usize::try_from(next() % PIECES.len() as u64).unwrap()])
+                .collect();
+            let _ = has_snippets(&template);
+            let _ = preloaded_text(&template, &DefinitionExecution::default());
+            for posix in [true, false] {
+                let mut last = 0;
+                for snippet in snippets(&template, posix) {
+                    assert!(snippet.span.start >= last, "{template:?}");
+                    assert!(
+                        template.is_char_boundary(snippet.span.start),
+                        "{template:?}"
+                    );
+                    assert!(template.is_char_boundary(snippet.span.end), "{template:?}");
+                    last = snippet.span.end;
+                }
+            }
+            let _ = prepare(
+                &template,
+                "",
+                &DefinitionExecution::default(),
+                "s",
+                &Scripted::new(&[]),
+            )
+            .await;
+        }
+    }
+
+    #[test]
+    fn only_a_posix_shell_continues_a_line_that_ends_in_a_backslash() {
+        let lines = ["dir C:\\", "echo next"];
+        assert_eq!(block_commands(&lines, true), ["dir C:echo next"]);
+        assert_eq!(block_commands(&lines, false), ["dir C:\\", "echo next"]);
     }
 }
