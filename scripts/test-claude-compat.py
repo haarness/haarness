@@ -51,7 +51,11 @@ write(workspace/'.haarness/skills/standalone/SKILL.md','---\nname: standalone\nd
 write(plugins/'a/agents/turns.md','---\ndescription: One step\nmaxTurns: 1\n---\nTake one step.\n')
 write(plugins/'a/agents/runner.md','---\ndescription: Shell runner\ntools: Bash, Read\n---\nRun commands.\n')
 write(plugins/'a/agents/printer.md','---\ndescription: Printer\ntools: Read, Bash(printf:*)\n---\nPrint only.\n')
+# A plugin skill with a fenced block and its data folder, and one whose command needs approval.
+write(plugins/'a/skills/fenced/SKILL.md','---\nname: fenced\ndescription: Fenced context\n---\nDATA ${CLAUDE_PLUGIN_DATA}\n```!\nprintf FENCE_ONE\nprintf FENCE_TWO\n```\nFENCE_END\n')
+write(plugins/'a/skills/asking/SKILL.md','---\nname: asking\ndescription: Needs approval\n---\nASKING !`printf ASKED_OUTPUT` DENIED !`rm -f keep.txt` AFTER\n')
 write(workspace/'keep.txt','kept')
+write(workspace/'haarness.json',json.dumps({'permission':{'bash':{'printf ASKED*':'ask','rm *':'deny'}}}))
 # Projects whose folder names hold shell syntax and a snippet: the names must stay plain text.
 odd=root/'odd $(printf INJECTED) folder';odd_snippet=root/'w !`printf SNIPPET`'
 write(odd/'.haarness/commands/where.md','---\ndescription: Folder in a snippet\n---\nWHERE !`printf \'[%s]\' "${CLAUDE_PROJECT_DIR}" \'${CLAUDE_PROJECT_DIR}\' "$(dirname "${CLAUDE_PROJECT_DIR}")"`\n')
@@ -115,6 +119,10 @@ try:
  check('a tools pattern allows what it names','PATTERN_OK' in result['out'],result)
  result=cli('--yolo','run','!tool bash {"command":"printf x && touch pattern-breach"}','--provider','echo','--model','echo-1','--agent','a:printer')
  check('a tools pattern refuses the rest even in Yolo',not (workspace/'pattern-breach').exists() and 'bash:*' in result['out']+result['err'],result)
+ result=run('!tool skill {"name":"a:fenced"}')
+ check('a fenced block runs line by line in a plugin skill','FENCE_ONE\nFENCE_TWO\nFENCE_END' in result['out'] and 'DATA '+str(plugins/'a'/'.data') in result['out'],result)
+ result=run('!tool skill {"name":"a:asking"}')
+ check('a model-loaded skill names a command instead of asking',result['code']==0 and 'ASKING (skipped: `printf ASKED_OUTPUT` asks for approval' in result['out'] and 'DENIED (skipped: `rm -f keep.txt` is not permitted) AFTER' in result['out'] and (workspace/'keep.txt').exists(),result)
  result=run('!tool write {"path":"unknown-breach.txt","content":"bad"}','--agent','a:missing')
  check('unknown agents fail closed',result['code']!=0 and not (workspace/'unknown-breach.txt').exists(),result)
  before={t['id'] for t in api('/threads')};result=run('research','--command','a:forked')

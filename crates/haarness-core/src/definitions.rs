@@ -565,8 +565,77 @@ fn expand_arguments(
     }
 }
 
+/// Where a definition runs commands: `` !`command` `` where a line starts or
+/// after a space, or a ```` ```! ```` fence, one command to a line. The first
+/// group catches a fence's lines, the second an inline command.
+fn snippets() -> &'static regex::Regex {
+    static SNIPPETS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?m)^[ \t]*```![ \t]*\r?\n((?s:.*?))^[ \t]*```[ \t]*\r?$|(?:^|[ \t\r\n])!`([^`]+)`",
+        )
+        .expect("constant regex")
+    });
+    &SNIPPETS
+}
+
+/// Whether `template` has a `!` snippet, inline or fenced.
+#[must_use]
+pub fn has_snippets(template: &str) -> bool {
+    snippets().is_match(template)
+}
+
+/// The commands one snippet match runs, in order, and whether it is a
+/// fenced block (whose commands' outputs are put one per line).
+fn snippet_commands<'t>(capture: &regex::Captures<'t>) -> (Vec<&'t str>, bool) {
+    match capture.get(1) {
+        Some(lines) => (
+            lines
+                .as_str()
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect(),
+            true,
+        ),
+        None => (
+            vec![capture.get(2).map_or("", |command| command.as_str())],
+            false,
+        ),
+    }
+}
+
+/// What stands before an inline snippet's output: the space or line break
+/// its match began with. A fenced block is replaced whole.
+fn snippet_lead<'t>(capture: &regex::Captures<'t>, fenced: bool) -> &'t str {
+    if fenced {
+        ""
+    } else {
+        capture
+            .get(0)
+            .and_then(|whole| whole.as_str().split_once("!`"))
+            .map_or("", |(lead, _)| lead)
+    }
+}
+
+/// In place of a snippet of a skill the model loaded that would have asked
+/// for approval: loading a skill raises no card, so the model may run it.
+fn held_note(command: &str) -> String {
+    format!(
+        "(skipped: `{command}` asks for approval, which loading a skill never does; call bash with it to run it)"
+    )
+}
+
+/// In place of a snippet of a skill the model loaded that the rules refuse.
+fn refused_note(command: &str) -> String {
+    format!("(skipped: `{command}` is not permitted)")
+}
+
 /// Shell snippets are parsed from trusted definition text before argument
 /// substitution, so an argument containing !`...` cannot introduce a command.
+/// Each command of a snippet runs in order, a fenced block's one line at a
+/// time. A command the invoker holds back for approval or refuses (a skill
+/// the model loads, see [`crate::ToolInvoker::definition_shell`]) is named
+/// in a note in its place, and the rest of the text still loads.
 pub async fn prepare(
     template: &str,
     input: &str,
@@ -583,10 +652,9 @@ pub async fn prepare(
         session,
         workspace: &workspace,
     };
-    let snippets = regex::Regex::new(r"(?m)(?:^|[ \t\r\n])!`([^`]+)`").expect("constant regex");
     let mut prepared = String::new();
     let mut last = 0;
-    for capture in snippets.captures_iter(template) {
+    for capture in snippets().captures_iter(template) {
         let whole = capture.get(0).expect("whole match");
         prepared.push_str(&substitutions(
             &template[last..whole.start()],
@@ -594,49 +662,13 @@ pub async fn prepare(
             false,
             false,
         ));
-        prepared.push_str(whole.as_str().split_once("!`").unwrap().0);
-        // Permissions judge the snippet with its folders filled in (what
-        // the person reads on the card and what rules name); it runs with
-        // its references kept for the shell to read from its environment.
-        let shown = substitutions(&capture[1], &context, true, false);
-        let run = substitutions(&capture[1], &context, true, cfg!(not(windows)));
-        let result = invoker
-            .definition_shell(
-                shown,
-                run,
-                snippet_environment(execution, session, &workspace),
-            )
-            .await?;
-        if result
-            .metadata
-            .get("exit")
-            .and_then(Value::as_i64)
-            .is_some_and(|code| code != 0)
-        {
-            return Err(CoreError::Tool(format!(
-                "Definition context command failed: {}",
-                result.text
-            )));
+        let (commands, fenced) = snippet_commands(&capture);
+        prepared.push_str(snippet_lead(&capture, fenced));
+        let mut outputs = Vec::with_capacity(commands.len());
+        for command in commands {
+            outputs.push(run_snippet(command, &context, invoker).await?);
         }
-        prepared.push_str(
-            result
-                .metadata
-                .get("stdout")
-                .and_then(Value::as_str)
-                .unwrap_or(&result.text)
-                .trim_end(),
-        );
-        // Only the end of a long output is kept: the model is told, so it
-        // does not take the part it reads for the whole.
-        if result.metadata.get("stdoutCut").and_then(Value::as_bool) == Some(true) {
-            prepared.push_str(&snippet_cut_note(
-                result.metadata.get("outputPath").and_then(Value::as_str),
-                result
-                    .metadata
-                    .get("outputSavedBytes")
-                    .and_then(Value::as_u64),
-            ));
-        }
+        prepared.push_str(&outputs.join("\n"));
         last = whole.end();
     }
     prepared.push_str(&substitutions(&template[last..], &context, false, false));
@@ -653,6 +685,64 @@ pub async fn prepare(
         prepared.push_str(input);
     }
     expand_references_aside(prepared, invoker).await
+}
+
+/// Runs one command of a snippet and gives what takes its place: its output,
+/// or a note when the invoker held it back or refused it.
+async fn run_snippet(
+    command: &str,
+    context: &SubstitutionContext<'_>,
+    invoker: &dyn crate::ToolInvoker,
+) -> CoreResult<String> {
+    // Permissions judge the snippet with its folders filled in (what
+    // the person reads on the card and what rules name); it runs with
+    // its references kept for the shell to read from its environment.
+    let shown = substitutions(command, context, true, false);
+    let run = substitutions(command, context, true, cfg!(not(windows)));
+    let result = invoker
+        .definition_shell(
+            shown.clone(),
+            run,
+            snippet_environment(context.execution, context.session, context.workspace),
+        )
+        .await?;
+    let flag = |name: &str| result.metadata.get(name).and_then(Value::as_bool) == Some(true);
+    if flag("held") {
+        return Ok(held_note(&shown));
+    }
+    if flag("refused") {
+        return Ok(refused_note(&shown));
+    }
+    if result
+        .metadata
+        .get("exit")
+        .and_then(Value::as_i64)
+        .is_some_and(|code| code != 0)
+    {
+        return Err(CoreError::Tool(format!(
+            "Definition context command failed: {}",
+            result.text
+        )));
+    }
+    let mut output = result
+        .metadata
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or(&result.text)
+        .trim_end()
+        .to_owned();
+    // Only the end of a long output is kept: the model is told, so it
+    // does not take the part it reads for the whole.
+    if flag("stdoutCut") {
+        output.push_str(&snippet_cut_note(
+            result.metadata.get("outputPath").and_then(Value::as_str),
+            result
+                .metadata
+                .get("outputSavedBytes")
+                .and_then(Value::as_u64),
+        ));
+    }
+    Ok(output)
 }
 
 /// Bounds for `@path` expansion in command templates.
@@ -841,13 +931,15 @@ fn delegation_hint(agent: &str) -> String {
     )
 }
 /// The values a definition's placeholders stand for, by variable name: the
-/// session, the project folder, the skill's folder and the plugin's root.
-fn placeholder_values<'a>(
-    execution: &'a DefinitionExecution,
-    session: &'a str,
-    workspace: &'a str,
-) -> Vec<(&'static str, &'a str)> {
+/// session, the project folder, the skill's folder, the plugin's root and
+/// the plugin's data folder (`<root>/.data`, the one its hooks get).
+fn placeholder_values(
+    execution: &DefinitionExecution,
+    session: &str,
+    workspace: &str,
+) -> Vec<(&'static str, String)> {
     let root = execution.plugin_root.as_deref();
+    let data = root.map(|root| Path::new(root).join(".data").to_string_lossy().into_owned());
     [
         ("CLAUDE_SESSION_ID", Some(session)),
         ("CLAUDE_PROJECT_DIR", Some(workspace)),
@@ -855,9 +947,11 @@ fn placeholder_values<'a>(
         ("CLAUDE_PLUGIN_ROOT", root),
         ("HAARNESS_PLUGIN_ROOT", root),
         ("OPENCODE_PLUGIN_ROOT", root),
+        ("CLAUDE_PLUGIN_DATA", data.as_deref()),
+        ("HAARNESS_PLUGIN_DATA", data.as_deref()),
     ]
     .into_iter()
-    .filter_map(|(name, value)| Some((name, value?)))
+    .filter_map(|(name, value)| Some((name, value?.to_owned())))
     .collect()
 }
 
@@ -892,7 +986,7 @@ fn snippet_environment(
 ) -> std::collections::BTreeMap<String, String> {
     placeholder_values(execution, session, workspace)
         .into_iter()
-        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .map(|(name, value)| (name.to_owned(), value))
         .collect()
 }
 
@@ -919,18 +1013,6 @@ fn substitutions(
     } = *context;
     // Do not let supplied arguments be reinterpreted as template substitutions.
     let values = placeholder_values(execution, session, workspace);
-    let find = |rest: &str| {
-        values
-            .iter()
-            .find(|(name, _)| rest.starts_with(&format!("${{{name}}}")))
-            .map(|(name, _)| name.len() + 3)
-    };
-    let value = |name: &str| {
-        values
-            .iter()
-            .find(|(candidate, _)| *candidate == name)
-            .map_or_else(String::new, |(_, value)| (*value).to_owned())
-    };
     // The text a snippet runs (`sh` here; `cmd` on Windows gets the values
     // filled in) keeps its placeholders as written, and the shell reads them
     // from the snippet's environment, so a folder named `a b` or
@@ -940,28 +1022,11 @@ fn substitutions(
         crate::shell_text::place_placeholders(
             crate::shell_text::ShellKind::Posix,
             template,
-            &find,
-            &value,
+            &|rest: &str| placeholder_at(&values, rest),
+            &|name: &str| placeholder_value(&values, name),
         )
     } else {
-        let mut filled = String::with_capacity(template.len());
-        let mut rest = template;
-        while let Some(start) = rest.find("${") {
-            filled.push_str(&rest[..start]);
-            rest = &rest[start..];
-            match find(rest) {
-                Some(length) => {
-                    filled.push_str(&value(&rest[2..length - 1]));
-                    rest = &rest[length..];
-                }
-                None => {
-                    filled.push_str("${");
-                    rest = &rest[2..];
-                }
-            }
-        }
-        filled.push_str(rest);
-        filled
+        fill_placeholders(template, &values)
     };
     // arguments() has legacy implicit-tail behavior; suppress it for segments.
     if regex::Regex::new(r"\$ARGUMENTS|\$\d+")
@@ -983,9 +1048,47 @@ fn substitutions(
         template
     }
 }
+
+/// The length of the placeholder of `values` that `rest` starts with.
+fn placeholder_at(values: &[(&'static str, String)], rest: &str) -> Option<usize> {
+    values
+        .iter()
+        .find(|(name, _)| rest.starts_with(&format!("${{{name}}}")))
+        .map(|(name, _)| name.len() + 3)
+}
+
+fn placeholder_value(values: &[(&'static str, String)], name: &str) -> String {
+    values
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .map_or_else(String::new, |(_, value)| value.clone())
+}
+
+/// `template` with each placeholder of `values` replaced by its value; any
+/// other `${…}` stays as written.
+fn fill_placeholders(template: &str, values: &[(&'static str, String)]) -> String {
+    let mut filled = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("${") {
+        filled.push_str(&rest[..start]);
+        rest = &rest[start..];
+        match placeholder_at(values, rest) {
+            Some(length) => {
+                filled.push_str(&placeholder_value(values, &rest[2..length - 1]));
+                rest = &rest[length..];
+            }
+            None => {
+                filled.push_str("${");
+                rest = &rest[2..];
+            }
+        }
+    }
+    filled.push_str(rest);
+    filled
+}
 /// The rules a skill's or command's `allowed-tools` and `disallowed-tools`
-/// add for its turn, with `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SKILL_DIR}` and
-/// `${CLAUDE_PLUGIN_ROOT}` filled in. Snippets are judged with their folders
+/// add for its turn, with `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SKILL_DIR}`,
+/// `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_DATA}` filled in. Snippets are judged with their folders
 /// filled in, as the model writes them, so an allowance names the real paths
 /// only: one that kept the `${CLAUDE_PLUGIN_ROOT}` spelling would cover a
 /// command that sets that variable itself. A deny counts in both spellings.
@@ -997,7 +1100,10 @@ pub fn skill_rules(execution: &DefinitionExecution, workspace: &str) -> Vec<crat
             value = value.replace("${CLAUDE_SKILL_DIR}", directory);
         }
         if let Some(root) = &execution.plugin_root {
-            value = value.replace("${CLAUDE_PLUGIN_ROOT}", root);
+            value = value.replace("${CLAUDE_PLUGIN_ROOT}", root).replace(
+                "${CLAUDE_PLUGIN_DATA}",
+                &Path::new(root).join(".data").to_string_lossy(),
+            );
         }
         value
     };
@@ -1791,5 +1897,158 @@ mod tests {
         for name in ["KillShell", "KillBash", "TaskStop"] {
             assert_eq!(tool_names(name), ["bash_stop"], "{name}");
         }
+    }
+
+    /// Answers each `!` snippet from a script of outcomes, keyed by the text
+    /// a person would read, and records the order the snippets ran in.
+    struct Scripted {
+        answers: std::collections::HashMap<&'static str, Value>,
+        ran: parking_lot::Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
+    }
+    impl Scripted {
+        fn new(answers: &[(&'static str, Value)]) -> Self {
+            Self {
+                answers: answers.iter().cloned().collect(),
+                ran: parking_lot::Mutex::default(),
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::ToolInvoker for Scripted {
+        fn workspace(&self) -> Option<String> {
+            Some("/work/project".into())
+        }
+        async fn definition_shell(
+            &self,
+            shown: String,
+            _run: String,
+            env: std::collections::BTreeMap<String, String>,
+        ) -> CoreResult<crate::ToolOutput> {
+            let metadata = self.answers.get(shown.as_str()).cloned().unwrap_or_else(
+                || serde_json::json!({"exit": 0, "stdout": format!("<{shown}>\n")}),
+            );
+            self.ran.lock().push((shown, env));
+            Ok(crate::ToolOutput {
+                text: String::new(),
+                metadata,
+            })
+        }
+        async fn invoke(&self, _: &str, _: Value) -> CoreResult<crate::ToolOutput> {
+            Err(CoreError::Tool("unused".into()))
+        }
+        fn side_effectful_for(&self, _: &str, _: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fenced_block_runs_each_line_in_order_and_reads_as_their_outputs() {
+        let invoker = Scripted::new(&[]);
+        let template = "## Environment\n```!\nnode --version\n\n  git status --short  \n```\nThen: !`date` done.\n```bash\n!echo not a block\n```";
+        let text = prepare(template, "", &DefinitionExecution::default(), "s", &invoker)
+            .await
+            .unwrap();
+        assert_eq!(
+            text,
+            "## Environment\n<node --version>\n<git status --short>\nThen: <date> done.\n```bash\n!echo not a block\n```"
+        );
+        let ran: Vec<String> = invoker
+            .ran
+            .lock()
+            .iter()
+            .map(|(shown, _)| shown.clone())
+            .collect();
+        assert_eq!(ran, ["node --version", "git status --short", "date"]);
+        // Written with Windows line ends, and opened with spaces after `!`.
+        let invoker = Scripted::new(&[]);
+        let text = prepare(
+            "A\r\n```! \r\npwd\r\nls\r\n```\r\nB",
+            "",
+            &DefinitionExecution::default(),
+            "s",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(text, "A\r\n<pwd>\n<ls>\nB");
+        assert!(has_snippets("```!\nls\n```") && has_snippets("Run !`ls`"));
+        assert!(!has_snippets("KEY=!`ls`") && !has_snippets("```!\nls"));
+    }
+
+    #[tokio::test]
+    async fn a_plugin_skill_names_its_data_folder() {
+        let execution = DefinitionExecution {
+            plugin_root: Some("/plugins/kit".into()),
+            directory: Some("/plugins/kit/skills/lint".into()),
+            allowed_tools: vec!["Bash(${CLAUDE_PLUGIN_DATA}/cache.sh:*)".into()],
+            ..DefinitionExecution::default()
+        };
+        let invoker = Scripted::new(&[]);
+        let text = prepare(
+            "Data ${CLAUDE_PLUGIN_DATA} and ${HAARNESS_PLUGIN_DATA}: !`ls ${CLAUDE_PLUGIN_DATA}`",
+            "",
+            &execution,
+            "s",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            text,
+            "Data /plugins/kit/.data and /plugins/kit/.data: <ls /plugins/kit/.data>"
+        );
+        let (_, env) = invoker.ran.lock()[0].clone();
+        assert_eq!(env["CLAUDE_PLUGIN_DATA"], "/plugins/kit/.data");
+        assert_eq!(env["HAARNESS_PLUGIN_DATA"], "/plugins/kit/.data");
+        assert!(
+            skill_rules(&execution, "/work/project")
+                .iter()
+                .any(|rule| rule.pattern == "bash:/plugins/kit/.data/cache.sh *")
+        );
+        // Outside a plugin there is no data folder: the text stays as written.
+        let text = prepare(
+            "Data ${CLAUDE_PLUGIN_DATA}",
+            "",
+            &DefinitionExecution::default(),
+            "s",
+            &Scripted::new(&[]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(text, "Data ${CLAUDE_PLUGIN_DATA}");
+    }
+
+    #[tokio::test]
+    async fn a_snippet_held_back_or_refused_is_named_and_the_rest_loads() {
+        let invoker = Scripted::new(&[
+            ("git push", serde_json::json!({"held": true})),
+            ("rm -rf build", serde_json::json!({"refused": true})),
+        ]);
+        let text = prepare(
+            "Branch: !`git branch` Push: !`git push`\n```!\nrm -rf build\nls\n```\nEnd",
+            "",
+            &DefinitionExecution::default(),
+            "s",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            text,
+            "Branch: <git branch> Push: (skipped: `git push` asks for approval, which loading a skill never does; call bash with it to run it)\n(skipped: `rm -rf build` is not permitted)\n<ls>\nEnd"
+        );
+        // A failing command still fails the whole definition.
+        let failing = Scripted::new(&[("false", serde_json::json!({"exit": 1, "stdout": ""}))]);
+        assert!(
+            prepare(
+                "!`false`",
+                "",
+                &DefinitionExecution::default(),
+                "s",
+                &failing
+            )
+            .await
+            .is_err()
+        );
     }
 }

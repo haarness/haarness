@@ -9285,6 +9285,12 @@ struct TurnToolInvoker {
     agent: String,
     parent_call_id: String,
     sequence: std::sync::atomic::AtomicUsize,
+    /// Whether a definition's `!` snippet it runs may ask: a person's own
+    /// `/command` asks as any call does. A skill the model loads raises no
+    /// card and no Auto review: a snippet that would ask, or that the rules
+    /// refuse, comes back marked so (`held`, `refused`) and is named in the
+    /// skill's text in its place.
+    snippets_ask: bool,
 }
 
 /// `rules` bounded by an active skill's: what its `disallowed-tools` denies
@@ -9323,11 +9329,13 @@ impl crate::ToolInvoker for DirectRules {
 }
 
 /// A definition's `!` snippet on its way to the shell tool: the text its
-/// permissions are judged on, the text that runs, and that text's values.
+/// permissions are judged on, the text that runs, that text's values, and
+/// whether it may ask (see [`TurnToolInvoker::snippets_ask`]).
 pub(crate) struct DefinitionShell<'a> {
     shown: &'a str,
     run: &'a str,
     env: &'a std::collections::BTreeMap<String, String>,
+    ask: bool,
 }
 
 #[async_trait::async_trait]
@@ -9393,7 +9401,8 @@ impl crate::ToolInvoker for TurnToolInvoker {
         env: std::collections::BTreeMap<String, String>,
     ) -> CoreResult<ToolOutput> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        self.runner
+        let result = self
+            .runner
             .execute_call_inner(
                 &self.agent,
                 &format!("{}:{sequence}", self.parent_call_id),
@@ -9404,9 +9413,22 @@ impl crate::ToolInvoker for TurnToolInvoker {
                     shown: &shown,
                     run: &run,
                     env: &env,
+                    ask: self.snippets_ask,
                 }),
             )
-            .await
+            .await;
+        match result {
+            Err(
+                CoreError::PermissionDenied(_)
+                | CoreError::PermissionRejected(_)
+                | CoreError::HookRefused { .. }
+                | CoreError::ReviewBlocked(_),
+            ) if !self.snippets_ask => Ok(ToolOutput {
+                text: String::new(),
+                metadata: json!({"refused": true}),
+            }),
+            result => result,
+        }
     }
     fn resolve_name(&self, name: &str) -> String {
         self.runner.resolve_tool_name(name)
@@ -10521,6 +10543,9 @@ enum AnsweredBy {
     Hook,
     /// A hook could not answer it, which refuses it: `feedback` is why.
     HookFailure,
+    /// It was not put to anyone, since its caller may not ask (a skill's
+    /// snippet the model loaded): not an answer, and nothing ran.
+    NotAsked,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11464,6 +11489,7 @@ impl RunnerTask {
                     agent: agent.into(),
                     parent_call_id: format!("command-{}", self.turn.id),
                     sequence: std::sync::atomic::AtomicUsize::new(0),
+                    snippets_ask: true,
                 };
                 crate::ToolInvoker::activate_skill_permissions(&invoker, &command.execution);
                 let text = crate::definitions::prepare(
@@ -14289,13 +14315,25 @@ impl RunnerTask {
                     agent,
                     &plan,
                     &arguments,
-                    (forced, yolo_answers),
+                    (
+                        forced,
+                        yolo_answers,
+                        definition_shell.is_none_or(|snippet| snippet.ask),
+                    ),
                     explicit,
                     reviewable,
                     (name, call_id),
                     &AskWhy::of(&plan, &causes),
                 )
                 .await?;
+            // Nobody was asked (a model-loaded skill's snippet): the skill
+            // names the command instead of its output.
+            if resolution.answered_by == AnsweredBy::NotAsked {
+                return Ok(ToolOutput {
+                    text: String::new(),
+                    metadata: json!({"held": true}),
+                });
+            }
             if let Some(review) = resolution.review {
                 return Err(CoreError::ReviewBlocked(Box::new(review)));
             }
@@ -14424,6 +14462,7 @@ impl RunnerTask {
                             agent: agent.to_owned(),
                             parent_call_id: call_id.to_owned(),
                             sequence: std::sync::atomic::AtomicUsize::new(0),
+                            snippets_ask: false,
                         })),
                     },
                 )
@@ -14598,22 +14637,24 @@ impl RunnerTask {
     /// `reviewable`: Auto's reviewer may answer it (no asked pattern is one
     /// a person configured an ask for). `tool`: the tool and call that raise
     /// it.
-    /// `asks`: whether the request asks every time, and whether Yolo answers
-    /// it all the same (see [`crate::Tool::yolo_answers`]). `why`: why it
-    /// asks, for the log lines.
+    /// `asks`: whether the request asks every time, whether Yolo answers
+    /// it all the same (see [`crate::Tool::yolo_answers`]), and whether
+    /// anyone may be asked: when not, only Yolo (or `--yolo`) answers, and
+    /// what would go to a hook, Auto's reviewer or a card comes back
+    /// [`AnsweredBy::NotAsked`]. `why`: why it asks, for the log lines.
     #[allow(clippy::too_many_arguments)]
     async fn ask_permission(
         &self,
         agent: &str,
         plan: &AskPlan,
         detail: &serde_json::Value,
-        asks: (bool, bool),
+        asks: (bool, bool, bool),
         explicit_operations: Vec<String>,
         reviewable: bool,
         tool: (&str, &str),
         why: &AskWhy,
     ) -> CoreResult<PermissionResolution> {
-        let (forced, yolo_answers) = asks;
+        let (forced, yolo_answers, may_ask) = asks;
         let operation = plan.describe(&plan.patterns);
         let always_rules = plan.always_rules();
         let remembered = plan.remembered_rules();
@@ -14692,6 +14733,18 @@ impl RunnerTask {
                 );
                 return Ok(PermissionResolution::allowed());
             }
+        }
+        if !may_ask {
+            tracing::info!(
+                thread = %self.thread.id,
+                operation = ?operation_for_log(&operation),
+                cause = %why.cause,
+                "not asked (a skill's snippet the model loaded)"
+            );
+            return Ok(PermissionResolution {
+                answered_by: AnsweredBy::NotAsked,
+                ..PermissionResolution::rejected(None)
+            });
         }
         if let Some(hooks) = &self.hooks {
             // A hook answers Always only where a person's Always would be

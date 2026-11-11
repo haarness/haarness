@@ -1,7 +1,8 @@
-//! Agent files as Claude Code writes them: an agent that lists `Bash`
-//! follows its own commands, a `tools` pattern limits the agent, a
-//! subagent's own `task` runs in the foreground, and a continued subagent
-//! keeps its agent and model.
+//! Agent and skill files as Claude Code writes them: an agent that lists
+//! `Bash` follows its own commands, a `tools` pattern limits the agent, a
+//! skill the model loads never asks while it loads, a subagent's own `task`
+//! runs in the foreground, and a continued subagent keeps its agent and
+//! model.
 use super::*;
 use haarness_protocol::ItemData;
 use serde_json::json;
@@ -206,6 +207,159 @@ async fn a_tools_pattern_limits_the_agent_even_when_every_ask_is_approved() {
         "{results:?}"
     );
     assert!(runtime.pending_permissions().is_empty());
+}
+
+/// A skill as the `skill` tool loads it: its text prepared with the turn's
+/// own invoker.
+struct LoadSkill(&'static str);
+#[async_trait]
+impl Tool for LoadSkill {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "loadskill".into(),
+            description: "Fixture skill".into(),
+            input_schema: json!({"type":"object"}),
+        }
+    }
+    fn side_effectful(&self) -> bool {
+        false
+    }
+    async fn execute(&self, _args: Value, context: ToolContext) -> CoreResult<ToolOutput> {
+        let invoker = context.invoker.expect("a turn's invoker");
+        let text = haarness_core::definitions::prepare(
+            self.0,
+            "",
+            &haarness_protocol::DefinitionExecution::default(),
+            &context.thread_id.to_string(),
+            invoker.as_ref(),
+        )
+        .await?;
+        Ok(ToolOutput {
+            text: format!("SKILL {text}"),
+            metadata: Value::Null,
+        })
+    }
+}
+struct WithSkill(NativeToolRegistry, &'static str);
+impl ToolRegistry for WithSkill {
+    fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if name == "loadskill" {
+            Some(Arc::new(LoadSkill(self.1)))
+        } else {
+            self.0.get(name)
+        }
+    }
+    fn list(&self) -> Vec<ToolDefinition> {
+        let mut tools = self.0.list();
+        tools.push(LoadSkill(self.1).definition());
+        tools
+    }
+}
+
+const SKILL: &str = "A: !`printf ran` B: !`printf asked` C: !`rm -f gone.txt`\n```!\nprintf one\nprintf two\n```\nEND";
+
+#[tokio::test]
+async fn a_skill_the_model_loads_names_what_it_would_ask_about_instead_of_asking() {
+    for mode in [
+        haarness_protocol::ApprovalMode::Review,
+        haarness_protocol::ApprovalMode::Auto,
+        haarness_protocol::ApprovalMode::Yolo,
+    ] {
+        let fixture = Fixture::new("skill-quiet");
+        std::fs::write(fixture.0.join("gone.txt"), "kept").unwrap();
+        let mut config = RuntimeConfig {
+            approval_mode: mode,
+            ..RuntimeConfig::default()
+        };
+        config.base_rules.extend([
+            rule("bash:printf asked*", haarness_core::PermissionDecision::Ask),
+            rule("bash:rm *", haarness_core::PermissionDecision::Deny),
+        ]);
+        let runtime = runtime_with(
+            &fixture,
+            Arc::new(Capturing::default()),
+            Arc::new(WithSkill(NativeToolRegistry::new(fixture.0.clone()), SKILL)),
+            config,
+        );
+        let chat = echo_thread(&runtime).await;
+        let turn = runtime
+            .start_turn(chat.id, turn_request("!tool loadskill {}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed,
+            "{mode:?}"
+        );
+        let items = runtime.items(chat.id, None).await.unwrap();
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item.data, ItemData::PermissionRequest { .. })),
+            "{mode:?}: a card was raised"
+        );
+        let (text, failed) = tool_results(&items, "loadskill").pop().unwrap();
+        assert!(!failed, "{text}");
+        let asked = if mode == haarness_protocol::ApprovalMode::Yolo {
+            "B: asked"
+        } else {
+            "B: (skipped: `printf asked` asks for approval, which loading a skill never does; call bash with it to run it)"
+        };
+        assert_eq!(
+            text,
+            format!(
+                "SKILL A: ran {asked} C: (skipped: `rm -f gone.txt` is not permitted)\none\ntwo\nEND"
+            ),
+            "{mode:?}"
+        );
+        assert!(fixture.0.join("gone.txt").exists());
+    }
+}
+
+#[tokio::test]
+async fn a_person_s_own_command_still_asks_about_its_snippet() {
+    let fixture = Fixture::new("command-asks");
+    let mut config = review();
+    config.base_rules.push(rule(
+        "bash:printf asked*",
+        haarness_core::PermissionDecision::Ask,
+    ));
+    config.commands.push(haarness_protocol::CommandInfo {
+        name: "probe".into(),
+        description: "Snippet".into(),
+        source: None,
+        agent: None,
+        model: None,
+        argument_hint: None,
+        template: "B: !`printf asked`".into(),
+        plugin: None,
+        execution: haarness_protocol::DefinitionExecution::default(),
+    });
+    let runtime = runtime_with(
+        &fixture,
+        Arc::new(Capturing::default()),
+        Arc::new(NativeToolRegistry::new(fixture.0.clone())),
+        config,
+    );
+    let chat = echo_thread(&runtime).await;
+    let mut request = turn_request("");
+    request.command = Some("probe".into());
+    let turn = runtime.start_turn(chat.id, request).await.unwrap();
+    let permission = wait_permission(&runtime, chat.id).await;
+    runtime
+        .reply_permission(
+            &permission,
+            haarness_protocol::PermissionReply {
+                decision: haarness_protocol::PermissionReplyDecision::Once,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
 }
 
 #[tokio::test]

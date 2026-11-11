@@ -4325,6 +4325,7 @@ impl Tool for BuiltinTool {
                 let Some(invoker) = context.invoker.as_ref() else {
                     if info.execution.fork
                         || body.contains("!`")
+                        || haarness_core::definitions::has_snippets(body)
                         || !info.execution.allowed_tools.is_empty()
                         || !info.execution.disallowed_tools.is_empty()
                     {
