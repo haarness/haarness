@@ -9,6 +9,9 @@ use unicode_segmentation::UnicodeSegmentation as _;
 /// composer uses the same sizes (`pasteFolds` in `prompt-context.ts`).
 const PASTE_LINE_THRESHOLD: usize = 8;
 const PASTE_CHAR_THRESHOLD: usize = 1000;
+/// The largest paste a second paste opens in place: the prompt edits text
+/// much longer than this slowly, so such a paste makes a chip as before.
+const UNFOLD_LIMIT: usize = 256 * 1024;
 const UNDO_CAP: usize = 100;
 /// Prompts ↑ reaches back through in a project, and the history file keeps
 /// for it: the text alone, so a long reach costs little.
@@ -269,8 +272,20 @@ impl Composer {
 
     /// Large pastes are opaque chips with tracked byte ranges. Their labels
     /// never act as delimiters in ordinary text or inside another payload.
+    /// Pasting a chip's text again right after it opens the chip into that
+    /// text, to edit in place (up to [`UNFOLD_LIMIT`]); undo folds it back.
     pub fn paste(&mut self, value: &str) {
         let value = value.replace("\r\n", "\n").replace('\r', "\n");
+        let repeated = self.expansions.iter().find(|e| {
+            matches!(e.kind, ExpansionKind::Paste(_))
+                && e.end == self.cursor
+                && value.len() <= UNFOLD_LIMIT
+                && e.content == value
+        });
+        if let Some(&Expansion { start, end, .. }) = repeated {
+            self.edit(start, end, &value, LastEdit::Other);
+            return;
+        }
         let lines = value.lines().count();
         if lines > PASTE_LINE_THRESHOLD || value.len() > PASTE_CHAR_THRESHOLD {
             let id = self.next_paste_id();
@@ -947,6 +962,92 @@ mod tests {
         composer.redo();
         assert_eq!(composer.text(), "[#1 pasted 10 lines]");
         assert_eq!(composer.take(), second);
+    }
+
+    fn numbered(word: &str, count: usize) -> String {
+        let mut text = String::new();
+        for line in 1..=count {
+            use std::fmt::Write as _;
+            let _ = writeln!(text, "{word} {line}");
+        }
+        text
+    }
+
+    #[test]
+    fn the_same_paste_right_after_its_chip_unfolds_it_and_undo_folds_it_back() {
+        let block = numbered("block", 12);
+        let mut composer = typed("see ");
+        composer.paste(&block);
+        assert_eq!(composer.text(), "see [#1 pasted 12 lines]");
+        composer.paste(&block);
+        assert_eq!(composer.text(), format!("see {block}"));
+        assert_eq!(composer.expanded_text(), composer.text());
+        assert_eq!(composer.cursor(), composer.text().len());
+
+        composer.undo();
+        assert_eq!(composer.text(), "see [#1 pasted 12 lines]");
+        assert_eq!(composer.cursor(), composer.text().len());
+        assert_eq!(composer.expanded_text(), format!("see {block}"));
+        composer.redo();
+        assert_eq!(composer.text(), format!("see {block}"));
+
+        // The unfolded text edits like typed text and is sent once.
+        composer.insert_str("thanks");
+        assert_eq!(composer.take(), format!("see {block}thanks"));
+
+        // The terminal's carriage returns are the same text.
+        let mut composer = Composer::default();
+        composer.paste(&block);
+        composer.paste(&block.replace('\n', "\r\n"));
+        assert_eq!(composer.text(), block);
+    }
+
+    #[test]
+    fn a_paste_anywhere_but_right_after_its_own_chip_folds_as_before() {
+        let block = numbered("block", 12);
+        let other = numbered("other", 12);
+        // Different text right after the chip.
+        let mut composer = Composer::default();
+        composer.paste(&block);
+        composer.paste(&other);
+        assert_eq!(composer.text(), "[#1 pasted 12 lines][#2 pasted 12 lines]");
+        // The same text after another chip, or after a space typed after its own.
+        composer.paste(&block);
+        assert_eq!(
+            composer.text(),
+            "[#1 pasted 12 lines][#2 pasted 12 lines][#3 pasted 12 lines]"
+        );
+        let mut composer = Composer::default();
+        composer.paste(&block);
+        composer.insert_char(' ');
+        composer.paste(&block);
+        assert_eq!(composer.text(), "[#1 pasted 12 lines] [#2 pasted 12 lines]");
+        // The same text with the cursor before the chip.
+        let mut composer = typed("see ");
+        composer.paste(&block);
+        composer.move_left();
+        composer.paste(&block);
+        assert_eq!(
+            composer.text(),
+            "see [#2 pasted 12 lines][#1 pasted 12 lines]"
+        );
+        assert_eq!(composer.take(), format!("see {block}{block}"));
+        // A paste too large to edit in the prompt stays a chip.
+        let huge = numbered("huge", 30_000);
+        assert!(huge.len() > super::UNFOLD_LIMIT);
+        let mut composer = Composer::default();
+        composer.paste(&huge);
+        composer.paste(&huge);
+        assert_eq!(
+            composer.text(),
+            "[#1 pasted 30000 lines][#2 pasted 30000 lines]"
+        );
+        // Only a paste's chip unfolds, not an attached reference holding the same text.
+        let mut composer = typed("@notes");
+        composer.attach_context(0, 6, "notes", &block).unwrap();
+        composer.move_left();
+        composer.paste(&block);
+        assert_eq!(composer.text(), "[notes][#1 pasted 12 lines] ");
     }
 
     #[test]
