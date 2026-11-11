@@ -81,7 +81,7 @@ pub use stream_limits::{
 pub use tool_catalog::{
     LOAD_TOOL_NAME, LazyToolSettings, code_can_call, load_tool_definition, select_tools,
 };
-pub use tool_validation::tool_call_arguments;
+pub use tool_validation::{shell_call_from_words, tool_call_arguments, with_field_aliases};
 pub use turn_context::{
     AGENT_MESSAGE_PREFIX, SESSION_MESSAGE_PREFIX, is_session_message, is_turn_reminder,
 };

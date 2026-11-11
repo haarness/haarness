@@ -701,8 +701,8 @@ pub fn promoted_in(items: &[Item], tools: &[String]) -> HashSet<String> {
 
 /// Whether a call's error is a refusal made before the call started, which
 /// promoted nothing: an unknown tool, one deferred, not offered or turned off
-/// for the round, one an inherited rule denies, or arguments its schema
-/// refuses. Reads the runtime's wording of those refusals.
+/// for the round, one an inherited rule denies, arguments its schema
+/// refuses, or a call that failed the same way twice before in its turn. Reads the runtime's wording of those refusals.
 fn refused_before_running(error: &str) -> bool {
     let line = error.lines().next().unwrap_or_default();
     let line = ["tool error: ", "permission denied: ", "invalid request: "]
@@ -710,6 +710,7 @@ fn refused_before_running(error: &str) -> bool {
         .find_map(|category| line.strip_prefix(category))
         .unwrap_or(line);
     line.starts_with("unknown tool: ")
+        || line.starts_with("Not run: this exact call already failed")
         || (line.starts_with("tool ")
             && [
                 " is deferred and was not advertised",

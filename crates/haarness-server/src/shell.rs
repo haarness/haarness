@@ -148,7 +148,6 @@ async fn spawn(
     env: &BTreeMap<String, String>,
     agent: Option<ThreadId>,
 ) -> CoreResult<Spawned> {
-    let error = |e: std::io::Error| CoreError::Tool(e.to_string());
     // Git for Windows' bash on Windows when Git is installed, else cmd.exe;
     // the choice is gone before anything here waits.
     let mut command = {
@@ -157,7 +156,11 @@ async fn spawn(
             haarness_core::agent_shell::AgentShell::GitBash(bash) => Some(bash.as_path()),
             _ => None,
         };
-        haarness_ripgrep::shell_command(command, windows_bash).map_err(error)?
+        haarness_ripgrep::shell_command(command, windows_bash).map_err(|e| {
+            CoreError::Tool(format!(
+                "The command did not start: its shell could not be set up ({e})."
+            ))
+        })?
     };
     command
         .current_dir(dunce::simplified(workdir))
@@ -196,7 +199,12 @@ async fn spawn(
     }
     let (path, file) = crate::data_folder::new_private_file(directory, "tool")
         .await
-        .map_err(error)?;
+        .map_err(|e| {
+            CoreError::Tool(format!(
+                "The command did not start: Haarness could not make a file for its output in {} ({e}). Free some disk space there, or check that its folder can be written.",
+                directory.display()
+            ))
+        })?;
     let mut command = Command::from(command);
     command.kill_on_drop(true);
     let mut command = process_wrap::tokio::CommandWrap::from(command);
@@ -208,7 +216,18 @@ async fn spawn(
     // reach) ends too.
     #[cfg(windows)]
     command.wrap(process_wrap::tokio::JobObject);
-    let mut child = command.spawn().map_err(error)?;
+    let mut child = command.spawn().map_err(|e| {
+        let why = if e.kind() == std::io::ErrorKind::NotFound {
+            if cfg!(windows) {
+                " The shell was not found, or the working folder is gone."
+            } else {
+                " The shell `sh` was not found on PATH, or the working folder is gone."
+            }
+        } else {
+            ""
+        };
+        CoreError::Tool(format!("The command did not start ({e}).{why}"))
+    })?;
     let leader = child
         .id()
         .ok_or_else(|| CoreError::Tool("shell process did not start".into()))?;
