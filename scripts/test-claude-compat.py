@@ -52,11 +52,11 @@ write(plugins/'a/agents/turns.md','---\ndescription: One step\nmaxTurns: 1\n---\
 write(plugins/'a/agents/runner.md','---\ndescription: Shell runner\ntools: Bash, Read\n---\nRun commands.\n')
 write(plugins/'a/agents/printer.md','---\ndescription: Printer\ntools: Read, Bash(printf:*)\n---\nPrint only.\n')
 write(plugins/'a/agents/mdreader.md','---\ndescription: Markdown reader\ntools: Read(./*.md)\n---\nRead notes.\n')
-# A plugin skill with a fenced block and its data folder, and one whose command needs approval.
-write(plugins/'a/skills/fenced/SKILL.md','---\nname: fenced\ndescription: Fenced context\n---\nDATA ${CLAUDE_PLUGIN_DATA}\n```!\nprintf FENCE_ONE\nprintf FENCE_TWO\n```\nFENCE_END\n')
-write(plugins/'a/skills/asking/SKILL.md','---\nname: asking\ndescription: Needs approval\n---\nASKING !`printf ASKED_OUTPUT` DENIED !`rm -f keep.txt` AFTER\n')
+# A plugin skill with a fenced block and its data folder, and one whose commands need approval or are denied.
+write(plugins/'a/skills/fenced/SKILL.md','---\nname: fenced\ndescription: Fenced context\n---\nDATA ${CLAUDE_PLUGIN_DATA}\n```!\n# FENCE_COMMENT\nprintf FENCE_ONE\nprintf \\\n  FENCE_TWO\n```\nFENCE_END\n')
+write(plugins/'a/skills/asking/SKILL.md','---\nname: asking\ndescription: Needs approval\n---\nASKING !`printf ASKED_OUTPUT` DENIED !`printf DENIED_OUTPUT` AFTER\n')
 write(workspace/'keep.txt','kept')
-write(workspace/'haarness.json',json.dumps({'permission':{'bash':{'printf ASKED*':'ask','rm *':'deny'}}}))
+write(workspace/'haarness.json',json.dumps({'permission':{'bash':{'printf ASKED*':'ask','printf DENIED*':'deny'}}}))
 # Projects whose folder names hold shell syntax and a snippet: the names must stay plain text.
 odd=root/'odd $(printf INJECTED) folder';odd_snippet=root/'w !`printf SNIPPET`'
 write(odd/'.haarness/commands/where.md','---\ndescription: Folder in a snippet\n---\nWHERE !`printf \'[%s]\' "${CLAUDE_PROJECT_DIR}" \'${CLAUDE_PROJECT_DIR}\' "$(dirname "${CLAUDE_PROJECT_DIR}")"`\n')
@@ -123,9 +123,9 @@ try:
  result=run('!tool read {"path":"keep.txt"}','--agent','a:mdreader')
  check('a pattern on another tool gives the whole tool','kept' in result['out'] and 'denied' not in result['out']+result['err'],result)
  result=run('!tool skill {"name":"a:fenced"}')
- check('a fenced block runs line by line in a plugin skill','FENCE_ONE\nFENCE_TWO\nFENCE_END' in result['out'] and 'DATA '+str(plugins/'a'/'.data') in result['out'],result)
+ check('a fenced block runs line by line in a plugin skill','FENCE_ONE\nFENCE_TWO\nFENCE_END' in result['out'] and 'FENCE_COMMENT' not in result['out'] and 'DATA '+str(plugins/'a'/'.data') in result['out'],result)
  result=run('!tool skill {"name":"a:asking"}')
- check('a model-loaded skill names a command instead of asking',result['code']==0 and 'ASKING (skipped: `printf ASKED_OUTPUT` asks for approval' in result['out'] and 'DENIED (skipped: `rm -f keep.txt` is not permitted) AFTER' in result['out'] and (workspace/'keep.txt').exists(),result)
+ check('a model-loaded skill names a command instead of asking',result['code']==0 and 'ASKING (skipped: `printf ASKED_OUTPUT` asks for approval' in result['out'] and 'DENIED (skipped: `printf DENIED_OUTPUT` is not permitted) AFTER' in result['out'],result)
  result=run('!tool write {"path":"unknown-breach.txt","content":"bad"}','--agent','a:missing')
  check('unknown agents fail closed',result['code']!=0 and not (workspace/'unknown-breach.txt').exists(),result)
  before={t['id'] for t in api('/threads')};result=run('research','--command','a:forked')

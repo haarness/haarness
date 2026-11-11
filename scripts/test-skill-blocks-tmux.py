@@ -3,8 +3,9 @@
 skill the model loads never asks.
 
 The project asks before every shell command (`bash = "ask"`, Review). `/fenced`, typed in the TUI,
-holds a fenced block of two commands: a card names the first, and once it is allowed a second card
-names the second; the prompt the model gets holds both outputs, one per line. Then the model loads
+holds a fenced block of a comment and two commands: no card for the comment, a card names the first
+command, and once it is allowed a second card names the second; the prompt the model gets holds both
+outputs, one per line. Then the model loads
 the `quiet` skill, whose inline command and fenced block would each ask: no card appears, the turn
 ends, and the skill's text names each command in a note instead of its output, so nothing ran.
 
@@ -22,7 +23,7 @@ for folder in (project/'.haarness/commands', project/'.haarness/skills/quiet', s
 (project/'.haarness/config.toml').write_text(
     '[defaults]\napproval_mode="review"\n[permissions]\nbash="ask"\n[lsp]\nenabled=false\n')
 (project/'.haarness/commands/fenced.md').write_text(
-    '---\ndescription: Two commands in a fenced block\n---\nContext:\n```!\nprintf FENCE_ONE\nprintf FENCE_TWO\n```\nEnd of context\n')
+    '---\ndescription: Two commands in a fenced block\n---\nContext:\n```!\n# a note, not a command\n\nprintf FENCE_ONE\nprintf FENCE_TWO\n```\nEnd of context\n')
 (project/'.haarness/skills/quiet/SKILL.md').write_text(
     '---\nname: quiet\ndescription: Commands that would ask\n---\nQUIET !`touch inline-ran.txt`\n```!\ntouch fenced-ran.txt\n```\nQUIET_END\n')
 session = 'haarness-skill-blocks-' + uuid.uuid4().hex[:8]

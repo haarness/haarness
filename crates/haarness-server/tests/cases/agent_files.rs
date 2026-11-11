@@ -1,8 +1,9 @@
 //! Agent and skill files as Claude Code writes them: an agent that lists
 //! `Bash` follows its own commands, a `tools` pattern limits the agent, a
-//! skill the model loads never asks while it loads, an agent starts with the
-//! skills it lists, a subagent's own `task` runs in the foreground, and a
-//! continued subagent keeps its agent and model.
+//! skill the model loads never asks while it loads (its hooks still
+//! answer), an agent starts with the skills it lists, a subagent's own
+//! `task` runs in the foreground, and a continued subagent keeps its agent
+//! and model.
 use super::*;
 use haarness_protocol::ItemData;
 use serde_json::json;
@@ -256,7 +257,7 @@ impl ToolRegistry for WithSkill {
     }
 }
 
-const SKILL: &str = "A: !`printf ran` B: !`printf asked` C: !`rm -f gone.txt`\n```!\nprintf one\nprintf two\n```\nEND";
+const SKILL: &str = "A: !`printf ran` B: !`printf asked` C: !`printf denied > denied.txt`\n```!\nprintf one\nprintf two\n```\nEND";
 
 #[tokio::test]
 async fn a_skill_the_model_loads_names_what_it_would_ask_about_instead_of_asking() {
@@ -266,14 +267,16 @@ async fn a_skill_the_model_loads_names_what_it_would_ask_about_instead_of_asking
         haarness_protocol::ApprovalMode::Yolo,
     ] {
         let fixture = Fixture::new("skill-quiet");
-        std::fs::write(fixture.0.join("gone.txt"), "kept").unwrap();
         let mut config = RuntimeConfig {
             approval_mode: mode,
             ..RuntimeConfig::default()
         };
         config.base_rules.extend([
             rule("bash:printf asked*", haarness_core::PermissionDecision::Ask),
-            rule("bash:rm *", haarness_core::PermissionDecision::Deny),
+            rule(
+                "bash:printf denied*",
+                haarness_core::PermissionDecision::Deny,
+            ),
         ]);
         let runtime = runtime_with(
             &fixture,
@@ -308,12 +311,103 @@ async fn a_skill_the_model_loads_names_what_it_would_ask_about_instead_of_asking
         assert_eq!(
             text,
             format!(
-                "SKILL A: ran {asked} C: (skipped: `rm -f gone.txt` is not permitted)\none\ntwo\nEND"
+                "SKILL A: ran {asked} C: (skipped: `printf denied > denied.txt` is not permitted)\none\ntwo\nEND"
             ),
             "{mode:?}"
         );
-        assert!(fixture.0.join("gone.txt").exists());
+        assert!(!fixture.0.join("denied.txt").exists());
     }
+}
+
+/// Answers each request about a shell command by the command's text: allow
+/// for `printf hooked-yes`, deny for `printf hooked-no`, nothing otherwise.
+struct ByCommand;
+#[async_trait]
+impl haarness_core::HookPort for ByCommand {
+    async fn pre_tool_use(
+        &self,
+        _: &haarness_core::HookCall,
+        _: &str,
+        _: &Value,
+    ) -> haarness_core::HookDecision {
+        haarness_core::HookDecision::default()
+    }
+    async fn post_tool_use(
+        &self,
+        _: &haarness_core::HookCall,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> haarness_core::HookDecision {
+        haarness_core::HookDecision::default()
+    }
+    async fn user_prompt_submit(
+        &self,
+        _: &haarness_core::HookCall,
+        _: &str,
+    ) -> haarness_core::HookDecision {
+        haarness_core::HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: &haarness_core::HookCall,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        detail: &Value,
+    ) -> haarness_core::HookDecision {
+        let permission = match detail.get("command").and_then(Value::as_str) {
+            Some("printf hooked-yes") => Some(haarness_core::PermissionDecision::Allow),
+            Some("printf hooked-no") => Some(haarness_core::PermissionDecision::Deny),
+            _ => None,
+        };
+        haarness_core::HookDecision {
+            permission,
+            ..haarness_core::HookDecision::default()
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_permission_hook_still_answers_for_a_skill_the_model_loads() {
+    let fixture = Fixture::new("skill-hooks");
+    let mut config = review();
+    config.base_rules.push(rule(
+        "bash:printf hooked*",
+        haarness_core::PermissionDecision::Ask,
+    ));
+    let runtime = runtime_with(
+        &fixture,
+        Arc::new(Capturing::default()),
+        Arc::new(WithSkill(
+            NativeToolRegistry::new(fixture.0.clone()),
+            "Y: !`printf hooked-yes` N: !`printf hooked-no` Q: !`printf hooked-quiet`",
+        )),
+        config,
+    )
+    .with_hooks(Arc::new(ByCommand));
+    let chat = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(chat.id, turn_request("!tool loadskill {}"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let items = runtime.items(chat.id, None).await.unwrap();
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::PermissionRequest { .. }))
+    );
+    let (text, failed) = tool_results(&items, "loadskill").pop().unwrap();
+    assert!(!failed, "{text}");
+    assert_eq!(
+        text,
+        "SKILL Y: hooked-yes N: (skipped: `printf hooked-no` is not permitted) Q: (skipped: `printf hooked-quiet` asks for approval, which loading a skill never does; call bash with it to run it)"
+    );
 }
 
 #[tokio::test]

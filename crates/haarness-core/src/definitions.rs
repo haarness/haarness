@@ -565,56 +565,128 @@ fn expand_arguments(
     }
 }
 
-/// Where a definition runs commands: `` !`command` `` where a line starts or
-/// after a space, or a ```` ```! ```` fence, one command to a line. The first
-/// group catches a fence's lines, the second an inline command.
-fn snippets() -> &'static regex::Regex {
-    static SNIPPETS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(
-            r"(?m)^[ \t]*```![ \t]*\r?\n((?s:.*?))^[ \t]*```[ \t]*\r?$|(?:^|[ \t\r\n])!`([^`]+)`",
-        )
-        .expect("constant regex")
-    });
-    &SNIPPETS
+/// One `!` snippet of a definition: the part of the text it takes, what
+/// stays before its output (the space or line break before an inline `!`),
+/// and its commands in order, whose outputs go one to a line.
+struct Snippet<'t> {
+    span: std::ops::Range<usize>,
+    lead: &'t str,
+    commands: Vec<String>,
 }
 
-/// Whether `template` has a `!` snippet, inline or fenced.
+/// The `!` snippets of `template`, in order. An inline one is
+/// `` !`command` `` where a line starts or after a space or tab. A block is
+/// a code fence whose info string is `!` and nothing else, outside any other
+/// fence (one shown as an example inside a longer fence stays text), and
+/// ends at a fence of at least as many backticks; one never closed is text.
+/// Each line of a block is a command: a line ending in `\` goes on with the
+/// next, as in the shell, and blank lines and `#` comments are left out.
+fn snippets(template: &str) -> Vec<Snippet<'_>> {
+    static INLINE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?m)(?:^|[ \t\r\n])!`([^`]+)`").expect("constant regex")
+    });
+    // A fence: its character, its length and whether it is a `!` block,
+    // where it starts and the lines inside it.
+    let mut open: Option<(char, usize, bool, usize, Vec<&str>)> = None;
+    let mut blocks = Vec::new();
+    let mut offset = 0;
+    for line in template.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let text = line.trim_end_matches('\n');
+        let content = text.trim_end_matches('\r');
+        let trimmed = content.trim_start_matches([' ', '\t']);
+        let fence = trimmed
+            .chars()
+            .next()
+            .filter(|mark| matches!(mark, '`' | '~'))
+            .map(|mark| (mark, trimmed.chars().take_while(|c| *c == mark).count()))
+            .filter(|(_, length)| *length >= 3);
+        match &mut open {
+            None => {
+                if let Some((mark, length)) = fence {
+                    let info = trimmed[length..].trim();
+                    // A backtick fence's info string holds no backtick.
+                    if mark == '~' || !info.contains('`') {
+                        open = Some((mark, length, mark == '`' && info == "!", start, Vec::new()));
+                    }
+                }
+            }
+            Some((mark, length, runs, begin, lines)) => {
+                let closes = fence.is_some_and(|(found, found_length)| {
+                    found == *mark
+                        && found_length >= *length
+                        && trimmed[found_length..].trim().is_empty()
+                });
+                if !closes {
+                    lines.push(content);
+                    continue;
+                }
+                if *runs {
+                    blocks.push(Snippet {
+                        span: *begin..start + text.len(),
+                        lead: "",
+                        commands: block_commands(lines),
+                    });
+                }
+                open = None;
+            }
+        }
+    }
+    let mut found: Vec<Snippet<'_>> = INLINE
+        .captures_iter(template)
+        .filter_map(|capture| {
+            let whole = capture.get(0)?;
+            if blocks
+                .iter()
+                .any(|block| block.span.contains(&whole.start()))
+            {
+                return None;
+            }
+            Some(Snippet {
+                span: whole.range(),
+                lead: whole.as_str().split_once("!`").map_or("", |(lead, _)| lead),
+                commands: vec![capture.get(1)?.as_str().to_owned()],
+            })
+        })
+        .collect();
+    found.extend(blocks);
+    found.sort_by_key(|snippet| snippet.span.start);
+    found
+}
+
+/// A block's commands: its lines, a line ending in an odd number of `\`
+/// joined to the next, without blank lines and `#` comments.
+fn block_commands(lines: &[&str]) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut current = String::new();
+    for line in lines {
+        if current.is_empty() && line.trim_start().starts_with('#') {
+            continue;
+        }
+        let escapes = line.len() - line.trim_end_matches('\\').len();
+        if escapes % 2 == 1 {
+            current.push_str(&line[..line.len() - 1]);
+            continue;
+        }
+        current.push_str(line);
+        let command = current.trim();
+        if !command.is_empty() {
+            commands.push(command.to_owned());
+        }
+        current.clear();
+    }
+    let rest = current.trim();
+    if !rest.is_empty() {
+        commands.push(rest.to_owned());
+    }
+    commands
+}
+
+/// Whether `template` has a `!` snippet, inline or a block.
 #[must_use]
 pub fn has_snippets(template: &str) -> bool {
-    snippets().is_match(template)
-}
-
-/// The commands one snippet match runs, in order, and whether it is a
-/// fenced block (whose commands' outputs are put one per line).
-fn snippet_commands<'t>(capture: &regex::Captures<'t>) -> (Vec<&'t str>, bool) {
-    match capture.get(1) {
-        Some(lines) => (
-            lines
-                .as_str()
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .collect(),
-            true,
-        ),
-        None => (
-            vec![capture.get(2).map_or("", |command| command.as_str())],
-            false,
-        ),
-    }
-}
-
-/// What stands before an inline snippet's output: the space or line break
-/// its match began with. A fenced block is replaced whole.
-fn snippet_lead<'t>(capture: &regex::Captures<'t>, fenced: bool) -> &'t str {
-    if fenced {
-        ""
-    } else {
-        capture
-            .get(0)
-            .and_then(|whole| whole.as_str().split_once("!`"))
-            .map_or("", |(lead, _)| lead)
-    }
+    !snippets(template).is_empty()
 }
 
 /// In place of a snippet of a skill the model loaded that would have asked
@@ -662,22 +734,20 @@ pub async fn prepare(
     };
     let mut prepared = String::new();
     let mut last = 0;
-    for capture in snippets().captures_iter(template) {
-        let whole = capture.get(0).expect("whole match");
+    for snippet in snippets(template) {
         prepared.push_str(&substitutions(
-            &template[last..whole.start()],
+            &template[last..snippet.span.start],
             &context,
             false,
             false,
         ));
-        let (commands, fenced) = snippet_commands(&capture);
-        prepared.push_str(snippet_lead(&capture, fenced));
-        let mut outputs = Vec::with_capacity(commands.len());
-        for command in commands {
+        prepared.push_str(snippet.lead);
+        let mut outputs = Vec::with_capacity(snippet.commands.len());
+        for command in &snippet.commands {
             outputs.push(run_snippet(command, &context, invoker).await?);
         }
         prepared.push_str(&outputs.join("\n"));
-        last = whole.end();
+        last = snippet.span.end;
     }
     prepared.push_str(&substitutions(&template[last..], &context, false, false));
     // Append implicit arguments once, not once per text segment.
@@ -767,19 +837,21 @@ pub fn preloaded_text(template: &str, execution: &DefinitionExecution, workspace
     let values = placeholder_values(execution, SESSION_PLACEHOLDER, workspace);
     let mut text = String::new();
     let mut last = 0;
-    for capture in snippets().captures_iter(template) {
-        let whole = capture.get(0).expect("whole match");
-        text.push_str(&fill_placeholders(&template[last..whole.start()], &values));
-        let (commands, fenced) = snippet_commands(&capture);
-        text.push_str(snippet_lead(&capture, fenced));
+    for snippet in snippets(template) {
+        text.push_str(&fill_placeholders(
+            &template[last..snippet.span.start],
+            &values,
+        ));
+        text.push_str(snippet.lead);
         text.push_str(
-            &commands
-                .into_iter()
+            &snippet
+                .commands
+                .iter()
                 .map(|command| preloaded_note(&fill_placeholders(command, &values)))
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
-        last = whole.end();
+        last = snippet.span.end;
     }
     text.push_str(&fill_placeholders(&template[last..], &values));
     text
@@ -1214,11 +1286,13 @@ fn fill_placeholders(template: &str, values: &[(&'static str, String)]) -> Strin
     filled
 }
 /// The rules a skill's or command's `allowed-tools` and `disallowed-tools`
-/// add for its turn, with `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SKILL_DIR}`,
-/// `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_DATA}` filled in. Snippets are judged with their folders
-/// filled in, as the model writes them, so an allowance names the real paths
-/// only: one that kept the `${CLAUDE_PLUGIN_ROOT}` spelling would cover a
-/// command that sets that variable itself. A deny counts in both spellings.
+/// add for its turn, with `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SKILL_DIR}`
+/// and the plugin's root and data folder (`${CLAUDE_PLUGIN_ROOT}`,
+/// `${CLAUDE_PLUGIN_DATA}` and their `HAARNESS_` spellings) filled in.
+/// Snippets are judged with their folders filled in, as the model writes
+/// them, so an allowance names the real paths only: one that kept the
+/// `${CLAUDE_PLUGIN_ROOT}` spelling would cover a command that sets that
+/// variable itself. A deny counts in both spellings.
 #[must_use]
 pub fn skill_rules(execution: &DefinitionExecution, workspace: &str) -> Vec<crate::PermissionRule> {
     let expand = |entry: &String| {
@@ -1227,10 +1301,16 @@ pub fn skill_rules(execution: &DefinitionExecution, workspace: &str) -> Vec<crat
             value = value.replace("${CLAUDE_SKILL_DIR}", directory);
         }
         if let Some(root) = &execution.plugin_root {
-            value = value.replace("${CLAUDE_PLUGIN_ROOT}", root).replace(
-                "${CLAUDE_PLUGIN_DATA}",
-                &Path::new(root).join(".data").to_string_lossy(),
-            );
+            let data = Path::new(root).join(".data");
+            let data = data.to_string_lossy();
+            for (name, value_of) in [
+                ("CLAUDE_PLUGIN_ROOT", root.as_str()),
+                ("HAARNESS_PLUGIN_ROOT", root.as_str()),
+                ("CLAUDE_PLUGIN_DATA", &data),
+                ("HAARNESS_PLUGIN_DATA", &data),
+            ] {
+                value = value.replace(&format!("${{{name}}}"), value_of);
+            }
         }
         value
     };
@@ -2338,5 +2418,65 @@ mod tests {
             ..crate::CustomAgent::default()
         };
         assert_eq!(agent.instructions("t-9"), "Review.\n\nChat t-9.");
+    }
+
+    #[tokio::test]
+    async fn a_block_skips_comments_joins_continued_lines_and_examples_stay_text() {
+        let invoker = Scripted::new(&[]);
+        let template = "```!\n# what follows\n\ngit log \\\n  --oneline\n  # indented note\nls\n```\n````markdown\nAn example:\n```!\nnever run\n```\n````\n~~~\n```!\nnor this\n```\n~~~\n```!\nunclosed";
+        let text = prepare(template, "", &DefinitionExecution::default(), "s", &invoker)
+            .await
+            .unwrap();
+        let ran: Vec<String> = invoker
+            .ran
+            .lock()
+            .iter()
+            .map(|(shown, _)| shown.clone())
+            .collect();
+        assert_eq!(ran, ["git log   --oneline", "ls"]);
+        assert!(
+            text.starts_with(
+                "<git log   --oneline>\n<ls>\n````markdown\nAn example:\n```!\nnever run\n```\n````"
+            ),
+            "{text}"
+        );
+        assert!(text.ends_with("```!\nunclosed"), "{text}");
+        assert!(!has_snippets("````md\n```!\nls\n```\n````"));
+        // A block of comments alone runs nothing and reads as nothing.
+        let invoker = Scripted::new(&[]);
+        let text = prepare(
+            "A\n```!\n# only a note\n```\nB",
+            "",
+            &DefinitionExecution::default(),
+            "s",
+            &invoker,
+        )
+        .await
+        .unwrap();
+        assert!(invoker.ran.lock().is_empty());
+        assert_eq!(text, "A\n\nB");
+    }
+
+    #[test]
+    fn plugin_data_and_root_in_both_spellings_reach_allowed_tools() {
+        let execution = DefinitionExecution {
+            plugin_root: Some("/plugins/kit".into()),
+            allowed_tools: vec![
+                "Bash(${HAARNESS_PLUGIN_DATA}/cache.sh:*)".into(),
+                "Bash(${HAARNESS_PLUGIN_ROOT}/run.sh)".into(),
+            ],
+            ..DefinitionExecution::default()
+        };
+        let allowed: Vec<String> = skill_rules(&execution, "/work")
+            .into_iter()
+            .map(|rule| rule.pattern)
+            .collect();
+        assert_eq!(
+            allowed,
+            [
+                "bash:/plugins/kit/.data/cache.sh *",
+                "bash:/plugins/kit/run.sh"
+            ]
+        );
     }
 }

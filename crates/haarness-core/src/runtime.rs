@@ -9296,9 +9296,10 @@ struct TurnToolInvoker {
     sequence: std::sync::atomic::AtomicUsize,
     /// Whether a definition's `!` snippet it runs may ask: a person's own
     /// `/command` asks as any call does. A skill the model loads raises no
-    /// card and no Auto review: a snippet that would ask, or that the rules
-    /// refuse, comes back marked so (`held`, `refused`) and is named in the
-    /// skill's text in its place.
+    /// card and no Auto review (its `PermissionRequest` hooks still answer):
+    /// a snippet that would ask, or that the rules or a hook refuse, comes
+    /// back marked so (`held`, `refused`) and is named in the skill's text in
+    /// its place.
     snippets_ask: bool,
 }
 
@@ -10552,8 +10553,9 @@ enum AnsweredBy {
     Hook,
     /// A hook could not answer it, which refuses it: `feedback` is why.
     HookFailure,
-    /// It was not put to anyone, since its caller may not ask (a skill's
-    /// snippet the model loaded): not an answer, and nothing ran.
+    /// It was put to no person and no reviewer, since its caller may not ask
+    /// (a skill's snippet the model loaded), and no hook answered it: not an
+    /// answer, and nothing ran.
     NotAsked,
 }
 
@@ -14655,9 +14657,10 @@ impl RunnerTask {
     /// it.
     /// `asks`: whether the request asks every time, whether Yolo answers
     /// it all the same (see [`crate::Tool::yolo_answers`]), and whether
-    /// anyone may be asked: when not, only Yolo (or `--yolo`) answers, and
-    /// what would go to a hook, Auto's reviewer or a card comes back
-    /// [`AnsweredBy::NotAsked`]. `why`: why it asks, for the log lines.
+    /// anyone may be asked: when not, only Yolo (or `--yolo`) and the
+    /// `PermissionRequest` hooks answer, and what would go to Auto's
+    /// reviewer or a card comes back [`AnsweredBy::NotAsked`]. `why`: why it
+    /// asks, for the log lines.
     #[allow(clippy::too_many_arguments)]
     async fn ask_permission(
         &self,
@@ -14750,18 +14753,6 @@ impl RunnerTask {
                 return Ok(PermissionResolution::allowed());
             }
         }
-        if !may_ask {
-            tracing::info!(
-                thread = %self.thread.id,
-                operation = ?operation_for_log(&operation),
-                cause = %why.cause,
-                "not asked (a skill's snippet the model loaded)"
-            );
-            return Ok(PermissionResolution {
-                answered_by: AnsweredBy::NotAsked,
-                ..PermissionResolution::rejected(None)
-            });
-        }
         if let Some(hooks) = &self.hooks {
             // A hook answers Always only where a person's Always would be
             // offered and kept: not for a request only a person answers, not
@@ -14795,6 +14786,19 @@ impl RunnerTask {
                 }
                 HookAnswer::Allowed { .. } | HookAnswer::Open => {}
             }
+        }
+        // A hook may answer it; no one else is asked.
+        if !may_ask {
+            tracing::info!(
+                thread = %self.thread.id,
+                operation = ?operation_for_log(&operation),
+                cause = %why.cause,
+                "not asked (a skill's snippet the model loaded)"
+            );
+            return Ok(PermissionResolution {
+                answered_by: AnsweredBy::NotAsked,
+                ..PermissionResolution::rejected(None)
+            });
         }
         let detail = &plan.card_detail(detail, &plan.patterns);
         // A shell command's card, whatever it asks about (under the default
