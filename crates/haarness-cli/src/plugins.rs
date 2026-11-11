@@ -865,7 +865,7 @@ fn git_run(args: &[std::ffi::OsString], mode: GitMode) -> Result<String> {
     result
 }
 
-/// What a finished git run gave: its output, or the last line it wrote as
+/// What a finished git run gave: its output, or what it said went wrong as
 /// the error, with any credential in an address hidden.
 fn git_finished(
     status: std::process::ExitStatus,
@@ -874,21 +874,74 @@ fn git_finished(
 ) -> Result<String> {
     if !status.success() {
         let stderr = fs::read(err_path).unwrap_or_default();
-        let stderr = String::from_utf8_lossy(&stderr);
         // Git quotes the remote's address, which can carry a token.
         bail!(
             "{}",
-            haarness_core::redact::urls_in(
-                stderr
-                    .lines()
-                    .rev()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("git failed")
-                    .trim()
-            )
+            haarness_core::redact::urls_in(&git_error(&String::from_utf8_lossy(&stderr)))
         );
     }
     Ok(String::from_utf8_lossy(&fs::read(out_path)?).into_owned())
+}
+
+/// What git wrote when it failed, as one line: all of it when it is short
+/// (`fatal: Could not read from remote repository.`, with ssh's reason
+/// before it and the hint git wraps over two lines after it), else from its
+/// first `fatal:` or `error:` line on; at most four lines and 600
+/// characters. Its `hint:` advice and progress are left out.
+fn git_error(stderr: &str) -> String {
+    const MOST_LINES: usize = 4;
+    const MOST_CHARS: usize = 600;
+    // Each line, and whether a blank line came before it. Progress, redrawn
+    // after `\r`, never says what went wrong.
+    let mut said = Vec::new();
+    let mut last = None;
+    let mut blank = false;
+    for line in stderr.lines().map(str::trim) {
+        if line.is_empty() {
+            blank = true;
+            continue;
+        }
+        if line.contains('\r') {
+            continue;
+        }
+        last = Some(line);
+        if !line.starts_with("hint:") {
+            said.push((blank && !said.is_empty(), line));
+        }
+        blank = false;
+    }
+    if said.is_empty() {
+        return last.unwrap_or("git failed").to_owned();
+    }
+    let start = if said.len() <= MOST_LINES {
+        0
+    } else {
+        said.iter()
+            .position(|(_, line)| line.starts_with("fatal:") || line.starts_with("error:"))
+            .unwrap_or(said.len() - MOST_LINES)
+    };
+    // A line that starts a message of its own (`fatal:`, `ssh:`) or a
+    // paragraph follows the one before it as a new clause; a wrapped line
+    // simply goes on.
+    let mut message = String::new();
+    for (index, &(paragraph, line)) in said[start..].iter().take(MOST_LINES).enumerate() {
+        if index > 0 {
+            let labelled = line.split_once(':').is_some_and(|(word, _)| {
+                !word.is_empty() && word.bytes().all(|b| b.is_ascii_lowercase())
+            });
+            let ended = message.ends_with(['.', '!', '?', ':']);
+            message.push_str(if (paragraph || labelled) && !ended {
+                "; "
+            } else {
+                " "
+            });
+        }
+        message.push_str(line);
+    }
+    if message.chars().count() > MOST_CHARS {
+        message = message.chars().take(MOST_CHARS).collect::<String>() + "…";
+    }
+    message
 }
 
 /// The commit a checkout holds.
@@ -4414,6 +4467,67 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_secs(10));
         drop(listener);
+    }
+
+    /// A failed git command is reported by what went wrong, not by the
+    /// last line git wrapped its hint over.
+    #[test]
+    fn a_git_error_keeps_what_went_wrong_and_its_hint() {
+        let unreachable = "fatal: '/gone/market' does not appear to be a git repository\n\
+             fatal: Could not read from remote repository.\n\n\
+             Please make sure you have the correct access rights\n\
+             and the repository exists.\n";
+        assert_eq!(
+            git_error(unreachable),
+            "fatal: '/gone/market' does not appear to be a git repository; fatal: Could not read from remote repository. Please make sure you have the correct access rights and the repository exists."
+        );
+        // What ssh said comes first.
+        assert_eq!(
+            git_error(
+                "ssh: Could not resolve hostname git.example.invalid: nodename nor servname provided\n\
+                 fatal: Could not read from remote repository.\n\n\
+                 Please make sure you have the correct access rights\n\
+                 and the repository exists.\n"
+            ),
+            "ssh: Could not resolve hostname git.example.invalid: nodename nor servname provided; fatal: Could not read from remote repository. Please make sure you have the correct access rights and the repository exists."
+        );
+        // One line stays as it is; progress, advice and blank lines go.
+        assert_eq!(
+            git_error(
+                "Receiving objects:  50% (1/2)\rReceiving objects: 100% (2/2), done.\r\n\
+                 fatal: unable to access 'https://git.example.invalid/m.git/': Could not resolve host\n\
+                 hint: see git help config\n\n"
+            ),
+            "fatal: unable to access 'https://git.example.invalid/m.git/': Could not resolve host"
+        );
+        assert_eq!(
+            git_error("fatal: reference is not a tree: 0123\n"),
+            "fatal: reference is not a tree: 0123"
+        );
+        // A long one starts where it failed and stops after four lines.
+        let long = format!(
+            "warning: one\nwarning: two\nerror: Your local changes would be overwritten:\n{}Aborting\n",
+            "\tfile\n".repeat(10)
+        );
+        assert_eq!(
+            git_error(&long),
+            "error: Your local changes would be overwritten: file file file"
+        );
+        assert_eq!(git_error(&"x".repeat(700)).chars().count(), 601);
+        assert_eq!(git_error("hint: only advice\n"), "hint: only advice");
+        assert_eq!(git_error("\n \n"), "git failed");
+
+        // As a marketplace that cannot be reached says it.
+        let missing = std::env::temp_dir().join(format!("haarness-gone-{}", uuid::Uuid::now_v7()));
+        let error = format!(
+            "{:#}",
+            remote_commit(&missing.to_string_lossy(), None).unwrap_err()
+        );
+        assert!(
+            error.contains("does not appear to be a git repository")
+                && error.ends_with("and the repository exists."),
+            "{error}"
+        );
     }
 
     #[test]

@@ -13191,9 +13191,15 @@ fn marketplace_refresh_lines(refresh: &plugins::MarketplaceRefresh) -> Vec<Strin
         ));
     }
     for failure in &refresh.failed {
+        let error = failure.error.trim_end();
+        let stop = if error.ends_with(['.', '!', '?']) {
+            ""
+        } else {
+            "."
+        };
         lines.push(format!(
-            "  Could not update {}: {}",
-            failure.plugin, failure.error
+            "  Could not update {}: {error}{stop} `haarness plugin update {}` tries again.",
+            failure.plugin, failure.plugin
         ));
     }
     lines
@@ -15119,6 +15125,36 @@ mod tests {
         let escaped =
             super::script_preview(Some(&script("echo \u{1b}[2J\n", false, None))).unwrap();
         assert!(escaped.contains("echo \\u{1b}[2J"), "{escaped:?}");
+    }
+
+    /// A plugin that a marketplace update or a second add could not update
+    /// says how to try again, after the error whether or not it ends a
+    /// sentence.
+    #[test]
+    fn a_plugin_a_marketplace_could_not_update_says_how_to_try_again() {
+        use crate::plugins::{MarketplaceRefresh, PluginFailure};
+        let failure = |plugin: &str, error: &str| PluginFailure {
+            plugin: plugin.into(),
+            error: error.into(),
+        };
+        let refresh = MarketplaceRefresh {
+            name: "team".into(),
+            status: "updated",
+            commit: Some("0123456789abcdef".into()),
+            failed: vec![
+                failure("kit", "could not reach the repository"),
+                failure("docs", "its folder is in use.\n"),
+            ],
+            ..MarketplaceRefresh::default()
+        };
+        assert_eq!(
+            super::marketplace_refresh_lines(&refresh),
+            [
+                "team updated to commit 0123456789ab.",
+                "  Could not update kit: could not reach the repository. `haarness plugin update kit` tries again.",
+                "  Could not update docs: its folder is in use. `haarness plugin update docs` tries again.",
+            ]
+        );
     }
 
     /// Run in a process of its own (it installs the process's panic hook):

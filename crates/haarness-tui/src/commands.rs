@@ -5275,8 +5275,16 @@ pub(crate) fn marketplace_refresh_notice(result: &serde_json::Value) -> String {
         }
         let failed = list("failed");
         if !failed.is_empty() {
+            // How to try again: by its name when one failed.
+            let again = match row["failed"].as_array().map(Vec::len) {
+                Some(1) => failed.as_str(),
+                _ => "<name>",
+            };
             part.push_str(" · could not update: ");
             part.push_str(&failed);
+            part.push_str(" (/plugin update ");
+            part.push_str(again);
+            part.push_str(" tries again)");
         }
         parts.push(part);
     }

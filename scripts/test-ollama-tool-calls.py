@@ -249,5 +249,7 @@ try:
     if failed:
         raise SystemExit(f'{len(failed)} failed: {", ".join(failed)}')
 finally:
+    # `haarness run` started the project's server and left it running.
+    e2e_scratch.stop_server(binary, workspace, env)
     ollama.shutdown()
     e2e_scratch.settle(root)
