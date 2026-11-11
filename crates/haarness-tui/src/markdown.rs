@@ -7,7 +7,7 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use crate::highlight::highlight_block;
 use crate::theme::Theme;
-use crate::view::span::{decorate_prefix, wrap_spans};
+use crate::view::span::{CODE_TABS, decorate_prefix, expand_tabs, wrap_spans};
 
 pub fn render_markdown(text: &str, width: usize, theme: &Theme, indent: &str) -> Vec<Line> {
     let mut renderer = Renderer {
@@ -369,7 +369,7 @@ impl Renderer<'_> {
                     for row_spans in highlight_block(&body, &language, self.theme) {
                         let mut spans = vec![Span::new(self.indent, self.theme.muted)];
                         let mut used = 0;
-                        for span in row_spans {
+                        for span in expand_tabs(row_spans, CODE_TABS) {
                             used += span.text.chars().count();
                             spans.push(span);
                         }
@@ -475,6 +475,42 @@ mod tests {
             .iter()
             .map(|line| line.text() + "\n")
             .collect::<String>()
+    }
+
+    #[test]
+    fn a_code_block_with_tabs_is_drawn_whole() {
+        let theme = Theme::editorial_dark();
+        let lines = render_markdown(
+            "```go\nfunc main() {\n\tfmt.Println(\"hi\")\t// say it\n}\n```",
+            60,
+            &theme,
+            "  ",
+        );
+        assert!(lines.iter().all(|line| !line.text().contains('\t')));
+        let mut renderer = haarness_opentui::Renderer::new(60, 8, true).unwrap();
+        let drawn = renderer.snapshot_lines(&lines);
+        // The tab stops count from the code's first column, not the indent.
+        assert!(
+            drawn.contains("\n      fmt.Println(\"hi\")   // say it"),
+            "{drawn}"
+        );
+        // A drag over a block copies its own tabs: a Makefile copied from a
+        // reply still runs.
+        let copy = |lines: &[haarness_opentui::Line]| {
+            crate::view::frame::CopyFrame::new(lines, Vec::new())
+                .text((0, 0), (lines.len() - 1, 1000))
+        };
+        assert!(
+            copy(&lines).contains("func main() {\n\tfmt.Println(\"hi\")\t// say it\n}"),
+            "{:?}",
+            copy(&lines)
+        );
+        let make = render_markdown("```make\nall:\n\techo \"build\"\n```", 60, &theme, "  ");
+        assert!(
+            copy(&make).contains("all:\n\techo \"build\""),
+            "{:?}",
+            copy(&make)
+        );
     }
 
     #[test]

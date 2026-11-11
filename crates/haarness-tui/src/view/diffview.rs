@@ -14,7 +14,7 @@ use crate::diffview::{
 use crate::state::App;
 use crate::theme::Theme;
 use crate::view::frame::{CopyPane, HitRegion, HitTarget};
-use crate::view::span::single_line;
+use crate::view::span::{CODE_TABS, expand_tabs, single_code_line, single_line};
 
 /// Rows spent on chrome: header, its rule, the footer rule, and the footer.
 const CHROME_ROWS: usize = 4;
@@ -771,7 +771,7 @@ fn content_spans(
     style: &RowStyle,
 ) -> (Vec<Span>, usize) {
     let theme = &app.theme;
-    let text = single_line(&row.text, width);
+    let text = single_code_line(&row.text, width, CODE_TABS);
     if text.is_empty() {
         return (Vec::new(), 0);
     }
@@ -788,7 +788,10 @@ fn content_spans(
             .next()
             .unwrap_or_else(|| vec![Span::new(text.clone(), theme.text)])
     };
-    let emphasized = emphasize(base, &row.emphasis, theme, style);
+    // Tabs are opened after the emphasis, whose ranges count the row's own
+    // characters, and after highlighting, since a grammar may read them
+    // (a Makefile's recipe lines start with one).
+    let emphasized = expand_tabs(emphasize(base, &row.emphasis, theme, style), CODE_TABS);
     let used: usize = emphasized.iter().map(Span::width).sum();
     (emphasized, used)
 }

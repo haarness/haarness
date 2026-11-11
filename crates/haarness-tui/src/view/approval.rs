@@ -1224,10 +1224,18 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
                 '-' => (theme.diff.removed, theme.diff.removed_bg),
                 _ => (theme.muted, theme.overlay),
             };
-            let row = format!("{marker} {text}");
-            let pad = inner.saturating_sub(row.width());
-            let mut spans = vec![Span::new("  ", theme.text).on(theme.overlay)];
-            spans.extend(marked_spans(&row, fg, theme.muted, bg, &mut false));
+            // The line's tabs reach their stops counted from its text.
+            let body = crate::view::span::expand_tabs(
+                marked_spans(&text, fg, theme.muted, bg, &mut false),
+                crate::view::span::CODE_TABS,
+            );
+            let used = 2 + body.iter().map(Span::width).sum::<usize>();
+            let pad = inner.saturating_sub(used);
+            let mut spans = vec![
+                Span::new("  ", theme.text).on(theme.overlay),
+                Span::new(format!("{marker} "), fg).on(bg),
+            ];
+            spans.extend(body);
             spans.push(Span::new(" ".repeat(pad), fg).on(bg));
             push_row(&mut panel, spans, width, theme, focused);
         }
@@ -1308,8 +1316,13 @@ fn change_preview(pending: &PendingPermissionInfo, width: usize) -> Vec<(char, S
     // A direction override or isolate, or a control character, in a changed
     // line is a code, so the line cannot read as something it is not or
     // hide what an escape string holds; the rest is the file's text.
-    let clip =
-        |line: &str| single_line(&marked_directions(line.trim_end()), width.saturating_sub(2));
+    let clip = |line: &str| {
+        crate::view::span::single_code_line(
+            &marked_directions(line.trim_end()),
+            width.saturating_sub(2),
+            crate::view::span::CODE_TABS,
+        )
+    };
     let changed = |old: &str, new: &str| {
         similar::TextDiff::from_lines(old, new)
             .iter_all_changes()

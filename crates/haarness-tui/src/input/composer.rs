@@ -2,7 +2,6 @@
 //! deletion, undo/redo, input history, and collapsed large pastes. Pure state
 //! with no terminal knowledge, so every behavior is unit-testable.
 
-use crate::width::DisplayWidth as _;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 /// A paste of more lines or bytes than these becomes a chip. Desktop's
@@ -66,6 +65,14 @@ fn context_placeholder(label: &str) -> String {
 /// The chip a large paste shows as while it is a draft.
 fn paste_placeholder(id: usize, lines: usize) -> String {
     format!("[#{id} pasted {} lines]", lines.max(1))
+}
+
+/// Terminal cells `text` (one line of the draft) is drawn in, a tab
+/// reaching the next stop as the prompt draws it.
+fn columns(text: &str) -> usize {
+    text.graphemes(true).fold(0, |column, grapheme| {
+        column + crate::view::span::code_cells(column, grapheme, crate::view::span::CODE_TABS)
+    })
 }
 
 fn expand(text: &str, expansions: &[Expansion]) -> String {
@@ -367,7 +374,7 @@ impl Composer {
         if start == 0 {
             return false;
         }
-        let column = self.text[start..self.cursor].width();
+        let column = columns(&self.text[start..self.cursor]);
         let previous_start = self.text[..start - 1]
             .rfind('\n')
             .map_or(0, |index| index + 1);
@@ -383,7 +390,7 @@ impl Composer {
             return false;
         }
         let start = self.line_start();
-        let column = self.text[start..self.cursor].width();
+        let column = columns(&self.text[start..self.cursor]);
         let next_start = end + 1;
         let next_end = self.text[next_start..]
             .find('\n')
@@ -707,7 +714,8 @@ impl Composer {
     fn line_boundary_at_column(&self, start: usize, end: usize, target: usize) -> usize {
         let mut column = 0;
         for (offset, grapheme) in self.text[start..end].grapheme_indices(true) {
-            let next = column + grapheme.width();
+            let next = column
+                + crate::view::span::code_cells(column, grapheme, crate::view::span::CODE_TABS);
             if next > target {
                 return if target - column >= next - target {
                     start + offset + grapheme.len()
@@ -782,6 +790,29 @@ mod tests {
         assert_eq!(wide.cursor(), "界".len());
         wide.insert_char('!');
         assert_eq!(wide.text(), "界!a\nxy");
+    }
+
+    #[test]
+    fn vertical_motion_counts_a_tab_to_its_stop_as_the_prompt_draws_it() {
+        // `\tab` is drawn six cells wide, so ↓ lands six cells into the next line.
+        let mut composer = typed("abcdefgh");
+        composer.move_home();
+        composer.insert_str("\tab\n");
+        composer.move_up();
+        composer.move_end();
+        assert_eq!(composer.cursor(), "\tab".len());
+        assert!(composer.move_down());
+        assert_eq!(composer.cursor(), "\tab\nabcdef".len());
+        assert!(composer.move_up());
+        assert_eq!(composer.cursor(), "\tab".len());
+        // From four cells in, ↑ lands after the tab rather than inside it.
+        composer.move_down();
+        composer.move_home();
+        for _ in 0..4 {
+            composer.move_right();
+        }
+        assert!(composer.move_up());
+        assert_eq!(composer.cursor(), "\t".len());
     }
 
     #[test]

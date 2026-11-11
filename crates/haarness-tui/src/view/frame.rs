@@ -186,6 +186,19 @@ impl CopyFrame {
                 let mut column = 0;
                 let mut cells = Vec::new();
                 for span in &line.spans {
+                    // A tab is drawn as spaces up to its stop and copied as
+                    // the one tab it is.
+                    if span.tab {
+                        let width = span.width();
+                        cells.push(CopyCell {
+                            character: '\t',
+                            column,
+                            width,
+                            selectable: span.selectable,
+                        });
+                        column += width;
+                        continue;
+                    }
                     for character in span.text.chars() {
                         let width = character.width().unwrap_or(0);
                         cells.push(CopyCell {

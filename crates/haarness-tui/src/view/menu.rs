@@ -2808,6 +2808,20 @@ fn fit_line(
     let mut spans: Vec<Span> = Vec::new();
     let mut used = 0;
     'outer: for span in line.spans {
+        // A tab's spaces stay one span, which a selection copies as the tab,
+        // cut to the room left if they do not all fit.
+        if span.tab {
+            let cells = span.width().min(width - used);
+            if cells == 0 {
+                break;
+            }
+            let mut tab = span;
+            tab.text = " ".repeat(cells);
+            tab.bg = Some(background);
+            spans.push(tab);
+            used += cells;
+            continue;
+        }
         for grapheme in span.text.graphemes(true) {
             let character_width = grapheme.width();
             if used + character_width > width {
@@ -2817,6 +2831,7 @@ fn fit_line(
             character_span.text = grapheme.into();
             character_span.bg = Some(background);
             if let Some(previous) = spans.last_mut()
+                && !previous.tab
                 && previous.fg == character_span.fg
                 && previous.bg == character_span.bg
                 && previous.attributes == character_span.attributes
@@ -2837,6 +2852,42 @@ fn fit_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dialog row keeps a tab whole, so a drag copies it as the tab, and
+    /// never joins the text around it into it.
+    #[test]
+    fn a_dialog_row_keeps_its_tabs_whole() {
+        use crate::view::span::{CODE_TABS, wrap_spans};
+        let white = haarness_opentui::Color::rgb(255, 255, 255);
+        let background = haarness_opentui::Color::rgb(0, 0, 0);
+        let copied = |line: Line| {
+            crate::view::frame::CopyFrame::new(&[line], Vec::new()).text((0, 0), (0, 100))
+        };
+        for text in ["run\tfailed here", "\tstarts with a tab"] {
+            let row = wrap_spans(&[Span::new(text, white)], 60, "", "", white).remove(0);
+            let fitted = fit_line(row, 40, white, background);
+            assert_eq!(copied(fitted.clone()), text, "{text:?}");
+            assert!(
+                fitted
+                    .spans
+                    .iter()
+                    .all(|span| !span.tab || span.text.trim().is_empty())
+            );
+            assert_eq!(fitted.width(), 40);
+        }
+        // Cut short, a tab keeps what room is left and still copies whole.
+        let row = Line::new(crate::view::span::expand_tabs(
+            vec![Span::new("ab\tc", white)],
+            CODE_TABS,
+        ));
+        let fitted = fit_line(row, 3, white, background);
+        let pieces: Vec<(&str, bool)> = fitted
+            .spans
+            .iter()
+            .map(|span| (span.text.as_str(), span.tab))
+            .collect();
+        assert_eq!(pieces, [("ab", false), (" ", true)]);
+    }
 
     #[test]
     fn long_inputs_keep_the_cursor_and_whole_unicode_suffix_visible() {

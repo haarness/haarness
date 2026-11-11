@@ -448,12 +448,22 @@ impl Renderer {
                 if span.text.is_empty() {
                     continue;
                 }
-                let length = u32::try_from(span.text.len()).unwrap_or(u32::MAX);
+                // The native side draws a tab two cells wide, where
+                // `display_width` (and so `x` below) counts one: a tab left
+                // in a span is drawn as the one cell it was given, never
+                // over the text after it. Views that keep tabs open them to
+                // their stops before this.
+                let text = if span.text.contains('\t') {
+                    std::borrow::Cow::Owned(span.text.replace('\t', " "))
+                } else {
+                    std::borrow::Cow::Borrowed(span.text.as_str())
+                };
+                let length = u32::try_from(text.len()).unwrap_or(u32::MAX);
                 let background = span.bg.unwrap_or(self.background);
                 unsafe {
                     (self.draw_text)(
                         buffer,
-                        span.text.as_ptr(),
+                        text.as_ptr(),
                         length,
                         x,
                         u32::try_from(y).unwrap_or(0),
@@ -492,6 +502,9 @@ pub struct Span {
     /// gutter bar, is drawn but never copied (`OpenTUI`'s `selectable`). The
     /// renderer ignores it.
     pub selectable: bool,
+    /// The spaces one tab character is drawn as, up to its stop: a
+    /// selection copies the tab, not the spaces. The renderer ignores it.
+    pub tab: bool,
 }
 
 impl Span {
@@ -503,6 +516,7 @@ impl Span {
             bg: None,
             attributes: attr::NONE,
             selectable: true,
+            tab: false,
         }
     }
     /// The same text as decoration: drawn, never copied by a selection.
@@ -692,6 +706,20 @@ mod tests {
             .unwrap();
         assert_eq!(colors.0, foreground);
         assert_eq!(colors.1, DEFAULT_BACKGROUND);
+    }
+
+    /// A tab left in a span takes the one cell `display_width` gives it, so
+    /// the next span starts where it is placed and nothing is drawn over.
+    #[test]
+    fn a_tab_is_drawn_in_the_cell_it_is_measured_in() {
+        assert_eq!(display_width("\t\t"), 2);
+        let mut renderer = Renderer::new(20, 2, true).unwrap();
+        let white = Color::rgb(255, 255, 255);
+        let output = renderer.snapshot_lines(&[Line::new(vec![
+            Span::new("\techo\t\"x\"", white),
+            Span::new("|", white),
+        ])]);
+        assert!(output.starts_with(" echo \"x\"|"), "{output:?}");
     }
 
     #[test]
