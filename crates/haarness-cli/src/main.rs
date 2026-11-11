@@ -10666,6 +10666,7 @@ async fn mcp_command(
                 .complete(&callback_url)
                 .await
                 .map_err(management::plain_error)?;
+            let entry = composed_mcp_entry(paths, workspace, trust, &name).unwrap_or(entry);
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
@@ -10674,6 +10675,7 @@ async fn mcp_command(
             let entry = loaded_mcp_entry(&target, entry);
             let registry = oauth_registry(paths, workspace, &name, &entry, false).await?;
             registry.clear_oauth(&name).await?;
+            let entry = composed_mcp_entry(paths, workspace, trust, &name).unwrap_or(entry);
             let server = client.configure_mcp(&name, &entry).await?;
             println!(
                 "Cleared OAuth credentials for '{}': {}",
@@ -10777,10 +10779,9 @@ async fn mcp_command(
             write_mcp_entry(&target, &scope, &name, Some(&entry))?;
             // The entry stays saved when the server cannot start: fixing the
             // program or the URL and reconnecting is the usual next step.
-            match client
-                .configure_mcp(&name, &loaded_mcp_entry(&target, entry))
-                .await
-            {
+            let entry = composed_mcp_entry(paths, workspace, trust, &name)
+                .unwrap_or_else(|| loaded_mcp_entry(&target, entry));
+            match client.configure_mcp(&name, &entry).await {
                 Ok(server) => println!(
                     "Added MCP server '{name}' to {} ({}).",
                     target.display(),
@@ -10802,11 +10803,13 @@ async fn mcp_command(
         }
         McpCommand::Enable { name, project } => {
             let entry = set_mcp_enabled(paths, workspace, &name, project, true)?;
+            let entry = composed_mcp_entry(paths, workspace, trust, &name).unwrap_or(entry);
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
         McpCommand::Disable { name, project } => {
             let entry = set_mcp_enabled(paths, workspace, &name, project, false)?;
+            let entry = composed_mcp_entry(paths, workspace, trust, &name).unwrap_or(entry);
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
         }
@@ -10823,10 +10826,30 @@ async fn mcp_command(
                 &name,
                 None,
             )?;
+            // Another file (the project's, the system folder's) still
+            // defines it: that entry is in force now.
+            if let Some(remaining) = composed_mcp_entry(paths, workspace, trust, &name) {
+                client.configure_mcp(&name, &remaining).await?;
+            }
             println!("Removed MCP server '{name}' from {}.", target.display());
         }
     }
     Ok(())
+}
+
+/// MCP server `name` as the project's server composes it on a reload: from
+/// every configuration file, a project's entry over the global one, and with
+/// a server turned off as a capability off. Configured with one file's entry
+/// instead, the running server would keep that entry over the one in force.
+fn composed_mcp_entry(
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+    name: &str,
+) -> Option<McpConfigureRequest> {
+    compose_runtime_sources(paths, workspace, trust, false, Vec::new(), false)
+        .ok()
+        .and_then(|mut sources| sources.file_config.mcp.remove(name))
 }
 
 async fn mcp_secret_command(command: McpSecretCommand) -> Result<()> {

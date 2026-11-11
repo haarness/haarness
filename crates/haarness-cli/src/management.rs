@@ -976,7 +976,14 @@ impl ManagementService {
             "logout" => {
                 let name = required_string(input, "name")?;
                 let (target, _, entry) = self.resolve_mcp_readable(name, optional_scope(input)?)?;
-                let entry = loaded_mcp_entry(&target, entry);
+                // The entry in force, which a project's may be over this one.
+                let entry = super::composed_mcp_entry(
+                    &self.paths,
+                    &self.workspace,
+                    self.trust_project,
+                    name,
+                )
+                .unwrap_or_else(|| loaded_mcp_entry(&target, entry));
                 self.mcp.clear_oauth(name).await.map_err(core_error)?;
                 let live = if entry.enabled {
                     self.mcp.reconnect(name).await.map_err(core_error)?
