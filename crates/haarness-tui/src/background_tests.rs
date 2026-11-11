@@ -556,12 +556,22 @@ async fn background_in_a_working_subagent_s_view_says_its_own_tasks_stay() {
         is_subagent: true,
         ..fixture_thread()
     };
+    // The subagent's view shows the agent task it started.
+    let grandchild = ThreadId::new();
+    let link = message_item(
+        1,
+        &child,
+        ItemData::TaskLink {
+            call_id: "call-inner".into(),
+            child_thread_id: grandchild,
+        },
+    );
     // The server moves nothing: a subagent's work stays in the foreground.
     let (client, _seen) = recording_server(|_, _| ("200 OK", "[]".into())).await;
     let mut app = App::new(
         child.clone(),
         vec![root.clone(), child.clone()],
-        vec![],
+        vec![link],
         vec![],
         vec![],
     );
@@ -569,13 +579,26 @@ async fn background_in_a_working_subagent_s_view_says_its_own_tasks_stay() {
         haarness_protocol::BACKGROUND_COMMANDS_CAPABILITY.into(),
     ]));
     app.active_turn = Some(TurnId::new());
+    let set = |app: &mut App, state: &str| {
+        let task = app
+            .children
+            .values_mut()
+            .find(|task| task.child_thread_id == grandchild)
+            .expect("the row of the agent task it started");
+        task.state = state.into();
+    };
+    set(&mut app, "running");
     app.execute_command("/background", &client).await.unwrap();
     assert_eq!(
         app.notice,
         "A subagent's own agent tasks stay in the foreground"
     );
-    // With nothing running there, nothing is said to be.
-    app.active_turn = None;
+    // Working with no agent task running (its task done): the usual words.
+    set(&mut app, "done");
+    app.execute_command("/background", &client).await.unwrap();
+    assert_eq!(app.notice, "Nothing is running in the foreground");
+    // An agent task in the background is not one it waits on.
+    set(&mut app, "background");
     app.execute_command("/background", &client).await.unwrap();
     assert_eq!(app.notice, "Nothing is running in the foreground");
 }
