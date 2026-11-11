@@ -954,7 +954,7 @@ impl NativeMcpRegistry {
                 config.transport
             )));
         }
-        let info = McpServerInfo {
+        let mut info = McpServerInfo {
             name: name.into(),
             transport: config.transport.clone(),
             status: if config.enabled {
@@ -979,6 +979,13 @@ impl NativeMcpRegistry {
                     None => Some(replaced.config.clone()),
                 }),
         });
+        // One standing in for an entry keeps where that entry comes from
+        // (the system folder's servers are shown as such).
+        if added.as_ref().is_some_and(|added| added.shadowed.is_some()) {
+            info.scope = servers
+                .get(name)
+                .and_then(|replaced| replaced.info.scope.clone());
+        }
         if let Some(replaced) = servers.get_mut(name) {
             replaced.stop_start();
         }
@@ -1273,7 +1280,14 @@ impl NativeMcpRegistry {
                     }
                 })
             })
-            .map(|(name, live)| (name.clone(), live.clone()))
+            .map(|(name, live)| {
+                let mut kept = live.clone();
+                // Where its configuration comes from is the candidate's.
+                kept.info.scope = staged
+                    .get(name)
+                    .and_then(|configured| configured.info.scope.clone());
+                (name.clone(), kept)
+            })
             .collect();
         let mut entries = staged.clone();
         let mut watch = Vec::new();
@@ -8538,6 +8552,30 @@ mod recovery_tests {
         assert_eq!(statuses(&live).await["slow"], "connected");
         assert_eq!(launches(&root.join("slow")), 1);
         live.disconnect("slow").await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A system-folder server a client configures again (`haarness mcp
+    /// auth` does, with its entry) is still shown as the system folder's,
+    /// right away and after a reload.
+    #[tokio::test]
+    async fn a_system_folder_server_configured_again_keeps_its_scope() {
+        let root = scratch("system-scope");
+        let configured = launched_as(&root, "base");
+        let mut off = configured.clone();
+        off.enabled = false;
+        let live = NativeMcpRegistry::default();
+        live.prepare("base", off.clone()).unwrap();
+        live.set_scope("base", Some("system".into()));
+        let scope =
+            async |registry: &NativeMcpRegistry| registry.list().await.unwrap()[0].scope.clone();
+        live.configure("base", off.clone()).await.unwrap();
+        assert_eq!(scope(&live).await.as_deref(), Some("system"));
+        let candidate = NativeMcpRegistry::default().following(&live);
+        candidate.prepare_reusing(&live, "base", off).unwrap();
+        candidate.set_scope("base", Some("system".into()));
+        live.replace_from(&candidate);
+        assert_eq!(scope(&live).await.as_deref(), Some("system"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
