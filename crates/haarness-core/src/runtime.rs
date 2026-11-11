@@ -16696,12 +16696,13 @@ fn merge_agent_tools(
 }
 
 /// What the `task` tool says to a subagent, whose own tasks always run in
-/// the foreground: the chat's description without its advice on when to
-/// work in the background.
-const SUBAGENT_TASK_DESCRIPTION: &str = "Create or continue a durable child-agent task. \
+/// the foreground: the sentences of the chat's description that do not
+/// advise on working in the background (a test in the tool registry keeps
+/// them the same), with two of its own on waiting and continuing.
+pub const SUBAGENT_TASK_DESCRIPTION: &str = "Create or continue a durable child-agent task. \
 The call waits for the child's result. \
-Usage rules: (1) Multiple task calls emitted in one assistant response already start concurrently. \
-(2) Once work is delegated, do not duplicate it. For concurrent sibling tasks, define mutually exclusive file/topic boundaries and tell each child to stay within its assigned scope; if cross-scope evidence is needed, the child should report that dependency for the parent to reconcile instead of auditing a sibling's scope. For a broad audit, split distinct scopes across task calls in one response, wait for their concurrently produced results, and synthesize directly from those reports. After children return, do not re-read every delegated file or repeat their searches merely for reassurance. Inspect a specific delegated location only when a report lacks evidence required for the answer or two reports conflict, and keep that validation narrowly targeted. Cross-cutting tests that validate the combined conclusion are allowed. \
+Usage rules: (1) Multiple task calls emitted in one assistant response already start concurrently, including foreground tasks. \
+(2) Once work is delegated, the parent must not duplicate it. For concurrent sibling tasks, define mutually exclusive file/topic boundaries and tell each child to stay within its assigned scope; if cross-scope evidence is needed, the child should report that dependency for the parent to reconcile instead of auditing a sibling's scope. For a broad audit, split distinct scopes across foreground task calls in one response, wait for their concurrently produced results, and synthesize directly from those reports. After children return, do not re-read every delegated file or repeat their searches merely for reassurance. Inspect a specific delegated location only when a report lacks evidence required for the answer or two reports conflict, and keep that validation narrowly targeted. Cross-cutting tests that validate the combined conclusion are allowed. \
 Omit task_id for each independent assignment, including separate scopes in a parallel audit. Reusing one task_id never creates separate agents: pass it only to continue that exact child session; when it is still running, the new prompt joins it.";
 
 /// The `task` tool as a subagent sees it: without `background`, and with a

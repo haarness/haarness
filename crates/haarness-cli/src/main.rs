@@ -15319,7 +15319,19 @@ mod tests {
         }
         fn peek(&self, name: &str) -> Option<(haarness_protocol::SkillInfo, String)> {
             assert_ne!(name, "faulty", "a fault reading this skill");
-            None
+            (name == "real").then(|| {
+                (
+                    haarness_protocol::SkillInfo {
+                        execution: haarness_protocol::DefinitionExecution::default(),
+                        name: "real".into(),
+                        description: String::new(),
+                        path: "/skills/real/SKILL.md".into(),
+                        trusted: true,
+                        loaded: false,
+                    },
+                    "---\nname: real\n---\nREAL_BODY\n".into(),
+                )
+            })
         }
     }
 
@@ -15328,12 +15340,12 @@ mod tests {
         let mut agents = vec![
             haarness_core::CustomAgent {
                 id: "broken".into(),
-                skills: vec!["faulty".into()],
+                skills: vec!["real".into(), "faulty".into()],
                 ..Default::default()
             },
             haarness_core::CustomAgent {
                 id: "fine".into(),
-                skills: vec!["missing".into()],
+                skills: vec!["real".into()],
                 ..Default::default()
             },
         ];
@@ -15341,7 +15353,14 @@ mod tests {
             haarness_core::PermissionEngine::build_defaults()
         });
         assert_eq!(agents.len(), 2);
-        assert!(agents.iter().all(|agent| agent.preloaded.is_empty()));
+        // The faulty agent starts with none of its skills, the next one with
+        // its own.
+        assert!(agents[0].preloaded.is_empty(), "{}", agents[0].preloaded);
+        assert!(
+            agents[1].preloaded.contains("REAL_BODY"),
+            "{}",
+            agents[1].preloaded
+        );
     }
 
     /// The skills an agent starts with are judged by the rules its calls
