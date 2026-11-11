@@ -504,7 +504,7 @@ try:
     notes = skills_workspace / '.haarness/skills/house-notes'
     notes.mkdir(parents=True, exist_ok=True)
     (notes / 'SKILL.md').write_text('---\nname: house-notes\ndescription: House notes\n---\n'
-                                    'HOUSE_NOTES in ${CLAUDE_SKILL_DIR} for ${CLAUDE_SESSION_ID}\n!`touch never-ran.txt`\n')
+                                    'HOUSE_NOTES in ${CLAUDE_SKILL_DIR} for ${CLAUDE_SESSION_ID} at ${CLAUDE_PROJECT_DIR}\n!`touch never-ran.txt`\n')
     manual = skills_workspace / '.haarness/skills/by-hand'
     manual.mkdir(parents=True, exist_ok=True)
     (manual / 'SKILL.md').write_text('---\nname: by-hand\ndescription: By hand\ndisable-model-invocation: true\n---\nBY_HAND_ONLY\n')
@@ -523,7 +523,7 @@ try:
         first, second = sent[0], sent[1]
         system = system_text(first)
         assert f'Follow the notes.\n\nThese skills are already loaded' in system, system[:3000]
-        assert f'HOUSE_NOTES in {notes} for {noted}' in system, system[:3000]
+        assert f'HOUSE_NOTES in {notes} for {noted} at {skills_workspace}' in system, system[:3000]
         assert '(skipped: `touch never-ran.txt` does not run for a skill an agent starts with' in system, system[:3000]
         assert 'BY_HAND_ONLY' not in system and 'nowhere' not in system, system[:3000]
         assert json.dumps(first['system']) == json.dumps(second['system']), 'the preloaded skills changed between turns'

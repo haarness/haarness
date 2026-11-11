@@ -823,18 +823,25 @@ async fn run_snippet(
     Ok(output)
 }
 
-/// The value [`preloaded_text`] keeps for `${CLAUDE_SESSION_ID}`: each chat
-/// fills in its own (see [`crate::CustomAgent::instructions`]).
+/// What [`preloaded_text`] keeps of `${CLAUDE_SESSION_ID}` and
+/// `${CLAUDE_PROJECT_DIR}`: each chat fills in its own id and folder (see
+/// [`crate::CustomAgent::instructions`]).
 pub const SESSION_PLACEHOLDER: &str = "${CLAUDE_SESSION_ID}";
+pub const PROJECT_PLACEHOLDER: &str = "${CLAUDE_PROJECT_DIR}";
+
+/// How much of one skill an agent starts with: as much as the `skill` tool
+/// gives the model of a skill it loads.
+const PRELOAD_SKILL_LINES: usize = 2_000;
+const PRELOAD_SKILL_BYTES: usize = 50 * 1_024;
 
 /// A skill's text as an agent that lists it under `skills` starts with: its
-/// placeholders filled in, `${CLAUDE_SESSION_ID}` left for each chat, and
+/// placeholders filled in, the chat's id and folder left for each chat, and
 /// each `!` snippet's commands named in notes in its place. Nothing runs and
 /// no file is read: the agent is handed the skill's text, the skill itself
 /// was never run. `$ARGUMENTS` and `@path` references stay as written.
 #[must_use]
-pub fn preloaded_text(template: &str, execution: &DefinitionExecution, workspace: &str) -> String {
-    let values = placeholder_values(execution, SESSION_PLACEHOLDER, workspace);
+pub fn preloaded_text(template: &str, execution: &DefinitionExecution) -> String {
+    let values = placeholder_values(execution, SESSION_PLACEHOLDER, PROJECT_PLACEHOLDER);
     let mut text = String::new();
     let mut last = 0;
     for snippet in snippets(template) {
@@ -857,45 +864,67 @@ pub fn preloaded_text(template: &str, execution: &DefinitionExecution, workspace
     text
 }
 
+/// `text` cut to [`PRELOAD_SKILL_LINES`] whole lines and
+/// [`PRELOAD_SKILL_BYTES`], with a line naming `file`, where the rest is,
+/// when anything was left out.
+fn preload_cut(text: &str, file: &str) -> String {
+    if text.lines().count() <= PRELOAD_SKILL_LINES && text.len() <= PRELOAD_SKILL_BYTES {
+        return text.to_owned();
+    }
+    let mut kept = String::new();
+    for line in text.lines().take(PRELOAD_SKILL_LINES) {
+        if kept.len() + line.len() + 1 > PRELOAD_SKILL_BYTES {
+            if kept.is_empty() {
+                let mut end = PRELOAD_SKILL_BYTES;
+                while !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                kept.push_str(&line[..end]);
+            }
+            break;
+        }
+        if !kept.is_empty() {
+            kept.push('\n');
+        }
+        kept.push_str(line);
+    }
+    format!("{kept}\n(this skill is longer than shown here; the rest is in {file})")
+}
+
 /// The most skills one agent starts with, as in Claude Code.
 pub const PRELOAD_LIMIT: usize = 32;
 
 /// Sets `agent.preloaded` to the text of the skills its `skills` field
-/// lists, in that order, the first [`PRELOAD_LIMIT`] names only: each as
-/// [`preloaded_text`] gives it. A bare name of a plugin's agent is looked
-/// for in that plugin first. A listed skill is left out, with a line in the
-/// log, when no skill has that name (or it is turned off, or the project's
-/// files are not trusted), when it is marked `disable-model-invocation`, or
-/// when a rule written for that skill (`skill:<name>`) in `rules` or the
-/// agent's own does not allow it, an ask counting as no, since no one is
-/// there to answer it while the agent's prompt is composed. `skill:*`
-/// governs calls of the skill tool, and starting with a skill is no call.
-/// An agent that lists none keeps its prompt as it is.
+/// lists, the first [`PRELOAD_LIMIT`] names only: each as
+/// [`preloaded_text`] gives it, cut as the `skill` tool cuts a skill, and
+/// those that name the chat's id last, so the chats of one agent share as
+/// much of their prompt as they can. A bare name of a plugin's agent is
+/// looked for in that plugin first. A listed skill is left out, with a line
+/// in the log, when no skill has that name (or it is turned off, or the
+/// project's files are not trusted), when it is marked
+/// `disable-model-invocation`, or when `rules` (the agent's rules as its
+/// calls meet them, the person's floor included) settle `skill:<name>` with
+/// a rule written for that skill that does not allow it, an ask counting as
+/// no, since no one is there to answer it while the prompt is composed. A
+/// rule for every skill (`skill:*`, `*`) governs calls of the skill tool, and
+/// starting with a skill is no call. An agent that lists none keeps its
+/// prompt as it is.
 pub fn preload_skills(
     agent: &mut crate::CustomAgent,
     registry: &dyn crate::SkillRegistry,
-    rules: &[crate::PermissionRule],
-    workspace: &str,
+    rules: &crate::PermissionEngine,
 ) {
     agent.preloaded.clear();
     if agent.skills.is_empty() {
         return;
     }
-    let named = crate::PermissionEngine::new(
-        rules
-            .iter()
-            .chain(&agent.permissions)
-            .filter(|rule| {
-                rule.pattern
-                    .strip_prefix("skill:")
+    let refused = |name: &str| {
+        let evaluation = rules.evaluate_detailed(&format!("skill:{name}"));
+        evaluation.decision != crate::PermissionDecision::Allow
+            && evaluation.matched.as_deref().is_some_and(|rule| {
+                rule.strip_prefix("skill:")
                     .is_some_and(|target| target != "*")
             })
-            .cloned()
-            .collect(),
-    );
-    let refused = |name: &str| {
-        let evaluation = named.evaluate_detailed(&format!("skill:{name}"));
-        evaluation.matched.is_some() && evaluation.decision != crate::PermissionDecision::Allow
     };
     let mut listed: Vec<&str> = Vec::new();
     for name in agent.skills.iter().map(|name| name.trim()) {
@@ -928,14 +957,20 @@ pub fn preload_skills(
             continue;
         }
         let body = markdown(&content).map_or(content.as_str(), |(_, body)| body);
+        let text = preload_cut(
+            preloaded_text(body.trim(), &info.execution).trim(),
+            &info.path,
+        );
         blocks.push(format!(
-            "<skill name=\"{}\">\nSkill directory: {}\n\n{}\n</skill>",
+            "<skill name=\"{}\">\nSkill directory: {}\n\n{text}\n</skill>",
             info.name,
             info.execution.directory.as_deref().unwrap_or(""),
-            preloaded_text(body.trim(), &info.execution, workspace).trim()
         ));
         paths.push(info.path);
     }
+    // Stable: the skills that name the chat's id keep their order, after
+    // the rest.
+    blocks.sort_by_key(|block| block.contains(SESSION_PLACEHOLDER));
     if !blocks.is_empty() {
         agent.preloaded = format!(
             "These skills are already loaded; follow them where they apply, without loading them again:\n\n{}",
@@ -2269,155 +2304,12 @@ mod tests {
         let text = preloaded_text(
             "Read ${CLAUDE_SKILL_DIR}/guide.md in ${CLAUDE_PROJECT_DIR} for ${CLAUDE_SESSION_ID}.\nBranch: !`git -C ${CLAUDE_PROJECT_DIR} branch`\n```!\nls ${CLAUDE_PLUGIN_DATA}\npwd\n```\nArgs $ARGUMENTS and @notes.md",
             &execution,
-            "/work/project",
         );
+        // The chat's id and folder stay for each chat to fill in.
         assert_eq!(
             text,
-            "Read /plugins/kit/skills/style/guide.md in /work/project for ${CLAUDE_SESSION_ID}.\nBranch: (skipped: `git -C /work/project branch` does not run for a skill an agent starts with; call bash with it to run it)\n(skipped: `ls /plugins/kit/.data` does not run for a skill an agent starts with; call bash with it to run it)\n(skipped: `pwd` does not run for a skill an agent starts with; call bash with it to run it)\nArgs $ARGUMENTS and @notes.md"
+            "Read /plugins/kit/skills/style/guide.md in ${CLAUDE_PROJECT_DIR} for ${CLAUDE_SESSION_ID}.\nBranch: (skipped: `git -C ${CLAUDE_PROJECT_DIR} branch` does not run for a skill an agent starts with; call bash with it to run it)\n(skipped: `ls /plugins/kit/.data` does not run for a skill an agent starts with; call bash with it to run it)\n(skipped: `pwd` does not run for a skill an agent starts with; call bash with it to run it)\nArgs $ARGUMENTS and @notes.md"
         );
-    }
-
-    /// Skills by name, as the filesystem registry reads them.
-    struct Catalog(Vec<(&'static str, &'static str, DefinitionExecution)>);
-    #[async_trait::async_trait]
-    impl crate::SkillRegistry for Catalog {
-        async fn discover(&self) -> CoreResult<Vec<haarness_protocol::SkillInfo>> {
-            Ok(Vec::new())
-        }
-        async fn load(&self, _: &str) -> CoreResult<String> {
-            Err(CoreError::Tool("unused".into()))
-        }
-        fn peek(&self, name: &str) -> Option<(haarness_protocol::SkillInfo, String)> {
-            let (canonical, content, execution) = self.0.iter().find(|(canonical, _, _)| {
-                *canonical == name || canonical.rsplit(':').next() == Some(name)
-            })?;
-            Some((
-                haarness_protocol::SkillInfo {
-                    execution: execution.clone(),
-                    name: (*canonical).to_owned(),
-                    description: String::new(),
-                    path: format!("/skills/{canonical}/SKILL.md"),
-                    trusted: true,
-                    loaded: false,
-                },
-                (*content).to_owned(),
-            ))
-        }
-    }
-
-    fn skill(directory: &str) -> DefinitionExecution {
-        DefinitionExecution {
-            directory: Some(directory.into()),
-            ..DefinitionExecution::default()
-        }
-    }
-
-    #[test]
-    fn an_agent_starts_with_the_skills_it_lists_that_it_may_load() {
-        let catalog = Catalog(vec![
-            (
-                "checklist",
-                "---\nname: checklist\n---\nCHECK ${CLAUDE_SKILL_DIR}\n",
-                skill("/s/checklist"),
-            ),
-            (
-                "kit:style",
-                "---\nname: style\n---\nKIT_STYLE !`ls`\n",
-                DefinitionExecution {
-                    plugin_root: Some("/plugins/kit".into()),
-                    ..skill("/plugins/kit/skills/style")
-                },
-            ),
-            ("style", "STYLE\n", skill("/s/style")),
-            (
-                "manual",
-                "MANUAL\n",
-                DefinitionExecution {
-                    disable_model_invocation: true,
-                    ..skill("/s/manual")
-                },
-            ),
-            ("secret", "SECRET\n", skill("/s/secret")),
-            ("asked", "ASKED\n", skill("/s/asked")),
-        ]);
-        let rule = |pattern: &str, decision| crate::PermissionRule {
-            pattern: pattern.into(),
-            decision,
-        };
-        let mut agent = crate::CustomAgent {
-            id: "kit:reviewer".into(),
-            prompt: "Review.".into(),
-            plugin: Some("kit".into()),
-            skills: [
-                "checklist",
-                "style",
-                "missing",
-                "manual",
-                "secret",
-                "asked",
-                "checklist",
-                "style",
-            ]
-            .map(str::to_owned)
-            .to_vec(),
-            permissions: vec![rule("skill:secret", crate::PermissionDecision::Deny)],
-            ..crate::CustomAgent::default()
-        };
-        // A rule for the skill tool as a whole does not decide a preload; one
-        // that names the skill does, ask included.
-        let rules = [
-            rule("skill:*", crate::PermissionDecision::Deny),
-            rule("skill:ask*", crate::PermissionDecision::Ask),
-        ];
-        preload_skills(&mut agent, &catalog, &rules, "/work");
-        let text = agent.preloaded.clone();
-        assert!(text.contains("<skill name=\"checklist\">\nSkill directory: /s/checklist\n\nCHECK /s/checklist\n</skill>"), "{text}");
-        // The plugin's own skill comes first, and its command does not run.
-        assert!(text.contains("<skill name=\"kit:style\">"), "{text}");
-        assert!(
-            text.contains("KIT_STYLE (skipped: `ls` does not run"),
-            "{text}"
-        );
-        assert!(!text.contains("\nSTYLE"), "{text}");
-        for left_out in ["MANUAL", "SECRET", "ASKED", "missing"] {
-            assert!(!text.contains(left_out), "{left_out}: {text}");
-        }
-        assert_eq!(text.matches("<skill ").count(), 2, "{text}");
-        assert!(text.find("checklist").unwrap() < text.find("kit:style").unwrap());
-        let instructions = agent.instructions("thread-1");
-        assert!(instructions.starts_with("Review.\n\nThese skills are already loaded"));
-
-        // Only the first 32 names count.
-        let mut many = crate::CustomAgent {
-            skills: (0..40)
-                .map(|index| format!("n{index}"))
-                .chain(["checklist".into()])
-                .collect(),
-            ..crate::CustomAgent::default()
-        };
-        preload_skills(&mut many, &catalog, &[], "/work");
-        assert!(many.preloaded.is_empty());
-        many.skills.insert(31, "checklist".into());
-        preload_skills(&mut many, &catalog, &[], "/work");
-        assert!(many.preloaded.contains("CHECK /s/checklist"));
-    }
-
-    #[test]
-    fn an_agent_without_preloaded_skills_keeps_its_prompt_as_written() {
-        let agent = crate::CustomAgent {
-            prompt: "Review.\n\n".into(),
-            ..crate::CustomAgent::default()
-        };
-        assert!(matches!(
-            agent.instructions("t"),
-            std::borrow::Cow::Borrowed("Review.\n\n")
-        ));
-        let agent = crate::CustomAgent {
-            prompt: "Review.".into(),
-            preloaded: "Chat ${CLAUDE_SESSION_ID}.".into(),
-            ..crate::CustomAgent::default()
-        };
-        assert_eq!(agent.instructions("t-9"), "Review.\n\nChat t-9.");
     }
 
     #[tokio::test]
@@ -2455,6 +2347,239 @@ mod tests {
         .unwrap();
         assert!(invoker.ran.lock().is_empty());
         assert_eq!(text, "A\n\nB");
+    }
+
+    /// Skills by name, as the filesystem registry reads them.
+    struct Catalog(Vec<(&'static str, String, DefinitionExecution)>);
+    #[async_trait::async_trait]
+    impl crate::SkillRegistry for Catalog {
+        async fn discover(&self) -> CoreResult<Vec<haarness_protocol::SkillInfo>> {
+            Ok(Vec::new())
+        }
+        async fn load(&self, _: &str) -> CoreResult<String> {
+            Err(CoreError::Tool("unused".into()))
+        }
+        fn peek(&self, name: &str) -> Option<(haarness_protocol::SkillInfo, String)> {
+            let (canonical, content, execution) = self.0.iter().find(|(canonical, _, _)| {
+                *canonical == name || canonical.rsplit(':').next() == Some(name)
+            })?;
+            Some((
+                haarness_protocol::SkillInfo {
+                    execution: execution.clone(),
+                    name: (*canonical).to_owned(),
+                    description: String::new(),
+                    path: format!("/skills/{canonical}/SKILL.md"),
+                    trusted: true,
+                    loaded: false,
+                },
+                content.clone(),
+            ))
+        }
+    }
+
+    fn skill(directory: &str) -> DefinitionExecution {
+        DefinitionExecution {
+            directory: Some(directory.into()),
+            ..DefinitionExecution::default()
+        }
+    }
+
+    fn rule(pattern: &str, decision: crate::PermissionDecision) -> crate::PermissionRule {
+        crate::PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        }
+    }
+
+    #[test]
+    fn an_agent_starts_with_the_skills_it_lists_that_it_may_load() {
+        let catalog = Catalog(vec![
+            (
+                "checklist",
+                "---\nname: checklist\n---\nCHECK ${CLAUDE_SKILL_DIR}\n".into(),
+                skill("/s/checklist"),
+            ),
+            (
+                "kit:style",
+                "---\nname: style\n---\nKIT_STYLE !`ls`\n".into(),
+                DefinitionExecution {
+                    plugin_root: Some("/plugins/kit".into()),
+                    ..skill("/plugins/kit/skills/style")
+                },
+            ),
+            ("style", "STYLE\n".into(), skill("/s/style")),
+            (
+                "manual",
+                "MANUAL\n".into(),
+                DefinitionExecution {
+                    disable_model_invocation: true,
+                    ..skill("/s/manual")
+                },
+            ),
+            ("secret", "SECRET\n".into(), skill("/s/secret")),
+            ("asked", "ASKED\n".into(), skill("/s/asked")),
+            (
+                "chat",
+                "CHAT ${CLAUDE_SESSION_ID}\n".into(),
+                skill("/s/chat"),
+            ),
+        ]);
+        let deny = crate::PermissionDecision::Deny;
+        let mut agent = crate::CustomAgent {
+            id: "kit:reviewer".into(),
+            prompt: "Review.".into(),
+            plugin: Some("kit".into()),
+            skills: [
+                "chat",
+                "checklist",
+                "style",
+                "missing",
+                "manual",
+                "secret",
+                "asked",
+                "checklist",
+                "style",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            permissions: vec![rule("skill:secret", deny)],
+            ..crate::CustomAgent::default()
+        };
+        // A rule for the skill tool as a whole does not decide a preload; one
+        // that names the skill does, ask included.
+        let config = crate::RuntimeConfig {
+            base_rules: vec![
+                rule("skill:*", deny),
+                rule("skill:ask*", crate::PermissionDecision::Ask),
+            ],
+            ..crate::RuntimeConfig::default()
+        };
+        let rules = config.agent_rules(&agent);
+        preload_skills(&mut agent, &catalog, &rules);
+        let text = agent.preloaded.clone();
+        assert!(
+            text.contains("<skill name=\"checklist\">\nSkill directory: /s/checklist\n\nCHECK /s/checklist\n</skill>"),
+            "{text}"
+        );
+        // The plugin's own skill comes first, and its command does not run.
+        assert!(text.contains("<skill name=\"kit:style\">"), "{text}");
+        assert!(
+            text.contains("KIT_STYLE (skipped: `ls` does not run"),
+            "{text}"
+        );
+        assert!(!text.contains("\nSTYLE"), "{text}");
+        for left_out in ["MANUAL", "SECRET", "ASKED", "missing"] {
+            assert!(!text.contains(left_out), "{left_out}: {text}");
+        }
+        assert_eq!(text.matches("<skill ").count(), 3, "{text}");
+        // In the order listed, but the one that names the chat comes last.
+        let at = |name: &str| text.find(&format!("<skill name=\"{name}\">")).unwrap();
+        assert!(at("checklist") < at("kit:style") && at("kit:style") < at("chat"));
+        let instructions = agent.instructions("thread-1", "/work");
+        assert!(instructions.starts_with("Review.\n\nThese skills are already loaded"));
+        assert!(instructions.contains("CHAT thread-1"));
+
+        // Only the first 32 names count.
+        let mut many = crate::CustomAgent {
+            skills: (0..40)
+                .map(|index| format!("n{index}"))
+                .chain(["checklist".into()])
+                .collect(),
+            ..crate::CustomAgent::default()
+        };
+        let open = crate::PermissionEngine::build_defaults();
+        preload_skills(&mut many, &catalog, &open);
+        assert!(many.preloaded.is_empty());
+        many.skills.insert(31, "checklist".into());
+        preload_skills(&mut many, &catalog, &open);
+        assert!(many.preloaded.contains("CHECK /s/checklist"));
+    }
+
+    #[test]
+    fn a_project_agent_cannot_preload_a_skill_the_person_denies() {
+        let catalog = Catalog(vec![("secret", "SECRET\n".into(), skill("/s/secret"))]);
+        let allow = rule("skill:secret", crate::PermissionDecision::Allow);
+        let deny = rule("skill:secret", crate::PermissionDecision::Deny);
+        let config = crate::RuntimeConfig {
+            base_rules: vec![deny.clone()],
+            global_rules: vec![deny],
+            ..crate::RuntimeConfig::default()
+        };
+        let mut project = crate::CustomAgent {
+            id: "reviewer".into(),
+            skills: vec!["secret".into()],
+            permissions: vec![allow.clone()],
+            project: true,
+            ..crate::CustomAgent::default()
+        };
+        let rules = config.agent_rules(&project);
+        preload_skills(&mut project, &catalog, &rules);
+        assert!(project.preloaded.is_empty());
+        // The person's own agent may lift the person's deny, as its calls may.
+        let mut own = crate::CustomAgent {
+            project: false,
+            ..project
+        };
+        let rules = config.agent_rules(&own);
+        preload_skills(&mut own, &catalog, &rules);
+        assert!(own.preloaded.contains("SECRET"));
+    }
+
+    #[test]
+    fn a_long_preloaded_skill_is_cut_and_names_its_file() {
+        let long = (0..3_000)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let catalog = Catalog(vec![("long", long, skill("/s/long"))]);
+        let mut agent = crate::CustomAgent {
+            skills: vec!["long".into()],
+            ..crate::CustomAgent::default()
+        };
+        preload_skills(
+            &mut agent,
+            &catalog,
+            &crate::PermissionEngine::build_defaults(),
+        );
+        let text = &agent.preloaded;
+        assert!(text.contains("line 1999\n(this skill is longer than shown here; the rest is in /skills/long/SKILL.md)"), "{}", &text[text.len() - 300..]);
+        assert!(!text.contains("line 2000"));
+        // One line too long to show whole shows its start.
+        let catalog = Catalog(vec![("wide", "x".repeat(60 * 1_024), skill("/s/wide"))]);
+        let mut agent = crate::CustomAgent {
+            skills: vec!["wide".into()],
+            ..crate::CustomAgent::default()
+        };
+        preload_skills(
+            &mut agent,
+            &catalog,
+            &crate::PermissionEngine::build_defaults(),
+        );
+        assert!(agent.preloaded.contains(&format!(
+            "{}\n(this skill is longer",
+            "x".repeat(50 * 1_024)
+        )));
+    }
+
+    #[test]
+    fn an_agent_without_preloaded_skills_keeps_its_prompt_as_written() {
+        let agent = crate::CustomAgent {
+            prompt: "Review.\n\n".into(),
+            ..crate::CustomAgent::default()
+        };
+        assert!(matches!(
+            agent.instructions("t", "/w"),
+            std::borrow::Cow::Borrowed("Review.\n\n")
+        ));
+        let agent = crate::CustomAgent {
+            prompt: "Review.".into(),
+            preloaded: "Chat ${CLAUDE_SESSION_ID} in ${CLAUDE_PROJECT_DIR}.".into(),
+            ..crate::CustomAgent::default()
+        };
+        assert_eq!(
+            agent.instructions("t-9", "/home/chats/a"),
+            "Review.\n\nChat t-9 in /home/chats/a."
+        );
     }
 
     #[test]

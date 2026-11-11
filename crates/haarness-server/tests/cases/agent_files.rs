@@ -466,7 +466,9 @@ async fn an_agent_s_preloaded_skills_ride_in_its_system_prompt_unchanged_turn_to
         prompt: "Follow the house style.".into(),
         mode: Some("all".into()),
         skills: vec!["style".into()],
-        preloaded: "<skill name=\"style\">\nSTYLE_BODY in ${CLAUDE_SESSION_ID}\n</skill>".into(),
+        preloaded:
+            "<skill name=\"style\">\nSTYLE_BODY in ${CLAUDE_SESSION_ID} at ${CLAUDE_PROJECT_DIR}\n</skill>"
+                .into(),
         ..Default::default()
     });
     let runtime = runtime_with(
@@ -500,8 +502,9 @@ async fn an_agent_s_preloaded_skills_ride_in_its_system_prompt_unchanged_turn_to
     let second = request_for(&requests, "SECOND styled");
     assert!(
         first.system.contains(&format!(
-            "Follow the house style.\n\n<skill name=\"style\">\nSTYLE_BODY in {}\n</skill>",
-            chat.id
+            "Follow the house style.\n\n<skill name=\"style\">\nSTYLE_BODY in {} at {}\n</skill>",
+            chat.id,
+            fixture.0.display()
         )),
         "{}",
         first.system

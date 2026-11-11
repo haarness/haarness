@@ -77,11 +77,12 @@ impl CustomAgent {
         }
     }
 
-    /// The agent's instructions in chat `session`: its prompt, then the
-    /// skills it starts with, which name the chat where they say
-    /// `${CLAUDE_SESSION_ID}`. Without such skills the prompt as written.
+    /// The agent's instructions in chat `session`, working in `folder`: its
+    /// prompt, then the skills it starts with, which name that chat and its
+    /// folder where they say `${CLAUDE_SESSION_ID}` and
+    /// `${CLAUDE_PROJECT_DIR}`. Without such skills the prompt as written.
     #[must_use]
-    pub fn instructions(&self, session: &str) -> std::borrow::Cow<'_, str> {
+    pub fn instructions(&self, session: &str, folder: &str) -> std::borrow::Cow<'_, str> {
         if self.preloaded.is_empty() {
             return std::borrow::Cow::Borrowed(&self.prompt);
         }
@@ -90,6 +91,7 @@ impl CustomAgent {
             self.prompt.trim_end(),
             self.preloaded
                 .replace(crate::definitions::SESSION_PLACEHOLDER, session)
+                .replace(crate::definitions::PROJECT_PLACEHOLDER, folder)
         ))
     }
 }
@@ -192,6 +194,22 @@ impl RuntimeConfig {
                 });
             }
         }
+        engine
+    }
+    /// The rules `agent`'s calls meet before anything one chat adds (its
+    /// Always answers, the boundary of the chat that started it): Haarness's
+    /// defaults, the configured rules with the person's as their floor, the
+    /// workspace's remembered answers, then the agent's own.
+    #[must_use]
+    pub fn agent_rules(&self, agent: &CustomAgent) -> crate::PermissionEngine {
+        let mut engine = self.permission_defaults(&agent.id, "");
+        for rule in &self.base_rules {
+            engine.add_rule(rule.clone());
+        }
+        for rule in &self.granted_rules {
+            engine.add_grant(rule.clone());
+        }
+        agent.apply_permissions(&mut engine);
         engine
     }
     /// Resolve one configured agent by its exact id.

@@ -8879,20 +8879,31 @@ struct ComposedRuntimeSources {
 }
 
 /// Fills in the text of the skills each agent starts with (`skills`) from
-/// `skills`, leaving out any that `rules`, the configuration's own, or the
-/// agent's deny by name (see [`haarness_core::definitions::preload_skills`]).
-/// Every place that hands agents to the runtime does this, so an agent reads
-/// the same however its definitions were last loaded.
+/// `skills`, leaving out any that `rules(agent)`, the rules the agent's
+/// calls meet, refuse by name (see
+/// [`haarness_core::definitions::preload_skills`]). Every place that hands
+/// agents to the runtime does this, so an agent reads the same however its
+/// definitions were last loaded.
 pub(crate) fn preload_agent_skills(
     agents: &mut [haarness_core::CustomAgent],
     skills: &dyn SkillRegistry,
-    rules: &[haarness_core::PermissionRule],
-    workspace: &Path,
+    rules: &dyn Fn(&haarness_core::CustomAgent) -> haarness_core::PermissionEngine,
 ) {
-    let workspace = workspace.to_string_lossy();
     for agent in agents {
-        haarness_core::definitions::preload_skills(agent, skills, rules, &workspace);
+        let rules = rules(agent);
+        haarness_core::definitions::preload_skills(agent, skills, &rules);
     }
+}
+
+/// [`preload_agent_skills`] for the agents of `config`, judged by its rules
+/// as its turns are.
+fn preload_configured_agents(
+    config: &mut haarness_core::RuntimeConfig,
+    skills: &dyn SkillRegistry,
+) {
+    let mut agents = std::mem::take(&mut config.custom_agents);
+    preload_agent_skills(&mut agents, skills, &|agent| config.agent_rules(agent));
+    config.custom_agents = agents;
 }
 
 fn compose_runtime_sources(
@@ -9217,12 +9228,7 @@ impl HotReloadController {
         let disabled_skills =
             capability_state::disabled(&self.paths, &self.workspace, self.trust, "skill")?;
         candidate_skills.set_disabled(disabled_skills.clone());
-        preload_agent_skills(
-            &mut sources.runtime_config.custom_agents,
-            &candidate_skills,
-            &sources.json_layers.rules,
-            &self.workspace,
-        );
+        preload_configured_agents(&mut sources.runtime_config, &candidate_skills);
         let skill_infos = candidate_skills.discover().await.unwrap_or_default();
         let tools: Arc<dyn ToolRegistry> = Arc::new(
             NativeToolRegistry::with_workflows_and_scheduler(
@@ -10021,12 +10027,7 @@ async fn application_at(
     skills.set_disabled(capability_state::disabled(
         paths, workspace, trust, "skill",
     )?);
-    preload_agent_skills(
-        &mut runtime_config.custom_agents,
-        skills.as_ref(),
-        &json_layers.rules,
-        workspace,
-    );
+    preload_configured_agents(&mut runtime_config, skills.as_ref());
     let events = EventBus::new(2048);
     let workflow_host = WorkflowRuntimeAdapter::new();
     let workflows = Arc::new(WorkflowCoordinator::new(
@@ -15279,6 +15280,73 @@ mod tests {
         std::fs::write(memory.join("settings.json"), r#"{"enabled": false,}"#).unwrap();
         assert_eq!(compose(), Ok(Some(false)));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The skills an agent starts with are judged by the rules its calls
+    /// meet, as composition builds them: a TOML rule counts, and the
+    /// person's deny holds over a project agent's own allow.
+    #[test]
+    fn an_agent_starts_without_the_skills_the_person_denies_wherever_the_rule_is_written() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-preload-rules-{}", uuid::Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let workspace = root.join("workspace");
+        let config = paths.config.parent().unwrap().to_path_buf();
+        for (name, body) in [
+            ("preload-open", "OPEN_BODY in ${CLAUDE_PROJECT_DIR}"),
+            ("preload-toml-secret", "TOML_SECRET_BODY"),
+            ("preload-json-secret", "JSON_SECRET_BODY"),
+        ] {
+            let folder = paths.skills.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(
+                folder.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Fixture\n---\n{body}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            &paths.config,
+            "[permissions.skill]\n\"preload-toml-secret\" = \"deny\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            config.join("haarness.json"),
+            r#"{"permission": {"skill": {"preload-json-secret": "deny"}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(workspace.join(".haarness/agents")).unwrap();
+        std::fs::write(
+            workspace.join(".haarness/agents/lister.md"),
+            "---\ndescription: Lists skills\nskills: [preload-open, preload-toml-secret, preload-json-secret]\n\
+             permission: {\"skill\": {\"preload-json-secret\": \"allow\"}}\n---\nList.\n",
+        )
+        .unwrap();
+        let sources =
+            super::compose_runtime_sources(&paths, &workspace, true, false, Vec::new(), false)
+                .unwrap();
+        let mut runtime_config = sources.runtime_config;
+        let skills = haarness_server::FilesystemSkillRegistry::new_scoped(sources.skill_roots);
+        super::preload_configured_agents(&mut runtime_config, &skills);
+        let lister = runtime_config
+            .custom_agent("lister")
+            .expect("the project agent");
+        assert!(lister.project);
+        let text = &lister.preloaded;
+        // The chat's folder is filled in for each chat.
+        assert!(
+            text.contains("OPEN_BODY in ${CLAUDE_PROJECT_DIR}"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("TOML_SECRET_BODY"),
+            "a TOML rule counts: {text}"
+        );
+        assert!(
+            !text.contains("JSON_SECRET_BODY"),
+            "the person's deny is a floor: {text}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

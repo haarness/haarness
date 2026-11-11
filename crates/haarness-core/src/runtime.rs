@@ -5135,7 +5135,7 @@ impl AgentRuntime {
                 },
                 |custom| {
                     custom_system_prompt_with_context(
-                        &custom.instructions(&thread.id.to_string()),
+                        &custom.instructions(&thread.id.to_string(), &workspace.to_string_lossy()),
                         &context,
                     )
                 },
@@ -8205,6 +8205,13 @@ impl AgentRuntime {
     pub fn replace_commands(&self, commands: Vec<haarness_protocol::CommandInfo>) {
         self.prepared_prompts.lock().clear();
         *self.live_commands.write() = commands;
+    }
+
+    /// The rules `agent`'s calls meet under the live configuration, before
+    /// anything one chat adds (see [`crate::RuntimeConfig::agent_rules`]).
+    #[must_use]
+    pub fn agent_rules(&self, agent: &crate::CustomAgent) -> PermissionEngine {
+        self.components().config.agent_rules(agent)
     }
 
     /// Refresh configured agent profiles after agent/plugin changes.
@@ -11923,7 +11930,10 @@ impl RunnerTask {
                     // Custom bodies replace only the role-specific guidance;
                     // the runtime/environment contract remains universal.
                     custom_system_prompt_with_context(
-                        &custom.instructions(&self.thread.id.to_string()),
+                        &custom.instructions(
+                            &self.thread.id.to_string(),
+                            &self.workspace.to_string_lossy(),
+                        ),
                         &SystemPromptContext {
                             provider: provider_id,
                             model: &model,
