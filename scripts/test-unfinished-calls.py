@@ -167,7 +167,10 @@ env = {**ISOLATED, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "
        "ANTHROPIC_API_KEY": "fixture-key", "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{service.server_port}/v1"}
 args = [str(BINARY), "--workspace", str(workspace), "--trust-project"]
 connection = {}
-TMUX = ["tmux", "-L", f"haarness-unfinished-{os.getpid()}", "-f", "/dev/null"]
+# A tmux server of the run's own, its socket in the run's folder, started and stopped with one
+# environment: wherever the caller's TMUX_TMPDIR points, the stop reaches the server the start made.
+TMUX = ["tmux", "-S", str(root / "tmux"), "-f", "/dev/null"]
+TMUX_ENV = {**env, "PATH": os.environ["PATH"]}
 EVIDENCE = Path(os.environ.get("UNFINISHED_CALLS_EVIDENCE", root / "tui")).resolve()
 
 
@@ -201,11 +204,6 @@ def kill_daemon():
     for pid in pids:
         os.kill(pid, signal.SIGKILL)
     until(lambda: not daemon_pids(), "the killed daemon is still listed")
-
-
-def stop_daemon():
-    subprocess.run(args + ["serve", "--stop"], env=env, capture_output=True, timeout=30)
-    until(lambda: not daemon_pids(), "the stopped daemon is still listed")
 
 
 def database():
@@ -251,7 +249,7 @@ def chat():
 
 def tmux(*values):
     return subprocess.run(TMUX + [str(value) for value in values], check=True, capture_output=True,
-                          text=True, env={**env, "PATH": os.environ["PATH"]}).stdout
+                          text=True, env=TMUX_ENV).stdout
 
 
 def pane():
@@ -383,8 +381,7 @@ finally:
             screen("last")  # what the TUI showed when the run failed
         except subprocess.CalledProcessError:
             pass
-    subprocess.run(TMUX + ["kill-server"], capture_output=True)
-    if connection:
-        stop_daemon()
+    subprocess.run(TMUX + ["kill-server"], capture_output=True, env=TMUX_ENV)
+    e2e_scratch.stop_server(BINARY, workspace, env)
     service.shutdown()
     e2e_scratch.settle(root)

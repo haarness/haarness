@@ -155,5 +155,28 @@ class OwnHomeTests(unittest.TestCase):
                 self.assertEqual((data, telemetry, cloud), ("", "0", "http://127.0.0.1:9"), line)
 
 
+class LeftoverTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "processes are listed with ps")
+    def test_nothing_that_names_a_runs_project_outlives_stopping_its_server(self):
+        import e2e_scratch
+
+        with tempfile.TemporaryDirectory(prefix="haarness-isolation-test-") as temp:
+            project = Path(temp).resolve() / "project"
+            project.mkdir()
+            # Stands in for haarness: `serve --stop` stops nothing.
+            binary = Path(temp) / "haarness"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(0o755)
+            # A process the run started that names its project and outlives the stop.
+            straggler = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", str(project)])
+            try:
+                e2e_scratch.stop_server(binary, project, dict(os.environ), wait=0.5)
+                self.assertEqual(straggler.wait(timeout=10), -9)
+            finally:
+                if straggler.poll() is None:
+                    straggler.kill()
+                    straggler.wait()
+
+
 if __name__ == "__main__":
     unittest.main()
