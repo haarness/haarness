@@ -715,7 +715,7 @@ fn preloaded_note(command: &str) -> String {
 /// Each command of a snippet runs in order, a fenced block's one line at a
 /// time. A command the invoker holds back for approval or refuses (a skill
 /// the model loads, see [`crate::ToolInvoker::definition_shell`]) is named
-/// in a note in its place, and the rest of the text still loads.
+/// in a note instead, and the text around it still loads.
 pub async fn prepare(
     template: &str,
     input: &str,
@@ -834,9 +834,9 @@ pub const PROJECT_PLACEHOLDER: &str = "${CLAUDE_PROJECT_DIR}";
 const PRELOAD_SKILL_LINES: usize = 2_000;
 const PRELOAD_SKILL_BYTES: usize = 50 * 1_024;
 
-/// A skill's text as an agent that lists it under `skills` starts with: its
+/// A skill's text as it reaches an agent whose `skills` field names it: its
 /// placeholders filled in, the chat's id and folder left for each chat, and
-/// each `!` snippet's commands named in notes in its place. Nothing runs and
+/// each `!` snippet's commands named in notes instead. Nothing runs and
 /// no file is read: the agent is handed the skill's text, the skill itself
 /// was never run. `$ARGUMENTS` and `@path` references stay as written.
 #[must_use]

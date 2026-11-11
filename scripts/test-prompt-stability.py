@@ -495,8 +495,8 @@ try:
                                       'byte-identical after a restart']})
     print(f'PASS Auto keeps deferring after the loads and a restart ({len(names(last))} tools)', flush=True)
 
-    # 8. An agent that lists `skills` starts with their text in its system prompt, the same on
-    # every request of the chat, and none of their commands runs.
+    # 8. An agent that lists `skills` starts with their text in its system prompt, unchanged from
+    # one request of the chat to the next, and none of their commands runs.
     skills_workspace = root / 'skills-workspace'
     (skills_workspace / '.haarness/agents').mkdir(parents=True, exist_ok=True)
     (skills_workspace / '.haarness/config.toml').write_text(
