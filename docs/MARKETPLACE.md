@@ -124,8 +124,11 @@ from: `name → {source, autoUpdate, commit, updatedAt}`. When the address named
 `source` ends in that `#<ref>` (`https://github.com/team/plugins.git#release`). The ref lives inside
 `source` on purpose: a Haarness from before refs reads an address it cannot fetch, so it reports a
 failed update instead of moving the marketplace to the default branch, and the ref stays when it
-rewrites the file. Registering a Git marketplace writes its entry with `autoUpdate: true` (and says
-how to turn that off); a folder gets none, because it is read as it is. Registering one again under the
+rewrites the file. The ref is kept by its short name and looked up branch first, so a marketplace
+that follows a tag, even one added as `#refs/tags/<name>` (refused while a branch of that name
+exists), follows a branch of that name once the repository gains one. Registering a Git marketplace
+writes its entry with `autoUpdate: true` (and says how to turn that off); a folder gets none, because
+it is read as it is. Registering one again under the
 same name, at another ref or none, keeps the `autoUpdate` it had and swaps in the new clone as an update
 does; when the new clone holds another commit it then updates its installed plugins the same way, and
 on the same commit it leaves them alone, as an update that finds nothing new does.
