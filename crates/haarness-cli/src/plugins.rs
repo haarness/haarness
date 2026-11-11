@@ -590,8 +590,9 @@ fn github_shorthand(source: &str) -> bool {
 /// the branch or tag to follow. Both of Claude Code's spellings are read:
 /// `#<ref>` after any address, and `@<ref>` after `owner/repo`. A full ref
 /// name is kept by its short one (`refs/heads/release` as `release`), which
-/// is how `git clone --branch` takes it.
-fn marketplace_address(source: &str) -> Result<String> {
+/// is how `git clone --branch` takes it; the flag says it was written as
+/// `refs/tags/…`, so only a tag will do.
+fn marketplace_address(source: &str) -> Result<(String, bool)> {
     let (address, separator, reference) = match source.split_once('#') {
         Some((address, reference)) => (address, '#', Some(reference)),
         None => match source.split_once('@') {
@@ -602,27 +603,43 @@ fn marketplace_address(source: &str) -> Result<String> {
         },
     };
     let url = git_url(address);
-    let Some(reference) = reference else {
-        return Ok(url);
+    let Some(written) = reference else {
+        return Ok((url, false));
     };
-    if reference.is_empty() {
-        // Named as typed, with any credential in it hidden.
+    // Named as typed, with any credential in it hidden.
+    let shown = format!(
+        "{}{separator}{written}",
+        haarness_core::redact::url(address)
+    );
+    if written.is_empty() {
         bail!(
-            "nothing follows the {separator} in {}{separator}: name a branch or tag after it, or leave it out",
-            haarness_core::redact::url(address)
+            "nothing follows the {separator} in {shown}: name a branch or tag after it, or leave it out"
         );
     }
-    let reference = match reference.strip_prefix("refs/") {
-        Some(full) => full
-            .strip_prefix("heads/")
-            .or_else(|| full.strip_prefix("tags/"))
-            .with_context(|| {
-                format!("{reference} is neither a branch nor a tag: name one for the marketplace to follow")
-            })?,
-        None => reference,
+    let (reference, tag_only) = match written.strip_prefix("refs/") {
+        Some(full) => match (full.strip_prefix("heads/"), full.strip_prefix("tags/")) {
+            (Some(branch), _) => (branch, false),
+            (_, Some(tag)) => (tag, true),
+            _ => bail!(
+                "{written} is neither a branch nor a tag: name one for the marketplace to follow"
+            ),
+        },
+        None => (written, false),
     };
+    if reference.is_empty() {
+        bail!("nothing follows {written} in {shown}: name a branch or tag after it");
+    }
     followable_ref(reference)?;
-    Ok(format!("{url}#{reference}"))
+    Ok((format!("{url}#{reference}"), tag_only))
+}
+
+/// Whether the repository at `url` has a branch called `name`.
+fn remote_has_branch(url: &str, name: &str) -> Result<bool> {
+    checked_git_value(url, "URL")?;
+    checked_git_value(name, "ref")?;
+    let listed = git_output(["ls-remote", "--", url, &format!("refs/heads/{name}")])
+        .with_context(|| format!("could not reach {}", haarness_core::redact::url(url)))?;
+    Ok(!listed.trim().is_empty())
 }
 
 /// A ref a marketplace can follow: a branch or tag, as `git clone --branch`
@@ -1238,9 +1255,10 @@ pub struct MarketplaceAdded {
 /// Register a marketplace from a git URL or a local directory. A Git one
 /// follows new commits of its repository from then on: of the branch or tag
 /// its address ends in (`…#release`), else of the default branch. Adding it
-/// again with another ref, or none, moves it: its installed plugins follow
-/// the new clone as an update would have them, and whether it updates
-/// automatically stays as it was. The clone is made before the
+/// again with another ref, or none, moves it: when that brings another
+/// commit, its installed plugins follow the new clone as an update would
+/// have them, and whether it updates automatically stays as it was either
+/// way. The clone is made before the
 /// registrations are locked, so a slow host holds nobody up.
 pub fn marketplace_add(data: &Path, source: &str) -> Result<MarketplaceAdded> {
     let local = local_path(source).unwrap_or_else(|| PathBuf::from(source));
@@ -1271,8 +1289,18 @@ pub fn marketplace_add(data: &Path, source: &str) -> Result<MarketplaceAdded> {
         bail!("{source} does not exist");
     }
     // owner/repo becomes a GitHub URL; a trailing #ref stays on it.
-    let address = marketplace_address(source)?;
+    let (address, tag_only) = marketplace_address(source)?;
     let (url, reference) = followed(&address);
+    // `git clone --branch` takes a branch over a tag of the same name.
+    if tag_only
+        && let Some(tag) = reference
+        && remote_has_branch(url, tag)?
+    {
+        bail!(
+            "{} has both a branch and a tag called {tag}, and a marketplace follows the branch of that name: add it with #{tag} to follow the branch, or give the tag a name of its own",
+            haarness_core::redact::url(url)
+        );
+    }
     let staging = plugins_root(data)
         .join("marketplaces")
         .join(format!(".add-{}", short_nonce()));
@@ -1326,15 +1354,18 @@ pub fn marketplace_add(data: &Path, source: &str) -> Result<MarketplaceAdded> {
         replaced
     };
     let refresh = replaced.map(|(before, previous)| {
-        let status = if previous == commit {
-            "unchanged"
-        } else {
-            "updated"
-        };
+        // On the commit it held, nothing moved: like an update that finds
+        // nothing new, it leaves the installed plugins alone.
+        if previous == commit {
+            return MarketplaceRefresh {
+                commit,
+                ..MarketplaceRefresh::new(&name, "unchanged")
+            };
+        }
         let mut refresh = MarketplaceRefresh {
             commit,
             previous,
-            ..MarketplaceRefresh::new(&name, status)
+            ..MarketplaceRefresh::new(&name, "updated")
         };
         refresh_installed(data, &destination, &manifest, &before, &mut refresh);
         refresh
@@ -3494,7 +3525,10 @@ mod tests {
                 "https://github.com/team/market.git#v1.2.0",
             ),
         ] {
-            assert_eq!(marketplace_address(written).unwrap(), recorded, "{written}");
+            let (address, tag_only) = marketplace_address(written).unwrap();
+            assert_eq!(address, recorded, "{written}");
+            // Only a ref written as refs/tags/… must be a tag.
+            assert_eq!(tag_only, written.contains("#refs/tags/"), "{written}");
         }
         assert_eq!(
             followed("https://git.example.com/team/market.git#release/2026-11"),
@@ -3518,6 +3552,10 @@ mod tests {
             (
                 "team/market#refs/pull/1/head",
                 "is neither a branch nor a tag",
+            ),
+            (
+                "team/market#refs/heads/",
+                "nothing follows refs/heads/ in team/market#refs/heads/",
             ),
             (
                 "https://git.example.com/team/market.git#--upload-pack=touch",
@@ -3877,6 +3915,122 @@ mod tests {
         assert_eq!(
             marketplace_update(&data, "team").unwrap().commit.as_deref(),
             Some(release_two.as_str())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adding_the_same_address_again_leaves_its_plugins_as_an_update_would() {
+        let root = std::env::temp_dir().join(format!("haarness-same-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let data = root.join("data");
+        let upstream = Upstream::new(&root);
+        // A plugin with a repository of its own, beside one inside the marketplace.
+        let own = Upstream::new(&root.join("own"));
+        own.commit(
+            &[
+                (".claude-plugin/plugin.json", r#"{"name":"ext"}"#),
+                ("commands/run.md", "Ext one"),
+            ],
+            "ext one",
+        );
+        let manifest = serde_json::json!({
+            "name": "team",
+            "plugins": [
+                {"name": "kit", "source": "./plugins/kit"},
+                {"name": "ext", "source": {"source": "url", "url": own.url}},
+            ],
+        })
+        .to_string();
+        upstream.commit(
+            &[
+                files(&[plugin_files("kit", "Kit one")]),
+                vec![(".claude-plugin/marketplace.json", manifest.as_str())],
+            ]
+            .concat(),
+            "one",
+        );
+        marketplace_add(&data, &upstream.url).unwrap();
+        let kit = install(&data, "kit@team")
+            .unwrap()
+            .path
+            .join("commands/run.md");
+        let ext = install(&data, "ext@team")
+            .unwrap()
+            .path
+            .join("commands/run.md");
+        let records = fs::read_to_string(installed_file(&data)).unwrap();
+
+        // The plugin's own repository moves on, then cannot be reached: the
+        // marketplace did not move, so an update and adding it again alike
+        // leave both plugins as they are, and neither fails.
+        own.commit(&[("commands/run.md", "Ext two")], "ext two");
+        assert_eq!(
+            marketplace_update(&data, "team").unwrap().status,
+            "unchanged"
+        );
+        let add_again = || {
+            let refresh = marketplace_add(&data, &upstream.url)
+                .unwrap()
+                .refresh
+                .unwrap();
+            assert_eq!(refresh.status, "unchanged");
+            assert!(
+                refresh.plugins.is_empty()
+                    && refresh.failed.is_empty()
+                    && refresh.held.is_empty()
+                    && refresh.unlisted.is_empty(),
+                "{refresh:?}"
+            );
+            assert_eq!(fs::read_to_string(&ext).unwrap(), "Ext one");
+            assert_eq!(fs::read_to_string(&kit).unwrap(), "Kit one");
+            assert_eq!(fs::read_to_string(installed_file(&data)).unwrap(), records);
+        };
+        add_again();
+        fs::rename(root.join("own/upstream.git"), root.join("own/gone.git")).unwrap();
+        add_again();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_tag_named_in_full_is_refused_where_a_branch_shares_its_name() {
+        let root = std::env::temp_dir().join(format!("haarness-fulltag-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let data = root.join("data");
+        let upstream = Upstream::new(&root);
+        let tagged = upstream.commit(
+            &[(
+                ".claude-plugin/marketplace.json",
+                market_manifest("team", &[]).as_str(),
+            )],
+            "one",
+        );
+        upstream.tag("v1");
+        upstream.tag("v2");
+        upstream.commit_to("v1", &[("notes.md", "On the branch")], "branch");
+        // Both a branch and a tag are called v1: the tag cannot be followed.
+        let error = format!(
+            "{:#}",
+            marketplace_add(&data, &format!("{}#refs/tags/v1", upstream.url)).unwrap_err()
+        );
+        assert!(
+            error.contains("both a branch and a tag called v1")
+                && error.contains("add it with #v1"),
+            "{error}"
+        );
+        assert!(marketplaces(&data).is_empty());
+        // A tag alone by its name is followed as v2.
+        marketplace_add(&data, &format!("{}#refs/tags/v2", upstream.url)).unwrap();
+        assert_eq!(
+            marketplace_sources(&data)["team"].source,
+            format!("{}#v2", upstream.url)
+        );
+        assert_eq!(head_commit(&owned_clone(&data, "team")).unwrap(), tagged);
+        // The branch named in full is the branch.
+        marketplace_add(&data, &format!("{}#refs/heads/v1", upstream.url)).unwrap();
+        assert_eq!(
+            marketplace_sources(&data)["team"].source,
+            format!("{}#v1", upstream.url)
         );
         fs::remove_dir_all(root).unwrap();
     }

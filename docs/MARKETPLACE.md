@@ -126,8 +126,9 @@ from: `name → {source, autoUpdate, commit, updatedAt}`. When the address named
 failed update instead of moving the marketplace to the default branch, and the ref stays when it
 rewrites the file. Registering a Git marketplace writes its entry with `autoUpdate: true` (and says
 how to turn that off); a folder gets none, because it is read as it is. Registering one again under the
-same name, at another ref or none, keeps the `autoUpdate` it had, swaps in the new clone as an update
-does and then updates its installed plugins the same way.
+same name, at another ref or none, keeps the `autoUpdate` it had and swaps in the new clone as an update
+does; when the new clone holds another commit it then updates its installed plugins the same way, and
+on the same commit it leaves them alone, as an update that finds nothing new does.
 `haarness plugin marketplace update [name]` (the `update_plugin_marketplace` request, or plugin
 action `marketplace_update`) asks the repository with `git ls-remote` for the commit of the ref it
 follows (the default branch when there is none) and does nothing more when the clone and the record
