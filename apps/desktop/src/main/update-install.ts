@@ -3,6 +3,7 @@ import { constants, existsSync } from "node:fs";
 import { access, chmod, copyFile, lstat, mkdir, readdir, rm, statfs } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve, win32 } from "node:path";
 import { UpdateError, renameSoon, type Install } from "./updater";
+import { removeTree } from "./remove-tree";
 
 /** Runs a system tool; resolves with what it wrote, rejects when it fails. */
 export function run(command: string, args: string[]) {
@@ -84,7 +85,7 @@ export async function stageMacApp(input: { file: string; version: string; folder
   if (input.team === null)
     throw new UpdateError("signature", "This app's own signature could not be read, so no update can be checked against it.");
   const unpacked = join(input.folder, "unpacked");
-  await rm(unpacked, { recursive: true, force: true });
+  await removeTree(unpacked);
   await mkdir(unpacked, { recursive: true });
   try {
     await run("/usr/bin/ditto", ["-x", "-k", input.file, unpacked]);
@@ -117,9 +118,9 @@ export async function stageMacApp(input: { file: string; version: string; folder
     );
   }
   const staged = join(input.folder, "Haarness.app");
-  await rm(staged, { recursive: true, force: true });
+  await removeTree(staged);
   await renameSoon(app, staged);
-  await rm(unpacked, { recursive: true, force: true });
+  await removeTree(unpacked);
   await rm(input.file, { force: true });
   return staged;
 }
@@ -437,6 +438,6 @@ export async function removeLeftovers(target: string, now = Date.now()) {
     if (!pattern.test(entry)) continue;
     const path = join(folder, entry);
     const info = await lstat(path).catch(() => undefined);
-    if (info && now - info.mtimeMs > 10 * 60_000) await rm(path, { recursive: true, force: true }).catch(() => {});
+    if (info && now - info.mtimeMs > 10 * 60_000) await removeTree(path).catch(() => {});
   }
 }

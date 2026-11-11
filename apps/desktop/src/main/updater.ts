@@ -13,6 +13,7 @@ import {
   type UpdateErrorCode,
   type UpdateState,
 } from "../updates";
+import { removeTree } from "./remove-tree";
 
 /**
  * How this copy of Desktop updates (see `UpdateState.method`), and which
@@ -248,7 +249,7 @@ export function createUpdater(options: UpdaterOptions) {
     );
   }
   async function removeStaged(path: string) {
-    if (ours(path)) await rm(path, { recursive: true, force: true }).catch(() => {});
+    if (ours(path)) await removeTree(path).catch(() => {});
   }
 
   /** What an earlier run left: a finished or failed install, a staged
@@ -287,7 +288,7 @@ export function createUpdater(options: UpdaterOptions) {
     }
     for (const name of await readdir(options.dir).catch(() => [] as string[]))
       if (validVersion(name) && compareVersions(name, options.version) <= 0)
-        await rm(join(options.dir, name), { recursive: true, force: true }).catch(() => {});
+        await removeTree(join(options.dir, name)).catch(() => {});
   }
 
   async function latest(): Promise<Found | undefined> {
@@ -604,7 +605,7 @@ export function createUpdater(options: UpdaterOptions) {
         if (error instanceof Stopped || stop.signal.aborted) {
           options.log(`Haarness update: stopped downloading ${version}: ${error instanceof Error ? error.message : String(error)}`);
           // A version no longer offered leaves nothing behind.
-          if (found?.release.version !== version) await rm(folder, { recursive: true, force: true }).catch(() => {});
+          if (found?.release.version !== version) await removeTree(folder).catch(() => {});
           return;
         }
         const reason = updateError(error);

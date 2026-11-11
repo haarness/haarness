@@ -35,11 +35,23 @@ let page: Page;
 let env: Record<string, string>;
 const errors: string[] = [];
 
+/** A real `.asar` archive, Electron's own: Electron's file functions treat
+ * one as a folder, which a removal of an app holding it has to get past. */
+const archive =
+  process.platform === "darwin"
+    ? resolve("node_modules/electron/dist/Electron.app/Contents/Resources/default_app.asar")
+    : resolve("node_modules/electron/dist/resources/default_app.asar");
+/** What an app bundle holds where Haarness.app keeps its code. */
+async function withArchive(bundle: string) {
+  await mkdir(join(bundle, "Contents", "Resources"), { recursive: true });
+  await copyFile(archive, join(bundle, "Contents", "Resources", "app.asar"));
+}
 /** A stand-in macOS app: a signed bundle that says its version. */
 async function macApp(folder: string, version: string) {
   const bundle = join(folder, "Haarness.app");
   await rm(bundle, { recursive: true, force: true });
   await mkdir(join(bundle, "Contents", "MacOS"), { recursive: true });
+  await withArchive(bundle);
   await copyFile("/usr/bin/true", join(bundle, "Contents", "MacOS", "Haarness"));
   await writeFile(
     join(bundle, "Contents", "Info.plist"),
@@ -86,8 +98,9 @@ function manifest(port: number) {
   };
 }
 
-async function launch(extra: Record<string, string> = {}) {
+async function launch(extra: Record<string, string> = {}, prepare?: (data: string) => Promise<void>) {
   const data = await mkdtemp(join(temporary, "run-"));
+  await prepare?.(data);
   env = {
     ...Object.fromEntries(Object.entries(process.env).filter((x): x is [string, string] => x[1] !== undefined)),
     HAARNESS_BIN: binary,
@@ -137,6 +150,11 @@ async function closeSettings() {
   await expect(settings()).toBeHidden();
 }
 const updateRow = () => page.locator(".sidebar-footer .update-row");
+/** `touch -t`'s form of a time: [[CC]YY]MMDDhhmm[.ss]. */
+function stamp(time: Date) {
+  const two = (value: number) => String(value).padStart(2, "0");
+  return `${time.getFullYear()}${two(time.getMonth() + 1)}${two(time.getDate())}${two(time.getHours())}${two(time.getMinutes())}.${two(time.getSeconds())}`;
+}
 async function theme(value: "light" | "dark") {
   await app!.evaluate(({ nativeTheme }, value) => {
     nativeTheme.themeSource = value;
@@ -234,6 +252,29 @@ test("a failed check says why in About, not in the sidebar; once the service is 
   app = undefined;
   await expect.poll(installed, { timeout: 30_000 }).toBe(NEW);
   await expect.poll(() => stat(join(temporary, "reopened")).then(() => true, () => false), { timeout: 10_000 }).toBe(true);
+});
+
+test("copies of the app that earlier runs left behind are removed whole, app.asar and all", async () => {
+  test.setTimeout(240_000);
+  behaviour.mode = "down";
+  const exists = (path: string) => stat(path).then(() => true, () => false);
+  let staged = "";
+  const aside = join(temporary, "Applications", ".Haarness.app.previous.4242");
+  await launch({}, async (data) => {
+    // A version this one has passed, staged by an earlier run and never installed.
+    staged = join(data, "desktop", "updates", "0.0.1", "Haarness.app");
+    await withArchive(staged);
+    // An install stopped halfway, long enough ago that it is not still running.
+    if (os === "macos") {
+      await withArchive(aside);
+      const before = new Date(Date.now() - 60 * 60_000);
+      execFileSync("/usr/bin/touch", ["-t", stamp(before), aside]);
+    }
+  });
+  await expect.poll(() => exists(join(staged, "..")), { timeout: 30_000 }).toBe(false);
+  if (os === "macos") await expect.poll(() => exists(aside), { timeout: 30_000 }).toBe(false);
+  await quit();
+  behaviour.mode = "ok";
 });
 
 test("with automatic downloads off the sidebar offers the update and shows its download; quitting installs it quietly", async () => {
