@@ -1,8 +1,8 @@
 //! Agent and skill files as Claude Code writes them: an agent that lists
 //! `Bash` follows its own commands, a `tools` pattern limits the agent, a
-//! skill the model loads never asks while it loads, a subagent's own `task`
-//! runs in the foreground, and a continued subagent keeps its agent and
-//! model.
+//! skill the model loads never asks while it loads, an agent starts with the
+//! skills it lists, a subagent's own `task` runs in the foreground, and a
+//! continued subagent keeps its agent and model.
 use super::*;
 use haarness_protocol::ItemData;
 use serde_json::json;
@@ -360,6 +360,59 @@ async fn a_person_s_own_command_still_asks_about_its_snippet() {
         wait_done(&runtime, &turn).await.status,
         TurnStatus::Completed
     );
+}
+
+#[tokio::test]
+async fn an_agent_s_preloaded_skills_ride_in_its_system_prompt_unchanged_turn_to_turn() {
+    let fixture = Fixture::new("agent-preload");
+    let provider = Arc::new(Capturing::default());
+    let mut config = review();
+    config.custom_agents.push(haarness_core::CustomAgent {
+        id: "styled".into(),
+        prompt: "Follow the house style.".into(),
+        mode: Some("all".into()),
+        skills: vec!["style".into()],
+        preloaded: "<skill name=\"style\">\nSTYLE_BODY in ${CLAUDE_SESSION_ID}\n</skill>".into(),
+        ..Default::default()
+    });
+    let runtime = runtime_with(
+        &fixture,
+        provider.clone(),
+        Arc::new(NativeToolRegistry::new(fixture.0.clone())),
+        config,
+    );
+    let chat = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Styled".into()),
+            agent: Some("styled".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for text in ["FIRST styled", "SECOND styled"] {
+        let turn = runtime
+            .start_turn(chat.id, turn_request(text))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+    }
+    let requests = provider.requests.lock().unwrap().clone();
+    let first = request_for(&requests, "FIRST styled");
+    let second = request_for(&requests, "SECOND styled");
+    assert!(
+        first.system.contains(&format!(
+            "Follow the house style.\n\n<skill name=\"style\">\nSTYLE_BODY in {}\n</skill>",
+            chat.id
+        )),
+        "{}",
+        first.system
+    );
+    assert_eq!(first.system, second.system);
 }
 
 #[tokio::test]

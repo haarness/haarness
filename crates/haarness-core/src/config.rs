@@ -40,11 +40,21 @@ pub struct CustomAgent {
     /// folders or its local plugins) rather than by the person or the
     /// system folder: its rules never reopen what their rules deny.
     pub project: bool,
+    /// The plugin the agent comes from, whose skills its `skills` names
+    /// first.
+    pub plugin: Option<String>,
     /// The limits a `tools` entry with a pattern sets (`Bash(git diff:*)`):
     /// that tool is denied except for the pattern. A ceiling, so no rule,
     /// Always answer or Yolo reopens the rest, and the agent's children
     /// inherit it.
     pub ceiling: Vec<PermissionRule>,
+    /// Skills the agent starts with (`skills`), by name, as listed.
+    pub skills: Vec<String>,
+    /// Their text, filled in by the composition root (see
+    /// [`crate::definitions::preload_skills`]); empty when none is listed or
+    /// found. It follows the prompt in every request (see
+    /// [`CustomAgent::instructions`]).
+    pub preloaded: String,
 }
 
 impl CustomAgent {
@@ -65,6 +75,22 @@ impl CustomAgent {
         if !self.ceiling.is_empty() {
             engine.add_inherited_ceiling([self.ceiling.clone()]);
         }
+    }
+
+    /// The agent's instructions in chat `session`: its prompt, then the
+    /// skills it starts with, which name the chat where they say
+    /// `${CLAUDE_SESSION_ID}`. Without such skills the prompt as written.
+    #[must_use]
+    pub fn instructions(&self, session: &str) -> std::borrow::Cow<'_, str> {
+        if self.preloaded.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.prompt);
+        }
+        std::borrow::Cow::Owned(format!(
+            "{}\n\n{}",
+            self.prompt.trim_end(),
+            self.preloaded
+                .replace(crate::definitions::SESSION_PLACEHOLDER, session)
+        ))
     }
 }
 

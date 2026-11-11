@@ -1295,7 +1295,10 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
                         .and_then(Value::as_str)
                         .map(str::to_owned),
                     project: layers.project,
+                    plugin: None,
                     ceiling: Vec::new(),
+                    skills: agent_skills(entry.get("skills")),
+                    preloaded: String::new(),
                 },
             );
         }
@@ -2111,7 +2114,10 @@ fn discover_agents_with(
                 top_p: number("top_p"),
                 variant: front.get("variant").cloned(),
                 project,
+                plugin: plugin.map(str::to_owned),
                 ceiling: markdown_agent_ceiling(&front),
+                skills: haarness_core::definitions::list(front.get("skills")),
+                preloaded: String::new(),
             },
         );
     }
@@ -2169,6 +2175,20 @@ fn scoped_agent_name(plugin: &str, relative: &str, explicit: Option<&str>) -> St
         *leaf = explicit;
     }
     format!("{plugin}:{}", parts.join(":"))
+}
+
+/// A JSON agent's `skills`: a list of names, or one string of names
+/// separated by commas.
+fn agent_skills(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        Some(Value::String(names)) => haarness_core::definitions::list(Some(names)),
+        _ => Vec::new(),
+    }
 }
 
 /// The limit a markdown agent's `tools` list sets with entries that carry a
@@ -4464,7 +4484,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_agent_turns_and_tool_patterns_mean_what_they_say() {
+    fn claude_code_agent_turns_skills_and_tool_patterns_mean_what_they_say() {
         let root =
             std::env::temp_dir().join(format!("haarness-claude-agents-{}", uuid::Uuid::now_v7()));
         let agents_dir = root.join("agents");
@@ -4477,6 +4497,8 @@ mod tests {
             ("follower", "tools: Bash, BashOutput, KillShell"),
             ("differ", "tools: Read, Bash(git diff:*), Bash(git log:*)"),
             ("whole", "tools: Bash(git diff:*), Bash"),
+            ("starter", "skills:\n  - checklist\n  - style"),
+            ("one-line", "skills: checklist, style"),
         ] {
             fs::write(
                 agents_dir.join(format!("{name}.md")),
@@ -4504,6 +4526,7 @@ mod tests {
         assert_eq!(agent("turns").steps, Some(3));
         assert_eq!(agent("steps-win").steps, Some(5));
         assert_eq!(agent("max-steps-win").steps, Some(7));
+        assert_eq!(agent("turns").plugin.as_deref(), Some("kit"));
         let runner = agent("runner");
         assert_eq!(runner.tools.get("*"), Some(&false));
         assert_eq!(runner.tools.get("bash"), Some(&true));
@@ -4528,6 +4551,8 @@ mod tests {
         );
         assert_eq!(agent("differ").tools.get("bash"), Some(&true));
         assert!(agent("whole").ceiling.is_empty());
+        assert_eq!(agent("starter").skills, ["checklist", "style"]);
+        assert_eq!(agent("one-line").skills, ["checklist", "style"]);
 
         // The limit holds in the agent's rules, however wide the rules
         // around it are: it never grants, and nothing reopens it.
@@ -4554,14 +4579,14 @@ mod tests {
             PermissionDecision::Allow
         );
 
-        // A JSON entry reads `maxTurns` too.
+        // A JSON entry reads `maxTurns` and `skills` too.
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         fs::write(
             workspace.join("haarness.json"),
             serde_json::json!({"agent": {
-                "listed": {"prompt": "P", "maxTurns": 4},
-                "named": {"prompt": "P", "steps": 2, "maxTurns": 4}
+                "listed": {"prompt": "P", "maxTurns": 4, "skills": ["checklist"]},
+                "named": {"prompt": "P", "steps": 2, "maxTurns": 4, "skills": "checklist, style"}
             }})
             .to_string(),
         )
@@ -4569,8 +4594,10 @@ mod tests {
         let layers = load_layers(&root.join("config"), None, &workspace, true, &[]);
         let listed = layers.agents.iter().find(|a| a.id == "listed").unwrap();
         assert_eq!(listed.steps, Some(4));
+        assert_eq!(listed.skills, ["checklist"]);
         let named = layers.agents.iter().find(|a| a.id == "named").unwrap();
         assert_eq!(named.steps, Some(2));
+        assert_eq!(named.skills, ["checklist", "style"]);
         fs::remove_dir_all(root).unwrap();
     }
 

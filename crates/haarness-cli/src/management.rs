@@ -283,7 +283,14 @@ impl ManagementService {
                 .retain(|command| !disabled.contains(&command.name));
         }
         runtime.replace_commands(layers.commands);
-        runtime.replace_custom_agents(layers.agents);
+        let mut agents = layers.agents;
+        crate::preload_agent_skills(
+            &mut agents,
+            self.skills.as_ref(),
+            &layers.rules,
+            &self.workspace,
+        );
+        runtime.replace_custom_agents(agents);
         runtime.set_memory_context(self.memory_index().unwrap_or_default());
     }
 

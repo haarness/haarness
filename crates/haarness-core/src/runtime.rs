@@ -5133,7 +5133,12 @@ impl AgentRuntime {
                         &context,
                     )
                 },
-                |custom| custom_system_prompt_with_context(&custom.prompt, &context),
+                |custom| {
+                    custom_system_prompt_with_context(
+                        &custom.instructions(&thread.id.to_string()),
+                        &context,
+                    )
+                },
             );
             let ultracode = if let Some(turn) = turn_id {
                 self.repository.get_turn(turn).await?.ultracode
@@ -11912,7 +11917,7 @@ impl RunnerTask {
                     // Custom bodies replace only the role-specific guidance;
                     // the runtime/environment contract remains universal.
                     custom_system_prompt_with_context(
-                        &custom.prompt,
+                        &custom.instructions(&self.thread.id.to_string()),
                         &SystemPromptContext {
                             provider: provider_id,
                             model: &model,

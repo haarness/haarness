@@ -8878,6 +8878,23 @@ struct ComposedRuntimeSources {
     runtime_config: haarness_core::RuntimeConfig,
 }
 
+/// Fills in the text of the skills each agent starts with (`skills`) from
+/// `skills`, leaving out any that `rules`, the configuration's own, or the
+/// agent's deny by name (see [`haarness_core::definitions::preload_skills`]).
+/// Every place that hands agents to the runtime does this, so an agent reads
+/// the same however its definitions were last loaded.
+pub(crate) fn preload_agent_skills(
+    agents: &mut [haarness_core::CustomAgent],
+    skills: &dyn SkillRegistry,
+    rules: &[haarness_core::PermissionRule],
+    workspace: &Path,
+) {
+    let workspace = workspace.to_string_lossy();
+    for agent in agents {
+        haarness_core::definitions::preload_skills(agent, skills, rules, &workspace);
+    }
+}
+
 fn compose_runtime_sources(
     paths: &Paths,
     workspace: &Path,
@@ -9153,7 +9170,7 @@ impl HotReloadController {
         )
         .await
         .unwrap_or_default();
-        let sources = compose_runtime_sources(
+        let mut sources = compose_runtime_sources(
             &self.paths,
             &self.workspace,
             self.trust,
@@ -9200,6 +9217,12 @@ impl HotReloadController {
         let disabled_skills =
             capability_state::disabled(&self.paths, &self.workspace, self.trust, "skill")?;
         candidate_skills.set_disabled(disabled_skills.clone());
+        preload_agent_skills(
+            &mut sources.runtime_config.custom_agents,
+            &candidate_skills,
+            &sources.json_layers.rules,
+            &self.workspace,
+        );
         let skill_infos = candidate_skills.discover().await.unwrap_or_default();
         let tools: Arc<dyn ToolRegistry> = Arc::new(
             NativeToolRegistry::with_workflows_and_scheduler(
@@ -9963,7 +9986,7 @@ async fn application_at(
         skill_roots,
         workflow_catalog,
         project_context,
-        runtime_config,
+        mut runtime_config,
     } = sources;
     for notice in migration_notices.iter().chain(&json_layers.notices) {
         tracing::info!("config: {notice}");
@@ -9998,6 +10021,12 @@ async fn application_at(
     skills.set_disabled(capability_state::disabled(
         paths, workspace, trust, "skill",
     )?);
+    preload_agent_skills(
+        &mut runtime_config.custom_agents,
+        skills.as_ref(),
+        &json_layers.rules,
+        workspace,
+    );
     let events = EventBus::new(2048);
     let workflow_host = WorkflowRuntimeAdapter::new();
     let workflows = Arc::new(WorkflowCoordinator::new(
