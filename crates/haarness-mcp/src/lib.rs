@@ -8826,6 +8826,7 @@ mod recovery_tests {
     }
 
     /// `config` configured by the process `pid`, as it says when it started.
+    #[cfg(unix)]
     fn owned_by(config: &McpConfigureRequest, pid: u32, started: &str) -> McpConfigureRequest {
         let mut owned = config.clone();
         owned.owner = Some(McpOwner {
