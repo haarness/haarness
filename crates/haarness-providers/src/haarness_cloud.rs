@@ -1314,6 +1314,7 @@ mod tests {
                         if state.refusing.load(Ordering::SeqCst) {
                             return (
                                 StatusCode::TOO_MANY_REQUESTS,
+                                [("x-request-id", "req_0193a0d7busy")],
                                 Json(json!({"error":{"message":"per-key concurrency limit reached",
                                     "type":"rate_limit_error","code":"concurrency_limited"}})),
                             )
@@ -1567,6 +1568,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A request Cloud refuses is named in the log by Cloud's own
+    /// `x-request-id`, so it can be found in Cloud's logs; the person reads
+    /// the same words as before, without the id.
+    #[tokio::test]
+    async fn a_refused_request_is_named_in_the_log_by_clouds_request_id() {
+        use futures::StreamExt as _;
+        let (mut provider, stand, server, root) = stand_in().await;
+        stand.refusing.store(true, Ordering::SeqCst);
+        provider.busy_jitter = || Duration::ZERO;
+        let (logged, _guard) = crate::log_capture::Logged::start();
+        let events = provider
+            .stream(
+                recording("anthropic/claude-sonnet-5-5"),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let error = events.into_iter().find_map(Result::err).unwrap();
+        assert_eq!(
+            error.to_string(),
+            "provider error: Haarness Cloud is already running as many of your requests at once \
+             as its rate limit allows. Try again in a moment, or once another chat or agent \
+             finishes."
+        );
+        let lines = logged.lines("provider refused the request");
+        assert_eq!(lines.len(), 1, "{}", logged.all());
+        assert!(
+            lines[0].contains(" status=429")
+                && lines[0].contains(" host=127.0.0.1")
+                && lines[0].contains(" request_id=req_0193a0d7busy"),
+            "{}",
+            lines[0]
+        );
+        server.abort();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[derive(Clone)]
     struct Grants {
         url: String,
@@ -1711,14 +1751,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A name no other test of this run shares: the clock alone repeats
+    /// for tests that start together (macOS reads it to the microsecond),
+    /// and two stand-ins sharing a folder read each other's sign-in.
     fn uuid_for_test() -> String {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         format!(
-            "{}-{}",
+            "{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
         )
     }
 }

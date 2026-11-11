@@ -15,6 +15,8 @@ mod gemini;
 mod haarness_cloud;
 mod key_check;
 mod live_models;
+#[cfg(test)]
+mod log_capture;
 mod media;
 mod model_order;
 mod ollama;
@@ -131,16 +133,103 @@ fn identifier(value: &str) -> Option<String> {
     .then(|| value.to_owned())
 }
 
-/// The provider's own id for one request, from its response headers.
+/// The response headers that name a request, in the order they are tried:
+/// Anthropic's `request-id`, Azure OpenAI's `apim-request-id` (its id for
+/// troubleshooting, sent beside an `x-request-id`), the `x-request-id` of
+/// OpenAI, Haarness Cloud and most gateways, AWS's, Google's and GitHub
+/// Copilot's. Only these exact names are read, never a header that could
+/// carry a credential.
+const REQUEST_ID_HEADERS: [&str; 9] = [
+    "request-id",
+    "apim-request-id",
+    "x-request-id",
+    "anthropic-request-id",
+    "x-amzn-requestid",
+    "x-amz-request-id",
+    "x-goog-request-id",
+    "x-github-request-id",
+    "apigw-requestid",
+];
+
+/// The provider's own id for one request, from its response headers: the
+/// first of [`REQUEST_ID_HEADERS`] whose value is a plain identifier.
 pub(crate) fn request_id(headers: &HeaderMap) -> Option<String> {
-    [
-        "request-id",
-        "x-request-id",
-        "anthropic-request-id",
-        "x-amzn-requestid",
-    ]
-    .iter()
-    .find_map(|name| headers.get(*name)?.to_str().ok().and_then(identifier))
+    REQUEST_ID_HEADERS
+        .iter()
+        .find_map(|name| headers.get(*name)?.to_str().ok().and_then(identifier))
+}
+
+/// Where one model request went and the id its provider answered with, for
+/// the daemon log: a failure names them, so it can be found in the
+/// provider's own records or in Haarness Cloud's. Only the log carries
+/// them; the error people see stays as it is. Clones share whether the
+/// reply finished.
+#[derive(Clone)]
+pub(crate) struct RequestTrace {
+    host: Option<String>,
+    id: Option<String>,
+    finished: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RequestTrace {
+    pub(crate) fn of(response: &reqwest::Response) -> Self {
+        Self {
+            host: response.url().host_str().map(str::to_owned),
+            id: request_id(response.headers()),
+            finished: Arc::default(),
+        }
+    }
+
+    pub(crate) fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    /// The provider said its reply is complete (a finish reason, a stop
+    /// event): a connection that breaks or goes silent after this loses
+    /// nothing, and the turn keeps the reply.
+    pub(crate) fn mark_finished(&self) {
+        self.finished
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The provider answered the request with `status` instead of a reply.
+    pub(crate) fn refused(&self, status: reqwest::StatusCode) {
+        tracing::warn!(
+            status = status.as_u16(),
+            host = self.host.as_deref().unwrap_or("unknown"),
+            request_id = self.id().unwrap_or("unknown"),
+            "provider refused the request"
+        );
+    }
+
+    /// The reader of the reply's stream failed: its connection broke off or
+    /// went silent, or what it carried could not be read. A cut after the
+    /// reply finished loses nothing, since the turn keeps the reply as it
+    /// is, and logs nothing.
+    pub(crate) fn cut_off(&self, error: &haarness_core::CoreError) {
+        if self.finished.load(std::sync::atomic::Ordering::Relaxed)
+            && haarness_core::is_stream_cut(error)
+        {
+            return;
+        }
+        self.failed(error);
+    }
+
+    /// The reply failed part way: the provider sent an error in its stream,
+    /// even one after its finish (a Haarness router's word that the model
+    /// behind it fell silent reads like a cut, but the turn does not keep
+    /// the reply for it), or the stream broke off or went silent. A stop is
+    /// no failure and logs nothing.
+    pub(crate) fn failed(&self, error: &haarness_core::CoreError) {
+        if matches!(error, haarness_core::CoreError::Cancelled) {
+            return;
+        }
+        tracing::warn!(
+            host = self.host.as_deref().unwrap_or("unknown"),
+            request_id = self.id().unwrap_or("unknown"),
+            "provider's reply failed part way"
+        );
+    }
 }
 
 /// Say in the daemon log which response a provider's safety check stopped,
@@ -1219,6 +1308,103 @@ mod tests {
             Ok(CompatibleProtocol::AmazonBedrock)
         );
         assert!(CompatibleProtocol::parse("vendor-private-wire").is_err());
+    }
+
+    /// The id [`super::request_id`] reads from a response with `headers`,
+    /// each a name and its raw value.
+    fn id_of(headers: &[(&str, &[u8])]) -> Option<String> {
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            map.append(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_bytes(value).unwrap(),
+            );
+        }
+        super::request_id(&map)
+    }
+
+    /// Every service's id header names the request, however the service
+    /// capitalises it, and Azure's own id wins over the generic one it sends
+    /// beside it.
+    #[test]
+    fn each_services_id_header_names_the_request() {
+        for name in super::REQUEST_ID_HEADERS {
+            let shouted = name.to_ascii_uppercase();
+            assert_eq!(
+                id_of(&[
+                    ("content-type", b"application/json"),
+                    (&shouted, b"lane-42.k9")
+                ])
+                .as_deref(),
+                Some("lane-42.k9"),
+                "{name}"
+            );
+        }
+        // GitHub's ids are hex groups joined by colons.
+        assert_eq!(
+            id_of(&[("X-GitHub-Request-Id", b"E1F0:2B3C:4D5E6F:708192:AB12CD34")]).as_deref(),
+            Some("E1F0:2B3C:4D5E6F:708192:AB12CD34")
+        );
+        assert_eq!(
+            id_of(&[
+                ("x-request-id", b"edge-7"),
+                ("apim-request-id", b"5d0c8e7a-3f11-4c2b-9e64-a1b2c3d4e5f6"),
+            ])
+            .as_deref(),
+            Some("5d0c8e7a-3f11-4c2b-9e64-a1b2c3d4e5f6")
+        );
+        assert_eq!(
+            id_of(&[
+                ("x-goog-request-id", b"g-31"),
+                ("x-amzn-requestid", b"aws-12")
+            ])
+            .as_deref(),
+            Some("aws-12")
+        );
+    }
+
+    /// A value that could break a log line, or run on, is passed over for
+    /// the next header, or leaves the request unnamed.
+    #[test]
+    fn an_id_that_is_no_plain_token_is_passed_over() {
+        let edge = "e".repeat(128);
+        let past_edge = "e".repeat(129);
+        for unsafe_value in [
+            b"id with gaps".as_slice(),
+            b"tab\there",
+            b"caf\xc3\xa9",
+            b"quote\"d",
+            b"key;value",
+            b"pct%20",
+            b"",
+            past_edge.as_bytes(),
+        ] {
+            assert_eq!(id_of(&[("request-id", unsafe_value)]), None);
+            assert_eq!(
+                id_of(&[("request-id", unsafe_value), ("x-amz-request-id", b"S3-77")]).as_deref(),
+                Some("S3-77")
+            );
+        }
+        assert_eq!(id_of(&[("request-id", edge.as_bytes())]), Some(edge));
+    }
+
+    /// Nothing but the listed names is read: not a header whose name only
+    /// looks like one, and never one that carries a credential or a session.
+    #[test]
+    fn only_the_listed_id_headers_are_read() {
+        assert_eq!(
+            id_of(&[
+                ("cookie", b"hsid=opaque-session"),
+                ("openai-organization", b"org-fixture"),
+                ("x-haarness-grant", b"grant-fixture"),
+                ("x-request-identifier", b"near-1"),
+                ("request-id-hint", b"near-2"),
+                ("x-amzn-trace-id", b"Root=1-6f1e"),
+            ]),
+            None
+        );
+        assert_eq!(id_of(&[]), None);
     }
 
     #[test]

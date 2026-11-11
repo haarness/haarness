@@ -1097,8 +1097,10 @@ const STREAM_CUT: [&str; 5] = [
 /// Whether a response stopped because its connection broke or fell silent,
 /// not because the provider reported an error. After output has begun, such
 /// a cut is continued like a response cut short; an error the provider sent
-/// itself (an error event, which arrives as JSON) still fails the turn.
-fn is_stream_cut(error: &CoreError) -> bool {
+/// itself (an error event, which arrives as JSON) still fails the turn. After
+/// the response finished, a cut loses nothing, and providers log it as no
+/// failure either.
+pub fn is_stream_cut(error: &CoreError) -> bool {
     let CoreError::Provider(message) = error else {
         return false;
     };

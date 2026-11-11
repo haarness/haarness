@@ -1,5 +1,5 @@
 use async_stream::try_stream;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt as _};
 use haarness_core::{CoreError, CoreResult, StreamLimits, stream_stall};
 use serde_json::Value;
 use std::{pin::Pin, time::Duration};
@@ -69,23 +69,27 @@ pub(crate) async fn send(
 /// The response's server-sent events as JSON values. Any byte resets the idle
 /// limit, so a provider's keep-alive pings and `:` comments count as activity;
 /// a silence that outlasts it ends the stream with an error, and dropping the
-/// stream closes the connection, so the provider stops generating.
+/// stream closes the connection, so the provider stops generating. A refusal,
+/// or a reply that fails part way, is named in the log by `trace`, the
+/// response's own.
 pub fn json_stream(
     response: reqwest::Response,
+    trace: &crate::RequestTrace,
     cancel: CancellationToken,
     limits: StreamLimits,
 ) -> JsonStream {
-    framed_stream(response, cancel, limits, Framing::Events)
+    framed_stream(response, trace.clone(), cancel, limits, Framing::Events)
 }
 
 /// The response's lines as JSON values, one value a line (Ollama's own API
 /// streams this way), with the same limits and errors as [`json_stream`].
 pub(crate) fn json_lines_stream(
     response: reqwest::Response,
+    trace: &crate::RequestTrace,
     cancel: CancellationToken,
     limits: StreamLimits,
 ) -> JsonStream {
-    framed_stream(response, cancel, limits, Framing::Lines)
+    framed_stream(response, trace.clone(), cancel, limits, Framing::Lines)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -98,12 +102,17 @@ enum Framing {
 
 fn framed_stream(
     response: reqwest::Response,
+    trace: crate::RequestTrace,
     cancel: CancellationToken,
     limits: StreamLimits,
     framing: Framing,
 ) -> JsonStream {
     let limit = limits.idle(is_loopback(response.url()));
-    Box::pin(try_stream! {
+    let refused = !response.status().is_success();
+    if refused {
+        trace.refused(response.status());
+    }
+    let stream = try_stream! {
         let response = if response.status().is_success() {
             response
         } else {
@@ -177,7 +186,12 @@ fn framed_stream(
         } else if !yielded && !rest.is_empty() {
             yield whole_reply(&rest)?;
         }
-    })
+    };
+    Box::pin(stream.inspect_err(move |error| {
+        if !refused {
+            trace.cut_off(error);
+        }
+    }))
 }
 
 /// The JSON in one server-sent event, or `None` for an event with no data
@@ -548,7 +562,8 @@ mod tests {
         let response = send(reqwest::Client::new().post(&url).body("{}"), limits)
             .await
             .unwrap();
-        let mut events = json_stream(response, CancellationToken::new(), limits);
+        let trace = crate::RequestTrace::of(&response);
+        let mut events = json_stream(response, &trace, CancellationToken::new(), limits);
         assert_eq!(events.next().await.unwrap().unwrap(), json!({"n": 1}));
         let error = events.next().await.unwrap().unwrap_err();
         assert_eq!(
@@ -608,7 +623,8 @@ mod tests {
         let response = send(reqwest::Client::new().post(url).body("{}"), limits)
             .await
             .unwrap();
-        json_stream(response, CancellationToken::new(), limits)
+        let trace = crate::RequestTrace::of(&response);
+        json_stream(response, &trace, CancellationToken::new(), limits)
             .collect()
             .await
     }

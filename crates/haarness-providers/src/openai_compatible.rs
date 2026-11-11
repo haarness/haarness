@@ -2750,6 +2750,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         // the output it says it can afford, when that still leaves room to work.
         if self.id == "openrouter" && response.status() == reqwest::StatusCode::PAYMENT_REQUIRED {
             let status = response.status();
+            let trace = crate::RequestTrace::of(&response);
             let text = response.text().await.unwrap_or_default();
             let requested = body["max_tokens"].as_u64();
             match affordable_output(&text).filter(|afford| {
@@ -2766,6 +2767,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     response = crate::sse::send(builder, limits).await?;
                 }
                 None => {
+                    trace.refused(status);
                     let message = crate::sse::provider_error_detail(&text).map_or_else(
                         || format!("HTTP {status}"),
                         |detail| format!("HTTP {status}: {detail}"),
@@ -2795,7 +2797,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         // A refusal read here is the stream's first item, as one the stream
         // reads itself would be.
-        let mut request_id = crate::request_id(response.headers());
+        let mut trace = crate::RequestTrace::of(&response);
         let answer = if !response.status().is_success() && !self.server_output_limit {
             let status = response.status();
             let headers_seen = response.headers().clone();
@@ -2822,12 +2824,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     .headers(headers)
                     .json(&body);
                 let response = crate::sse::send(builder, limits).await?;
-                request_id = crate::request_id(response.headers());
+                trace = crate::RequestTrace::of(&response);
                 if response.status().is_success() {
                     Ok(response)
                 } else {
                     let status = response.status();
                     let headers_seen = response.headers().clone();
+                    trace.refused(status);
                     let text = crate::sse::within(idle, response.text())
                         .await?
                         .unwrap_or_default();
@@ -2849,15 +2852,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     .headers(headers)
                     .json(&body);
                 let response = crate::sse::send(builder, limits).await?;
-                request_id = crate::request_id(response.headers());
+                trace = crate::RequestTrace::of(&response);
                 Ok(response)
             } else if matches!(status.as_u16(), 404 | 405) && missing_route(&text) {
+                trace.refused(status);
                 Err(CoreError::ProviderUnavailable(format!(
                     "{} has no chat API at {}. Change the provider's base URL to the one in its API documentation: it usually ends in /v1.",
                     self.name,
                     redacted_url(&self.endpoint)
                 )))
             } else {
+                trace.refused(status);
                 Err(crate::sse::status_error(status, &headers_seen, &text))
             }
         } else {
@@ -2884,9 +2889,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         .flatten()
                         .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
                         .collect();
-                    ollama::chat_chunks(json_lines_stream(response, cancel, limits), tools)
+                    ollama::chat_chunks(json_lines_stream(response, &trace, cancel, limits), tools)
                 } else {
-                    json_stream(response, cancel, limits)
+                    json_stream(response, &trace, cancel, limits)
                 }
             }
             Err(error) => Box::pin(futures::stream::once(std::future::ready(Err(error)))),
@@ -2981,7 +2986,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         Some(status) => format!("HTTP {status}: {message}"),
                         None => message,
                     };
-                    Err(CoreError::Provider(message))?;
+                    let error = CoreError::Provider(message);
+                    trace.failed(&error);
+                    Err(error)?;
                 }
                 // A reply sent whole carries `message` where a stream's
                 // chunks carry `delta`.
@@ -3073,7 +3080,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 }
                 // Some gateways put an empty reason on every chunk, the last
                 // one after the real reason among them.
-                if let Some(reason)=event["choices"][0]["finish_reason"].as_str().filter(|reason| !reason.is_empty()){finish_reason = Some(reason.to_owned());}
+                if let Some(reason)=event["choices"][0]["finish_reason"].as_str().filter(|reason| !reason.is_empty()){finish_reason = Some(reason.to_owned()); trace.mark_finished();}
                 if response_id.is_none() { response_id = event["id"].as_str().map(str::to_owned); }
             }
             let mut provider_metadata = json!({});
@@ -3145,7 +3152,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 yield ProviderEvent::StructuredOutput(value);
             }
             let reason = finish_reason.unwrap_or_else(||"incomplete".into());
-            crate::log_blocked_finish(&provider_id, &reason, request_id.as_deref(), response_id.as_deref());
+            crate::log_blocked_finish(&provider_id, &reason, trace.id(), response_id.as_deref());
             yield ProviderEvent::Finished{reason};
             if let Some(error) = broken_after_finish {
                 Err::<(), _>(error)?;
@@ -5565,16 +5572,22 @@ mod tests {
         async fn nearly_empty(
             State(state): State<FixtureState>,
             Json(request): Json<Value>,
-        ) -> (axum::http::StatusCode, Json<Value>) {
+        ) -> (
+            axum::http::StatusCode,
+            [(&'static str, &'static str); 1],
+            Json<Value>,
+        ) {
             state.0.lock().push(request);
             (
                 axum::http::StatusCode::PAYMENT_REQUIRED,
+                [("x-request-id", "or-credits-31")],
                 Json(
                     json!({"error":{"code":402,"message":"This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 900."}}),
                 ),
             )
         }
         let (provider, state) = openrouter_fixture(post(nearly_empty)).await;
+        let (logged, _guard) = crate::log_capture::Logged::start();
         let Err(haarness_core::CoreError::Provider(message)) = provider
             .stream(short_request(), CancellationToken::new())
             .await
@@ -5586,7 +5599,16 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("can only afford 900"), "{message}");
+        assert!(!message.contains("or-credits-31"), "{message}");
         assert_eq!(state.0.lock().len(), 1);
+        // The refusal is named in the log by its request id.
+        let lines = logged.lines("provider refused the request");
+        assert_eq!(lines.len(), 1, "{}", logged.all());
+        assert!(
+            lines[0].contains(" status=402") && lines[0].contains(" request_id=or-credits-31"),
+            "{}",
+            lines[0]
+        );
     }
 
     /// A call whose arguments are not valid JSON (ByteDance Seed wrote a

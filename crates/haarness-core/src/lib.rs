@@ -71,8 +71,8 @@ pub use ports::*;
 pub use prompts::{PromptFile, PromptMode, PromptName, Prompts};
 pub use runtime::{
     AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, PROMPT_BLOCKED,
-    ResourceMentionPolicy, StaticProviderRegistry, prompt_blocked, refusal_reason, shorten_title,
-    webfetch_address, webfetch_redirect_verdict,
+    ResourceMentionPolicy, StaticProviderRegistry, is_stream_cut, prompt_blocked, refusal_reason,
+    shorten_title, webfetch_address, webfetch_redirect_verdict,
 };
 pub use stream_limits::{
     DEFAULT_RESPONSE_TOTAL, DEFAULT_STREAM_IDLE, StreamLimits, response_timeout, stream_stall,

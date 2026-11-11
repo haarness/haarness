@@ -12,7 +12,7 @@ use std::{
 use async_stream::try_stream;
 use async_trait::async_trait;
 use chrono::Utc;
-use futures::StreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use haarness_core::{
     CoreError, CoreResult, KeyCheck, ModelProvider, ProviderEvent, ProviderMessage,
     ProviderRequest, ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, StreamLimits,
@@ -513,6 +513,8 @@ impl ModelProvider for BedrockProvider {
         let tools = body.get("toolConfig").is_some();
         let (mut profiled, mut unforced, mut unreasoned, mut renewed) =
             (false, false, false, false);
+        // The refusal of the model's own id, its status and trace, kept while
+        // its inference profile is asked.
         let mut first_refusal = None;
         loop {
             let whole = tools && self.answers_tools_whole(&model_id);
@@ -562,6 +564,7 @@ impl ModelProvider for BedrockProvider {
             }
             let status = response.status();
             let kind = error_type(response.headers());
+            let trace = crate::RequestTrace::of(&response);
             let limit = limits.idle(crate::sse::is_loopback(response.url()));
             let text = crate::sse::within(limit, response.text())
                 .await?
@@ -609,7 +612,8 @@ impl ModelProvider for BedrockProvider {
                 {
                     tracing::info!(model = %model_id, %profile, "Bedrock runs this model only through an inference profile");
                     profiled = true;
-                    first_refusal = Some(http_error(status, kind.as_deref(), &text));
+                    first_refusal =
+                        Some((http_error(status, kind.as_deref(), &text), status, trace));
                     model_id = profile;
                     continue;
                 }
@@ -622,11 +626,14 @@ impl ModelProvider for BedrockProvider {
                 // Bedrock said of the model's own id says more.
                 if profiled
                     && lower.contains("model identifier is invalid")
-                    && let Some(refusal) = first_refusal.take()
+                    && let Some((refusal, first_status, first_trace)) = first_refusal.take()
                 {
+                    // The log names the request whose refusal the person reads.
+                    first_trace.refused(first_status);
                     return Err(refusal);
                 }
             }
+            trace.refused(status);
             return Err(http_error(status, kind.as_deref(), &text));
         }
     }
@@ -647,8 +654,9 @@ fn converse_whole(
     limits: StreamLimits,
     provider_id: String,
 ) -> ProviderStream {
-    let request_id = crate::request_id(response.headers());
-    Box::pin(try_stream! {
+    let trace = crate::RequestTrace::of(&response);
+    let failed = trace.clone();
+    let stream = try_stream! {
         let body = async {
             match limits.total() {
                 Some(limit) => tokio::time::timeout(limit, response.text())
@@ -673,10 +681,11 @@ fn converse_whole(
         }
         let finished = events.finish()?;
         if let ProviderEvent::Finished { reason } = &finished {
-            crate::log_blocked_finish(&provider_id, reason, request_id.as_deref(), None);
+            crate::log_blocked_finish(&provider_id, reason, trace.id(), None);
         }
         yield finished;
-    })
+    };
+    Box::pin(stream.inspect_err(move |error| failed.failed(error)))
 }
 
 /// A whole Converse answer as the ConverseStream events that would have
@@ -746,8 +755,9 @@ fn converse_stream(
     provider_id: String,
 ) -> ProviderStream {
     let limit = limits.idle(crate::sse::is_loopback(response.url()));
-    let request_id = crate::request_id(response.headers());
-    Box::pin(try_stream! {
+    let trace = crate::RequestTrace::of(&response);
+    let failed = trace.clone();
+    let stream = try_stream! {
         let mut chunks = response.bytes_stream();
         let mut decoder = aws_event_stream::Decoder::default();
         let mut events = ConverseEvents::default();
@@ -787,10 +797,13 @@ fn converse_stream(
         }
         let finished = events.finish()?;
         if let ProviderEvent::Finished { reason } = &finished {
-            crate::log_blocked_finish(&provider_id, reason, request_id.as_deref(), None);
+            crate::log_blocked_finish(&provider_id, reason, trace.id(), None);
         }
         yield finished;
-    })
+    };
+    // An exception Bedrock sends, or a stream that breaks off, names the
+    // request in the log.
+    Box::pin(stream.inspect_err(move |error| failed.failed(error)))
 }
 
 /// Set on a call's metadata when some of its reasoning came after words of
@@ -2813,9 +2826,18 @@ mod tests {
                  uri: axum::http::Uri,
                  Json(body): Json<Value>| async move {
                     let path = uri.path().to_owned();
-                    seen.lock().push((path.clone(), body.clone()));
+                    let number = {
+                        let mut seen = seen.lock();
+                        seen.push((path.clone(), body.clone()));
+                        seen.len()
+                    };
                     let (status, bytes) = answer(&path, &body);
-                    (axum::http::StatusCode::from_u16(status).unwrap(), bytes)
+                    // Each answer names its request, as AWS does.
+                    (
+                        axum::http::StatusCode::from_u16(status).unwrap(),
+                        [("x-amzn-requestid", format!("bedrock-step-{number}"))],
+                        bytes,
+                    )
                 },
             )
             .with_state(state);
@@ -3318,11 +3340,20 @@ mod tests {
         });
         let (base, _) = scripted_bedrock(answer).await;
         let provider = scripted_provider(base, &["acme.chat-v1:0"]);
+        let (logged, _guard) = crate::log_capture::Logged::start();
         let error = answer_of(&provider, ask("acme.chat-v1:0", false))
             .await
             .unwrap_err()
             .to_string();
         assert!(error.contains("on-demand throughput"), "{error}");
+        // The log names the request whose words the person reads: the first.
+        let lines = logged.lines("provider refused the request");
+        assert_eq!(lines.len(), 1, "{}", logged.all());
+        assert!(
+            lines[0].contains(" status=400") && lines[0].contains(" request_id=bedrock-step-1"),
+            "{}",
+            lines[0]
+        );
     }
 
     #[tokio::test]

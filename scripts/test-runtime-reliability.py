@@ -230,11 +230,13 @@ class Provider(http.server.BaseHTTPRequestHandler):
             self.wfile.write(('data: ' + json.dumps(event) + '\n\n').encode())
         self.wfile.flush()
 
-    def refuse(self, status, body):
+    def refuse(self, status, body, headers=()):
         raw = json.dumps(body).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(raw)))
+        for name, value in headers:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -290,7 +292,9 @@ class Provider(http.server.BaseHTTPRequestHandler):
             seen = BUSY_SEEN.get(model, 0)
             BUSY_SEEN[model] = seen + 1
             if seen % 2 == 0:
-                return self.refuse(503, {'type': 'error', 'error': {'type': 'api_error', 'message': 'Service busy'}})
+                # Anthropic names each request it answers in `request-id`.
+                return self.refuse(503, {'type': 'error', 'error': {'type': 'api_error', 'message': 'Service busy'}},
+                                   [('request-id', f'req_busy_round_{seen // 2}')])
             if done < 5:
                 return self.events(kind, call=(f'busy-{done}', 'read', {'path': 'notes.txt'}))
             return self.events(kind, 'BUSY_DONE')
@@ -463,7 +467,14 @@ def turn_loop_checks():
                 assert len(sent) == 12, len(sent)
                 # Six waits of 2 seconds, not 2 + 4 + 8 + 16 and a failure.
                 assert time.monotonic() - started < 25, time.monotonic() - started
-                passed.append('busy provider retried in every round')
+                # The daemon log names each refused request by the provider's id, and no chat shows one.
+                def named():
+                    log = ''.join(path.read_text(errors='replace') for path in sorted((root / 'data').glob('**/logs/haarness.log*')))
+                    lines = [line for line in log.splitlines() if 'provider refused the request' in line and 'status=503' in line]
+                    return all(any(f'request_id="req_busy_round_{round_}"' in line for line in lines) for round_ in range(6))
+                until(named, 'the daemon log does not name every refused request', timeout=15)
+                assert 'req_busy_round_' not in json.dumps(api(f'/threads/{thread}/items'))
+                passed.append('busy provider retried in every round, each refusal named in the log')
 
             def cut_rounds():
                 """Every other response cut off, a tool round between: twelve recoveries, and the one the

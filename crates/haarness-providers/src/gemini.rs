@@ -307,9 +307,9 @@ impl ModelProvider for GeminiProvider {
         }
         let response =
             crate::sse::send(self.client.post(url).headers(headers).json(&body), limits).await?;
-        let request_id = crate::request_id(response.headers());
+        let trace = crate::RequestTrace::of(&response);
         let provider_id = self.id.clone();
-        let mut events = json_stream(response, cancel, limits);
+        let mut events = json_stream(response, &trace, cancel, limits);
         Ok(Box::pin(try_stream! {
             let mut call_index = 0_u64;
             while let Some(event)=events.next().await {
@@ -348,12 +348,14 @@ impl ModelProvider for GeminiProvider {
                 if let Some(usage)=event.get("usageMetadata") { yield ProviderEvent::Usage { input_tokens:usage["promptTokenCount"].as_u64().unwrap_or(0),output_tokens:usage["candidatesTokenCount"].as_u64().unwrap_or(0)+usage["thoughtsTokenCount"].as_u64().unwrap_or(0),cache_read_tokens:usage["cachedContentTokenCount"].as_u64().unwrap_or(0),cache_write_tokens:0 }; }
                 if event.pointer("/candidates/0/finishReason").is_some() {
                     let reason = event.pointer("/candidates/0/finishReason").and_then(Value::as_str).unwrap_or("completed");
-                    crate::log_blocked_finish(&provider_id, reason, request_id.as_deref(), event["responseId"].as_str());
+                    trace.mark_finished();
+                    crate::log_blocked_finish(&provider_id, reason, trace.id(), event["responseId"].as_str());
                     yield ProviderEvent::Finished { reason: reason.into() };
                 }
                 if let Some(reason) = event.pointer("/promptFeedback/blockReason").and_then(Value::as_str).filter(|reason| *reason != "BLOCK_REASON_UNSPECIFIED") {
                     let reason = if haarness_core::ProviderEvent::finish_error(reason).is_some() { reason } else { "SAFETY" };
-                    crate::log_blocked_finish(&provider_id, reason, request_id.as_deref(), event["responseId"].as_str());
+                    trace.mark_finished();
+                    crate::log_blocked_finish(&provider_id, reason, trace.id(), event["responseId"].as_str());
                     yield ProviderEvent::Finished { reason: reason.into() };
                 }
             }
