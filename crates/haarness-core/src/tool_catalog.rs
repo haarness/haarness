@@ -443,7 +443,12 @@ where
 }
 
 /// Search only enabled, currently deferred tools. Exact id matches win;
-/// wildcard and text matches are deterministic and bounded.
+/// wildcard and text matches are deterministic and bounded. A query that
+/// is the id of a tool the model has this round finds only the deferred
+/// tools whose ids begin or end with it (`bash_output` and `bash_stop` for
+/// `bash`, `skill_manage` for `skill`), not an MCP tool holding it inside
+/// its id (`mcp__github__list_issues` for `list`) or every one whose
+/// description mentions it; [`already_available`] names the tool it has.
 #[must_use]
 pub fn search_deferred_tools(
     definitions: &[ToolDefinition],
@@ -461,7 +466,21 @@ pub fn search_deferred_tools(
         if query.is_empty() {
             continue;
         }
-        for id in query_matches(&deferred, &by_id, &query) {
+        let found = if offered(catalog, &query).is_some() {
+            let mut ids = deferred
+                .iter()
+                .filter(|entry| {
+                    let id = entry.id.to_ascii_lowercase();
+                    id.starts_with(&query) || id.ends_with(&query)
+                })
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        } else {
+            query_matches(&deferred, &by_id, &query)
+        };
+        for id in found {
             if !matched.contains(&id) {
                 matched.push(id);
                 if matched.len() == MAX_LOAD_MATCHES {
@@ -473,10 +492,10 @@ pub fn search_deferred_tools(
     matched
 }
 
-/// The tools a query names exactly, or by a wildcard, among those the model
-/// has this round, for each query that names no deferred tool: loading them
-/// does nothing, and a small model told that nothing matched tries the same
-/// id again. Bounded as a search is.
+/// The tools a query names exactly among those the model has this round,
+/// and those a wildcard names for each query that names no deferred tool:
+/// loading them does nothing, and a small model told that nothing matched
+/// tries the same id again. Bounded as a search is.
 #[must_use]
 pub fn already_available(
     definitions: &[ToolDefinition],
@@ -491,6 +510,15 @@ pub fn already_available(
     let mut found = Vec::new();
     for raw in queries.iter().take(10) {
         let query = raw.trim().to_ascii_lowercase();
+        if let Some(id) = offered(catalog, &query) {
+            if !found.iter().any(|known| known == id) {
+                found.push(id.to_owned());
+                if found.len() == MAX_LOAD_MATCHES {
+                    return found;
+                }
+            }
+            continue;
+        }
         if query.is_empty() || !query_matches(&deferred, &by_id, &query).is_empty() {
             continue;
         }
@@ -507,6 +535,15 @@ pub fn already_available(
         }
     }
     found
+}
+
+/// The tool the model has this round whose id is `query` (lowercased).
+fn offered<'a>(catalog: &'a ToolCatalogResponse, query: &str) -> Option<&'a str> {
+    catalog
+        .tools
+        .iter()
+        .find(|entry| entry.advertised && entry.id.eq_ignore_ascii_case(query))
+        .map(|entry| entry.id.as_str())
 }
 
 fn deferred_entries<'a>(
@@ -1298,6 +1335,9 @@ mod tests {
             definition("bash", "run a command"),
             definition("memory_read", "read durable notes"),
             definition("mcp__github__issues", "list issues"),
+            // Deferred, and it mentions bash: asked for `bash`, the loader
+            // still answers with the tool the model has.
+            definition("cloud_workspace", "Remote workspaces run bash themselves"),
         ];
         let selection = select_tools(
             definitions.clone(),
@@ -1347,6 +1387,69 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("Call them directly")
+        );
+    }
+
+    /// Asked for a tool it has, the model is told so, and gets the
+    /// deferred tools whose ids begin or end with that id, but not an MCP
+    /// tool holding it inside its id, nor every tool whose description
+    /// mentions it.
+    #[test]
+    fn an_offered_id_loads_the_deferred_tools_named_after_it() {
+        let definitions = vec![
+            definition("bash", "run a command"),
+            definition("bash_output", "read a background command's output"),
+            definition("bash_stop", "stop a background command"),
+            definition("edit", "change a file"),
+            definition("multiedit", "change a file in several places"),
+            definition("list", "list a folder"),
+            definition("memory_list", "list durable notes"),
+            definition("mcp__github__list_issues", "list a repository's issues"),
+            definition("read", "read a file"),
+            definition(
+                "cloud_workspace",
+                "Remote workspaces run bash, edit files and list folders",
+            ),
+        ];
+        // A tight window, where the companions of the project's own tools
+        // wait behind the loader.
+        let tight = select_tools(
+            definitions.clone(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::new(),
+            Some(TIGHT_WINDOW),
+            false,
+        );
+        assert!(tight.response.lazy_active);
+        let queries = ["bash", "EDIT", "list"].map(String::from);
+        let loaded = search_deferred_tools(&definitions, &tight.response, &queries);
+        let already = already_available(&definitions, &tight.response, &queries);
+        assert_eq!(
+            loaded,
+            ["bash_output", "bash_stop", "multiedit", "memory_list"]
+        );
+        assert_eq!(already, ["bash", "edit", "list"]);
+        let result = load_tool_result(&loaded, &already, &[], &tight.response);
+        assert_eq!(result["available"], json!(["bash", "edit", "list"]));
+        let message = result["message"].as_str().unwrap();
+        assert!(
+            message.contains("available on the next model round")
+                && message.contains("Already in your tool list"),
+            "{message}"
+        );
+        // A word that is no tool's id still searches ids and descriptions.
+        assert_eq!(
+            search_deferred_tools(&definitions, &tight.response, &["issues".into()]),
+            ["mcp__github__list_issues"]
+        );
+        assert_eq!(
+            search_deferred_tools(&definitions, &tight.response, &["workspaces".into()]),
+            ["cloud_workspace"]
         );
     }
 
