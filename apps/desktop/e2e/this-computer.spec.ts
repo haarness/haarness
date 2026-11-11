@@ -6,7 +6,7 @@ import {
   type ElectronApplication,
   type Page,
 } from "@playwright/test";
-import { mkdtemp, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -476,6 +476,53 @@ exec "${binary}" "$@"
   env.HAARNESS_BIN = wrapper;
   return flags;
 }
+
+test("an updated Desktop keeps This computer on the earlier build's daemon while a terminal is open there, and moves it to its own once the terminal closes", async () => {
+  // A copy of the binary at another path stands in for the earlier app's
+  // build, whose daemon outlived it with a terminal open.
+  const previous = join(temporary, "previous-haarness");
+  await copyFile(binary, previous);
+  const home = chatHomeFolder(join(temporary, "desktop"));
+  await mkdir(home, { recursive: true });
+  const earlier = JSON.parse(
+    execFileSync(previous, ["--workspace", await realpath(home), "--chat-home", "desktop"], {
+      env,
+      input: JSON.stringify({ action: "connect" }),
+      encoding: "utf8",
+      timeout: 240000,
+    }),
+  );
+  const prior = new Haarness({ baseUrl: earlier.url, token: earlier.token });
+  try {
+    const original = await prior.info();
+    const terminal = await prior.createPty({ title: "zsh", command: "/bin/sh" });
+    env.HAARNESS_DESKTOP_UPGRADE_CHECK_MS = "500";
+    await launch();
+    await ready();
+    const id = "local:" + (await realpath(home));
+    const instance = () =>
+      page.evaluate(
+        async (id) => (await window.haarness.api<{ serverInstanceId: string }>(id, "info", [])).serverInstanceId,
+        id,
+      );
+    // Used as it is: replacing it would end the terminal.
+    expect(await instance()).toBe(original.serverInstanceId);
+    await page.waitForTimeout(2000);
+    expect(await instance()).toBe(original.serverInstanceId);
+    expect((await prior.getPty(terminal.id)).status).toBe("running");
+    // The terminal closes: This computer moves to this build's daemon by
+    // itself, and works there.
+    await prior.deletePty(terminal.id);
+    await expect.poll(instance, { timeout: 45000 }).not.toBe(original.serverInstanceId);
+    await expect(prior.info()).rejects.toThrow();
+    await send("after the move");
+    await expect(page.locator(".transcript")).toContainText("Echo: after the move");
+    await expect(page.locator(".titlebar-caption")).toHaveText("This computer");
+    await expect(page.locator(".error-banner")).toHaveCount(0);
+  } finally {
+    prior.close();
+  }
+});
 
 test("opening This computer from a project chat shows its new chat at once, and a message sent meanwhile goes when it is open", async () => {
   const flags = await wrappedBinary();

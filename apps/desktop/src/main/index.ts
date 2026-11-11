@@ -96,7 +96,9 @@ import {
   command,
   commands,
   stopCommand,
+  onUpgradePending,
 } from "./runtime";
+import { serverIdle, upgradeCheckMs, upgradeWatcher } from "./server-upgrade";
 import {
   load,
   data,
@@ -469,6 +471,50 @@ function forgetNotifications(id: string) {
   notificationWatches.delete(id);
   notifications.forget(id);
 }
+/** Projects moving to this build's server right now: their requests wait
+ * for the move rather than reach the server that is stopping. */
+const handovers = new Map<string, Promise<unknown>>();
+/** Projects on this computer still served by an earlier build's server,
+ * which had work under way when they opened (see `server-upgrade.ts`): each
+ * moves to this build's server once that work is done. Windows showing one
+ * follow, as they follow a server that restarted. */
+const serverUpgrades = upgradeWatcher({
+  pending: (id) => {
+    const item = connections.get(id);
+    return item &&
+      !item.view.remote &&
+      item.view.upgradePending &&
+      data().recent.some((saved) => saved.id === id)
+      ? item.client
+      : undefined;
+  },
+  idle: serverIdle,
+  replace: (id) => {
+    const move = projectTransaction(id, async () => {
+      const before = connections.get(id)?.view;
+      if (!before || before.remote || !before.upgradePending) return;
+      const view = await connectLocal(before.workspace, before.trust);
+      // What opening the project added to its view stays with it.
+      if (before.chatHome) view.chatHome = true;
+      if (before.askedFolder) view.askedFolder = before.askedFolder;
+      if (before.project) view.project = before.project;
+      if (before.checkout) view.checkout = before.checkout;
+      if (view.upgradePending) return;
+      console.info(`Haarness: ${before.workspace} now runs on this build's server`);
+      const watch = notificationWatches.get(id);
+      if (watch) watchNotifications(id, watch.owner);
+    });
+    const settled = move.catch(() => {});
+    handovers.set(id, settled);
+    void settled.then(() => {
+      if (handovers.get(id) === settled) handovers.delete(id);
+    });
+    return move;
+  },
+  every: upgradeCheckMs(),
+  log: (message) => console.info(message),
+});
+onUpgradePending((id) => serverUpgrades.watch(id));
 /** Ends the event streams windows hold for a connection that closed. */
 function closeSubscriptions(connection: string) {
   for (const [key, item] of subscriptions)
@@ -1306,6 +1352,7 @@ function installHandlers() {
       )
     )
       return manageWorktree(input.connection, input.method, input.args);
+    await handovers.get(input.connection);
     const client = connection(input.connection).client;
     const fn = (client as unknown as Record<string, unknown>)[input.method];
     if (typeof fn !== "function")
@@ -1319,6 +1366,7 @@ function installHandlers() {
   handle(
     "files",
     async (_, id: string, action: string, input: Record<string, unknown>) => {
+      await handovers.get(id);
       const item = connection(id);
       const spec = (
         {

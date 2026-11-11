@@ -225,7 +225,7 @@ async function openLocal(workspace: string, trust: boolean) {
   };
   if (typeof value.url !== "string" || typeof value.token !== "string")
     throw new Error("Invalid local server connection");
-  return establish(
+  const view = await establish(
     workspace,
     value.url,
     value.token,
@@ -234,6 +234,14 @@ async function openLocal(workspace: string, trust: boolean) {
     undefined,
     value.upgradePending,
   );
+  if (view.upgradePending) upgradeLater?.(view.id);
+  return view;
+}
+let upgradeLater: ((id: string) => void) | undefined;
+/** Told of each project connected to a server of an earlier build that had
+ * work under way, so it was used as it is (see `server-upgrade.ts`). */
+export function onUpgradePending(listener: (id: string) => void) {
+  upgradeLater = listener;
 }
 export async function establish(
   workspace: string,

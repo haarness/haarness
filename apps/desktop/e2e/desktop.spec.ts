@@ -287,6 +287,8 @@ test.beforeAll(async () => {
     HAARNESS_DESKTOP_DATA: join(temporary, "desktop"),
     HAARNESS_TEST_PROVIDER: "1",
     HAARNESS_DESKTOP_TEST: "1",
+    // A server of an earlier build is asked often whether its work is done.
+    HAARNESS_DESKTOP_UPGRADE_CHECK_MS: "500",
     HAARNESS_VOICE_TEST_HELPER: join(temporary, "voice-fixture"),
     // Schedules are written into this run's folder and never handed to
     // launchd, systemd or Task Scheduler; the one test that runs a schedule
@@ -7625,6 +7627,25 @@ test("app rebuilds keep permission-waiting projects usable and upgrade them afte
     await expect(page.locator(".transcript")).toContainText(
       "preserved-permission-proof",
     );
+    // With its work done, the project moves to this build's server on its
+    // own, and the open chat follows it.
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            async (id) =>
+              (await window.haarness.api<{ serverInstanceId: string }>(id, "info", []))
+                .serverInstanceId,
+            "local:" + directory,
+          ),
+        { timeout: 45_000 },
+      )
+      .not.toBe(original.serverInstanceId);
+    await expect(prior.info()).rejects.toThrow();
+    await expect(page.locator(".transcript")).toContainText(
+      "preserved-permission-proof",
+    );
+    await expect(page.locator(".error-banner")).toHaveCount(0);
     // Multiple windows/sidebar requests share one idle upgrade, preserving history.
     const instances = await page.evaluate(async (path) => {
       const views = await Promise.all(
