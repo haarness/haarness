@@ -15,7 +15,7 @@ import uuid
 
 import e2e_scratch
 from e2e_env import clean_env
-from e2e_tmux import pane_command
+from e2e_tmux import drop_socket, pane_command, socket_path
 
 
 def run(*args, **kwargs):
@@ -42,8 +42,10 @@ project = root / "project"
 )
 env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(root / "state"), HAARNESS_TEST_PROVIDER="1")
-# Its socket in the run's folder, so the stop reaches the server the start made whatever TMUX_TMPDIR says.
-tmux = ["tmux", "-S", str(root / "tmux"), "-f", "/dev/null"]
+# Its socket in the run's folder (a short one of its own when that path is too long for a socket), so the
+# stop reaches the server the start made whatever TMUX_TMPDIR says.
+socket = socket_path(root)
+tmux = ["tmux", "-S", str(socket), "-f", "/dev/null"]
 try:
     connection = json.loads(run(binary, "--workspace", str(project), "--trust-project", "desktop",
                                 input='{"action":"connect"}', env=env))
@@ -106,5 +108,6 @@ except BaseException:
     raise
 finally:
     subprocess.run(tmux + ["kill-server"], capture_output=True, env=env)
+    drop_socket(socket, root)
     e2e_scratch.stop_server(binary, project, env)
     e2e_scratch.settle(root)

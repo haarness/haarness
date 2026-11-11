@@ -43,7 +43,7 @@ import uuid
 
 import e2e_scratch
 from e2e_env import ISOLATED
-from e2e_tmux import pane_command
+from e2e_tmux import drop_socket, pane_command, socket_path
 
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", REPO / "target/debug/haarness")).resolve()
@@ -167,9 +167,11 @@ env = {**ISOLATED, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "
        "ANTHROPIC_API_KEY": "fixture-key", "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{service.server_port}/v1"}
 args = [str(BINARY), "--workspace", str(workspace), "--trust-project"]
 connection = {}
-# A tmux server of the run's own, its socket in the run's folder, started and stopped with one
+# A tmux server of the run's own, its socket in the run's folder (or a short folder of its own when that
+# path is too long for a socket), started and stopped with one
 # environment: wherever the caller's TMUX_TMPDIR points, the stop reaches the server the start made.
-TMUX = ["tmux", "-S", str(root / "tmux"), "-f", "/dev/null"]
+SOCKET = socket_path(root)
+TMUX = ["tmux", "-S", str(SOCKET), "-f", "/dev/null"]
 TMUX_ENV = {**env, "PATH": os.environ["PATH"]}
 EVIDENCE = Path(os.environ.get("UNFINISHED_CALLS_EVIDENCE", root / "tui")).resolve()
 
@@ -382,6 +384,7 @@ finally:
         except subprocess.CalledProcessError:
             pass
     subprocess.run(TMUX + ["kill-server"], capture_output=True, env=TMUX_ENV)
+    drop_socket(SOCKET, root)
     e2e_scratch.stop_server(BINARY, workspace, env)
     service.shutdown()
     e2e_scratch.settle(root)

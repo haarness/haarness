@@ -12,6 +12,8 @@ import os
 import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness a script starts)
 import re
 import shlex
+import tempfile
+from pathlib import Path
 
 # Kept from the script's environment as they are, whatever the tmux server has.
 BASE = ("HOME", "PATH", "USER", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
@@ -42,3 +44,25 @@ def pane_command(env, args):
         + 'exec "$@"'
     )
     return shlex.join(["sh", "-c", clear, "sh", "env", *values, *[str(arg) for arg in args]])
+
+
+def socket_path(folder):
+    """Where a script's own tmux server keeps its socket: in the run's `folder`, so a stop made with
+    any TMUX_TMPDIR reaches the server the start made. A Unix socket's address holds about 100 bytes,
+    so a run folder deep in a long temporary path gets a short folder of its own under /tmp instead,
+    which `drop_socket` removes once the server has stopped."""
+    path = Path(folder) / "tmux"
+    if len(os.fsencode(str(path))) <= 100:
+        return path
+    return Path(tempfile.mkdtemp(prefix="hx-", dir="/tmp")) / "tmux"
+
+
+def drop_socket(path, folder):
+    """Remove the short folder `socket_path` made outside the run's `folder`, after its server stopped."""
+    path = Path(path)
+    if path.parent != Path(folder):
+        path.unlink(missing_ok=True)
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
