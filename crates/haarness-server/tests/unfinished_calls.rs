@@ -732,3 +732,135 @@ async fn a_call_made_again_under_its_id_has_not_begun() {
     .await
     .expect("the turn's runner ends");
 }
+
+/// A runtime with the stubborn tool and the scripted provider over `store`.
+fn stubborn_runtime(
+    store: Arc<SqliteStore>,
+    tool: Arc<Stubborn>,
+    provider: Provider,
+) -> AgentRuntime {
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
+    config.base_rules.push(PermissionRule {
+        pattern: "stubborn:*".into(),
+        decision: PermissionDecision::Allow,
+    });
+    AgentRuntime::with_config(
+        store,
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(Registry(tool)),
+        EventBus::new(256),
+        std::env::temp_dir(),
+        String::new(),
+        config,
+    )
+}
+
+/// A person's steering a turn that outlived the shutdown's wait never read
+/// takes its place in the history there and then, and the turn's notice asks
+/// for it again, once. After a restart the chat's next request ends with the
+/// next message, not with the old steering.
+#[tokio::test]
+async fn steering_a_turn_the_shutdown_outlived_never_read_is_settled_with_it() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let tool = Arc::new(Stubborn {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let runtime = stubborn_runtime(store.clone(), tool.clone(), Provider::default());
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("wait for it"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), tool.started.acquire())
+        .await
+        .expect("the tool starts")
+        .unwrap()
+        .forget();
+    let steer = haarness_protocol::QueueInputRequest {
+        request_id: RequestId::new(),
+        delivery: haarness_protocol::InputDelivery::Steer,
+        text: "keep the public names".into(),
+        ..Default::default()
+    };
+    let steered = runtime.queue_input(thread, steer).await.unwrap();
+    let message = steered.item.expect("steered into the running turn");
+    let mut events = runtime.events().subscribe(None);
+
+    runtime
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.turn(turn.id).await.unwrap().status,
+        TurnStatus::Interrupted
+    );
+    let items = runtime.items(thread, None).await.unwrap();
+    let markers = items
+        .iter()
+        .filter(|item| matches!(item.data, ItemData::QueueConsumed { item_id } if item_id == message.id))
+        .count();
+    assert_eq!(markers, 1, "{items:#?}");
+    let notices = items
+        .iter()
+        .filter_map(|item| match &item.data {
+            ItemData::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        notices[0].starts_with(&format!(
+            "Haarness stopped, {}. ",
+            haarness_core::UNREAD_WHILE_WORKING
+        )),
+        "{notices:?}"
+    );
+    let heard = std::iter::from_fn(|| events.receiver.try_recv().ok()).any(|event| {
+        event.event_type == "item.created" && event.payload["data"]["type"] == "queue_consumed"
+    });
+    assert!(heard, "clients hear the steering took its place");
+
+    // The server starts again over the same chats; nothing runs by itself,
+    // and the next message's requests end with it.
+    let provider = Provider::default();
+    let tool = Arc::new(Stubborn {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(1)),
+    });
+    let restarted = stubborn_runtime(store.clone(), tool, provider.clone());
+    restarted.recover().await.unwrap();
+    assert!(restarted.active_turn(thread).await.unwrap().is_none());
+    let next = restarted
+        .start_turn(thread, turn_request("next task"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&restarted, next.id).await, TurnStatus::Completed);
+    let sent = provider.requests.lock().unwrap().first().cloned().unwrap();
+    let said = sent
+        .iter()
+        .filter_map(|message| match message {
+            ProviderMessage::Text { role, content } if role == "user" => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(said.last(), Some(&"next task"), "{said:?}");
+    assert_eq!(
+        said.iter()
+            .filter(|content| content.contains("keep the public names"))
+            .count(),
+        1,
+        "{said:?}"
+    );
+    let items = restarted.items(thread, None).await.unwrap();
+    let markers = items
+        .iter()
+        .filter(|item| matches!(item.data, ItemData::QueueConsumed { item_id } if item_id == message.id))
+        .count();
+    assert_eq!(markers, 1, "recovery settles nothing twice");
+}

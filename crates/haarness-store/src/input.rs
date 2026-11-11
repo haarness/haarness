@@ -863,25 +863,58 @@ mod tests {
         assert!(store.last_turn(thread.id).await.unwrap().is_none());
     }
 
+    fn steer_data(text: &str, synthetic: bool) -> ItemData {
+        ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: true,
+            synthetic,
+            command_line: None,
+            hook: None,
+        }
+    }
+
+    fn markers(items: &[Item], id: ItemId) -> usize {
+        items
+            .iter()
+            .filter(
+                |item| matches!(item.data, ItemData::QueueConsumed { item_id } if item_id == id),
+            )
+            .count()
+    }
+
+    fn errors(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::Error { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[tokio::test]
-    async fn recovery_settles_steering_no_request_took_as_a_failed_turn_does() {
+    async fn recovery_settles_steering_no_request_took_with_one_notice() {
         let store = SqliteStore::in_memory().unwrap();
         let steer = RequestId::new();
         let (thread, turn, unread) = steered_chat(&store, steer).await;
-        // A second steer a request already took is left as it is.
+        // A second unread steer, and one a request already took.
+        let second = store
+            .append_steered_input(
+                thread,
+                turn.id,
+                RequestId::new(),
+                steer_data("and the changelog", false),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         let read = store
             .append_steered_input(
                 thread,
                 turn.id,
                 RequestId::new(),
-                ItemData::UserMessage {
-                    text: "read already".into(),
-                    attachments: Vec::new(),
-                    queued: true,
-                    synthetic: false,
-                    command_line: None,
-                    hook: None,
-                },
+                steer_data("read already", false),
             )
             .await
             .unwrap()
@@ -894,7 +927,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // A chat stopped without steering gets no such notice.
+        // A chat stopped without steering gets the plain notice.
         let quiet = store
             .create_thread(CreateThreadRequest::default())
             .await
@@ -908,35 +941,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recovered, 2);
-        let notice = format!(
-            "{}: server restarted during active turn",
-            haarness_core::UNDELIVERED_INPUT
-        );
-        // Clients hear the marker and the notice; both come before the
-        // restart's own notice in the chat.
-        assert_eq!(written.len(), 2, "{written:#?}");
-        assert!(
-            matches!(written[0].data, ItemData::QueueConsumed { item_id } if item_id == unread.id)
-        );
-        assert!(
-            matches!(&written[1].data, ItemData::Error { message, retryable: true } if *message == notice)
-        );
+        // Clients hear each marker; the restart's own notice asks for the
+        // messages, and no other notice says so twice.
+        let heard: Vec<_> = written
+            .iter()
+            .filter_map(|item| match item.data {
+                ItemData::QueueConsumed { item_id } => Some(item_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(heard, [unread.id, second.id], "{written:#?}");
+        assert_eq!(written.len(), 2);
         let items = store.list_items(thread, None).await.unwrap();
-        let markers = |id: ItemId| {
-            items
-                .iter()
-                .filter(|item| matches!(item.data, ItemData::QueueConsumed { item_id } if item_id == id))
-                .count()
-        };
-        assert_eq!((markers(unread.id), markers(read.id)), (1, 1));
-        let tail: Vec<_> = items.iter().rev().take(2).map(|item| &item.data).collect();
-        assert!(
-            matches!(tail[0], ItemData::Error { message, .. } if message == RECOVERED_TURN_MESSAGE)
+        assert_eq!(
+            (
+                markers(&items, unread.id),
+                markers(&items, second.id),
+                markers(&items, read.id)
+            ),
+            (1, 1, 1)
         );
-        assert!(matches!(tail[1], ItemData::Error { message, .. } if *message == notice));
-        assert!(!store.list_items(quiet.id, None).await.unwrap().iter().any(
-            |item| matches!(&item.data, ItemData::Error { message, .. } if *message == notice)
+        assert_eq!(errors(&items), [recovered_turn_message(true)]);
+        assert!(errors(&items)[0].contains(haarness_core::UNREAD_WHILE_WORKING));
+        assert!(matches!(
+            items.last().map(|item| &item.data),
+            Some(ItemData::Error { .. })
         ));
+        assert_eq!(
+            errors(&store.list_items(quiet.id, None).await.unwrap()),
+            [RECOVERED_TURN_MESSAGE]
+        );
         // Nothing runs it; sent again, it runs once.
         assert!(matches!(
             store.steered_input(thread, steer).await.unwrap(),
@@ -957,13 +991,92 @@ mod tests {
                 .is_empty()
         );
         let items = store.list_items(thread, None).await.unwrap();
-        assert_eq!(
-            items
-                .iter()
-                .filter(|item| matches!(item.data, ItemData::QueueConsumed { item_id } if item_id == unread.id))
-                .count(),
-            1
-        );
+        assert_eq!(markers(&items, unread.id), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_settles_only_haarness_own_steering_without_asking_for_it() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let (turn, _, _) = store
+            .start_turn(thread.id, turn_request(RequestId::new(), "running"))
+            .await
+            .unwrap();
+        // A background result steered into the turn, which no request took.
+        let result = store
+            .append_item(
+                thread.id,
+                Some(turn.id),
+                steer_data("background result", true),
+            )
+            .await
+            .unwrap();
+        let (_, written) = store
+            .recover_interrupted_tasks(&|_| Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(written.len(), 1);
+        let items = store.list_items(thread.id, None).await.unwrap();
+        assert_eq!(markers(&items, result.id), 1);
+        assert_eq!(errors(&items), [RECOVERED_TURN_MESSAGE]);
+    }
+
+    #[tokio::test]
+    async fn opening_an_older_database_settles_steering_its_ended_turns_left_unread_once() {
+        let scratch = Scratch::new("steering-heal");
+        let path = scratch.database();
+        let store = SqliteStore::open(&path).unwrap();
+        // As an older build left them: an interrupted turn with a steer no
+        // request took, one with a steer a request took, and a turn still
+        // running, which startup recovery settles instead.
+        let steer = RequestId::new();
+        let (stopped, turn, unread) = steered_chat(&store, steer).await;
+        store
+            .set_turn_status(turn.id, TurnStatus::Interrupted, None)
+            .await
+            .unwrap();
+        let (answered, turn, read) = steered_chat(&store, RequestId::new()).await;
+        store
+            .append_item(
+                answered,
+                Some(turn.id),
+                ItemData::QueueConsumed { item_id: read.id },
+            )
+            .await
+            .unwrap();
+        store
+            .set_turn_status(turn.id, TurnStatus::Completed, None)
+            .await
+            .unwrap();
+        let (running, _, waiting) = steered_chat(&store, RequestId::new()).await;
+        store
+            .connection
+            .lock()
+            .execute("DELETE FROM schema_migrations WHERE version=13", [])
+            .unwrap();
+        drop(store);
+        for _ in 0..2 {
+            let store = SqliteStore::open(&path).unwrap();
+            let items = store.list_items(stopped, None).await.unwrap();
+            assert_eq!(markers(&items, unread.id), 1);
+            assert!(matches!(
+                items.last().map(|item| &item.data),
+                Some(ItemData::QueueConsumed { .. })
+            ));
+            assert!(errors(&items).is_empty());
+            let items = store.list_items(answered, None).await.unwrap();
+            assert_eq!(markers(&items, read.id), 1);
+            let items = store.list_items(running, None).await.unwrap();
+            assert_eq!(markers(&items, waiting.id), 0);
+            // Sent again, it still runs once.
+            assert!(matches!(
+                store.steered_input(stopped, steer).await.unwrap(),
+                Some(SteeredInput::Unread { consumed: true, .. })
+            ));
+        }
     }
 
     #[tokio::test]

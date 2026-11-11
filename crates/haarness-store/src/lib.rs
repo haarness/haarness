@@ -31,6 +31,18 @@ use uuid::Uuid;
 
 const RECOVERED_TURN_MESSAGE: &str = "Haarness restarted while this turn was running. Work already recorded in this session is preserved. In-flight tool calls were not replayed automatically; retry or continue when ready.";
 
+/// The notice of a turn a restart stopped; with `unread`, it also asks for
+/// what the person sent while the turn worked, which the model never read.
+fn recovered_turn_message(unread: bool) -> String {
+    if !unread {
+        return RECOVERED_TURN_MESSAGE.into();
+    }
+    format!(
+        "Haarness restarted while this turn was running, {}. Work already recorded in this session is preserved. In-flight tool calls were not replayed automatically; retry or continue when ready.",
+        haarness_core::UNREAD_WHILE_WORKING
+    )
+}
+
 #[derive(Clone)]
 pub struct SqliteStore {
     connection: Arc<Mutex<Connection>>,
@@ -145,12 +157,14 @@ impl SqliteStore {
     }
 
     /// The queued messages (steering) turn `turn` took that no model request
-    /// received: no `QueueConsumed` marker names them.
+    /// received: no `QueueConsumed` marker names them. True with them when
+    /// one is the person's, not one Haarness steered in (a background
+    /// result, a stop's continuation).
     fn unconsumed_turn_input(
         tx: &rusqlite::Transaction<'_>,
         thread: &str,
         turn: &str,
-    ) -> CoreResult<Vec<ItemId>> {
+    ) -> CoreResult<(Vec<ItemId>, bool)> {
         let mut statement = tx
             .prepare(
                 "SELECT id,turn_id,data_json FROM items
@@ -174,10 +188,12 @@ impl SqliteStore {
             let (id, item_turn, data) = row.map_err(storage)?;
             // An item this version cannot read is no message of its own.
             match serde_json::from_str::<ItemData>(&data) {
-                Ok(ItemData::UserMessage { queued: true, .. })
-                    if item_turn.as_deref() == Some(turn) =>
-                {
-                    queued.push(id);
+                Ok(ItemData::UserMessage {
+                    queued: true,
+                    synthetic,
+                    ..
+                }) if item_turn.as_deref() == Some(turn) => {
+                    queued.push((id, !synthetic));
                 }
                 Ok(ItemData::QueueConsumed { item_id }) => {
                     consumed.insert(item_id.to_string());
@@ -185,11 +201,75 @@ impl SqliteStore {
                 _ => {}
             }
         }
-        queued
+        queued.retain(|(id, _)| !consumed.contains(id));
+        let person = queued.iter().any(|(_, person)| *person);
+        let ids = queued
             .into_iter()
-            .filter(|id| !consumed.contains(id))
-            .map(|id| item_id(&id))
-            .collect()
+            .map(|(id, _)| item_id(&id))
+            .collect::<CoreResult<_>>()?;
+        Ok((ids, person))
+    }
+
+    /// Migration 13. Steering a turn took that no model request received,
+    /// which an older build left as it was when a restart or a shutdown
+    /// ended the turn: every later request in its chat ended with it, and
+    /// the terminal UI listed it as steering whenever a turn ran. It takes
+    /// its place in the history now, at the end of its chat, as startup
+    /// recovery and the shutdown settle it since (without a notice: the turn
+    /// has its own already).
+    fn settle_unread_steering(connection: &mut Connection) -> CoreResult<()> {
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let unread = {
+            let mut statement = tx
+                .prepare(
+                    "SELECT i.id,i.thread_id,i.turn_id FROM items i JOIN turns t ON t.id=i.turn_id
+                     WHERE i.deleted=0 AND t.status NOT IN ('queued','running')
+                       AND json_extract(i.data_json,'$.type')='user_message'
+                       AND json_extract(i.data_json,'$.queued')=1
+                       AND NOT EXISTS (SELECT 1 FROM items m
+                         WHERE m.thread_id=i.thread_id AND m.sequence>i.sequence AND m.deleted=0
+                           AND json_extract(m.data_json,'$.type')='queue_consumed'
+                           AND json_extract(m.data_json,'$.item_id')=i.id)
+                     ORDER BY i.thread_id,i.sequence",
+                )
+                .map_err(storage)?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(storage)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(storage)?
+        };
+        let now = time(Utc::now());
+        for (item, thread, turn) in unread {
+            let sequence = Self::next_sequence(&tx, thread_id(&thread)?)?;
+            let data = ItemData::QueueConsumed {
+                item_id: item_id(&item)?,
+            };
+            tx.execute(
+                "INSERT INTO items(id,thread_id,turn_id,sequence,data_json,created_at)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    ItemId::new().to_string(),
+                    thread,
+                    turn,
+                    i64::try_from(sequence).map_err(storage)?,
+                    serde_json::to_string(&data).map_err(storage)?,
+                    now,
+                ],
+            )
+            .map_err(storage)?;
+        }
+        tx.execute("INSERT INTO schema_migrations(version) VALUES (13)", [])
+            .map_err(storage)?;
+        tx.commit().map_err(storage)
     }
 
     /// Reconcile parent-side task checkpoints with terminal child turns.
@@ -471,7 +551,7 @@ impl SqliteStore {
     }
 
     fn migrate(&self) -> CoreResult<()> {
-        let connection = self.connection.lock();
+        let mut connection = self.connection.lock();
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);",
@@ -667,6 +747,9 @@ impl SqliteStore {
                  COMMIT;",
                 )
                 .map_err(storage)?;
+        }
+        if version < 13 {
+            Self::settle_unread_steering(&mut connection)?;
         }
         input::migrate(&connection)?;
         // A chat's own working folder. Checked rather than numbered, like the
@@ -2047,26 +2130,20 @@ impl ThreadRepository for SqliteStore {
                 })
                 .collect::<Vec<_>>();
             let cut = ended.len();
-            // Steering the turn took and no model request received is settled
-            // as a failed turn settles it: it takes its place in the history,
-            // where later requests read it once instead of each ending with
-            // it, and a notice says to send it again, which runs it once.
-            // Nothing runs it now.
-            let unread = Self::unconsumed_turn_input(&tx, raw_thread_id, raw_turn_id)?;
-            if !unread.is_empty() {
-                ended.extend(
-                    unread
-                        .into_iter()
-                        .map(|item_id| ItemData::QueueConsumed { item_id }),
-                );
-                ended.push(ItemData::Error {
-                    message: format!("{}: {error}", haarness_core::UNDELIVERED_INPUT),
-                    retryable: true,
-                });
-            }
+            // Steering the turn took and no model request received takes its
+            // place in the history, as a failed turn's does, where later
+            // requests read it once instead of each ending with it. Nothing
+            // runs it now: the restart's notice asks for a person's message
+            // again, and sent again it runs once.
+            let (unread, person) = Self::unconsumed_turn_input(&tx, raw_thread_id, raw_turn_id)?;
+            ended.extend(
+                unread
+                    .into_iter()
+                    .map(|item_id| ItemData::QueueConsumed { item_id }),
+            );
             let settled = ended.len();
             ended.push(ItemData::Error {
-                message: RECOVERED_TURN_MESSAGE.into(),
+                message: recovered_turn_message(person),
                 retryable: true,
             });
             for (index, data) in ended.into_iter().enumerate() {
@@ -3882,7 +3959,7 @@ mod tests {
             origin.name
         );
         // Upgrading an old database must preserve its conversations without inventing origins.
-        store.connection.lock().execute_batch("ALTER TABLE threads DROP COLUMN schedule_json; DELETE FROM schema_migrations WHERE version=12;").unwrap();
+        store.connection.lock().execute_batch("ALTER TABLE threads DROP COLUMN schedule_json; DELETE FROM schema_migrations WHERE version>=12;").unwrap();
         drop(store);
         let store = SqliteStore::open(&path).unwrap();
         assert!(store.get_thread(run.id).await.unwrap().schedule.is_none());
@@ -4294,7 +4371,7 @@ mod tests {
             let rows = statement.query_map([], |row| row.get(0)).unwrap();
             rows.map(Result::unwrap).collect()
         };
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     }
 
     #[tokio::test]
