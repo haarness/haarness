@@ -2415,19 +2415,47 @@ fn schedule_output<T: serde::Serialize>(title: &str, value: &T) -> CoreResult<To
     })
 }
 
+/// The most bytes of skill names a call naming no skill is answered with.
+const UNKNOWN_SKILL_NAMES: usize = 2_048;
+
+/// The answer to a call naming no skill: the names the model may load, those
+/// sharing a word with the name it tried first, as many as fit
+/// [`UNKNOWN_SKILL_NAMES`]. The skill tool's own list may name only some.
+fn unknown_skill(name: &str, infos: &[SkillInfo]) -> CoreError {
+    let words = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.chars().count() > 1)
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    let mut names = infos
+        .iter()
+        .filter(|info| !info.execution.disable_model_invocation)
+        .map(|info| info.name.as_str())
+        .collect::<Vec<_>>();
+    // Stable: each group keeps the registry's order.
+    names.sort_by_key(|candidate| {
+        let candidate = candidate.to_lowercase();
+        !words.iter().any(|word| candidate.contains(word.as_str()))
+    });
+    if names.is_empty() {
+        return CoreError::NotFound(format!("skill {name}. There are no skills to load."));
+    }
+    CoreError::NotFound(format!(
+        "skill {name}. Call the skill tool with one of these exact names: {}.",
+        haarness_core::some_names(&names, UNKNOWN_SKILL_NAMES)
+    ))
+}
+
 fn skill_catalog_text(infos: &[SkillInfo]) -> String {
-    use std::fmt::Write as _;
     if infos.is_empty() {
         return String::new();
     }
-    let mut text = String::from(" Available skills:");
-    for info in infos
+    let skills = infos
         .iter()
         .filter(|s| !s.execution.disable_model_invocation)
-    {
-        let _ = write!(text, " {} ({}).", info.name, info.description);
-    }
-    text
+        .map(|info| (info.name.as_str(), info.description.as_str()))
+        .collect::<Vec<_>>();
+    haarness_core::skill_list(&skills)
 }
 impl ToolRegistry for NativeToolRegistry {
     fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -4314,7 +4342,13 @@ impl Tool for BuiltinTool {
                         "no skill registry is configured for this server".into(),
                     ));
                 };
-                let info = registry.describe(name).await?;
+                let info = match registry.describe(name).await {
+                    Err(CoreError::NotFound(_)) => {
+                        let infos = registry.discover().await.unwrap_or_default();
+                        return Err(unknown_skill(name, &infos));
+                    }
+                    found => found?,
+                };
                 if info.execution.disable_model_invocation {
                     return Err(CoreError::PermissionDenied(
                         "This skill can only be invoked by the user.".into(),
@@ -8071,6 +8105,135 @@ export default workflow({
 
         let missing = skill.execute(json!({"name":"absent"}), context).await;
         assert!(missing.is_err());
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    /// Today's wording while the list is short; past the budget every
+    /// skill the model may load is still named, the person-only ones never.
+    #[test]
+    fn the_skill_tool_lists_every_skill_it_can_load_within_a_budget() {
+        let info = |name: &str, description: &str, manual: bool| SkillInfo {
+            execution: haarness_protocol::DefinitionExecution {
+                disable_model_invocation: manual,
+                ..Default::default()
+            },
+            name: name.into(),
+            description: description.into(),
+            path: format!("/skills/{name}/SKILL.md"),
+            trusted: true,
+            loaded: false,
+        };
+        let description = |infos: Vec<SkillInfo>| {
+            NativeToolRegistry::with_extras(std::env::temp_dir(), None, None, infos)
+                .get("skill")
+                .unwrap()
+                .definition()
+                .description
+        };
+        assert_eq!(description(Vec::new()), SKILL_DESCRIPTION);
+        assert_eq!(
+            description(vec![info("deploy", "Ship it", true)]),
+            format!("{SKILL_DESCRIPTION} Available skills:")
+        );
+        assert_eq!(
+            description(vec![
+                info("deploy", "Ship it", true),
+                info("review", "Review a change", false),
+                info("tidy", "Tidy imports", false),
+            ]),
+            format!(
+                "{SKILL_DESCRIPTION} Available skills: review (Review a change). tidy (Tidy imports)."
+            )
+        );
+
+        let long = "Walks through the fixture procedure step by step. ".repeat(12);
+        let mut infos = (0..80)
+            .map(|index| info(&format!("skill-{index:02}"), &long, false))
+            .collect::<Vec<_>>();
+        infos.push(info("zz-manual", "Only a person starts this", true));
+        let text = description(infos);
+        let list = text.strip_prefix(SKILL_DESCRIPTION).unwrap();
+        assert!(
+            list.len() <= haarness_core::SKILL_LIST_BUDGET,
+            "{}",
+            list.len()
+        );
+        for index in 0..80 {
+            assert!(list.contains(&format!("skill-{index:02}")), "{index}");
+        }
+        assert!(!list.contains("zz-manual"));
+        assert!(list.contains(" More skills: "), "{list}");
+    }
+
+    /// A name that is no skill is answered with the names it could be,
+    /// those sharing a word with it first, within a bound.
+    #[tokio::test]
+    async fn a_skill_name_that_is_no_skill_is_answered_with_the_names() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-skill-names-{}", uuid::Uuid::now_v7()));
+        let root = workspace.join("skills-root");
+        let mut names = (0..300)
+            .map(|index| format!("helper-{index:03}"))
+            .collect::<Vec<_>>();
+        names.push("release-check".into());
+        for name in &names {
+            tokio::fs::create_dir_all(root.join(name)).await.unwrap();
+            tokio::fs::write(
+                root.join(format!("{name}/SKILL.md")),
+                format!("---\ndescription: {name}\n---\nBody\n"),
+            )
+            .await
+            .unwrap();
+        }
+        tokio::fs::create_dir_all(root.join("manual"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            root.join("manual/SKILL.md"),
+            "---\ndescription: Manual\ndisable-model-invocation: true\n---\nBody\n",
+        )
+        .await
+        .unwrap();
+        let registry = crate::FilesystemSkillRegistry::new(vec![(root, true)]);
+        let infos = registry.discover().await.unwrap();
+        let tools = NativeToolRegistry::with_extras(
+            workspace.clone(),
+            None,
+            Some(Arc::new(registry)),
+            infos,
+        );
+        let context = ToolContext {
+            execution: haarness_core::ExecutionSettings::default(),
+            thread_id: ThreadId::new(),
+            turn_id: TurnId::new(),
+            workspace: workspace.clone(),
+            authorized_external_paths: Vec::new(),
+            cancel: CancellationToken::new(),
+            invoker: None,
+        };
+        let error = tools
+            .get("skill")
+            .unwrap()
+            .execute(json!({"name":"release-checklist"}), context)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(
+                "not found: skill release-checklist. Call the skill tool with one of these exact names: release-check, helper-000, helper-001,"
+            ),
+            "{error}"
+        );
+        assert!(error.len() < UNKNOWN_SKILL_NAMES + 200, "{}", error.len());
+        assert!(error.ends_with(" more."), "{error}");
+        assert!(!error.contains("manual"), "{error}");
+        assert!(!error.contains("load_tool"), "{error}");
+
+        let empty = unknown_skill("anything", &[]).to_string();
+        assert_eq!(
+            empty,
+            "not found: skill anything. There are no skills to load."
+        );
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
