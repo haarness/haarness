@@ -1743,11 +1743,14 @@ async fn prompt_calls(
 
 /// The same session open in two editor windows, or an editor that
 /// reconnects and loads the session before its old `haarness acp` has
-/// exited, runs two agents on the project. Each sets the session's servers
-/// up under a name of its own, so the first one quitting leaves the
-/// second one's running and its prompts keep their tools.
+/// exited, runs two agents on the project. They share the session's server
+/// under the chat's name, started once: the first one quitting leaves it to
+/// the second, whose prompts keep its tools. The second one killed (as Zed
+/// stops its agents, with SIGKILL, which no process can answer), the server
+/// is let go once the project's server sees the process gone.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_second_acp_agent_keeps_its_servers_when_the_first_quits() {
+async fn agents_sharing_a_chat_share_its_servers_until_the_last_ends() {
     let directory = TestDirectory::new();
     let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, _) =
         acp_session(&directory).await;
@@ -1755,8 +1758,11 @@ async fn a_second_acp_agent_keeps_its_servers_when_the_first_quits() {
         env!("CARGO_MANIFEST_DIR"),
         "/../haarness-mcp/tests/fixtures/recovery.py"
     );
+    let launch_log = directory.0.join("launches");
+    let launched = || std::fs::read_to_string(&launch_log).map_or(0, |text| text.lines().count());
     let server = json!({"name": "editor", "command": python3(), "args": [fixture],
-                        "env": [{"name": "CALL_LOG", "value": directory.0.join("calls")}]});
+                        "env": [{"name": "LAUNCH_LOG", "value": launch_log},
+                                {"name": "CALL_LOG", "value": directory.0.join("calls")}]});
     send(
         &mut stdin,
         json!({"jsonrpc":"2.0", "id":60, "method":"session/new",
@@ -1767,7 +1773,8 @@ async fn a_second_acp_agent_keeps_its_servers_when_the_first_quits() {
     let created = receive_response(&mut lines, &mut stdin, 60, &mut messages).await;
     let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
     let api = daemon_api(&data);
-    let first = editor_server(&api, &session, "editor").await;
+    let name = editor_server(&api, &session, "editor").await;
+    assert_eq!(name, format!("acp-{}-editor", &session[..8]));
 
     let (mut second, mut second_in, mut second_lines) =
         second_agent(&workspace, &data, &directory.0.join("home")).await;
@@ -1780,31 +1787,276 @@ async fn a_second_acp_agent_keeps_its_servers_when_the_first_quits() {
     let mut messages = Vec::new();
     let loaded = receive_response(&mut second_lines, &mut second_in, 61, &mut messages).await;
     assert!(loaded.get("error").is_none(), "{loaded}");
-    let both = editor_servers(&api, &session, "editor").await;
-    assert_eq!(both.len(), 2, "{both:?}");
-    let own = both.into_iter().find(|name| *name != first).unwrap();
+    assert_eq!(editor_server(&api, &session, "editor").await, name);
+    assert_eq!(launched(), 1, "the second agent started the server again");
 
     drop(stdin);
     timeout(Duration::from_secs(20), child.wait())
         .await
         .expect("the first ACP agent did not exit")
         .expect("wait for the first ACP agent");
-    assert_eq!(
-        editor_servers(&api, &session, "editor").await,
-        std::slice::from_ref(&own)
-    );
-    let tool = format!("mcp__{own}__ping");
+    assert_eq!(editor_server(&api, &session, "editor").await, name);
+    let tool = format!("mcp__{name}__ping");
     for id in [62, 63] {
         prompt_calls(&mut second_in, &mut second_lines, id, &session, &tool).await;
     }
-    assert_eq!(editor_servers(&api, &session, "editor").await, [own]);
 
+    second.start_kill().expect("kill the second ACP agent");
+    timeout(Duration::from_secs(20), second.wait())
+        .await
+        .expect("the second ACP agent did not end")
+        .expect("wait for the second ACP agent");
+    // Seen at the next listing.
+    assert!(editor_servers(&api, &session, "editor").await.is_empty());
+    drop(second_in);
+    daemon_guard.stop().await;
+}
+
+/// Send a prompt that calls `tool`, answer each request it raises with
+/// `answer`, and say how many it raised.
+async fn asked(
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    id: u64,
+    session: &str,
+    tool: &str,
+    answer: &str,
+) -> usize {
+    send(
+        stdin,
+        json!({"jsonrpc":"2.0", "id":id, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool {tool} {{}}")}]}}),
+    )
+    .await;
+    let mut asked = 0;
+    loop {
+        let message = receive(lines).await;
+        if message["method"].as_str() == Some("session/request_permission") {
+            asked += 1;
+            send(
+                stdin,
+                json!({"jsonrpc":"2.0", "id":message["id"].clone(),
+                       "result":{"outcome":{"outcome":"selected", "optionId":answer}}}),
+            )
+            .await;
+        } else if message["id"].as_u64() == Some(id) {
+            assert_eq!(message["result"]["stopReason"], "end_turn", "{message}");
+            return asked;
+        }
+    }
+}
+
+/// An answer "Allow while Haarness is running" to an editor's MCP tool
+/// still holds once the editor runs a new agent process for the chat (Zed
+/// starts one for each thread it opens): the tool keeps its name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_always_answer_holds_for_an_editors_tool_in_a_new_agent_process() {
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness")).expect("create ACP workspace config");
+    std::fs::write(
+        workspace.join(".haarness/config.toml"),
+        "[defaults]\napproval_mode = \"review\"\n[permissions]\n\"mcp__*\" = \"ask\"\n",
+    )
+    .expect("configure MCP tools to ask");
+    std::fs::create_dir_all(&home).expect("create isolated ACP home");
+    let mut daemon_guard = DaemonGuard::new(workspace.clone(), data.clone(), home.clone());
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    let server = json!({"name": "editor", "command": python3(), "args": [fixture],
+                        "env": [{"name": "CALL_LOG", "value": directory.0.join("calls")}]});
+    let (mut first, mut first_in, mut first_lines) = second_agent(&workspace, &data, &home).await;
+    send(
+        &mut first_in,
+        json!({"jsonrpc":"2.0", "id":2, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[server.clone()]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let created = receive_response(&mut first_lines, &mut first_in, 2, &mut messages).await;
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let tool = format!(
+        "mcp__{}__ping",
+        editor_server(&daemon_api(&data), &session, "editor").await
+    );
+    assert_eq!(
+        asked(
+            &mut first_in,
+            &mut first_lines,
+            3,
+            &session,
+            &tool,
+            "always"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        asked(&mut first_in, &mut first_lines, 4, &session, &tool, "once").await,
+        0
+    );
+    drop(first_in);
+    timeout(Duration::from_secs(20), first.wait())
+        .await
+        .expect("the first ACP agent did not exit")
+        .expect("wait for the first ACP agent");
+
+    let (mut second, mut second_in, mut second_lines) =
+        second_agent(&workspace, &data, &home).await;
+    send(
+        &mut second_in,
+        json!({"jsonrpc":"2.0", "id":2, "method":"session/load",
+               "params":{"sessionId":session, "cwd":workspace, "mcpServers":[server]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let loaded = receive_response(&mut second_lines, &mut second_in, 2, &mut messages).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    assert_eq!(
+        asked(
+            &mut second_in,
+            &mut second_lines,
+            3,
+            &session,
+            &tool,
+            "once"
+        )
+        .await,
+        0,
+        "the new agent process asked again"
+    );
     drop(second_in);
     timeout(Duration::from_secs(20), second.wait())
         .await
         .expect("the second ACP agent did not exit")
         .expect("wait for the second ACP agent");
-    assert!(editor_servers(&api, &session, "editor").await.is_empty());
+    daemon_guard.stop().await;
+}
+
+/// Two sessions of one agent share a server. Once the project's server has
+/// restarted, the second session's prompt reads the listing while the first
+/// session's prompt is about to set the server up again there: it waits for
+/// that and gets the tool, rather than taking the server for turned off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_that_read_the_listing_first_waits_for_the_server_set_up_again() {
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness")).expect("create ACP workspace config");
+    std::fs::create_dir_all(&home).expect("create isolated ACP home");
+    let mut daemon_guard = DaemonGuard::new(workspace.clone(), data.clone(), home.clone());
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    let launch_log = directory.0.join("launches");
+    let launched = || std::fs::read_to_string(&launch_log).map_or(0, |text| text.lines().count());
+    let server = json!({"name": "shared", "command": python3(), "args": [fixture],
+                        "env": [{"name": "LAUNCH_LOG", "value": launch_log},
+                                {"name": "CALL_LOG", "value": directory.0.join("calls")}]});
+    // Configuring a session's server again waits 2 s first.
+    let mut command = base_command(&workspace, &data, &home);
+    command
+        .args(["acp", "--provider", "echo", "--model", "echo-1"])
+        .env("HAARNESS_TEST_ACP_RESTORE_DELAY_MS", "2000")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn().expect("launch Haarness ACP agent");
+    let mut stdin = child.stdin.take().expect("ACP stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("ACP stdout")).lines();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":1, "method":"initialize",
+               "params":{"protocolVersion":1, "clientCapabilities":{}}}),
+    )
+    .await;
+    assert_eq!(receive(&mut lines).await["id"], 1);
+    // A chat id starts with its time in units of 65.536 s: both sessions are
+    // made well inside one.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let left = 65_536 - (now % 65_536);
+    if left < 15_000 {
+        tokio::time::sleep(Duration::from_millis(u64::try_from(left).unwrap() + 100)).await;
+    }
+    let mut sessions = Vec::new();
+    for id in [80, 81] {
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0", "id":id, "method":"session/new",
+                   "params":{"cwd":workspace, "mcpServers":[server.clone()]}}),
+        )
+        .await;
+        let mut messages = Vec::new();
+        let created = receive_response(&mut lines, &mut stdin, id, &mut messages).await;
+        sessions.push(created["result"]["sessionId"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(sessions[0][..8], sessions[1][..8]);
+    let api = daemon_api(&data);
+    let name = editor_server(&api, &sessions[0], "shared").await;
+    let tool = format!("mcp__{name}__ping");
+    let ask = |id: u64, session: &str| {
+        json!({"jsonrpc":"2.0", "id":id, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool {tool} {{}}")}]}})
+    };
+
+    daemon_guard.stop().await;
+    daemon_guard.stopped = false;
+    send(&mut stdin, ask(82, &sessions[0])).await;
+    // The new server is up and the first prompt waits before configuring
+    // the server again: the second prompt reads a listing without it.
+    timeout(Duration::from_secs(30), async {
+        while running_daemon_api(&data).is_none_or(|next| next == api) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the first prompt did not start the project's server again");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    send(&mut stdin, ask(83, &sessions[1])).await;
+    let mut answered = Vec::new();
+    let mut got = HashSet::new();
+    while answered.len() < 2 {
+        let message = receive(&mut lines).await;
+        if let Some(id) = message["id"]
+            .as_u64()
+            .filter(|_| message.get("method").is_none())
+        {
+            assert_eq!(message["result"]["stopReason"], "end_turn", "{message}");
+            answered.push(id);
+        } else if update_text(&message, "agent_message_chunk")
+            .is_some_and(|text| text == format!("Tool {tool} => pong"))
+        {
+            got.insert(message["params"]["sessionId"].as_str().unwrap().to_owned());
+        }
+    }
+    assert_eq!(
+        got.len(),
+        2,
+        "a session ran without the shared server's tool"
+    );
+    assert_eq!(launched(), 2, "the shared server was set up twice");
+    assert_eq!(
+        editor_servers(&daemon_api(&data), &sessions[0], "shared").await,
+        [name]
+    );
+
+    drop(stdin);
+    timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
     daemon_guard.stop().await;
 }
 

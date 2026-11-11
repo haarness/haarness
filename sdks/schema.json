@@ -3496,6 +3496,17 @@
             },
             "type": "array"
           },
+          "owner": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/McpOwner",
+                "description": "The process that uses a server configured through the API (an\neditor's `haarness acp`). Each configure adds its owner and a\nconfigure with `enabled: false` from it releases it; the server goes\nonce no owner is left, or once no owner's process still runs on the\nserver's computer. Without one, the server stays until it is\nconfigured off. Never saved in a configuration file."
+              }
+            ]
+          },
           "timeoutMs": {
             "description": "Optional connection/helper timeout. Plugin `timeout` seconds are\nnormalized to milliseconds by configuration discovery.",
             "format": "int64",
@@ -3517,6 +3528,25 @@
         },
         "required": [
           "transport"
+        ],
+        "type": "object"
+      },
+      "McpOwner": {
+        "description": "A process that uses an MCP server configured through the API.",
+        "properties": {
+          "pid": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "started": {
+            "description": "When the process started, as Haarness reads it on its computer, so a\nlater process given the same pid is not taken for it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pid",
+          "started"
         ],
         "type": "object"
       },

@@ -33,7 +33,7 @@ use agent_client_protocol::schema::{
 use agent_client_protocol::{Agent, Client, ConnectionTo, Stdio};
 use anyhow::{Context as _, Result};
 use haarness_protocol::{
-    CreateThreadRequest, Item, ItemData, McpConfigureRequest, PermissionReply,
+    CreateThreadRequest, Item, ItemData, McpConfigureRequest, McpOwner, PermissionReply,
     PermissionReplyDecision, RequestId, StartTurnRequest, Thread, ThreadId, Turn, TurnId,
     TurnStatus,
 };
@@ -96,10 +96,11 @@ struct Service {
     agent: Option<String>,
     auto_approve: bool,
     active: Arc<Mutex<HashMap<String, TurnId>>>,
-    /// This process's part of its sessions' MCP server names, so another
-    /// `haarness acp` on the project (the same session open in a second
-    /// window, an editor reconnecting) never lets go of this one's servers.
-    instance: String,
+    /// This process, named with each MCP server it configures: the server
+    /// keeps it while any process that configured it runs and has not let it
+    /// go, the same chat open in a second window's included, and sees one
+    /// an editor killed (SIGKILL says nothing) gone.
+    owner: McpOwner,
     /// The MCP servers the sessions' editors passed, by Haarness's name for
     /// them, so a prompt can configure again one the server no longer has
     /// (see `Service::restore_mcp`).
@@ -129,9 +130,13 @@ impl Service {
             agent: config.agent,
             auto_approve: config.auto_approve,
             active: Arc::new(Mutex::new(HashMap::new())),
-            // Random (the end of a v7 id is): four hex digits tell apart the
-            // few processes a project has at once.
-            instance: Uuid::now_v7().simple().to_string()[28..].to_owned(),
+            owner: McpOwner {
+                pid: std::process::id(),
+                // Unknown, the server cannot tell when the process ends, and
+                // keeps its servers until it lets them go.
+                started: haarness_core::process_groups::process_start(std::process::id())
+                    .unwrap_or_default(),
+            },
             mcp: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             waits: Arc::new(Mutex::new(HashMap::new())),
@@ -240,6 +245,20 @@ pub async fn serve(config: Config) -> Result<()> {
     };
     service.release_all().await;
     result
+}
+
+/// Debug builds under the test providers wait
+/// `HAARNESS_TEST_ACP_RESTORE_DELAY_MS` before configuring a session's server
+/// again, so a test can have a session sharing it read the listing first.
+async fn restore_delay() {
+    if cfg!(debug_assertions)
+        && std::env::var_os("HAARNESS_TEST_PROVIDER").is_some()
+        && let Some(delay) = std::env::var("HAARNESS_TEST_ACP_RESTORE_DELAY_MS")
+            .ok()
+            .and_then(|delay| delay.parse().ok())
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+    }
 }
 
 /// A signal that asks `haarness acp` to stop.
@@ -725,7 +744,7 @@ impl Service {
         let session = thread.to_string();
         for server in servers {
             let (shown, config) = mcp_config(server, cwd)?;
-            let name = format!("acp-{}-{}-{shown}", &session[..8], self.instance);
+            let name = format!("acp-{}-{shown}", &session[..8]);
             // Held from the moment the name is known, so a session sharing
             // it waits until the server has taken it.
             let held = {
@@ -756,7 +775,11 @@ impl Service {
                 held
             };
             let started = self.start_mcp(&name, &config).await;
-            self.configured(&name, on);
+            if !self.configured(&name, on) {
+                // The session closed meanwhile.
+                self.release_mcp(&name, config).await;
+                continue;
+            }
             drop(held);
             match started {
                 Ok(true) => self
@@ -799,14 +822,23 @@ impl Service {
             }
         };
         if let Some(server) = released {
-            self.release_mcp(name, server.config).await;
+            self.let_go(name, server).await;
         }
     }
 
-    /// Let `name` go on the server: a server a client turns off is removed
-    /// there at once, its process with it.
+    /// Let `server` (no longer tracked) go once a configure of it on its way
+    /// has ended, waiting [`MCP_RELEASE_WAIT`] for that at most: let go
+    /// before that configure landed, it would start again.
+    async fn let_go(&self, name: &str, server: SessionMcp) {
+        let _turn = tokio::time::timeout(MCP_RELEASE_WAIT, server.turn.lock()).await;
+        self.release_mcp(name, server.config).await;
+    }
+
+    /// Release `name` on the server as this process's: the server goes once
+    /// no process that configured it is left.
     async fn release_mcp(&self, name: &str, mut config: McpConfigureRequest) {
         config.enabled = false;
+        config.owner = Some(self.owner.clone());
         if let Err(error) = self.client.configure_mcp(name, &config).await {
             tracing::debug!(server = %name, %error, "an editor's MCP server was not let go");
         }
@@ -817,7 +849,7 @@ impl Service {
     async fn close(&self, session: &SessionId) -> AcpResult<CloseSessionResponse> {
         let _ = self.cancel(session).await;
         let key = session.to_string();
-        let released: Vec<(String, McpConfigureRequest)> = {
+        let released: Vec<(String, SessionMcp)> = {
             let mut known = self
                 .mcp
                 .lock()
@@ -832,7 +864,7 @@ impl Service {
                 .collect();
             unused
                 .into_iter()
-                .filter_map(|name| known.remove(&name).map(|server| (name, server.config)))
+                .filter_map(|name| known.remove(&name).map(|server| (name, server)))
                 .collect()
         };
         self.starting
@@ -842,7 +874,7 @@ impl Service {
         futures::future::join_all(
             released
                 .into_iter()
-                .map(|(name, config)| async move { self.release_mcp(&name, config).await }),
+                .map(|(name, server)| async move { self.let_go(&name, server).await }),
         )
         .await;
         Ok(CloseSessionResponse::new())
@@ -862,22 +894,24 @@ impl Service {
         }
         let releases = servers
             .into_iter()
-            .map(|(name, server)| async move { self.release_mcp(&name, server.config).await });
+            .map(|(name, server)| async move { self.let_go(&name, server).await });
         let _ = tokio::time::timeout(MCP_RELEASE_WAIT, futures::future::join_all(releases)).await;
     }
 
     /// Record that `name` was configured on the server `on` and that the
-    /// server has taken it.
-    fn configured(&self, name: &str, on: Uuid) {
-        if let Some(server) = self
+    /// server has taken it; `false` when it is no longer tracked (its
+    /// sessions closed meanwhile), and is to be let go.
+    fn configured(&self, name: &str, on: Uuid) -> bool {
+        let mut known = self
             .mcp
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(name)
-        {
-            server.on = on;
-            server.since = std::time::Instant::now();
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(server) = known.get_mut(name) else {
+            return false;
+        };
+        server.on = on;
+        server.since = std::time::Instant::now();
+        true
     }
 
     /// Before a prompt, configure again each of the session's MCP servers
@@ -952,8 +986,12 @@ impl Service {
             };
             if let Some(config) = config {
                 tracing::info!(server = %name, "configuring an editor's MCP server again on a new Haarness server");
+                restore_delay().await;
                 let started = self.start_mcp(&name, &config).await;
-                self.configured(&name, on);
+                if !self.configured(&name, on) {
+                    self.release_mcp(&name, config).await;
+                    continue;
+                }
                 if matches!(started, Ok(false)) {
                     continue;
                 }
@@ -1067,7 +1105,9 @@ impl Service {
     /// server, and the session's next prompt waits for it. A server that
     /// needs authorization is configured too.
     async fn start_mcp(&self, name: &str, config: &McpConfigureRequest) -> Result<bool> {
-        match tokio::time::timeout(MCP_START_WAIT, self.client.configure_mcp(name, config)).await {
+        let mut config = config.clone();
+        config.owner = Some(self.owner.clone());
+        match tokio::time::timeout(MCP_START_WAIT, self.client.configure_mcp(name, &config)).await {
             Ok(configured) => configured.map(|_| false),
             Err(_) => {
                 let servers = self.client.mcp().await?;
@@ -1927,6 +1967,7 @@ fn mcp_config(server: McpServer, cwd: &Path) -> AcpResult<(String, McpConfigureR
             oauth_scopes: Vec::new(),
             enabled: true,
             apps: None,
+            owner: None,
         },
     ))
 }

@@ -1331,9 +1331,27 @@ pub struct McpConfigureRequest {
     /// carry no page and its `ui://` pages are not served. On when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apps: Option<bool>,
+    /// The process that uses a server configured through the API (an
+    /// editor's `haarness acp`). Each configure adds its owner and a
+    /// configure with `enabled: false` from it releases it; the server goes
+    /// once no owner is left, or once no owner's process still runs on the
+    /// server's computer. Without one, the server stays until it is
+    /// configured off. Never saved in a configuration file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<McpOwner>,
 }
 fn default_true() -> bool {
     true
+}
+
+/// A process that uses an MCP server configured through the API.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOwner {
+    pub pid: u32,
+    /// When the process started, as Haarness reads it on its computer, so a
+    /// later process given the same pid is not taken for it.
+    pub started: String,
 }
 
 /// One unanswered permission prompt, listable so clients can repopulate
@@ -1681,6 +1699,7 @@ pub enum RefusalReason {
         SkillInfo,
         McpServerInfo,
         McpConfigureRequest,
+        McpOwner,
         LoopConfig,
         PendingPermissionInfo,
         PermissionScript,

@@ -1555,6 +1555,7 @@ fn mcp_entry_with_root(entry: &Value, plugin_root: Option<&Path>) -> Option<McpC
             },
             enabled,
             apps: entry.get("apps").and_then(Value::as_bool),
+            owner: None,
         });
     }
     let command = entry.get("command")?;
@@ -1611,6 +1612,7 @@ fn mcp_entry_with_root(entry: &Value, plugin_root: Option<&Path>) -> Option<McpC
         oauth_scopes: Vec::new(),
         enabled,
         apps: entry.get("apps").and_then(Value::as_bool),
+        owner: None,
     })
 }
 

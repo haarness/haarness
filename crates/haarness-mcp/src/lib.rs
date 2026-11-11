@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::{FutureExt as _, StreamExt, future::BoxFuture};
 use haarness_core::{CoreError, CoreResult, McpRegistry, ToolDefinition, ToolOutput};
-use haarness_protocol::{McpConfigureRequest, McpServerInfo};
+use haarness_protocol::{McpConfigureRequest, McpOwner, McpServerInfo};
 use http::{HeaderName, HeaderValue};
 use parking_lot::RwLock;
 use rmcp::{
@@ -152,7 +152,20 @@ pub struct NativeMcpRegistry {
     /// Told the name of each server whose start came to an answer (see
     /// [`Self::announce_starts`]); a candidate shares the live registry's.
     announce: Announcer,
+    /// Set once a task looks every [`OWNER_SWEEP`] for owners whose process
+    /// ended (see [`Added::owners`]).
+    sweeping: Arc<AtomicBool>,
 }
+/// How often the processes owning servers clients configured are looked
+/// for, to let go of the servers whose owners all ended: one killed (an
+/// editor stopping its agent with SIGKILL) never says it is going.
+#[cfg(not(test))]
+const OWNER_SWEEP: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const OWNER_SWEEP: Duration = Duration::from_millis(200);
+/// The processes that use a server, each with whether it was found on this
+/// computer when it configured the server, so its end can be seen here.
+type Owners = BTreeMap<McpOwner, bool>;
 /// Where a registry tells of each start that came to an answer.
 type Announcer = Arc<RwLock<Option<Arc<dyn Fn(&str) + Send + Sync>>>>;
 /// How long an explicit Reconnect waits for a start already on its way
@@ -237,6 +250,10 @@ struct Added {
     /// configured it, if any. A reload that finds other settings there, or
     /// none, lets the configuration's apply.
     shadowed: Option<McpConfigureRequest>,
+    /// The processes that use it (an editor's `haarness acp` each), when its
+    /// clients named them: it goes once none is left. `None` when a client
+    /// configured it without one: it stays until it is configured off.
+    owners: Option<Owners>,
 }
 impl Entry {
     /// Stop the start on its way, if any. Explicitly: a hot reload's
@@ -288,6 +305,88 @@ static CLASHES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet
     std::sync::LazyLock::new(Default::default);
 fn first_clash(name: &str) -> bool {
     CLASHES.lock().insert(name.to_owned())
+}
+/// Whether `owner` runs on this computer: a process here has its pid and
+/// started when it says. Only such an owner's end can be seen here.
+async fn on_this_computer(owner: &McpOwner) -> bool {
+    let (pid, started) = (owner.pid, owner.started.clone());
+    tokio::task::spawn_blocking(move || {
+        haarness_core::process_groups::process_start(pid).is_some_and(|start| start == started)
+    })
+    .await
+    .unwrap_or(false)
+}
+/// Whether the owner process `owner` has ended; `thorough` as in
+/// [`NativeMcpRegistry::let_go_of_ended`].
+fn owner_ended(owner: &McpOwner, thorough: bool) -> bool {
+    use haarness_core::process_groups::{process_ended, process_start};
+    process_ended(owner.pid)
+        || (thorough && process_start(owner.pid).is_some_and(|start| start != owner.started))
+}
+/// The owners on this computer of the servers in `servers` that have ended.
+fn ended_owners(servers: &RwLock<BTreeMap<String, Entry>>, thorough: bool) -> Vec<McpOwner> {
+    owners_here(servers)
+        .into_iter()
+        .filter(|owner| owner_ended(owner, thorough))
+        .collect()
+}
+/// The owners on this computer of the servers in `servers`.
+fn owners_here(servers: &RwLock<BTreeMap<String, Entry>>) -> Vec<McpOwner> {
+    let servers = servers.read();
+    let mut owners: Vec<McpOwner> = servers
+        .values()
+        .filter_map(|entry| entry.added.as_ref()?.owners.as_ref())
+        .flat_map(|owners| owners.iter().filter(|(_, here)| **here))
+        .map(|(owner, _)| owner.clone())
+        .collect();
+    owners.sort();
+    owners.dedup();
+    owners
+}
+/// [`NativeMcpRegistry::let_go_of_ended`] for `servers`.
+async fn let_go_of_ended(servers: &RwLock<BTreeMap<String, Entry>>, thorough: bool) {
+    let ended = if thorough {
+        let owners = owners_here(servers);
+        if owners.is_empty() {
+            return;
+        }
+        tokio::task::spawn_blocking(move || {
+            owners
+                .into_iter()
+                .filter(|owner| owner_ended(owner, true))
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
+    } else {
+        ended_owners(servers, false)
+    };
+    let_go_of(servers, &ended);
+}
+/// Take `ended` off the owners of every server in `servers`, and let go of
+/// each server that has none left: its start stops, and its process ends
+/// with its connection.
+fn let_go_of(servers: &RwLock<BTreeMap<String, Entry>>, ended: &[McpOwner]) {
+    if ended.is_empty() {
+        return;
+    }
+    let mut servers = servers.write();
+    let mut gone = Vec::new();
+    for (name, entry) in servers.iter_mut() {
+        let Some(owners) = entry.added.as_mut().and_then(|added| added.owners.as_mut()) else {
+            continue;
+        };
+        let before = owners.len();
+        owners.retain(|owner, _| !ended.contains(owner));
+        if owners.is_empty() && before > 0 {
+            entry.stop_start();
+            gone.push(name.clone());
+        }
+    }
+    for name in gone {
+        tracing::info!(server = %name, "the processes that used an MCP server ended; it was let go");
+        servers.remove(&name);
+    }
 }
 #[derive(Clone)]
 struct CatalogClient {
@@ -755,6 +854,7 @@ impl McpRegistry for NativeMcpRegistry {
     }
     async fn list(&self) -> CoreResult<Vec<McpServerInfo>> {
         self.revoke_stale();
+        self.let_go_of_ended(false).await;
         Ok(self
             .servers
             .read()
@@ -765,11 +865,22 @@ impl McpRegistry for NativeMcpRegistry {
     async fn configure(
         &self,
         name: &str,
-        config: McpConfigureRequest,
+        mut config: McpConfigureRequest,
     ) -> CoreResult<McpServerInfo> {
+        self.let_go_of_ended(false).await;
+        let owner = match config.owner.take() {
+            Some(owner) => {
+                let here = on_this_computer(&owner).await;
+                if here {
+                    self.sweep_owners();
+                }
+                Some((owner, here))
+            }
+            None => None,
+        };
         let enabled = config.enabled;
-        let info = self.register(name, config, true)?;
-        if !enabled {
+        let (info, fresh) = self.register_owned(name, config, true, owner)?;
+        if !enabled || !fresh {
             return Ok(info);
         }
         // Started at a client's request (an editor's session, say), which
@@ -945,6 +1056,23 @@ impl NativeMcpRegistry {
         config: McpConfigureRequest,
         added: bool,
     ) -> CoreResult<McpServerInfo> {
+        self.register_owned(name, config, added, None)
+            .map(|(info, _)| info)
+    }
+    /// [`Self::register`] for a client naming the process that uses the
+    /// server (`owner`, and whether it runs on this computer). Configured on
+    /// with the settings it already runs (or starts) with, the server gains
+    /// the owner and goes on as it is; configured off, it loses the owner,
+    /// and goes only once none is left. Whether the server was recorded
+    /// anew, and is to start when it is on.
+    fn register_owned(
+        &self,
+        name: &str,
+        mut config: McpConfigureRequest,
+        added: bool,
+        owner: Option<(McpOwner, bool)>,
+    ) -> CoreResult<(McpServerInfo, bool)> {
+        config.owner = None;
         if !matches!(
             config.transport.as_str(),
             "stdio" | "streamable_http" | "sse"
@@ -970,6 +1098,47 @@ impl NativeMcpRegistry {
             turned_off: None,
         };
         let mut servers = self.servers.write();
+        let owners = servers
+            .get(name)
+            .and_then(|live| live.added.as_ref())
+            .and_then(|added| added.owners.clone());
+        if added && let Some((owner, here)) = &owner {
+            let live = servers.get_mut(name).filter(|live| {
+                live.added
+                    .as_ref()
+                    .is_some_and(|added| added.owners.is_some())
+            });
+            if !config.enabled {
+                // Released by one of its owners: it goes with the last.
+                let Some(live) = live else {
+                    return Ok((info, false));
+                };
+                let owners = live
+                    .added
+                    .as_mut()
+                    .and_then(|added| added.owners.as_mut())
+                    .expect("an owned entry");
+                owners.remove(owner);
+                if !owners.is_empty() {
+                    return Ok((live.info.clone(), false));
+                }
+                live.stop_start();
+                servers.remove(name);
+                return Ok((info, false));
+            }
+            if let Some(live) = live.filter(|live| {
+                same_effective_config(&live.config, &config)
+                    && (live.info.status == "connected" || live.pending().is_some())
+            }) {
+                // Another owner of the server as it runs.
+                live.added
+                    .as_mut()
+                    .and_then(|added| added.owners.as_mut())
+                    .expect("an owned entry")
+                    .insert(owner.clone(), *here);
+                return Ok((live.info.clone(), false));
+            }
+        }
         // Configured again, it still stands in for what it first did.
         let added = added.then(|| Added {
             shadowed: servers
@@ -978,6 +1147,11 @@ impl NativeMcpRegistry {
                     Some(added) => added.shadowed.clone(),
                     None => Some(replaced.config.clone()),
                 }),
+            owners: owner.map(|(owner, here)| {
+                let mut owners = owners.unwrap_or_default();
+                owners.insert(owner, here);
+                owners
+            }),
         });
         // One standing in for an entry keeps where that entry comes from
         // (the system folder's servers are shown as such).
@@ -994,7 +1168,7 @@ impl NativeMcpRegistry {
         // reconnect, and its process (if any) ends with the entry.
         if added.as_ref().is_some_and(|added| added.shadowed.is_none()) && !config.enabled {
             servers.remove(name);
-            return Ok(info);
+            return Ok((info, true));
         }
         servers.insert(
             name.into(),
@@ -1017,7 +1191,35 @@ impl NativeMcpRegistry {
                 added,
             },
         );
-        Ok(info)
+        Ok((info, true))
+    }
+    /// Let go of the servers whose owners have all ended (see
+    /// [`Added::owners`]). `thorough` also reads each owner's start time (a
+    /// `ps` on macOS), to tell a later process given the same pid from it;
+    /// otherwise only whether the pid is taken is asked, which is cheap.
+    async fn let_go_of_ended(&self, thorough: bool) {
+        let_go_of_ended(&self.servers, thorough).await;
+    }
+    /// Look for ended owners every [`OWNER_SWEEP`], from the first server
+    /// with an owner on this computer on.
+    fn sweep_owners(&self) {
+        if self.sweeping.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let servers = Arc::downgrade(&self.servers);
+        let closed = self.closed.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(OWNER_SWEEP) => {}
+                    () = closed.cancelled() => return,
+                }
+                let Some(servers) = servers.upgrade() else {
+                    return;
+                };
+                let_go_of_ended(&servers, true).await;
+            }
+        });
     }
     /// Start `name` in a task of its own, or join the start it is on: a
     /// Reconnect meanwhile waits for that start rather than discarding it.
@@ -1262,6 +1464,7 @@ impl NativeMcpRegistry {
     /// configuration now has one (`haarness mcp add` saves the entry and
     /// configures the server, in either order with a reload).
     pub fn replace_from(&self, candidate: &Self) {
+        let_go_of(&self.servers, &ended_owners(&self.servers, false));
         // Held to the end: a start that finishes meanwhile writes into the
         // candidate before its entries are copied, or into this registry
         // once its home points here (see `with_home`).
@@ -1683,6 +1886,7 @@ impl NativeMcpRegistry {
                     folder,
                     closed,
                     announce,
+                    sweeping: Arc::default(),
                 };
                 let _ = registry.connect(&name, Some(generation)).await;
                 return;
@@ -1944,6 +2148,7 @@ impl McpStart {
                 folder,
                 closed,
                 announce: announce.clone(),
+                sweeping: Arc::default(),
             }
             .watch(name, generation);
         }
@@ -4487,6 +4692,7 @@ mod tests {
                     oauth_scopes: Vec::new(),
                     enabled: true,
                     apps: None,
+                    owner: None,
                 },
             )
             .await
@@ -4527,6 +4733,7 @@ mod tests {
                     oauth_scopes: Vec::new(),
                     enabled: true,
                     apps: None,
+                    owner: None,
                 },
             )
             .await
@@ -4598,6 +4805,7 @@ mod tests {
                 oauth_scopes: vec!["mcp".into()],
                 enabled: true,
                 apps: None,
+                owner: None,
             };
             registry.configure("secure", config).await.unwrap();
             let error = registry
@@ -4783,6 +4991,7 @@ mod tests {
             oauth_scopes: vec!["mcp".into()],
             enabled: true,
             apps: None,
+            owner: None,
         };
         let info = registry.configure("secure", config.clone()).await.unwrap();
         assert_eq!(info.status, "needs_auth");
@@ -6108,6 +6317,7 @@ mod tests {
                     oauth_scopes: Vec::new(),
                     enabled: false,
                     apps: None,
+                    owner: None,
                 },
             )
             .unwrap();
@@ -6133,6 +6343,7 @@ mod tests {
             oauth_scopes: Vec::new(),
             enabled: false,
             apps: None,
+            owner: None,
         };
         let live = NativeMcpRegistry::default();
         live.prepare("old", config.clone()).unwrap();
@@ -6371,6 +6582,7 @@ mod tests {
             oauth_scopes: Vec::new(),
             enabled: true,
             apps: None,
+            owner: None,
         };
         let headers = resolve_headers("weather", &config).await.unwrap();
         assert_eq!(
@@ -8576,6 +8788,154 @@ mod recovery_tests {
         candidate.set_scope("base", Some("system".into()));
         live.replace_from(&candidate);
         assert_eq!(scope(&live).await.as_deref(), Some("system"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `config` configured by the process `pid`, as it says when it started.
+    fn owned_by(config: &McpConfigureRequest, pid: u32, started: &str) -> McpConfigureRequest {
+        let mut owned = config.clone();
+        owned.owner = Some(McpOwner {
+            pid,
+            started: started.into(),
+        });
+        owned
+    }
+
+    /// A process on this computer that runs until it is killed.
+    #[cfg(unix)]
+    fn owner_process() -> (std::process::Child, String) {
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let started = haarness_core::process_groups::process_start(child.id())
+            .expect("the start of a process just started");
+        (child, started)
+    }
+
+    /// Two processes (two editor windows on one chat) configuring the same
+    /// server share it, started once: one releasing it leaves it to the
+    /// other, and it goes with the last.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owners_share_a_server_that_goes_with_the_last() {
+        let root = scratch("owners");
+        let config = launched_as(&root, "shared");
+        let (mut first, first_started) = owner_process();
+        let (mut second, second_started) = owner_process();
+        let live = NativeMcpRegistry::default();
+        let mine = owned_by(&config, first.id(), &first_started);
+        let theirs = owned_by(&config, second.id(), &second_started);
+        assert_eq!(
+            live.configure("ed", mine.clone()).await.unwrap().status,
+            "connected"
+        );
+        assert_eq!(
+            live.configure("ed", theirs.clone()).await.unwrap().status,
+            "connected"
+        );
+        assert_eq!(
+            launches(&root.join("shared")),
+            1,
+            "the second owner started it again"
+        );
+        let mut off = mine;
+        off.enabled = false;
+        assert_eq!(live.configure("ed", off).await.unwrap().status, "connected");
+        let ping = live.call("ed", "ping", serde_json::json!({})).await;
+        assert_eq!(ping.unwrap().text, "pong");
+        let mut off = theirs;
+        off.enabled = false;
+        live.configure("ed", off).await.unwrap();
+        assert!(statuses(&live).await.is_empty());
+        for child in [&mut first, &mut second] {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An owner killed (an editor stopping its agent with SIGKILL) says
+    /// nothing: its server is let go once its process is seen gone, on the
+    /// next listing. A server configured without an owner stays, and so
+    /// does one whose owner runs on another computer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_server_whose_owners_ended_is_let_go() {
+        let root = scratch("ended");
+        let (mut owner, started) = owner_process();
+        let live = NativeMcpRegistry::default();
+        live.configure(
+            "ed",
+            owned_by(&launched_as(&root, "ed"), owner.id(), &started),
+        )
+        .await
+        .unwrap();
+        live.configure("sdk", launched_as(&root, "sdk"))
+            .await
+            .unwrap();
+        // No process here has this pid and start: another computer's.
+        live.configure(
+            "remote",
+            owned_by(&launched_as(&root, "remote"), u32::MAX - 7, "elsewhere"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(statuses(&live).await.len(), 3);
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        let listed = statuses(&live).await;
+        assert_eq!(
+            listed.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["remote", "sdk"]
+        );
+        for name in ["remote", "sdk"] {
+            live.disconnect(name).await.unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A later process given an owner's pid is not taken for it: the slow
+    /// look at owners reads each one's start time too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_later_process_with_an_owners_pid_does_not_keep_its_server() {
+        let root = scratch("reused");
+        let (mut owner, started) = owner_process();
+        let live = NativeMcpRegistry::default();
+        live.configure(
+            "ed",
+            owned_by(&launched_as(&root, "ed"), owner.id(), &started),
+        )
+        .await
+        .unwrap();
+        // As if the pid had ended and been given to a process started later.
+        {
+            let mut servers = live.servers.write();
+            let owners = servers
+                .get_mut("ed")
+                .and_then(|entry| entry.added.as_mut())
+                .and_then(|added| added.owners.as_mut())
+                .unwrap();
+            let (before, here) = owners.pop_first().unwrap();
+            owners.insert(
+                McpOwner {
+                    pid: before.pid,
+                    started: format!("{started} (earlier)"),
+                },
+                here,
+            );
+        }
+        assert_eq!(statuses(&live).await.len(), 1, "the pid alone let it go");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !statuses(&live).await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the later process kept the server");
+        owner.kill().unwrap();
+        owner.wait().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -345,17 +345,32 @@ request to a server that is starting (its tools, a tool call, a resource or
 prompt request) waits for that start too.
 
 A server configured through `POST /v1/mcp/{name}` (as an editor's ACP
-session or an SDK's `configureMcp` does) is in no configuration file. It
-lives as long as the project's server, until its client configures it again
-with `enabled: false`, which removes it at once with its process and its
-tools: a reload keeps it as it is (connected, still starting, or
-disconnected by the person), and a restart of the server forgets it. While
-it lives, every chat of the project is offered its tools. One configured
-under the name of a server in the configuration keeps that name while the
-configuration's entry stays as it was; configured off, it stays off there
-(as `haarness mcp disable` does); once the entry is edited or removed, the
-configuration's entry applies again. `haarness acp` lets its sessions'
-servers go when the editor closes a session or quits (see below).
+session or an SDK's `configureMcp` does) is in no configuration file. A
+reload keeps it as it is (connected, still starting, or disconnected by the
+person), a restart of the server forgets it, and while it lives every chat
+of the project is offered its tools. How long it lives depends on `owner`:
+
+- Configured without one (an SDK), it lives as long as the project's server,
+  until a client configures it again with `enabled: false`, which removes it
+  at once with its process and its tools.
+- Configured with one (`{"pid", "started"}`, the process that uses it, as
+  `haarness acp` sends), it lives while it has an owner. Each configure adds
+  its owner, and one with the settings the server already runs with leaves
+  it running rather than starting it again; a configure with
+  `enabled: false` from an owner takes that owner off, and the server goes
+  with its last owner. An owner whose process runs on the server's computer
+  (its pid and start time found there when it configured the server) is
+  also taken off once that process has ended: Haarness looks when a server
+  is configured or listed, on every reload, and every 30 seconds, so a
+  process that was killed and said nothing is noticed within that time. An
+  owner Haarness cannot find there (another computer's, or one on Windows)
+  stays until it lets the server go.
+
+One configured under the name of a server in the configuration keeps that
+name while the configuration's entry stays as it was; configured off, it
+stays off there (as `haarness mcp disable` does); once the entry is edited
+or removed, the configuration's entry applies again. `haarness acp` names
+itself as the owner of its sessions' servers (see below).
 
 Such a server holds up no turn while it starts: its client waits for it. ACP
 takes a server still starting (or needing authorization) after 2 seconds as
@@ -376,13 +391,20 @@ server (a restart, an update) does not have the session's servers yet: they
 are configured there again and waited for like a new session's. One the
 person disconnected is still listed and stays disconnected; one turned off
 (configured with `enabled: false`) is gone and stays gone for the session,
-a later restart included. Sessions of one `haarness acp` process made
-within a minute or so share a server of the same name, which is set up once
-for them and waited for by each; another process (the same session open in a
-second window) has servers of its own. ACP lets a session's
-servers go when the editor closes the session (`session/close`), unless
-another open session shares them, and lets every one go when the editor
-closes the connection or stops `haarness acp` with a signal.
+a later restart included. A server's name is the chat's
+(`acp-<chat id prefix>-<name>`), so sessions made within a minute or so
+share a server of the same name, which is set up once for them and waited
+for by each, and an answer that allows one of its tools while Haarness runs
+still holds in the agent process an editor starts for the chat later. Two
+agent processes on one chat (the same session open in two windows) share
+its servers: the server keeps them while either process uses them. ACP lets
+a session's servers go when the editor closes the session
+(`session/close`), unless another open session shares them, and lets every
+one go when the editor closes the connection or stops `haarness acp` with
+SIGTERM, SIGINT or SIGHUP. An editor that kills the process with SIGKILL (as
+Zed does when it quits or opens another thread) gives it no chance to: the
+project's server lets its servers go once it sees the process has ended (see
+`owner` above).
 
 Every start runs on its own: a client that gives up on `configure` or
 `reconnect` leaves it running. A `reconnect` during a start that has run

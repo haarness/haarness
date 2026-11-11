@@ -2680,6 +2680,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             oauth_scopes: Vec::new(),
             enabled,
             apps: input.get("apps").and_then(Value::as_bool).filter(|on| !on),
+            owner: None,
         },
         "remote" => McpConfigureRequest {
             transport: "streamable_http".into(),
@@ -2696,6 +2697,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             oauth_scopes: string_array(input, "oauthScopes")?,
             enabled,
             apps: input.get("apps").and_then(Value::as_bool).filter(|on| !on),
+            owner: None,
         },
         _ => bail!("MCP type must be local or remote"),
     };

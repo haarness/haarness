@@ -310,6 +310,30 @@ fn parse_record(text: &str) -> (Option<(u32, String)>, BTreeMap<i32, String>) {
     (server, groups)
 }
 
+/// When process `pid` started, as this system says it (the same text each
+/// time it is read), or `None` when it is gone or this system cannot say.
+/// With its pid it names that process, and no later one given the same pid.
+pub fn process_start(pid: u32) -> Option<String> {
+    start_of(pid)
+}
+
+/// Whether process `pid` has surely ended: no process has that pid. Asked
+/// of the kernel alone, so it is cheap to ask often; a later process given
+/// the same pid reads as running (see [`process_start`]).
+pub fn process_ended(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
+        i32::try_from(pid)
+            .is_ok_and(|pid| pid > 0 && kill(Pid::from_raw(pid), None) == Err(Errno::ESRCH))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 /// A process's start time as this system says it, the same way every time.
 fn start_of(pid: u32) -> Option<String> {
     match probe(i32::try_from(pid).ok()?) {

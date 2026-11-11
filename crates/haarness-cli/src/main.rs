@@ -10743,6 +10743,7 @@ async fn mcp_command(
                         oauth_scopes: Vec::new(),
                         enabled: !disabled,
                         apps: None,
+                        owner: None,
                     }
                 }
                 (None, Some(url)) => {
@@ -10770,6 +10771,7 @@ async fn mcp_command(
                         oauth_scopes: oauth_scopes.clone(),
                         enabled: !disabled,
                         apps: None,
+                        owner: None,
                     }
                 }
                 _ => anyhow::bail!("provide exactly one of --command or --url"),
@@ -16628,6 +16630,7 @@ mod tests {
             oauth_scopes: vec!["mcp:read".into(), "mcp:write".into()],
             enabled: false,
             apps: None,
+            owner: None,
         };
         write_mcp_entry(
             &path,
@@ -16691,6 +16694,7 @@ mod tests {
             oauth_scopes: Vec::new(),
             enabled: true,
             apps: None,
+            owner: None,
         };
         let writers: Vec<_> = (0..8)
             .map(|writer| {
@@ -16755,6 +16759,7 @@ mod tests {
             oauth_scopes: Vec::new(),
             enabled: true,
             apps: None,
+            owner: None,
         };
         let shown = mcp_config_for_display(&remote, false).unwrap();
         assert_eq!(
