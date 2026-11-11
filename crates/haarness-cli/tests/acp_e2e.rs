@@ -1337,6 +1337,124 @@ async fn prompts_sent_while_a_server_starts_keep_their_order() {
     daemon_guard.stop().await;
 }
 
+/// An editor's MCP servers last as long as its session: a reload of the
+/// project's configuration (a skill added) keeps them, and once the
+/// project's server has stopped (an update replaces it, it is stopped), the
+/// next prompt reaches the one that serves the project now and sets them up
+/// there again. One the person disconnected stays disconnected through the
+/// reload; a new server starts it again, as it starts a configured one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sessions_mcp_servers_outlast_a_reload_and_a_restart_of_the_server() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, _) =
+        acp_session(&directory).await;
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    let launch_log = directory.0.join("launches");
+    let server = |name: &str| {
+        json!({"name": name, "command": python3(), "args": [fixture],
+               "env": [{"name": "LAUNCH_LOG", "value": launch_log},
+                       {"name": "CALL_LOG", "value": directory.0.join("calls")}]})
+    };
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":30, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[server("editor"), server("spare")]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let created = receive_response(&mut lines, &mut stdin, 30, &mut messages).await;
+    let session = created["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"))
+        .to_owned();
+    let tool = format!("mcp__acp-{}-editor__ping", &session[..8]);
+    let spare = format!("acp-{}-spare", &session[..8]);
+    let launched = || std::fs::read_to_string(&launch_log).map_or(0, |text| text.lines().count());
+    assert_eq!(launched(), 2);
+    let mut prompt = async |id: u64| {
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0", "id":id, "method":"session/prompt",
+                   "params":{"sessionId":session,
+                             "prompt":[{"type":"text", "text":format!("!tool {tool} {{}}")}]}}),
+        )
+        .await;
+        let mut messages = Vec::new();
+        let answered = receive_response(&mut lines, &mut stdin, id, &mut messages).await;
+        assert_eq!(answered["result"]["stopReason"], "end_turn", "{answered}");
+        assert!(
+            messages
+                .iter()
+                .filter_map(|message| update_text(message, "agent_message_chunk"))
+                .any(|text| text == format!("Tool {tool} => pong")),
+            "prompt {id} did not get the editor's tool: {messages:?}"
+        );
+    };
+    prompt(31).await;
+
+    let api = daemon_api(&data);
+    daemon(
+        &api,
+        reqwest::Method::POST,
+        &format!("/mcp/{spare}/disconnect"),
+        Some(json!({})),
+    )
+    .await;
+    let skill = workspace.join(".haarness/skills/late/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).expect("create skill folder");
+    std::fs::write(
+        &skill,
+        "---\nname: late\ndescription: Says late.\n---\n\nSay late.\n",
+    )
+    .expect("write skill");
+    timeout(Duration::from_secs(20), async {
+        while !daemon(&api, reqwest::Method::GET, "/skills", None)
+            .await
+            .as_array()
+            .is_some_and(|skills| skills.iter().any(|skill| skill["name"] == "late"))
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the skill never reloaded the configuration");
+    prompt(32).await;
+    assert_eq!(launched(), 2, "a server was started again after the reload");
+    let listed = daemon(&api, reqwest::Method::GET, "/mcp", None).await;
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|server| server["name"] == spare.as_str() && server["status"] == "disconnected"),
+        "{listed}"
+    );
+
+    // The server stops; the next prompt starts the project's server again
+    // and sets the session's servers up there. The guard stops that one,
+    // should the test fail before it does.
+    daemon_guard.stop().await;
+    daemon_guard.stopped = false;
+    prompt(33).await;
+    assert_eq!(launched(), 4);
+    assert_ne!(
+        daemon_api(&data),
+        api,
+        "the prompt reached the stopped server"
+    );
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}
+
 /// `haarness acp -m provider/model`, the form the docs show, names that
 /// provider as `haarness run` does: the bare id went to the default provider,
 /// which could be another account's (Haarness Cloud spending its credit for a

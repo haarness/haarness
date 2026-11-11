@@ -1747,7 +1747,15 @@ async fn cli_main() -> Result<()> {
         Some(Command::Acp(args)) => {
             let discovery =
                 ensure_workspace_server(&paths, &workspace, project_config).await?;
-            let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
+            // It follows the project's server when an update replaces it, or
+            // starts it again when it stopped, as the TUI does.
+            let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?
+                .with_endpoint_resolver(runtime_endpoint_resolver(&paths, &workspace))
+                .with_server_restarter(workspace_server_restarter(
+                    &paths,
+                    &workspace,
+                    project_config,
+                ));
             // `-m provider/model` names its provider, as for `haarness run`:
             // left whole, the id would go to the default provider, which can be
             // another account's.

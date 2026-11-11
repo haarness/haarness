@@ -352,7 +352,8 @@ that name while the configuration's entry stays as it was; once the entry is
 edited or removed, the configuration's entry applies again. One configured
 with `enabled: false` under a name the configuration does not hold is let go
 at the next reload, as `haarness mcp remove` turns a server off before
-removing its entry. A restart of the server forgets them.
+removing its entry. A restart of the server forgets them; ACP sets its
+sessions' servers up again (see below).
 
 Such a server holds up no turn while it starts: its client waits for it. ACP
 takes a server still starting (or needing authorization) after 2 seconds as
@@ -366,7 +367,12 @@ prompt's reply and logged; the prompt goes on without it, and the server is
 left disconnected for the session's next load to configure again. One still
 starting after 150 seconds is told too, and the next prompt waits for it
 again. One that fails within the 2 seconds fails the session and is left
-disconnected too.
+disconnected too. Each prompt first makes sure it reaches the project's
+server: one an update replaced is followed to its successor, and one that
+stopped is started again, as the TUI does. A session's server the project's
+server no longer lists (it restarted, or an older build let it go on a
+reload) is then configured again and waited for like a new session's; one
+the person disconnected is still listed and stays disconnected.
 
 Every start runs on its own: a client that gives up on `configure` or
 `reconnect` leaves it running. A `reconnect` during a start that has run

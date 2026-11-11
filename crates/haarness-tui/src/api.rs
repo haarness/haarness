@@ -561,6 +561,44 @@ impl ApiClient {
         Some(info)
     }
 
+    /// Reach the project's server again when the one this client used no
+    /// longer answers: the server that took its place (an update replaced
+    /// it), or one the restarter starts (it stopped or crashed). For a
+    /// client that is not always following the server's events, which do
+    /// this themselves (an editor over ACP, between its prompts). Whether it
+    /// now talks to another server.
+    pub async fn reach_server(&self) -> bool {
+        if self
+            .info()
+            .await
+            .is_ok_and(|info| compatible_server_info(&info, None))
+        {
+            return false;
+        }
+        if self.rediscover_endpoint(None).await.is_some() {
+            return true;
+        }
+        let Some(restart) = self.server_restarter.as_ref() else {
+            return false;
+        };
+        match restart().await {
+            Ok(credentials) if !self.endpoint().matches(&credentials) => {
+                match ApiEndpoint::new(&credentials.server, credentials.auth) {
+                    Ok(next) => {
+                        self.replace_endpoint(next);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
+            Ok(_) => false,
+            Err(error) => {
+                tracing::warn!(%error, "could not restart the workspace server");
+                false
+            }
+        }
+    }
+
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         Ok(
             checked_response(self.request(reqwest::Method::GET, path).sent().await?)
@@ -3459,6 +3497,69 @@ mod tests {
             "restarts only after a few failed reconnects"
         );
         assert_eq!(*restarts.lock().unwrap(), 1);
+        let requests = server.await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.contains("authorization: Bearer new-token"))
+        );
+    }
+
+    /// A client between its requests (an editor over ACP) whose server
+    /// stopped reaches the one that took its place, or starts one; one whose
+    /// server still answers stays with it.
+    #[tokio::test]
+    async fn a_client_reaches_the_server_that_took_its_servers_place() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let info = serde_json::to_string(&fixture_server_info(uuid::Uuid::now_v7(), "/workspace"))
+            .unwrap();
+        let server = tokio::spawn(serve_responses(
+            listener,
+            vec![
+                // The replacement, asked by the rediscovery and then again.
+                response("application/json", &info),
+                response("application/json", &info),
+                response("application/json", &info),
+            ],
+        ));
+        let replaced: EndpointResolver = Arc::new(move || {
+            Some(EndpointCredentials::new(
+                format!("http://{address}"),
+                "new-token",
+            ))
+        });
+        let restarts = Arc::new(Mutex::new(0_u32));
+        let restarter: super::ServerRestarter = {
+            let restarts = restarts.clone();
+            Arc::new(move || {
+                *restarts.lock().unwrap() += 1;
+                Box::pin(async move {
+                    Ok(EndpointCredentials::new(
+                        format!("http://{address}"),
+                        "new-token",
+                    ))
+                })
+            })
+        };
+        // Nothing listens on port 1: the server this client used is gone.
+        let client = ApiClient::new("http://127.0.0.1:1", "old-token")
+            .unwrap()
+            .with_endpoint_resolver(replaced)
+            .with_server_restarter(restarter.clone());
+        assert!(client.reach_server().await);
+        assert!(
+            !client.reach_server().await,
+            "it left a server that answers"
+        );
+        // None took its place: the restarter starts one.
+        let started = ApiClient::new("http://127.0.0.1:1", "old-token")
+            .unwrap()
+            .with_endpoint_resolver(Arc::new(|| None))
+            .with_server_restarter(restarter);
+        assert!(started.reach_server().await);
+        assert_eq!(*restarts.lock().unwrap(), 1);
+        assert!(started.info().await.is_ok());
         let requests = server.await.unwrap();
         assert!(
             requests

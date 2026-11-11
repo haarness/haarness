@@ -43,6 +43,15 @@ use uuid::Uuid;
 /// An MCP server of a session: Haarness's name for it, and the editor's.
 type SessionServer = (String, String);
 
+/// An MCP server an editor passed: the sessions it came with (chats made
+/// within a minute or so share the start of their id, which names it), the
+/// editor's name for it and its settings.
+struct SessionMcp {
+    sessions: HashSet<String>,
+    shown: String,
+    config: McpConfigureRequest,
+}
+
 /// How long setting a session up waits for one of its MCP servers to start
 /// before leaving the rest of that start to the server (see
 /// `Service::start_mcp`).
@@ -74,7 +83,10 @@ struct Service {
     agent: Option<String>,
     auto_approve: bool,
     active: Arc<Mutex<HashMap<String, TurnId>>>,
-    mcp: Arc<Mutex<HashSet<String>>>,
+    /// The MCP servers the sessions' editors passed, by Haarness's name for
+    /// them, so a prompt can configure again one the server no longer has
+    /// (see `Service::restore_mcp`).
+    mcp: Arc<Mutex<HashMap<String, SessionMcp>>>,
     /// Each session's MCP servers still starting when it was set up, by
     /// session: Haarness's name and the editor's. Its next prompt waits for
     /// them (see `Service::await_mcp`).
@@ -100,7 +112,7 @@ impl Service {
             agent: config.agent,
             auto_approve: config.auto_approve,
             active: Arc::new(Mutex::new(HashMap::new())),
-            mcp: Arc::new(Mutex::new(HashSet::new())),
+            mcp: Arc::new(Mutex::new(HashMap::new())),
             starting: Arc::new(Mutex::new(HashMap::new())),
             waits: Arc::new(Mutex::new(HashMap::new())),
             gates: Arc::new(Mutex::new(HashMap::new())),
@@ -214,6 +226,7 @@ impl Service {
 
     async fn create(&self, request: NewSessionRequest) -> AcpResult<NewSessionResponse> {
         self.validate_scope(&request.cwd, &request.additional_directories)?;
+        self.client.reach_server().await;
         let thread = self
             .client
             .create_thread(CreateThreadRequest {
@@ -245,6 +258,7 @@ impl Service {
     ) -> AcpResult<LoadSessionResponse> {
         self.validate_scope(&request.cwd, &request.additional_directories)?;
         let thread = thread_id(&request.session_id)?;
+        self.client.reach_server().await;
         let chat = self.client.thread(thread).await.map_err(not_found)?;
         self.configure_mcp(thread, request.mcp_servers, &request.cwd)
             .await?;
@@ -303,7 +317,12 @@ impl Service {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key.clone(), stop.clone());
         let begun: AcpResult<Option<_>> = async {
+            // The project's server may have been replaced since the last
+            // prompt (an update), or stopped: the prompt goes to the one that
+            // serves the project now, with the session's servers set up there.
+            self.client.reach_server().await;
             let chat = self.client.thread(thread).await.map_err(not_found)?;
+            self.restore_mcp(&request.session_id).await;
             if self
                 .await_mcp(&request.session_id, &stop, connection)
                 .await?
@@ -626,13 +645,23 @@ impl Service {
         for server in servers {
             let (shown, config) = mcp_config(server, cwd)?;
             let name = format!("acp-{}-{shown}", &thread.to_string()[..8]);
-            let fresh = self
-                .mcp
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(name.clone());
-            if !fresh {
-                continue;
+            {
+                let mut known = self
+                    .mcp
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(passed) = known.get_mut(&name) {
+                    passed.sessions.insert(thread.to_string());
+                    continue;
+                }
+                known.insert(
+                    name.clone(),
+                    SessionMcp {
+                        sessions: HashSet::from([thread.to_string()]),
+                        shown: shown.clone(),
+                        config: config.clone(),
+                    },
+                );
             }
             match self.start_mcp(&name, &config).await {
                 Ok(true) => self
@@ -661,6 +690,47 @@ impl Service {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(name);
         let _ = self.client.disconnect_mcp(name).await;
+    }
+
+    /// Before a prompt, configure again each of the session's MCP servers
+    /// that the server no longer has: the server restarted (an update), or
+    /// an older build let them go when it reloaded its configuration. One
+    /// still starting after a moment, or that failed, is waited for and
+    /// told to the editor as a new session's are (see `Service::await_mcp`).
+    /// One the person disconnected is still listed, and stays as it is.
+    async fn restore_mcp(&self, session: &SessionId) {
+        let key = session.to_string();
+        let servers: Vec<(String, String, McpConfigureRequest)> = self
+            .mcp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, server)| server.sessions.contains(&key))
+            .map(|(name, server)| (name.clone(), server.shown.clone(), server.config.clone()))
+            .collect();
+        if servers.is_empty() {
+            return;
+        }
+        let Ok(listed) = self.client.mcp().await else {
+            return;
+        };
+        for (name, shown, config) in servers {
+            if listed.iter().any(|server| server.name == name) {
+                continue;
+            }
+            tracing::info!(server = %name, "configuring an editor's MCP server again, which the Haarness server no longer had");
+            if matches!(self.start_mcp(&name, &config).await, Ok(false)) {
+                continue;
+            }
+            let mut starting = self
+                .starting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let waits = starting.entry(key.clone()).or_default();
+            if !waits.iter().any(|(waited, _)| *waited == name) {
+                waits.push((name, shown));
+            }
+        }
     }
 
     /// Before a prompt, wait for the session's MCP servers still starting

@@ -44,7 +44,10 @@ version 1.
   invalid request (`-32600`) whose message is the server's own sentence (`prompt blocked by a hook:
   <reason>` for a hook's block); a turn running elsewhere runs on.
 - **MCP servers** the editor passes are added to the server as `acp-<chat id prefix>-<name>`; a stdio
-  server's command must be an absolute path.
+  server's command must be an absolute path. They stay through configuration reloads. When the project's
+  server is replaced (an update) or stopped, the next prompt reaches the one serving the project now,
+  starting it if needed, and sets the session's servers up there again (see
+  [MCP servers in the API](API.md)).
 - **Approvals** offer *Allow once*, *Allow while Haarness is running* (only when the request allows
   more than once; *Allow in this chat* for a site in the user's Chrome) and *Reject*. The editor is
   asked one request at a time. A request settled first somewhere else (another app, a sibling's
