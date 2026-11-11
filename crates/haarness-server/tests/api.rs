@@ -14970,6 +14970,250 @@ async fn programmatic_stop_does_not_answer_unread_steering() {
 }
 
 #[tokio::test]
+async fn a_steer_sent_again_as_a_turn_returns_the_turn_it_joined_and_runs_once() {
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(
+        provider.clone(),
+        Arc::new(SqliteStore::in_memory().unwrap()),
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("long refactor"))
+        .await
+        .unwrap();
+    provider.wait().await;
+    let mut steer = deferred_request("keep the public names");
+    steer.delivery = haarness_protocol::InputDelivery::Steer;
+    let steered = runtime.queue_input(thread.id, steer.clone()).await.unwrap();
+    assert!(steered.queued && steered.item.is_some());
+    // A client that lost the steer's answer sends it again as a turn. While
+    // the turn it joined runs, that is the turn it gets, not "busy".
+    let resend = StartTurnRequest {
+        request_id: steer.request_id,
+        ..turn_request("keep the public names")
+    };
+    let running = runtime.start_turn(thread.id, resend.clone()).await.unwrap();
+    assert_eq!(running.id, turn.id);
+    provider.next();
+    provider.wait().await;
+    assert!(provider.requests.lock().unwrap()[1].contains("keep the public names"));
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    wait_idle(&runtime, thread.id).await;
+    // After it ended too: the finished turn, and nothing runs again.
+    let ended = runtime.start_turn(thread.id, resend).await.unwrap();
+    assert_eq!(ended.id, turn.id);
+    assert_eq!(ended.status, TurnStatus::Completed);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert_eq!(items.iter().filter(|item| matches!(&item.data, haarness_protocol::ItemData::UserMessage { text, .. } if text == "keep the public names")).count(), 1);
+}
+
+fn copies(items: &[haarness_protocol::Item], text: &str) -> usize {
+    items
+        .iter()
+        .filter(|item| matches!(&item.data, haarness_protocol::ItemData::UserMessage { text: sent, .. } if sent == text))
+        .count()
+}
+
+#[tokio::test]
+async fn a_steer_a_stop_left_unread_runs_once_when_sent_again() {
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(
+        provider.clone(),
+        Arc::new(SqliteStore::in_memory().unwrap()),
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("long refactor"))
+        .await
+        .unwrap();
+    provider.wait().await;
+    let mut steer = deferred_request("keep the public names");
+    steer.delivery = haarness_protocol::InputDelivery::Steer;
+    runtime.queue_input(thread.id, steer.clone()).await.unwrap();
+    // A plain stop ends the turn before the model reads it.
+    runtime.interrupt_thread_tree(thread.id).await.unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Interrupted
+    );
+    wait_idle(&runtime, thread.id).await;
+    // The client that lost the steer's answer sends it again: it runs now,
+    // once, as a turn of its own.
+    let response = runtime.queue_input(thread.id, steer.clone()).await.unwrap();
+    assert!(!response.queued);
+    let rerun = response.turn.expect("it runs as a turn of its own");
+    assert_ne!(rerun.id, turn.id);
+    assert_eq!(rerun.request_id, steer.request_id);
+    provider.wait().await;
+    assert!(
+        provider.requests.lock().unwrap()[1].ends_with("keep the public names"),
+        "{:?}",
+        provider.requests.lock().unwrap()
+    );
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &rerun).await.status,
+        TurnStatus::Completed
+    );
+    wait_idle(&runtime, thread.id).await;
+    // Again, either way: that turn, and nothing more runs.
+    let again = runtime.queue_input(thread.id, steer.clone()).await.unwrap();
+    assert!(!again.queued);
+    assert_eq!(again.turn.map(|turn| turn.id), Some(rerun.id));
+    let resend = StartTurnRequest {
+        request_id: steer.request_id,
+        ..turn_request("keep the public names")
+    };
+    assert_eq!(
+        runtime.start_turn(thread.id, resend).await.unwrap().id,
+        rerun.id
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert_eq!(copies(&items, "keep the public names"), 2);
+}
+
+#[tokio::test]
+async fn a_steer_a_restart_left_unread_runs_once_and_its_first_copy_is_not_read_again() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(provider.clone(), store.clone());
+    let thread = echo_thread(&runtime).await;
+    // The server stopped under a turn holding a steer no request took yet.
+    let (turn, _, _) = store
+        .start_turn(thread.id, turn_request("long refactor"))
+        .await
+        .unwrap();
+    let mut steer = deferred_request("keep the public names");
+    steer.delivery = haarness_protocol::InputDelivery::Steer;
+    let first = store
+        .append_steered_input(
+            thread.id,
+            turn.id,
+            steer.request_id,
+            haarness_protocol::ItemData::UserMessage {
+                text: "keep the public names".into(),
+                attachments: Vec::new(),
+                queued: true,
+                synthetic: false,
+                command_line: None,
+                hook: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store.recover_interrupted().await.unwrap();
+    let rerun = runtime
+        .queue_input(thread.id, steer.clone())
+        .await
+        .unwrap()
+        .turn
+        .expect("it runs as a turn of its own");
+    // The first copy took its place before this turn's prompt, so the
+    // request ends with the prompt and holds the words twice, not three times.
+    provider.wait().await;
+    let request = provider.requests.lock().unwrap()[0].clone();
+    assert!(request.ends_with("keep the public names"), "{request}");
+    assert_eq!(request.matches("keep the public names").count(), 2);
+    let marked = runtime
+        .events()
+        .subscribe(Some(0))
+        .replay
+        .into_iter()
+        .any(|event| {
+            event.event_type == "item.created"
+                && event.payload["data"]["type"] == "queue_consumed"
+                && event.payload["data"]["item_id"] == serde_json::json!(first.id)
+        });
+    assert!(marked, "clients hear the first copy took its place");
+    provider.next();
+    provider.wait().await;
+    let request = provider.requests.lock().unwrap()[1].clone();
+    assert_eq!(request.matches("keep the public names").count(), 2);
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &rerun).await.status,
+        TurnStatus::Completed
+    );
+    wait_idle(&runtime, thread.id).await;
+    assert_eq!(
+        runtime
+            .queue_input(thread.id, steer)
+            .await
+            .unwrap()
+            .turn
+            .map(|turn| turn.id),
+        Some(rerun.id)
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_steer_left_unread_is_not_run_again_while_another_turn_runs() {
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(
+        provider.clone(),
+        Arc::new(SqliteStore::in_memory().unwrap()),
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("long refactor"))
+        .await
+        .unwrap();
+    provider.wait().await;
+    let mut steer = deferred_request("keep the public names");
+    steer.delivery = haarness_protocol::InputDelivery::Steer;
+    runtime.queue_input(thread.id, steer.clone()).await.unwrap();
+    runtime.interrupt_thread_tree(thread.id).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    wait_idle(&runtime, thread.id).await;
+    // Another message runs; the model reads the stopped steer with it.
+    let next = runtime
+        .start_turn(thread.id, turn_request("next task"))
+        .await
+        .unwrap();
+    provider.wait().await;
+    assert!(provider.requests.lock().unwrap()[1].contains("keep the public names"));
+    let resend = StartTurnRequest {
+        request_id: steer.request_id,
+        ..turn_request("keep the public names")
+    };
+    let queued = runtime.queue_input(thread.id, steer.clone()).await.unwrap();
+    assert!(queued.queued && queued.turn.is_none());
+    assert!(matches!(
+        runtime.start_turn(thread.id, resend.clone()).await,
+        Err(CoreError::Conflict(_))
+    ));
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &next).await.status,
+        TurnStatus::Completed
+    );
+    wait_idle(&runtime, thread.id).await;
+    // Answered with it, it counts as read: the stopped turn, nothing new.
+    assert!(runtime.queue_input(thread.id, steer).await.unwrap().queued);
+    assert_eq!(
+        runtime.start_turn(thread.id, resend).await.unwrap().id,
+        turn.id
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert_eq!(copies(&items, "keep the public names"), 1);
+}
+
+#[tokio::test]
 async fn deferred_queue_idle_submission_starts_work_immediately() {
     let runtime = AgentRuntime::new(
         Arc::new(SqliteStore::in_memory().unwrap()),

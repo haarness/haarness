@@ -199,23 +199,62 @@ pub(super) fn change(
     Ok(queue)
 }
 
+/// Where a person's steer went: the turn it joined and its message there.
+/// A record an older server kept names neither.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub(super) struct Steer {
+    #[serde(default)]
+    pub(super) turn: Option<TurnId>,
+    #[serde(default)]
+    pub(super) item: Option<ItemId>,
+}
+
 /// Records that request `request` was steered into a running turn of
-/// `thread`: a tombstone no queue lists, so a retry of the same request is
-/// found (`has_input_admission`) and not delivered twice. False when the
-/// request was already recorded (steered, queued or removed).
+/// `thread` as `item`: a tombstone no queue lists, so a retry of the same
+/// request is found (`has_input_admission`, `steer`) and not delivered
+/// twice. False when the request was already recorded (steered, queued or
+/// removed).
 pub(super) fn record_steer(
     db: &Connection,
     thread: ThreadId,
     request: RequestId,
+    item: &Item,
 ) -> CoreResult<bool> {
+    let place = Steer {
+        turn: item.turn_id,
+        item: Some(item.id),
+    };
     let inserted = db
         .execute(
-            "INSERT INTO pending_inputs(id,thread_id,payload,position,state) VALUES(?1,?2,'{}',0,'steered')
+            "INSERT INTO pending_inputs(id,thread_id,payload,position,state) VALUES(?1,?2,?3,0,'steered')
              ON CONFLICT(id) DO NOTHING",
-            params![request.to_string(), thread.to_string()],
+            params![
+                request.to_string(),
+                thread.to_string(),
+                serde_json::to_string(&place).map_err(storage)?
+            ],
         )
         .map_err(storage)?;
     Ok(inserted == 1)
+}
+
+/// Where request `request` of `thread` went, when a person steered it into a
+/// running turn.
+pub(super) fn steer(
+    db: &Connection,
+    thread: ThreadId,
+    request: RequestId,
+) -> CoreResult<Option<Steer>> {
+    let payload: Option<String> = db
+        .query_row(
+            "SELECT payload FROM pending_inputs WHERE id=?1 AND thread_id=?2 AND state='steered'",
+            params![request.to_string(), thread.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    // An older server's record is `{}`: a steer that names no place.
+    Ok(payload.map(|payload| serde_json::from_str(&payload).unwrap_or_default()))
 }
 
 /// Keep a tombstone so retransmission cannot resurrect delivered/removed work.
@@ -558,16 +597,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        // A turn started with its id is a turn of its own, as before.
-        let (_, prompt, created) = store
-            .start_turn(thread.id, turn_request(steer, "a turn"))
-            .await
-            .unwrap();
-        assert!(created);
-        assert!(
-            matches!(&prompt.data, ItemData::UserMessage { text, .. } if text == "a turn"),
-            "{prompt:?}"
-        );
+        // Nor does a turn take it: see the tests below.
         let steered = store
             .list_items(thread.id, None)
             .await
@@ -576,5 +606,317 @@ mod tests {
             .filter(|item| matches!(&item.data, ItemData::UserMessage { text, .. } if text == "steered"))
             .count();
         assert_eq!(steered, 1);
+    }
+
+    fn user_messages(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::UserMessage { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A chat with a running turn and request `steer` steered into it.
+    async fn steered_chat(store: &SqliteStore, steer: RequestId) -> (ThreadId, Turn, Item) {
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let (turn, _, _) = store
+            .start_turn(thread.id, turn_request(RequestId::new(), "running"))
+            .await
+            .unwrap();
+        let item = store
+            .append_steered_input(
+                thread.id,
+                turn.id,
+                steer,
+                ItemData::UserMessage {
+                    text: "Also update the docs".into(),
+                    attachments: vec!["data:text/plain;base64,dGVzdA==".into()],
+                    queued: true,
+                    synthetic: false,
+                    command_line: None,
+                    hook: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        (thread.id, turn, item)
+    }
+
+    fn taken(found: Option<SteeredInput>) -> Option<TurnId> {
+        match found {
+            Some(SteeredInput::Taken(turn)) => Some(turn.id),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_steer_sent_again_as_a_turn_returns_its_turn_while_it_runs_and_once_read() {
+        let store = SqliteStore::in_memory().unwrap();
+        let steer = RequestId::new();
+        let (thread, turn, item) = steered_chat(&store, steer).await;
+        let again = || store.start_turn(thread, turn_request(steer, "Also update the docs"));
+        // Its turn still runs: that turn.
+        assert_eq!(
+            taken(store.steered_input(thread, steer).await.unwrap()),
+            Some(turn.id)
+        );
+        let (found, message, created) = again().await.unwrap();
+        assert!(!created);
+        assert_eq!((found.id, message.id), (turn.id, item.id));
+        // A request takes it and the model answers; the turn ends.
+        for data in [
+            ItemData::QueueConsumed { item_id: item.id },
+            ItemData::AssistantMessage {
+                text: "Docs updated".into(),
+            },
+        ] {
+            store
+                .append_item(thread, Some(turn.id), data)
+                .await
+                .unwrap();
+        }
+        store
+            .set_turn_status(turn.id, TurnStatus::Completed, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            taken(store.steered_input(thread, steer).await.unwrap()),
+            Some(turn.id)
+        );
+        for _ in 0..2 {
+            let (found, message, created) = again().await.unwrap();
+            assert!(!created);
+            assert_eq!(found.id, turn.id);
+            assert_eq!(found.status, TurnStatus::Completed);
+            assert_eq!(message.id, item.id);
+        }
+        assert!(
+            store
+                .turn_for_request(thread, steer)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            user_messages(&store.list_items(thread, None).await.unwrap()),
+            ["running", "Also update the docs"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_steer_its_turn_ended_without_reading_runs_once_as_stored_when_sent_again() {
+        let store = SqliteStore::in_memory().unwrap();
+        let steer = RequestId::new();
+        let (thread, turn, item) = steered_chat(&store, steer).await;
+        // The turn fails before the model writes a word after it, as the
+        // runtime records it.
+        for data in [
+            ItemData::QueueConsumed { item_id: item.id },
+            ItemData::Error {
+                message: "Queued input could not be delivered".into(),
+                retryable: true,
+            },
+        ] {
+            store
+                .append_item(thread, Some(turn.id), data)
+                .await
+                .unwrap();
+        }
+        store
+            .set_turn_status(turn.id, TurnStatus::Failed, Some("fixture".into()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.steered_input(thread, steer).await.unwrap(),
+            Some(SteeredInput::Unread { message, consumed: true }) if message.id == item.id
+        ));
+        // Sent again, it runs once, as it was stored.
+        let (rerun, prompt, created) = store
+            .start_turn(thread, turn_request(steer, "words a retry changed"))
+            .await
+            .unwrap();
+        assert!(created);
+        assert_ne!(rerun.id, turn.id);
+        assert_eq!(rerun.request_id, steer);
+        assert!(matches!(
+            &prompt.data,
+            ItemData::UserMessage { text, attachments, queued: false, .. }
+                if text == "Also update the docs" && attachments.len() == 1
+        ));
+        // Then every retry is that turn.
+        assert_eq!(
+            taken(store.steered_input(thread, steer).await.unwrap()),
+            Some(rerun.id)
+        );
+        let (again, _, created) = store
+            .start_turn(thread, turn_request(steer, "Also update the docs"))
+            .await
+            .unwrap();
+        assert!(!created);
+        assert_eq!(again.id, rerun.id);
+        assert_eq!(
+            user_messages(&store.list_items(thread, None).await.unwrap()),
+            ["running", "Also update the docs", "Also update the docs"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_steer_no_request_received_is_read_once_a_later_turn_answers() {
+        let store = SqliteStore::in_memory().unwrap();
+        let steer = RequestId::new();
+        let (thread, turn, item) = steered_chat(&store, steer).await;
+        // The server stopped first: no request took it, and nothing marks it.
+        store
+            .set_turn_status(turn.id, TurnStatus::Interrupted, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.steered_input(thread, steer).await.unwrap(),
+            Some(SteeredInput::Unread {
+                consumed: false,
+                ..
+            })
+        ));
+        // Undone, it is taken as it is.
+        let undo = |deleted: bool| {
+            store
+                .connection
+                .lock()
+                .execute(
+                    "UPDATE items SET deleted=?2 WHERE id=?1",
+                    params![item.id.to_string(), deleted],
+                )
+                .unwrap();
+        };
+        undo(true);
+        assert_eq!(
+            taken(store.steered_input(thread, steer).await.unwrap()),
+            Some(turn.id)
+        );
+        undo(false);
+        // Every request of a later turn ends with it, so the model has read
+        // it once one of them is answered.
+        let (later, _, _) = store
+            .start_turn(thread, turn_request(RequestId::new(), "next"))
+            .await
+            .unwrap();
+        store
+            .append_item(
+                thread,
+                Some(later.id),
+                ItemData::AssistantMessage {
+                    text: "On it".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            taken(store.steered_input(thread, steer).await.unwrap()),
+            Some(turn.id)
+        );
+        let (found, _, created) = store
+            .start_turn(thread, turn_request(steer, "Also update the docs"))
+            .await
+            .unwrap();
+        assert!(!created);
+        assert_eq!(found.id, turn.id);
+    }
+
+    #[tokio::test]
+    async fn a_steer_an_older_server_recorded_is_refused_as_a_turn_rather_than_run_again() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let steer = RequestId::new();
+        // Servers before this one kept a steer's record without its place.
+        store
+            .connection
+            .lock()
+            .execute(
+                "INSERT INTO pending_inputs(id,thread_id,payload,position,state) VALUES(?1,?2,'{}',0,'steered')",
+                params![steer.to_string(), thread.id.to_string()],
+            )
+            .unwrap();
+        assert!(store.has_input_admission(thread.id, steer).await.unwrap());
+        assert!(
+            store
+                .steered_input(thread.id, steer)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            store
+                .start_turn(thread.id, turn_request(steer, "steered before"))
+                .await,
+            Err(CoreError::Conflict(_))
+        ));
+        assert!(store.list_items(thread.id, None).await.unwrap().is_empty());
+        assert!(store.last_turn(thread.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_queued_message_sent_again_as_a_turn_runs_once() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let queued = message("from the queue");
+        store
+            .enqueue_input(thread.id, queued.clone())
+            .await
+            .unwrap();
+        // Still waiting, it is the message the turn runs, taken off the queue.
+        let (turn, prompt, created) = store
+            .start_turn(thread.id, turn_request(queued.id, "sent again"))
+            .await
+            .unwrap();
+        assert!(created);
+        assert!(
+            matches!(&prompt.data, ItemData::UserMessage { text, .. } if text == "from the queue")
+        );
+        assert!(store.input_queue(thread.id).await.unwrap().items.is_empty());
+        // Once more: that turn.
+        let (again, _, created) = store
+            .start_turn(thread.id, turn_request(queued.id, "sent again"))
+            .await
+            .unwrap();
+        assert!(!created);
+        assert_eq!(again.id, turn.id);
+        // Removed from the queue, it is refused.
+        let removed = message("removed");
+        let queue = store
+            .enqueue_input(thread.id, removed.clone())
+            .await
+            .unwrap();
+        store
+            .change_input_queue(
+                thread.id,
+                InputQueueAction::Remove {
+                    revision: queue.revision,
+                    id: removed.id,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .start_turn(thread.id, turn_request(removed.id, "removed"))
+                .await,
+            Err(CoreError::Conflict(_))
+        ));
+        assert_eq!(
+            user_messages(&store.list_items(thread.id, None).await.unwrap()),
+            ["from the queue"]
+        );
     }
 }

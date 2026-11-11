@@ -37,8 +37,8 @@ use crate::tool_validation::{unknown_tool, validate_arguments};
 use crate::{
     CoreError, CoreResult, EventBus, ModelProvider, PermissionDecision, PermissionEngine,
     PermissionRule, ProviderEvent, ProviderMessage, ProviderRegistry, ProviderRequest,
-    RuntimeConfig, StrandedTask, SystemPromptContext, ThreadRepository, ToolContext, ToolOutput,
-    ToolRegistry,
+    RuntimeConfig, SteeredInput, StrandedTask, SystemPromptContext, ThreadRepository, ToolContext,
+    ToolOutput, ToolRegistry,
 };
 
 /// Compactions in a row the provider has not answered yet: each one after
@@ -4235,11 +4235,39 @@ impl AgentRuntime {
             .has_input_admission(thread_id, request.request_id)
             .await?
         {
-            return Ok(QueueInputResponse {
-                queued: true,
-                item: None,
-                turn: None,
-            });
+            match self
+                .repository
+                .steered_input(thread_id, request.request_id)
+                .await?
+            {
+                // A steer its turn ended without reading, sent again while
+                // nothing runs: it runs once, as a turn of its own (see
+                // `start_turn_with_ceilings`). While another turn runs, the
+                // message is in what that turn's model reads already.
+                Some(SteeredInput::Unread { .. }) if !self.active.contains_key(&thread_id) => {
+                    let tools = request
+                        .preview
+                        .map(|preview| HashMap::from([("preview".into(), preview)]));
+                    return self
+                        .queue_input_with_options(thread_id, request, false, false, tools, None)
+                        .await;
+                }
+                // Run once that way already: its retry finds that turn.
+                Some(SteeredInput::Taken(turn)) if turn.request_id == request.request_id => {
+                    return Ok(QueueInputResponse {
+                        queued: false,
+                        item: None,
+                        turn: Some(turn),
+                    });
+                }
+                _ => {
+                    return Ok(QueueInputResponse {
+                        queued: true,
+                        item: None,
+                        turn: None,
+                    });
+                }
+            }
         }
         // A steer that started a turn: its retry finds that turn instead of
         // joining it as a second message.
@@ -8297,6 +8325,19 @@ impl AgentRuntime {
         thread_id: ThreadId,
         request: StartTurnRequest,
     ) -> CoreResult<Turn> {
+        // A message a person steered into a turn is part of that turn. Sent
+        // again as a turn of its own (a client that lost the first answer),
+        // it returns that turn while it runs and once the model has read the
+        // message, and nothing runs twice. One its turn ended without reading
+        // runs once (see `start_turn_with_ceilings`). The store checks again
+        // as it creates a turn.
+        if let Some(SteeredInput::Taken(turn)) = self
+            .repository
+            .steered_input(thread_id, request.request_id)
+            .await?
+        {
+            return Ok(turn);
+        }
         self.start_turn_with_ceilings(thread_id, request, Vec::new(), None, None, false)
             .await
     }
@@ -8503,6 +8544,38 @@ impl AgentRuntime {
             merge_agent_tools(&mut request.tools, &custom.tools);
         }
         let root = self.resolve_root(&thread).await;
+        // A steer its turn ended without reading, sent again: the store runs
+        // it once as this turn, from the copy it holds. A copy no model
+        // request received takes its place in the history first, as a
+        // request would have put it, so this turn's requests do not end with
+        // it a second time.
+        if let Some(SteeredInput::Unread {
+            message,
+            consumed: false,
+        }) = self
+            .repository
+            .steered_input(thread_id, request.request_id)
+            .await?
+        {
+            let marker = self
+                .repository
+                .append_item(
+                    thread_id,
+                    message.turn_id,
+                    ItemData::QueueConsumed {
+                        item_id: message.id,
+                    },
+                )
+                .await?;
+            self.events.publish_scoped(
+                "item.created",
+                Some(thread_id),
+                Some(root),
+                message.turn_id,
+                Some(marker.id),
+                json!(marker),
+            );
+        }
         let stored = StartTurnRequest {
             command: typed_command,
             ..request.clone()

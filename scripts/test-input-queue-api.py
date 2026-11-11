@@ -58,4 +58,29 @@ with Fixture() as server:
     api(f'/threads/{thread}/input',request,202)
     assert not api('/turns/active')
     assert not api(f'/threads/{thread}/input/queue')['items']
-    print('PASS: HTTP queue isolation, auth, validation, hard restart, parked retry, explicit resume and exactly-once admission')
+    # A steer sent again as a turn is the turn it joined, while that turn runs
+    # and after. One a plain stop left unread runs once when sent again, and
+    # every later repeat is the turn it ran as.
+    def copies(text):return sum(item['data'].get('text')==text for item in api(f'/threads/{other}/items'))
+    def resend(steer):return {'requestId':steer['requestId'],'text':steer['text']}
+    first=api(f'/threads/{other}/turns',{'requestId':str(uuid4()),'text':'!linger 3000 working'},202)
+    until(lambda:api(f'/threads/{other}/active'))
+    joined={'requestId':str(uuid4()),'delivery':'steer','text':'steered once'}
+    assert api(f'/threads/{other}/input',joined,202)['queued']
+    assert api(f'/threads/{other}/turns',resend(joined),202)['id']==first['id']
+    until(lambda:not api(f'/threads/{other}/active'))
+    assert api(f'/threads/{other}/turns',resend(joined),202)['id']==first['id']
+    assert copies('steered once')==1
+    api(f'/threads/{other}/turns',{'requestId':str(uuid4()),'text':'!linger 8000 working'},202)
+    until(lambda:api(f'/threads/{other}/active'))
+    stopped={'requestId':str(uuid4()),'delivery':'steer','text':'stopped unread'}
+    api(f'/threads/{other}/input',stopped,202)
+    api(f'/threads/{other}/interrupt',{})
+    until(lambda:not api(f'/threads/{other}/active'))
+    rerun=api(f'/threads/{other}/input',stopped,202)['turn']
+    assert rerun['requestId']==stopped['requestId']
+    until(lambda:not api(f'/threads/{other}/active'))
+    assert api(f'/threads/{other}/input',stopped,202)['turn']['id']==rerun['id']
+    assert api(f'/threads/{other}/turns',resend(stopped),202)['id']==rerun['id']
+    assert copies('stopped unread')==2
+    print('PASS: HTTP queue isolation, auth, validation, hard restart, parked retry, explicit resume, exactly-once admission and steer repeats')

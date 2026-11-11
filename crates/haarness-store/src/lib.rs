@@ -17,8 +17,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use haarness_core::{
-    CoreError, CoreResult, StrandedCommand, StrandedCommandReport, StrandedReport, StrandedTask,
-    ThreadRepository,
+    CoreError, CoreResult, SteeredInput, StrandedCommand, StrandedCommandReport, StrandedReport,
+    StrandedTask, ThreadRepository,
 };
 use haarness_protocol::{
     CompactRequest, CreateThreadRequest, GoalState, Item, ItemData, ItemId, RequestId,
@@ -42,6 +42,15 @@ pub struct SqliteStore {
 const RETRIED_TURN_PROMPT: &str =
     "SELECT id,thread_id,turn_id,sequence,data_json,created_at FROM items
      WHERE thread_id=?1 AND turn_id=?2 ORDER BY sequence LIMIT 1";
+
+/// What became of a person's steer: the turn that holds it and its message
+/// there, and `unread` (with whether it took its place in the history) when
+/// that turn ended before the model read it.
+struct SteerProgress {
+    turn: Turn,
+    message: Item,
+    unread: Option<bool>,
+}
 
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> CoreResult<Self> {
@@ -736,6 +745,27 @@ impl SqliteStore {
             ).map_err(storage)?;
             return Ok((turn, decode_item(raw)?, false));
         }
+        // A person steered this request into a running turn. While that turn
+        // runs, and once the model has read the message, a retry as a turn
+        // of its own returns that turn and runs nothing again. A message its
+        // turn ended without reading runs once, as stored, as this turn.
+        // Read here, with the turn's creation, it holds when retries race.
+        if let Some(steer) = input::steer(&tx, id, request.request_id)? {
+            let progress =
+                Self::steer_progress(&tx, id, request.request_id, &steer)?.ok_or_else(|| {
+                    CoreError::Conflict("This message has already been sent or removed".into())
+                })?;
+            if progress.unread.is_none() {
+                return Ok((progress.turn, progress.message, false));
+            }
+            if let ItemData::UserMessage {
+                text, attachments, ..
+            } = progress.message.data
+            {
+                request.text = text;
+                request.attachments = attachments;
+            }
+        }
         // A deferred request is consumed in the same transaction as its new
         // turn. Cancellation/edit races cannot lose or duplicate the prompt.
         if let Some(revision) = queue_revision {
@@ -822,6 +852,117 @@ impl SqliteStore {
         .map_err(storage)?;
         tx.commit().map_err(storage)?;
         Ok((turn, item, true))
+    }
+
+    /// What became of request `request` of chat `thread`, which a person
+    /// steered into a running turn (`steer` is its record). None for a
+    /// record an older server kept, which names neither its turn nor its
+    /// message.
+    fn steer_progress(
+        connection: &Connection,
+        thread: ThreadId,
+        request: RequestId,
+        steer: &input::Steer,
+    ) -> CoreResult<Option<SteerProgress>> {
+        // Sent again after it went unread, it ran as a turn of its own.
+        if let Some(raw) = connection
+            .query_row(
+                "SELECT id,thread_id,request_id,status,agent,provider,model,error,created_at,updated_at,ultracode
+                 FROM turns WHERE thread_id=?1 AND request_id=?2",
+                params![thread.to_string(), request.to_string()],
+                raw_turn,
+            )
+            .optional()
+            .map_err(storage)?
+        {
+            let turn = decode_turn(raw)?;
+            let prompt = connection
+                .query_row(
+                    RETRIED_TURN_PROMPT,
+                    params![thread.to_string(), turn.id.to_string()],
+                    raw_item,
+                )
+                .map_err(storage)?;
+            return Ok(Some(SteerProgress {
+                turn,
+                message: decode_item(prompt)?,
+                unread: None,
+            }));
+        }
+        let (Some(turn), Some(item)) = (steer.turn, steer.item) else {
+            return Ok(None);
+        };
+        let Some(turn) = connection
+            .query_row(
+                "SELECT id,thread_id,request_id,status,agent,provider,model,error,created_at,updated_at,ultracode
+                 FROM turns WHERE id=?1",
+                [turn.to_string()],
+                raw_turn,
+            )
+            .optional()
+            .map_err(storage)?
+        else {
+            return Ok(None);
+        };
+        let turn = decode_turn(turn)?;
+        let Some((message, deleted)) = connection
+            .query_row(
+                "SELECT id,thread_id,turn_id,sequence,data_json,created_at,deleted FROM items WHERE id=?1",
+                [item.to_string()],
+                |row| Ok((raw_item(row)?, row.get::<_, bool>(6)?)),
+            )
+            .optional()
+            .map_err(storage)?
+        else {
+            return Ok(None);
+        };
+        let message = decode_item(message)?;
+        // Still in its running turn, or undone since: taken as it is.
+        if deleted || matches!(turn.status, TurnStatus::Queued | TurnStatus::Running) {
+            return Ok(Some(SteerProgress {
+                turn,
+                message,
+                unread: None,
+            }));
+        }
+        let mut statement = connection
+            .prepare(
+                "SELECT id,thread_id,turn_id,sequence,data_json,created_at FROM items
+                 WHERE thread_id=?1 AND sequence>?2 AND deleted=0 ORDER BY sequence",
+            )
+            .map_err(storage)?;
+        let later = statement
+            .query_map(
+                params![
+                    thread.to_string(),
+                    i64::try_from(message.sequence).map_err(storage)?
+                ],
+                raw_item,
+            )
+            .map_err(storage)?
+            .map(|row| row.map_err(storage).and_then(decode_item))
+            .collect::<CoreResult<Vec<_>>>()?;
+        let consumed = later.iter().find_map(|item| match item.data {
+            ItemData::QueueConsumed { item_id } if item_id == message.id => Some(item.sequence),
+            _ => None,
+        });
+        // Read once the model wrote after it reached a request: where its
+        // marker stands, or without one (the server stopped first) in any
+        // later turn, whose requests all end with it.
+        let read = later.iter().any(|item| {
+            matches!(
+                item.data,
+                ItemData::AssistantMessage { .. } | ItemData::ToolCall { .. }
+            ) && match consumed {
+                Some(at) => item.sequence > at,
+                None => item.turn_id != Some(turn.id),
+            }
+        });
+        Ok(Some(SteerProgress {
+            turn,
+            message,
+            unread: (!read).then_some(consumed.is_some()),
+        }))
     }
 
     /// One item appended inside `tx`, the chat's last change time with it.
@@ -1090,6 +1231,27 @@ impl ThreadRepository for SqliteStore {
             .map(decode_turn)
             .transpose()
     }
+    async fn steered_input(
+        &self,
+        id: ThreadId,
+        request: RequestId,
+    ) -> CoreResult<Option<SteeredInput>> {
+        let connection = self.connection.lock();
+        let Some(steer) = input::steer(&connection, id, request)? else {
+            return Ok(None);
+        };
+        Ok(
+            Self::steer_progress(&connection, id, request, &steer)?.map(|progress| match progress
+                .unread
+            {
+                None => SteeredInput::Taken(progress.turn),
+                Some(consumed) => SteeredInput::Unread {
+                    message: progress.message,
+                    consumed,
+                },
+            }),
+        )
+    }
     async fn has_input_admission(&self, id: ThreadId, request: RequestId) -> CoreResult<bool> {
         let owner: Option<String> = self
             .connection
@@ -1132,10 +1294,13 @@ impl ThreadRepository for SqliteStore {
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage)?;
-        if !input::record_steer(&tx, id, request)? {
+        let item = Self::insert_item(&tx, id, Some(turn), data)?;
+        // The record names the message, so a retry as a turn finds where it
+        // went. A request already taken keeps nothing: the transaction ends
+        // without the item.
+        if !input::record_steer(&tx, id, request, &item)? {
             return Ok(None);
         }
-        let item = Self::insert_item(&tx, id, Some(turn), data)?;
         tx.commit().map_err(storage)?;
         Ok(Some(item))
     }
