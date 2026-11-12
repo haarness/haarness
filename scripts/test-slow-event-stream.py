@@ -130,7 +130,7 @@ args = [str(BINARY), '--workspace', str(workspace), '--trust-project']
 reader = None
 try:
     (workspace / '.haarness').mkdir(parents=True, exist_ok=True)
-    (workspace / '.haarness/config.toml').write_text(f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\n[lsp]\nenabled=false\n')
+    (workspace / '.haarness/config.toml').write_text(f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\napproval_mode="review"\n[lsp]\nenabled=false\n')
     run(['git', 'init', '-q', str(workspace)])
     connection = json.loads(run(args + ['desktop'], input='{"action":"connect"}', env=env, timeout=120))
 
