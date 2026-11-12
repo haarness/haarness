@@ -1674,6 +1674,10 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         "exceeds the available context size",
         "greater than the context length",
         "longer than the model's context length",
+        // OpenRouter, for a prompt past every endpoint of the model: "The
+        // input (137016 tokens) is longer than the model's max input length
+        // (131072 tokens)."
+        "longer than the model's max input length",
         "context length is only",
         "configured context size",
         "maximum prompt length is",
@@ -1733,6 +1737,10 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         || message
             .split_once("requested input length ")
             .is_some_and(|(_, rest)| rest.contains(" exceeds maximum input length "))
+        // DeepInfra's own servers, also behind OpenRouter: "The sum of prompt
+        // length (66478.0), query length (0) should not exceed max_num_tokens
+        // (32768)".
+        || (message.contains("prompt length") && message.contains("should not exceed max_num_tokens"))
 }
 
 /// A provider that refused an image in the request (its type, bytes, size,
@@ -2738,9 +2746,18 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     // violating our usage policy. Please try again with a different
     // prompt"): a new message in the same chat can be refused again for an
     // old one.
-    if provider_error_fields(raw)
-        .is_some_and(|(_, code, _)| code.as_deref() == Some("invalid_prompt"))
-        || raw.contains("[invalid_prompt]")
+    // Alibaba's content check for Qwen (DashScope, or a gateway passing its
+    // words on) is the same kind of refusal: `data_inspection_failed`, "Input
+    // data may contain inappropriate content".
+    if provider_error_fields(raw).is_some_and(|(_, code, _)| {
+        matches!(
+            code.as_deref(),
+            Some("invalid_prompt" | "data_inspection_failed" | "DataInspectionFailed")
+        )
+    }) || raw.contains("[invalid_prompt]")
+        || raw.contains("data_inspection_failed")
+        || raw.contains("DataInspectionFailed")
+        || raw.contains("data may contain inappropriate content")
     {
         return format!(
             "{} refused this chat: its safety check flagged it as possibly against its usage policy. Rephrase your last message, or start a new chat if something earlier in this one set it off.",
@@ -24189,6 +24206,12 @@ mod tests {
             "HTTP 400 Bad Request: [ValidationException] The model returned the following errors: Input Tokens Exceeded: Number of input tokens exceeds maximum length. Please update the input to try again.",
             // DeepInfra.
             "HTTP 400 Bad Request: Requested input length 600010 exceeds maximum input length 131071",
+            // DeepInfra's own servers, behind OpenRouter.
+            "HTTP 400: DeepInfra: The sum of prompt length (66478.0), query length (0) should not exceed max_num_tokens (32768)",
+            // OpenRouter past every endpoint's input limit.
+            "HTTP 400: The input (137016 tokens) is longer than the model's max input length (131072 tokens).",
+            // A Haarness router's words for any provider's too-long prompt.
+            "HTTP 400 Bad Request: [upstream_400] The conversation is longer than this model's maximum context length, so the provider refused it (its maximum context length is 32768 tokens). Compact the conversation, or choose a model with a larger context window.",
             // Text Generation Inference (Together, Hugging Face).
             "HTTP 422 Unprocessable Entity: Input validation error: `inputs` tokens + `max_new_tokens` must be <= 131073. Given: 600035 `inputs` tokens and 16 `max_new_tokens`",
             // Servers people set up themselves, and the gateways before them.
@@ -28756,6 +28779,18 @@ mod tests {
             ),
             "OpenAI refused this chat: its safety check flagged it as possibly against its usage policy. Rephrase your last message, or start a new chat if something earlier in this one set it off."
         );
+        // Alibaba's content check for Qwen, from DashScope directly and
+        // through OpenRouter, which passes on only its message.
+        for raw in [
+            r#"HTTP 400 Bad Request: {"error":{"code":"data_inspection_failed","param":null,"message":"Input data may contain inappropriate content.","type":"data_inspection_failed"},"id":"chatcmpl-1"}"#,
+            "HTTP 400: Alibaba: Input data may contain inappropriate content.",
+        ] {
+            assert_eq!(
+                super::describe_failure(&CoreError::Provider(raw.into()), Some("Qwen"), true),
+                "Qwen refused this chat: its safety check flagged it as possibly against its usage policy. Rephrase your last message, or start a new chat if something earlier in this one set it off.",
+                "{raw}"
+            );
+        }
         // Any other refusal of the request keeps the provider's words.
         assert_eq!(
             super::describe_failure(

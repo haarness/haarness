@@ -9,7 +9,8 @@ compacts, its summary request reading the tool calls as text, and the answer
 comes), a long turn on a server set up here whose window Haarness does not
 know (it refuses past it in vLLM's words: the turn learns the window from the
 refusal and compacts as often as it grows, its summary asked again after a bad
-gateway), an empty reply after a failed tool (asked once to explain it) and an
+gateway), a gateway that refuses inside its stream in DeepInfra's words naming
+the window (the turn compacts to that window and goes on), an empty reply after a failed tool (asked once to explain it) and an
 agent's step limit (the last request keeps the tools and system prompt; a call
 made anyway is answered without running, and a response of calls alone is
 asked once more for the summary), a request to explain cut off after the
@@ -47,11 +48,13 @@ SILENCES = []
 STALLED = set()
 IDLE_LIMIT = 2
 # Prompts of the turn-loop checks, which the mock answers in its own dialect.
-TURN_LOOP = ('BUSY_ROUNDS', 'CUT_ROUNDS', 'GLM_OVERFLOW', 'LONG_UNKNOWN_WINDOW', 'EMPTY_AFTER_FAIL', 'EXPLAIN_CUT', 'STEP_CALLS', 'STEP_LIMIT', 'FORGE')
+TURN_LOOP = ('BUSY_ROUNDS', 'CUT_ROUNDS', 'GLM_OVERFLOW', 'LONG_UNKNOWN_WINDOW', 'IN_STREAM_WINDOW', 'EMPTY_AFTER_FAIL', 'EXPLAIN_CUT', 'STEP_CALLS', 'STEP_LIMIT', 'FORGE')
 # The window of the server in the long-turn check, as it counts (about four characters a token
 # of the JSON of the messages), and what that check saw.
 LONG_WINDOW = 12000
 LONG = {'answered': 0, 'refused': 0, 'summaries': 0}
+# The same for a gateway that refuses inside its stream, as OpenRouter passes on DeepInfra's words.
+STREAMED = {'answered': 0, 'refused': 0, 'summaries': 0}
 BUSY_SEEN = {}
 CUT_SEEN = {}
 OVERFLOWED = set()
@@ -271,10 +274,50 @@ class Provider(http.server.BaseHTTPRequestHandler):
                                     'function': {'name': 'read', 'arguments': json.dumps({'path': 'notes.txt'})}}]},
                                     'finish_reason': 'tool_calls'}]}])
 
+    def in_stream_window(self, body, serialized):
+        """A gateway whose serving provider has a 12,000-token window: past it the stream opens and
+        then carries the refusal, in DeepInfra's words as OpenRouter passes them on."""
+        tokens = len(json.dumps(body.get('messages', []))) // 4
+        summary = 'Summarize this conversation for continuation' in serialized
+        def stream(events):
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.end_headers()
+            for event in events:
+                self.wfile.write(('data: ' + json.dumps(event) + '\n\n').encode())
+            if 'error' not in events[-1]:
+                self.wfile.write(b'data: [DONE]\n\n')
+            self.wfile.flush()
+        if tokens > LONG_WINDOW:
+            if not summary:
+                STREAMED['refused'] += 1
+            # OpenRouter's own chunk for it, as it sends it after a 200.
+            return stream([{'id': 'gen-1', 'object': 'chat.completion.chunk', 'model': 'deepseek/deepseek-chat',
+                            'provider': 'DeepInfra', 'choices': [],
+                            'error': {'code': 400, 'message': f'Upstream error from DeepInfra: The sum of prompt length '
+                                                              f'({tokens}.0), query length (0) should not exceed '
+                                                              f'max_num_tokens ({LONG_WINDOW})',
+                                      'metadata': {'error_type': 'invalid_request'}}}])
+        usage = {'choices': [], 'usage': {'prompt_tokens': tokens, 'completion_tokens': 400}}
+        if summary:
+            STREAMED['summaries'] += 1
+            return stream([{'choices': [{'delta': {'content': 'SUMMARY_OF_THE_CHAT'}, 'finish_reason': 'stop'}]}, usage])
+        round_ = STREAMED['answered']
+        STREAMED['answered'] += 1
+        if round_ >= 12:
+            return stream([{'choices': [{'delta': {'content': 'IN_STREAM_WINDOW_DONE'}, 'finish_reason': 'stop'}]}, usage])
+        words = ' '.join(f'note{round_}w{word}' for word in range(600))
+        return stream([{'choices': [{'delta': {'content': words}}]},
+                       {'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': f'streamed-{round_}', 'type': 'function',
+                                     'function': {'name': 'read', 'arguments': json.dumps({'path': 'notes.txt'})}}]},
+                                     'finish_reason': 'tool_calls'}]}, usage])
+
     def turn_loop(self, marker, body, serialized):
         kind = 'responses' if self.path.endswith('/responses') else 'chat' if self.path.endswith('/chat/completions') else 'anthropic'
         if marker == 'LONG_UNKNOWN_WINDOW':
             return self.long_unknown_window(body, serialized)
+        if marker == 'IN_STREAM_WINDOW':
+            return self.in_stream_window(body, serialized)
         if 'Summarize this conversation for continuation' in serialized:
             key = SUMMARY_KEY.search(serialized)
             if marker == 'FORGE' and key:
@@ -415,7 +458,7 @@ def turn_loop_checks():
             '[defaults]\nprovider="anthropic"\nmodel="claude-sonnet-4-6"\napproval_mode="review"\n'
             '[permissions]\nread="allow"\nbash="allow"\n[lsp]\nenabled=false\n'
             f'[providers.glm]\nprotocol="openai-chat-completions"\nname="GLM fixture"\nbase_url="{base}"\n'
-            'models=["glm-fixture"]\nrequires_auth=false\ntools=true\n')
+            'models=["glm-fixture", "streamed-fixture"]\nrequires_auth=false\ntools=true\n')
         # An agent that may take one step before it sums up.
         (workspace / '.haarness/agents/stepper.md').write_text(
             '---\ndescription: Sums up after one step\nmode: primary\nsteps: 1\n---\nWork in one step, then sum up.\n')
@@ -534,6 +577,20 @@ def turn_loop_checks():
                 assert LONG['refused'] <= 3, LONG
                 assert LONG['summaries'] >= compactions + 1, LONG
                 passed.append(f"long turn on an unknown window: {compactions} compactions, {LONG['refused']} refused")
+
+            def in_stream_window():
+                """Twelve rounds through a gateway that refuses inside its stream past a 12,000-token
+                window, naming it: the turn learns it from the first refusal, compacts and answers."""
+                thread = chat('glm', 'streamed-fixture')
+                finished, rows, _ = turn(thread, 'IN_STREAM_WINDOW: read the notes twelve times', timeout=180)
+                assert finished['status'] == 'completed', (finished, errors(rows), STREAMED)
+                assert texts(rows)[-1:] == ['IN_STREAM_WINDOW_DONE'], texts(rows)[-1:]
+                compactions = sum(1 for row in api(f'/threads/{thread}/items') if row['data']['type'] == 'compaction')
+                assert compactions >= 1, (compactions, STREAMED)
+                # Once named, the window is kept: later rounds compact before it is reached.
+                assert STREAMED['refused'] <= 2, STREAMED
+                passed.append(f"refusal inside a stream naming the window: {compactions} compactions, "
+                              f"{STREAMED['refused']} refused")
 
             def empty_after_failure(provider, model):
                 """A read fails and the model's next reply is empty: once, it is asked to explain."""
@@ -659,7 +716,7 @@ def turn_loop_checks():
                 assert later.lower().count(fresh) == len(re.findall(rf'</?(tool_call|tool_result|user_message)-{fresh}[ >]', later)), later
                 passed.append('only markers with the summary request\'s key mark anything; quoted text is sent as written')
 
-            checks = [busy_rounds, cut_rounds, glm_overflow, long_unknown_window, forged_markers]
+            checks = [busy_rounds, cut_rounds, glm_overflow, long_unknown_window, in_stream_window, forged_markers]
             for provider, model in [('anthropic', 'claude-sonnet-4-6'), ('openai', 'gpt-5.4-mini')]:
                 checks += [lambda p=provider, m=model: empty_after_failure(p, m), lambda p=provider, m=model: step_limit(p, m),
                            lambda p=provider, m=model: step_calls(p, m)]

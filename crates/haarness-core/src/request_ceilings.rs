@@ -125,8 +125,12 @@ pub(crate) fn shown_window(message: &str, refused: u64) -> Option<u64> {
 /// maximum number of tokens allowed (1048576)") and Claude ("prompt is too
 /// long: 210000 tokens > 200000 maximum").
 fn named_window(message: &str) -> Option<u64> {
-    const BEFORE: [&str; 15] = [
+    const BEFORE: [&str; 17] = [
         "maximum context length is ",
+        // DeepInfra: "should not exceed max_num_tokens (32768)".
+        "max_num_tokens (",
+        // OpenRouter: "longer than the model's max input length (131072 tokens)".
+        "max input length (",
         "maximum context length: ",
         "available context size (",
         "context length of only ",
@@ -447,6 +451,22 @@ mod tests {
                 32_768,
             ),
             ("prompt is too long: 34000 tokens > 32768 maximum", 32_768),
+            // DeepInfra's own servers, behind OpenRouter: the prompt length
+            // is the refused request, not the window.
+            (
+                "HTTP 400: DeepInfra: The sum of prompt length (34000.0), query length (0) should not exceed max_num_tokens (32768)",
+                32_768,
+            ),
+            // OpenRouter past every endpoint's input limit.
+            (
+                "HTTP 400: The input (34000 tokens) is longer than the model's max input length (32768 tokens).",
+                32_768,
+            ),
+            // A Haarness router's words, naming the provider's window.
+            (
+                "HTTP 400 Bad Request: [upstream_400] The conversation is longer than this model's maximum context length, so the provider refused it (its maximum context length is 32768 tokens). Compact the conversation, or choose a model with a larger context window.",
+                32_768,
+            ),
             (
                 "HTTP 400 Bad Request: The decoder prompt (length 34000) is longer than the maximum model length of 32768.",
                 34_000,
