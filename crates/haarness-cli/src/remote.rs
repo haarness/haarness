@@ -1,11 +1,9 @@
 //! Host-level discovery delegates execution to the existing leased workspace daemons.
-use super::{
-    Paths, ensure_workspace_server_for_remote, inspect_workspace_server, server_compatibility_error,
-};
+use super::{Paths, ensure_workspace_server_for_remote, inspect_workspace_server};
 use anyhow::{Context, Result, ensure};
 use haarness_protocol::{WorkspaceInfo, WorkspaceListResponse};
 use haarness_server::remote::{
-    BrowseOptions, DirectoryEntry, DirectoryListing, ProjectBusy, WorkspaceHost, WorkspaceTarget,
+    BrowseOptions, DirectoryEntry, DirectoryListing, WorkspaceHost, WorkspaceTarget,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
@@ -90,20 +88,16 @@ impl WorkspaceHost for Host {
         self.paths.workspace_manager()?.get(&id)?;
         set_visible(&self.paths, &id, false)
     }
+    /// Reads and changes go to the same server: a busy one of another build
+    /// takes both when it speaks this build's API (see
+    /// [`ensure_workspace_server_for_remote`]).
     async fn target(&self, id: String) -> Result<WorkspaceTarget> {
         self.resolve(id, false).await
     }
-    async fn read_target(&self, id: String) -> Result<WorkspaceTarget> {
-        self.resolve_read(id, false).await
-    }
     /// A chat without a project, published from the chat home, is reachable
     /// as that one chat; the chat home itself stays this computer's.
-    async fn chat_target(&self, id: String, read: bool) -> Result<WorkspaceTarget> {
-        if read {
-            self.resolve_read(id, true).await
-        } else {
-            self.resolve(id, true).await
-        }
+    async fn chat_target(&self, id: String, _read: bool) -> Result<WorkspaceTarget> {
+        self.resolve(id, true).await
     }
 }
 
@@ -149,40 +143,6 @@ impl Host {
             token: discovery.token,
         })
     }
-    /// A server another Haarness build runs cannot be replaced while it works,
-    /// but reading from it changes none of that work: reads reach it as it is,
-    /// so the project can still be viewed. Only a server that speaks this
-    /// build's API and confines a published chat's requests (`remote-chat-scope.v1`)
-    /// is read from; anything else keeps the busy answer.
-    async fn resolve_read(&self, id: String, chat: bool) -> Result<WorkspaceTarget> {
-        let error = match self.resolve(id.clone(), chat).await {
-            Err(error) if error.downcast_ref::<ProjectBusy>().is_some() => error,
-            other => return other,
-        };
-        let paths = self.paths.clone();
-        let workspace = tokio::task::spawn_blocking(move || {
-            Ok::<_, anyhow::Error>(paths.workspace_manager()?.get(&id)?)
-        })
-        .await??;
-        let paths = self.paths.scoped(&workspace.id, false)?;
-        match inspect_workspace_server(&paths, std::path::Path::new(&workspace.path)).await {
-            Ok(Some(live)) if readable(&live.info) => Ok(WorkspaceTarget {
-                url: live.discovery.url,
-                token: live.discovery.token,
-            }),
-            // Gone or replaced meanwhile: the next request starts over.
-            _ => Err(error),
-        }
-    }
-}
-
-/// Whether reads may go to a running server of another build as it is.
-fn readable(info: &haarness_protocol::ServerInfo) -> bool {
-    server_compatibility_error(info).is_none()
-        && info
-            .capabilities
-            .iter()
-            .any(|capability| capability == "remote-chat-scope.v1")
 }
 
 fn list_directories(
@@ -299,47 +259,8 @@ fn set_visible(paths: &Paths, id: &str, visible: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowseOptions, CHAT_HOME_STAYS, Host, readable};
-    use haarness_protocol::{
-        PTY_CAPABILITY, SCHEMA_VERSION, ServerInfo, WORKSPACE_HISTORY_CAPABILITY,
-    };
+    use super::{BrowseOptions, CHAT_HOME_STAYS, Host};
     use haarness_server::remote::WorkspaceHost as _;
-
-    fn info(capabilities: &[&str]) -> ServerInfo {
-        ServerInfo {
-            name: "haarness".into(),
-            version: "0.0.0-other".into(),
-            schema_version: SCHEMA_VERSION.into(),
-            server_instance_id: uuid::Uuid::now_v7(),
-            event_cursor: 0,
-            capabilities: capabilities.iter().map(|value| (*value).into()).collect(),
-            workspace: None,
-            git_branch: None,
-            default_provider: None,
-            default_model: None,
-            default_approval_mode: None,
-            default_reasoning_effort: None,
-            default_agent: None,
-            project_trusted: None,
-            pid: None,
-        }
-    }
-
-    #[test]
-    fn reads_reach_another_build_only_when_it_speaks_this_api_and_confines_shared_chats() {
-        let full = [
-            WORKSPACE_HISTORY_CAPABILITY,
-            PTY_CAPABILITY,
-            "remote-chat-scope.v1",
-        ];
-        assert!(readable(&info(&full)));
-        // Without scope enforcement a published chat's reads would see every chat.
-        assert!(!readable(&info(&full[..2])));
-        assert!(!readable(&info(&full[1..])));
-        let mut other_schema = info(&full);
-        other_schema.schema_version = "0".into();
-        assert!(!readable(&other_schema));
-    }
 
     #[tokio::test]
     async fn the_chat_home_stays_out_of_project_access_but_a_chat_published_from_it_is_reachable() {

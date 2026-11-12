@@ -86,6 +86,12 @@ jobs:
           npm --prefix apps/browser-extension ci
           npm --prefix apps/browser-extension run build
           echo "HAARNESS_EMBED_BROWSER_EXTENSION=${{ github.workspace }}/apps/browser-extension/dist/chrome" >> "$GITHUB_ENV"
+      # The binary names the release it is (build.rs), so the CLI's copy and
+      # the one inside Desktop are one build and use each other's project
+      # servers. Kept for every later cargo build, as the variable above.
+      - name: Name the release build
+        shell: bash
+        run: echo "HAARNESS_RELEASE_BUILD=1" >> "$GITHUB_ENV"
       # Every later step (installer and package checks, Desktop packaging,
       # collection) uses this one binary through HAARNESS_BIN.
       - name: Build the CLI

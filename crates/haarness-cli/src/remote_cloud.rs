@@ -5135,6 +5135,7 @@ mod tests {
                 pid: std::process::id(),
                 workspace: Some(workspace.display().to_string()),
                 executable_fingerprint: executable,
+                release_build: None,
                 access_fingerprint: Some(
                     haarness_server::auth::ServerAccess::Private.fingerprint("fixture"),
                 ),
@@ -5305,8 +5306,9 @@ mod tests {
         assert_eq!(question["chatTitle"], Value::Null, "an untitled chat");
         assert_eq!(question["custom"], true);
         assert_eq!(question["category"], Value::Null);
-        // An older build's server would be replaced, not reused, so Cloud cannot answer it.
-        assert_eq!(question["actionable"], false);
+        // An older build's server that speaks this API is used as it is while
+        // something waits in it, so Cloud answers it as any other.
+        assert_eq!(question["actionable"], true);
         let text = first.to_string();
         for private in [
             "git push",
@@ -5894,85 +5896,6 @@ mod tests {
         assert_eq!(items.len(), 1, "{first}");
         assert_eq!(items[0]["id"], "question-1");
         assert_eq!(items[0]["projectId"], computer.other.id.as_str());
-        connection.abort();
-        std::fs::remove_dir_all(&computer.root).unwrap();
-    }
-    #[tokio::test]
-    async fn servers_of_the_old_build_cannot_be_answered_from_the_phone_after_an_in_place_upgrade()
-    {
-        let computer = Computer::new();
-        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
-        let other = FakeDaemon::start(Path::new(&computer.other.path)).await;
-        home.record(
-            &computer.paths,
-            &computer.home.id,
-            Path::new(&computer.home.path),
-            Some("build-1".into()),
-        );
-        other.record(
-            &computer.paths,
-            &computer.other.id,
-            Path::new(&computer.other.path),
-            Some("build-1".into()),
-        );
-        let (fix, upgrade) = (Uuid::now_v7(), Uuid::now_v7());
-        home.state
-            .lock()
-            .unwrap()
-            .permissions
-            .push(pending_permission("perm-1", fix, fix));
-        other.state.lock().unwrap().questions.push(pending_question(
-            "question-1",
-            upgrade,
-            upgrade,
-        ));
-        let build = Arc::new(std::sync::Mutex::new("build-1".to_owned()));
-        let installed = build.clone();
-        let attention = remote_attention::Context::with_executable(
-            &computer.paths,
-            remote_attention::Timing {
-                debounce: Duration::from_millis(50),
-                settle: Duration::from_millis(300),
-                scan: Duration::from_millis(100),
-                first: Duration::from_secs(5),
-            },
-            Arc::new(move || Some(installed.lock().unwrap().clone())),
-        );
-        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
-        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
-        let actionable = |frame: &Value| -> Vec<(String, bool)> {
-            let mut items: Vec<(String, bool)> = frame["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|item| {
-                    (
-                        item["id"].as_str().unwrap().to_owned(),
-                        item["actionable"] == true,
-                    )
-                })
-                .collect();
-            items.sort();
-            items
-        };
-        let first = next_attention(&mut frames).await;
-        assert_eq!(
-            actionable(&first),
-            [("perm-1".to_owned(), true), ("question-1".to_owned(), true)],
-            "{first}"
-        );
-        // Haarness is upgraded in place while the connector keeps running:
-        // the gateway would now replace the other project's server.
-        *build.lock().unwrap() = "build-2".into();
-        let upgraded = next_attention(&mut frames).await;
-        assert_eq!(
-            actionable(&upgraded),
-            [
-                ("perm-1".to_owned(), true),
-                ("question-1".to_owned(), false)
-            ],
-            "{upgraded}"
-        );
         connection.abort();
         std::fs::remove_dir_all(&computer.root).unwrap();
     }

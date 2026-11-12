@@ -220,9 +220,6 @@ impl Hold {
 /// root chats, are kept per server.
 const MAX_TRACKED: usize = 1024;
 
-/// This build's executable fingerprint as it is now.
-pub(crate) type Fingerprint = Arc<dyn Fn() -> Option<String> + Send + Sync>;
-
 pub(crate) struct Context {
     setup: Setup,
     /// Started by the first connection whose Cloud stores attention and kept
@@ -236,10 +233,6 @@ pub(crate) struct Context {
 #[derive(Clone)]
 struct Setup {
     paths: Paths,
-    /// This build's executable as it is now. An in-place upgrade changes it
-    /// while the connector runs, and the host gateway compares each server
-    /// with the executable on disk at every request.
-    executable: Fingerprint,
     timing: Timing,
     memory: Memory,
 }
@@ -247,23 +240,9 @@ struct Setup {
 impl Context {
     /// For the connector of the workspace `paths` is scoped to.
     pub(crate) fn new(paths: &Paths, timing: Timing) -> Arc<Self> {
-        Self::with_executable(
-            paths,
-            timing,
-            Arc::new(|| super::current_executable_fingerprint().ok()),
-        )
-    }
-
-    /// As `new`, comparing servers with `executable` (tests replace the build).
-    pub(crate) fn with_executable(
-        paths: &Paths,
-        timing: Timing,
-        executable: Fingerprint,
-    ) -> Arc<Self> {
         Arc::new(Self {
             setup: Setup {
                 paths: paths.clone(),
-                executable,
                 timing,
                 memory: Arc::default(),
             },
@@ -435,7 +414,7 @@ async fn follow_host(setup: Setup, publish: tokio::sync::watch::Sender<Board>) {
     let (updates, mut received) = mpsc::channel(64);
     let mut discovery = Discovery::new(vec![setup.paths.cache.clone()], discovery::http_client());
     let mut projects = Projects::new(setup.paths.clone());
-    let mut watching = Watching::new(publish, setup.executable.clone());
+    let mut watching = Watching::new(publish);
     let mut servers = Vec::new();
     let mut next_scan = Instant::now();
     loop {
@@ -455,7 +434,6 @@ async fn follow_host(setup: Setup, publish: tokio::sync::watch::Sender<Board>) {
                     .lock()
                     .retain(|instance, _| servers.iter().any(|server| &server.id == instance));
                 watching.forget_gone(&servers);
-                watching.refresh_executable();
                 projects.want(&servers);
             }
             matched = projects.finished(), if projects.busy() => {
@@ -502,7 +480,7 @@ async fn follow_chat(
         .flatten()
         .unwrap_or_default();
     let (updates, mut received) = mpsc::channel(64);
-    let mut watching = Watching::new(publish, setup.executable.clone());
+    let mut watching = Watching::new(publish);
     let key = String::from("chat");
     let follower = follow(
         Daemon::new(base, token, Some(chat)),
@@ -541,9 +519,6 @@ struct Watched {
 struct Watching {
     watched: HashMap<String, Watched>,
     publish: tokio::sync::watch::Sender<Board>,
-    fingerprint: Fingerprint,
-    /// What `fingerprint` said at the last scan.
-    executable: Option<String>,
     scanned: bool,
     ready: bool,
     /// Changed since the last publish.
@@ -551,12 +526,10 @@ struct Watching {
 }
 
 impl Watching {
-    fn new(publish: tokio::sync::watch::Sender<Board>, fingerprint: Fingerprint) -> Self {
+    fn new(publish: tokio::sync::watch::Sender<Board>) -> Self {
         Self {
             watched: HashMap::new(),
             publish,
-            executable: fingerprint(),
-            fingerprint,
             scanned: false,
             ready: false,
             dirty: false,
@@ -566,16 +539,6 @@ impl Watching {
     fn update(&mut self, key: &str, view: View) {
         if let Some(entry) = self.watched.get_mut(key) {
             entry.view = Some(view);
-            self.dirty = true;
-        }
-    }
-
-    /// Look at this build's executable again: after an in-place upgrade,
-    /// the servers the old one started are the ones the gateway replaces.
-    fn refresh_executable(&mut self) {
-        let current = (self.fingerprint)();
-        if current != self.executable {
-            self.executable = current;
             self.dirty = true;
         }
     }
@@ -650,13 +613,12 @@ impl Watching {
         }
         self.dirty = false;
         self.ready = ready;
-        let executable = self.executable.as_deref();
         let servers = self
             .watched
             .values()
             .map(|entry| {
                 let view = entry.view.clone().map(|mut view| {
-                    view.reachable = entry.route.reaches(view.info.as_deref(), executable);
+                    view.reachable = entry.route.reaches(view.info.as_deref());
                     view
                 });
                 (entry.project.clone(), view)
@@ -807,24 +769,23 @@ enum Route {
 }
 
 impl Route {
-    /// Whether Cloud can answer the server that said `info`, while this
-    /// build's executable is `executable`.
-    fn reaches(&self, info: Option<&ServerInfo>, executable: Option<&str>) -> bool {
+    /// Whether Cloud can answer the server that said `info`.
+    fn reaches(&self, info: Option<&ServerInfo>) -> bool {
         match self {
             Self::Direct => true,
-            Self::Gateway { record } => {
-                info.is_some_and(|info| reused_as_is(record, info, executable))
-            }
+            Self::Gateway { record } => info.is_some_and(|info| reused_as_is(record, info)),
         }
     }
 }
 
-/// Whether `ensure_workspace_server`, as the host gateway calls it, keeps this
-/// server as it runs, with whatever project configuration setting it runs
-/// with. It replaces any other one, and refuses to while a turn runs, which
-/// is always so while something waits on the person: Cloud cannot answer for
-/// such a server.
-fn reused_as_is(record: &RuntimeDiscovery, info: &ServerInfo, executable: Option<&str>) -> bool {
+/// Whether `ensure_workspace_server_for_remote`, as the host gateway calls
+/// it, sends Cloud's requests to this server as it runs, with whatever
+/// project configuration setting it runs with, while something in it waits
+/// on the person (which keeps it busy). Any build's server does when it
+/// speaks this build's API and keeps a published chat's requests to that
+/// chat; one that does not is replaced once idle, and cannot be answered from
+/// Cloud until then.
+fn reused_as_is(record: &RuntimeDiscovery, info: &ServerInfo) -> bool {
     if super::server_compatibility_error(info).is_some() {
         return false;
     }
@@ -833,9 +794,7 @@ fn reused_as_is(record: &RuntimeDiscovery, info: &ServerInfo, executable: Option
         .access_fingerprint
         .as_deref()
         .is_none_or(|access| access == ServerAccess::Private.fingerprint(&record.token));
-    !private
-        || executable
-            .is_none_or(|current| record.executable_fingerprint.as_deref() == Some(current))
+    !private || super::confines_published_chats(info)
 }
 
 /// One server's part of the snapshot, as its follower last saw it.
@@ -3090,7 +3049,8 @@ mod tests {
         serde_json::from_value(json!({
             "name": "haarness", "version": "0.1.1", "schemaVersion": schema,
             "serverInstanceId": Uuid::from_u128(1), "projectTrusted": trusted,
-            "capabilities": [haarness_protocol::WORKSPACE_HISTORY_CAPABILITY, haarness_protocol::PTY_CAPABILITY],
+            "capabilities": [haarness_protocol::WORKSPACE_HISTORY_CAPABILITY,
+                haarness_protocol::PTY_CAPABILITY, "remote-chat-scope.v1"],
         }))
         .unwrap()
     }
@@ -3102,6 +3062,7 @@ mod tests {
             pid: 1,
             workspace: None,
             executable_fingerprint: executable.map(str::to_owned),
+            release_build: None,
             access_fingerprint: access,
             trace_endpoint: None,
             system_config_dir: None,
@@ -3109,42 +3070,41 @@ mod tests {
     }
 
     #[test]
-    fn cloud_answers_only_servers_the_gateway_would_keep() {
+    fn cloud_answers_servers_of_any_build_that_speak_this_api() {
         let private = Some(ServerAccess::Private.fingerprint("token"));
-        let this = Some("this-build");
-        assert!(reused_as_is(
-            &record(this, private.clone()),
-            &info("1", false),
-            this
-        ));
-        // Another build, or a record from before fingerprints: replaced.
+        // This build's server, another build's, and a record from before
+        // fingerprints: answered alike.
+        for executable in [Some("this-build"), Some("old-build"), None] {
+            assert!(reused_as_is(
+                &record(executable, private.clone()),
+                &info("1", false)
+            ));
+        }
+        // Another API schema: replaced once idle, so not answered.
         assert!(!reused_as_is(
             &record(Some("old-build"), private.clone()),
-            &info("1", false),
-            this
+            &info("0", false)
         ));
-        assert!(!reused_as_is(&record(None, None), &info("1", false), this));
-        // Another API schema: replaced.
+        // A server that would let a published chat's requests reach every chat.
+        let mut unscoped = info("1", false);
+        unscoped
+            .capabilities
+            .retain(|capability| capability != "remote-chat-scope.v1");
         assert!(!reused_as_is(
-            &record(this, private.clone()),
-            &info("0", false),
-            this
+            &record(Some("old-build"), private.clone()),
+            &unscoped
         ));
         // Either project configuration setting: kept as the person started it.
-        assert!(reused_as_is(&record(this, private), &info("1", true), this));
+        assert!(reused_as_is(&record(None, private), &info("1", true)));
         // A configured server is kept whichever build runs it.
         let open = Some(ServerAccess::Open.fingerprint("token"));
-        assert!(reused_as_is(
-            &record(Some("old-build"), open),
-            &info("1", false),
-            this
-        ));
-        assert!(Route::Direct.reaches(Some(&info("0", true)), None));
+        assert!(reused_as_is(&record(Some("old-build"), open), &unscoped));
+        assert!(Route::Direct.reaches(Some(&info("0", true))));
         assert!(
             !Route::Gateway {
-                record: record(this, None)
+                record: record(None, None)
             }
-            .reaches(None, this),
+            .reaches(None),
             "a server that has not answered yet"
         );
     }

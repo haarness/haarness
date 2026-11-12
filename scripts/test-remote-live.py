@@ -661,9 +661,11 @@ try:
         "a second project's question is reported while its server runs, withdrawn while the project is closed, and its stopped server stays stopped"
     )
 
-    # A project server started by another Haarness build (Desktop's own, say)
-    # is watched too, but Cloud cannot route an answer to it while its turn
-    # runs, so its request is marked as one to answer on the computer.
+    # A project server started by another Haarness build (another copy, an
+    # older version, or one left running across an update) is watched too,
+    # and Cloud's requests reach it as it is while it works: what waits in it
+    # is answered from the phone, and a message sent from the phone while it
+    # is busy starts there, as one typed at the computer would.
     other_build = ROOT / "other-build" / "haarness"
     other_build.parent.mkdir()
     if subprocess.run(["cp", "-c", BIN, str(other_build)]).returncode != 0:
@@ -681,6 +683,7 @@ try:
         ).stdout
     )
     foreign = Haarness(started["url"], token=started["token"])
+    foreign_server = foreign.info()["serverInstanceId"]
     pid3 = until(
         lambda: next(
             (
@@ -703,38 +706,42 @@ try:
         "projectId": pid3,
         "chatTitle": "Started by another build",
         "category": "bash",
-        "actionable": False,
+        "actionable": True,
         "connected": True,
     }
     assert {k: row.get(k) for k in expected} == expected, row
     if pushes:
-        alert = alerted(
-            request["permissionId"], "an approval only the computer can answer"
-        )
-        assert alert["aps"]["category"] == "haarness.view", alert  # no answer buttons
-    try:
-        host.workspace(pid3).reply_permission(
-            request["permissionId"], {"decision": "once"}
-        )
-    except ApiError as error:
-        assert error.status >= 400, error
-    else:
-        raise AssertionError("Cloud answered a server it was told it cannot reach")
-    assert any(
-        p["permissionId"] == request["permissionId"] for p in foreign.list_permissions()
+        alert = alerted(request["permissionId"], "an approval in another build's project")
+        assert alert["aps"]["category"] == "haarness.approval", alert
+    # The phone's message while the project is busy: a new chat and a turn.
+    through = host.workspace(pid3)
+    phone_chat = through.create_thread(
+        {"title": "Sent from the phone", "provider": "echo", "model": "echo-1"}
     )
-    reply(foreign, request)
+    phone_turn = through.start_turn(
+        phone_chat["id"], {"requestId": str(uuid.uuid4()), "text": "hello from the phone"}
+    )
+    completed(phone_turn, through)
+    assert any(t["id"] == phone_chat["id"] for t in foreign.list_threads()), (
+        "the phone's chat is not on the busy server"
+    )
+    # And the approval, answered from the phone.
+    through.reply_permission(request["permissionId"], {"decision": "once"})
     completed(foreign_turn, foreign)
+    assert (elsewhere / "other-proof.txt").read_text() == "other"
     until(
         lambda: not attention(itemId=request["permissionId"]),
-        "an answer given on the computer was not reported",
+        "an approval answered from the phone stayed open",
+    )
+    assert foreign.info()["serverInstanceId"] == foreign_server, (
+        "the busy server was replaced"
     )
     foreign.shutdown_server()
     foreign.close()
     other_build.unlink()
     host.host_close(pid3)
     proof(
-        "a project server from another Haarness build is reported, marked to answer on the computer"
+        "a busy project server from another Haarness build takes the phone's message and answer as it is"
     )
 
     # A network drop: the connector keeps running and reconnects by itself.

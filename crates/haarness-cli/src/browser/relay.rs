@@ -543,6 +543,7 @@ mod tests {
                     pid: 1,
                     workspace: Some("/w".into()),
                     executable_fingerprint: None,
+                    release_build: None,
                     access_fingerprint: None,
                     trace_endpoint: None,
                     system_config_dir: None,

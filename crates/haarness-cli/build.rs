@@ -4,6 +4,13 @@
 //! checkout, the variable is left unset and the binary logs `unknown`. That
 //! part never fails the build.
 //!
+//! A release build (`HAARNESS_RELEASE_BUILD=1`) from a clean checkout also
+//! names itself as `HAARNESS_BUILD_ID` (`<version>+<short sha>`). Every copy
+//! of that binary, the CLI's and the one inside Desktop alike, is then the
+//! same build to the others, though each is a file of its own. Any other
+//! build has no name and is known by its executable file alone, so a
+//! development rebuild still counts as a new build.
+//!
 //! Release builds also set `HAARNESS_EMBED_BROWSER_EXTENSION` to the built
 //! Haarness for Chrome (`apps/browser-extension/dist/chrome`), which is then
 //! included in the binary for `haarness browser setup`. A folder that cannot
@@ -22,13 +29,23 @@ use std::{
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build/browser_extension.rs");
+    println!("cargo:rerun-if-env-changed=HAARNESS_RELEASE_BUILD");
     embed_browser_extension();
     let Some(manifest) = env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from) else {
         return;
     };
     if let Some(commit) = commit(&manifest) {
         println!("cargo:rustc-env=HAARNESS_BUILD_COMMIT={commit}");
+        // A tree with uncommitted changes is no release, whatever it is called.
+        if release_build() && !commit.ends_with("-dirty") {
+            let version = env::var("CARGO_PKG_VERSION").expect("Cargo sets CARGO_PKG_VERSION");
+            println!("cargo:rustc-env=HAARNESS_BUILD_ID={version}+{commit}");
+        }
     }
+}
+
+fn release_build() -> bool {
+    env::var_os("HAARNESS_RELEASE_BUILD").is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Writes `$OUT_DIR/browser_extension.rs` for `src/browser/embedded.rs`.

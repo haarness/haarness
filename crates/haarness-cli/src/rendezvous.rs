@@ -24,6 +24,10 @@ pub(crate) struct RuntimeDiscovery {
     /// checks alone can otherwise attach a new client to stale server code.
     #[serde(default)]
     pub(crate) executable_fingerprint: Option<String>,
+    /// The release build the daemon is (`HAARNESS_BUILD_ID`), whichever copy
+    /// of it the daemon was started from; none for any other build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) release_build: Option<String>,
     #[serde(default)]
     pub(crate) access_fingerprint: Option<String>,
     /// The OTLP traces endpoint the daemon exports to, if any. A client reusing

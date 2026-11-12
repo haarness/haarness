@@ -1467,6 +1467,8 @@ struct ScheduleUpdateArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Which executable this process is, before an update can replace it.
+    started_from();
     let outcome = Box::pin(cli_main()).await;
     if let Err(error) = &outcome {
         // Each refusal was already said on its own line.
@@ -5881,6 +5883,7 @@ async fn serve_command(
             pid: std::process::id(),
             workspace: Some(workspace.display().to_string()),
             executable_fingerprint: Some(current_executable_fingerprint()?),
+            release_build: release_build().map(str::to_owned),
             access_fingerprint,
             trace_endpoint: otel::configured_endpoint(),
             system_config_dir: crate::layout::system_config_dir()
@@ -14193,6 +14196,53 @@ fn current_executable_fingerprint() -> Result<String> {
     rendezvous::executable_fingerprint(&path)
 }
 
+/// The release build this binary is (`build.rs`), if it was built as one.
+fn release_build() -> Option<&'static str> {
+    option_env!("HAARNESS_BUILD_ID").filter(|id| !id.is_empty())
+}
+
+/// This process's executable file as it was when the process started, so an
+/// update that replaces the file under it is noticed.
+fn started_from() -> Option<&'static str> {
+    static STARTED_FROM: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    STARTED_FROM
+        .get_or_init(|| current_executable_fingerprint().ok())
+        .as_deref()
+}
+
+/// Whether the server `record` describes runs the build this client would
+/// start: the executable on disk now, or another copy of the same release
+/// build (the CLI and Desktop each install their own). An executable updated
+/// in place under this process is a build this process is not, so then only
+/// the file counts: a server started from it is the same build, one started
+/// before the update is not.
+fn same_build(record: &rendezvous::RuntimeDiscovery) -> bool {
+    let Ok(current) = current_executable_fingerprint() else {
+        return true;
+    };
+    same_build_as(record, &current, started_from(), release_build())
+}
+
+fn same_build_as(
+    record: &rendezvous::RuntimeDiscovery,
+    current: &str,
+    started_from: Option<&str>,
+    release: Option<&str>,
+) -> bool {
+    record.executable_fingerprint.as_deref() == Some(current)
+        || (started_from == Some(current)
+            && release.is_some_and(|release| record.release_build.as_deref() == Some(release)))
+}
+
+/// Whether a server keeps a published chat's requests to that chat
+/// (`remote-chat-scope.v1`), which Cloud's requests rely on. Every server of
+/// this build does; one of an older build may not.
+pub(crate) fn confines_published_chats(info: &ServerInfo) -> bool {
+    info.capabilities
+        .iter()
+        .any(|capability| capability == "remote-chat-scope.v1")
+}
+
 /// Inspect the one live server associated with this data directory. Runtime
 /// discovery is only a rendezvous hint: health and workspace identity are
 /// always verified against the authenticated server before it is reused.
@@ -14283,8 +14333,7 @@ fn server_compatibility_error(info: &ServerInfo) -> Option<String> {
 
 fn local_server_compatibility_error(live: &LiveWorkspaceServer) -> Option<String> {
     server_compatibility_error(&live.info).or_else(|| {
-        let current = current_executable_fingerprint().ok()?;
-        (live.discovery.executable_fingerprint.as_deref() != Some(current.as_str()))
+        (!same_build(&live.discovery))
             .then(|| "server executable differs from this client build".to_owned())
     })
 }
@@ -14545,10 +14594,10 @@ async fn ensure_workspace_server(
 }
 
 /// [`ensure_workspace_server`] for requests that arrive through Haarness
-/// Cloud: a busy server of another build or setting is refused with
-/// [`haarness_server::remote::ProjectBusy`] instead of being used as it is,
-/// because Cloud's requests must not drive a server this build cannot vouch
-/// for.
+/// Cloud. A busy server of another build is used as it is, as it is for the
+/// person at the computer, when it speaks this build's API and keeps a
+/// published chat's requests to that chat; only one that cannot is refused
+/// with [`haarness_server::remote::ProjectBusy`].
 pub(crate) async fn ensure_workspace_server_for_remote(
     paths: &Paths,
     workspace: &Path,
@@ -14563,7 +14612,7 @@ pub(crate) async fn ensure_workspace_server_for_remote(
         Some(0),
         random_token(),
         None,
-        BusyServer::Refuse,
+        BusyServer::ReuseForCloud,
     )
     .await
 }
@@ -14578,6 +14627,9 @@ enum BusyServer {
     /// Use it as it is when it speaks this build's API and runs with the
     /// requested setting; refuse otherwise.
     Reuse,
+    /// As `Reuse`, for Cloud's requests, which the server must also keep to
+    /// the chat they are scoped to ([`confines_published_chats`]).
+    ReuseForCloud,
 }
 
 /// Whether a notice about the server this client starts or reuses is also
@@ -14719,9 +14771,13 @@ async fn ensure_workspace_server_at(
                 .as_ref()
                 .map(|_| "system configuration folder changed".to_owned())
         }) {
-            let reusable = busy == BusyServer::Reuse
-                && server_compatibility_error(&live.info).is_none()
+            let speaks = server_compatibility_error(&live.info).is_none()
                 && live.info.project_trusted == Some(trust);
+            let reusable = match busy {
+                BusyServer::Refuse => false,
+                BusyServer::Reuse => speaks,
+                BusyServer::ReuseForCloud => speaks && confines_published_chats(&live.info),
+            };
             let discovery = live.discovery.clone();
             match replace_incompatible_workspace_server(paths, workspace, live, &reason).await {
                 Ok(()) => {}
@@ -14746,6 +14802,12 @@ async fn ensure_workspace_server_at(
                             .is_some() =>
                 {
                     let notice = format!("{error}. Using it as it is meanwhile.");
+                    if busy == BusyServer::ReuseForCloud {
+                        // Found again at each of Cloud's requests while the
+                        // work lasts, and no one reads it at a terminal.
+                        tracing::debug!("{notice}");
+                        return Ok(discovery);
+                    }
                     tracing::warn!("{notice}");
                     if notices_on_stderr(io::stderr().is_terminal(), haarness_tui::owns_terminal())
                     {
@@ -17715,6 +17777,7 @@ request_timeout = 0
                 pid: 42,
                 workspace: None,
                 executable_fingerprint: Some(current),
+                release_build: None,
                 access_fingerprint: None,
                 trace_endpoint: None,
                 system_config_dir: None,
@@ -17868,14 +17931,26 @@ request_timeout = 0
         root: &std::path::Path,
         trusted: bool,
     ) -> (Paths, PathBuf, FakeServer, RuntimeDiscovery) {
+        fake_other_build_with(root, trusted, &[]).await
+    }
+
+    /// As `fake_other_build`, with these capabilities beside the required ones.
+    async fn fake_other_build_with(
+        root: &std::path::Path,
+        trusted: bool,
+        more: &[&str],
+    ) -> (Paths, PathBuf, FakeServer, RuntimeDiscovery) {
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         let workspace = dunce::canonicalize(&workspace).unwrap();
         let paths = Paths::new(Some(&root.join("state"))).unwrap();
-        let mut info = fixture_server_info(vec![
-            WORKSPACE_HISTORY_CAPABILITY.into(),
-            PTY_CAPABILITY.into(),
-        ]);
+        let mut info = fixture_server_info(
+            [WORKSPACE_HISTORY_CAPABILITY, PTY_CAPABILITY]
+                .iter()
+                .chain(more)
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+        );
         info.workspace = Some(workspace.display().to_string());
         info.project_trusted = Some(trusted);
         let (fake, address) = FakeServer::start(info, paths.runtime.clone()).await;
@@ -17885,6 +17960,7 @@ request_timeout = 0
             pid: 4242,
             workspace: Some(workspace.display().to_string()),
             executable_fingerprint: Some("other-build".into()),
+            release_build: None,
             access_fingerprint: None,
             trace_endpoint: None,
             system_config_dir: None,
@@ -18047,10 +18123,11 @@ request_timeout = 0
     }
 
     #[tokio::test]
-    async fn a_busy_server_of_another_build_is_used_as_it_is_but_never_from_cloud() {
+    async fn a_busy_server_of_another_build_is_used_as_it_is_from_here_and_from_cloud() {
         let root =
             std::env::temp_dir().join(format!("haarness-busy-reuse-test-{}", uuid::Uuid::now_v7()));
-        let (paths, workspace, fake, discovery) = fake_other_build(&root, true).await;
+        let (paths, workspace, fake, discovery) =
+            fake_other_build_with(&root, true, &["remote-chat-scope.v1"]).await;
         fake.set(FakeActivity {
             ptys: json!([fake_terminal(
                 "npm run dev",
@@ -18058,20 +18135,16 @@ request_timeout = 0
             )]),
             ..FakeActivity::default()
         });
-        // The person at this computer keeps the server and its terminal.
+        // The person at this computer keeps the server and its terminal, and
+        // so do Cloud's requests: a phone sends to it as Desktop does.
         let reused = super::ensure_workspace_server(&paths, &workspace, true)
             .await
             .unwrap();
         assert_eq!(reused.url, discovery.url);
-        // Cloud's requests are refused with the marker the gateway answers from.
-        let error = super::ensure_workspace_server_for_remote(&paths, &workspace, true)
+        let reused = super::ensure_workspace_server_for_remote(&paths, &workspace, true)
             .await
-            .unwrap_err();
-        assert_eq!(
-            error.downcast_ref::<ProjectBusy>(),
-            Some(&ProjectBusy::OtherBuild),
-            "{error:#}"
-        );
+            .unwrap();
+        assert_eq!(reused.url, discovery.url);
         // Nor is one running with the other project configuration setting.
         let error = super::ensure_workspace_server(&paths, &workspace, false)
             .await
@@ -18084,6 +18157,99 @@ request_timeout = 0
         assert_eq!(fake.shutdowns(), 0);
         assert!(paths.runtime.exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cloud_is_refused_only_a_busy_server_that_cannot_keep_a_shared_chat_to_itself() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-busy-unscoped-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let (paths, workspace, fake, discovery) = fake_other_build(&root, true).await;
+        fake.set(FakeActivity {
+            turns: fake_running_turn(),
+            ..FakeActivity::default()
+        });
+        let error = super::ensure_workspace_server_for_remote(&paths, &workspace, true)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ProjectBusy>(),
+            Some(&ProjectBusy::OtherBuild),
+            "{error:#}"
+        );
+        // The person at the computer keeps using it.
+        let reused = super::ensure_workspace_server(&paths, &workspace, true)
+            .await
+            .unwrap();
+        assert_eq!(reused.url, discovery.url);
+        assert_eq!(fake.shutdowns(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copies_of_one_release_build_are_one_build_and_an_update_in_place_is_another() {
+        let record = |file: &str, release: Option<&str>| RuntimeDiscovery {
+            url: "http://127.0.0.1:1".into(),
+            token: "test".into(),
+            pid: 1,
+            workspace: None,
+            executable_fingerprint: Some(file.into()),
+            release_build: release.map(str::to_owned),
+            access_fingerprint: None,
+            trace_endpoint: None,
+            system_config_dir: None,
+        };
+        let release = Some("0.1.22+abc");
+        // Started from the executable on disk: the same build, named or not.
+        assert!(super::same_build_as(
+            &record("cli", None),
+            "cli",
+            Some("cli"),
+            None
+        ));
+        // Desktop's copy of the release the CLI is.
+        assert!(super::same_build_as(
+            &record("desktop", release),
+            "cli",
+            Some("cli"),
+            release
+        ));
+        // Another release, or a build without a name (a development build).
+        assert!(!super::same_build_as(
+            &record("desktop", Some("0.1.21+def")),
+            "cli",
+            Some("cli"),
+            release
+        ));
+        assert!(!super::same_build_as(
+            &record("desktop", None),
+            "cli",
+            Some("cli"),
+            release
+        ));
+        assert!(!super::same_build_as(
+            &record("desktop", release),
+            "cli",
+            Some("cli"),
+            None
+        ));
+        // The executable was updated in place under this process: a server of
+        // the release this process is was started before the update, and one
+        // started from the file now is the same build as what this client
+        // would start.
+        assert!(!super::same_build_as(
+            &record("desktop", release),
+            "cli-updated",
+            Some("cli"),
+            release
+        ));
+        assert!(super::same_build_as(
+            &record("cli-updated", Some("0.1.23+fed")),
+            "cli-updated",
+            Some("cli"),
+            release
+        ));
     }
 
     #[test]
@@ -21202,6 +21368,7 @@ request_timeout = 0
             pid: 7,
             workspace: None,
             executable_fingerprint: None,
+            release_build: None,
             access_fingerprint: None,
             trace_endpoint: None,
             system_config_dir: base,

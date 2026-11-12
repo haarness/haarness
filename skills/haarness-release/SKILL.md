@@ -103,13 +103,16 @@ First, on every platform, the JavaScript the CLI embeds and Desktop bundles, in 
 order: the extension's typecheck needs the built SDK (`@haarness/sdk` is a `file:` dependency)
 and the driver's dependencies, and `prepare.mjs` builds the SDK again. Without
 `HAARNESS_EMBED_BROWSER_EXTENSION` (absolute path) the CLI builds fine but ships no Haarness for
-Chrome; only `test-release-package.py` notices.
+Chrome; only `test-release-package.py` notices. `HAARNESS_RELEASE_BUILD=1` makes a build from a
+clean checkout name its release, so the CLI's copy and Desktop's are one build that uses the
+other's project servers; without it each install replaces the other's idle servers.
 
 ```sh
 npm --prefix sdks/typescript ci && npm --prefix sdks/typescript run build
 npm --prefix packages/browser-driver ci
 npm --prefix apps/browser-extension ci && npm --prefix apps/browser-extension run build
 export HAARNESS_EMBED_BROWSER_EXTENSION="$PWD/apps/browser-extension/dist/chrome"
+export HAARNESS_RELEASE_BUILD=1
 ```
 
 ```sh
