@@ -287,6 +287,20 @@ pub enum ProviderInstance {
 }
 
 impl ProviderInstance {
+    /// Where its requests go.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        match self {
+            Self::OpenAiChatCompletions(instance) => &instance.base_url,
+            Self::AnthropicMessages(instance)
+            | Self::GeminiGenerateContent(instance)
+            | Self::AzureOpenAi(instance)
+            | Self::GoogleVertex(instance)
+            | Self::GithubCopilot(instance)
+            | Self::AmazonBedrock(instance) => &instance.base_url,
+        }
+    }
+
     #[must_use]
     pub fn id(&self) -> &str {
         match self {
@@ -300,6 +314,207 @@ impl ProviderInstance {
             | Self::AmazonBedrock(instance) => &instance.id,
         }
     }
+}
+
+/// Which configured providers a project's configuration defines, and what
+/// keeps them from credentials of other addresses. A project may define a
+/// provider under any id and at any address, while keys are saved under the
+/// id, so such a provider is sent a saved key only when it was saved for the
+/// provider's own address (see [`auth::key_address`]), checked at every
+/// request, and its requests follow a redirect only where that key may go:
+/// the HTTP client drops only `Authorization` on the way to another server,
+/// not the `x-api-key`, `x-goog-api-key` or `api-key` other wires carry
+/// their key in.
+#[derive(Clone, Debug, Default)]
+pub struct CredentialFence {
+    /// Providers a project defines.
+    pub project: std::collections::HashSet<String>,
+    /// Providers that may not use this computer's sign-in to a cloud: the
+    /// `gcloud` access token, the Azure CLI's, or the AWS setup's keys and
+    /// `AWS_BEARER_TOKEN_BEDROCK`.
+    pub no_ambient: std::collections::HashSet<String>,
+    /// Providers of `project` whose saved key is for another address and
+    /// that have no key of their own, with what a chat on one says instead
+    /// of going out without a key.
+    pub withheld: HashMap<String, String>,
+}
+
+/// The HTTP client of a provider a project defines at `base_url`: it
+/// follows a redirect only to where a key saved for that address may go (see
+/// [`auth::address_covers`]), or to the same place over https. One that
+/// leads elsewhere comes back as the answer.
+fn covered_redirect_client(base_url: &str) -> reqwest::Client {
+    let base = auth::key_address(base_url);
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            let covered = base
+                .as_deref()
+                .is_some_and(|base| redirect_covered(base, attempt.url()));
+            if !covered {
+                attempt.stop()
+            } else if attempt.previous().len() > 10 {
+                attempt.error("too many redirects")
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
+        .unwrap_or_default()
+}
+
+/// Whether a redirect to `next` stays where a key saved for `base` (see
+/// [`auth::key_address`]) may go: at that address or below it, or the same
+/// over https on the same host (the default port for each, or the same one).
+fn redirect_covered(base: &str, next: &url::Url) -> bool {
+    if auth::address_covers(base, next.as_str()) {
+        return true;
+    }
+    let Ok(mut secure) = url::Url::parse(base) else {
+        return false;
+    };
+    if secure.scheme() != "http" || next.scheme() != "https" {
+        return false;
+    }
+    let port = secure.port();
+    if secure.set_scheme("https").is_err() || secure.set_port(port).is_err() {
+        return false;
+    }
+    auth::address_covers(secure.as_str().trim_end_matches('/'), next.as_str())
+}
+
+/// A provider a project defines whose saved key is for another address: a
+/// chat on it fails before anything is sent, saying why, until a key is
+/// saved for its own address (or the saved one is removed).
+struct Withheld {
+    inner: Arc<dyn ModelProvider>,
+    store: Arc<CredentialStore>,
+    id: String,
+    base_url: String,
+    notice: String,
+}
+
+impl Withheld {
+    fn holds(&self) -> bool {
+        let saved = |store: &CredentialStore| store.get(&self.id).ok().flatten().is_some();
+        saved(&self.store) && !saved(&self.store.for_address(&self.base_url))
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for Withheld {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn info(&self) -> ProviderInfo {
+        self.inner.info()
+    }
+    fn prepare_side_question(&self, request: &mut haarness_core::ProviderRequest) {
+        self.inner.prepare_side_question(request);
+    }
+    async fn refresh_models(&self, force: bool) {
+        self.inner.refresh_models(force).await;
+    }
+    fn can_pay(&self) -> bool {
+        self.inner.can_pay()
+    }
+    async fn check_api_key(&self, key: &str) -> haarness_core::KeyCheck {
+        self.inner.check_api_key(key).await
+    }
+    fn explicit_prompt_cache_scope(&self, model: &str) -> Option<String> {
+        self.inner.explicit_prompt_cache_scope(model)
+    }
+    fn image_limits(&self, model: &str) -> haarness_core::ImageLimits {
+        self.inner.image_limits(model)
+    }
+    async fn stream(
+        &self,
+        request: haarness_core::ProviderRequest,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> haarness_core::CoreResult<haarness_core::ProviderStream> {
+        if self.holds() {
+            return Err(haarness_core::CoreError::ProviderUnavailable(
+                self.notice.clone(),
+            ));
+        }
+        self.inner.stream(request, cancel).await
+    }
+}
+
+/// Whether `url` is the cloud's own address for `protocol`, the only kind of
+/// address a provider a project defines may send this computer's sign-in to
+/// that cloud: https to Google's Vertex AI (`*.googleapis.com`,
+/// `*.vertexai.goog`), to Amazon Bedrock itself (`bedrock-runtime.<region>`,
+/// `bedrock.<region>` and their FIPS and VPC endpoints under
+/// `amazonaws.com`), or to Azure's AI services. Other names of those clouds
+/// can lead to servers their customers run (`*.execute-api.amazonaws.com`,
+/// `*.cloudapp.azure.com`). Every other protocol uses no such sign-in.
+#[must_use]
+pub fn own_cloud_address(protocol: CompatibleProtocol, url: &str) -> bool {
+    let Ok(url) = url::Url::parse(url.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str().filter(|_| url.scheme() == "https") else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    match protocol {
+        CompatibleProtocol::GoogleVertex => {
+            host.ends_with(".googleapis.com") || host.ends_with(".vertexai.goog")
+        }
+        CompatibleProtocol::AmazonBedrock => {
+            let Some(name) = host
+                .strip_suffix(".amazonaws.com")
+                .or_else(|| host.strip_suffix(".amazonaws.com.cn"))
+            else {
+                return false;
+            };
+            let labels: Vec<&str> = name.split('.').collect();
+            // `bedrock-runtime.us-east-1`, or a VPC endpoint's
+            // `vpce-….bedrock-runtime.us-east-1.vpce`.
+            let (service, region) = match labels.as_slice() {
+                [service, region] => (*service, *region),
+                [endpoint, service, region, "vpce"] if endpoint.starts_with("vpce-") => {
+                    (*service, *region)
+                }
+                _ => return false,
+            };
+            region_shaped(region)
+                && matches!(
+                    service,
+                    "bedrock" | "bedrock-runtime" | "bedrock-fips" | "bedrock-runtime-fips"
+                )
+        }
+        CompatibleProtocol::AzureOpenAi => [
+            ".openai.azure.com",
+            ".cognitiveservices.azure.com",
+            ".services.ai.azure.com",
+            ".openai.azure.us",
+            ".cognitiveservices.azure.us",
+            ".openai.azure.cn",
+            ".cognitiveservices.azure.cn",
+        ]
+        .iter()
+        .any(|suffix| host.ends_with(suffix)),
+        CompatibleProtocol::OpenAiChatCompletions
+        | CompatibleProtocol::AnthropicMessages
+        | CompatibleProtocol::GeminiGenerateContent
+        | CompatibleProtocol::GithubCopilot => false,
+    }
+}
+
+/// Whether `label` reads as an AWS region (`us-east-1`, `us-gov-west-1`,
+/// `cn-north-1`), not as a bucket's or a customer's name.
+fn region_shaped(label: &str) -> bool {
+    let parts: Vec<&str> = label.split('-').collect();
+    parts.len() >= 3
+        && parts[0].len() == 2
+        && parts[..parts.len() - 1]
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_lowercase()))
+        && parts[parts.len() - 1]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        && !parts[parts.len() - 1].is_empty()
 }
 
 #[derive(Default)]
@@ -317,8 +532,10 @@ impl NativeProviderRegistry {
         instances: Vec<ProviderInstance>,
         disabled: &std::collections::HashSet<String>,
         credential_store: Arc<CredentialStore>,
+        fence: &CredentialFence,
     ) -> Self {
-        let registry = Self::with_providers_and_store(instances, disabled, credential_store).await;
+        let registry =
+            Self::with_providers_and_store(instances, disabled, credential_store, fence).await;
         futures::future::join_all(
             registry
                 .providers
@@ -337,6 +554,7 @@ impl NativeProviderRegistry {
         instances: Vec<ProviderInstance>,
         disabled: &std::collections::HashSet<String>,
         credential_store: Arc<CredentialStore>,
+        fence: &CredentialFence,
     ) -> Self {
         let mut registry = Self::default();
         let auth_store = Some(credential_store.clone());
@@ -451,32 +669,89 @@ impl NativeProviderRegistry {
             ));
         }
         for (instance, aliases) in configured {
-            let auth_store = auth_store.clone();
-            registry.insert(match instance {
-                ProviderInstance::OpenAiChatCompletions(instance) => Arc::new(
-                    OpenAiCompatibleProvider::new(instance)
+            let id = instance.id().to_owned();
+            let base_url = instance.base_url().to_owned();
+            let project = fence.project.contains(&id);
+            let auth_store = if project {
+                Some(Arc::new(credential_store.for_address(&base_url)))
+            } else {
+                auth_store.clone()
+            };
+            let ambient = !fence.no_ambient.contains(&id);
+            // Where a project points it, a redirect elsewhere is not followed.
+            let client = project.then(|| covered_redirect_client(&base_url));
+            let provider: Arc<dyn ModelProvider> = match instance {
+                ProviderInstance::OpenAiChatCompletions(instance) => {
+                    let mut provider = OpenAiCompatibleProvider::new(instance)
                         .with_auth_store(auth_store)
-                        .with_auth_aliases(aliases),
-                ),
+                        .with_auth_aliases(aliases);
+                    if let Some(client) = client {
+                        provider = provider.with_http_client(client);
+                    }
+                    Arc::new(provider)
+                }
                 ProviderInstance::AnthropicMessages(instance) => {
-                    Arc::new(AnthropicProvider::new(instance).with_auth_store(auth_store))
+                    let mut provider = AnthropicProvider::new(instance).with_auth_store(auth_store);
+                    if let Some(client) = client {
+                        provider = provider.with_http_client(client);
+                    }
+                    Arc::new(provider)
                 }
                 ProviderInstance::GeminiGenerateContent(instance) => {
-                    Arc::new(GeminiProvider::new(instance).with_auth_store(auth_store))
+                    let mut provider = GeminiProvider::new(instance).with_auth_store(auth_store);
+                    if let Some(client) = client {
+                        provider = provider.with_http_client(client);
+                    }
+                    Arc::new(provider)
                 }
                 ProviderInstance::AzureOpenAi(instance) => {
-                    Arc::new(AzureProvider::new(instance, auth_store))
+                    let mut provider = AzureProvider::new(instance, auth_store);
+                    if let Some(client) = client {
+                        provider = provider.with_http_client(client);
+                    }
+                    if !ambient {
+                        provider = provider.without_ambient_credentials();
+                    }
+                    Arc::new(provider)
                 }
                 ProviderInstance::GoogleVertex(instance) => {
-                    Arc::new(VertexProvider::new(instance, auth_store))
+                    let mut provider = VertexProvider::new(instance, auth_store);
+                    if let Some(client) = client {
+                        provider = provider.with_http_client(client);
+                    }
+                    if !ambient {
+                        provider = provider.without_ambient_credentials();
+                    }
+                    Arc::new(provider)
                 }
                 ProviderInstance::GithubCopilot(instance) => {
-                    Arc::new(CopilotProvider::new(instance, auth_store))
+                    let mut provider = CopilotProvider::new(instance, auth_store);
+                    if let Some(client) = client {
+                        provider = provider.with_http_client(client);
+                    }
+                    Arc::new(provider)
                 }
                 ProviderInstance::AmazonBedrock(instance) => {
-                    Arc::new(BedrockProvider::new(instance, auth_store))
+                    let mut provider = BedrockProvider::new(instance, auth_store);
+                    if let Some(client) = client {
+                        provider = provider.with_http_client(client);
+                    }
+                    if !ambient {
+                        provider = provider.without_ambient_credentials();
+                    }
+                    Arc::new(provider)
                 }
-            });
+            };
+            match fence.withheld.get(&id).filter(|_| project) {
+                Some(notice) => registry.insert(Arc::new(Withheld {
+                    inner: provider,
+                    store: credential_store.clone(),
+                    id,
+                    base_url,
+                    notice: notice.clone(),
+                })),
+                None => registry.insert(provider),
+            }
         }
         for instance in locals {
             if !declared.contains(&instance.id) {
@@ -1180,7 +1455,7 @@ impl ProviderRegistry for NativeProviderRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
     use haarness_core::ModelProvider;
     use haarness_protocol::ModelInfo;
@@ -1537,6 +1812,7 @@ mod tests {
             vec![instance],
             &HashSet::new(),
             store,
+            &super::CredentialFence::default(),
         )
         .await;
         assert!(
@@ -1546,5 +1822,554 @@ mod tests {
         );
         let provider = haarness_core::ProviderRegistry::get(&registry, "stalled").unwrap();
         assert_eq!(provider.info().models[0].id, "fallback");
+    }
+
+    /// A provider a project defines is sent a saved key only at the address
+    /// it was saved for, checked at each request: a key saved for another
+    /// address, even one saved after the provider was built, never leaves.
+    #[tokio::test]
+    async fn a_project_provider_is_sent_only_a_key_saved_for_its_address() {
+        use axum::{Router, http::HeaderMap, routing::post};
+        use futures::StreamExt as _;
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<Option<String>>::new()));
+        let record = seen.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |headers: HeaderMap| {
+                let record = record.clone();
+                async move {
+                    record.lock().push(
+                        headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned),
+                    );
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(super::CredentialStore::new(root.path().join("auth.json")));
+        store
+            .set_api_key("router", "router-key", Some("http://127.0.0.1:1/v1"))
+            .unwrap();
+        let instance = super::ProviderInstance::OpenAiChatCompletions(CompatibleInstance {
+            id: "router".into(),
+            name: "Router".into(),
+            base_url: address.clone(),
+            api_key: None,
+            models: vec!["m".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: ProviderHeaders::default(),
+        });
+        let fence = super::CredentialFence {
+            project: HashSet::from(["router".to_owned()]),
+            ..super::CredentialFence::default()
+        };
+        let registry = super::NativeProviderRegistry::with_providers_and_store(
+            vec![instance],
+            &HashSet::new(),
+            store.clone(),
+            &fence,
+        )
+        .await;
+        let provider = haarness_core::ProviderRegistry::get(&registry, "router").unwrap();
+        assert!(!provider.info().authenticated);
+        let ask = async || {
+            let request = haarness_core::ProviderRequest {
+                model: "m".into(),
+                system: String::new(),
+                messages: vec![haarness_core::ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                tools: Vec::new(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            };
+            if let Ok(stream) = provider
+                .stream(request, tokio_util::sync::CancellationToken::new())
+                .await
+            {
+                let _ = stream.collect::<Vec<_>>().await;
+            }
+        };
+        ask().await;
+        assert_eq!(
+            seen.lock().pop(),
+            Some(None),
+            "no key at the project's address"
+        );
+        // Connected again for this address: the same provider sends it.
+        store
+            .set_api_key("router", "router-key", Some(&address))
+            .unwrap();
+        assert!(provider.info().authenticated);
+        ask().await;
+        assert_eq!(seen.lock().pop(), Some(Some("Bearer router-key".into())));
+    }
+
+    /// A provider kept from this computer's cloud sign-in says so instead of
+    /// asking `gcloud`, the Azure CLI or the AWS setup for one.
+    #[tokio::test]
+    async fn a_project_provider_never_asks_for_this_computers_cloud_sign_in() {
+        let native = |id: &str| super::NativeInstance {
+            id: id.into(),
+            name: id.into(),
+            base_url: "https://cloud.invalid/v1".into(),
+            api_key: None,
+            models: vec!["m".into()],
+            discover_models: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: ProviderHeaders::default(),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(super::CredentialStore::new(root.path().join("auth.json")));
+        let ids = ["team-vertex", "team-azure", "team-bedrock"];
+        let fence = super::CredentialFence {
+            project: ids.iter().map(|id| (*id).to_owned()).collect(),
+            no_ambient: ids.iter().map(|id| (*id).to_owned()).collect(),
+            ..super::CredentialFence::default()
+        };
+        let registry = super::NativeProviderRegistry::with_providers_and_store(
+            vec![
+                super::ProviderInstance::GoogleVertex(native("team-vertex")),
+                super::ProviderInstance::AzureOpenAi(native("team-azure")),
+                super::ProviderInstance::AmazonBedrock(native("team-bedrock")),
+            ],
+            &HashSet::new(),
+            store,
+            &fence,
+        )
+        .await;
+        for (id, cloud) in [
+            ("team-vertex", "Google Cloud"),
+            ("team-azure", "Azure"),
+            ("team-bedrock", "AWS"),
+        ] {
+            let provider = haarness_core::ProviderRegistry::get(&registry, id).unwrap();
+            assert!(!provider.info().authenticated, "{id}");
+            let request = haarness_core::ProviderRequest {
+                model: "m".into(),
+                system: String::new(),
+                messages: vec![haarness_core::ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                tools: Vec::new(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            };
+            let error = match provider
+                .stream(request, tokio_util::sync::CancellationToken::new())
+                .await
+            {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("{id} sent a request"),
+            };
+            assert!(
+                error.contains(&format!("your {cloud} sign-in goes only to")),
+                "{id}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clouds_own_addresses_are_told_from_its_customers() {
+        use super::own_cloud_address;
+        let vertex = CompatibleProtocol::GoogleVertex;
+        let bedrock = CompatibleProtocol::AmazonBedrock;
+        let azure = CompatibleProtocol::AzureOpenAi;
+        for (protocol, url) in [
+            (
+                vertex,
+                "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google",
+            ),
+            (vertex, "https://aiplatform.googleapis.com/v1"),
+            (
+                vertex,
+                "https://1234.us-central1-56.prediction.vertexai.goog/v1",
+            ),
+            (bedrock, "https://bedrock-runtime.us-east-1.amazonaws.com"),
+            (
+                bedrock,
+                "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+            ),
+            (
+                bedrock,
+                "https://bedrock-runtime.cn-north-1.amazonaws.com.cn",
+            ),
+            (
+                bedrock,
+                "https://vpce-0abc-xyz.bedrock-runtime.eu-west-1.vpce.amazonaws.com",
+            ),
+            (azure, "https://team.openai.azure.com/openai/v1"),
+            (azure, "https://team.cognitiveservices.azure.com/openai/v1"),
+            (azure, "https://team.services.ai.azure.com/models"),
+        ] {
+            assert!(own_cloud_address(protocol, url), "{url}");
+        }
+        for (protocol, url) in [
+            (vertex, "https://evil.example/v1"),
+            (vertex, "http://us-central1-aiplatform.googleapis.com/v1"),
+            (vertex, "https://googleapis.com.evil.example/v1"),
+            (vertex, "https://evil.example/aiplatform.googleapis.com"),
+            (
+                bedrock,
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+            ),
+            (bedrock, "https://ec2-1-2-3-4.compute-1.amazonaws.com"),
+            (
+                bedrock,
+                "https://vpce-0abc.vpce-svc-123.us-east-1.vpce.amazonaws.com",
+            ),
+            (
+                bedrock,
+                "https://bedrock-runtime.us-east-1.amazonaws.com.evil.example",
+            ),
+            (bedrock, "http://bedrock-runtime.us-east-1.amazonaws.com"),
+            (bedrock, "https://bedrock.s3.amazonaws.com"),
+            (bedrock, "https://bedrock-runtime.team-bucket.amazonaws.com"),
+            (azure, "https://team.cloudapp.azure.com"),
+            (azure, "https://team.azure-api.net/openai"),
+            (
+                CompatibleProtocol::OpenAiChatCompletions,
+                "https://api.openai.com/v1",
+            ),
+        ] {
+            assert!(!own_cloud_address(protocol, url), "{url}");
+        }
+    }
+
+    /// A request asking about one model, as a chat sends it.
+    fn chat() -> haarness_core::ProviderRequest {
+        haarness_core::ProviderRequest {
+            model: "m".into(),
+            system: String::new(),
+            messages: vec![haarness_core::ProviderMessage::Text {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        }
+    }
+
+    async fn send(provider: &std::sync::Arc<dyn ModelProvider>) -> Result<(), String> {
+        use futures::StreamExt as _;
+        let stream = provider
+            .stream(chat(), tokio_util::sync::CancellationToken::new())
+            .await
+            .map_err(|error| error.to_string())?;
+        let _ = stream.collect::<Vec<_>>().await;
+        Ok(())
+    }
+
+    /// The server a project points a provider at may redirect it, but only
+    /// where the saved key may go: the HTTP client drops only
+    /// `Authorization` on the way to another server, so `x-api-key`,
+    /// `x-goog-api-key` and `api-key` would go along, and on the same server
+    /// another path can be another account's. A redirect below the saved
+    /// address is still followed.
+    #[tokio::test]
+    async fn a_project_provider_follows_no_redirect_off_its_server() {
+        use axum::{
+            Router,
+            http::{HeaderMap, StatusCode, Uri, header},
+            response::IntoResponse,
+            routing::any,
+        };
+        type Seen = std::sync::Arc<parking_lot::Mutex<Vec<(String, HeaderMap)>>>;
+        let elsewhere: Seen = std::sync::Arc::default();
+        let record = elsewhere.clone();
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_address = format!("http://{}", other.local_addr().unwrap());
+        tokio::spawn(async move {
+            let app = Router::new().fallback(any(move |uri: Uri, headers: HeaderMap| {
+                let record = record.clone();
+                async move {
+                    record.lock().push((uri.to_string(), headers));
+                    StatusCode::OK
+                }
+            }));
+            axum::serve(other, app).await.unwrap();
+        });
+        // The saved server: `/hop/…` is sent on to the other server,
+        // `/leave/…` to its own `/v1/…`, and `/moved/…` to `/moved/here/…`;
+        // what is not sent on is answered.
+        let here: Seen = std::sync::Arc::default();
+        let record = here.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let own = address.clone();
+        tokio::spawn(async move {
+            let app = Router::new().fallback(any(move |uri: Uri, headers: HeaderMap| {
+                let (record, own, other) = (record.clone(), own.clone(), other_address.clone());
+                async move {
+                    let target = uri.path_and_query().map_or("/", |path| path.as_str());
+                    if let Some(rest) = target.strip_prefix("/moved").filter(|rest| !rest.starts_with("/here")) {
+                        return (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, format!("{own}/moved/here{rest}"))]).into_response();
+                    }
+                    if let Some(rest) = target.strip_prefix("/leave") {
+                        return (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, format!("{own}/v1{rest}"))]).into_response();
+                    }
+                    if target.starts_with("/hop") {
+                        return (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, format!("{other}{target}"))]).into_response();
+                    }
+                    record.lock().push((uri.to_string(), headers));
+                    (
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                    )
+                        .into_response()
+                }
+            }));
+            axum::serve(listener, app).await.unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(super::CredentialStore::new(root.path().join("auth.json")));
+        let native = |id: &str, base_url: String| super::NativeInstance {
+            id: id.into(),
+            name: id.into(),
+            base_url,
+            api_key: None,
+            models: vec!["m".into()],
+            discover_models: true,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: ProviderHeaders::default(),
+        };
+        let instances = vec![
+            super::ProviderInstance::AnthropicMessages(native(
+                "team-anthropic",
+                format!("{address}/hop"),
+            )),
+            super::ProviderInstance::GeminiGenerateContent(native(
+                "team-gemini",
+                format!("{address}/hop/v1beta"),
+            )),
+            super::ProviderInstance::AzureOpenAi(native(
+                "team-azure",
+                format!("{address}/hop/openai/v1"),
+            )),
+            super::ProviderInstance::OpenAiChatCompletions(CompatibleInstance {
+                id: "team-gateway".into(),
+                name: "team-gateway".into(),
+                base_url: format!("{address}/moved"),
+                api_key: None,
+                models: vec!["m".into()],
+                discover_models: false,
+                server_output_limit: false,
+                replay_observed_reasoning: false,
+                model_defaults: CompatibleModelDefaults::default(),
+                assume_authenticated: false,
+                headers: ProviderHeaders::default(),
+            }),
+            super::ProviderInstance::AnthropicMessages(native(
+                "team-leave",
+                format!("{address}/leave"),
+            )),
+        ];
+        for instance in &instances {
+            store
+                .set_api_key(
+                    instance.id(),
+                    &format!("{}-key", instance.id()),
+                    Some(instance.base_url()),
+                )
+                .unwrap();
+        }
+        let fence = super::CredentialFence {
+            project: instances
+                .iter()
+                .map(|instance| instance.id().to_owned())
+                .collect(),
+            ..super::CredentialFence::default()
+        };
+        let registry = super::NativeProviderRegistry::with_providers_and_store(
+            instances,
+            &HashSet::new(),
+            store,
+            &fence,
+        )
+        .await;
+        for id in [
+            "team-anthropic",
+            "team-gemini",
+            "team-azure",
+            "team-gateway",
+            "team-leave",
+        ] {
+            let provider = haarness_core::ProviderRegistry::get(&registry, id).unwrap();
+            assert!(provider.info().authenticated, "{id}");
+            provider.refresh_models(true).await;
+            let _ = send(&provider).await;
+        }
+        assert!(elsewhere.lock().is_empty(), "{:?}", elsewhere.lock());
+        let arrived = here.lock();
+        assert!(
+            arrived.iter().any(
+                |(uri, headers)| uri.starts_with("/moved/here/chat/completions")
+                    && headers
+                        .get("authorization")
+                        .is_some_and(|value| value == "Bearer team-gateway-key")
+            ),
+            "{arrived:?}"
+        );
+        assert!(
+            !arrived.iter().any(|(uri, _)| uri.starts_with("/v1/")),
+            "a redirect off the saved path was followed: {arrived:?}"
+        );
+    }
+
+    /// Where a redirect may lead a project's provider: below its address,
+    /// or to the same place over https on the same host.
+    #[test]
+    fn a_redirect_is_followed_only_where_the_key_may_go() {
+        let follows =
+            |base: &str, next: &str| super::redirect_covered(base, &url::Url::parse(next).unwrap());
+        assert!(follows(
+            "http://gw.example/v1/acct",
+            "http://gw.example/v1/acct/models"
+        ));
+        assert!(follows(
+            "http://gw.example/v1/acct",
+            "https://gw.example/v1/acct/models"
+        ));
+        assert!(follows(
+            "http://gw.example:8080/v1",
+            "https://gw.example:8080/v1/models"
+        ));
+        assert!(follows("http://gw.example", "https://gw.example/anything"));
+        assert!(!follows(
+            "http://gw.example/v1/acct",
+            "http://gw.example/v1/other/models"
+        ));
+        assert!(!follows(
+            "http://gw.example/v1/acct",
+            "https://gw.example:8443/v1/acct/models"
+        ));
+        assert!(!follows(
+            "http://gw.example:8080/v1",
+            "https://gw.example/v1/models"
+        ));
+        assert!(!follows(
+            "http://gw.example/v1",
+            "https://evil.example/v1/models"
+        ));
+        assert!(!follows(
+            "https://gw.example/v1",
+            "http://gw.example/v1/models"
+        ));
+        // A Location as servers write it, resolved against the request.
+        let request = url::Url::parse("http://gw.example/v1/acct/models").unwrap();
+        for location in [
+            "../other/models",
+            "/v1/acct/../other/models",
+            "/v1/acct/%2e%2e/other/models",
+            "/v1/acct/.%2E/other/models",
+            "/v1/acct/..%2fother/models",
+            "/v1/acct/..%5Cother/models",
+            "//evil.example/v1/acct/models",
+        ] {
+            let next = request.join(location).unwrap();
+            assert!(
+                !super::redirect_covered("http://gw.example/v1/acct", &next),
+                "{location}"
+            );
+        }
+        let next = request.join("./models/v2").unwrap();
+        assert!(super::redirect_covered("http://gw.example/v1/acct", &next));
+    }
+
+    /// A chat on a provider whose saved key is for another address fails
+    /// before anything is sent, with the notice; once a key is saved for its
+    /// address it goes out with it.
+    #[tokio::test]
+    async fn a_chat_on_a_withheld_provider_says_why_before_sending() {
+        use axum::{Router, http::HeaderMap, routing::post};
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<Option<String>>::new()));
+        let record = seen.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |headers: HeaderMap| {
+                let record = record.clone();
+                async move {
+                    record.lock().push(
+                        headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned),
+                    );
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        "data: [DONE]\n\n",
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(super::CredentialStore::new(root.path().join("auth.json")));
+        store
+            .set_api_key("router", "router-key", Some("http://127.0.0.1:1/v1"))
+            .unwrap();
+        let fence = super::CredentialFence {
+            project: HashSet::from(["router".to_owned()]),
+            withheld: HashMap::from([(
+                "router".to_owned(),
+                "The saved key is for another address.".to_owned(),
+            )]),
+            ..super::CredentialFence::default()
+        };
+        let registry = super::NativeProviderRegistry::with_providers_and_store(
+            vec![super::ProviderInstance::OpenAiChatCompletions(
+                CompatibleInstance {
+                    id: "router".into(),
+                    name: "Router".into(),
+                    base_url: address.clone(),
+                    api_key: None,
+                    models: vec!["m".into()],
+                    discover_models: false,
+                    server_output_limit: false,
+                    replay_observed_reasoning: false,
+                    model_defaults: CompatibleModelDefaults::default(),
+                    assume_authenticated: false,
+                    headers: ProviderHeaders::default(),
+                },
+            )],
+            &HashSet::new(),
+            store.clone(),
+            &fence,
+        )
+        .await;
+        let provider = haarness_core::ProviderRegistry::get(&registry, "router").unwrap();
+        assert_eq!(
+            send(&provider).await.unwrap_err(),
+            "The saved key is for another address."
+        );
+        assert!(seen.lock().is_empty());
+        store
+            .set_api_key("router", "router-key", Some(&address))
+            .unwrap();
+        send(&provider).await.unwrap();
+        assert_eq!(*seen.lock(), [Some("Bearer router-key".to_owned())]);
     }
 }

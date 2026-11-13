@@ -44,10 +44,38 @@ pub type AuthResult<T> = Result<T, AuthError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
-    #[error("could not read provider credentials: {0}")]
-    Read(#[source] std::io::Error),
-    #[error("could not decode provider credentials: {0}")]
-    Decode(#[source] serde_json::Error),
+    /// The file is there but cannot be read (its permissions, a disk error):
+    /// nothing replaces it until it can be.
+    #[error(
+        "cannot read the saved provider keys in {} ({source}). Make the file readable to you again, or rename it to start a new one",
+        path.display()
+    )]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// [`Self::Read`] when a key was to be saved.
+    #[error(
+        "cannot read the saved provider keys in {} ({source}), so nothing was saved. Make the file readable to you again, or rename it to start a new one",
+        path.display()
+    )]
+    Unsaved {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The file holds something other than saved keys. The next save keeps a
+    /// copy of it beside it and starts a new file.
+    #[error(
+        "the saved provider keys in {} are damaged ({source}). Connect a provider again to start a new file; Haarness keeps a copy of this one beside it",
+        path.display()
+    )]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("could not write provider credentials: {0}")]
     Write(#[source] std::io::Error),
     #[error("could not encode provider credentials: {0}")]
@@ -58,6 +86,16 @@ pub enum AuthError {
     Xai(String),
     #[error("GitHub Copilot sign-in failed: {0}")]
     Copilot(String),
+}
+
+impl AuthError {
+    /// A read that failed while a key was to be saved says nothing was.
+    fn unsaved(self) -> Self {
+        match self {
+            Self::Read { path, source } => Self::Unsaved { path, source },
+            other => other,
+        }
+    }
 }
 
 /// A device sign-in's link is printed and opened in a browser, so one that
@@ -81,6 +119,23 @@ pub enum TypedCredential {
         key: String,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         metadata: BTreeMap<String, String>,
+        /// The addresses the key was saved for, each as scheme, host, port
+        /// and path (see [`key_address`]): a provider a project's
+        /// configuration defines is sent the key only at one of them or
+        /// below it. `None` on a key an earlier Haarness saved, before it
+        /// recorded addresses; empty on one saved for no address in
+        /// particular.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        addresses: Option<Vec<String>>,
+        /// Set on a key an earlier Haarness saved while the addresses it was
+        /// used at are still being looked for (see [`CredentialStore::record_addresses`]):
+        /// `addresses` then holds the ones found so far.
+        #[serde(
+            default,
+            rename = "addressesPending",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        addresses_pending: bool,
     },
     #[serde(rename = "oauth")]
     OAuth {
@@ -110,7 +165,61 @@ impl Credential {
         Self::Typed(TypedCredential::Api {
             key,
             metadata: BTreeMap::new(),
+            addresses: None,
+            addresses_pending: false,
         })
+    }
+
+    /// An API key saved for `addresses` (see [`key_address`]).
+    #[must_use]
+    pub fn api_for(key: String, addresses: Vec<String>) -> Self {
+        Self::api_found(key, addresses, false)
+    }
+
+    /// An API key an earlier Haarness saved, with the addresses found for it
+    /// so far, and whether more are still to be looked for.
+    #[must_use]
+    pub fn api_found(key: String, addresses: Vec<String>, pending: bool) -> Self {
+        Self::Typed(TypedCredential::Api {
+            key,
+            metadata: BTreeMap::new(),
+            addresses: Some(addresses),
+            addresses_pending: pending,
+        })
+    }
+
+    /// Whether this is an API key an earlier Haarness saved whose addresses
+    /// are not all known yet: none recorded, or some found while the rest
+    /// are still looked for.
+    #[must_use]
+    pub fn addresses_pending(&self) -> bool {
+        match self {
+            Self::Typed(TypedCredential::Api {
+                addresses,
+                addresses_pending,
+                ..
+            }) => addresses.is_none() || *addresses_pending,
+            Self::Legacy(_) => true,
+            Self::Typed(TypedCredential::OAuth { .. }) => false,
+        }
+    }
+
+    /// The addresses an API key was saved for; `None` for a key an earlier
+    /// Haarness saved and for a sign-in.
+    #[must_use]
+    pub fn addresses(&self) -> Option<&[String]> {
+        match self {
+            Self::Typed(TypedCredential::Api { addresses, .. }) => addresses.as_deref(),
+            Self::Typed(TypedCredential::OAuth { .. }) | Self::Legacy(_) => None,
+        }
+    }
+
+    /// Whether this is an API key saved for `url`'s address, or for one
+    /// above it on the same server.
+    #[must_use]
+    pub fn saved_for(&self, url: &str) -> bool {
+        self.addresses()
+            .is_some_and(|addresses| addresses.iter().any(|address| address_covers(address, url)))
     }
 
     #[must_use]
@@ -180,6 +289,8 @@ pub struct OAuthCredential<'a> {
 pub struct CredentialStore {
     path: PathBuf,
     mutation: Mutex<()>,
+    /// The only address [`Self::get`] answers for (see [`Self::for_address`]).
+    address: Option<String>,
 }
 
 impl CredentialStore {
@@ -188,6 +299,19 @@ impl CredentialStore {
         Self {
             path,
             mutation: Mutex::new(()),
+            address: None,
+        }
+    }
+
+    /// The same store as a provider at `url` reads it: [`Self::get`] gives
+    /// only an API key saved for `url`'s address, and nothing for an address
+    /// that is no http or https URL.
+    #[must_use]
+    pub fn for_address(&self, url: &str) -> Self {
+        Self {
+            path: self.path.clone(),
+            mutation: Mutex::new(()),
+            address: Some(url.to_owned()),
         }
     }
 
@@ -196,12 +320,70 @@ impl CredentialStore {
         &self.path
     }
 
+    /// Every saved record by provider id. A missing file, or one that holds
+    /// nothing but white space (as an interrupted copy or an editor can
+    /// leave), holds none.
     pub fn all_raw(&self) -> AuthResult<BTreeMap<String, serde_json::Value>> {
-        if !self.path.exists() {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(source) => {
+                return Err(AuthError::Read {
+                    path: self.path.clone(),
+                    source,
+                });
+            }
+        };
+        if bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(BTreeMap::new());
         }
-        serde_json::from_slice(&fs::read(&self.path).map_err(AuthError::Read)?)
-            .map_err(AuthError::Decode)
+        serde_json::from_slice(&bytes).map_err(|source| AuthError::Decode {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
+    /// The saved records, read to be changed. A damaged file is copied
+    /// aside first (`auth.json.unreadable-<ms>`, readable by its owner only)
+    /// and the change starts from none, so connecting a provider works again
+    /// and what the file held is not lost; a file that cannot be read stops
+    /// the change.
+    fn records_to_change(&self) -> AuthResult<BTreeMap<String, serde_json::Value>> {
+        match self.all_raw() {
+            Err(AuthError::Decode { .. }) => {
+                let copy = self.keep_aside()?;
+                tracing::warn!(
+                    copy = %copy.display(),
+                    "the saved provider keys were damaged; kept a copy and started a new file"
+                );
+                Ok(BTreeMap::new())
+            }
+            records => records.map_err(AuthError::unsaved),
+        }
+    }
+
+    fn keep_aside(&self) -> AuthResult<PathBuf> {
+        let bytes = fs::read(&self.path).map_err(|source| AuthError::Unsaved {
+            path: self.path.clone(),
+            source,
+        })?;
+        let mut name = self.path.as_os_str().to_os_string();
+        name.push(format!(".unreadable-{}", unix_millis()));
+        let copy = PathBuf::from(name);
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&copy).map_err(AuthError::Write)?;
+        set_private(&file)?;
+        file.write_all(&bytes).map_err(AuthError::Write)?;
+        file.sync_all().map_err(AuthError::Write)?;
+        Ok(copy)
     }
 
     pub fn all(&self) -> AuthResult<BTreeMap<String, Credential>> {
@@ -209,11 +391,19 @@ impl CredentialStore {
             .all_raw()?
             .into_iter()
             .filter_map(|(id, value)| {
-                serde_json::from_value(value)
+                serde_json::from_value::<Credential>(value)
                     .ok()
+                    .filter(|credential| self.answers(credential))
                     .map(|credential| (id, credential))
             })
             .collect())
+    }
+
+    /// Whether lookups give `credential` (see [`Self::for_address`]).
+    fn answers(&self, credential: &Credential) -> bool {
+        self.address
+            .as_deref()
+            .is_none_or(|url| credential.saved_for(url))
     }
 
     pub fn get(&self, provider: &str) -> AuthResult<Option<Credential>> {
@@ -221,21 +411,164 @@ impl CredentialStore {
             .all_raw()?
             .get(normalize(provider))
             .cloned()
-            .and_then(|value| serde_json::from_value(value).ok()))
+            .and_then(|value| serde_json::from_value::<Credential>(value).ok())
+            .filter(|credential| self.answers(credential)))
     }
 
     pub fn set(&self, provider: &str, credential: &Credential) -> AuthResult<()> {
+        self.update(provider, |_| credential.clone())
+    }
+
+    /// Save `key` for `provider` and for the address `url` (see
+    /// [`key_address`]), or for none in particular. The same key saved again
+    /// for another address keeps the addresses it had, so one key can serve
+    /// a provider that two projects define at different addresses; a new key
+    /// has only its own.
+    pub fn set_api_key(&self, provider: &str, key: &str, url: Option<&str>) -> AuthResult<()> {
+        self.update(provider, |current| {
+            // The same key an earlier Haarness saved stays looked for, so
+            // the projects that used it before still get it.
+            let same = current.filter(|current| current.api_key() == Some(key));
+            let pending = same.as_ref().is_some_and(Credential::addresses_pending);
+            let mut addresses = same
+                .and_then(|current| current.addresses().map(<[String]>::to_vec))
+                .unwrap_or_default();
+            if let Some(address) = url.and_then(key_address)
+                && !addresses.contains(&address)
+            {
+                addresses.push(address);
+            }
+            Credential::api_found(key.to_owned(), addresses, pending)
+        })
+    }
+
+    /// Add `url`'s address to those the saved API key of `provider` was saved
+    /// for, as when the person moves their provider to another address. Says
+    /// whether there was such a key.
+    pub fn allow_address(&self, provider: &str, url: &str) -> AuthResult<bool> {
+        let Some(address) = key_address(url) else {
+            return Ok(false);
+        };
         let _guard = self
             .mutation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _file_lock = self.lock_mutations()?;
         let provider = normalize(provider);
-        let mut raw = self.all_raw()?;
+        // A damaged file holds no key to move: it is left for a save.
+        let mut raw = match self.all_raw() {
+            Err(AuthError::Decode { .. }) => return Ok(false),
+            records => records.map_err(AuthError::unsaved)?,
+        };
+        let Some(credential) = raw
+            .get(provider)
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Credential>(value).ok())
+        else {
+            return Ok(false);
+        };
+        let Some(key) = credential.api_key() else {
+            return Ok(false);
+        };
+        let mut addresses = credential
+            .addresses()
+            .map(<[String]>::to_vec)
+            .unwrap_or_default();
+        if addresses.contains(&address) {
+            return Ok(true);
+        }
+        addresses.push(address);
+        raw.insert(
+            provider.to_owned(),
+            serde_json::to_value(Credential::api_found(
+                key.to_owned(),
+                addresses,
+                credential.addresses_pending(),
+            ))
+            .map_err(AuthError::Encode)?,
+        );
+        self.write_raw(&raw)?;
+        Ok(true)
+    }
+
+    /// Record addresses found for API keys an earlier Haarness saved: each
+    /// id of `found` names the key that was looked for and the addresses its
+    /// definitions give. They are added to that key while it is still looked
+    /// for, also when it was saved again since (the same key, connected in
+    /// one more project); a key replaced by another is left alone, and so is
+    /// a damaged file. With `done`, the key is no longer looked for.
+    pub fn record_addresses(
+        &self,
+        found: &BTreeMap<String, (String, Vec<String>)>,
+        done: bool,
+    ) -> AuthResult<()> {
+        let _guard = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _file_lock = self.lock_mutations()?;
+        let mut raw = match self.all_raw() {
+            Err(AuthError::Decode { .. }) => return Ok(()),
+            records => records.map_err(AuthError::unsaved)?,
+        };
+        let mut changed = false;
+        for (provider, (looked_for, found)) in found {
+            let Some(credential) = raw
+                .get(provider.as_str())
+                .cloned()
+                .and_then(|value| serde_json::from_value::<Credential>(value).ok())
+            else {
+                continue;
+            };
+            if credential.api_key() != Some(looked_for.as_str()) || !credential.addresses_pending()
+            {
+                continue;
+            }
+            let mut addresses = credential
+                .addresses()
+                .map(<[String]>::to_vec)
+                .unwrap_or_default();
+            for address in found {
+                if !addresses.contains(address) {
+                    addresses.push(address.clone());
+                }
+            }
+            let next = Credential::api_found(looked_for.clone(), addresses, !done);
+            if next != credential {
+                raw.insert(
+                    provider.clone(),
+                    serde_json::to_value(next).map_err(AuthError::Encode)?,
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            self.write_raw(&raw)?;
+        }
+        Ok(())
+    }
+
+    /// Replace `provider`'s record with what `next` makes of the current one.
+    fn update(
+        &self,
+        provider: &str,
+        next: impl FnOnce(Option<Credential>) -> Credential,
+    ) -> AuthResult<()> {
+        let _guard = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _file_lock = self.lock_mutations()?;
+        let provider = normalize(provider);
+        let mut raw = self.records_to_change()?;
+        let current = raw
+            .get(provider)
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
         raw.remove(&format!("{provider}/"));
         raw.insert(
             provider.to_owned(),
-            serde_json::to_value(credential).map_err(AuthError::Encode)?,
+            serde_json::to_value(next(current)).map_err(AuthError::Encode)?,
         );
         self.write_raw(&raw)
     }
@@ -247,7 +580,7 @@ impl CredentialStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _file_lock = self.lock_mutations()?;
         let provider = normalize(provider);
-        let mut raw = self.all_raw()?;
+        let mut raw = self.records_to_change()?;
         let removed =
             raw.remove(provider).is_some() | raw.remove(&format!("{provider}/")).is_some();
         self.write_raw(&raw)?;
@@ -348,6 +681,34 @@ impl CredentialStore {
 
 fn normalize(provider: &str) -> &str {
     provider.trim_end_matches('/')
+}
+
+/// The address a key is saved for: `url`'s scheme, host, port and path,
+/// without a trailing slash, query or fragment (`https://models.example.com/v1`,
+/// `http://127.0.0.1:8080`). It names the server that gets the key and where
+/// on it, so a gateway that tells its customers apart by path keeps each
+/// one's key to its own. `None` for what is not an http or https URL.
+#[must_use]
+pub fn key_address(url: &str) -> Option<String> {
+    let url = Url::parse(url.trim()).ok()?;
+    let origin = url.origin().ascii_serialization();
+    (matches!(url.scheme(), "http" | "https") && origin != "null")
+        .then(|| format!("{origin}{}", url.path().trim_end_matches('/')))
+}
+
+/// Whether a key saved for `address` (see [`key_address`]) may go to `url`:
+/// the same server, at that path or below it. A slash or backslash written
+/// encoded below it (`%2f`, `%5c`) is refused: a server that decodes it
+/// before it resolves `..` would take the request above the address.
+#[must_use]
+pub fn address_covers(address: &str, url: &str) -> bool {
+    key_address(url).is_some_and(|url| {
+        url == address
+            || url.strip_prefix(address).is_some_and(|rest| {
+                let lower = rest.to_ascii_lowercase();
+                rest.starts_with('/') && !lower.contains("%2f") && !lower.contains("%5c")
+            })
+    })
 }
 
 #[cfg(unix)]
@@ -1463,10 +1824,11 @@ mod tests {
 
     use super::{
         CallbackRequest, CopilotOAuthClient, CopilotOAuthConfig, Credential, CredentialStore,
-        OpenAiOAuthClient, OpenAiOAuthConfig, XaiOAuthClient, XaiOAuthConfig,
-        answer_until_callback, openai_residency, query, read_callback,
+        OpenAiOAuthClient, OpenAiOAuthConfig, XaiOAuthClient, XaiOAuthConfig, address_covers,
+        answer_until_callback, key_address, openai_residency, query, read_callback,
     };
     use haarness_account::loopback::AcceptFailures;
+    use std::collections::BTreeMap;
 
     #[tokio::test]
     async fn browser_login_uses_the_haarness_pkce_contract() {
@@ -1990,6 +2352,387 @@ mod tests {
         );
         assert!(store.get("openai").unwrap().is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A key saved for one address is not given out for another: a provider
+    /// a project defines reads the store through `for_address`.
+    #[test]
+    fn a_saved_key_is_given_only_for_the_address_it_was_saved_for() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(root.path().join("auth.json"));
+        store
+            .set_api_key("router", "key-a", Some("http://127.0.0.1:5000/v1"))
+            .unwrap();
+        let at = |url: &str| store.for_address(url).get("router").unwrap();
+        assert!(
+            at("http://127.0.0.1:5000/v1/").is_some(),
+            "a trailing slash"
+        );
+        assert!(at("http://127.0.0.1:5000/v1/team").is_some(), "below it");
+        assert!(at("http://127.0.0.1:5000/v10").is_none(), "another path");
+        assert!(at("http://127.0.0.1:5000/r/v1").is_none(), "another path");
+        assert!(at("http://127.0.0.1:5000").is_none(), "above it");
+        assert!(at("http://127.0.0.1:5001/v1").is_none(), "another port");
+        assert!(at("https://127.0.0.1:5000/v1").is_none(), "another scheme");
+        assert!(at("http://evil.example/v1").is_none());
+        assert!(at("not a url").is_none());
+        assert!(
+            store
+                .for_address("http://127.0.0.1:5001/v1")
+                .all()
+                .unwrap()
+                .is_empty()
+        );
+        // The person's own definitions read it as before.
+        assert_eq!(
+            store.get("router").unwrap().unwrap().api_key(),
+            Some("key-a")
+        );
+
+        // The same key saved again for another address serves both; a new
+        // key has only its own.
+        store
+            .set_api_key("router", "key-a", Some("https://router.example.com:8443/"))
+            .unwrap();
+        assert!(at("http://127.0.0.1:5000/v1").is_some());
+        assert!(at("https://router.example.com:8443/v1").is_some());
+        store
+            .set_api_key("router", "key-b", Some("https://router.example.com:8443"))
+            .unwrap();
+        assert!(at("http://127.0.0.1:5000/v1").is_none());
+        assert_eq!(
+            at("https://router.example.com:8443/v1").unwrap().api_key(),
+            Some("key-b")
+        );
+        // A key saved for no address in particular, and one an earlier
+        // Haarness saved, go to no project's provider.
+        store.set_api_key("spare", "key-c", None).unwrap();
+        store
+            .set("older", &Credential::api("key-d".into()))
+            .unwrap();
+        for id in ["spare", "older"] {
+            assert!(
+                store
+                    .for_address("http://127.0.0.1:5000")
+                    .get(id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(store.get(id).unwrap().is_some());
+        }
+        // A provider moved by the person takes its key along.
+        assert!(
+            store
+                .allow_address("router", "http://10.0.0.2:9000/v1")
+                .unwrap()
+        );
+        assert!(at("http://10.0.0.2:9000/v1").is_some());
+        assert!(at("http://10.0.0.2:9000/other").is_none());
+        assert!(at("https://router.example.com:8443/v1").is_some());
+        assert!(
+            !store
+                .allow_address("absent", "http://10.0.0.2:9000")
+                .unwrap()
+        );
+    }
+
+    /// The addresses found for keys saved before are recorded once: a key
+    /// saved meanwhile, or one already recorded, keeps its own.
+    #[test]
+    fn earlier_keys_get_their_addresses_once() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"team":"legacy-key","router":{"type":"api","key":"k"},"spare":{"type":"api","key":"s"},"anthropic":{"type":"api","key":"sk"}}"#,
+        )
+        .unwrap();
+        let store = CredentialStore::new(path);
+        let found = |entries: &[(&str, &str, &[&str])]| {
+            entries
+                .iter()
+                .map(|(id, key, addresses)| {
+                    (
+                        (*id).to_owned(),
+                        (
+                            (*key).to_owned(),
+                            addresses
+                                .iter()
+                                .map(|address| (*address).to_owned())
+                                .collect(),
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        store
+            .record_addresses(
+                &found(&[
+                    ("team", "legacy-key", &["https://team.example/v1"]),
+                    ("router", "k", &["http://127.0.0.1:5000/v1"]),
+                    ("spare", "s", &[]),
+                ]),
+                true,
+            )
+            .unwrap();
+        let get = |id: &str| store.get(id).unwrap().unwrap();
+        assert_eq!(
+            get("team").addresses(),
+            Some(&["https://team.example/v1".to_owned()][..])
+        );
+        assert_eq!(get("team").api_key(), Some("legacy-key"));
+        assert!(!get("team").addresses_pending());
+        assert_eq!(get("spare").addresses(), Some(&[][..]));
+        assert_eq!(get("anthropic").addresses(), None, "not named, not touched");
+        // Recorded to the end: nothing is added later.
+        store
+            .record_addresses(&found(&[("router", "k", &["http://evil.example"])]), true)
+            .unwrap();
+        assert_eq!(
+            get("router").addresses(),
+            Some(&["http://127.0.0.1:5000/v1".to_owned()][..])
+        );
+    }
+
+    /// While a key saved before is still looked for, the addresses found so
+    /// far are added to it, also after it was connected again with the same
+    /// key; a key replaced by another gets none of them.
+    #[test]
+    fn a_key_still_looked_for_gathers_the_addresses_found() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"team":{"type":"api","key":"k"},"other":{"type":"api","key":"o"}}"#,
+        )
+        .unwrap();
+        let store = CredentialStore::new(path);
+        let found = |id: &str, key: &str, address: &str| {
+            BTreeMap::from([(id.to_owned(), (key.to_owned(), vec![address.to_owned()]))])
+        };
+        store
+            .record_addresses(&found("team", "k", "http://a.example/v1"), false)
+            .unwrap();
+        assert!(store.get("team").unwrap().unwrap().addresses_pending());
+        store
+            .set_api_key("team", "k", Some("http://c.example/v1"))
+            .unwrap();
+        assert!(
+            store.get("team").unwrap().unwrap().addresses_pending(),
+            "the same key"
+        );
+        store
+            .record_addresses(&found("team", "k", "http://b.example/v1"), true)
+            .unwrap();
+        let team = store.get("team").unwrap().unwrap();
+        assert!(!team.addresses_pending());
+        assert_eq!(
+            team.addresses().unwrap(),
+            [
+                "http://a.example/v1",
+                "http://c.example/v1",
+                "http://b.example/v1"
+            ]
+        );
+        store
+            .set_api_key("other", "new", Some("http://c.example/v1"))
+            .unwrap();
+        assert!(
+            !store.get("other").unwrap().unwrap().addresses_pending(),
+            "a new key"
+        );
+        store
+            .record_addresses(&found("other", "o", "http://a.example/v1"), true)
+            .unwrap();
+        assert_eq!(
+            store.get("other").unwrap().unwrap().addresses().unwrap(),
+            ["http://c.example/v1"]
+        );
+    }
+
+    /// Only a save that writes a new file keeps a copy of a damaged one:
+    /// recording addresses and moving a provider leave it as it is.
+    #[test]
+    fn a_damaged_key_file_is_copied_only_when_a_save_replaces_it() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        std::fs::write(&path, "{\"router\": ").unwrap();
+        let store = CredentialStore::new(path.clone());
+        let copies = || {
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".unreadable-"))
+                .count()
+        };
+        assert!(
+            !store
+                .allow_address("router", "http://127.0.0.1:5000/v1")
+                .unwrap()
+        );
+        store
+            .record_addresses(
+                &BTreeMap::from([("router".to_owned(), ("key".to_owned(), Vec::new()))]),
+                true,
+            )
+            .unwrap();
+        assert_eq!(copies(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"router\": ");
+        store
+            .set_api_key("router", "key", Some("http://127.0.0.1:5000/v1"))
+            .unwrap();
+        assert_eq!(copies(), 1);
+    }
+
+    /// An empty file (white space only) holds no keys and takes a new one.
+    #[test]
+    fn an_empty_key_file_reads_as_none() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        for text in ["", " \n\t\r\n"] {
+            std::fs::write(&path, text).unwrap();
+            let store = CredentialStore::new(path.clone());
+            assert!(store.all_raw().unwrap().is_empty());
+            assert!(store.get("openai").unwrap().is_none());
+            store.set("openai", &Credential::api("sk".into())).unwrap();
+            assert_eq!(store.get("openai").unwrap().unwrap().api_key(), Some("sk"));
+        }
+        let kept: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains("unreadable"))
+            .collect();
+        assert!(kept.is_empty(), "an empty file is not kept");
+    }
+
+    /// A damaged file says so, naming itself; the next save keeps a private
+    /// copy of it before starting a new one.
+    #[test]
+    fn a_damaged_key_file_is_kept_aside_before_a_key_replaces_it() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        let damaged = b"{\"openai\": {\"type\": \"api\", \"key\": \"sk-old\"";
+        std::fs::write(&path, damaged).unwrap();
+        let store = CredentialStore::new(path.clone());
+        let error = store.get("openai").unwrap_err().to_string();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains("damaged"), "{error}");
+        store
+            .set("anthropic", &Credential::api("sk-new".into()))
+            .unwrap();
+        assert_eq!(
+            store.get("anthropic").unwrap().unwrap().api_key(),
+            Some("sk-new")
+        );
+        let copies: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("auth.json.unreadable-")
+            })
+            .collect();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(std::fs::read(copies[0].path()).unwrap(), damaged);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = copies[0].metadata().unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    /// A file that cannot be read is never replaced, and the refusal names it;
+    /// a lookup says it cannot read it, a save that nothing was saved.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_key_file_stops_a_save_and_names_itself() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        std::fs::write(&path, r#"{"openai":{"type":"api","key":"sk"}}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Running as root: nothing is unreadable.
+            return;
+        }
+        let store = CredentialStore::new(path.clone());
+        let looked_up = store.get("openai").unwrap_err().to_string();
+        assert!(
+            looked_up.contains(&path.display().to_string()),
+            "{looked_up}"
+        );
+        assert!(!looked_up.contains("saved."), "{looked_up}");
+        for error in [
+            store
+                .set("anthropic", &Credential::api("sk-new".into()))
+                .unwrap_err(),
+            store
+                .allow_address("openai", "http://127.0.0.1:5000")
+                .unwrap_err(),
+        ] {
+            let error = error.to_string();
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(error.contains("nothing was saved"), "{error}");
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"openai":{"type":"api","key":"sk"}}"#
+        );
+    }
+
+    #[test]
+    fn a_key_is_saved_for_its_servers_address_and_path() {
+        for (url, address) in [
+            (
+                "https://Models.Example.com/v1/",
+                Some("https://models.example.com/v1"),
+            ),
+            (
+                "https://models.example.com:443/v1?x=1#y",
+                Some("https://models.example.com/v1"),
+            ),
+            ("http://127.0.0.1:8080", Some("http://127.0.0.1:8080")),
+            ("http://127.0.0.1:8080/", Some("http://127.0.0.1:8080")),
+            ("http://[::1]:11434/v1", Some("http://[::1]:11434/v1")),
+            ("file:///etc/passwd", None),
+            ("models.example.com/v1", None),
+        ] {
+            assert_eq!(key_address(url).as_deref(), address, "{url}");
+        }
+        assert!(address_covers(
+            "https://gw.example/v1/acct/gw",
+            "https://gw.example/v1/acct/gw/openai"
+        ));
+        assert!(!address_covers(
+            "https://gw.example/v1/acct/gw",
+            "https://gw.example/v1/other/gw/openai"
+        ));
+        assert!(!address_covers(
+            "https://gw.example/v1/acct",
+            "https://gw.example/v1/acct-2"
+        ));
+        assert!(address_covers(
+            "https://gw.example",
+            "https://gw.example/anything"
+        ));
+        for below in [
+            "/..%2facct-other/openai",
+            "/..%2Facct-other",
+            "/x%5c..%5cother",
+            "/%2F",
+        ] {
+            assert!(
+                !address_covers(
+                    "https://gw.example/v1/acct",
+                    &format!("https://gw.example/v1/acct{below}")
+                ),
+                "{below}"
+            );
+        }
     }
 
     #[test]

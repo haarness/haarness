@@ -4182,6 +4182,124 @@ test("a key that could not be checked is saved and the connect dialog says so", 
   expect(errors).toEqual([]);
 });
 
+test("a project's provider gets no key saved for another address, Connect says why and saves one there", async () => {
+  test.setTimeout(120000);
+  const provider = "elsewhere-fixture";
+  const authorizations: (string | undefined)[] = [];
+  const server = createServer((request, response) => {
+    authorizations.push(request.headers.authorization);
+    response
+      .writeHead(request.headers.authorization ? 200 : 401, {
+        "Content-Type": "application/json",
+      })
+      .end(JSON.stringify({ data: [{ id: "elsewhere-model" }] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw Error("No provider fixture");
+  const configPath = join(workspace, ".haarness/config.toml");
+  const original = await readFile(configPath, "utf8");
+  const define = (port: number) =>
+    writeFile(
+      configPath,
+      original +
+        `\n[providers.${provider}]\nname="Elsewhere fixture"\nprotocol="openai-chat-completions"\nbase_url="http://127.0.0.1:${port}/v1"\nmodels=["elsewhere-model"]\n`,
+    );
+  const native = (input: Record<string, unknown>) =>
+    execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], {
+      env,
+      input: JSON.stringify(input),
+      encoding: "utf8",
+      timeout: 60000,
+    });
+  const connected = async () =>
+    (await client.refreshProviders()).find((row) => row.id === provider)?.authenticated;
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  try {
+    // The key is saved where the project first defined the provider; the
+    // project then points it at the fixture, as a pulled change could.
+    await define(1);
+    native({ action: "set_credential", provider, key: "elsewhere-key" });
+    await expect.poll(connected).toBe(true);
+    await define(address.port);
+    await expect.poll(connected).toBe(false);
+    expect(authorizations.filter(Boolean)).toEqual([]);
+    const notice = `The saved key is for another address. Connect to save a key for http://127.0.0.1:${address.port}/v1.`;
+    // A chat on it fails before anything is sent, and its error row says why.
+    const thread = await client.createThread({
+      title: "Elsewhere chat",
+      provider,
+      model: "elsewhere-model",
+    });
+    await page
+      .locator(".sessions")
+      .getByRole("button", { name: "Elsewhere chat", exact: true })
+      .click();
+    await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text: "hi" });
+    const alert = page.locator(".transcript").getByRole("alert");
+    await expect(alert).toContainText(notice);
+    await expect(alert).toHaveCount(1);
+    expect(authorizations).toEqual([]);
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", scheme);
+      await page.locator(".transcript").screenshot({
+        path: test.info().outputPath(`chat-elsewhere-${scheme}.png`),
+      });
+    }
+    await page.emulateMedia({ colorScheme: "light" });
+    await client.updateThread(thread.id, { provider: "echo", model: "echo-1" });
+
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await settings.getByRole("button", { name: "Providers", exact: true }).click();
+    await settings
+      .getByRole("button", { name: "Connect a provider", exact: true })
+      .click();
+    const picker = page.getByRole("dialog", { name: "Connect a provider", exact: true });
+    await picker
+      .getByRole("searchbox", { name: "Search providers", exact: true })
+      .fill("elsewhere");
+    await picker
+      .getByRole("button", { name: "Elsewhere fixture", exact: true })
+      .click();
+    const dialog = page.getByRole("dialog", {
+      name: "Connect Elsewhere fixture",
+      exact: true,
+    });
+    await expect(dialog.locator("header p")).toHaveText(notice);
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", scheme);
+      await dialog.screenshot({
+        path: test.info().outputPath(`connect-key-elsewhere-${scheme}.png`),
+      });
+    }
+    await page.emulateMedia({ colorScheme: "light" });
+    expect(authorizations.filter(Boolean)).toEqual([]);
+    await dialog.getByLabel("API key", { exact: true }).fill("elsewhere-key");
+    await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+    await expect.poll(connected).toBe(true);
+    expect(authorizations).toContain("Bearer elsewhere-key");
+    const saved = JSON.parse(
+      await readFile(join(temporary, "state/data/auth.json"), "utf8"),
+    )[provider];
+    expect(saved.addresses).toEqual([
+      "http://127.0.0.1:1/v1",
+      `http://127.0.0.1:${address.port}/v1`,
+    ]);
+    if (await dialog.isVisible())
+      await page.keyboard.press("Escape");
+  } finally {
+    await writeFile(configPath, original);
+    native({ action: "remove_credential", provider });
+    if (await settings.isVisible())
+      await settings.getByRole("button", { name: "Close settings", exact: true }).click();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  expect(errors).toEqual([]);
+});
+
 test("Auto approvals allow once, inherit to agents, preserve Review and survive Desktop reload", async () => {
   test.setTimeout(120000);
   const parent = await client.createThread({

@@ -93,6 +93,13 @@ impl AnthropicProvider {
             headers: instance.headers,
         }
     }
+    /// Send requests through `client`: for a provider a project defines, one
+    /// that follows no redirect off its server (see [`crate::CredentialFence`]).
+    #[must_use]
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
     #[must_use]
     pub fn with_auth_store(mut self, store: Option<Arc<CredentialStore>>) -> Self {
         self.auth_store = store;

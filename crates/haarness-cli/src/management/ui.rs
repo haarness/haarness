@@ -852,10 +852,13 @@ impl ManagementService {
                 return Ok((input.clone(), Vec::new()));
             }
             let headers = crate::provider_headers(&section.headers).map_err(anyhow::Error::msg)?;
+            // The saved key is asked about at the new address only when the
+            // provider is sent it now.
             let key = CredentialStore::new(self.paths.auth.clone())
                 .get(id)
                 .ok()
                 .flatten()
+                .filter(|_| !self.key_fence().withholds(id))
                 .and_then(|credential| credential.api_key().map(str::to_owned))
                 .or_else(|| {
                     section
@@ -1276,7 +1279,13 @@ impl ManagementService {
                 let info = providers.iter().find(|p| p.id == id);
                 let name = provider_name(&providers, id);
                 let store = CredentialStore::new(self.paths.auth.clone());
-                let stored = store.get(id).ok().flatten();
+                let fence = self.key_fence();
+                // A key this project's provider is not sent is not its key.
+                let stored = store
+                    .get(id)
+                    .ok()
+                    .flatten()
+                    .filter(|_| !fence.withholds(id));
                 let guide = haarness_providers::connect::guide(id);
                 let connected = info.is_some_and(|p| p.authenticated);
                 let models = info.map_or(0, |p| p.models.len());
@@ -1320,6 +1329,9 @@ impl ManagementService {
                 }
                 if let Some(note) = guide.note {
                     view.lines.push(note.to_owned());
+                }
+                if let Some(notice) = fence.notice(id) {
+                    view.lines.push(notice.to_owned());
                 }
                 if stored.is_some() {
                     view.entries.push(destructive(
@@ -1392,6 +1404,7 @@ impl ManagementService {
     /// connected, popular ones first. With a `name`, only that provider.
     fn connect_view(&self, providers: &[haarness_protocol::ProviderInfo], only: &str) -> View {
         let store = CredentialStore::new(self.paths.auth.clone());
+        let fence = self.key_fence();
         let mut rows: Vec<_> = providers
             .iter()
             .filter(|p| only.is_empty() || p.id == only)
@@ -1401,7 +1414,11 @@ impl ManagementService {
             .iter()
             .map(|p| {
                 let guide = haarness_providers::connect::guide(&p.id);
-                let stored = store.get(&p.id).ok().flatten();
+                let stored = store
+                    .get(&p.id)
+                    .ok()
+                    .flatten()
+                    .filter(|_| !fence.withholds(&p.id));
                 let source = match (&stored, p.authenticated, guide.methods.is_empty()) {
                     // Cloud is signed in through the Haarness account, not a stored key.
                     (None, true, _) if p.id == "haarness" => Some("oauth"),
@@ -1419,7 +1436,9 @@ impl ManagementService {
                     "methods": guide.methods,
                     "keyUrl": guide.key_url,
                     "env": guide.env,
-                    "note": guide.note,
+                    // Said where the person connects it: why the saved key
+                    // stays home, and what connecting does.
+                    "note": fence.notice(&p.id).or(guide.note),
                     "popular": guide.popular,
                 })
             })
@@ -1440,6 +1459,16 @@ impl ManagementService {
             ..View::default()
         }
     }
+    /// What this workspace's configuration keeps its providers from (see
+    /// [`crate::key_addresses`]).
+    fn key_fence(&self) -> crate::key_addresses::KeyFence {
+        crate::load_config(&self.paths, &self.workspace, self.trust_project)
+            .map(|config| {
+                crate::key_addresses::current_or_none(&self.paths, &self.workspace, &config).1
+            })
+            .unwrap_or_default()
+    }
+
     fn provider_sources(&self, id: &str) -> Result<Vec<(String, PathBuf, crate::ProviderSection)>> {
         let mut entries = Vec::new();
         for project in [false, true] {
@@ -1490,7 +1519,13 @@ impl ManagementService {
             "credential" => {
                 let key = required_string(input, "key")?;
                 ensure!(!key.trim().is_empty(), "Enter an API key");
-                store.set(id, &Credential::api(key.to_owned()))?;
+                crate::key_addresses::save_key(
+                    &self.paths,
+                    &self.workspace,
+                    self.trust_project,
+                    id,
+                    key,
+                )?;
             }
             "logout" => {
                 store.remove(id)?;
@@ -1514,7 +1549,7 @@ impl ManagementService {
                 let section = crate::ProviderSection {
                     protocol: protocol.into(),
                     name: Some(required_string(input, "label")?.into()),
-                    base_url: Some(url),
+                    base_url: Some(url.clone()),
                     models,
                     requires_auth: text(input, "requiresAuth") != "false",
                     ..crate::ProviderSection::default()
@@ -1531,7 +1566,7 @@ impl ManagementService {
                     Some(&section),
                 )?;
                 if let Some(key) = optional_string(input, "key").filter(|key| !key.is_empty()) {
-                    store.set(id, &Credential::api(key.to_owned()))?;
+                    store.set_api_key(id, key, Some(&url))?;
                 }
             }
             "edit" | "remove" => {
@@ -1542,6 +1577,9 @@ impl ManagementService {
                     "Configuration changed; reopen the provider"
                 );
                 if text(input, "action") == "edit" {
+                    // The saved key follows its provider to the address the
+                    // person gives it here, unless it was not sent before.
+                    let follows = !self.key_fence().withholds(id);
                     let url = required_string(input, "url")?;
                     let base_url = if section.integration.is_some() {
                         crate::router_connection::normalize_url(url)?
@@ -1556,7 +1594,8 @@ impl ManagementService {
                     // other settings (context window, tools, headers, keys
                     // Haarness does not know) stay as written.
                     let mut fields = Vec::new();
-                    if section.base_url.as_deref() != Some(base_url.as_str()) {
+                    let moved = section.base_url.as_deref() != Some(base_url.as_str());
+                    if moved {
                         fields.push(("base_url".to_owned(), Some(json!(base_url))));
                     }
                     // The form shows the id where the entry has no name.
@@ -1567,6 +1606,9 @@ impl ManagementService {
                         fields.push(("models".to_owned(), Some(json!(models))));
                     }
                     crate::write_entry_fields(&path, &scope, "providers", id, fields)?;
+                    if moved && follows {
+                        store.allow_address(id, &base_url)?;
+                    }
                 } else {
                     crate::write_provider_entry(&path, &scope, id, None)?;
                 }
@@ -2739,6 +2781,83 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
         assert!(
             refused.to_string().contains("use openai-chat-completions"),
             "{refused}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Where a project points a provider somewhere its saved key is not for,
+    /// Connect says so and offers no Disconnect of that key; connecting it
+    /// there saves the key for that address, and moving the provider in the
+    /// form takes the key along.
+    #[test]
+    fn connecting_a_project_provider_saves_its_key_for_that_address() {
+        let (root, workspace, paths, service) =
+            crate::management::tests::isolated_service("key-fence-connect");
+        let project = workspace.join(".haarness/haarness.json");
+        fs::create_dir_all(project.parent().unwrap()).unwrap();
+        fs::write(
+            &project,
+            r#"{"providers":{"router":{"name":"Team router","base_url":"http://127.0.0.1:9/v1"}}}"#,
+        )
+        .unwrap();
+        let store = haarness_providers::CredentialStore::new(paths.auth.clone());
+        store
+            .set_api_key("router", "router-key", Some("http://127.0.0.1:5000/v1"))
+            .unwrap();
+        let providers = [haarness_protocol::ProviderInfo {
+            id: "router".into(),
+            name: "Team router".into(),
+            authenticated: false,
+            models: Vec::new(),
+        }];
+        let row = |view: &haarness_protocol::ManagementView| {
+            view.data.as_ref().unwrap()["providers"][0].clone()
+        };
+        let before = row(&service.connect_view(&providers, ""));
+        assert_eq!(
+            before["note"],
+            "The saved key is for another address. Connect to save a key for http://127.0.0.1:9/v1."
+        );
+        assert_eq!(before["source"], Value::Null, "not this provider's key");
+        let edit = |url: &str| {
+            service
+                .provider_mutation(&json!({"action":"edit","name":"router","scope":"project",
+                    "source": project, "revision": super::revision(&project).unwrap(),
+                    "url": url, "label":"Team router","models":""}))
+                .unwrap();
+        };
+        // Moving a provider that is not sent the key does not send it there.
+        edit("http://127.0.0.1:8/v1");
+        assert!(
+            store
+                .for_address("http://127.0.0.1:8/v1")
+                .get("router")
+                .unwrap()
+                .is_none()
+        );
+
+        service
+            .provider_mutation(&json!({"action":"credential","name":"router","key":"router-key"}))
+            .unwrap();
+        assert!(
+            store
+                .for_address("http://127.0.0.1:8/v1")
+                .get("router")
+                .unwrap()
+                .is_some()
+        );
+        let after = row(&service.connect_view(&providers, ""));
+        assert_eq!(after["note"], Value::Null);
+        assert_eq!(after["source"], "api");
+
+        // Moved in the form, the provider keeps its key.
+        edit("http://127.0.0.1:7/v1");
+        assert!(
+            store
+                .for_address("http://127.0.0.1:7/v1")
+                .get("router")
+                .unwrap()
+                .is_some()
         );
         fs::remove_dir_all(root).unwrap();
     }

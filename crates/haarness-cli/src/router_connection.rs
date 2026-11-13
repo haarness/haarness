@@ -1,7 +1,7 @@
 //! Router identity is independent of the wire protocol and connection credentials.
 //! Cloud can add its own deployment/login here without changing model routing.
 use anyhow::{Context, Result, bail, ensure};
-use haarness_providers::auth::{Credential, CredentialStore};
+use haarness_providers::auth::{AuthError, CredentialStore};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Mutex, time::Duration};
 
@@ -151,7 +151,13 @@ pub(crate) async fn connect(
         } else {
             format!("router_{suffix}")
         };
-        if !current.providers.contains_key(&id) && store.get(&id)?.is_none() {
+        // A damaged key file holds no key under this id: saving the router's
+        // keeps a copy of it and starts a new one.
+        let saved = match store.get(&id) {
+            Err(AuthError::Decode { .. }) => None,
+            saved => saved?,
+        };
+        if !current.providers.contains_key(&id) && saved.is_none() {
             break id;
         }
         suffix += 1;
@@ -167,14 +173,16 @@ pub(crate) async fn connect(
             deployment: RouterDeployment::SelfHosted,
         }),
         name: Some(name.clone()),
-        base_url: Some(url),
+        base_url: Some(url.clone()),
         requires_auth,
         // An empty model list enables dynamic discovery; never freeze a live catalog.
         models: Vec::new(),
         ..crate::ProviderSection::default()
     };
     if requires_auth {
-        store.set(&id, &Credential::api(request.key.trim().to_owned()))?;
+        // Saved for the router's address: a project that defines this id
+        // elsewhere is not sent it.
+        store.set_api_key(&id, request.key.trim(), Some(&url))?;
     }
     let target = crate::provider_config_target(paths, workspace, request.project);
     let scope = crate::jsonconfig::SaveScope::of(request.project, workspace);
@@ -378,12 +386,60 @@ mod connection_tests {
                 .unwrap()
                 .contains("fixture-key")
         );
+        // Saved for the router's address, and for no other.
+        let saved = CredentialStore::new(paths.auth.clone());
         assert!(
-            CredentialStore::new(paths.auth.clone())
+            saved
+                .for_address(&config.providers[&id].base_url.clone().unwrap())
                 .get(&id)
                 .unwrap()
                 .is_some()
         );
+        assert!(
+            saved
+                .for_address("http://127.0.0.1:1/v1")
+                .get(&id)
+                .unwrap()
+                .is_none()
+        );
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A damaged key file does not stop a router connection: the key is
+    /// saved in a new file, and the old one is kept beside it once.
+    #[tokio::test]
+    async fn a_router_connects_over_a_damaged_key_file() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-router-damaged-{}", uuid::Uuid::now_v7()));
+        let paths = crate::Paths::new(Some(&root)).unwrap();
+        std::fs::write(&paths.auth, "{\"router\": ").unwrap();
+        let (url, task) = mock(true).await;
+        let request = ConnectRequest {
+            url,
+            name: String::new(),
+            key: "fixture-key".into(),
+            project: false,
+        };
+        let ConnectResult::Connected { id, .. } =
+            connect(&paths, &root, false, &request).await.unwrap()
+        else {
+            panic!("expected connection")
+        };
+        assert_eq!(id, "router");
+        let saved = CredentialStore::new(paths.auth.clone()).get(&id).unwrap();
+        assert_eq!(saved.unwrap().api_key(), Some("fixture-key"));
+        let kept = std::fs::read_dir(paths.auth.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("auth.json.unreadable-")
+            })
+            .count();
+        assert_eq!(kept, 1);
         task.abort();
         std::fs::remove_dir_all(root).unwrap();
     }

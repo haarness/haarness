@@ -12,6 +12,7 @@ mod extensions;
 mod input_settings;
 mod insights;
 mod jsonconfig;
+mod key_addresses;
 mod layout;
 mod logs;
 mod management;
@@ -1691,6 +1692,9 @@ async fn cli_main() -> Result<()> {
         !long_running && io::stderr().is_terminal(),
     )?;
     let workspace = dunce::canonicalize(&cli.workspace).context("canonicalize workspace")?;
+    // Before this run registers its project: one first opened now must not
+    // count among those that used a key saved before (see key_addresses).
+    key_addresses::note_first_run(&base_paths);
     let workspace_manager = base_paths.workspace_manager()?;
     let current_workspace = if cli.chat_home {
         workspace_manager.register_chat_home(&workspace)
@@ -1768,6 +1772,7 @@ async fn cli_main() -> Result<()> {
                     args.provider.as_deref(),
                     args.model.as_deref(),
                     &client.providers().await?,
+                    &withheld_here(&paths, &workspace, project_config),
                 )?;
                 (Some(provider), Some(model))
             } else {
@@ -2313,12 +2318,14 @@ async fn models_command(
     verbose: bool,
 ) -> Result<()> {
     let config = load_config(paths, workspace, trust)?;
-    let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
-    let (instances, disabled) = provider_instances(&config, &credentials);
+    let (auth, fence) = key_addresses::current_or_none(paths, workspace, &config);
+    let credentials = resolved_credentials(&auth);
+    let (instances, disabled) = provider_instances(&config, &credentials, &fence);
     let providers = NativeProviderRegistry::discover_with_providers_and_store(
         instances,
         &disabled,
         Arc::new(CredentialStore::new(paths.auth.clone())),
+        &fence.providers(),
     )
     .await;
     let listed = providers.list();
@@ -2362,12 +2369,14 @@ async fn providers_command(
     verbose: bool,
 ) -> Result<()> {
     let config = load_config(paths, workspace, trust)?;
-    let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
-    let (instances, disabled) = provider_instances(&config, &credentials);
+    let (auth, fence) = key_addresses::current_or_none(paths, workspace, &config);
+    let credentials = resolved_credentials(&auth);
+    let (instances, disabled) = provider_instances(&config, &credentials, &fence);
     let providers = NativeProviderRegistry::discover_with_providers_and_store(
         instances,
         &disabled,
         Arc::new(CredentialStore::new(paths.auth.clone())),
+        &fence.providers(),
     )
     .await;
     for provider in providers.list() {
@@ -4063,12 +4072,14 @@ async fn check_schedule_model(
         return Ok(model.to_owned());
     };
     let config = load_config(paths, workspace, trust)?;
-    let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
-    let (instances, disabled) = provider_instances(&config, &credentials);
+    let (auth, fence) = key_addresses::current_or_none(paths, workspace, &config);
+    let credentials = resolved_credentials(&auth);
+    let (instances, disabled) = provider_instances(&config, &credentials, &fence);
     let providers = NativeProviderRegistry::discover_with_providers_and_store(
         instances,
         &disabled,
         Arc::new(CredentialStore::new(paths.auth.clone())),
+        &fence.providers(),
     )
     .await;
     let listed = providers.list();
@@ -6319,10 +6330,16 @@ async fn run_command(
         }
         // Checked before a chat exists, so a typo leaves no empty chat behind.
         let requested_model = if args.provider.is_some() || args.model.is_some() {
+            let withheld = if args.attach.is_none() {
+                withheld_here(paths, &workspace, trust)
+            } else {
+                BTreeMap::new()
+            };
             Some(requested_run_model(
                 args.provider.as_deref(),
                 args.model.as_deref(),
                 &client.providers().await?,
+                &withheld,
             )?)
         } else {
             None
@@ -6909,6 +6926,7 @@ fn requested_run_model(
     provider: Option<&str>,
     model: Option<&str>,
     providers: &[haarness_protocol::ProviderInfo],
+    withheld: &BTreeMap<String, String>,
 ) -> Result<(String, String)> {
     let listed_id = |id: &str| {
         haarness_providers::listed_provider_id(
@@ -6971,7 +6989,7 @@ fn requested_run_model(
                 .with_context(|| unavailable_provider(&id))?;
             // A provider that is not connected lists no models yet.
             if !info.authenticated {
-                anyhow::bail!(not_connected_provider(info));
+                anyhow::bail!(not_connected_provider(info, withheld));
             }
             let model = info.models.first().with_context(|| {
                 format!("{} lists no models; pass --model as well", info.name)
@@ -6983,13 +7001,43 @@ fn requested_run_model(
     chosen.0 = listed_id(&chosen.0);
     match providers.iter().find(|info| info.id == chosen.0) {
         None if !providers.is_empty() => anyhow::bail!(unavailable_provider(&chosen.0)),
-        Some(info) if !info.authenticated => anyhow::bail!(not_connected_provider(info)),
+        Some(info) if !info.authenticated => {
+            anyhow::bail!(not_connected_provider(info, withheld))
+        }
         _ => Ok(chosen),
     }
 }
 
-/// What to run to connect a provider the command line chose.
-fn not_connected_provider(info: &haarness_protocol::ProviderInfo) -> String {
+/// Why each provider this workspace's configuration points away from its
+/// saved key's address is not sent it (see [`key_addresses`]).
+fn withheld_here(paths: &Paths, workspace: &Path, trust: bool) -> BTreeMap<String, String> {
+    load_config(paths, workspace, trust)
+        .map(|config| {
+            key_addresses::current_or_none(paths, workspace, &config)
+                .1
+                .reasons()
+                .clone()
+        })
+        .unwrap_or_default()
+}
+
+/// What to run to connect a provider the command line chose, and why its
+/// saved key was not sent when this project points it elsewhere (`withheld`,
+/// by id: see [`key_addresses`]).
+fn not_connected_provider(
+    info: &haarness_protocol::ProviderInfo,
+    withheld: &BTreeMap<String, String>,
+) -> String {
+    if let Some(reason) = withheld.get(&info.id) {
+        let mut letters = reason.chars();
+        let reason = letters.next().map_or_else(String::new, |first| {
+            first.to_lowercase().chain(letters).collect()
+        });
+        return format!(
+            "{} is not connected here: {reason} Connect it with `haarness auth login {}` in this project, then run this again.",
+            info.name, info.id
+        );
+    }
     if info.id == "haarness" {
         format!(
             "{} is not connected. Sign in with `haarness login`, then run this again.",
@@ -9217,11 +9265,12 @@ impl HotReloadController {
             persisted_rules,
             true,
         )?;
-        let auth = read_auth(&self.paths)?;
+        let (auth, fence) =
+            key_addresses::current(&self.paths, &self.workspace, &sources.file_config)?;
         let credentials = resolved_credentials(&auth);
         validate_provider_definitions(&sources.file_config)?;
         let (instances, disabled_providers) =
-            provider_instances(&sources.file_config, &credentials);
+            provider_instances(&sources.file_config, &credentials, &fence);
         // Its model lists load once it is live, as at start (see below). A
         // provider defined as before is the live one, lists and all: a
         // reload (an instructions edit, a hook added) no longer forgets every
@@ -9230,10 +9279,12 @@ impl HotReloadController {
             instances,
             &disabled_providers,
             Arc::new(CredentialStore::new(self.paths.auth.clone())),
+            &fence.providers(),
         )
         .await
         .with_stream_limits(&stream_limits(&sources.file_config));
-        let provider_definitions = provider_fingerprints(&sources.file_config, &auth, &registry);
+        let provider_definitions =
+            provider_fingerprints(&sources.file_config, &auth, &registry, &fence);
         let live = self.runtime.providers();
         {
             let known = self.provider_definitions.lock();
@@ -10051,20 +10102,22 @@ async fn application_at(
     for notice in config_specs::startup_notices(paths, workspace, trust) {
         tracing::warn!("config: {notice}");
     }
-    let auth = read_auth(paths).unwrap_or_default();
+    let (auth, fence) = key_addresses::current_or_none(paths, workspace, &file_config);
     let credentials = resolved_credentials(&auth);
-    let (instances, disabled_providers) = provider_instances(&file_config, &credentials);
+    let (instances, disabled_providers) = provider_instances(&file_config, &credentials, &fence);
     // Their live model lists load below, once the runtime can announce them.
     let providers = Arc::new(
         NativeProviderRegistry::with_providers_and_store(
             instances,
             &disabled_providers,
             Arc::new(CredentialStore::new(paths.auth.clone())),
+            &fence.providers(),
         )
         .await
         .with_stream_limits(&stream_limits(&file_config)),
     );
-    let provider_definitions = provider_fingerprints(&file_config, &auth, providers.as_ref());
+    let provider_definitions =
+        provider_fingerprints(&file_config, &auth, providers.as_ref(), &fence);
     // Its servers start in the background: one slow to start (a first
     // `npx -y` download) must not keep this server from answering.
     let (mcp, mcp_starts) = compose_mcp(paths, workspace, &file_config, None);
@@ -10415,7 +10468,7 @@ async fn auth_command(
         AuthCommand::Set { provider, key } => {
             let provider = known_auth_provider(paths, workspace, trust, &provider)?;
             let key = read_api_key(&provider, key)?;
-            store.set(&provider, &Credential::api(key))?;
+            key_addresses::save_key(paths, workspace, trust, &provider, &key)?;
             println!("Stored {provider} credential in owner-only auth.json");
         }
         AuthCommand::Login { provider, method } => {
@@ -10438,7 +10491,12 @@ async fn auth_command(
                 },
             );
             let credential = match method {
-                AuthLoginMethod::Api => Credential::api(read_api_key(&provider, None)?),
+                AuthLoginMethod::Api => {
+                    let key = read_api_key(&provider, None)?;
+                    key_addresses::save_key(paths, workspace, trust, &provider, &key)?;
+                    println!("Connected {provider} (api)");
+                    return Ok(());
+                }
                 AuthLoginMethod::Browser if provider == "openai" => {
                     let login = OpenAiOAuthClient::default().start_browser_login().await?;
                     println!("Open this URL to connect ChatGPT:\n{}", login.url);
@@ -12116,6 +12174,10 @@ struct FileConfig {
     /// Project provider entries the configuration loader ignored, and why.
     #[serde(skip)]
     provider_notices: Vec<String>,
+    /// The ids of `providers` only a project's configuration defines (see
+    /// [`key_addresses`]).
+    #[serde(skip)]
+    project_providers: std::collections::BTreeSet<String>,
     mcp: BTreeMap<String, McpConfigureRequest>,
     /// The servers of `mcp` the system folder defines and no layer above it.
     #[serde(skip)]
@@ -12363,11 +12425,26 @@ fn guard_project_providers(
         .collect()
 }
 
+/// The providers of `merged` that only a project's configuration defines:
+/// none Haarness ships and none the person's own configuration (`global`,
+/// the system folder's included) names.
+fn project_defined_providers(
+    global: &BTreeMap<String, ProviderSection>,
+    merged: &BTreeMap<String, ProviderSection>,
+) -> std::collections::BTreeSet<String> {
+    merged
+        .keys()
+        .filter(|id| !global.contains_key(*id) && !haarness_providers::builtin_provider(id))
+        .cloned()
+        .collect()
+}
+
 /// Compile `[providers.*]` into protocol-specific instances plus the set of
 /// suppressed provider ids.
 fn provider_instances(
     config: &FileConfig,
     credentials: &HashMap<String, String>,
+    fence: &key_addresses::KeyFence,
 ) -> (
     Vec<haarness_providers::ProviderInstance>,
     std::collections::HashSet<String>,
@@ -12377,6 +12454,10 @@ fn provider_instances(
     for notice in &config.provider_notices {
         eprintln!("{notice}");
         tracing::warn!("config: {notice}");
+    }
+    for line in fence.log_lines() {
+        eprintln!("{line}");
+        tracing::warn!("config: {line}");
     }
     for (id, section) in &config.providers {
         if !section.enabled {
@@ -12448,14 +12529,15 @@ fn provider_instances(
                         .find_map(|variable| std::env::var(variable).ok())
                 })
             });
-        let stored = credentials.contains_key(id)
-            || preset.is_some_and(|preset| {
-                credentials.contains_key(preset.id)
-                    || preset
-                        .aliases
-                        .iter()
-                        .any(|alias| credentials.contains_key(*alias))
-            });
+        let stored = !fence.withholds(id)
+            && (credentials.contains_key(id)
+                || preset.is_some_and(|preset| {
+                    credentials.contains_key(preset.id)
+                        || preset
+                            .aliases
+                            .iter()
+                            .any(|alias| credentials.contains_key(*alias))
+                }));
         let authenticated =
             api_key.is_some() || stored || !section.requires_auth || !headers.is_empty();
         let discover_models = section.models.is_empty()
@@ -12561,6 +12643,7 @@ fn provider_fingerprints(
     config: &FileConfig,
     auth: &BTreeMap<String, serde_json::Value>,
     registry: &NativeProviderRegistry,
+    fence: &key_addresses::KeyFence,
 ) -> HashMap<String, String> {
     let credentials = resolved_credentials(auth);
     let mut stored: Vec<_> = credentials.iter().collect();
@@ -12590,6 +12673,12 @@ fn provider_fingerprints(
             digest.update([0]);
             digest.update(&stored);
             digest.update([u8::from(signed_in.contains(info.id.as_str()))]);
+            // A key saved again for this provider's address, or no longer,
+            // changes what it may send.
+            digest.update([
+                u8::from(fence.withholds(&info.id)),
+                u8::from(fence.without_ambient(&info.id)),
+            ]);
             (info.id, format!("{:x}", digest.finalize()))
         })
         .collect()
@@ -15074,11 +15163,9 @@ fn remove_runtime_if_owner(paths: &Paths, pid: u32) {
 }
 /// Raw auth.json contents. Entries are kept as JSON values so record types
 /// this build does not understand survive read→write round trips untouched.
+#[cfg(test)]
 fn read_auth(paths: &Paths) -> Result<BTreeMap<String, serde_json::Value>> {
-    if !paths.auth.exists() {
-        return Ok(BTreeMap::new());
-    }
-    Ok(serde_json::from_slice(&fs::read(&paths.auth)?)?)
+    Ok(CredentialStore::new(paths.auth.clone()).all_raw()?)
 }
 fn resolved_credentials(value: &BTreeMap<String, serde_json::Value>) -> HashMap<String, String> {
     value
@@ -16279,8 +16366,13 @@ mod tests {
         assert_eq!(run_args.prompt.join(" "), "audit the workspace");
         assert_eq!(run_args.model.as_deref(), Some("openai/gpt-5.6-sol"));
         assert_eq!(
-            requested_run_model(run_args.provider.as_deref(), run_args.model.as_deref(), &[])
-                .unwrap(),
+            requested_run_model(
+                run_args.provider.as_deref(),
+                run_args.model.as_deref(),
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap(),
             ("openai".into(), "gpt-5.6-sol".into())
         );
     }
@@ -17254,6 +17346,7 @@ mod tests {
             Vec::new(),
             &std::collections::HashSet::new(),
             std::sync::Arc::new(super::CredentialStore::new(root.join("auth.json"))),
+            &haarness_providers::CredentialFence::default(),
         )
         .await;
         let config = FileConfig::default();
@@ -17264,9 +17357,24 @@ mod tests {
                     .unwrap(),
             )])
         };
-        let before = super::provider_fingerprints(&config, &BTreeMap::new(), &registry);
-        let signed_in = super::provider_fingerprints(&config, &oauth("first"), &registry);
-        let refreshed = super::provider_fingerprints(&config, &oauth("second"), &registry);
+        let before = super::provider_fingerprints(
+            &config,
+            &BTreeMap::new(),
+            &registry,
+            &crate::key_addresses::KeyFence::default(),
+        );
+        let signed_in = super::provider_fingerprints(
+            &config,
+            &oauth("first"),
+            &registry,
+            &crate::key_addresses::KeyFence::default(),
+        );
+        let refreshed = super::provider_fingerprints(
+            &config,
+            &oauth("second"),
+            &registry,
+            &crate::key_addresses::KeyFence::default(),
+        );
         // xAI decides when it is built whether to list its models: a reload
         // after a sign-in by OAuth builds it again.
         assert_ne!(before["xai"], signed_in["xai"]);
@@ -17292,7 +17400,11 @@ models = ["openrouter/auto"]
 "#,
         )
         .unwrap();
-        let (instances, _) = provider_instances(&config, &HashMap::new());
+        let (instances, _) = provider_instances(
+            &config,
+            &HashMap::new(),
+            &crate::key_addresses::KeyFence::default(),
+        );
         let replays = |id: &str| {
             instances.iter().find_map(|instance| match instance {
                 haarness_providers::ProviderInstance::OpenAiChatCompletions(compatible)
@@ -17328,7 +17440,11 @@ request_timeout = 0
         .unwrap();
         // Sections that only set a timeout define no provider of their own.
         validate_provider_definitions(&config).unwrap();
-        let (instances, disabled) = provider_instances(&config, &HashMap::new());
+        let (instances, disabled) = provider_instances(
+            &config,
+            &HashMap::new(),
+            &crate::key_addresses::KeyFence::default(),
+        );
         assert_eq!(
             instances
                 .iter()
@@ -18800,7 +18916,8 @@ request_timeout = 0
             provider("haarness", true, &["openai/gpt-6-sol"]),
         ];
         let chosen = |provider: Option<&str>, model: Option<&str>| {
-            requested_run_model(provider, model, &providers).map_err(|error| error.to_string())
+            requested_run_model(provider, model, &providers, &BTreeMap::new())
+                .map_err(|error| error.to_string())
         };
         assert_eq!(
             chosen(None, Some("echo/echo-2")),
@@ -18861,7 +18978,8 @@ request_timeout = 0
             cloud,
         ];
         let chosen = |provider: Option<&str>, model: Option<&str>| {
-            requested_run_model(provider, model, &providers).map_err(|error| error.to_string())
+            requested_run_model(provider, model, &providers, &BTreeMap::new())
+                .map_err(|error| error.to_string())
         };
         assert_eq!(
             chosen(Some("together"), None),
@@ -18909,6 +19027,17 @@ request_timeout = 0
             chosen(None, Some("gpt-5.6")),
             Err("OpenAI is not connected. Connect it with `haarness auth login openai`, then run this again.".into())
         );
+        // Where the project points a provider away from its saved key's
+        // address, the refusal says so.
+        let withheld = BTreeMap::from([(
+            "openai".to_owned(),
+            "The saved key is for https://a.example/v1, so it was not sent to https://b.example/v1.".to_owned(),
+        )]);
+        assert_eq!(
+            requested_run_model(Some("openai"), None, &providers, &withheld)
+                .map_err(|error| error.to_string()),
+            Err("OpenAI is not connected here: the saved key is for https://a.example/v1, so it was not sent to https://b.example/v1. Connect it with `haarness auth login openai` in this project, then run this again.".into())
+        );
         assert_eq!(
             requested_run_model(
                 Some("haarness-cloud"),
@@ -18916,7 +19045,8 @@ request_timeout = 0
                 &[ProviderInfo {
                     models: Vec::new(),
                     ..providers[3].clone()
-                }]
+                }],
+                &BTreeMap::new(),
             )
             .map_err(|error| error.to_string()),
             Err("Haarness Cloud is not connected. Sign in with `haarness login`, then run this again.".into())
@@ -21081,7 +21211,11 @@ request_timeout = 0
         "#,
         )
         .unwrap();
-        let (instances, _) = super::provider_instances(&config, &std::collections::HashMap::new());
+        let (instances, _) = super::provider_instances(
+            &config,
+            &std::collections::HashMap::new(),
+            &crate::key_addresses::KeyFence::default(),
+        );
         let window = |id: &str| {
             let Some(haarness_providers::ProviderInstance::OpenAiChatCompletions(instance)) =
                 instances.iter().find(|instance| instance.id() == id)
@@ -21147,7 +21281,11 @@ request_timeout = 0
         "#
         ))
         .unwrap();
-        let (instances, _) = super::provider_instances(&config, &std::collections::HashMap::new());
+        let (instances, _) = super::provider_instances(
+            &config,
+            &std::collections::HashMap::new(),
+            &crate::key_addresses::KeyFence::default(),
+        );
         let provider = |id: &str| -> std::sync::Arc<dyn haarness_core::ModelProvider> {
             match instances
                 .iter()
@@ -21283,7 +21421,11 @@ request_timeout = 0
         .unwrap();
         let credentials =
             std::collections::HashMap::from([("autodiscover".to_owned(), "stored-key".to_owned())]);
-        let (instances, disabled) = super::provider_instances(&config, &credentials);
+        let (instances, disabled) = super::provider_instances(
+            &config,
+            &credentials,
+            &crate::key_addresses::KeyFence::default(),
+        );
 
         assert!(disabled.contains("ollama"));
         let groq = instances

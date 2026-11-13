@@ -227,6 +227,14 @@ impl OpenAiProvider {
         }
     }
 
+    /// Send requests through `client`: for a provider a project defines, one
+    /// that follows no redirect off its server (see [`crate::CredentialFence`]).
+    #[must_use]
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     #[cfg(test)]
     fn for_oauth_test(endpoint: String, issuer: String, store: Arc<CredentialStore>) -> Self {
         let oauth = OpenAiOAuthClient::new(crate::auth::OpenAiOAuthConfig {

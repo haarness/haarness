@@ -4,6 +4,14 @@
 The address is typed the way people paste it: no scheme, no version, with the endpoint's own path. The
 form checks it before saving, saves it where the API answers and says so, keeps the key typed with the
 form out of the screen and the configuration, and a chat on the endpoint's model gets its answer.
+
+Then a provider added to project A with its key, and a project B (as a cloned repository would) that
+defines the same id at a second fixture and makes it its model: that fixture is sent nothing, `haarness
+run` fails before sending and says why, the TUI keeps a message for it and points to Connect, lists the
+provider as not connected and says why where it is connected, and connecting it there saves the key
+for that address too, after which a run gets its answer. With HAARNESS_UPGRADE_FROM naming an older Haarness binary, a key that
+binary saved for a project's provider keeps working in that project after the update, and is not sent
+to a project opened after it.
 Runs the real binary, daemon and TUI under tmux with an isolated profile.
 """
 
@@ -25,6 +33,7 @@ import e2e_env  # noqa: E402
 from e2e_tmux import pane_command  # noqa: E402
 
 KEY = "fixture-" + secrets.token_hex(6)
+TEAM_KEY = "team-" + secrets.token_hex(6)
 seen = []
 
 
@@ -41,10 +50,11 @@ class Fixture(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def authorized(self):
-        return self.headers.get("Authorization") == "Bearer " + KEY
+        self.server.keys.append(self.headers.get("Authorization"))
+        return self.headers.get("Authorization") in ("Bearer " + KEY, "Bearer " + TEAM_KEY)
 
     def do_GET(self):
-        seen.append(("GET", self.path, self.authorized()))
+        self.server.seen.append(("GET", self.path, self.authorized()))
         if self.path != "/openai/v1/models":
             return self.send(404, {"error": {"message": "Unknown request URL"}})
         if not self.authorized():
@@ -54,7 +64,7 @@ class Fixture(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
-        seen.append(("POST", self.path, self.authorized()))
+        self.server.seen.append(("POST", self.path, self.authorized()))
         if self.path != "/openai/v1/chat/completions":
             return self.send(404, {"error": {"message": "Unknown request URL"}})
         if not self.authorized():
@@ -75,9 +85,17 @@ def main():
     workspace.mkdir()
     # A developer machine's Ollama or LM Studio would count as connected.
     (root / "config/config.toml").write_text("[providers.ollama]\nenabled = false\n[providers.lmstudio]\nenabled = false\n")
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    def fixture(requests):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
+        server.seen, server.keys = requests, []
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    server = fixture(seen)
     port = server.server_address[1]
+    # Project B's address for the same provider id.
+    elsewhere = fixture([])
+    port_b = elsewhere.server_address[1]
     session = f"haarness-custom-{os.getpid()}"
     env = e2e_env.clean_env()
     env.update({"HAARNESS_DATA_DIR": str(root), "SSH_TTY": "fixture"})
@@ -162,9 +180,116 @@ def main():
         wait_for("The chat on the custom endpoint got no answer", "custom-endpoint-proof", timeout=60)
         assert ("POST", "/openai/v1/chat/completions", True) in seen, seen
         print("TUI custom endpoint: ok")
+
+        # A provider added to project A with its key, through the CLI.
+        def cli(*args, workspace=workspace, binary=binary):
+            done = subprocess.run([binary, "--workspace", workspace, *args], env=env, capture_output=True, text=True, timeout=120)
+            assert done.returncode == 0, (args, done.stdout, done.stderr)
+            return done
+        cli("provider", "add", "team-gateway", "--name", "Team gateway", "--url", f"http://127.0.0.1:{port}/openai/v1", "--project")
+        cli("auth", "set", "team-gateway", "--key", TEAM_KEY)
+        record = json.loads(auth.read_text())["team-gateway"]
+        assert record["key"] == TEAM_KEY and record["addresses"] == [f"http://127.0.0.1:{port}/openai/v1"], record
+        # Project B, as a cloned repository: the same id at another address.
+        project_b = root / "ws-b"
+        (project_b / ".haarness").mkdir(parents=True)
+        (project_b / ".haarness/haarness.json").write_text(json.dumps({
+            "model": "team-gateway/gateway-coder",
+            "providers": {"team-gateway": {
+                "name": "Team gateway", "base_url": f"http://127.0.0.1:{port_b}/openai/v1", "models": ["gateway-coder"]}}}))
+        reason = f"the saved key is for http://127.0.0.1:{port}/openai/v1, so it was not sent to http://127.0.0.1:{port_b}/openai/v1."
+        notice = f"The saved key is for another address. Connect to save a key for http://127.0.0.1:{port_b}/openai/v1."
+
+        def run(*args):
+            return subprocess.run([binary, "--workspace", project_b, "run", *args], env=env, capture_output=True, text=True, timeout=180)
+
+        # `haarness run` refuses before a chat exists when told the model, and the chat fails before
+        # sending when the project's model is taken.
+        named = run("-m", "team-gateway/gateway-coder", "Say the proof word.")
+        assert named.returncode != 0 and f"Team gateway is not connected here: {reason}" in named.stderr, named
+        print(" ".join(named.stderr.split()))
+        taken = run("Say the proof word.")
+        assert taken.returncode != 0 and notice in " ".join((taken.stdout + taken.stderr).split()), taken
+        assert not elsewhere.seen, elsewhere.seen
+        subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+        subprocess.run(["tmux", "new-session", "-d", "-x", "120", "-y", "40", "-s", session, pane_command(env, [binary, "--workspace", project_b])], check=True)
+        wait_for("Project B did not open", "Ask anything", timeout=60)
+        # The TUI keeps the message and points to Connect, which says why.
+        keys("Say the proof word.", literal=True)
+        keys("Enter")
+        wait_for("Sending did not point to Connect", "Team gateway is not connected · /connect team-gateway")
+        assert not elsewhere.seen, elsewhere.seen
+        keys("C-u")
+        keys("/providers", literal=True)
+        keys("Enter")
+        wait_for("The provider manager did not open in project B", "Providers", "Type to filter")
+        keys("team gateway", literal=True)
+        listed = wait_for("The provider manager did not list the project's provider", "Providers", "Team gateway")
+        row = next(line for line in listed.splitlines() if "Team gateway" in line)
+        assert "Not connected" in row, row
+        keys("Escape")
+        assert TEAM_KEY not in json.dumps(elsewhere.keys), elsewhere.keys
+        assert not any(request[0] == "GET" for request in elsewhere.seen), elsewhere.seen
+        # Connect says why, then saves the key for this address too.
+        keys("/connect team-gateway", literal=True)
+        keys("Enter")
+        why = " ".join(wait_for("Connect did not say why the saved key stayed home", "Connect Team gateway", "another address").split())
+        assert notice in why, why
+        print(notice)
+        assert TEAM_KEY not in json.dumps(elsewhere.keys), elsewhere.keys
+        keys(TEAM_KEY, literal=True)
+        keys("Enter")
+        wait_for("Connecting the provider in project B did not say so", "Team gateway connected", timeout=60)
+        record = json.loads(auth.read_text())["team-gateway"]
+        assert record["addresses"] == [f"http://127.0.0.1:{port}/openai/v1", f"http://127.0.0.1:{port_b}/openai/v1"], record
+        assert "Bearer " + TEAM_KEY in elsewhere.keys
+        answered = run("Say the proof word.")
+        assert answered.returncode == 0 and "custom-endpoint-proof" in answered.stdout, answered
+        assert ("POST", "/openai/v1/chat/completions", True) in elsewhere.seen, elsewhere.seen
+        print("TUI project provider keys: ok")
+
+        upgrade_from = os.environ.get("HAARNESS_UPGRADE_FROM")
+        if upgrade_from:
+            # A profile the older Haarness made, before this one ever ran with it: a provider it added to
+            # project C, with a key it saved with no address.
+            old = pathlib.Path(upgrade_from).resolve()
+            profile = root / "upgrade"
+            (profile / "config").mkdir(parents=True)
+            (profile / "config/config.toml").write_text((root / "config/config.toml").read_text())
+            profile_env = dict(env, HAARNESS_DATA_DIR=str(profile))
+            project_c, project_d = profile / "ws-c", profile / "ws-d"
+            project_c.mkdir()
+
+            def run(binary, workspace, *args):
+                done = subprocess.run([binary, "--workspace", workspace, *args], env=profile_env, capture_output=True, text=True, timeout=120)
+                assert done.returncode == 0, (args, done.stdout, done.stderr)
+                return done
+
+            run(old, project_c, "provider", "add", "legacy-gateway", "--url", f"http://127.0.0.1:{port}/openai/v1", "--project")
+            run(old, project_c, "auth", "set", "legacy-gateway", "--key", KEY)
+            saved = next(profile.rglob("auth.json"))
+            assert "addresses" not in json.loads(saved.read_text())["legacy-gateway"]
+            time.sleep(1)
+            # After the update: the project it was added to still uses it.
+            server.keys.clear()
+            listed = run(binary, project_c, "providers").stdout
+            assert "legacy-gateway\tlegacy-gateway\t1 model\tconnected" in listed, listed
+            assert "Bearer " + KEY in server.keys, server.keys
+            assert json.loads(saved.read_text())["legacy-gateway"]["addresses"] == [f"http://127.0.0.1:{port}/openai/v1"]
+            # A project first opened after the update does not get it.
+            (project_d / ".haarness").mkdir(parents=True)
+            (project_d / ".haarness/haarness.json").write_text(json.dumps(
+                {"providers": {"legacy-gateway": {"base_url": f"http://127.0.0.1:{port_b}/openai/v1"}}}))
+            elsewhere.keys.clear()
+            done = run(binary, project_d, "providers")
+            assert "legacy-gateway\tlegacy-gateway\t0 models\tnot authenticated" in done.stdout, done.stdout
+            assert f"was not sent to http://127.0.0.1:{port_b}" in done.stderr, done.stderr
+            assert not any(elsewhere.keys), elsewhere.keys
+            print("Upgrade from an older Haarness: ok")
     finally:
         subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
         server.shutdown()
+        elsewhere.shutdown()
         # The daemon the TUI started for the isolated profile, by the pid it recorded.
         for runtime in root.rglob("runtime*.json"):
             try:

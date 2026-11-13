@@ -151,12 +151,15 @@ fn native_instance(
 const AZURE_FALLBACK: &[&str] = &["gpt-5.5", "gpt-5.4-mini"];
 
 pub struct AzureProvider {
+    client: reqwest::Client,
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
     models: Vec<ModelInfo>,
     /// Kept across the transport each request makes (see
     /// [`crate::notes::NoteHold::remembering`]).
     unsigned_routes: crate::notes::UnsignedRoutes,
+    /// Whether the Azure CLI's sign-in may be asked for a token.
+    ambient: bool,
 }
 
 impl AzureProvider {
@@ -182,11 +185,29 @@ impl AzureProvider {
     pub fn new(instance: NativeInstance, auth_store: Option<Arc<CredentialStore>>) -> Self {
         let models = configured_models(&instance, AZURE_FALLBACK, "openai");
         Self {
+            client: reqwest::Client::new(),
             instance,
             auth_store,
             models,
             unsigned_routes: crate::notes::UnsignedRoutes::default(),
+            ambient: true,
         }
+    }
+
+    /// Send requests through `client`: for a provider a project defines, one
+    /// that follows no redirect off its server (see [`crate::CredentialFence`]).
+    #[must_use]
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
+    /// Never ask the Azure CLI for a token: the provider is defined where
+    /// that sign-in does not belong (see [`crate::own_cloud_address`]).
+    #[must_use]
+    pub fn without_ambient_credentials(mut self) -> Self {
+        self.ambient = false;
+        self
     }
 
     async fn credential(&self) -> CoreResult<CloudCredential> {
@@ -195,6 +216,12 @@ impl AzureProvider {
         }
         if let Some(credential) = stored_credential(self.auth_store.as_ref(), &self.instance.id) {
             return Ok(credential);
+        }
+        if !self.ambient {
+            return Err(CoreError::ProviderUnavailable(format!(
+                "{} has no key of its own here, and your Azure sign-in goes only to Azure's addresses. To use the sign-in at this address, define {} in your global configuration.",
+                self.instance.name, self.instance.name
+            )));
         }
         let output = Command::new("az")
             .args([
@@ -273,6 +300,7 @@ impl ModelProvider for AzureProvider {
             assume_authenticated: true,
             headers,
         })
+        .with_http_client(self.client.clone())
         .with_model_info(self.models.clone())
         .with_unsigned_routes(Arc::clone(&self.unsigned_routes))
         .stream(request, cancel)
@@ -281,6 +309,7 @@ impl ModelProvider for AzureProvider {
 }
 
 pub struct CopilotProvider {
+    client: reqwest::Client,
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
     models: Vec<ModelInfo>,
@@ -331,6 +360,7 @@ impl CopilotProvider {
     pub fn new(instance: NativeInstance, auth_store: Option<Arc<CredentialStore>>) -> Self {
         let models = configured_models(&instance, &["gpt-4.1", "gpt-4o", "gpt-4o-mini"], "openai");
         Self {
+            client: reqwest::Client::new(),
             instance,
             auth_store,
             models,
@@ -338,6 +368,14 @@ impl CopilotProvider {
             wires: std::sync::RwLock::default(),
             unsigned_routes: crate::notes::UnsignedRoutes::default(),
         }
+    }
+
+    /// Send requests through `client`: for a provider a project defines, one
+    /// that follows no redirect off its server (see [`crate::CredentialFence`]).
+    #[must_use]
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
     }
 
     fn token(&self) -> CoreResult<String> {
@@ -387,7 +425,8 @@ impl CopilotProvider {
         let Ok(headers) = self.request_headers(false, "user") else {
             return None;
         };
-        let response = reqwest::Client::new()
+        let response = self
+            .client
             .get(format!(
                 "{}/models",
                 self.instance.base_url.trim_end_matches('/')
@@ -480,6 +519,7 @@ impl ModelProvider for CopilotProvider {
             }
             let endpoint = format!("{}/responses", self.instance.base_url.trim_end_matches('/'));
             return crate::OpenAiProvider::for_endpoint(endpoint, self.token()?)
+                .with_http_client(self.client.clone())
                 .stream(request, cancel)
                 .await;
         }
@@ -501,6 +541,7 @@ impl ModelProvider for CopilotProvider {
             assume_authenticated: false,
             headers,
         })
+        .with_http_client(self.client.clone())
         .with_model_info(self.live_models.get(&self.models))
         .with_unsigned_routes(Arc::clone(&self.unsigned_routes))
         .stream(request, cancel)
@@ -640,10 +681,13 @@ fn google_refuses_keys(reason: &str) -> bool {
 }
 
 pub struct VertexProvider {
+    client: reqwest::Client,
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
     models: Vec<ModelInfo>,
     token: Option<SecretString>,
+    /// Whether `gcloud` may be asked for an access token.
+    ambient: bool,
 }
 
 impl VertexProvider {
@@ -685,11 +729,29 @@ impl VertexProvider {
         let token = instance.api_key.take().map(SecretString::from);
         let models = configured_models(&instance, VERTEX_FALLBACK, "gemini");
         Self {
+            client: reqwest::Client::new(),
             instance,
             auth_store,
             models,
             token,
+            ambient: true,
         }
+    }
+
+    /// Send requests through `client`: for a provider a project defines, one
+    /// that follows no redirect off its server (see [`crate::CredentialFence`]).
+    #[must_use]
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
+    /// Never ask `gcloud` for an access token: the provider is defined where
+    /// that sign-in does not belong (see [`crate::own_cloud_address`]).
+    #[must_use]
+    pub fn without_ambient_credentials(mut self) -> Self {
+        self.ambient = false;
+        self
     }
 
     async fn token(&self) -> CoreResult<String> {
@@ -700,6 +762,12 @@ impl VertexProvider {
             stored_credential(self.auth_store.as_ref(), &self.instance.id)
         {
             return Ok(token);
+        }
+        if !self.ambient {
+            return Err(CoreError::ProviderUnavailable(format!(
+                "{} has no key of its own here, and your Google Cloud sign-in goes only to Google's addresses. To use the sign-in at this address, define {} in your global configuration.",
+                self.instance.name, self.instance.name
+            )));
         }
         for args in [
             ["auth", "application-default", "print-access-token"].as_slice(),
@@ -772,7 +840,8 @@ impl ModelProvider for VertexProvider {
         let Ok(headers) = headers_with(&self.instance.headers, [auth]) else {
             return KeyCheck::Rejected(Some("The key holds characters a key cannot".into()));
         };
-        let request = reqwest::Client::new()
+        let request = self
+            .client
             .post(format!(
                 "{}/models/{}:countTokens",
                 base_url.trim_end_matches('/'),
@@ -808,6 +877,7 @@ impl ModelProvider for VertexProvider {
             assume_authenticated: true,
             headers,
         })
+        .with_http_client(self.client.clone())
         .stream(request, cancel)
         .await
     }
