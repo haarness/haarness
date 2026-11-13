@@ -364,9 +364,10 @@ test("inline code that names a project file opens it at its line; other code sta
   expect("src/a.ts:150").toContain(word);
   await page.waitForTimeout(700);
   await expect(activeTab).toContainText("README.md");
-  // So does a slow one, its second press well inside this computer's double-click time.
-  const interval = (await page.evaluate(() => window.haarness.boot())).doubleClick ?? 500;
-  const gap = Math.max(50, Math.min(400, interval - 100));
+  // So does a slow one, its second press well inside the wait (this computer's double-click
+  // time, at most 400 ms).
+  const interval = Math.min((await page.evaluate(() => window.haarness.boot())).doubleClick ?? 500, 400);
+  const gap = Math.max(50, Math.min(300, interval - 100));
   await page.evaluate(() => getSelection()?.removeAllRanges());
   const middle = (await source.boundingBox())!;
   const point = { x: middle.x + middle.width / 2, y: middle.y + middle.height / 2 };

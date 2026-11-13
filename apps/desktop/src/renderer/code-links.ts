@@ -206,7 +206,8 @@ export function codeLinksConnection(connection: string, connected: boolean) {
 /**
  * When the folder listed as `listing` is listed again: now, never (nothing
  * changed it), or in so many milliseconds. A listing that got no answer, once
- * the recheck time since it ended has passed. A large folder, once
+ * the recheck time since it ended has passed, or the least time between
+ * listings when the project changed urgently since it was sent. A large folder, once
  * `CODE_LINK_LIMITS.largeRecheck` has passed, whatever changed or was asked.
  * Otherwise a name asked about that it has no answer for, a file API write in
  * it or the viewed chat's turn end lists it at once, though not twice within
@@ -216,7 +217,10 @@ export function codeLinksConnection(connection: string, connected: boolean) {
 function due(scope: string, entry: string, listing: Listing, missing: boolean): "fresh" | "now" | number {
   const since = performance.now() - listing.at;
   const after = (wait: number) => (wait - since > 0 ? wait - since : "now");
-  if (listing.transient) return after(CODE_LINK_LIMITS.recheck);
+  // One that gave up after the connection came back (it was sent before)
+  // waits only the least time; any other, the recheck time.
+  if (listing.transient)
+    return after(listing.urgent !== urgent(scope) ? CODE_LINK_LIMITS.again : CODE_LINK_LIMITS.recheck);
   const urgentChange = missing || listing.touch !== touch(entry) || listing.urgent !== urgent(scope);
   const change = urgentChange || listing.epoch !== epoch(scope);
   if (!change) return "fresh";

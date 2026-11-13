@@ -223,6 +223,8 @@ export function Markdown(props: {
     );
   /** Where the pointer went down on a code link, and the selection then. */
   let pressed: { code: Element; mark: SelectionMark } | undefined;
+  /** The longest a click on a code link waits before it opens, in milliseconds. */
+  const CODE_LINK_WAIT = 400;
   /** A click's opening, waiting until no second click can follow. */
   let clicked: ReturnType<typeof setTimeout> | undefined;
   function callOff() {
@@ -233,7 +235,8 @@ export function Markdown(props: {
   /**
    * Opens the file a code link names, on a plain click or Enter. Enter opens
    * at once. A click opens once a double click could no longer follow (the
-   * system's double-click time), and any press meanwhile calls it off: a
+   * system's double-click time, but never later than `CODE_LINK_WAIT`, so a
+   * click never feels slow), and any press meanwhile calls it off: a
    * double or triple click selects the code's words, as in plain code, and
    * opens nothing, and a press elsewhere is not disturbed by the panel
    * opening under it. It opens only in the project and chat it was clicked in.
@@ -257,7 +260,7 @@ export function Markdown(props: {
       callOff();
       const still = `${app.state.connection?.id ?? ""}\n${app.state.selected ?? ""}` === where;
       if (still && !disposed && code.isConnected && codeLinkTarget(code)) openFile(file.path, file.line);
-    }, app.state.doubleClick);
+    }, Math.min(app.state.doubleClick, CODE_LINK_WAIT));
     window.addEventListener("pointerdown", callOff, true);
     return true;
   }

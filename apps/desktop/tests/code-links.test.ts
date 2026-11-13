@@ -302,6 +302,28 @@ test("a listing that gets no answer keeps the last answer; it is taken again aft
   assert.equal(listed.length, 4);
 });
 
+test("a listing sent before the connection dropped that gives up after it is back is listed again within the least time", async () => {
+  CODE_LINK_LIMITS.again = 0;
+  CODE_LINK_LIMITS.recheck = 60_000;
+  const signal = reply.signal;
+  const failing: Record<string, Error> = {};
+  const { list, listed, release, held } = project({ src: ["a.ts"] }, failing);
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await settle();
+  assert.equal(held.length, 1);
+  // The connection drops and comes back while the listing waits on the old one, which then fails.
+  codeLinksConnection("p", false);
+  codeLinksConnection("p", true);
+  failing.src = new Error("Error invoking remote method 'files': socket hang up");
+  held.splice(0).forEach((go) => go());
+  await settle();
+  delete failing.src;
+  await release();
+  // Listed again at once, not after the recheck time.
+  assert.deepEqual(listed, ["src", "src"]);
+  assert.equal(codeFileKnown("p", "src/a.ts", list, signal), true);
+});
+
 test("a listing due at once is not held back by a wait for a change that waits", async () => {
   CODE_LINK_LIMITS.again = 100;
   CODE_LINK_LIMITS.recheck = 3_000;
