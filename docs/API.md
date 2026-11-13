@@ -667,10 +667,10 @@ finish, with `metadata: {"unfinished": true}`; a turn that outlives a graceful
 shutdown's wait gets the same results before the shutdown marks it interrupted.
 So does a turn that ends on an error once its calls are stored (a database
 write that failed), before its notice, after stopping a delegated agent still
-at work for one of them; Stop while the model was still answering ends a call
+at work for one of them (one still waiting to start never starts); Stop while the model was still answering ends a call
 it made as Stop ends one it reaches before it begins (`operation cancelled`,
 `notRun`). No call is left drawn as running.
-Desktop and the TUI show such a call as one that did not finish, in a few words
+Desktop and the TUI show a call marked unfinished as one that did not finish, in a few words
 of their own, rather than its result's text, which is written for the model;
 the phone apps and Cloud web still show that text as a failed call. A request
 leaves out a second result for one call. A chat stored before then, or a fork

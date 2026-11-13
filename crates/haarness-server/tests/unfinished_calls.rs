@@ -441,9 +441,28 @@ fn batch_runtime_on(
     tools: &BatchTools,
     more: Vec<Arc<dyn Tool>>,
 ) -> AgentRuntime {
+    batch_runtime_with(
+        store,
+        provider,
+        patient,
+        tools,
+        more,
+        RuntimeConfig::default(),
+    )
+}
+
+/// A batch runtime over `store` from `config`, with `more` tools besides.
+fn batch_runtime_with(
+    store: Arc<dyn ThreadRepository>,
+    provider: Batch,
+    patient: Arc<Patient>,
+    tools: &BatchTools,
+    more: Vec<Arc<dyn Tool>>,
+    config: RuntimeConfig,
+) -> AgentRuntime {
     let mut config = RuntimeConfig {
         approval_mode: haarness_protocol::ApprovalMode::Review,
-        ..RuntimeConfig::default()
+        ..config
     };
     let stubborn = Arc::new(Stubborn {
         started: Arc::new(tokio::sync::Semaphore::new(0)),
@@ -1649,4 +1668,199 @@ async fn a_delegation_after_a_read_starts_its_agent_once() {
         agents, 1,
         "the delegation's agent was started more than once"
     );
+}
+
+/// A delegation still waiting for a place among the running agents when its
+/// turn fails never starts: its call already says it did not finish.
+#[tokio::test]
+async fn a_delegation_waiting_to_start_when_its_turn_fails_never_starts() {
+    let tools = BatchTools::default();
+    let gate = Arc::new(Gate {
+        open: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let patient = Arc::new(Patient {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let provider = Batch {
+        calls: vec!["gate", "task", "task"],
+        then: vec!["patient"],
+        ..Batch::default()
+    };
+    let mut config = RuntimeConfig::default();
+    // One agent at a time: the second delegation waits for the first.
+    config.execution.subagent_concurrency = 1;
+    let runtime = batch_runtime_with(
+        Arc::new(FailsFirstResult {
+            inner: SqliteStore::in_memory().unwrap(),
+            failed: AtomicBool::new(false),
+        }),
+        provider.clone(),
+        patient.clone(),
+        &tools,
+        vec![gate.clone() as Arc<dyn Tool>, Arc::new(Delegate)],
+        config,
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    // The first agent is at work; the second waits for its place.
+    tokio::time::timeout(Duration::from_secs(10), patient.started.acquire())
+        .await
+        .expect("the first agent works")
+        .unwrap()
+        .forget();
+    let links = |items: &[haarness_protocol::Item]| {
+        items
+            .iter()
+            .filter(|item| matches!(item.data, ItemData::TaskLink { .. }))
+            .count()
+    };
+    assert_eq!(links(&runtime.items(thread, None).await.unwrap()), 1);
+    gate.open.add_permits(1);
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Failed);
+    free(&runtime, thread, Duration::from_secs(10)).await;
+    // The first agent stopped and gave its place up; the second did not take it.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let items = runtime.items(thread, None).await.unwrap();
+    assert_eq!(links(&items), 1, "{items:#?}");
+    assert_eq!(
+        *provider.requests.lock().unwrap(),
+        2,
+        "no second agent asked"
+    );
+    let ended = results(&runtime, thread).await;
+    assert_eq!(ended.len(), 3, "{ended:?}");
+    assert!(
+        ended.iter().all(|(_, unfinished, _)| *unfinished),
+        "{ended:?}"
+    );
+}
+
+/// Hands work to an agent in the background; the agent waits for Stop.
+/// Every other request answers.
+struct DelegatesInBackground;
+
+#[async_trait]
+impl ModelProvider for DelegatesInBackground {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        Provider::default().info()
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let answered = matches!(
+            request.messages.last(),
+            Some(ProviderMessage::ToolResult { .. })
+        );
+        let agent = request.messages.iter().any(|message| {
+            matches!(message, ProviderMessage::Text { role, content }
+                if role == "user" && content.contains("work alone"))
+        });
+        let event = if request.tools.is_empty() || answered {
+            ProviderEvent::TextDelta("done".into())
+        } else if agent {
+            ProviderEvent::ToolCall {
+                call_id: "inner".into(),
+                name: "patient".into(),
+                arguments: json!({}),
+                provider_metadata: Value::Null,
+            }
+        } else {
+            ProviderEvent::ToolCall {
+                call_id: "call-0".into(),
+                name: "task".into(),
+                arguments: json!({"description": "alone", "prompt": "work alone", "background": true}),
+                provider_metadata: Value::Null,
+            }
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(event),
+            Ok(ProviderEvent::Finished {
+                reason: "done".into(),
+            }),
+        ])))
+    }
+}
+
+/// An agent at work in the background when the server shuts down ends with
+/// the shutdown's notice, not the words of a person's Stop.
+#[tokio::test]
+async fn a_background_agent_a_shutdown_stops_says_the_shutdown_stopped_it() {
+    let patient = Arc::new(Patient {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
+    for pattern in ["patient:*", "task:*"] {
+        config.base_rules.push(PermissionRule {
+            pattern: pattern.into(),
+            decision: PermissionDecision::Allow,
+        });
+    }
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(DelegatesInBackground) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(Calls(vec![
+            patient.clone() as Arc<dyn Tool>,
+            Arc::new(Delegate),
+        ])),
+        EventBus::new(256),
+        std::env::temp_dir(),
+        String::new(),
+        config,
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Completed);
+    tokio::time::timeout(Duration::from_secs(10), patient.started.acquire())
+        .await
+        .expect("the agent works in the background")
+        .unwrap()
+        .forget();
+    let child = runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|item| match item.data {
+            ItemData::TaskLink {
+                child_thread_id, ..
+            } => Some(child_thread_id),
+            _ => None,
+        })
+        .expect("the delegation's link");
+
+    runtime
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    free(&runtime, child, Duration::from_secs(10)).await;
+    let notices = runtime
+        .items(child, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            ItemData::Error { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].starts_with("Haarness stopped."), "{notices:?}");
 }

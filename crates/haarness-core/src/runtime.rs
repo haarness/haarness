@@ -8991,6 +8991,7 @@ impl AgentRuntime {
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(Vec::new()),
             instructions_in_context: crate::instructions::InContext::default(),
+            abandoned: Mutex::new(cancel.child_token()),
             cancel,
             workspace,
             runtime_workspace: self.workspace.clone(),
@@ -9497,6 +9498,11 @@ struct RunnerTask {
     command_started: AtomicBool,
     skill_rules: Mutex<Vec<PermissionRule>>,
     cancel: CancellationToken,
+    /// Cancelled when a run of this turn ends on an error and its open calls
+    /// are answered (see `end_open_calls`): a delegation of that run still
+    /// waiting to start (for a place among the running agents, say) then
+    /// does not. A retry of the turn gets a fresh one. A child of `cancel`.
+    abandoned: Mutex<CancellationToken>,
     /// Where this turn's tools work: the chat's own folder, or the project
     /// folder (`runtime_workspace`).
     workspace: PathBuf,
@@ -11328,6 +11334,10 @@ impl RunnerTask {
     /// since nothing waits for its answer any more. False when they could not
     /// all be answered.
     async fn end_open_calls(&self, error: &CoreError) -> bool {
+        // A delegation of this run still waiting to start does not start now;
+        // a retry's own get a fresh token.
+        let abandoned = std::mem::replace(&mut *self.abandoned.lock(), self.cancel.child_token());
+        abandoned.cancel();
         let items = match self.repository.list_items(self.thread.id, None).await {
             Ok(items) => items,
             Err(error) => {
@@ -15909,6 +15919,8 @@ impl RunnerTask {
         call_id: &str,
         arguments: &serde_json::Value,
     ) -> CoreResult<String> {
+        // Ends the waits before the agent starts when this run fails first.
+        let abandoned = self.abandoned.lock().clone();
         if self.depth >= self.config.execution.subagent_depth {
             return Err(CoreError::PermissionDenied(
                 "task depth limit reached; configure execution.subagent_depth to permit deeper delegation".into(),
@@ -16069,7 +16081,7 @@ impl RunnerTask {
         let admission_guard = loop {
             let guard = tokio::select! {
                 guard = admission_lock.lock() => guard,
-                () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                () = abandoned.cancelled() => return Err(CoreError::Cancelled),
             };
             let existing = self
                 .background_tasks
@@ -16163,7 +16175,7 @@ impl RunnerTask {
             drop(guard);
             tokio::select! {
                 () = existing.wait_delivery() => {},
-                () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                () = abandoned.cancelled() => return Err(CoreError::Cancelled),
             }
         };
         // Separate pools per depth prevent parents holding every slot while
@@ -16176,7 +16188,7 @@ impl RunnerTask {
             .clone();
         let permit = tokio::select! {
             permit = slots.acquire_owned() => permit.map_err(|_| CoreError::Cancelled)?,
-            () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+            () = abandoned.cancelled() => return Err(CoreError::Cancelled),
         };
         self.events.publish_scoped(
             "thread.updated",
@@ -16294,6 +16306,7 @@ impl RunnerTask {
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(self.skill_rules.lock().clone()),
             instructions_in_context: crate::instructions::InContext::default(),
+            abandoned: Mutex::new(cancel.child_token()),
             cancel: cancel.clone(),
             // The child's folder is its parent's.
             workspace: self.workspace.clone(),
@@ -16398,6 +16411,11 @@ impl RunnerTask {
             delivery_done: Notify::new(),
         });
         self.background_tasks.insert(child.id, Arc::clone(&task));
+        // The run failed while this agent was being set up, after its stop
+        // of the agents it no longer waits for: this one stops at once too.
+        if abandoned.is_cancelled() {
+            task.cancel_with_parent();
+        }
         drop(admission_guard);
 
         // Child threads are public session IDs and accept queued input through
