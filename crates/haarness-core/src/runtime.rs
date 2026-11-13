@@ -10585,7 +10585,7 @@ impl PendingPermission {
                 }
                 rules.iter().any(|rule| {
                     rule.decision == PermissionDecision::Allow
-                        && crate::permissions::wildcard_match(&rule.pattern, &operation)
+                        && crate::permissions::rule_covers(&rule.pattern, &operation)
                 })
             })
     }
@@ -19853,7 +19853,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             plans.push(AskPlan {
                 permission: "edit".into(),
                 patterns,
-                always: vec![file],
+                always: vec![crate::permissions::literal_path(&file)],
                 external_paths: Vec::new(),
                 resolved,
                 shell: None,
@@ -19937,11 +19937,13 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                     }
                 }
             }
-            let external_patterns = asked;
             plans.push(AskPlan {
                 permission: "external_directory".into(),
-                patterns: external_patterns.clone(),
-                always: external_patterns,
+                always: asked
+                    .iter()
+                    .map(|pattern| remembered_outside(pattern))
+                    .collect(),
+                patterns: asked,
                 external_paths,
                 resolved: Vec::new(),
                 shell: None,
@@ -19996,7 +19998,10 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         }
         plans.push(AskPlan {
             permission: "external_directory".into(),
-            always: patterns.clone(),
+            always: patterns
+                .iter()
+                .map(|pattern| remembered_outside(pattern))
+                .collect(),
             patterns,
             external_paths,
             resolved,
@@ -20087,9 +20092,13 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         patterns.push(pattern);
     }
     // Reads generalize only to the exact path (an approved `.env` read must
-    // not open every secret); mutations generalize wide.
+    // not open every secret), a `*` or `?` in its name included; mutations
+    // generalize wide.
     let always = if name == "read" {
-        patterns.clone()
+        patterns
+            .iter()
+            .map(|pattern| crate::permissions::literal_path(pattern))
+            .collect()
     } else {
         vec!["*".into()]
     };
@@ -21530,6 +21539,135 @@ mod shell_reading_tests {
         std::fs::remove_dir_all(&made).unwrap();
     }
 
+    // POSIX shell text with paths of this system: Windows runs commands in
+    // cmd.exe, and no Windows name holds a `*` or `?`.
+    #[cfg(unix)]
+    #[test]
+    fn always_for_a_name_that_holds_a_star_or_question_mark_names_it_alone() {
+        use PermissionDecision::{Allow, Ask};
+        let made = std::env::temp_dir().join(format!("haarness-literal-{}", uuid::Uuid::now_v7()));
+        for folder in [
+            "project/.haarness",
+            "out/a*",
+            "out/ab",
+            "out/x?y",
+            "out/xzy",
+        ] {
+            std::fs::create_dir_all(made.join(folder)).unwrap();
+        }
+        for file in [
+            "out/a*/f",
+            "out/ab/f",
+            "out/x?y/f",
+            "out/xzy/f",
+            "project/*.env",
+        ] {
+            std::fs::write(made.join(file), "x\n").unwrap();
+        }
+        let out = crate::paths::canonicalize(made.join("out")).unwrap();
+        let project = crate::paths::canonicalize(made.join("project")).unwrap();
+        let path = |name: &str| out.join(name).display().to_string();
+        let plans =
+            |name: &str, arguments: serde_json::Value| ask_plans(name, &arguments, &project);
+        let outside = |name: &str, arguments: serde_json::Value| {
+            plans(name, arguments)
+                .into_iter()
+                .find(|plan| plan.permission == "external_directory")
+                .unwrap()
+        };
+        let bash = |command: String| outside("bash", json!({ "command": command }));
+        // The card asks about the folder as it is named; Always keeps it with
+        // its `*` escaped, from the shell and from every file tool.
+        let starred = path("a*");
+        for plan in [
+            bash(format!("cat '{starred}/f'")),
+            bash(format!("echo x > \"{starred}/g\"")),
+            outside("read", json!({ "path": format!("{starred}/f") })),
+            outside(
+                "write",
+                json!({ "path": format!("{starred}/g"), "content": "x" }),
+            ),
+            outside("list", json!({ "path": starred })),
+        ] {
+            assert_eq!(plan.patterns, vec![format!("{starred}/*")]);
+            assert_eq!(
+                plan.always_rules(),
+                vec![format!(r"external_directory:{}/a\*/*", out.display())]
+            );
+        }
+        let verdict = |rules: &[String], plan: &AskPlan| {
+            let mut engine = PermissionEngine::build_defaults();
+            for rule in rules {
+                engine.add_grant(PermissionRule {
+                    pattern: rule.clone(),
+                    decision: Allow,
+                });
+            }
+            plan.evaluate(&engine, &plan.patterns[0]).decision
+        };
+        let always = bash(format!("cat '{starred}/f'")).always_rules();
+        assert_eq!(verdict(&always, &bash(format!("cat '{starred}/f'"))), Allow);
+        for plan in [
+            bash(format!("cat {}", path("ab/f"))),
+            outside("read", json!({ "path": path("ab/f") })),
+        ] {
+            assert_eq!(verdict(&always, &plan), Ask, "{:?}", plan.patterns);
+        }
+        // A card about that folder waiting meanwhile is released by the
+        // answer; one about `ab` waits for its own.
+        let saved: Vec<PermissionRule> = always
+            .iter()
+            .map(|pattern| PermissionRule {
+                pattern: pattern.clone(),
+                decision: Allow,
+            })
+            .collect();
+        assert!(waiting(&bash(format!("cat '{starred}/g'"))).covered_by(&saved));
+        assert!(!waiting(&bash(format!("cat {}", path("ab/f")))).covered_by(&saved));
+        // So does a `?`.
+        let marked = bash(format!("cat '{}'", path("x?y/f")));
+        assert_eq!(
+            marked.always_rules(),
+            vec![format!(r"external_directory:{}/x\?y/*", out.display())]
+        );
+        assert_eq!(
+            verdict(
+                &marked.always_rules(),
+                &bash(format!("cat {}", path("xzy/f")))
+            ),
+            Ask
+        );
+        // A read inside the project remembers the file it read and no other
+        // file its name matches.
+        let read = plans("read", json!({ "path": "*.env" }))
+            .into_iter()
+            .find(|plan| plan.permission == "read")
+            .unwrap();
+        assert_eq!(read.always_rules(), vec![r"read:\*.env".to_owned()]);
+        let mut engine = PermissionEngine::build_defaults();
+        engine.set_workspace(&project);
+        for rule in read.always_rules() {
+            engine.add_grant(PermissionRule {
+                pattern: rule,
+                decision: Allow,
+            });
+        }
+        assert_eq!(engine.evaluate("read:*.env"), Allow);
+        for other in ["read:.env", "read:prod.env", "read:config/.env"] {
+            assert_eq!(engine.evaluate(other), Ask, "{other}");
+        }
+        // The workflow file an agent creates is named alone too.
+        let created = plans("workflow", json!({ "action": "create", "name": "a*" }))
+            .into_iter()
+            .find(|plan| plan.permission == "edit")
+            .unwrap();
+        assert_eq!(
+            created.always_rules(),
+            vec![r"edit:.haarness/workflows/a\*.ts".to_owned()]
+        );
+        std::fs::remove_dir_all(&made).unwrap();
+    }
+
     #[test]
     fn a_command_a_limit_stopped_reading_is_refused_by_a_deny_and_asked_by_an_ask() {
         use PermissionDecision::{Allow, Ask, Deny};
@@ -21885,6 +22023,18 @@ fn outside_pattern(workspace: &Path, folder: &str, named: Option<(&Path, Named)>
         }
         Some((_, Named::Any)) => folder.to_owned(),
         Some((_, Named::Folder)) | None => alone(),
+    }
+}
+
+/// The rule Always keeps for an `external_directory` pattern an ask names
+/// (see [`outside_pattern`]): a folder and all in it (`/tmp/build/*`), the
+/// folder alone (`/home/me/`) or a file. A `*` or `?` in a name stands for
+/// itself there (see [`crate::permissions::literal_path`]), so the rule
+/// covers what the card showed and no other folder whose name it matches.
+fn remembered_outside(pattern: &str) -> String {
+    match pattern.strip_suffix("/*") {
+        Some(folder) => format!("{}/*", crate::permissions::literal_path(folder)),
+        None => crate::permissions::literal_path(pattern),
     }
 }
 

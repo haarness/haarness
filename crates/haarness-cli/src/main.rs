@@ -9017,9 +9017,11 @@ fn compose_runtime_sources(
         haarness_core::PermissionRule {
             pattern: format!(
                 "external_directory:{}/tool-output/*",
-                dunce::canonicalize(&paths.data)
-                    .unwrap_or_else(|_| paths.data.clone())
-                    .display()
+                haarness_core::literal_path(
+                    &dunce::canonicalize(&paths.data)
+                        .unwrap_or_else(|_| paths.data.clone())
+                        .to_string_lossy()
+                )
             ),
             decision: haarness_core::PermissionDecision::Allow,
         },
