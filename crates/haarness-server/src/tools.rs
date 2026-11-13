@@ -3997,13 +3997,13 @@ impl Tool for BuiltinTool {
                 // A file replaced keeps its byte order mark and UTF-16, as
                 // the editor that made it saves it; a new one is written as
                 // given.
-                let spelling = tokio::fs::read(&path)
+                let spelling = text::read_regular(&path)
                     .await
                     .ok()
                     .and_then(|bytes| text::decode(&bytes).map(|(_, spelling)| spelling))
                     .unwrap_or_default()
                     .for_new_text(new_contents);
-                tokio::fs::write(&path, spelling.encode(new_contents))
+                text::write_regular(&path, spelling.encode(new_contents))
                     .await
                     .map_err(|error| io_error(requested_path, &path, &error))?;
                 Ok(output_with_diffs(
@@ -4065,7 +4065,7 @@ impl Tool for BuiltinTool {
                         return Err(CoreError::Tool(not_one_match(requested_path, count, None)));
                     }
                 };
-                tokio::fs::write(&path, spelling.encode(&updated))
+                text::write_regular(&path, spelling.encode(&updated))
                     .await
                     .map_err(|error| io_error(requested_path, &path, &error))?;
                 Ok(output_with_diffs(
@@ -4135,7 +4135,7 @@ impl Tool for BuiltinTool {
                         updated.replacen(spelled_before, spelled_after, 1)
                     };
                 }
-                tokio::fs::write(&path, spelling.encode(&updated))
+                text::write_regular(&path, spelling.encode(&updated))
                     .await
                     .map_err(|error| io_error(requested_path, &path, &error))?;
                 Ok(output_with_diffs(
@@ -4808,7 +4808,7 @@ async fn write_patch(steps: Vec<(String, PatchStep)>) -> CoreResult<()> {
                 file,
                 path,
                 content,
-            } => write_file(&path, &content)
+            } => write_file(&path, content)
                 .await
                 .map_err(|error| failed(format!("could not write {file}: {error}")))?,
             PatchStep::Remove { file, entry } => tokio::fs::remove_file(&entry)
@@ -4827,7 +4827,7 @@ async fn write_patch(steps: Vec<(String, PatchStep)>) -> CoreResult<()> {
                         "{file}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
                     ))));
                 }
-                write_file(&destination, &content)
+                write_file(&destination, content)
                     .await
                     .map_err(|error| failed(format!("could not write {target}: {error}")))?;
                 tokio::fs::remove_file(&entry).await.map_err(|error| {
@@ -4843,11 +4843,11 @@ async fn write_patch(steps: Vec<(String, PatchStep)>) -> CoreResult<()> {
 }
 
 /// Write `content` to `path`, creating the folders it needs.
-async fn write_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
+async fn write_file(path: &Path, content: Vec<u8>) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(path, content).await
+    text::write_regular(path, content).await
 }
 
 /// A patch that failed before writing, saying so when it had other
@@ -4868,6 +4868,9 @@ fn unchanged(error: CoreError, several: bool) -> CoreError {
 /// that say what to do: a path that is not there names its missing folder
 /// or, when only the file is missing, names like it in its folder.
 pub(crate) fn io_error(named: &str, path: &Path, error: &std::io::Error) -> CoreError {
+    if matches!(error.get_ref(), Some(inner) if inner.is::<text::NotRegular>()) {
+        return text::not_regular(named);
+    }
     match error.kind() {
         std::io::ErrorKind::NotFound => CoreError::Tool(missing_path(named, path)),
         std::io::ErrorKind::PermissionDenied => CoreError::Tool(format!(
@@ -6027,7 +6030,7 @@ async fn existing_diff_body(path: &Path) -> ExistingDiffBody {
     {
         return ExistingDiffBody::Opaque { binary: false };
     }
-    match tokio::fs::read(path).await {
+    match text::read_regular(path).await {
         // As the text tools read it: no byte order mark, UTF-16 as its text.
         Ok(bytes) => text::decode(&bytes)
             .map_or(ExistingDiffBody::Opaque { binary: true }, |(text, _)| {
@@ -10285,10 +10288,7 @@ export default workflow({
     /// after that is let go by opening the pipe's other end, so a failing
     /// test leaves no thread blocked in an open.
     #[cfg(unix)]
-    async fn answered_at_once(
-        pipe: &Path,
-        call: impl std::future::Future<Output = CoreResult<ToolOutput>>,
-    ) -> CoreResult<ToolOutput> {
+    async fn answered_at_once<T>(pipe: &Path, call: impl std::future::Future<Output = T>) -> T {
         use std::os::unix::fs::OpenOptionsExt as _;
         match tokio::time::timeout(Duration::from_secs(1), call).await {
             Ok(answer) => answer,
@@ -10302,6 +10302,44 @@ export default workflow({
                 panic!("the call still waited on {} after a second", pipe.display());
             }
         }
+    }
+
+    /// A pipe put in a file's place after the look that refuses one is
+    /// refused when it is opened, read or written, instead of waited on; a
+    /// regular file and a folder are met as before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_open_file_is_checked_too() {
+        let root = std::env::temp_dir().join(format!("haarness-open-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pipe = root.join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&pipe)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let read = answered_at_once(&pipe, text::read_regular(&pipe))
+            .await
+            .unwrap_err();
+        let written = answered_at_once(&pipe, text::write_regular(&pipe, b"hi\n".to_vec()))
+            .await
+            .unwrap_err();
+        for error in [read, written] {
+            assert_eq!(
+                io_error("pipe", &pipe, &error).to_string(),
+                "tool error: pipe is not a regular file"
+            );
+        }
+        let file = root.join("note.txt");
+        text::write_regular(&file, b"one\n".to_vec()).await.unwrap();
+        text::write_regular(&file, b"two\n".to_vec()).await.unwrap();
+        assert_eq!(text::read_regular(&file).await.unwrap(), b"two\n");
+        let folder = text::read_regular(&root).await.unwrap_err();
+        let before: std::io::Error = tokio::fs::read(&root).await.unwrap_err();
+        assert_eq!(folder.kind(), before.kind());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(unix)]

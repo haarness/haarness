@@ -374,8 +374,79 @@ pub(super) fn read_text(
 }
 
 /// The refusal of a pipe, socket or device, which `shown` names.
-fn not_regular(shown: impl std::fmt::Display) -> CoreError {
+pub(super) fn not_regular(shown: impl std::fmt::Display) -> CoreError {
     CoreError::Tool(format!("{shown} is not a regular file"))
+}
+
+/// What a path held once it was opened that is no file to read or write: a
+/// pipe or a device put in a file's place after [`refuse_special`] looked.
+/// [`super::io_error`] words it as [`not_regular`] does.
+#[derive(Debug)]
+pub(super) struct NotRegular;
+
+impl std::fmt::Display for NotRegular {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("not a regular file")
+    }
+}
+
+impl std::error::Error for NotRegular {}
+
+/// Opens `path` without waiting for a pipe's other end, then refuses what
+/// the open file is if that is neither a regular file nor a folder (a folder
+/// fails as it always did). On Unix a pipe opened to be written with
+/// nothing reading it fails at once, and is refused the same way.
+fn open_regular(path: &Path, options: &mut std::fs::OpenOptions) -> io::Result<(File, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(nix::libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| {
+        #[cfg(unix)]
+        if error.raw_os_error() == Some(nix::libc::ENXIO) {
+            return io::Error::other(NotRegular);
+        }
+        error
+    })?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(io::Error::other(NotRegular));
+    }
+    Ok((file, metadata.len()))
+}
+
+/// A file's bytes, as `tokio::fs::read` gives them, but checked on the open
+/// file (see [`open_regular`]).
+pub(super) async fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let (mut file, length) = open_regular(&path, std::fs::OpenOptions::new().read(true))?;
+        let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// Writes `contents` as `tokio::fs::write` does, made or replaced whole, but
+/// checked on the open file (see [`open_regular`]).
+pub(super) async fn write_regular(path: &Path, contents: Vec<u8>) -> io::Result<()> {
+    use std::io::Write as _;
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let (mut file, _) = open_regular(
+            &path,
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true),
+        )?;
+        file.write_all(&contents)
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 /// Refuses a pipe, socket or device at `path` (or a link to one) before
@@ -402,7 +473,7 @@ pub(super) async fn read_text_file(
     tool: &str,
 ) -> CoreResult<(String, Spelling)> {
     refuse_special(path, named).await?;
-    let bytes = tokio::fs::read(path)
+    let bytes = read_regular(path)
         .await
         .map_err(|error| super::io_error(named, path, &error))?;
     match decode(&bytes) {
