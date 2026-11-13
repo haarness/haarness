@@ -5321,14 +5321,12 @@ impl AgentRuntime {
         }
         let turn_id = items.iter().rev().find_map(|item| item.turn_id);
         // What the next turn would tell the model first; only a cold
-        // question, which has no prepared turn to reuse, adds it.
-        // Side questions can't load tools, so they say nothing of those
-        // deferred.
+        // question, which has no prepared turn to reuse, adds it. Side
+        // questions can't load tools, so they say nothing of those deferred.
         let reminder = crate::turn_context::reminder(
             &items,
             crate::turn_context::local_date(thread.created_at),
             crate::turn_context::today(),
-            None,
             &self.memory_context.read(),
             None,
         );
@@ -12082,23 +12080,25 @@ impl RunnerTask {
                     () = starting => {}
                 }
             }
-            // A changed date, set of deferred tools or memory index and this
-            // prompt's hook context reach the model in a hidden message stored
+            // A changed set of deferred tools, date or memory index and this
+            // prompt's hook context reach the model in hidden messages stored
             // with the turn, so the system prompt, the tools and every earlier
-            // message stay byte-identical.
+            // message stay byte-identical. The deferred tools come first, in
+            // a message of their own that goes before the prompt (see
+            // `provider_messages_with_origins`).
             let deferred = self
                 .deferred_sources(agent, provider_id, &model, &provider_models)
                 .await?;
             let items = self.repository.list_items(self.thread.id, None).await?;
+            let tools = crate::turn_context::deferred_tools_reminder(&items, &deferred);
             let reminder = crate::turn_context::reminder(
                 &items,
                 crate::turn_context::local_date(self.thread.created_at),
                 crate::turn_context::today(),
-                Some(&deferred),
                 &self.memory_context.read(),
                 prompt_context.as_deref(),
             );
-            if let Some(text) = reminder {
+            for text in tools.into_iter().chain(reminder) {
                 self.publish_item(ItemData::UserMessage {
                     text,
                     attachments: Vec::new(),
@@ -18181,8 +18181,29 @@ fn provider_messages_with_origins(
                     origins.push(origin);
                 }
             }
-            messages.push(message);
-            origins.push(origin);
+            // The deferred tools a turn names are stored after the message
+            // that opened it, and go before it: the person's words stay the
+            // last of the turn's opening, as they were written. Read from
+            // what is stored, so every request (after a restart too) sends
+            // the same order.
+            let before_opening = matches!(&message,
+                ProviderMessage::Text { role, content }
+                    if role == "user" && crate::turn_context::is_deferred_tools_reminder(content))
+                && origins.last().is_some_and(|last| last.turn == origin.turn)
+                && messages.last().is_some_and(|last| match last {
+                    ProviderMessage::Text { role, content } => {
+                        role == "user" && !crate::turn_context::is_turn_reminder(content)
+                    }
+                    ProviderMessage::Media { role, .. } => role == "user",
+                    _ => false,
+                });
+            if before_opening {
+                messages.insert(messages.len() - 1, message);
+                origins.insert(origins.len() - 1, origin);
+            } else {
+                messages.push(message);
+                origins.push(origin);
+            }
         }
     }
     for (owed, origin) in owed {
@@ -24289,6 +24310,74 @@ mod tests {
             data,
             created_at: Utc::now(),
         }
+    }
+
+    /// The deferred tools a turn names go to the model before the message
+    /// that opened the turn, which stays the last of it; anywhere else they
+    /// stay where they were stored.
+    #[test]
+    fn the_deferred_tools_go_before_the_prompt_that_opened_their_turn() {
+        let tools =
+            crate::turn_context::deferred_tools_reminder(&[], "- docs (MCP server): 2 tools")
+                .unwrap();
+        let date = "<system-reminder>\nToday's date is now 2026-11-14.\n</system-reminder>";
+        let user = |sequence, turn: Option<TurnId>, text: &str, synthetic| Item {
+            turn_id: turn,
+            ..item(
+                sequence,
+                ItemData::UserMessage {
+                    text: text.into(),
+                    attachments: Vec::new(),
+                    queued: false,
+                    synthetic,
+                    command_line: None,
+                    hook: None,
+                },
+            )
+        };
+        let first = Some(TurnId::new());
+        let second = Some(TurnId::new());
+        let items = vec![
+            user(1, first, "PROMPT one", false),
+            user(2, first, &tools, true),
+            user(3, first, date, true),
+            Item {
+                turn_id: first,
+                ..item(
+                    4,
+                    ItemData::AssistantMessage {
+                        text: "answer".into(),
+                    },
+                )
+            },
+            // Stored after anything but its turn's opening message: left
+            // where it is.
+            user(5, second, &tools, true),
+            user(6, second, "PROMPT two", false),
+        ];
+        let texts = |messages: Vec<ProviderMessage>| {
+            messages
+                .into_iter()
+                .map(|message| match message {
+                    ProviderMessage::Text { content, .. } => content,
+                    other => panic!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let sent = texts(provider_messages(items.clone()));
+        assert_eq!(
+            sent,
+            [
+                tools.as_str(),
+                "PROMPT one",
+                date,
+                "answer",
+                tools.as_str(),
+                "PROMPT two"
+            ]
+        );
+        // The same items give the same request, as after a restart.
+        assert_eq!(texts(provider_messages(items)), sent);
     }
 
     #[test]

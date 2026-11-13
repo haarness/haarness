@@ -137,8 +137,20 @@ def sparse_pdf(path, size):
         handle.truncate(size)
 
 
+def opening(body):
+    """Where the person's first message sits in a request: a hidden context message (the tools
+    lazy loading defers) can go before it."""
+    for index, message in enumerate(body['messages']):
+        content = message['content']
+        text = content if isinstance(content, str) else ' '.join(block.get('text', '') for block in content)
+        if message['role'] == 'user' and not text.startswith('<system-reminder>'):
+            return index
+    return 0
+
+
 def first_text(body):
-    content = body['messages'][0]['content']
+    """The person's first message in a request."""
+    content = body['messages'][opening(body)]['content']
     return content if isinstance(content, str) else ' '.join(block.get('text', '') for block in content)
 
 
@@ -271,7 +283,7 @@ try:
     assert state['status'] == 'completed', state
     assert len(sent) == 2, f'expected refusal then one retry, saw {len(sent)} requests'
     # Noise does not fit 3.75 MB as a PNG even at 2000 pixels, so it became a JPEG.
-    assert image_blocks(sent[0]) == [('messages.0.content.1', 'image/jpeg')], image_blocks(sent[0])
+    assert image_blocks(sent[0]) == [(f'messages.{opening(sent[0])}.content.1', 'image/jpeg')], image_blocks(sent[0])
     assert image_blocks(sent[1]) == [], 'the retry still carried the image'
     items = api(f'/threads/{thread}/items')
     stored = next(item['data']['attachments'][0] for item in items if item['data']['type'] == 'user_message')
@@ -283,7 +295,7 @@ try:
     assert len(omitted) == 1 and omitted[0]['names'] == ['retina.png'] and not omitted[0].get('guessed'), omitted
     assert 'image exceeds 5 MB maximum' in omitted[0]['reason'], omitted
     assert not any(item['data']['type'] == 'error' for item in items), 'turn reported an error'
-    note = json.dumps(sent[1]['messages'][0])
+    note = json.dumps(sent[1]['messages'][opening(sent[1])])
     assert '[Image retina.png omitted' in note, note
     results.append({'check': 'refused image left out, one retry, turn completes',
                     'stored': stored[:30] + '…', 'storedBytes': len(encoded), 'omitted': omitted[0]})
@@ -300,7 +312,8 @@ try:
     connection = connect()
     state, sent = turn(thread, 'Still with me after the restart?')
     assert state['status'] == 'completed' and len(sent) == 1 and image_blocks(sent[0]) == [], (state, len(sent))
-    replayed = json.dumps(clean(sent[0]['messages'][:3]), sort_keys=True)
+    # The request before the restart, whatever number of messages it held, opens this one.
+    replayed = json.dumps(clean(sent[0]['messages'][:len(json.loads(before_restart))]), sort_keys=True)
     assert replayed == before_restart, 'replayed history changed after restart'
     results.append({'check': 'next turn and after restart: no image, identical prompt prefix'})
     print('PASS turn 3: restart keeps the omission and the prompt bytes', flush=True)
