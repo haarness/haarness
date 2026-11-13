@@ -13730,11 +13730,13 @@ impl RunnerTask {
             offer.context_window,
             deferring,
         );
-        // Those offered only on a turn whose words ask for them come and go
+        // Those on only because this prompt's words ask for them come and go
         // turn by turn: named, they would have the list told again as often.
+        // Those a turn has whatever it says (memory tools while the project
+        // has saved memory, every tool in Ultracode) are named.
         selection
             .optional
-            .retain(|name| !offered_by_the_prompt(name));
+            .retain(|name| self.tool_enabled_for(name, ""));
         Ok(crate::tool_catalog::deferred_sources(&selection, |tool| {
             self.tools.tool_server(tool)
         }))
@@ -13909,8 +13911,13 @@ impl RunnerTask {
     }
 
     fn tool_enabled(&self, name: &str) -> bool {
+        self.tool_enabled_for(name, &self.request.text)
+    }
+
+    /// [`Self::tool_enabled`] for a turn whose prompt is `text`.
+    fn tool_enabled_for(&self, name: &str, text: &str) -> bool {
         // Following and stopping commands goes with running them.
-        if matches!(name, "bash_output" | "bash_stop") && !self.tool_enabled("bash") {
+        if matches!(name, "bash_output" | "bash_stop") && !self.tool_enabled_for("bash", text) {
             return false;
         }
         // A published chat's viewers see its transcript: this Mac's screen stays out of it.
@@ -13953,7 +13960,7 @@ impl RunnerTask {
                 self.request.tools.as_ref(),
                 self.turn.ultracode,
                 self.depth,
-                &self.request.text,
+                text,
             );
         }
         if is_intent_gated_tool(name) {
@@ -13973,7 +13980,7 @@ impl RunnerTask {
                 self.request.tools.as_ref(),
                 self.turn.ultracode,
                 self.depth,
-                &self.request.text,
+                text,
                 name,
             );
         }
@@ -16844,13 +16851,6 @@ fn detects_workflow_keyword(text: &str) -> bool {
             !previous.is_some_and(identifier) && !next.is_some_and(identifier)
         })
     })
-}
-
-/// Whether a turn is offered `name` only when its prompt's words (or
-/// Ultracode, or a turn's own tool settings) ask for it: `workflow`, and the
-/// administration, memory and session tools [`is_intent_gated_tool`] names.
-fn offered_by_the_prompt(name: &str) -> bool {
-    name == "workflow" || is_intent_gated_tool(name)
 }
 
 fn is_intent_gated_tool(name: &str) -> bool {

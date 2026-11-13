@@ -811,3 +811,85 @@ async fn the_deferred_tools_are_told_once_and_the_next_request_keeps_the_prefix(
         serde_json::to_string(&requests[0].messages).unwrap()
     );
 }
+
+/// Tools a turn has whatever its prompt says are named in the reminder: the
+/// memory tools of a project with saved memory. A tool on only because the
+/// prompt's words ask for it (`workflow`) is not, and changes nothing.
+#[tokio::test]
+async fn tools_every_turn_has_are_told_and_those_the_words_switch_on_are_not() {
+    let provider = Arc::new(Probe::default());
+    let tools = Arc::new(Registry(
+        [
+            "read",
+            "memory_read",
+            "memory_list",
+            "workflow",
+            "mcp__docs__search",
+        ]
+        .into_iter()
+        .map(|name| {
+            Arc::new(HeldTool {
+                entered: CancellationToken::new(),
+                release: CancellationToken::new(),
+                writes: Arc::new(AtomicUsize::new(0)),
+                name,
+            }) as Arc<dyn Tool>
+        })
+        .collect(),
+    ));
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            provider.clone() as Arc<dyn ModelProvider>
+        ])),
+        tools,
+        EventBus::new(64),
+        PathBuf::from("."),
+        String::new(),
+        RuntimeConfig {
+            lazy_tools: LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            ..RuntimeConfig::default()
+        },
+    );
+    runtime.set_memory_context("- note [project]: a saved note".into());
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("parity".into()),
+            model: Some("fixture".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for text in ["First turn", "Run the release workflow", "Third turn"] {
+        let request = StartTurnRequest {
+            text: text.into(),
+            ..request()
+        };
+        let turn = runtime.start_turn(thread.id, request).await.unwrap();
+        done(&runtime, turn.id).await;
+    }
+    let told = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            haarness_protocol::ItemData::UserMessage {
+                text,
+                synthetic: true,
+                ..
+            } => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0].contains("\n- docs (MCP server): 1 tool\n- memory: 2 tools\n</system-reminder>"),
+        "{}",
+        told[0]
+    );
+    assert!(!told[0].contains("automation"), "{}", told[0]);
+}
