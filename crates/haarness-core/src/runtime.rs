@@ -309,6 +309,15 @@ that is done.";
 /// always blocks cannot hold a turn forever.
 const STOP_HOOK_CONTINUATIONS: u32 = 8;
 
+/// How long a call's tool may go on once its turn is stopped before the
+/// call ends without it. A tool that never looks at the stop (an open of a
+/// pipe nothing writes to, a library call with no way to cancel it) would
+/// otherwise keep the turn, and with it the chat, busy until Haarness
+/// restarts. A second past the time a command's processes get to end once
+/// Stop has signalled them.
+const STOPPED_TOOL_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(crate::background_commands::STOP_SETTLE.as_secs() + 1);
+
 /// How the stored error of a turn that could not start begins; the error
 /// follows.
 const LAUNCH_FAILED: &str = "turn launch failed: ";
@@ -14766,26 +14775,26 @@ impl RunnerTask {
                 .map(plain_tool_output)
                 .map_err(|error| CoreError::Storage(error.to_string()))
         } else {
-            tool.expect("non-internal tool resolved above")
-                .execute(
-                    executed,
-                    ToolContext {
-                        execution,
-                        thread_id: self.thread.id,
-                        turn_id: self.turn.id,
-                        workspace: self.workspace.clone(),
-                        authorized_external_paths,
-                        cancel: self.cancel.clone(),
-                        invoker: Some(Arc::new(TurnToolInvoker {
-                            runner: Arc::clone(self),
-                            agent: agent.to_owned(),
-                            parent_call_id: call_id.to_owned(),
-                            sequence: std::sync::atomic::AtomicUsize::new(0),
-                            snippets_ask: false,
-                        })),
-                    },
-                )
-                .await
+            let tool = tool.expect("non-internal tool resolved above");
+            let running = tool.execute(
+                executed,
+                ToolContext {
+                    execution,
+                    thread_id: self.thread.id,
+                    turn_id: self.turn.id,
+                    workspace: self.workspace.clone(),
+                    authorized_external_paths,
+                    cancel: self.cancel.clone(),
+                    invoker: Some(Arc::new(TurnToolInvoker {
+                        runner: Arc::clone(self),
+                        agent: agent.to_owned(),
+                        parent_call_id: call_id.to_owned(),
+                        sequence: std::sync::atomic::AtomicUsize::new(0),
+                        snippets_ask: false,
+                    })),
+                },
+            );
+            self.until_stopped_for_good(name, call_id, running).await
         };
         drop(execution_authority);
         tracing::debug!(
@@ -14834,6 +14843,46 @@ impl RunnerTask {
             append_post_tool_hooks(&mut output.text, decision);
         }
         Ok(output)
+    }
+
+    /// What the tool `running` call `call_id` answers, unless the turn is
+    /// stopped and the tool is still at work [`STOPPED_TOOL_WAIT`] later:
+    /// then the call ends as stopped without it, so Stop always frees the
+    /// chat for its next message. Tools that end their work on a stop
+    /// (commands, MCP calls, computer use) finish well within that. What the
+    /// tool was doing is dropped; a thread it holds in a blocking call stays
+    /// there, but nothing waits for it any more.
+    async fn until_stopped_for_good(
+        &self,
+        name: &str,
+        call_id: &str,
+        running: impl std::future::Future<Output = CoreResult<ToolOutput>>,
+    ) -> CoreResult<ToolOutput> {
+        let given_up = async {
+            self.cancel.cancelled().await;
+            // A server shutdown ends the calls of a turn that outlives its
+            // wait itself, and the server goes away: nothing more is done
+            // here.
+            if self.runtime_stop_reason(&CoreError::Cancelled).is_some() {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(STOPPED_TOOL_WAIT).await;
+        };
+        tokio::select! {
+            biased;
+            result = running => result,
+            () = given_up => {
+                warn!(
+                    thread = %self.thread.id,
+                    turn = %self.turn.id,
+                    tool = name,
+                    call_id,
+                    waited_ms = u64::try_from(STOPPED_TOOL_WAIT.as_millis()).unwrap_or(u64::MAX),
+                    "a tool went on after its turn was stopped; its call ends without it"
+                );
+                Err(CoreError::Cancelled)
+            }
+        }
     }
 
     /// A call whose tool ran and failed runs `PostToolUseFailure` hooks, as

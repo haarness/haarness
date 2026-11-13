@@ -1,5 +1,5 @@
-//! Calls a shutdown cut off, or a failed turn left, end with a result, so
-//! the chat goes on.
+//! Calls a shutdown cut off, or a failed turn left, end with a result, and
+//! a tool that never stops does not keep its chat: the chat goes on.
 
 use std::{
     sync::{
@@ -1210,4 +1210,173 @@ async fn a_call_made_before_a_stop_mid_answer_is_ended() {
         .await
         .unwrap();
     assert_eq!(settled(&runtime, next.id).await, TurnStatus::Completed);
+}
+
+/// A read that never looks at Stop no longer keeps its chat: once it has
+/// gone on past the time a stopped command gets, its call ends as stopped
+/// (it ran: not marked as never run, nor as cut off by a restart) and the
+/// chat takes its next message.
+#[tokio::test]
+async fn stop_frees_a_chat_whose_tool_never_stops() {
+    let tools = BatchTools::default();
+    let runtime = batch_runtime(
+        Batch {
+            calls: vec!["wait"],
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), tools.held.started.acquire())
+        .await
+        .expect("the read starts")
+        .unwrap()
+        .forget();
+    let stopped = std::time::Instant::now();
+    runtime.interrupt(turn.id).await.unwrap();
+    free(&runtime, thread, Duration::from_secs(20)).await;
+    assert!(
+        stopped.elapsed() >= Duration::from_secs(5),
+        "the tool had a command's time to end first: {:?}",
+        stopped.elapsed()
+    );
+    assert_eq!(
+        results(&runtime, thread).await,
+        [("call-0".to_owned(), false, false)]
+    );
+    let items = runtime.items(thread, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(
+            &item.data,
+            ItemData::ToolResult { call_id, is_error: true, output, .. }
+                if call_id == "call-0" && output != "released"
+        )),
+        "{items:#?}"
+    );
+
+    let next = runtime
+        .start_turn(thread, turn_request("and now?"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, next.id).await, TurnStatus::Completed);
+}
+
+/// Takes its time once its turn is stopped, as a command does while its
+/// processes end, then answers in words of its own.
+struct Tidy {
+    started: Arc<tokio::sync::Semaphore>,
+}
+
+#[async_trait]
+impl Tool for Tidy {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "tidy".into(),
+            description: "Tidy up slowly after Stop".into(),
+            input_schema: json!({"type": "object", "additionalProperties": false}),
+        }
+    }
+
+    fn side_effectful(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, _arguments: Value, context: ToolContext) -> CoreResult<ToolOutput> {
+        self.started.add_permits(1);
+        context.cancel.cancelled().await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        Err(CoreError::Tool("tidied up after the stop".into()))
+    }
+}
+
+/// A tool that ends its work on Stop, taking as long as a stopped command
+/// may, answers its call itself: Stop does not cut it short.
+#[tokio::test]
+async fn a_tool_that_tidies_up_after_stop_answers_its_call_itself() {
+    let tidy = Arc::new(Tidy {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let runtime = batch_runtime_on(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Batch {
+            calls: vec!["tidy"],
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &BatchTools::default(),
+        vec![tidy.clone() as Arc<dyn Tool>],
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), tidy.started.acquire())
+        .await
+        .expect("the tool starts")
+        .unwrap()
+        .forget();
+    runtime.interrupt(turn.id).await.unwrap();
+    free(&runtime, thread, Duration::from_secs(20)).await;
+    let items = runtime.items(thread, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(
+            &item.data,
+            ItemData::ToolResult { call_id, output, .. }
+                if call_id == "call-0" && output.contains("tidied up after the stop")
+        )),
+        "{items:#?}"
+    );
+}
+
+/// A shutdown, not the wait for a stopped tool, ends a turn it outlives:
+/// the turn's runner adds nothing after it, so the chat keeps one result for
+/// the call and one notice, however long the server takes to go.
+#[tokio::test]
+async fn a_shutdown_alone_ends_a_turn_whose_tool_never_stops() {
+    let tool = Arc::new(Stubborn {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let runtime = stubborn_runtime(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        tool.clone(),
+        Provider::default(),
+    );
+    let thread = chat(&runtime).await;
+    runtime
+        .start_turn(thread, turn_request("wait for it"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), tool.started.acquire())
+        .await
+        .expect("the tool starts")
+        .unwrap()
+        .forget();
+    runtime
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    // Past the time a stopped tool is given, with the tool still at work.
+    tokio::time::sleep(Duration::from_millis(7_500)).await;
+    let items = runtime.items(thread, None).await.unwrap();
+    assert_eq!(
+        results(&runtime, thread).await,
+        [("call-1".to_owned(), true, false)],
+        "{items:#?}"
+    );
+    let notices = items
+        .iter()
+        .filter(|item| matches!(item.data, ItemData::Error { .. }))
+        .count();
+    assert_eq!(notices, 1, "{items:#?}");
 }

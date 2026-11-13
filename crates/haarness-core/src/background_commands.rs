@@ -68,7 +68,7 @@ const OUTPUT_EVENT_EVERY: Duration = Duration::from_secs(1);
 /// How much of an unfinished line a later search for a match reads again.
 const MATCH_OVERLAP: usize = 4 * 1024;
 /// How long a stopped command's end is awaited before the stop answers.
-const STOP_SETTLE: Duration = Duration::from_secs(5);
+pub(crate) const STOP_SETTLE: Duration = Duration::from_secs(5);
 
 /// The signals Haarness sends a command's processes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
