@@ -2818,13 +2818,29 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
             "{note}"
         );
         assert_eq!(before["source"], Value::Null, "not this provider's key");
+        let edit = |url: &str| {
+            service
+                .provider_mutation(&json!({"action":"edit","name":"router","scope":"project",
+                    "source": project, "revision": super::revision(&project).unwrap(),
+                    "url": url, "label":"Team router","models":""}))
+                .unwrap();
+        };
+        // Moving a provider that is not sent the key does not send it there.
+        edit("http://127.0.0.1:8/v1");
+        assert!(
+            store
+                .for_address("http://127.0.0.1:8/v1")
+                .get("router")
+                .unwrap()
+                .is_none()
+        );
 
         service
             .provider_mutation(&json!({"action":"credential","name":"router","key":"router-key"}))
             .unwrap();
         assert!(
             store
-                .for_address("http://127.0.0.1:9/v1")
+                .for_address("http://127.0.0.1:8/v1")
                 .get("router")
                 .unwrap()
                 .is_some()
@@ -2834,11 +2850,7 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
         assert_eq!(after["source"], "api");
 
         // Moved in the form, the provider keeps its key.
-        service
-            .provider_mutation(&json!({"action":"edit","name":"router","scope":"project",
-                "source": project, "revision": super::revision(&project).unwrap(),
-                "url":"http://127.0.0.1:7/v1","label":"Team router","models":""}))
-            .unwrap();
+        edit("http://127.0.0.1:7/v1");
         assert!(
             store
                 .for_address("http://127.0.0.1:7/v1")

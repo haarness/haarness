@@ -1772,6 +1772,7 @@ async fn cli_main() -> Result<()> {
                     args.provider.as_deref(),
                     args.model.as_deref(),
                     &client.providers().await?,
+                    &withheld_here(&paths, &workspace, project_config),
                 )?;
                 (Some(provider), Some(model))
             } else {
@@ -6326,10 +6327,16 @@ async fn run_command(
         }
         // Checked before a chat exists, so a typo leaves no empty chat behind.
         let requested_model = if args.provider.is_some() || args.model.is_some() {
+            let withheld = if args.attach.is_none() {
+                withheld_here(paths, &workspace, trust)
+            } else {
+                BTreeMap::new()
+            };
             Some(requested_run_model(
                 args.provider.as_deref(),
                 args.model.as_deref(),
                 &client.providers().await?,
+                &withheld,
             )?)
         } else {
             None
@@ -6916,6 +6923,7 @@ fn requested_run_model(
     provider: Option<&str>,
     model: Option<&str>,
     providers: &[haarness_protocol::ProviderInfo],
+    withheld: &BTreeMap<String, String>,
 ) -> Result<(String, String)> {
     let listed_id = |id: &str| {
         haarness_providers::listed_provider_id(
@@ -6978,7 +6986,7 @@ fn requested_run_model(
                 .with_context(|| unavailable_provider(&id))?;
             // A provider that is not connected lists no models yet.
             if !info.authenticated {
-                anyhow::bail!(not_connected_provider(info));
+                anyhow::bail!(not_connected_provider(info, withheld));
             }
             let model = info.models.first().with_context(|| {
                 format!("{} lists no models; pass --model as well", info.name)
@@ -6990,13 +6998,43 @@ fn requested_run_model(
     chosen.0 = listed_id(&chosen.0);
     match providers.iter().find(|info| info.id == chosen.0) {
         None if !providers.is_empty() => anyhow::bail!(unavailable_provider(&chosen.0)),
-        Some(info) if !info.authenticated => anyhow::bail!(not_connected_provider(info)),
+        Some(info) if !info.authenticated => {
+            anyhow::bail!(not_connected_provider(info, withheld))
+        }
         _ => Ok(chosen),
     }
 }
 
-/// What to run to connect a provider the command line chose.
-fn not_connected_provider(info: &haarness_protocol::ProviderInfo) -> String {
+/// Why each provider this workspace's configuration points away from its
+/// saved key's address is not sent it (see [`key_addresses`]).
+fn withheld_here(paths: &Paths, workspace: &Path, trust: bool) -> BTreeMap<String, String> {
+    load_config(paths, workspace, trust)
+        .map(|config| {
+            key_addresses::current_or_none(paths, &config)
+                .1
+                .reasons()
+                .clone()
+        })
+        .unwrap_or_default()
+}
+
+/// What to run to connect a provider the command line chose, and why its
+/// saved key was not sent when this project points it elsewhere (`withheld`,
+/// by id: see [`key_addresses`]).
+fn not_connected_provider(
+    info: &haarness_protocol::ProviderInfo,
+    withheld: &BTreeMap<String, String>,
+) -> String {
+    if let Some(reason) = withheld.get(&info.id) {
+        let mut letters = reason.chars();
+        let reason = letters.next().map_or_else(String::new, |first| {
+            first.to_lowercase().chain(letters).collect()
+        });
+        return format!(
+            "{} is not connected here: {reason} Connect it with `haarness auth login {}` in this project, then run this again.",
+            info.name, info.id
+        );
+    }
     if info.id == "haarness" {
         format!(
             "{} is not connected. Sign in with `haarness login`, then run this again.",
@@ -16312,8 +16350,13 @@ mod tests {
         assert_eq!(run_args.prompt.join(" "), "audit the workspace");
         assert_eq!(run_args.model.as_deref(), Some("openai/gpt-5.6-sol"));
         assert_eq!(
-            requested_run_model(run_args.provider.as_deref(), run_args.model.as_deref(), &[])
-                .unwrap(),
+            requested_run_model(
+                run_args.provider.as_deref(),
+                run_args.model.as_deref(),
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap(),
             ("openai".into(), "gpt-5.6-sol".into())
         );
     }
@@ -18852,7 +18895,8 @@ request_timeout = 0
             provider("haarness", true, &["openai/gpt-6-sol"]),
         ];
         let chosen = |provider: Option<&str>, model: Option<&str>| {
-            requested_run_model(provider, model, &providers).map_err(|error| error.to_string())
+            requested_run_model(provider, model, &providers, &BTreeMap::new())
+                .map_err(|error| error.to_string())
         };
         assert_eq!(
             chosen(None, Some("echo/echo-2")),
@@ -18913,7 +18957,8 @@ request_timeout = 0
             cloud,
         ];
         let chosen = |provider: Option<&str>, model: Option<&str>| {
-            requested_run_model(provider, model, &providers).map_err(|error| error.to_string())
+            requested_run_model(provider, model, &providers, &BTreeMap::new())
+                .map_err(|error| error.to_string())
         };
         assert_eq!(
             chosen(Some("together"), None),
@@ -18961,6 +19006,17 @@ request_timeout = 0
             chosen(None, Some("gpt-5.6")),
             Err("OpenAI is not connected. Connect it with `haarness auth login openai`, then run this again.".into())
         );
+        // Where the project points a provider away from its saved key's
+        // address, the refusal says so.
+        let withheld = BTreeMap::from([(
+            "openai".to_owned(),
+            "The saved key is for https://a.example/v1, so it was not sent to https://b.example/v1.".to_owned(),
+        )]);
+        assert_eq!(
+            requested_run_model(Some("openai"), None, &providers, &withheld)
+                .map_err(|error| error.to_string()),
+            Err("OpenAI is not connected here: the saved key is for https://a.example/v1, so it was not sent to https://b.example/v1. Connect it with `haarness auth login openai` in this project, then run this again.".into())
+        );
         assert_eq!(
             requested_run_model(
                 Some("haarness-cloud"),
@@ -18968,7 +19024,8 @@ request_timeout = 0
                 &[ProviderInfo {
                     models: Vec::new(),
                     ..providers[3].clone()
-                }]
+                }],
+                &BTreeMap::new(),
             )
             .map_err(|error| error.to_string()),
             Err("Haarness Cloud is not connected. Sign in with `haarness login`, then run this again.".into())

@@ -151,6 +151,7 @@ fn native_instance(
 const AZURE_FALLBACK: &[&str] = &["gpt-5.5", "gpt-5.4-mini"];
 
 pub struct AzureProvider {
+    client: reqwest::Client,
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
     models: Vec<ModelInfo>,
@@ -181,11 +182,20 @@ impl AzureProvider {
     pub fn new(instance: NativeInstance, auth_store: Option<Arc<CredentialStore>>) -> Self {
         let models = configured_models(&instance, AZURE_FALLBACK, "openai");
         Self {
+            client: reqwest::Client::new(),
             instance,
             auth_store,
             models,
             ambient: true,
         }
+    }
+
+    /// Send requests through `client`: for a provider a project defines, one
+    /// that follows no redirect off its server (see [`crate::CredentialFence`]).
+    #[must_use]
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
     }
 
     /// Never ask the Azure CLI for a token: the provider is defined where
@@ -204,9 +214,9 @@ impl AzureProvider {
             return Ok(credential);
         }
         if !self.ambient {
-            return Err(CoreError::Provider(format!(
-                "{} is not connected: add its API key. This computer's Azure sign-in is used only at Azure's own addresses",
-                self.instance.name
+            return Err(CoreError::ProviderUnavailable(format!(
+                "{} has no key of its own here, and your Azure sign-in goes only to Azure's addresses. To use the sign-in at this address, define {} in your global configuration.",
+                self.instance.name, self.instance.name
             )));
         }
         let output = Command::new("az")
@@ -286,6 +296,7 @@ impl ModelProvider for AzureProvider {
             assume_authenticated: true,
             headers,
         })
+        .with_http_client(self.client.clone())
         .with_model_info(self.models.clone())
         .stream(request, cancel)
         .await
@@ -293,6 +304,7 @@ impl ModelProvider for AzureProvider {
 }
 
 pub struct CopilotProvider {
+    client: reqwest::Client,
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
     models: Vec<ModelInfo>,
@@ -339,12 +351,21 @@ impl CopilotProvider {
     pub fn new(instance: NativeInstance, auth_store: Option<Arc<CredentialStore>>) -> Self {
         let models = configured_models(&instance, &["gpt-4.1", "gpt-4o", "gpt-4o-mini"], "openai");
         Self {
+            client: reqwest::Client::new(),
             instance,
             auth_store,
             models,
             live_models: crate::live_models::LiveModels::default(),
             wires: std::sync::RwLock::default(),
         }
+    }
+
+    /// Send requests through `client`: for a provider a project defines, one
+    /// that follows no redirect off its server (see [`crate::CredentialFence`]).
+    #[must_use]
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
     }
 
     fn token(&self) -> CoreResult<String> {
@@ -394,7 +415,8 @@ impl CopilotProvider {
         let Ok(headers) = self.request_headers(false, "user") else {
             return None;
         };
-        let response = reqwest::Client::new()
+        let response = self
+            .client
             .get(format!(
                 "{}/models",
                 self.instance.base_url.trim_end_matches('/')
@@ -487,6 +509,7 @@ impl ModelProvider for CopilotProvider {
             }
             let endpoint = format!("{}/responses", self.instance.base_url.trim_end_matches('/'));
             return crate::OpenAiProvider::for_endpoint(endpoint, self.token()?)
+                .with_http_client(self.client.clone())
                 .stream(request, cancel)
                 .await;
         }
@@ -508,6 +531,7 @@ impl ModelProvider for CopilotProvider {
             assume_authenticated: false,
             headers,
         })
+        .with_http_client(self.client.clone())
         .with_model_info(self.live_models.get(&self.models))
         .stream(request, cancel)
         .await
@@ -646,6 +670,7 @@ fn google_refuses_keys(reason: &str) -> bool {
 }
 
 pub struct VertexProvider {
+    client: reqwest::Client,
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
     models: Vec<ModelInfo>,
@@ -693,12 +718,21 @@ impl VertexProvider {
         let token = instance.api_key.take().map(SecretString::from);
         let models = configured_models(&instance, VERTEX_FALLBACK, "gemini");
         Self {
+            client: reqwest::Client::new(),
             instance,
             auth_store,
             models,
             token,
             ambient: true,
         }
+    }
+
+    /// Send requests through `client`: for a provider a project defines, one
+    /// that follows no redirect off its server (see [`crate::CredentialFence`]).
+    #[must_use]
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
     }
 
     /// Never ask `gcloud` for an access token: the provider is defined where
@@ -719,9 +753,9 @@ impl VertexProvider {
             return Ok(token);
         }
         if !self.ambient {
-            return Err(CoreError::Provider(format!(
-                "{} is not connected: add its API key. This computer's Google Cloud sign-in is used only at Google's own addresses",
-                self.instance.name
+            return Err(CoreError::ProviderUnavailable(format!(
+                "{} has no key of its own here, and your Google Cloud sign-in goes only to Google's addresses. To use the sign-in at this address, define {} in your global configuration.",
+                self.instance.name, self.instance.name
             )));
         }
         for args in [
@@ -795,7 +829,8 @@ impl ModelProvider for VertexProvider {
         let Ok(headers) = headers_with(&self.instance.headers, [auth]) else {
             return KeyCheck::Rejected(Some("The key holds characters a key cannot".into()));
         };
-        let request = reqwest::Client::new()
+        let request = self
+            .client
             .post(format!(
                 "{}/models/{}:countTokens",
                 base_url.trim_end_matches('/'),
@@ -831,6 +866,7 @@ impl ModelProvider for VertexProvider {
             assume_authenticated: true,
             headers,
         })
+        .with_http_client(self.client.clone())
         .stream(request, cancel)
         .await
     }

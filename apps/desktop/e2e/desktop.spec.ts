@@ -4203,7 +4203,7 @@ test("a project's provider gets no key saved for another address, Connect says w
     writeFile(
       configPath,
       original +
-        `\n[providers.${provider}]\nname="Elsewhere fixture"\nprotocol="openai-chat-completions"\nbase_url="http://127.0.0.1:${port}/v1"\n`,
+        `\n[providers.${provider}]\nname="Elsewhere fixture"\nprotocol="openai-chat-completions"\nbase_url="http://127.0.0.1:${port}/v1"\nmodels=["elsewhere-model"]\n`,
     );
   const native = (input: Record<string, unknown>) =>
     execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], {
@@ -4224,6 +4224,31 @@ test("a project's provider gets no key saved for another address, Connect says w
     await define(address.port);
     await expect.poll(connected).toBe(false);
     expect(authorizations.filter(Boolean)).toEqual([]);
+    const notice = `The saved key is for http://127.0.0.1:1/v1, so it was not sent to http://127.0.0.1:${address.port}/v1. Connect to save a key for this address.`;
+    // A chat on it fails before anything is sent, and its error row says why.
+    const thread = await client.createThread({
+      title: "Elsewhere chat",
+      provider,
+      model: "elsewhere-model",
+    });
+    await page
+      .locator(".sessions")
+      .getByRole("button", { name: "Elsewhere chat", exact: true })
+      .click();
+    await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text: "hi" });
+    const alert = page.locator(".transcript").getByRole("alert");
+    await expect(alert).toContainText(notice);
+    await expect(alert).toHaveCount(1);
+    expect(authorizations).toEqual([]);
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", scheme);
+      await page.locator(".transcript").screenshot({
+        path: test.info().outputPath(`chat-elsewhere-${scheme}.png`),
+      });
+    }
+    await page.emulateMedia({ colorScheme: "light" });
+    await client.updateThread(thread.id, { provider: "echo", model: "echo-1" });
 
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await settings.getByRole("button", { name: "Providers", exact: true }).click();
@@ -4241,9 +4266,7 @@ test("a project's provider gets no key saved for another address, Connect says w
       name: "Connect Elsewhere fixture",
       exact: true,
     });
-    await expect(dialog.locator("header p")).toHaveText(
-      `The saved key is for http://127.0.0.1:1, so it was not sent to http://127.0.0.1:${address.port}. Connect to save a key for this address.`,
-    );
+    await expect(dialog.locator("header p")).toHaveText(notice);
     for (const scheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme: scheme });
       await expect(page.locator("html")).toHaveAttribute("data-theme", scheme);
@@ -4260,9 +4283,9 @@ test("a project's provider gets no key saved for another address, Connect says w
     const saved = JSON.parse(
       await readFile(join(temporary, "state/data/auth.json"), "utf8"),
     )[provider];
-    expect(saved.origins).toEqual([
-      "http://127.0.0.1:1",
-      `http://127.0.0.1:${address.port}`,
+    expect(saved.addresses).toEqual([
+      "http://127.0.0.1:1/v1",
+      `http://127.0.0.1:${address.port}/v1`,
     ]);
     if (await dialog.isVisible())
       await page.keyboard.press("Escape");

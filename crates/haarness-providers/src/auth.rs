@@ -47,10 +47,20 @@ pub enum AuthError {
     /// The file is there but cannot be read (its permissions, a disk error):
     /// nothing replaces it until it can be.
     #[error(
-        "cannot read the saved provider keys in {} ({source}), so nothing was saved. Make the file readable to you again, or rename it to start a new one",
+        "cannot read the saved provider keys in {} ({source}). Make the file readable to you again, or rename it to start a new one",
         path.display()
     )]
     Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// [`Self::Read`] when a key was to be saved.
+    #[error(
+        "cannot read the saved provider keys in {} ({source}), so nothing was saved. Make the file readable to you again, or rename it to start a new one",
+        path.display()
+    )]
+    Unsaved {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -78,6 +88,16 @@ pub enum AuthError {
     Copilot(String),
 }
 
+impl AuthError {
+    /// A read that failed while a key was to be saved says nothing was.
+    fn unsaved(self) -> Self {
+        match self {
+            Self::Read { path, source } => Self::Unsaved { path, source },
+            other => other,
+        }
+    }
+}
+
 /// A device sign-in's link is printed and opened in a browser, so one that
 /// is not http or https (a local file, an app's own scheme) stops it.
 const DEVICE_LINK_REFUSED: &str = "the sign-in server sent a link that is not http or https";
@@ -99,13 +119,14 @@ pub enum TypedCredential {
         key: String,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         metadata: BTreeMap<String, String>,
-        /// The addresses the key was saved for, each as scheme, host and
-        /// port (see [`key_origin`]): a provider a project's configuration
-        /// defines is sent the key only at one of them. `None` on a key an
-        /// earlier Haarness saved, before it recorded addresses; empty on
-        /// one saved for no address in particular.
+        /// The addresses the key was saved for, each as scheme, host, port
+        /// and path (see [`key_address`]): a provider a project's
+        /// configuration defines is sent the key only at one of them or
+        /// below it. `None` on a key an earlier Haarness saved, before it
+        /// recorded addresses; empty on one saved for no address in
+        /// particular.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        origins: Option<Vec<String>>,
+        addresses: Option<Vec<String>>,
     },
     #[serde(rename = "oauth")]
     OAuth {
@@ -135,37 +156,36 @@ impl Credential {
         Self::Typed(TypedCredential::Api {
             key,
             metadata: BTreeMap::new(),
-            origins: None,
+            addresses: None,
         })
     }
 
-    /// An API key saved for the addresses `origins` (see [`key_origin`]).
+    /// An API key saved for `addresses` (see [`key_address`]).
     #[must_use]
-    pub fn api_for(key: String, origins: Vec<String>) -> Self {
+    pub fn api_for(key: String, addresses: Vec<String>) -> Self {
         Self::Typed(TypedCredential::Api {
             key,
             metadata: BTreeMap::new(),
-            origins: Some(origins),
+            addresses: Some(addresses),
         })
     }
 
     /// The addresses an API key was saved for; `None` for a key an earlier
     /// Haarness saved and for a sign-in.
     #[must_use]
-    pub fn origins(&self) -> Option<&[String]> {
+    pub fn addresses(&self) -> Option<&[String]> {
         match self {
-            Self::Typed(TypedCredential::Api { origins, .. }) => origins.as_deref(),
+            Self::Typed(TypedCredential::Api { addresses, .. }) => addresses.as_deref(),
             Self::Typed(TypedCredential::OAuth { .. }) | Self::Legacy(_) => None,
         }
     }
 
-    /// Whether this is an API key saved for `url`'s address.
+    /// Whether this is an API key saved for `url`'s address, or for one
+    /// above it on the same server.
     #[must_use]
     pub fn saved_for(&self, url: &str) -> bool {
-        key_origin(url).is_some_and(|origin| {
-            self.origins()
-                .is_some_and(|origins| origins.contains(&origin))
-        })
+        self.addresses()
+            .is_some_and(|addresses| addresses.iter().any(|address| address_covers(address, url)))
     }
 
     #[must_use]
@@ -306,12 +326,12 @@ impl CredentialStore {
                 );
                 Ok(BTreeMap::new())
             }
-            records => records,
+            records => records.map_err(AuthError::unsaved),
         }
     }
 
     fn keep_aside(&self) -> AuthResult<PathBuf> {
-        let bytes = fs::read(&self.path).map_err(|source| AuthError::Read {
+        let bytes = fs::read(&self.path).map_err(|source| AuthError::Unsaved {
             path: self.path.clone(),
             source,
         })?;
@@ -366,22 +386,22 @@ impl CredentialStore {
     }
 
     /// Save `key` for `provider` and for the address `url` (see
-    /// [`key_origin`]), or for none in particular. The same key saved again
+    /// [`key_address`]), or for none in particular. The same key saved again
     /// for another address keeps the addresses it had, so one key can serve
     /// a provider that two projects define at different addresses; a new key
     /// has only its own.
     pub fn set_api_key(&self, provider: &str, key: &str, url: Option<&str>) -> AuthResult<()> {
         self.update(provider, |current| {
-            let mut origins = current
+            let mut addresses = current
                 .filter(|current| current.api_key() == Some(key))
-                .and_then(|current| current.origins().map(<[String]>::to_vec))
+                .and_then(|current| current.addresses().map(<[String]>::to_vec))
                 .unwrap_or_default();
-            if let Some(origin) = url.and_then(key_origin)
-                && !origins.contains(&origin)
+            if let Some(address) = url.and_then(key_address)
+                && !addresses.contains(&address)
             {
-                origins.push(origin);
+                addresses.push(address);
             }
-            Credential::api_for(key.to_owned(), origins)
+            Credential::api_for(key.to_owned(), addresses)
         })
     }
 
@@ -389,7 +409,7 @@ impl CredentialStore {
     /// for, as when the person moves their provider to another address. Says
     /// whether there was such a key.
     pub fn allow_address(&self, provider: &str, url: &str) -> AuthResult<bool> {
-        let Some(origin) = key_origin(url) else {
+        let Some(address) = key_address(url) else {
             return Ok(false);
         };
         let _guard = self
@@ -398,7 +418,11 @@ impl CredentialStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _file_lock = self.lock_mutations()?;
         let provider = normalize(provider);
-        let mut raw = self.records_to_change()?;
+        // A damaged file holds no key to move: it is left for a save.
+        let mut raw = match self.all_raw() {
+            Err(AuthError::Decode { .. }) => return Ok(false),
+            records => records.map_err(AuthError::unsaved)?,
+        };
         let Some(credential) = raw
             .get(provider)
             .cloned()
@@ -409,17 +433,17 @@ impl CredentialStore {
         let Some(key) = credential.api_key() else {
             return Ok(false);
         };
-        let mut origins = credential
-            .origins()
+        let mut addresses = credential
+            .addresses()
             .map(<[String]>::to_vec)
             .unwrap_or_default();
-        if origins.contains(&origin) {
+        if addresses.contains(&address) {
             return Ok(true);
         }
-        origins.push(origin);
+        addresses.push(address);
         raw.insert(
             provider.to_owned(),
-            serde_json::to_value(Credential::api_for(key.to_owned(), origins))
+            serde_json::to_value(Credential::api_for(key.to_owned(), addresses))
                 .map_err(AuthError::Encode)?,
         );
         self.write_raw(&raw)?;
@@ -429,16 +453,19 @@ impl CredentialStore {
     /// Record the addresses of API keys an earlier Haarness saved, before it
     /// recorded any: each id of `found` whose key still has none gets the
     /// addresses listed for it (none in particular when the list is empty).
-    /// A key saved meanwhile keeps its own.
-    pub fn record_origins(&self, found: &BTreeMap<String, Vec<String>>) -> AuthResult<()> {
+    /// A key saved meanwhile keeps its own, and a damaged file is left alone.
+    pub fn record_addresses(&self, found: &BTreeMap<String, Vec<String>>) -> AuthResult<()> {
         let _guard = self
             .mutation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _file_lock = self.lock_mutations()?;
-        let mut raw = self.records_to_change()?;
+        let mut raw = match self.all_raw() {
+            Err(AuthError::Decode { .. }) => return Ok(()),
+            records => records.map_err(AuthError::unsaved)?,
+        };
         let mut changed = false;
-        for (provider, origins) in found {
+        for (provider, addresses) in found {
             let Some(credential) = raw
                 .get(provider.as_str())
                 .cloned()
@@ -448,13 +475,13 @@ impl CredentialStore {
             };
             let Some(key) = credential
                 .api_key()
-                .filter(|_| credential.origins().is_none())
+                .filter(|_| credential.addresses().is_none())
             else {
                 continue;
             };
             raw.insert(
                 provider.clone(),
-                serde_json::to_value(Credential::api_for(key.to_owned(), origins.clone()))
+                serde_json::to_value(Credential::api_for(key.to_owned(), addresses.clone()))
                     .map_err(AuthError::Encode)?,
             );
             changed = true;
@@ -600,15 +627,29 @@ fn normalize(provider: &str) -> &str {
     provider.trim_end_matches('/')
 }
 
-/// The address a key is saved for: `url`'s scheme, host and port
-/// (`https://models.example.com`, `http://127.0.0.1:8080`), the part that
-/// says which server gets it. `None` for what is not an http or https URL.
+/// The address a key is saved for: `url`'s scheme, host, port and path,
+/// without a trailing slash, query or fragment (`https://models.example.com/v1`,
+/// `http://127.0.0.1:8080`). It names the server that gets the key and where
+/// on it, so a gateway that tells its customers apart by path keeps each
+/// one's key to its own. `None` for what is not an http or https URL.
 #[must_use]
-pub fn key_origin(url: &str) -> Option<String> {
+pub fn key_address(url: &str) -> Option<String> {
     let url = Url::parse(url.trim()).ok()?;
-    matches!(url.scheme(), "http" | "https")
-        .then(|| url.origin().ascii_serialization())
-        .filter(|origin| origin != "null")
+    let origin = url.origin().ascii_serialization();
+    (matches!(url.scheme(), "http" | "https") && origin != "null")
+        .then(|| format!("{origin}{}", url.path().trim_end_matches('/')))
+}
+
+/// Whether a key saved for `address` (see [`key_address`]) may go to `url`:
+/// the same server, at that path or below it.
+#[must_use]
+pub fn address_covers(address: &str, url: &str) -> bool {
+    key_address(url).is_some_and(|url| {
+        url == address
+            || url
+                .strip_prefix(address)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 #[cfg(unix)]
@@ -1724,8 +1765,8 @@ mod tests {
 
     use super::{
         CallbackRequest, CopilotOAuthClient, CopilotOAuthConfig, Credential, CredentialStore,
-        OpenAiOAuthClient, OpenAiOAuthConfig, XaiOAuthClient, XaiOAuthConfig,
-        answer_until_callback, key_origin, openai_residency, query, read_callback,
+        OpenAiOAuthClient, OpenAiOAuthConfig, XaiOAuthClient, XaiOAuthConfig, address_covers,
+        answer_until_callback, key_address, openai_residency, query, read_callback,
     };
     use haarness_account::loopback::AcceptFailures;
     use std::collections::BTreeMap;
@@ -2265,9 +2306,13 @@ mod tests {
             .unwrap();
         let at = |url: &str| store.for_address(url).get("router").unwrap();
         assert!(
-            at("http://127.0.0.1:5000/other/v1").is_some(),
-            "same server"
+            at("http://127.0.0.1:5000/v1/").is_some(),
+            "a trailing slash"
         );
+        assert!(at("http://127.0.0.1:5000/v1/team").is_some(), "below it");
+        assert!(at("http://127.0.0.1:5000/v10").is_none(), "another path");
+        assert!(at("http://127.0.0.1:5000/r/v1").is_none(), "another path");
+        assert!(at("http://127.0.0.1:5000").is_none(), "above it");
         assert!(at("http://127.0.0.1:5001/v1").is_none(), "another port");
         assert!(at("https://127.0.0.1:5000/v1").is_none(), "another scheme");
         assert!(at("http://evil.example/v1").is_none());
@@ -2288,20 +2333,12 @@ mod tests {
         // The same key saved again for another address serves both; a new
         // key has only its own.
         store
-            .set_api_key(
-                "router",
-                "key-a",
-                Some("https://router.example.com:8443/v1"),
-            )
+            .set_api_key("router", "key-a", Some("https://router.example.com:8443/"))
             .unwrap();
         assert!(at("http://127.0.0.1:5000/v1").is_some());
-        assert!(at("https://router.example.com:8443").is_some());
+        assert!(at("https://router.example.com:8443/v1").is_some());
         store
-            .set_api_key(
-                "router",
-                "key-b",
-                Some("https://router.example.com:8443/v1"),
-            )
+            .set_api_key("router", "key-b", Some("https://router.example.com:8443"))
             .unwrap();
         assert!(at("http://127.0.0.1:5000/v1").is_none());
         assert_eq!(
@@ -2330,8 +2367,9 @@ mod tests {
                 .allow_address("router", "http://10.0.0.2:9000/v1")
                 .unwrap()
         );
-        assert!(at("http://10.0.0.2:9000").is_some());
-        assert!(at("https://router.example.com:8443").is_some());
+        assert!(at("http://10.0.0.2:9000/v1").is_some());
+        assert!(at("http://10.0.0.2:9000/other").is_none());
+        assert!(at("https://router.example.com:8443/v1").is_some());
         assert!(
             !store
                 .allow_address("absent", "http://10.0.0.2:9000")
@@ -2352,33 +2390,67 @@ mod tests {
         .unwrap();
         let store = CredentialStore::new(path);
         store
-            .record_origins(&BTreeMap::from([
-                ("team".to_owned(), vec!["https://team.example".to_owned()]),
+            .record_addresses(&BTreeMap::from([
+                (
+                    "team".to_owned(),
+                    vec!["https://team.example/v1".to_owned()],
+                ),
                 (
                     "router".to_owned(),
-                    vec!["http://127.0.0.1:5000".to_owned()],
+                    vec!["http://127.0.0.1:5000/v1".to_owned()],
                 ),
                 ("spare".to_owned(), Vec::new()),
             ]))
             .unwrap();
         let get = |id: &str| store.get(id).unwrap().unwrap();
         assert_eq!(
-            get("team").origins(),
-            Some(&["https://team.example".to_owned()][..])
+            get("team").addresses(),
+            Some(&["https://team.example/v1".to_owned()][..])
         );
         assert_eq!(get("team").api_key(), Some("legacy-key"));
-        assert_eq!(get("spare").origins(), Some(&[][..]));
-        assert_eq!(get("anthropic").origins(), None, "not named, not touched");
+        assert_eq!(get("spare").addresses(), Some(&[][..]));
+        assert_eq!(get("anthropic").addresses(), None, "not named, not touched");
         store
-            .record_origins(&BTreeMap::from([(
+            .record_addresses(&BTreeMap::from([(
                 "router".to_owned(),
                 vec!["http://evil.example".to_owned()],
             )]))
             .unwrap();
         assert_eq!(
-            get("router").origins(),
-            Some(&["http://127.0.0.1:5000".to_owned()][..])
+            get("router").addresses(),
+            Some(&["http://127.0.0.1:5000/v1".to_owned()][..])
         );
+    }
+
+    /// Only a save that writes a new file keeps a copy of a damaged one:
+    /// recording addresses and moving a provider leave it as it is.
+    #[test]
+    fn a_damaged_key_file_is_copied_only_when_a_save_replaces_it() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        std::fs::write(&path, "{\"router\": ").unwrap();
+        let store = CredentialStore::new(path.clone());
+        let copies = || {
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".unreadable-"))
+                .count()
+        };
+        assert!(
+            !store
+                .allow_address("router", "http://127.0.0.1:5000/v1")
+                .unwrap()
+        );
+        store
+            .record_addresses(&BTreeMap::from([("router".to_owned(), Vec::new())]))
+            .unwrap();
+        assert_eq!(copies(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"router\": ");
+        store
+            .set_api_key("router", "key", Some("http://127.0.0.1:5000/v1"))
+            .unwrap();
+        assert_eq!(copies(), 1);
     }
 
     /// An empty file (white space only) holds no keys and takes a new one.
@@ -2441,7 +2513,8 @@ mod tests {
         }
     }
 
-    /// A file that cannot be read is never replaced, and the refusal names it.
+    /// A file that cannot be read is never replaced, and the refusal names it;
+    /// a lookup says it cannot read it, a save that nothing was saved.
     #[cfg(unix)]
     #[test]
     fn an_unreadable_key_file_stops_a_save_and_names_itself() {
@@ -2455,12 +2528,24 @@ mod tests {
             return;
         }
         let store = CredentialStore::new(path.clone());
-        let error = store
-            .set("anthropic", &Credential::api("sk-new".into()))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(&path.display().to_string()), "{error}");
-        assert!(error.contains("nothing was saved"), "{error}");
+        let looked_up = store.get("openai").unwrap_err().to_string();
+        assert!(
+            looked_up.contains(&path.display().to_string()),
+            "{looked_up}"
+        );
+        assert!(!looked_up.contains("saved."), "{looked_up}");
+        for error in [
+            store
+                .set("anthropic", &Credential::api("sk-new".into()))
+                .unwrap_err(),
+            store
+                .allow_address("openai", "http://127.0.0.1:5000")
+                .unwrap_err(),
+        ] {
+            let error = error.to_string();
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(error.contains("nothing was saved"), "{error}");
+        }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -2469,23 +2554,40 @@ mod tests {
     }
 
     #[test]
-    fn a_key_is_saved_for_its_servers_origin() {
-        for (url, origin) in [
+    fn a_key_is_saved_for_its_servers_address_and_path() {
+        for (url, address) in [
             (
                 "https://Models.Example.com/v1/",
-                Some("https://models.example.com"),
+                Some("https://models.example.com/v1"),
             ),
             (
-                "https://models.example.com:443/v1",
-                Some("https://models.example.com"),
+                "https://models.example.com:443/v1?x=1#y",
+                Some("https://models.example.com/v1"),
             ),
-            ("http://127.0.0.1:8080/v1", Some("http://127.0.0.1:8080")),
-            ("http://[::1]:11434", Some("http://[::1]:11434")),
+            ("http://127.0.0.1:8080", Some("http://127.0.0.1:8080")),
+            ("http://127.0.0.1:8080/", Some("http://127.0.0.1:8080")),
+            ("http://[::1]:11434/v1", Some("http://[::1]:11434/v1")),
             ("file:///etc/passwd", None),
             ("models.example.com/v1", None),
         ] {
-            assert_eq!(key_origin(url).as_deref(), origin, "{url}");
+            assert_eq!(key_address(url).as_deref(), address, "{url}");
         }
+        assert!(address_covers(
+            "https://gw.example/v1/acct/gw",
+            "https://gw.example/v1/acct/gw/openai"
+        ));
+        assert!(!address_covers(
+            "https://gw.example/v1/acct/gw",
+            "https://gw.example/v1/other/gw/openai"
+        ));
+        assert!(!address_covers(
+            "https://gw.example/v1/acct",
+            "https://gw.example/v1/acct-2"
+        ));
+        assert!(address_covers(
+            "https://gw.example",
+            "https://gw.example/anything"
+        ));
     }
 
     #[test]

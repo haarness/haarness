@@ -193,6 +193,14 @@ impl BedrockProvider {
         }
     }
 
+    /// Send requests through `client`: for a provider a project defines, one
+    /// that follows no redirect off its server (see [`crate::CredentialFence`]).
+    #[must_use]
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     /// Use only the provider's own key: no `AWS_BEARER_TOKEN_BEDROCK` and no
     /// AWS setup's keys, since the provider is defined where they do not
     /// belong (see [`crate::own_cloud_address`]).
@@ -244,9 +252,9 @@ impl BedrockProvider {
             return Ok(Signer::SigV4(sign_in.credentials().await?));
         }
         if !self.ambient {
-            return Err(CoreError::Provider(format!(
-                "{} is not connected: add its API key. This computer's AWS sign-in is used only at Amazon Bedrock's own addresses",
-                self.instance.name
+            return Err(CoreError::ProviderUnavailable(format!(
+                "{} has no key of its own here, and your AWS sign-in goes only to Amazon Bedrock's addresses. To use the sign-in at this address, define {} in your global configuration.",
+                self.instance.name, self.instance.name
             )));
         }
         Err(CoreError::Provider(
