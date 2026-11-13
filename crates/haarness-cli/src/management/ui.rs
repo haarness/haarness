@@ -1463,7 +1463,9 @@ impl ManagementService {
     /// [`crate::key_addresses`]).
     fn key_fence(&self) -> crate::key_addresses::KeyFence {
         crate::load_config(&self.paths, &self.workspace, self.trust_project)
-            .map(|config| crate::key_addresses::current_or_none(&self.paths, &config).1)
+            .map(|config| {
+                crate::key_addresses::current_or_none(&self.paths, &self.workspace, &config).1
+            })
             .unwrap_or_default()
     }
 
@@ -2812,10 +2814,9 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
             view.data.as_ref().unwrap()["providers"][0].clone()
         };
         let before = row(&service.connect_view(&providers, ""));
-        let note = before["note"].as_str().unwrap();
-        assert!(
-            note.contains("http://127.0.0.1:5000") && note.contains("http://127.0.0.1:9"),
-            "{note}"
+        assert_eq!(
+            before["note"],
+            "The saved key is for another address. Connect to save a key for http://127.0.0.1:9/v1."
         );
         assert_eq!(before["source"], Value::Null, "not this provider's key");
         let edit = |url: &str| {

@@ -198,7 +198,7 @@ def main():
             "providers": {"team-gateway": {
                 "name": "Team gateway", "base_url": f"http://127.0.0.1:{port_b}/openai/v1", "models": ["gateway-coder"]}}}))
         reason = f"the saved key is for http://127.0.0.1:{port}/openai/v1, so it was not sent to http://127.0.0.1:{port_b}/openai/v1."
-        notice = reason[0].upper() + reason[1:] + " Connect to save a key for this address."
+        notice = f"The saved key is for another address. Connect to save a key for http://127.0.0.1:{port_b}/openai/v1."
 
         def run(*args):
             return subprocess.run([binary, "--workspace", project_b, "run", *args], env=env, capture_output=True, text=True, timeout=180)
@@ -233,7 +233,7 @@ def main():
         # Connect says why, then saves the key for this address too.
         keys("/connect team-gateway", literal=True)
         keys("Enter")
-        why = " ".join(wait_for("Connect did not say why the saved key stayed home", "Connect Team gateway", "was not sent to").split())
+        why = " ".join(wait_for("Connect did not say why the saved key stayed home", "Connect Team gateway", "another address").split())
         assert notice in why, why
         print(notice)
         assert TEAM_KEY not in json.dumps(elsewhere.keys), elsewhere.keys

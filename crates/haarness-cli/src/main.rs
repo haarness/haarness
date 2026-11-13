@@ -2318,7 +2318,7 @@ async fn models_command(
     verbose: bool,
 ) -> Result<()> {
     let config = load_config(paths, workspace, trust)?;
-    let (auth, fence) = key_addresses::current_or_none(paths, &config);
+    let (auth, fence) = key_addresses::current_or_none(paths, workspace, &config);
     let credentials = resolved_credentials(&auth);
     let (instances, disabled) = provider_instances(&config, &credentials, &fence);
     let providers = NativeProviderRegistry::discover_with_providers_and_store(
@@ -2369,7 +2369,7 @@ async fn providers_command(
     verbose: bool,
 ) -> Result<()> {
     let config = load_config(paths, workspace, trust)?;
-    let (auth, fence) = key_addresses::current_or_none(paths, &config);
+    let (auth, fence) = key_addresses::current_or_none(paths, workspace, &config);
     let credentials = resolved_credentials(&auth);
     let (instances, disabled) = provider_instances(&config, &credentials, &fence);
     let providers = NativeProviderRegistry::discover_with_providers_and_store(
@@ -4072,7 +4072,7 @@ async fn check_schedule_model(
         return Ok(model.to_owned());
     };
     let config = load_config(paths, workspace, trust)?;
-    let (auth, fence) = key_addresses::current_or_none(paths, &config);
+    let (auth, fence) = key_addresses::current_or_none(paths, workspace, &config);
     let credentials = resolved_credentials(&auth);
     let (instances, disabled) = provider_instances(&config, &credentials, &fence);
     let providers = NativeProviderRegistry::discover_with_providers_and_store(
@@ -7010,7 +7010,7 @@ fn requested_run_model(
 fn withheld_here(paths: &Paths, workspace: &Path, trust: bool) -> BTreeMap<String, String> {
     load_config(paths, workspace, trust)
         .map(|config| {
-            key_addresses::current_or_none(paths, &config)
+            key_addresses::current_or_none(paths, workspace, &config)
                 .1
                 .reasons()
                 .clone()
@@ -9258,7 +9258,8 @@ impl HotReloadController {
             persisted_rules,
             true,
         )?;
-        let (auth, fence) = key_addresses::current(&self.paths, &sources.file_config)?;
+        let (auth, fence) =
+            key_addresses::current(&self.paths, &self.workspace, &sources.file_config)?;
         let credentials = resolved_credentials(&auth);
         validate_provider_definitions(&sources.file_config)?;
         let (instances, disabled_providers) =
@@ -10094,7 +10095,7 @@ async fn application_at(
     for notice in config_specs::startup_notices(paths, workspace, trust) {
         tracing::warn!("config: {notice}");
     }
-    let (auth, fence) = key_addresses::current_or_none(paths, &file_config);
+    let (auth, fence) = key_addresses::current_or_none(paths, workspace, &file_config);
     let credentials = resolved_credentials(&auth);
     let (instances, disabled_providers) = provider_instances(&file_config, &credentials, &fence);
     // Their live model lists load below, once the runtime can announce them.

@@ -4224,7 +4224,7 @@ test("a project's provider gets no key saved for another address, Connect says w
     await define(address.port);
     await expect.poll(connected).toBe(false);
     expect(authorizations.filter(Boolean)).toEqual([]);
-    const notice = `The saved key is for http://127.0.0.1:1/v1, so it was not sent to http://127.0.0.1:${address.port}/v1. Connect to save a key for this address.`;
+    const notice = `The saved key is for another address. Connect to save a key for http://127.0.0.1:${address.port}/v1.`;
     // A chat on it fails before anything is sent, and its error row says why.
     const thread = await client.createThread({
       title: "Elsewhere chat",

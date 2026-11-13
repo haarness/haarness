@@ -127,6 +127,15 @@ pub enum TypedCredential {
         /// particular.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         addresses: Option<Vec<String>>,
+        /// Set on a key an earlier Haarness saved while the addresses it was
+        /// used at are still being looked for (see [`CredentialStore::record_addresses`]):
+        /// `addresses` then holds the ones found so far.
+        #[serde(
+            default,
+            rename = "addressesPending",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        addresses_pending: bool,
     },
     #[serde(rename = "oauth")]
     OAuth {
@@ -157,17 +166,42 @@ impl Credential {
             key,
             metadata: BTreeMap::new(),
             addresses: None,
+            addresses_pending: false,
         })
     }
 
     /// An API key saved for `addresses` (see [`key_address`]).
     #[must_use]
     pub fn api_for(key: String, addresses: Vec<String>) -> Self {
+        Self::api_found(key, addresses, false)
+    }
+
+    /// An API key an earlier Haarness saved, with the addresses found for it
+    /// so far, and whether more are still to be looked for.
+    #[must_use]
+    pub fn api_found(key: String, addresses: Vec<String>, pending: bool) -> Self {
         Self::Typed(TypedCredential::Api {
             key,
             metadata: BTreeMap::new(),
             addresses: Some(addresses),
+            addresses_pending: pending,
         })
+    }
+
+    /// Whether this is an API key an earlier Haarness saved whose addresses
+    /// are not all known yet: none recorded, or some found while the rest
+    /// are still looked for.
+    #[must_use]
+    pub fn addresses_pending(&self) -> bool {
+        match self {
+            Self::Typed(TypedCredential::Api {
+                addresses,
+                addresses_pending,
+                ..
+            }) => addresses.is_none() || *addresses_pending,
+            Self::Legacy(_) => true,
+            Self::Typed(TypedCredential::OAuth { .. }) => false,
+        }
     }
 
     /// The addresses an API key was saved for; `None` for a key an earlier
@@ -392,8 +426,11 @@ impl CredentialStore {
     /// has only its own.
     pub fn set_api_key(&self, provider: &str, key: &str, url: Option<&str>) -> AuthResult<()> {
         self.update(provider, |current| {
-            let mut addresses = current
-                .filter(|current| current.api_key() == Some(key))
+            // The same key an earlier Haarness saved stays looked for, so
+            // the projects that used it before still get it.
+            let same = current.filter(|current| current.api_key() == Some(key));
+            let pending = same.as_ref().is_some_and(Credential::addresses_pending);
+            let mut addresses = same
                 .and_then(|current| current.addresses().map(<[String]>::to_vec))
                 .unwrap_or_default();
             if let Some(address) = url.and_then(key_address)
@@ -401,7 +438,7 @@ impl CredentialStore {
             {
                 addresses.push(address);
             }
-            Credential::api_for(key.to_owned(), addresses)
+            Credential::api_found(key.to_owned(), addresses, pending)
         })
     }
 
@@ -443,18 +480,28 @@ impl CredentialStore {
         addresses.push(address);
         raw.insert(
             provider.to_owned(),
-            serde_json::to_value(Credential::api_for(key.to_owned(), addresses))
-                .map_err(AuthError::Encode)?,
+            serde_json::to_value(Credential::api_found(
+                key.to_owned(),
+                addresses,
+                credential.addresses_pending(),
+            ))
+            .map_err(AuthError::Encode)?,
         );
         self.write_raw(&raw)?;
         Ok(true)
     }
 
-    /// Record the addresses of API keys an earlier Haarness saved, before it
-    /// recorded any: each id of `found` whose key still has none gets the
-    /// addresses listed for it (none in particular when the list is empty).
-    /// A key saved meanwhile keeps its own, and a damaged file is left alone.
-    pub fn record_addresses(&self, found: &BTreeMap<String, Vec<String>>) -> AuthResult<()> {
+    /// Record addresses found for API keys an earlier Haarness saved: each
+    /// id of `found` names the key that was looked for and the addresses its
+    /// definitions give. They are added to that key while it is still looked
+    /// for, also when it was saved again since (the same key, connected in
+    /// one more project); a key replaced by another is left alone, and so is
+    /// a damaged file. With `done`, the key is no longer looked for.
+    pub fn record_addresses(
+        &self,
+        found: &BTreeMap<String, (String, Vec<String>)>,
+        done: bool,
+    ) -> AuthResult<()> {
         let _guard = self
             .mutation
             .lock()
@@ -465,7 +512,7 @@ impl CredentialStore {
             records => records.map_err(AuthError::unsaved)?,
         };
         let mut changed = false;
-        for (provider, addresses) in found {
+        for (provider, (looked_for, found)) in found {
             let Some(credential) = raw
                 .get(provider.as_str())
                 .cloned()
@@ -473,18 +520,27 @@ impl CredentialStore {
             else {
                 continue;
             };
-            let Some(key) = credential
-                .api_key()
-                .filter(|_| credential.addresses().is_none())
-            else {
+            if credential.api_key() != Some(looked_for.as_str()) || !credential.addresses_pending()
+            {
                 continue;
-            };
-            raw.insert(
-                provider.clone(),
-                serde_json::to_value(Credential::api_for(key.to_owned(), addresses.clone()))
-                    .map_err(AuthError::Encode)?,
-            );
-            changed = true;
+            }
+            let mut addresses = credential
+                .addresses()
+                .map(<[String]>::to_vec)
+                .unwrap_or_default();
+            for address in found {
+                if !addresses.contains(address) {
+                    addresses.push(address.clone());
+                }
+            }
+            let next = Credential::api_found(looked_for.clone(), addresses, !done);
+            if next != credential {
+                raw.insert(
+                    provider.clone(),
+                    serde_json::to_value(next).map_err(AuthError::Encode)?,
+                );
+                changed = true;
+            }
         }
         if changed {
             self.write_raw(&raw)?;
@@ -2389,18 +2445,32 @@ mod tests {
         )
         .unwrap();
         let store = CredentialStore::new(path);
+        let found = |entries: &[(&str, &str, &[&str])]| {
+            entries
+                .iter()
+                .map(|(id, key, addresses)| {
+                    (
+                        (*id).to_owned(),
+                        (
+                            (*key).to_owned(),
+                            addresses
+                                .iter()
+                                .map(|address| (*address).to_owned())
+                                .collect(),
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
         store
-            .record_addresses(&BTreeMap::from([
-                (
-                    "team".to_owned(),
-                    vec!["https://team.example/v1".to_owned()],
-                ),
-                (
-                    "router".to_owned(),
-                    vec!["http://127.0.0.1:5000/v1".to_owned()],
-                ),
-                ("spare".to_owned(), Vec::new()),
-            ]))
+            .record_addresses(
+                &found(&[
+                    ("team", "legacy-key", &["https://team.example/v1"]),
+                    ("router", "k", &["http://127.0.0.1:5000/v1"]),
+                    ("spare", "s", &[]),
+                ]),
+                true,
+            )
             .unwrap();
         let get = |id: &str| store.get(id).unwrap().unwrap();
         assert_eq!(
@@ -2408,17 +2478,72 @@ mod tests {
             Some(&["https://team.example/v1".to_owned()][..])
         );
         assert_eq!(get("team").api_key(), Some("legacy-key"));
+        assert!(!get("team").addresses_pending());
         assert_eq!(get("spare").addresses(), Some(&[][..]));
         assert_eq!(get("anthropic").addresses(), None, "not named, not touched");
+        // Recorded to the end: nothing is added later.
         store
-            .record_addresses(&BTreeMap::from([(
-                "router".to_owned(),
-                vec!["http://evil.example".to_owned()],
-            )]))
+            .record_addresses(&found(&[("router", "k", &["http://evil.example"])]), true)
             .unwrap();
         assert_eq!(
             get("router").addresses(),
             Some(&["http://127.0.0.1:5000/v1".to_owned()][..])
+        );
+    }
+
+    /// While a key saved before is still looked for, the addresses found so
+    /// far are added to it, also after it was connected again with the same
+    /// key; a key replaced by another gets none of them.
+    #[test]
+    fn a_key_still_looked_for_gathers_the_addresses_found() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"team":{"type":"api","key":"k"},"other":{"type":"api","key":"o"}}"#,
+        )
+        .unwrap();
+        let store = CredentialStore::new(path);
+        let found = |id: &str, key: &str, address: &str| {
+            BTreeMap::from([(id.to_owned(), (key.to_owned(), vec![address.to_owned()]))])
+        };
+        store
+            .record_addresses(&found("team", "k", "http://a.example/v1"), false)
+            .unwrap();
+        assert!(store.get("team").unwrap().unwrap().addresses_pending());
+        store
+            .set_api_key("team", "k", Some("http://c.example/v1"))
+            .unwrap();
+        assert!(
+            store.get("team").unwrap().unwrap().addresses_pending(),
+            "the same key"
+        );
+        store
+            .record_addresses(&found("team", "k", "http://b.example/v1"), true)
+            .unwrap();
+        let team = store.get("team").unwrap().unwrap();
+        assert!(!team.addresses_pending());
+        assert_eq!(
+            team.addresses().unwrap(),
+            [
+                "http://a.example/v1",
+                "http://c.example/v1",
+                "http://b.example/v1"
+            ]
+        );
+        store
+            .set_api_key("other", "new", Some("http://c.example/v1"))
+            .unwrap();
+        assert!(
+            !store.get("other").unwrap().unwrap().addresses_pending(),
+            "a new key"
+        );
+        store
+            .record_addresses(&found("other", "o", "http://a.example/v1"), true)
+            .unwrap();
+        assert_eq!(
+            store.get("other").unwrap().unwrap().addresses().unwrap(),
+            ["http://c.example/v1"]
         );
     }
 
@@ -2443,7 +2568,10 @@ mod tests {
                 .unwrap()
         );
         store
-            .record_addresses(&BTreeMap::from([("router".to_owned(), Vec::new())]))
+            .record_addresses(
+                &BTreeMap::from([("router".to_owned(), ("key".to_owned(), Vec::new()))]),
+                true,
+            )
             .unwrap();
         assert_eq!(copies(), 0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"router\": ");

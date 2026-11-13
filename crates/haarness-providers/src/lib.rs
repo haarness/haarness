@@ -320,9 +320,10 @@ impl ProviderInstance {
 /// provider under any id and at any address, while keys are saved under the
 /// id, so such a provider is sent a saved key only when it was saved for the
 /// provider's own address (see [`auth::key_address`]), checked at every
-/// request, and its requests follow no redirect off that server: the HTTP
-/// client drops only `Authorization` on the way, not the `x-api-key`,
-/// `x-goog-api-key` or `api-key` other wires carry their key in.
+/// request, and its requests follow a redirect only where that key may go:
+/// the HTTP client drops only `Authorization` on the way to another server,
+/// not the `x-api-key`, `x-goog-api-key` or `api-key` other wires carry
+/// their key in.
 #[derive(Clone, Debug, Default)]
 pub struct CredentialFence {
     /// Providers a project defines.
@@ -337,17 +338,18 @@ pub struct CredentialFence {
     pub withheld: HashMap<String, String>,
 }
 
-/// The HTTP client of a provider a project defines: it follows a redirect
-/// only on the server the request went to. One that leads elsewhere comes
-/// back as the answer.
-fn same_server_client() -> reqwest::Client {
+/// The HTTP client of a provider a project defines at `base_url`: it
+/// follows a redirect only to where a key saved for that address may go (see
+/// [`auth::address_covers`]), or to the same place over https. One that
+/// leads elsewhere comes back as the answer.
+fn covered_redirect_client(base_url: &str) -> reqwest::Client {
+    let base = auth::key_address(base_url);
     reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            let same_server = attempt
-                .previous()
-                .first()
-                .is_some_and(|first| first.origin() == attempt.url().origin());
-            if !same_server {
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            let covered = base
+                .as_deref()
+                .is_some_and(|base| redirect_covered(base, attempt.url()));
+            if !covered {
                 attempt.stop()
             } else if attempt.previous().len() > 10 {
                 attempt.error("too many redirects")
@@ -357,6 +359,26 @@ fn same_server_client() -> reqwest::Client {
         }))
         .build()
         .unwrap_or_default()
+}
+
+/// Whether a redirect to `next` stays where a key saved for `base` (see
+/// [`auth::key_address`]) may go: at that address or below it, or the same
+/// over https on the same host (the default port for each, or the same one).
+fn redirect_covered(base: &str, next: &url::Url) -> bool {
+    if auth::address_covers(base, next.as_str()) {
+        return true;
+    }
+    let Ok(mut secure) = url::Url::parse(base) else {
+        return false;
+    };
+    if secure.scheme() != "http" || next.scheme() != "https" {
+        return false;
+    }
+    let port = secure.port();
+    if secure.set_scheme("https").is_err() || secure.set_port(port).is_err() {
+        return false;
+    }
+    auth::address_covers(secure.as_str().trim_end_matches('/'), next.as_str())
 }
 
 /// A provider a project defines whose saved key is for another address: a
@@ -656,7 +678,7 @@ impl NativeProviderRegistry {
             };
             let ambient = !fence.no_ambient.contains(&id);
             // Where a project points it, a redirect elsewhere is not followed.
-            let client = project.then(same_server_client);
+            let client = project.then(|| covered_redirect_client(&base_url));
             let provider: Arc<dyn ModelProvider> = match instance {
                 ProviderInstance::OpenAiChatCompletions(instance) => {
                     let mut provider = OpenAiCompatibleProvider::new(instance)
@@ -2057,10 +2079,12 @@ mod tests {
         Ok(())
     }
 
-    /// The server a project points a provider at may redirect it, but not
-    /// to another server: the HTTP client drops only `Authorization` on the
-    /// way, so `x-api-key`, `x-goog-api-key` and `api-key` would go along.
-    /// A redirect on the same server is still followed.
+    /// The server a project points a provider at may redirect it, but only
+    /// where the saved key may go: the HTTP client drops only
+    /// `Authorization` on the way to another server, so `x-api-key`,
+    /// `x-goog-api-key` and `api-key` would go along, and on the same server
+    /// another path can be another account's. A redirect below the saved
+    /// address is still followed.
     #[tokio::test]
     async fn a_project_provider_follows_no_redirect_off_its_server() {
         use axum::{
@@ -2085,7 +2109,8 @@ mod tests {
             axum::serve(other, app).await.unwrap();
         });
         // The saved server: `/hop/…` is sent on to the other server,
-        // `/moved/…` to its own `/v1/…`, which answers.
+        // `/leave/…` to its own `/v1/…`, and `/moved/…` to `/moved/here/…`;
+        // what is not sent on is answered.
         let here: Seen = std::sync::Arc::default();
         let record = here.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2096,7 +2121,10 @@ mod tests {
                 let (record, own, other) = (record.clone(), own.clone(), other_address.clone());
                 async move {
                     let target = uri.path_and_query().map_or("/", |path| path.as_str());
-                    if let Some(rest) = target.strip_prefix("/moved") {
+                    if let Some(rest) = target.strip_prefix("/moved").filter(|rest| !rest.starts_with("/here")) {
+                        return (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, format!("{own}/moved/here{rest}"))]).into_response();
+                    }
+                    if let Some(rest) = target.strip_prefix("/leave") {
                         return (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, format!("{own}/v1{rest}"))]).into_response();
                     }
                     if target.starts_with("/hop") {
@@ -2151,6 +2179,10 @@ mod tests {
                 assume_authenticated: false,
                 headers: ProviderHeaders::default(),
             }),
+            super::ProviderInstance::AnthropicMessages(native(
+                "team-leave",
+                format!("{address}/leave"),
+            )),
         ];
         for instance in &instances {
             store
@@ -2180,6 +2212,7 @@ mod tests {
             "team-gemini",
             "team-azure",
             "team-gateway",
+            "team-leave",
         ] {
             let provider = haarness_core::ProviderRegistry::get(&registry, id).unwrap();
             assert!(provider.info().authenticated, "{id}");
@@ -2189,14 +2222,59 @@ mod tests {
         assert!(elsewhere.lock().is_empty(), "{:?}", elsewhere.lock());
         let arrived = here.lock();
         assert!(
-            arrived
-                .iter()
-                .any(|(uri, headers)| uri.starts_with("/v1/chat/completions")
+            arrived.iter().any(
+                |(uri, headers)| uri.starts_with("/moved/here/chat/completions")
                     && headers
                         .get("authorization")
-                        .is_some_and(|value| value == "Bearer team-gateway-key")),
+                        .is_some_and(|value| value == "Bearer team-gateway-key")
+            ),
             "{arrived:?}"
         );
+        assert!(
+            !arrived.iter().any(|(uri, _)| uri.starts_with("/v1/")),
+            "a redirect off the saved path was followed: {arrived:?}"
+        );
+    }
+
+    /// Where a redirect may lead a project's provider: below its address,
+    /// or to the same place over https on the same host.
+    #[test]
+    fn a_redirect_is_followed_only_where_the_key_may_go() {
+        let follows =
+            |base: &str, next: &str| super::redirect_covered(base, &url::Url::parse(next).unwrap());
+        assert!(follows(
+            "http://gw.example/v1/acct",
+            "http://gw.example/v1/acct/models"
+        ));
+        assert!(follows(
+            "http://gw.example/v1/acct",
+            "https://gw.example/v1/acct/models"
+        ));
+        assert!(follows(
+            "http://gw.example:8080/v1",
+            "https://gw.example:8080/v1/models"
+        ));
+        assert!(follows("http://gw.example", "https://gw.example/anything"));
+        assert!(!follows(
+            "http://gw.example/v1/acct",
+            "http://gw.example/v1/other/models"
+        ));
+        assert!(!follows(
+            "http://gw.example/v1/acct",
+            "https://gw.example:8443/v1/acct/models"
+        ));
+        assert!(!follows(
+            "http://gw.example:8080/v1",
+            "https://gw.example/v1/models"
+        ));
+        assert!(!follows(
+            "http://gw.example/v1",
+            "https://evil.example/v1/models"
+        ));
+        assert!(!follows(
+            "https://gw.example/v1",
+            "http://gw.example/v1/models"
+        ));
     }
 
     /// A chat on a provider whose saved key is for another address fails
