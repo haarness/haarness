@@ -187,9 +187,16 @@ test("chats without a project: a ready first launch, a folder of their own on on
   const threads = async () => (await client!.listThreads({ archived: true })) as (Thread & { directory?: string })[];
   const one = (await threads()).find((thread) => thread.directory === first);
   expect(one, "the chat reports its folder").toBeTruthy();
+  // Desktop starts the turn only once the chat is made and opened, so no
+  // turn running yet does not mean it ran: wait for its tool's result.
+  await expect
+    .poll(
+      async () =>
+        JSON.stringify((await client!.listItems(one!.id)).find((item) => item.data.type === "tool_result")?.data ?? ""),
+      { timeout: 60000 },
+    )
+    .toContain(first);
   await settled(one!.id);
-  const ran = (await client.listItems(one!.id)).find((item) => item.data.type === "tool_result");
-  expect(JSON.stringify(ran?.data)).toContain(first);
   await expect(chatFolder()).toHaveAccessibleName("Chat folder: tool-bash-command-pwd");
   await expect(page.locator(".titlebar-caption")).toHaveText("This computer");
 
