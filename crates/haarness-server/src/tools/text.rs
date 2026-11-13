@@ -394,26 +394,67 @@ impl std::error::Error for NotRegular {}
 
 /// Opens `path` without waiting for a pipe's other end, then refuses what
 /// the open file is if that is neither a regular file nor a folder (a folder
-/// fails as it always did). On Unix a pipe opened to be written with
-/// nothing reading it fails at once, and is refused the same way.
-fn open_regular(path: &Path, options: &mut std::fs::OpenOptions) -> io::Result<(File, u64)> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(nix::libc::O_NONBLOCK);
-    }
-    let file = options.open(path).map_err(|error| {
-        #[cfg(unix)]
-        if error.raw_os_error() == Some(nix::libc::ENXIO) {
-            return io::Error::other(NotRegular);
-        }
-        error
-    })?;
-    let metadata = file.metadata()?;
+/// fails as it always did). The file is then read or written as any other:
+/// only its open does not wait.
+fn open_regular(path: &Path, options: &std::fs::OpenOptions) -> io::Result<(File, u64)> {
+    let file = open_without_waiting(path, options)?;
+    let metadata = file.metadata().map_err(unreadable_handle)?;
     if !metadata.is_file() && !metadata.is_dir() {
         return Err(io::Error::other(NotRegular));
     }
+    #[cfg(unix)]
+    {
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+        let flags = OFlag::from_bits_truncate(fcntl(&file, FcntlArg::F_GETFL)?);
+        fcntl(&file, FcntlArg::F_SETFL(flags - OFlag::O_NONBLOCK))?;
+    }
     Ok((file, metadata.len()))
+}
+
+/// The open of [`open_regular`]: on Unix with `O_NONBLOCK`, so a pipe opens
+/// at once. A pipe or socket opened to be written with nothing reading it
+/// fails then (ENXIO) and is refused as no regular file; ENXIO from anything
+/// else (a disk that went away) keeps its own words. An open a lease would
+/// hold (a file another NFS or SMB client has open) is made again the usual
+/// way, waiting as it always did.
+#[cfg(unix)]
+fn open_without_waiting(path: &Path, options: &std::fs::OpenOptions) -> io::Result<File> {
+    use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _};
+    let mut without_waiting = options.clone();
+    without_waiting.custom_flags(nix::libc::O_NONBLOCK);
+    match without_waiting.open(path) {
+        Err(error)
+            if error.raw_os_error() == Some(nix::libc::ENXIO)
+                && std::fs::metadata(path).is_ok_and(|metadata| {
+                    metadata.file_type().is_fifo() || metadata.file_type().is_socket()
+                }) =>
+        {
+            Err(io::Error::other(NotRegular))
+        }
+        Err(error)
+            if error.kind() == io::ErrorKind::WouldBlock
+                && std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) =>
+        {
+            options.open(path)
+        }
+        opened => opened,
+    }
+}
+
+#[cfg(not(unix))]
+fn open_without_waiting(path: &Path, options: &std::fs::OpenOptions) -> io::Result<File> {
+    options.open(path)
+}
+
+/// The failure of an open handle to say what it is: on Windows a device
+/// name (`NUL`, `CON`) or a named pipe, which is no regular file; elsewhere
+/// the error as it came.
+fn unreadable_handle(error: io::Error) -> io::Error {
+    if cfg!(windows) {
+        io::Error::other(NotRegular)
+    } else {
+        error
+    }
 }
 
 /// A file's bytes, as `tokio::fs::read` gives them, but checked on the open
@@ -966,6 +1007,32 @@ pub(super) fn any_line_ends(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the open does not wait: the file it gives is read and written as
+    /// any other, so a filesystem that heeds the flag on a regular file never
+    /// answers a read or a write with "try again".
+    #[cfg(unix)]
+    #[test]
+    fn a_checked_file_is_read_and_written_as_usual() {
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+        let root = std::env::temp_dir().join(format!("haarness-opened-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("note.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        for options in [
+            std::fs::OpenOptions::new().read(true).clone(),
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .clone(),
+        ] {
+            let (file, _) = open_regular(&path, &options).unwrap();
+            let flags = OFlag::from_bits_truncate(fcntl(&file, FcntlArg::F_GETFL).unwrap());
+            assert!(!flags.contains(OFlag::O_NONBLOCK), "{options:?}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn an_old_across_mixed_line_ends_is_found_line_by_line() {
