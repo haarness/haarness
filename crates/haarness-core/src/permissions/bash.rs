@@ -1428,8 +1428,11 @@ impl Reader<'_> {
                 .named_children(&mut statements)
                 .filter(|node| node.kind() != "comment")
                 .collect();
+            // Under dash, `&>` sends the chain before it to the background.
             self.analysis.directories = match statements.as_slice() {
-                [statement] if and_chain(*statement) => Some(Vec::new()),
+                [statement] if and_chain(*statement) && !dash_backgrounds(*statement, command) => {
+                    Some(Vec::new())
+                }
                 _ => None,
             };
             // Not for a line the parser cannot read whole, or one whose
@@ -5328,8 +5331,13 @@ fn read_only_invocation(tokens: &[String]) -> bool {
                 && names.iter().any(|full| full.starts_with(name))
         })
     };
-    // Words that are not options.
-    let operands = || args.iter().filter(|arg| !arg.starts_with('-')).count();
+    // Whether an option is exactly one of `names`, alone or with `=value`.
+    let exact = |names: &[&str]| {
+        args.iter().any(|arg| {
+            let name = arg.split('=').next().unwrap_or_default();
+            names.contains(&name)
+        })
+    };
     match program {
         ":" | "true" | "false" | "pwd" | "echo" | "cat" | "head" | "tail" | "cut" | "tr"
         | "grep" | "ls" | "stat" | "df" | "basename" | "dirname" | "realpath" | "cmp" | "comm"
@@ -5337,14 +5345,46 @@ fn read_only_invocation(tokens: &[String]) -> bool {
         | "test" | "[" | "jq" | "cd" => true,
         // `printf -v` sets a variable of the shell, which may be `PATH`.
         "printf" => !short("v"),
-        // `uniq in out` writes `out`.
-        "uniq" => operands() <= 1,
+        // `uniq in out` writes `out`; `-f`, `-s` and `-w` take a number.
+        "uniq" => {
+            let mut files = 0;
+            let mut value = false;
+            for arg in args {
+                if std::mem::take(&mut value) {
+                    continue;
+                }
+                if matches!(
+                    arg.as_str(),
+                    "-f" | "-s" | "-w" | "--skip-fields" | "--skip-chars" | "--check-chars"
+                ) {
+                    value = true;
+                } else if !arg.starts_with('-') || arg == "-" {
+                    files += 1;
+                }
+            }
+            files <= 1
+        }
         // `file -C` writes a compiled magic file.
         "file" => !short("C") && !long(&["--compile"]),
         // They read the files to look at from a list in a file.
         "wc" | "du" => !long(&["--files0-from"]),
-        // Any other word may set the clock.
-        "date" => args.iter().all(|arg| arg.starts_with('+') || arg == "-u"),
+        // What only shows a time; any other word may set the clock.
+        "date" => {
+            let mut value = false;
+            args.iter().all(|arg| {
+                if std::mem::take(&mut value) {
+                    return true;
+                }
+                value = matches!(arg.as_str(), "-r" | "--reference");
+                value
+                    || arg.starts_with('+')
+                    || arg.starts_with("-I")
+                    || arg.starts_with("--iso-8601")
+                    || arg.starts_with("--rfc-")
+                    || arg.starts_with("--reference=")
+                    || matches!(arg.as_str(), "-u" | "-R" | "--utc" | "--universal")
+            })
+        }
         "sleep" => {
             args.len() == 1
                 && !args[0].is_empty()
@@ -5353,12 +5393,16 @@ fn read_only_invocation(tokens: &[String]) -> bool {
                 })
         }
         // `-o` writes, `-T` keeps temporary files in a folder, and
-        // `--compress-program` runs a program; GNU sort takes long options
-        // shortened, so any `--o…`, `--c…` or `--t…` counts.
+        // `--compress-program` runs a program. GNU sort takes a long option
+        // shortened as long as no other starts the same way: `--o` is
+        // `--output`, `--t` `--temporary-directory`, `--co` the program
+        // (`--c` alone is ambiguous with `--check`).
         "sort" => {
             !short("oT")
+                && !long(&["--output", "--temporary-directory"])
                 && !args.iter().any(|arg| {
-                    arg.starts_with("--o") || arg.starts_with("--c") || arg.starts_with("--t")
+                    let name = arg.split('=').next().unwrap_or_default();
+                    name.len() > 3 && "--compress-program".starts_with(name)
                 })
         }
         // `--pre` and `--hostname-bin` run a program.
@@ -5400,14 +5444,17 @@ fn read_only_invocation(tokens: &[String]) -> bool {
                         | "count-objects"
                         | "version"
                 )
-            }) && !short("O")
-                && !long(&[
-                    "--output",
-                    "--ext-diff",
-                    "--textconv",
-                    "--filters",
-                    "--open-files-in-pager",
-                ])
+            }) && match args[0].as_str() {
+                // These read their options as git's option parser does,
+                // which takes a long one shortened: `--te` is `--textconv`.
+                "cat-file" => !long(&["--textconv", "--filters"]),
+                // `-O` and `--open-files-in-pager` run a program, also in a
+                // cluster of short options (`-iO`).
+                "grep" => !short("O") && !long(&["--open-files-in-pager"]),
+                // Diff and log options are taken only as written: `--text`
+                // is not `--textconv`.
+                _ => !exact(&["--output", "--ext-diff", "--textconv"]),
+            }
         }
         _ => false,
     }
@@ -6085,6 +6132,21 @@ fn and_chain(node: tree_sitter::Node<'_>) -> bool {
     true
 }
 
+/// Whether a redirect under `node` is written `&>` or `&>>`, which dash
+/// reads as `&` and `>`: what comes before it runs in the background, and
+/// the shell goes on where it was.
+fn dash_backgrounds(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "file_redirect" && matches!(operator(node, source).as_str(), "&>" | "&>>")
+        {
+            return true;
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
+    false
+}
+
 /// Builtins that run text or another command in the line's own shell, which
 /// [`moves_shell`] does not name: `time cd /x` moves it, a `trap`, `mapfile
 /// -C` or `readarray -C` runs text there later, and `enable -f` loads a
@@ -6128,6 +6190,14 @@ fn chain_folders(
     let mut folder: Rc<Path> = Rc::from(workspace);
     let (mut moves, mut ran) = (0, false);
     for (node, outer) in steps(chain) {
+        // Dash reads `&>` as `&` and `>`: the chain up to it runs in the
+        // background, and what follows where the shell was.
+        if std::iter::once(node)
+            .chain(outer.iter().copied())
+            .any(|node| dash_backgrounds(node, source))
+        {
+            break;
+        }
         // A pipeline's stages each run in a subshell started where the shell
         // is, and leave it there. A redirect the tree hangs on the list
         // around it (`cd sub && a | b > f`) is its last stage's.
@@ -6258,8 +6328,9 @@ fn reading_folders(
     };
     let mut folder = start.to_path_buf();
     let mut moves = 0;
+    let mut targets = Vec::new();
     for (node, outer) in &first.steps {
-        let Some(next) = entered(*node, outer, source, &folder) else {
+        let Some((next, target)) = entered(*node, outer, source, &folder) else {
             break;
         };
         moves += 1;
@@ -6267,6 +6338,13 @@ fn reading_folders(
             return folders;
         }
         folder = next;
+        targets.push(target);
+    }
+    // The parser takes a carriage return, a form feed or a backslash before
+    // a tab for a blank where the shell keeps it in the word: the line's own
+    // bytes must say the same `cd`s.
+    if opening_cds(source).is_none_or(|written| written != targets) {
+        return folders;
     }
     let inside = |folder: &Path| {
         let project = crate::paths::canonicalize(workspace);
@@ -6292,6 +6370,100 @@ fn reading_folders(
     folders
 }
 
+/// The folders of the plain `cd`s a line opens with, joined by `&&`, read
+/// from its bytes: `cd`, spaces or tabs, one word of letters, digits and
+/// `.`, `_`, `-`, `/`, `+`, `@` or `,`, then at most redirects that cannot
+/// fail in any shell (`>/dev/null`, `2>>/dev/null`, `2>&1`, `>&2`: a
+/// descriptor of 0 to 2 or none, onto `/dev/null` or standard output or
+/// error), each after a space or a tab, and then `&&`, `;`, a line break
+/// or a comment. `None` when the line does not open so: any other byte
+/// there, a carriage return, a form feed, a backslash, a quote or `&>`
+/// (which dash reads as `&` and `>`), may leave the shell where it was.
+fn opening_cds(line: &str) -> Option<Vec<String>> {
+    let bytes = line.as_bytes();
+    let blanks = |at: &mut usize| {
+        let start = *at;
+        while bytes
+            .get(*at)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            *at += 1;
+        }
+        *at > start
+    };
+    let mut at = 0;
+    while bytes
+        .get(at)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+    {
+        at += 1;
+    }
+    let mut folders = Vec::new();
+    loop {
+        let mut next = at;
+        if !line[next..].starts_with("cd") {
+            return Some(folders).filter(|folders| !folders.is_empty());
+        }
+        next += 2;
+        if !blanks(&mut next) {
+            return Some(folders).filter(|folders| !folders.is_empty());
+        }
+        let word: String = line[next..]
+            .chars()
+            .take_while(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '.' | '_' | '-' | '/' | '+' | '@' | ',')
+                    || (!c.is_ascii() && c.is_alphabetic())
+            })
+            .collect();
+        if word.is_empty() {
+            return None;
+        }
+        next += word.len();
+        folders.push(word);
+        loop {
+            let before = next;
+            if !blanks(&mut next) {
+                break;
+            }
+            // A descriptor of 0 to 2, or none, then `>&1`, `>&2`, or `>` or
+            // `>>` onto `/dev/null`, blanks allowed before it.
+            let mut end = next + usize::from(line[next..].starts_with(['0', '1', '2']));
+            let redirect = &line[end..];
+            if redirect.starts_with(">&1") || redirect.starts_with(">&2") {
+                end += 3;
+            } else if redirect.starts_with('>') {
+                end += if redirect.starts_with(">>") { 2 } else { 1 };
+                blanks(&mut end);
+                if !line[end..].starts_with("/dev/null") {
+                    next = before;
+                    break;
+                }
+                end += "/dev/null".len();
+            } else {
+                next = before;
+                break;
+            }
+            next = end;
+        }
+        let spaced = blanks(&mut next);
+        let rest = &line[next..];
+        if rest.starts_with("&&") {
+            at = next + 2;
+            while bytes
+                .get(at)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+            {
+                at += 1;
+            }
+        } else if rest.starts_with([';', '\n']) || (rest.starts_with('#') && spaced) {
+            return Some(folders);
+        } else {
+            return None;
+        }
+    }
+}
+
 /// Where a plain `cd` step goes from `from`, for [`reading_folders`]: one
 /// folder [`plain_path`] takes and written with no `$` (a `$'…'` or `$"…"`
 /// word is no quoting at all to dash), with no assignment or substitution
@@ -6302,7 +6474,7 @@ fn entered(
     outer: &[tree_sitter::Node<'_>],
     source: &str,
     from: &Path,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, String)> {
     let (Some(command), redirects) = statement(node, outer) else {
         return None;
     };
@@ -6328,10 +6500,11 @@ fn entered(
     if program.raw != "cd" || !plain_path(target) || names_no_path(&program.value, &target.value) {
         return None;
     }
+    let written = target.raw.clone();
     let target =
         home_expansion(&target.raw, &target.value).unwrap_or_else(|| PathBuf::from(&target.value));
     let next = from.join(target);
-    (next.as_os_str().len() <= MAX_PLACED_BYTES && enterable(&next)).then_some(next)
+    (next.as_os_str().len() <= MAX_PLACED_BYTES && enterable(&next)).then_some((next, written))
 }
 
 /// Whether `folder` is a folder this process may search, as `cd` needs.
@@ -6423,18 +6596,24 @@ fn reads_or_silences(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
                             value == "-"
                                 || (!value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
                         }
-                        ">" | ">>" | "&>" | "&>>" | ">|" => value == "/dev/null",
+                        ">" | ">>" | ">|" => value == "/dev/null",
                         _ => false,
                     }
             })
 }
 
-/// Whether a redirect on a `cd` can never keep it from running: output sent
-/// to `/dev/null`, copied onto standard output or error, or closed. A file
-/// to read may be missing and another descriptor may not be open, and then
-/// the shell skips the `cd` and runs what follows `;` where it was.
+/// Whether a redirect on a `cd` can never keep it from running: standard
+/// input, output or error (or no descriptor written) sent to `/dev/null` or
+/// copied onto standard output or error. A file to read may be missing,
+/// another descriptor may not be open or be past the shell's limit, and
+/// dash reads `&>` as `&` and `>`, running the `cd` in the background: then
+/// the shell runs what follows `;` where it was.
 fn cannot_fail(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
+    let descriptor = redirect
+        .child_by_field_name("descriptor")
+        .map(|descriptor| node_text(descriptor, source));
     redirect.kind() == "file_redirect"
+        && descriptor.is_none_or(|descriptor| matches!(descriptor.as_str(), "0" | "1" | "2"))
         && !has_substitution(redirect)
         && redirect
             .children_by_field_name("destination", &mut redirect.walk())
@@ -6446,18 +6625,11 @@ fn cannot_fail(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
                 let (value, complete) = literal(destination, source);
                 complete
                     && match operator(redirect, source).as_str() {
-                        ">&" => matches!(value.as_str(), "1" | "2" | "-"),
-                        ">" | ">>" | "&>" | "&>>" | ">|" => value == "/dev/null",
+                        ">&" => matches!(value.as_str(), "1" | "2"),
+                        ">" | ">>" => value == "/dev/null",
                         _ => false,
                     }
             })
-        // `>&-` closes standard output; the parser reads it as one operator.
-        || redirect.kind() == "file_redirect"
-            && operator(redirect, source) == ">&-"
-            && redirect
-                .children_by_field_name("destination", &mut redirect.walk())
-                .count()
-                == 0
 }
 
 /// `text` kept to [`CLIPPED_PATTERN_BYTES`], with `…` when cut.
@@ -7906,7 +8078,8 @@ mod tests {
             "rg --hostname-bin=tool needle",
             "fd -Hx touch",
             "git grep -Oless needle",
-            "git log --outp=changed",
+            "git log --output=changed",
+            "git cat-file --te HEAD:x",
             "git cat-file --filters HEAD:x",
             "echo changed > file",
             "./looks-safe status",
@@ -8309,6 +8482,9 @@ mod regression {
             "cd sub > >(cat) && cat ../x",
             "cd sub 2> \"$(mktemp)\" && cat ../x",
             "cd sub || cat ../x",
+            // Dash runs a chain up to `&>` in the background.
+            "cd sub &>/dev/null && cat ../x",
+            "cd sub && cat x &>/dev/null && cat ../x",
             "env cd sub && cat ../x",
             "/usr/bin/cd sub && cat ../x",
             &format!("cd sub && c\\\nd {} && cat ../x", workspace.display()),
@@ -8350,7 +8526,8 @@ mod regression {
             "cd sub > /dev/null; cat ../README.md",
             "cd sub >/dev/null 2>&1; cat ../README.md",
             "cd sub 2>&1 >&2; cat ../README.md",
-            "cd sub >&-; cat ../README.md",
+            "cd sub 2>/dev/null >> /dev/null 1>&2; cat ../README.md",
+            "cd sub # into it\ncat ../README.md",
             "cd a/l\ncat ../../../README.md",
             "cd sub; cat ../README.md\ncat ../README.md",
         ] {
@@ -8411,6 +8588,26 @@ mod regression {
             "cd sub < nosuch.txt; cat ../x",
             "cd sub 2>&9; cat ../x",
             "cd sub 9>&8; cat ../x",
+            // Bytes the parser takes for blanks and the shell keeps in the
+            // word, a descriptor past the shell's limit, and `&>`, which dash
+            // reads as `&` and `>`.
+            "cd sub\r; cat ../x",
+            "cd sub\r\ncat ../x",
+            "cd sub\x0c; cat ../x",
+            "cd sub\x0b; cat ../x",
+            "cd sub\\\t; cat ../x",
+            "cd sub \r; cat ../x",
+            "cd sub >/dev/null\r; cat ../x",
+            "cd sub && cd deeper\x0c; cat ../x",
+            "cd sub 99999999>/dev/null; cat ../x",
+            "cd sub 2147483647>&2; cat ../x",
+            "cd sub 2>/dev/null 99999999>&1; cat ../x",
+            "cd sub &>/dev/null; cat ../x",
+            "cd sub &>>/dev/null; cat ../x",
+            "cd sub >&-; cat ../x",
+            "cd sub#x; cat ../x",
+            "cd sub>/dev/null; cat ../x",
+            "cd 'sub'; cat ../x",
             "pushd sub > /dev/null; cat ../x",
             "cd $'sub'; cat ../x",
             "cd $\"sub\"; cat ../x",
@@ -8433,7 +8630,7 @@ mod regression {
             "cd sub; rg --pr=tool x; cat ../x",
             "cd sub; fd -Hx echo; cat ../x",
             "cd sub; git grep -Oless x; cat ../x",
-            "cd sub; git log --outp=../out; cat ../x",
+            "cd sub; git log --output=../out; cat ../x",
             "cd sub; git cat-file --filt HEAD:x; cat ../x",
         ] {
             assert_eq!(
@@ -8473,14 +8670,18 @@ mod regression {
         .unwrap();
         // Where Auto's reviewer places a deletion is as before: only a line
         // that is one `&&` chain is followed.
-        assert_eq!(
-            outside_deletions("cd sub; rm -rf ../x", &workspace, None),
-            vec![OutsideDeletion {
-                path: "../x".into(),
-                placed: false,
-                effect: Effect::Deletes,
-            }]
-        );
+        // Nor one whose `cd` dash may send to the background.
+        for command in ["cd sub; rm -rf ../x", "cd sub &>/dev/null && rm -rf ../x"] {
+            assert_eq!(
+                outside_deletions(command, &workspace, None),
+                vec![OutsideDeletion {
+                    path: "../x".into(),
+                    placed: false,
+                    effect: Effect::Deletes,
+                }],
+                "{command}"
+            );
+        }
         assert_eq!(
             analyze("cd sub; cat ../README.md", &workspace).directories,
             None
@@ -8889,6 +9090,17 @@ mod regression {
         }
         for command in [
             "git status '--short'",
+            "date -Iseconds",
+            "date -R",
+            "date -u +%s",
+            "date -r Cargo.toml",
+            "uniq -f 1 notes.txt",
+            "uniq -s 2 -c notes.txt",
+            "git diff --text",
+            "git log -SOpen --oneline",
+            "git diff -Oorder.txt",
+            "sort --check notes.txt",
+            "sort -c -t, -k2 notes.txt",
             "printf '%s' hello",
             "find . -name '*.rs'",
             "cat 'file with spaces'",
@@ -9974,6 +10186,8 @@ mod readings {
             "\\rm -rf /tmp/x",
             "rm -rf $\"/tmp/x\"",
             "rm -rf $'/tmp/x'",
+            "cd /tmp &>/dev/null && rm -rf x",
+            "rm -rf /tmp/x &>/dev/null",
         ] {
             assert!(!cleans_up(command, &workspace), "{command}");
         }
