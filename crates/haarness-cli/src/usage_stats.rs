@@ -1,5 +1,6 @@
 //! Usage statistics (docs/USAGE-STATISTICS.md): daily counts of chats, turns,
-//! tokens, models and tool calls, shared with Haarness Cloud unless turned off.
+//! tokens, models and tool calls, and what failed and why, shared with
+//! Haarness Cloud unless turned off.
 //!
 //! What is sent is computed from the local history by `haarness_insights`,
 //! one snapshot per UTC day for the last week. Cloud replaces a day's snapshot
@@ -15,6 +16,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod scrub;
+
 /// `0`, `false`, `off`, `no` or `disabled` turns usage statistics off;
 /// `1`, `true`, `on` or `yes` turns them on whatever the settings say.
 pub(crate) const ENV: &str = "HAARNESS_TELEMETRY";
@@ -23,6 +26,48 @@ const WINDOW_DAYS: u32 = 7;
 const UPLOAD_EVERY: Duration = Duration::hours(6);
 const FIRST_CHECK_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// The most failed turns a day reports (its latest), the most tool error rows
+/// and versions, and how many characters of words each keeps.
+const MAX_FAILURES_PER_DAY: usize = 50;
+const MAX_TOOL_ERRORS_PER_DAY: usize = 40;
+const MAX_VERSIONS_PER_DAY: usize = 10;
+const FAILURE_WORDS: usize = 500;
+const TOOL_ERROR_WORDS: usize = 300;
+
+/// Tools whose errors are Haarness's own words about the call (with the path,
+/// address or name it was about), reported scrubbed. Any other tool's error
+/// can be a program's output, a page, a screen or someone else's server's
+/// words, and only counts.
+const TOOL_ERROR_WORDS_OF: &[&str] = &[
+    "agent_switch",
+    "apply_patch",
+    "batch",
+    "edit",
+    "glob",
+    "grep",
+    "image_generate",
+    "list",
+    "load_tool",
+    "lsp",
+    "multiedit",
+    "preview",
+    "question",
+    "read",
+    "schedule",
+    "session_wait",
+    "skill",
+    "StructuredOutput",
+    "task",
+    "task_abort",
+    "todo",
+    "todoread",
+    "todowrite",
+    "video_generate",
+    "webfetch",
+    "websearch",
+    "workflow",
+    "write",
+];
 
 /// Built-in tools reported by name. Any other tool (plugins, extensions, MCP
 /// servers) is counted as `mcp` or `other`, so custom names never leave; a
@@ -323,6 +368,202 @@ fn reported_tool(name: &str) -> &str {
     }
 }
 
+/// The names a person chose that `provider` and `model` stand for when they
+/// are reported as `custom`, `other` or `local`: taken out of an error's words.
+fn private_names<'a>(
+    provider: &'a str,
+    model: &'a str,
+    reported: &(String, String),
+) -> Vec<&'a str> {
+    let mut names = Vec::new();
+    if reported.0 != provider {
+        names.push(provider);
+    }
+    if reported.1 != model {
+        names.push(model);
+        // A model id with its owner (`acme/private-7b`) can be quoted by its
+        // last part.
+        if let Some((_, last)) = model.rsplit_once('/') {
+            names.push(last);
+        }
+    }
+    names
+}
+
+/// A version as Cloud takes it; `unknown` for turns recorded before versions
+/// were.
+fn reported_version(version: Option<&str>) -> String {
+    let version: String = version
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "._+-".contains(*c))
+        .take(64)
+        .collect();
+    if version.is_empty() {
+        "unknown".to_owned()
+    } else {
+        version
+    }
+}
+
+/// The day's latest failed turns: when, why (a kind from a closed list), on
+/// which provider and model (named as [`reported_model`] names them) and
+/// Haarness version, the turn's words scrubbed (see `scrub`), and how far it
+/// got. A hook's words are the person's own script's and stay here.
+fn reported_failures(rows: &[haarness_insights::FailedTurn]) -> Vec<Value> {
+    let skip = rows.len().saturating_sub(MAX_FAILURES_PER_DAY);
+    rows.iter()
+        .skip(skip)
+        .map(|row| {
+            let reported = reported_model(&row.provider, &row.model);
+            let message = if row.kind == haarness_insights::FailureKind::Hook {
+                String::new()
+            } else {
+                scrub::words(
+                    &row.error,
+                    &private_names(&row.provider, &row.model, &reported),
+                    FAILURE_WORDS,
+                )
+            };
+            let (provider, model) = reported;
+            json!({
+                "turnId": row.id,
+                "at": row.at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "kind": row.kind.as_str(),
+                "provider": provider,
+                "model": model,
+                "version": reported_version(row.version.as_deref()),
+                "message": (!message.is_empty()).then_some(message),
+                "durationMs": row.duration_ms,
+                "toolCalls": row.tool_calls,
+                "toolErrors": row.tool_errors,
+                "inputTokens": row.input_tokens,
+                "outputTokens": row.output_tokens,
+                "lastTool": row.last_tool.as_deref().map(reported_tool),
+            })
+        })
+        .collect()
+}
+
+/// The day's tool errors in words: one row per tool, provider, model,
+/// version and scrubbed words, with how many calls answered so, the most
+/// common first. Tools outside [`TOOL_ERROR_WORDS_OF`] only count, in `tools`.
+fn reported_tool_errors(rows: &[haarness_insights::ToolError]) -> Vec<Value> {
+    // (tool, provider, model, version, words) and how many calls said them.
+    type Key = (String, String, String, String, String);
+    let mut grouped: Vec<(Key, u64)> = Vec::new();
+    for row in rows {
+        if !TOOL_ERROR_WORDS_OF.contains(&row.tool.as_str()) {
+            continue;
+        }
+        let reported = reported_model(&row.provider, &row.model);
+        let message = scrub::words(
+            &row.output,
+            &private_names(&row.provider, &row.model, &reported),
+            TOOL_ERROR_WORDS,
+        );
+        if message.is_empty() {
+            continue;
+        }
+        let key = (
+            row.tool.clone(),
+            reported.0,
+            reported.1,
+            reported_version(row.version.as_deref()),
+            message,
+        );
+        match grouped.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, errors)) => *errors += 1,
+            None => grouped.push((key, 1)),
+        }
+    }
+    // Most common first; the same count keeps the day's order.
+    grouped.sort_by(|a, b| b.1.cmp(&a.1));
+    grouped
+        .into_iter()
+        .take(MAX_TOOL_ERRORS_PER_DAY)
+        .map(|((tool, provider, model, version, message), errors)| {
+            json!({
+                "tool": tool,
+                "provider": provider,
+                "model": model,
+                "version": version,
+                "message": message,
+                "errors": errors,
+            })
+        })
+        .collect()
+}
+
+/// The day's turns by the Haarness version that ran them, the most turns
+/// first.
+fn reported_versions(rows: &[haarness_insights::VersionUsage]) -> Vec<Value> {
+    let mut versions: Vec<(String, [u64; 4])> = Vec::new();
+    for row in rows {
+        let version = reported_version(row.version.as_deref());
+        let counts = [row.turns, row.completed, row.failed, row.interrupted];
+        match versions.iter_mut().find(|(v, _)| *v == version) {
+            Some((_, total)) => {
+                for (total, count) in total.iter_mut().zip(counts) {
+                    *total += count;
+                }
+            }
+            None => versions.push((version, counts)),
+        }
+    }
+    versions.sort_by(|a, b| b.1[0].cmp(&a.1[0]).then_with(|| a.0.cmp(&b.0)));
+    versions
+        .into_iter()
+        .take(MAX_VERSIONS_PER_DAY)
+        .map(|(version, [turns, completed, failed, interrupted])| {
+            json!({
+                "version": version,
+                "turns": turns,
+                "completedTurns": completed,
+                "failedTurns": failed,
+                "interruptedTurns": interrupted,
+            })
+        })
+        .collect()
+}
+
+/// A day's fields that a Haarness Cloud older than them refuses: it knows
+/// every field it takes and refuses the rest.
+const DETAIL_FIELDS: [&str; 3] = ["failures", "toolErrorMessages", "versions"];
+
+/// Whether Haarness Cloud refused a report for its failure details, as one
+/// older than them does: by a field's name, or by its size.
+fn refuses_details(status: reqwest::StatusCode, refusal: &str) -> bool {
+    status == reqwest::StatusCode::PAYLOAD_TOO_LARGE
+        || (status == reqwest::StatusCode::BAD_REQUEST
+            && DETAIL_FIELDS
+                .iter()
+                .any(|field| refusal.contains(&format!("unknown field `{field}`"))))
+}
+
+/// `report` without failure details, for a Haarness Cloud that doesn't take
+/// them yet: everything else still counts.
+fn without_details(report: &Value) -> Value {
+    let mut report = report.clone();
+    if let Some(days) = report["days"].as_array_mut() {
+        for day in days {
+            if let Some(day) = day.as_object_mut() {
+                for field in DETAIL_FIELDS {
+                    day.remove(field);
+                }
+            }
+        }
+    }
+    report
+}
+
+fn has_details(report: &Value) -> bool {
+    report["days"].as_array().is_some_and(|days| {
+        days.iter()
+            .any(|day| DETAIL_FIELDS.iter().any(|field| day.get(field).is_some()))
+    })
+}
+
 fn cost(value: f64, priced: u64) -> Value {
     // No priced usage at all means the cost is unknown, not zero.
     if priced == 0 {
@@ -363,7 +604,10 @@ pub(crate) fn report(data: &Path, now: DateTime<Utc>) -> Result<Value> {
             }
             models.sort_by(|a, b| b.2.tokens().cmp(&a.2.tokens()).then_with(|| a.0.cmp(&b.0)));
             tools.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            json!({
+            let failures = reported_failures(&day.failures);
+            let tool_errors = reported_tool_errors(&day.tool_errors);
+            let versions = reported_versions(&day.versions);
+            let mut day = json!({
                 "day": day.day,
                 "chats": total.sessions,
                 "turns": total.turns,
@@ -395,7 +639,18 @@ pub(crate) fn report(data: &Path, now: DateTime<Utc>) -> Result<Value> {
                 "tools": tools.iter().take(64).map(|(name, calls, errors)| json!({
                     "name": name, "calls": calls, "errors": errors,
                 })).collect::<Vec<_>>(),
-            })
+            });
+            // Each is left out when it has nothing to say.
+            for (field, rows) in [
+                ("failures", failures),
+                ("toolErrorMessages", tool_errors),
+                ("versions", versions),
+            ] {
+                if !rows.is_empty() {
+                    day[field] = Value::Array(rows);
+                }
+            }
+            day
         })
         .collect();
     Ok(json!({
@@ -480,17 +735,30 @@ pub(crate) async fn upload(data: &Path, config_dir: &Path, force: bool) -> Resul
         with_state(data, |state| state.last_upload_at = Some(now))?;
         return Ok(Outcome::Nothing);
     }
-    let mut request = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent(concat!("haarness/", env!("CARGO_PKG_VERSION")))
-        .build()?
-        .post(endpoint()?)
-        .json(&report);
-    if let Some(token) = bearer().await {
-        request = request.bearer_auth(token);
-    }
+        .build()?;
+    let url = endpoint()?;
+    let token = bearer().await;
+    let send = |report: &Value| {
+        let mut request = client.post(url.clone()).json(report);
+        if let Some(token) = &token {
+            request = request.bearer_auth(token);
+        }
+        request.send()
+    };
     let result = async {
-        let response = request.send().await.context("send usage statistics")?;
+        let mut response = send(&report).await.context("send usage statistics")?;
+        let status = response.status();
+        if !status.is_success() && has_details(&report) {
+            if !refuses_details(status, &response.text().await.unwrap_or_default()) {
+                bail!("Haarness Cloud answered {status}");
+            }
+            response = send(&without_details(&report))
+                .await
+                .context("send usage statistics")?;
+        }
         let status = response.status();
         if !status.is_success() {
             bail!("Haarness Cloud answered {status}");
@@ -740,6 +1008,256 @@ mod tests {
         assert_eq!(reported_tool("read_file"), "other");
         assert_eq!(clean("claude sonnet<script>"), "claudesonnetscript");
         assert_eq!(clean("   "), "other");
+    }
+
+    fn failed(
+        kind: haarness_insights::FailureKind,
+        provider: &str,
+        model: &str,
+        error: &str,
+    ) -> haarness_insights::FailedTurn {
+        haarness_insights::FailedTurn {
+            id: "019a7c4e-0000-7000-8000-000000000001".into(),
+            at: "2026-11-12T10:20:30.456Z".parse().unwrap(),
+            kind,
+            provider: provider.into(),
+            model: model.into(),
+            version: Some("0.1.22".into()),
+            error: error.into(),
+            duration_ms: 4_200,
+            tool_calls: 3,
+            tool_errors: 1,
+            input_tokens: 12_000,
+            output_tokens: 300,
+            last_tool: Some("mcp__acme__deploy".into()),
+        }
+    }
+
+    #[test]
+    fn a_failed_turn_says_when_why_where_and_on_which_version() {
+        use haarness_insights::FailureKind;
+        let failures = reported_failures(&[failed(
+            FailureKind::Quota,
+            "gemini",
+            "gemini-2.5-flash",
+            "This API key has used up today's free allowance for Gemini 2.5 Flash on Gemini, which comes back at midnight Pacific time, in about 9 hours.",
+        )]);
+        assert_eq!(
+            failures,
+            [json!({
+                "turnId": "019a7c4e-0000-7000-8000-000000000001",
+                "at": "2026-11-12T10:20:30Z",
+                "kind": "quota",
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "version": "0.1.22",
+                "message": "This API key has used up today's free allowance for Gemini 2.5 Flash on Gemini, which comes back at midnight Pacific time, in about 9 hours.",
+                "durationMs": 4_200,
+                "toolCalls": 3,
+                "toolErrors": 1,
+                "inputTokens": 12_000,
+                "outputTokens": 300,
+                "lastTool": "mcp",
+            })]
+        );
+    }
+
+    #[test]
+    fn a_failed_turn_s_words_lose_the_person_s_names_paths_and_hooks() {
+        use haarness_insights::FailureKind;
+        let mut older = failed(
+            FailureKind::ProviderError,
+            "acme-gateway",
+            "acme/private-7b",
+            "Could not reach acme-gateway: private-7b broke at /Users/sam/acme/main.rs on https://llm.acme.example.com/v1",
+        );
+        older.version = None;
+        let rows = reported_failures(&[
+            older,
+            failed(
+                FailureKind::Network,
+                "ollama",
+                "acme-private-7b",
+                "Could not reach Ollama at http://localhost:11434: acme-private-7b isn't running",
+            ),
+            failed(
+                FailureKind::Hook,
+                "anthropic",
+                "claude-sonnet-5-5",
+                "A hook blocked this prompt: the ticket SECRET-123 is closed",
+            ),
+        ]);
+        assert_eq!(
+            (rows[0]["provider"].clone(), rows[0]["model"].clone()),
+            (json!("custom"), json!("custom"))
+        );
+        assert_eq!(
+            rows[0]["message"],
+            "Could not reach <name>: <name> broke at <path> on <url>"
+        );
+        assert_eq!(rows[0]["version"], "unknown");
+        assert_eq!(rows[1]["model"], "local");
+        assert_eq!(
+            rows[1]["message"],
+            "Could not reach Ollama at http://localhost:11434: <name> isn't running"
+        );
+        assert_eq!(rows[2]["kind"], "hook");
+        assert_eq!(rows[2]["message"], Value::Null, "a hook's words stay here");
+        let all = serde_json::to_string(&rows).unwrap();
+        for gone in ["acme", "sam", "SECRET"] {
+            assert!(!all.contains(gone), "{gone} left in {all}");
+        }
+    }
+
+    #[test]
+    fn a_day_reports_its_latest_failures_only() {
+        use haarness_insights::FailureKind;
+        let rows: Vec<_> = (0..MAX_FAILURES_PER_DAY + 7)
+            .map(|i| {
+                let mut row = failed(FailureKind::Timeout, "openai", "gpt-5", "timed out");
+                row.id = format!("turn-{i}");
+                row
+            })
+            .collect();
+        let reported = reported_failures(&rows);
+        assert_eq!(reported.len(), MAX_FAILURES_PER_DAY);
+        assert_eq!(reported[0]["turnId"], "turn-7");
+        assert!(reported_failures(&[]).is_empty());
+    }
+
+    #[test]
+    fn tool_errors_are_grouped_scrubbed_and_only_haarness_s_own_words() {
+        let row =
+            |tool: &str, provider: &str, model: &str, output: &str| haarness_insights::ToolError {
+                tool: tool.into(),
+                at: Utc::now(),
+                provider: provider.into(),
+                model: model.into(),
+                version: Some("0.1.22".into()),
+                output: output.into(),
+            };
+        let rows = reported_tool_errors(&[
+            row(
+                "edit",
+                "anthropic",
+                "claude-sonnet-5-5",
+                "old was not found in src/app.rs; nothing was changed",
+            ),
+            row(
+                "edit",
+                "anthropic",
+                "claude-sonnet-5-5",
+                "old was not found in src/lib.rs; nothing was changed",
+            ),
+            row(
+                "task",
+                "gemini",
+                "gemini-2.5-flash",
+                "The subagent failed: Gemini is overloaded or unavailable right now",
+            ),
+            row(
+                "bash",
+                "gemini",
+                "gemini-2.5-flash",
+                "AWS_SECRET=abc make: *** [deploy] Error 1",
+            ),
+            row(
+                "mcp__acme__deploy",
+                "gemini",
+                "gemini-2.5-flash",
+                "acme says no",
+            ),
+            row(
+                "browser_navigate",
+                "gemini",
+                "gemini-2.5-flash",
+                "page text",
+            ),
+            row(
+                "read",
+                "acme-gateway",
+                "acme-7b",
+                "acme-7b asked for C:\\Users\\sam\\notes.txt, which is not there",
+            ),
+        ]);
+        assert_eq!(
+            rows,
+            [
+                json!({"tool": "edit", "provider": "anthropic", "model": "claude-sonnet-5-5", "version": "0.1.22",
+                       "message": "old was not found in <path>; nothing was changed", "errors": 2}),
+                json!({"tool": "task", "provider": "gemini", "model": "gemini-2.5-flash", "version": "0.1.22",
+                       "message": "The subagent failed: Gemini is overloaded or unavailable right now", "errors": 1}),
+                json!({"tool": "read", "provider": "custom", "model": "custom", "version": "0.1.22",
+                       "message": "<name> asked for <path>, which is not there", "errors": 1}),
+            ]
+        );
+        let many: Vec<_> = (0..MAX_TOOL_ERRORS_PER_DAY + 5)
+            .map(|i| {
+                row(
+                    "webfetch",
+                    "openai",
+                    "gpt-5",
+                    &format!("HTTP {} from the page", 400 + i),
+                )
+            })
+            .collect();
+        assert_eq!(reported_tool_errors(&many).len(), MAX_TOOL_ERRORS_PER_DAY);
+    }
+
+    #[test]
+    fn turns_count_by_the_version_that_ran_them() {
+        let row = |version: Option<&str>, turns, failed| haarness_insights::VersionUsage {
+            version: version.map(Into::into),
+            turns,
+            completed: turns - failed,
+            failed,
+            interrupted: 0,
+        };
+        assert_eq!(
+            reported_versions(&[
+                row(None, 2, 1),
+                row(Some("0.1.22"), 5, 2),
+                row(Some(""), 1, 0)
+            ]),
+            [
+                json!({"version": "0.1.22", "turns": 5, "completedTurns": 3, "failedTurns": 2, "interruptedTurns": 0}),
+                json!({"version": "unknown", "turns": 3, "completedTurns": 2, "failedTurns": 1, "interruptedTurns": 0}),
+            ]
+        );
+    }
+
+    /// A Haarness Cloud older than failure details refuses them by name (or
+    /// by the size they add); the report then goes again without them,
+    /// whatever else it refused.
+    #[test]
+    fn an_older_cloud_gets_the_report_without_failure_details() {
+        let report = json!({"schemaVersion": 1, "days": [
+            {"day": "2026-11-10", "turns": 3, "failures": [{"kind": "quota"}], "toolErrorMessages": [], "versions": []},
+            {"day": "2026-11-11", "turns": 1}
+        ]});
+        assert!(has_details(&report));
+        let older = without_details(&report);
+        assert!(!has_details(&older));
+        assert_eq!(older["days"][0], json!({"day": "2026-11-10", "turns": 3}));
+        assert_eq!(older["days"][1], report["days"][1]);
+        let bad = reqwest::StatusCode::BAD_REQUEST;
+        for field in DETAIL_FIELDS {
+            assert!(refuses_details(
+                bad,
+                &format!(
+                    r#"{{"code":"invalid_request","message":"Failed to deserialize the JSON body into the target type: days[0]: unknown field `{field}`, expected one of `day`, `chats`, `turns` at line 1 column 412"}}"#
+                )
+            ));
+        }
+        assert!(refuses_details(reqwest::StatusCode::PAYLOAD_TOO_LARGE, ""));
+        assert!(!refuses_details(
+            bad,
+            r#"{"code":"invalid_request","message":"days[0].failures[0].model: must be 1 to 100 characters"}"#
+        ));
+        assert!(!refuses_details(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            ""
+        ));
     }
 
     #[test]

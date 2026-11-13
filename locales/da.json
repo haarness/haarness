@@ -1823,7 +1823,7 @@
   "Detailed logging off · /logs detail on · /logs export [path]": "Detaljeret logning fra · /logs detail on · /logs export [sti]",
   "Detailed logging on until {time} · /logs detail off stops it": "Detaljeret logning til indtil {time} · /logs detail off stopper den",
   "Detailed logging on until stopped · /logs detail off stops it": "Detaljeret logning til, indtil den stoppes · /logs detail off stopper den",
-  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "Daglige optællinger af chats, ture, tokens, modeller og værktøjskald, knyttet til din Haarness-konto, når du er logget ind. Aldrig prompts, kode, filnavne eller stier.",
+  "Daily counts of chats, turns, tokens, models and tool calls, with the error messages of failed turns and tools, linked to your Haarness account when you're signed in. Never prompts or code; file names, paths and keys are taken out of error messages.": "Daglige optællinger af chats, ture, tokens, modeller og værktøjskald samt fejlmeddelelserne fra mislykkede ture og værktøjer, knyttet til din Haarness-konto, når du er logget ind. Aldrig prompts eller kode; filnavne, stier og nøgler fjernes fra fejlmeddelelserne.",
   "See what's shared": "Se, hvad der deles",
   "Off because DO_NOT_TRACK is set where Haarness started.": "Slået fra, fordi DO_NOT_TRACK er sat, hvor Haarness blev startet.",
   "Set by {variable} where Haarness started.": "Sat af {variable}, hvor Haarness blev startet.",

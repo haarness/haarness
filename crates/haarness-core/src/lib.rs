@@ -70,7 +70,7 @@ pub use permissions::{
 pub use ports::*;
 pub use prompts::{PromptFile, PromptMode, PromptName, Prompts};
 pub use runtime::{
-    AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, PROMPT_BLOCKED,
+    AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, FailureKind, PROMPT_BLOCKED,
     ResourceMentionPolicy, SUBAGENT_TASK_DESCRIPTION, StaticProviderRegistry, is_stream_cut,
     prompt_blocked, refusal_reason, shorten_title, webfetch_address, webfetch_redirect_verdict,
 };

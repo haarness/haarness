@@ -5,7 +5,10 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -13,7 +16,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
-    routing::post,
+    routing::{get, post},
 };
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, process::Command, time::timeout};
@@ -39,6 +42,56 @@ async fn ingest(
         StatusCode::ACCEPTED,
         Json(json!({"accepted": true, "days": days, "linked": false})),
     )
+}
+
+/// A Haarness Cloud that may predate failure kinds, and a provider that
+/// refuses every key, on one address.
+#[derive(Clone, Default)]
+struct OlderCloud {
+    reports: Arc<Mutex<Vec<Value>>>,
+    /// Refuses `failures` as an unknown field, as a Cloud older than them does.
+    older: Arc<AtomicBool>,
+    refused: Arc<AtomicUsize>,
+}
+
+async fn ingest_maybe_older(
+    State(cloud): State<OlderCloud>,
+    Json(report): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let carries_failures = report["days"]
+        .as_array()
+        .is_some_and(|days| days.iter().any(|day| day.get("failures").is_some()));
+    if cloud.older.load(Ordering::SeqCst) && carries_failures {
+        cloud.refused.fetch_add(1, Ordering::SeqCst);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "code": "invalid_request",
+                "message": "Failed to deserialize the JSON body into the target type: days[0]: unknown field `failures`, expected one of `day`, `chats`, `turns` at line 1 column 400",
+            })),
+        );
+    }
+    let days = report["days"].as_array().map_or(0, Vec::len);
+    cloud.reports.lock().expect("reports lock").push(report);
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"accepted": true, "days": days, "linked": false})),
+    )
+}
+
+async fn refuse_the_key() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": {
+            "message": "Incorrect API key provided: sk-SENTINEL-KEY",
+            "type": "invalid_request_error",
+            "code": "invalid_api_key",
+        }})),
+    )
+}
+
+async fn models() -> Json<Value> {
+    Json(json!({"object": "list", "data": [{"id": "acme-1", "object": "model"}]}))
 }
 
 struct TestDirectory(PathBuf);
@@ -175,6 +228,14 @@ async fn usage_statistics_are_sent_from_real_history_and_never_when_off() {
     assert_eq!(day["models"][0]["provider"], "custom");
     assert_eq!(day["models"][0]["model"], "custom");
     assert_eq!(day["tools"][0]["name"], "read");
+    // The read that missed says so in Haarness's words, without the name.
+    let errors = day["toolErrorMessages"]
+        .as_array()
+        .expect("tool errors in words");
+    assert_eq!(errors.len(), 1, "{day}");
+    assert_eq!(errors[0]["tool"], "read");
+    assert_eq!(errors[0]["errors"], 1);
+    assert!(errors[0]["message"].as_str().is_some_and(|m| !m.is_empty()));
     let sent = report.to_string();
     for private in [
         "SENTINEL_PROJECT",
@@ -230,6 +291,127 @@ async fn usage_statistics_are_sent_from_real_history_and_never_when_off() {
 
     let _ = output({
         let mut command = haarness(&directory.0, &workspace, address);
+        command.args(["serve", "--stop"]);
+        command
+    })
+    .await;
+    server.abort();
+}
+
+/// A failed turn is sent with its kind, version and scrubbed words, never a
+/// name the person chose or a key; a Cloud older than failure details gets
+/// the rest of the report.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_turn_is_sent_with_its_scrubbed_words_and_an_older_cloud_gets_the_rest() {
+    let cloud = OlderCloud::default();
+    cloud.older.store(true, Ordering::SeqCst);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock cloud");
+    let address = listener.local_addr().expect("mock cloud address");
+    let router = Router::new()
+        .route("/api/v1/telemetry/usage", post(ingest_maybe_older))
+        .route("/v1/chat/completions", post(refuse_the_key))
+        .route("/v1/models", get(models))
+        .with_state(cloud.clone());
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let directory = TestDirectory(
+        std::env::temp_dir().join(format!("haarness-usage-failures-{}", Uuid::now_v7())),
+    );
+    let workspace = directory.0.join("SENTINEL_PROJECT");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    let haarness = || {
+        let mut command = haarness(&directory.0, &workspace, address);
+        command
+            .env("OPENAI_COMPATIBLE_BASE_URL", format!("http://{address}/v1"))
+            .env("OPENAI_COMPATIBLE_MODEL", "acme-1")
+            .env("OPENAI_COMPATIBLE_API_KEY", "sk-SENTINEL-KEY");
+        command
+    };
+    let (ok, text) = output({
+        let mut command = haarness();
+        command.args([
+            "--yolo",
+            "run",
+            "--provider",
+            "openai-compatible",
+            "--model",
+            "acme-1",
+            "SENTINEL PROMPT",
+        ]);
+        command
+    })
+    .await;
+    assert!(!ok && text.contains("rejected the API key"), "{text}");
+
+    let send = || async {
+        let (ok, text) = output({
+            let mut command = haarness();
+            command.args(["telemetry", "send"]);
+            command
+        })
+        .await;
+        assert!(ok && text.contains("Sent 1 day"), "{text}");
+    };
+    send().await;
+    assert_eq!(
+        cloud.refused.load(Ordering::SeqCst),
+        1,
+        "refused once for the field"
+    );
+    let older = cloud.reports.lock().unwrap()[0].clone();
+    assert_eq!(older["days"][0]["failedTurns"], 1, "{older}");
+    assert!(older["days"][0].get("failures").is_none(), "{older}");
+
+    cloud.older.store(false, Ordering::SeqCst);
+    send().await;
+    let report = cloud.reports.lock().unwrap()[1].clone();
+    let failures = report["days"][0]["failures"]
+        .as_array()
+        .expect("failures sent");
+    assert_eq!(failures.len(), 1, "{report}");
+    let failure = &failures[0];
+    assert_eq!(
+        (
+            &failure["kind"],
+            &failure["provider"],
+            &failure["model"],
+            &failure["version"]
+        ),
+        (
+            &json!("auth"),
+            &json!("custom"),
+            &json!("custom"),
+            &json!(env!("CARGO_PKG_VERSION"))
+        ),
+        "{report}"
+    );
+    let message = failure["message"].as_str().expect("words sent");
+    assert!(message.contains("rejected the API key"), "{message}");
+    assert!(failure["turnId"].as_str().is_some_and(|id| id.len() == 36));
+    assert!(failure["at"].as_str().is_some_and(|at| at.ends_with('Z')));
+    assert_eq!(
+        report["days"][0]["versions"],
+        json!([{"version": env!("CARGO_PKG_VERSION"), "turns": 1, "completedTurns": 0,
+                "failedTurns": 1, "interruptedTurns": 0}]),
+        "{report}"
+    );
+    let body = report.to_string();
+    for private in [
+        "SENTINEL",
+        "sk-",
+        "openai-compatible",
+        "OpenAI-compatible",
+        "acme-1",
+    ] {
+        assert!(!body.contains(private), "{private} was sent: {body}");
+    }
+
+    let _ = output({
+        let mut command = haarness();
         command.args(["serve", "--stop"]);
         command
     })

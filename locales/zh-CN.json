@@ -1823,7 +1823,7 @@
   "Detailed logging off · /logs detail on · /logs export [path]": "详细日志已关闭 · /logs detail on · /logs export [路径]",
   "Detailed logging on until {time} · /logs detail off stops it": "详细日志已开启，直到 {time} · /logs detail off 可停止",
   "Detailed logging on until stopped · /logs detail off stops it": "详细日志已开启，直到手动停止 · /logs detail off 可停止",
-  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "每日的对话、轮次、token、模型和工具调用计数，登录后会关联到你的 Haarness 账户。绝不包含提示词、代码、文件名或路径。",
+  "Daily counts of chats, turns, tokens, models and tool calls, with the error messages of failed turns and tools, linked to your Haarness account when you're signed in. Never prompts or code; file names, paths and keys are taken out of error messages.": "每日的对话、轮次、token、模型和工具调用计数，以及失败的轮次和工具的错误信息，登录后会关联到你的 Haarness 账户。绝不包含提示词或代码；错误信息中的文件名、路径和密钥会被去除。",
   "See what's shared": "查看共享内容",
   "Off because DO_NOT_TRACK is set where Haarness started.": "已关闭，因为启动 Haarness 的环境中设置了 DO_NOT_TRACK。",
   "Set by {variable} where Haarness started.": "由启动 Haarness 的环境中的 {variable} 设置。",

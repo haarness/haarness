@@ -1574,6 +1574,7 @@ dependencies = [
  "prost",
  "qrcode",
  "rand 0.9.5",
+ "regex",
  "reqwest",
  "rpassword",
  "rusqlite",

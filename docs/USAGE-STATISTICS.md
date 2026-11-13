@@ -4,7 +4,7 @@ What the daily usage summary contains, when and how it is sent, and every way to
 
 > **User guide:** [Data and storage](https://haarness.ai/docs/security/data-and-storage).
 
-Haarness shares a small daily summary of how it is used with Haarness Cloud, so the team can see which models, tools and features people rely on and where turns fail. It is on by default, and you can turn it off at any time.
+Haarness shares a small daily summary of how it is used with Haarness Cloud, so the team can see which models, tools and features people rely on, and find and fix what fails. It is on by default, and you can turn it off at any time.
 
 ## What is sent
 
@@ -13,9 +13,47 @@ One snapshot per UTC day for the last seven days, computed from the history alre
 - **Per day:** chats, turns (completed, failed, stopped), turns run by subagents and by schedules, input/output/cache tokens, known cost in USD, tool calls and tool errors, files changed and lines added/removed. A subagent is part of the chat and the turn that started it: its thread is not another chat, and the outcomes count only the turns you started, so a subagent that failed while its turn went on to finish is no failed turn (it shows as an error of the `task` tool). Its turns, tokens and tool calls count with the rest.
 - **Per model:** provider and model id, turns, tokens and cost. Providers are named only when Haarness ships them (with their presets), and model ids only when Haarness's own model catalog lists them: a fine-tune or any other model is reported as `other`. Azure, Google Vertex and Amazon Bedrock model ids name your own deployments and inference profiles, so those models are reported as `custom`. A provider you configured yourself is reported as `custom` without its model; local runtimes (Ollama, LM Studio) report their models as `local`.
 - **Per tool:** calls and errors for each of Haarness's built-in tools, `multiedit`, `batch`, `lsp` and the Cloud, memory and session tools among them; the browser's tools count as `browser` and computer use's as `computer`. Every MCP tool counts as `mcp`; every plugin or extension tool, and a tool name a model made up, as `other`.
+- **Per failed turn:** each turn of the day that failed (the ones counted as failed above; the latest 50 of a day), with:
+  - its id (a random id the history gave it) and when it started;
+  - why it failed, as a kind from the fixed list below, read on your computer from the error the turn stored;
+  - the provider and model, named as in the per-model counts;
+  - the Haarness version that ran it (`unknown` for turns recorded before versions were);
+  - the error message the transcript shows, scrubbed and cut to 500 characters (see below); a hook's refusal is sent without its words, which are your own script's;
+  - how long it ran, how many tool calls and tool errors it had, its input and output tokens, and the last tool it called (named as in the per-tool counts).
+
+  | Kind | The turn failed because |
+  | --- | --- |
+  | `rate_limited` | a limit on requests or tokens per minute was hit |
+  | `quota` | a day's allowance was used up, or the account is out of credit or over its budget |
+  | `auth` | the provider isn't connected, or refused or expired the key or sign-in |
+  | `model_unavailable` | the model is retired, outside the plan or region, or not downloaded |
+  | `unsupported_input` | an attachment the model can't take |
+  | `context_overflow` | the chat or the message is too long for the model |
+  | `overloaded` | the provider was overloaded or unavailable, even after retries |
+  | `provider_error` | the provider answered with a server error |
+  | `invalid_request` | the provider refused the request as invalid |
+  | `endpoint` | the configured address doesn't speak the provider's API |
+  | `network` | the provider couldn't be reached, or the connection broke |
+  | `timeout` | the provider answered nothing in time |
+  | `incomplete` | answers kept ending before they were done |
+  | `empty_reply` | the model sent back an empty reply |
+  | `blocked` | the provider's safety check stopped the response |
+  | `tool_call_unreadable` | the model's tool calls couldn't be read or didn't match their tools |
+  | `compaction` | compacting the chat failed |
+  | `hook` | a hook refused the prompt |
+  | `internal` | Haarness itself failed |
+  | `other` | anything else |
+
+  The kinds are `haarness_core::FailureKind`; Haarness Cloud counts a kind it doesn't know yet as `other`.
+- **Tool error messages:** for Haarness's own file, search, web, task, skill, todo and workflow tools, what a call that failed answered, scrubbed and cut to 300 characters, with the tool, provider, model and version, and how many calls answered the same. A command's output (`bash`), a page, a screen, a memory and the words of an MCP server or an extension are never sent: their errors only count, per tool.
+- **Per version:** the day's turns by the Haarness version that ran them (completed, failed, stopped), so a version's failures are counted against its own turns.
 - **About the app:** the Haarness version, operating system, CPU architecture, release or development build, and a random installation id stored in `<data>/telemetry/state.json`.
 
-**Never sent:** prompts, model answers, tool arguments or output, code, file names, paths, project or chat titles, custom provider, model or tool names, environment variables or credentials.
+Error messages are scrubbed on your computer before anything is sent. Out go credentials (as Haarness's logs lose them: keys, tokens, passwords, signed addresses), email addresses, paths and file names, web addresses and host names other than the public services Haarness talks to (their address stays, without its query), IP addresses other than this computer's, numbers of nine digits or more (account and project numbers), and the names of providers and models you configured yourself. What is left is Haarness's wording and the provider's, which is what tells one failure from another. `haarness telemetry preview` shows the messages exactly as they would be sent.
+
+A Haarness Cloud older than failure details refuses them; the report then goes again without them, so no day's counts are lost.
+
+**Never sent:** prompts, model answers, tool arguments, a command's or MCP tool's output, code, file names, paths, project or chat titles, custom provider, model or tool names, environment variables or credentials.
 
 When you are signed in to Haarness Cloud, the report carries your sign-in token, so your statistics are linked to your account (and appear together across your computers). Otherwise the report is anonymous: only the installation id ties reports together.
 

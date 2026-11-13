@@ -309,6 +309,10 @@ that is done.";
 /// always blocks cannot hold a turn forever.
 const STOP_HOOK_CONTINUATIONS: u32 = 8;
 
+/// How the stored error of a turn that could not start begins; the error
+/// follows.
+const LAUNCH_FAILED: &str = "turn launch failed: ";
+
 /// The transcript line for a turn the runtime had to stop.
 fn stopped_turn_message(reason: &str, unread: bool) -> String {
     if unread {
@@ -2026,6 +2030,24 @@ fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
     } else {
         None
     }
+}
+
+/// The words a turn on `model` of the provider `info` describes (when it is
+/// known) fails with: what its transcript shows and its stored error holds.
+/// With `advice` they also say what to do (see `describe_failure`).
+fn turn_failure_words(
+    error: &CoreError,
+    info: Option<&haarness_protocol::ProviderInfo>,
+    model: &str,
+    advice: bool,
+) -> String {
+    if let Some(info) = info
+        && let Some(words) = describe_local_model_failure(error, info, model, advice)
+            .or_else(|| describe_model_refusal(error, info, model, advice))
+    {
+        return words;
+    }
+    describe_failure(error, info.map(|info| info.name.as_str()), advice)
 }
 
 /// Keep transport envelopes in logs while giving the transcript a concise,
@@ -8792,7 +8814,7 @@ impl AgentRuntime {
                 None,
                 json!(turn),
             );
-            let message = format!("turn launch failed: {error}");
+            let message = format!("{LAUNCH_FAILED}{error}");
             if let Ok(item) = self
                 .repository
                 .append_item(
@@ -10796,14 +10818,7 @@ impl RunnerTask {
             .get(&self.turn.provider)
             .map(|provider| provider.info());
         // A child agent's failure is read by the model that started it.
-        let advice = self.depth == 0;
-        if let Some(info) = &info
-            && let Some(words) = describe_local_model_failure(error, info, &self.turn.model, advice)
-                .or_else(|| describe_model_refusal(error, info, &self.turn.model, advice))
-        {
-            return words;
-        }
-        describe_failure(error, info.as_ref().map(|info| info.name.as_str()), advice)
+        turn_failure_words(error, info.as_ref(), &self.turn.model, self.depth == 0)
     }
 
     /// An agent's definition: this turn's own from its snapshot, any other
@@ -20448,8 +20463,11 @@ fn rule_spelling(path: &Path) -> String {
 }
 
 mod commands;
+mod failure_kinds;
 mod retained;
 mod undo_files;
+
+pub use failure_kinds::FailureKind;
 
 #[cfg(test)]
 mod permission_corpus;

@@ -205,7 +205,7 @@ fn usage_statistics_view(status: Value, input: &Value) -> View {
                 .map(str::to_owned),
         );
     } else {
-        lines.push("Daily counts of chats, turns, tokens, models and tool calls. Never prompts, code, file names or paths.".to_owned());
+        lines.push("Daily counts of chats, turns, tokens, models and tool calls, with the error messages of failed turns and tools. Never prompts or code; file names, paths and keys are taken out of error messages.".to_owned());
         lines.push("Linked to your Haarness account when you are signed in.".to_owned());
         if let Some(sent) = status["lastSentAt"].as_str() {
             lines.push(format!("Last sent: {sent}"));

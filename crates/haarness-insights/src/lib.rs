@@ -4,6 +4,7 @@ pub use render::{render_html, render_text, write_report};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+pub use haarness_core::FailureKind;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -205,7 +206,21 @@ struct RecordedTurn {
     subagent: bool,
     /// Part of a scheduled chat.
     scheduled: bool,
+    /// Why a failed turn of the chat's own agent failed, read from its
+    /// stored error.
+    failure: Option<FailureKind>,
+    /// The words a failed turn stored, read only for the daily usage.
+    error: Option<String>,
+    /// The Haarness version that ran the turn, when the history recorded it.
+    version: Option<String>,
     created: DateTime<Utc>,
+    /// When the turn last changed: when it ended, for one that did.
+    updated: DateTime<Utc>,
+    /// The last tool the turn called.
+    last_tool: Option<String>,
+    /// The turn's tool calls that answered with an error, as
+    /// `(tool, output)`, read only for the daily usage.
+    tool_errors: Vec<(String, String)>,
     metrics: Metrics,
     tools: BTreeMap<String, Metrics>,
     files: BTreeMap<String, Metrics>,
@@ -274,7 +289,14 @@ pub fn collect_at(
         duplicate_turns_skipped: 0,
         detached_items_skipped: 0,
     };
-    let scan = scan(data, &registry, project_filter.as_deref(), since, now)?;
+    let scan = scan(
+        data,
+        &registry,
+        project_filter.as_deref(),
+        since,
+        now,
+        false,
+    )?;
     report.databases_read = scan.databases_read;
     report.detached_items_skipped = scan.detached_items;
     report.duplicate_turns_skipped = scan.duplicate_turns;
@@ -339,8 +361,9 @@ pub fn collect_at(
 
 /// One UTC day of activity across every workspace: the source of the usage
 /// statistics Haarness shares unless they are turned off
-/// (docs/USAGE-STATISTICS.md). Counts and model names only; no titles,
-/// projects, paths or file names.
+/// (docs/USAGE-STATISTICS.md). Counts, model names and the failures of the
+/// day; no titles, projects or file names. A failure's words are kept as the
+/// history stored them: usage statistics scrub them before they leave.
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DailyUsage {
@@ -354,6 +377,12 @@ pub struct DailyUsage {
     pub models: Vec<ModelUsage>,
     /// Keyed by tool name.
     pub tools: Vec<Group>,
+    /// The failed turns counted in `total.failed`, oldest first.
+    pub failures: Vec<FailedTurn>,
+    /// Every tool call of the day that answered with an error, oldest first.
+    pub tool_errors: Vec<ToolError>,
+    /// The day's turns by the Haarness version that ran them.
+    pub versions: Vec<VersionUsage>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -363,6 +392,61 @@ pub struct ModelUsage {
     pub model: String,
     pub metrics: Metrics,
 }
+
+/// One failed turn of a chat's own agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedTurn {
+    pub id: String,
+    /// When the turn started.
+    pub at: DateTime<Utc>,
+    pub kind: FailureKind,
+    pub provider: String,
+    pub model: String,
+    /// The Haarness version that ran it; `None` for turns recorded before
+    /// versions were.
+    pub version: Option<String>,
+    /// The words the turn stored, as the transcript shows them.
+    pub error: String,
+    /// From the turn's start to its failure.
+    pub duration_ms: u64,
+    pub tool_calls: u64,
+    pub tool_errors: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// The last tool the turn called before it failed.
+    pub last_tool: Option<String>,
+}
+
+/// A tool call that answered with an error, on the model of the turn that
+/// made it (a subagent's own turn for a subagent's call).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolError {
+    pub tool: String,
+    pub at: DateTime<Utc>,
+    pub provider: String,
+    pub model: String,
+    pub version: Option<String>,
+    /// The start of what the tool answered.
+    pub output: String,
+}
+
+/// The turns one Haarness version ran on a day, counted as the day's totals
+/// count them. `version` is `None` for turns recorded before versions were.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionUsage {
+    pub version: Option<String>,
+    pub turns: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub interrupted: u64,
+}
+
+/// The most of a tool's error output read back for usage statistics, which
+/// keep less still.
+const TOOL_ERROR_READ: usize = 2_000;
 
 /// The last `days` UTC days (today included) of every workspace, oldest first.
 /// Days without turns are left out.
@@ -374,7 +458,7 @@ pub fn daily_usage(data: &Path, days: u32, now: DateTime<Utc>) -> Result<Vec<Dai
         .and_hms_opt(0, 0, 0)
         .context("start of day")?
         .and_utc();
-    let scan = scan(data, &registry, None, Some(start), now)?;
+    let scan = scan(data, &registry, None, Some(start), now, true)?;
     let mut by_day = BTreeMap::<String, (DailyUsage, BTreeSet<String>)>::new();
     for turn in scan.turns {
         let day = turn.created.format("%Y-%m-%d").to_string();
@@ -394,6 +478,52 @@ pub fn daily_usage(data: &Path, days: u32, now: DateTime<Utc>) -> Result<Vec<Dai
         }
         usage.subagent_turns += u64::from(turn.subagent);
         usage.scheduled_turns += u64::from(turn.scheduled);
+        if let Some(kind) = turn.failure {
+            usage.failures.push(FailedTurn {
+                id: turn.id.clone(),
+                at: turn.created,
+                kind,
+                provider: turn.provider.clone(),
+                model: turn.model_name.clone(),
+                version: turn.version.clone(),
+                error: turn.error.clone().unwrap_or_default(),
+                duration_ms: u64::try_from((turn.updated - turn.created).num_milliseconds())
+                    .unwrap_or_default(),
+                tool_calls: turn.metrics.tool_calls,
+                tool_errors: turn.metrics.tool_errors,
+                input_tokens: turn.metrics.input_tokens,
+                output_tokens: turn.metrics.output_tokens,
+                last_tool: turn.last_tool.clone(),
+            });
+        }
+        for (tool, output) in &turn.tool_errors {
+            usage.tool_errors.push(ToolError {
+                tool: tool.clone(),
+                at: turn.created,
+                provider: turn.provider.clone(),
+                model: turn.model_name.clone(),
+                version: turn.version.clone(),
+                output: output.clone(),
+            });
+        }
+        let version = match usage
+            .versions
+            .iter_mut()
+            .position(|row| row.version == turn.version)
+        {
+            Some(index) => &mut usage.versions[index],
+            None => {
+                usage.versions.push(VersionUsage {
+                    version: turn.version.clone(),
+                    ..VersionUsage::default()
+                });
+                usage.versions.last_mut().expect("just pushed")
+            }
+        };
+        version.turns += turn.metrics.turns;
+        version.completed += turn.metrics.completed;
+        version.failed += turn.metrics.failed;
+        version.interrupted += turn.metrics.interrupted;
         match usage
             .models
             .iter_mut()
@@ -417,7 +547,17 @@ pub fn daily_usage(data: &Path, days: u32, now: DateTime<Utc>) -> Result<Vec<Dai
             }
         }
     }
-    Ok(by_day.into_values().map(|(usage, _)| usage).collect())
+    Ok(by_day
+        .into_values()
+        .map(|(mut usage, _)| {
+            // Turns are scanned across histories; the day reads in time order.
+            usage
+                .failures
+                .sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+            usage.tool_errors.sort_by(|a, b| a.at.cmp(&b.at));
+            usage
+        })
+        .collect())
 }
 
 /// Every recorded turn in the window, across workspace databases, once each.
@@ -429,12 +569,15 @@ struct Scan {
     warnings: Vec<String>,
 }
 
+/// `details` also reads what failed turns and tool calls said, which only the
+/// daily usage needs.
 fn scan(
     data: &Path,
     registry: &Registry,
     project_filter: Option<&str>,
     since: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
+    details: bool,
 ) -> Result<Scan> {
     let mut result = Scan {
         turns: Vec::new(),
@@ -492,7 +635,7 @@ fn scan(
     sources.sort_by(|a, b| a.path.cmp(&b.path));
     let mut turns = Vec::new();
     for source in sources {
-        match read_source(&source, since, now) {
+        match read_source(&source, since, now, details) {
             Ok((records, detached)) => {
                 turns.extend(records);
                 result.databases_read += 1;
@@ -556,17 +699,24 @@ fn read_source(
     source: &Source,
     since: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
+    details: bool,
 ) -> Result<(Vec<RecordedTurn>, u64)> {
     let mut connection = history_connection(&source.path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let tx = connection.transaction()?;
     // Older databases predate these columns; their turns count as the chat's own.
-    let has_column = |column: &str| -> Result<bool> {
+    let has = |table: &str, column: &str| -> Result<bool> {
         Ok(tx.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('threads') WHERE name=?1",
-            [column],
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+            [table, column],
             |r| r.get::<_, i64>(0),
         )? > 0)
+    };
+    let has_column = |column: &str| has("threads", column);
+    let version = if has("turns", "app_version")? {
+        "t.app_version"
+    } else {
+        "NULL"
     };
     let subagent = if has_column("is_subagent")? {
         "h.is_subagent"
@@ -604,7 +754,7 @@ fn read_source(
         }
         chat.to_owned()
     };
-    let mut statement = tx.prepare(&format!("SELECT t.id,t.thread_id,h.title,t.provider,t.model,t.status,t.created_at,{subagent},{scheduled} FROM turns t JOIN threads h ON h.id=t.thread_id ORDER BY t.created_at,t.id"))?;
+    let mut statement = tx.prepare(&format!("SELECT t.id,t.thread_id,h.title,t.provider,t.model,t.status,t.created_at,{subagent},{scheduled},t.error,t.updated_at,{version} FROM turns t JOIN threads h ON h.id=t.thread_id ORDER BY t.created_at,t.id"))?;
     let rows = statement.query_map([], |r| {
         Ok((
             (
@@ -618,12 +768,24 @@ fn read_source(
             ),
             r.get::<_, bool>(7)?,
             r.get::<_, bool>(8)?,
+            r.get::<_, Option<String>>(9)?,
+            r.get::<_, String>(10)?,
+            r.get::<_, Option<String>>(11)?,
         ))
     })?;
     let mut turns = BTreeMap::new();
     for row in rows {
-        let ((id, session, title, provider, model, status, date), subagent, scheduled) = row?;
+        let (
+            (id, session, title, provider, model, status, date),
+            subagent,
+            scheduled,
+            error,
+            updated,
+            version,
+        ) = row?;
         let created = DateTime::parse_from_rfc3339(&date)?.with_timezone(&Utc);
+        let updated = DateTime::parse_from_rfc3339(&updated)
+            .map_or(created, |updated| updated.with_timezone(&Utc));
         if created > now || since.is_some_and(|start| created < start) {
             continue;
         }
@@ -636,10 +798,14 @@ fn read_source(
         // error included, and goes on: a subagent that failed fails nothing
         // the person sees unless that turn fails too, and then it counts
         // once, there. Its work (tokens, tools, files) still counts.
+        let mut failure = None;
         if !subagent {
             match status.as_str() {
                 "completed" => metrics.completed = 1,
-                "failed" => metrics.failed = 1,
+                "failed" => {
+                    metrics.failed = 1;
+                    failure = Some(FailureKind::of(error.as_deref().unwrap_or_default()));
+                }
                 "interrupted" => metrics.interrupted = 1,
                 _ => metrics.in_progress = 1,
             }
@@ -658,7 +824,17 @@ fn read_source(
                 model_name: model,
                 subagent,
                 scheduled,
+                failure,
+                error: if details && failure.is_some() {
+                    error
+                } else {
+                    None
+                },
+                version: version.filter(|version| !version.is_empty()),
                 created,
+                updated,
+                last_tool: None,
+                tool_errors: Vec::new(),
                 metrics,
                 tools: BTreeMap::new(),
                 files: BTreeMap::new(),
@@ -713,6 +889,7 @@ fn read_source(
                 let name = data["name"].as_str().context("tool name missing")?;
                 turn.metrics.tool_calls += 1;
                 turn.tools.entry(name.into()).or_default().tool_calls += 1;
+                turn.last_tool = Some(name.to_owned());
             }
             Some("tool_result") => {
                 let name = data["name"].as_str().context("tool name missing")?;
@@ -722,6 +899,13 @@ fn read_source(
                 if data["is_error"].as_bool() == Some(true) {
                     tool.tool_errors += 1;
                     turn.metrics.tool_errors += 1;
+                    if details {
+                        let output = data["output"].as_str().unwrap_or_default();
+                        turn.tool_errors.push((
+                            name.to_owned(),
+                            output.chars().take(TOOL_ERROR_READ).collect(),
+                        ));
+                    }
                 }
                 if let Some(diffs) = data["metadata"]["diffs"].as_array() {
                     for diff in diffs {

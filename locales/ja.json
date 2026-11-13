@@ -1823,7 +1823,7 @@
   "Detailed logging off · /logs detail on · /logs export [path]": "詳細なログ: オフ · /logs detail on · /logs export [パス]",
   "Detailed logging on until {time} · /logs detail off stops it": "詳細なログ: {time} までオン · /logs detail off で停止",
   "Detailed logging on until stopped · /logs detail off stops it": "詳細なログ: 停止するまでオン · /logs detail off で停止",
-  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "チャット、ターン、トークン、モデル、ツール呼び出しの日別の件数です。サインインしている場合は Haarness アカウントに関連付けられます。プロンプト、コード、ファイル名、パスは含まれません。",
+  "Daily counts of chats, turns, tokens, models and tool calls, with the error messages of failed turns and tools, linked to your Haarness account when you're signed in. Never prompts or code; file names, paths and keys are taken out of error messages.": "チャット、ターン、トークン、モデル、ツール呼び出しの日別の件数と、失敗したターンやツールのエラーメッセージです。サインインしている場合は Haarness アカウントに関連付けられます。プロンプトやコードは含まれず、エラーメッセージからはファイル名、パス、キーが取り除かれます。",
   "See what's shared": "共有される内容を見る",
   "Off because DO_NOT_TRACK is set where Haarness started.": "Haarness を起動した環境で DO_NOT_TRACK が設定されているため、オフになっています。",
   "Set by {variable} where Haarness started.": "Haarness を起動した環境の {variable} で設定されています。",

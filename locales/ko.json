@@ -1823,7 +1823,7 @@
   "Detailed logging off · /logs detail on · /logs export [path]": "자세한 로깅 꺼짐 · /logs detail on · /logs export [경로]",
   "Detailed logging on until {time} · /logs detail off stops it": "자세한 로깅 켜짐({time}까지) · /logs detail off로 중지",
   "Detailed logging on until stopped · /logs detail off stops it": "자세한 로깅 켜짐(중지할 때까지) · /logs detail off로 중지",
-  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "채팅, 턴, 토큰, 모델, 도구 호출의 일별 집계로, 로그인한 경우 Haarness 계정에 연결됩니다. 프롬프트, 코드, 파일 이름, 경로는 절대 포함되지 않습니다.",
+  "Daily counts of chats, turns, tokens, models and tool calls, with the error messages of failed turns and tools, linked to your Haarness account when you're signed in. Never prompts or code; file names, paths and keys are taken out of error messages.": "채팅, 턴, 토큰, 모델, 도구 호출의 일별 집계와 실패한 턴 및 도구의 오류 메시지로, 로그인한 경우 Haarness 계정에 연결됩니다. 프롬프트와 코드는 절대 포함되지 않으며, 오류 메시지에서 파일 이름, 경로, 키는 제거됩니다.",
   "See what's shared": "공유되는 내용 보기",
   "Off because DO_NOT_TRACK is set where Haarness started.": "Haarness를 시작한 환경에 DO_NOT_TRACK이 설정되어 있어 꺼져 있습니다.",
   "Set by {variable} where Haarness started.": "Haarness를 시작한 환경에서 {variable}에 의해 설정되었습니다.",

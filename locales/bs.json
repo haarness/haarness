@@ -1823,7 +1823,7 @@
   "Detailed logging off · /logs detail on · /logs export [path]": "Detaljno bilježenje isključeno · /logs detail on · /logs export [putanja]",
   "Detailed logging on until {time} · /logs detail off stops it": "Detaljno bilježenje uključeno do {time} · /logs detail off ga zaustavlja",
   "Detailed logging on until stopped · /logs detail off stops it": "Detaljno bilježenje uključeno dok se ne zaustavi · /logs detail off ga zaustavlja",
-  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "Dnevni broj razgovora, krugova, tokena, modela i poziva alata, povezan s vašim Haarness računom kada ste prijavljeni. Nikad ne uključuje promptove, kod, nazive datoteka ni putanje.",
+  "Daily counts of chats, turns, tokens, models and tool calls, with the error messages of failed turns and tools, linked to your Haarness account when you're signed in. Never prompts or code; file names, paths and keys are taken out of error messages.": "Dnevni broj razgovora, krugova, tokena, modela i poziva alata, uz poruke o greškama neuspjelih krugova i alata, povezan s vašim Haarness računom kada ste prijavljeni. Nikad ne uključuje promptove ni kod; nazivi datoteka, putanje i ključevi uklanjaju se iz poruka o greškama.",
   "See what's shared": "Pogledaj šta se dijeli",
   "Off because DO_NOT_TRACK is set where Haarness started.": "Isključeno jer je DO_NOT_TRACK postavljen tamo gdje je Haarness pokrenut.",
   "Set by {variable} where Haarness started.": "Postavljeno varijablom {variable} tamo gdje je Haarness pokrenut.",

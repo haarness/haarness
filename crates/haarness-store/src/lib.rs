@@ -784,6 +784,22 @@ impl SqliteStore {
                 .execute_batch("ALTER TABLE threads ADD COLUMN revert_unrestored_json TEXT;")
                 .map_err(storage)?;
         }
+        // The Haarness version that ran a turn, so a failure counts against
+        // the build that had it rather than whichever build reports it later
+        // (docs/USAGE-STATISTICS.md). Checked like the columns above: an
+        // older server ignores it and leaves its own turns without one.
+        let has_app_version: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('turns') WHERE name='app_version')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if !has_app_version {
+            connection
+                .execute_batch("ALTER TABLE turns ADD COLUMN app_version TEXT;")
+                .map_err(storage)?;
+        }
         connection
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_threads_directory ON threads(directory) WHERE directory IS NOT NULL;",
@@ -947,10 +963,11 @@ impl SqliteStore {
             updated_at: now,
         };
         tx.execute(
-            "INSERT INTO turns(id,thread_id,request_id,status,agent,provider,model,error,created_at,updated_at,ultracode)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,NULL,?8,?9,?10)",
+            "INSERT INTO turns(id,thread_id,request_id,status,agent,provider,model,error,created_at,updated_at,ultracode,app_version)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,NULL,?8,?9,?10,?11)",
             params![turn.id.to_string(), id.to_string(), turn.request_id.to_string(), status(turn.status),
-                turn.agent, turn.provider, turn.model, time(now), time(now), turn.ultracode],
+                turn.agent, turn.provider, turn.model, time(now), time(now), turn.ultracode,
+                env!("CARGO_PKG_VERSION")],
         ).map_err(storage)?;
         let item = Item {
             id: ItemId::new(),

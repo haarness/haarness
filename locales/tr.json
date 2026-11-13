@@ -1823,7 +1823,7 @@
   "Detailed logging off · /logs detail on · /logs export [path]": "Ayrıntılı günlük kapalı · /logs detail on · /logs export [yol]",
   "Detailed logging on until {time} · /logs detail off stops it": "Ayrıntılı günlük {time} saatine kadar açık · /logs detail off durdurur",
   "Detailed logging on until stopped · /logs detail off stops it": "Ayrıntılı günlük durdurulana kadar açık · /logs detail off durdurur",
-  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "Günlük sohbet, tur, token, model ve araç çağrısı sayıları; oturum açtığınızda Haarness hesabınıza bağlanır. Hiçbir zaman istem, kod, dosya adı veya yol içermez.",
+  "Daily counts of chats, turns, tokens, models and tool calls, with the error messages of failed turns and tools, linked to your Haarness account when you're signed in. Never prompts or code; file names, paths and keys are taken out of error messages.": "Günlük sohbet, tur, token, model ve araç çağrısı sayıları ile başarısız tur ve araçların hata mesajları; oturum açtığınızda Haarness hesabınıza bağlanır. Hiçbir zaman istem veya kod içermez; dosya adları, yollar ve anahtarlar hata mesajlarından çıkarılır.",
   "See what's shared": "Paylaşılanları gör",
   "Off because DO_NOT_TRACK is set where Haarness started.": "DO_NOT_TRACK, Haarness’in başlatıldığı yerde ayarlandığı için kapalı.",
   "Set by {variable} where Haarness started.": "Haarness’in başlatıldığı yerde {variable} ile ayarlanmış.",

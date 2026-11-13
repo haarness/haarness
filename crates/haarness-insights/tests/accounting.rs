@@ -435,6 +435,15 @@ async fn a_subagent_s_outcome_and_thread_count_within_the_chat_that_started_it()
     let model = &today.models[0];
     assert_eq!(model.metrics.turns, 7);
     assert_eq!(model.metrics.failed, 2);
+    assert_eq!(
+        today
+            .failures
+            .iter()
+            .map(|row| (row.kind, row.provider.as_str(), row.model.as_str()))
+            .collect::<Vec<_>>(),
+        [(haarness_insights::FailureKind::Other, "test", "model-a"); 2],
+        "only the person's failed turns, which stored no words"
+    );
 
     // `haarness stats` counts outcomes the same way and says so.
     let report = collect_at(
@@ -456,6 +465,178 @@ async fn a_subagent_s_outcome_and_thread_count_within_the_chat_that_started_it()
         "{outcomes}"
     );
     assert!(outcomes.contains("a subagent's turn is part of the one that started it"));
+}
+
+/// Each failed turn of the day is there with why it failed (read from the
+/// words it stored), those words, the version that ran it and how far it got;
+/// the day's tool errors and its turns by version are there too.
+#[tokio::test]
+async fn failed_turns_keep_their_kind_words_version_and_progress() {
+    async fn failed(
+        store: &SqliteStore,
+        provider: &str,
+        model: &str,
+        error: &str,
+    ) -> haarness_protocol::Turn {
+        let thread = store
+            .create_thread(CreateThreadRequest {
+                title: Some("Private title".into()),
+                provider: Some(provider.into()),
+                model: Some(model.into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (turn, _, _) = store
+            .start_turn(
+                thread.id,
+                serde_json::from_value(
+                    json!({"requestId": RequestId::new(), "text":"SECRET PROMPT"}),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .append_item(
+                thread.id,
+                Some(turn.id),
+                ItemData::ToolCall {
+                    call_id: "call".into(),
+                    name: "task".into(),
+                    arguments: json!({}),
+                    provider_metadata: json!(null),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append_item(
+                thread.id,
+                Some(turn.id),
+                ItemData::ToolResult {
+                    call_id: "call".into(),
+                    name: "task".into(),
+                    output: "The subagent failed: Gemini is overloaded or unavailable right now"
+                        .into(),
+                    is_error: true,
+                    metadata: json!(null),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .set_turn_status(turn.id, TurnStatus::Failed, Some(error.into()))
+            .await
+            .unwrap();
+        turn
+    }
+    let fixture = Fixture::new();
+    let store = fixture.store("w1");
+    let flash = "gemini-3-flash-preview";
+    let used_up = "This API key has used up today's free allowance for Gemini 3 Flash on Gemini, which comes back at midnight Pacific time, in about 9 hours. Choose another model for this chat, or turn on billing for this API key's project in Google AI Studio.";
+    let first = failed(&store, "gemini", flash, used_up).await;
+    failed(&store, "gemini", flash, used_up).await;
+    failed(
+        &store,
+        "gemini",
+        flash,
+        "Could not reach Gemini at generativelanguage.googleapis.com. Check the network connection and provider endpoint, then retry.",
+    )
+    .await;
+    failed(
+        &store,
+        "acme-gateway",
+        "secret-model",
+        "Provider error: HTTP 500 Internal Server Error: SECRET STACK at /Users/sam/project/main.rs",
+    )
+    .await;
+    turn(&store, "model-a", 10, None).await;
+
+    let days = haarness_insights::daily_usage(&fixture.0, 7, Utc::now()).unwrap();
+    let today = &days[0];
+    assert_eq!((today.total.turns, today.total.failed), (5, 4));
+    let failures: Vec<_> = today
+        .failures
+        .iter()
+        .map(|row| {
+            (
+                row.kind.as_str(),
+                row.provider.as_str(),
+                row.model.as_str(),
+                row.version.as_deref(),
+            )
+        })
+        .collect();
+    let version = Some(env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        failures,
+        [
+            ("quota", "gemini", flash, version),
+            ("quota", "gemini", flash, version),
+            ("network", "gemini", flash, version),
+            ("provider_error", "acme-gateway", "secret-model", version),
+        ],
+        "oldest first, each on the version that ran it"
+    );
+    let row = &today.failures[0];
+    assert_eq!(row.id, first.id.to_string());
+    assert_eq!(row.at, first.created_at);
+    assert_eq!(
+        row.error, used_up,
+        "the words as stored; the report scrubs them"
+    );
+    assert_eq!((row.tool_calls, row.tool_errors), (1, 1));
+    assert_eq!(row.last_tool.as_deref(), Some("task"));
+
+    let task_errors: Vec<_> = today
+        .tool_errors
+        .iter()
+        .filter(|row| row.tool == "task")
+        .collect();
+    assert_eq!(task_errors.len(), 4);
+    assert_eq!(
+        task_errors[0].output,
+        "The subagent failed: Gemini is overloaded or unavailable right now"
+    );
+    assert_eq!(
+        today.versions,
+        [haarness_insights::VersionUsage {
+            version: version.map(Into::into),
+            turns: 5,
+            completed: 1,
+            failed: 4,
+            interrupted: 0,
+        }]
+    );
+
+    // `haarness stats` reads no words at all.
+    let report = collect_at(
+        &fixture.0,
+        std::path::Path::new("/alpha"),
+        Options::default(),
+        Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(report.total.failed, 4);
+}
+
+/// A history older than recorded versions still counts, under no version.
+#[tokio::test]
+async fn turns_from_before_versions_were_recorded_count_under_none() {
+    let fixture = Fixture::new();
+    let store = fixture.store("w1");
+    turn(&store, "model-a", 10, None).await;
+    drop(store);
+    let path = fixture.0.join("workspaces/w1/haarness.db");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("ALTER TABLE turns DROP COLUMN app_version;")
+        .unwrap();
+    drop(connection);
+    let days = haarness_insights::daily_usage(&fixture.0, 7, Utc::now()).unwrap();
+    assert_eq!(days[0].versions[0].version, None);
+    assert_eq!(days[0].versions[0].turns, 1);
 }
 
 #[tokio::test]

@@ -22,6 +22,7 @@ agent-client-protocol.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+regex.workspace = true
 clap.workspace = true
 directories.workspace = true
 fs2.workspace = true

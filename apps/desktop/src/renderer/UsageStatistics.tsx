@@ -28,7 +28,7 @@ interface UsageStatus {
 const CAPABILITY = "usage-statistics.v1";
 const TITLE = "Share usage statistics";
 const DESCRIPTION =
-  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.";
+  "Daily counts of chats, turns, tokens, models and tool calls, with the error messages of failed turns and tools, linked to your Haarness account when you're signed in. Never prompts or code; file names, paths and keys are taken out of error messages.";
 
 async function request(connection: string, input: Record<string, unknown>) {
   const result = await window.haarness.api<{ data: UsageStatus }>(

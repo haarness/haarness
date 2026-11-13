@@ -1823,7 +1823,7 @@
   "Detailed logging off · /logs detail on · /logs export [path]": "التسجيل المفصّل متوقف · ‎/logs detail on · ‎/logs export [المسار]",
   "Detailed logging on until {time} · /logs detail off stops it": "التسجيل المفصّل مفعّل حتى {time} · ‎/logs detail off يوقفه",
   "Detailed logging on until stopped · /logs detail off stops it": "التسجيل المفصّل مفعّل حتى يتم إيقافه · ‎/logs detail off يوقفه",
-  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "أعداد يومية للمحادثات والجولات والرموز والنماذج واستدعاءات الأدوات، مرتبطة بحسابك في Haarness عند تسجيل دخولك. لا تتضمن أبدًا الموجّهات أو الشيفرة أو أسماء الملفات أو المسارات.",
+  "Daily counts of chats, turns, tokens, models and tool calls, with the error messages of failed turns and tools, linked to your Haarness account when you're signed in. Never prompts or code; file names, paths and keys are taken out of error messages.": "أعداد يومية للمحادثات والجولات والرموز والنماذج واستدعاءات الأدوات، مع رسائل الخطأ للجولات والأدوات التي فشلت، مرتبطة بحسابك في Haarness عند تسجيل دخولك. لا تتضمن أبدًا الموجّهات أو الشيفرة، وتُحذف أسماء الملفات والمسارات والمفاتيح من رسائل الخطأ.",
   "See what's shared": "عرض ما تتم مشاركته",
   "Off because DO_NOT_TRACK is set where Haarness started.": "معطّل لأن DO_NOT_TRACK معيّن حيث بدأ تشغيل Haarness.",
   "Set by {variable} where Haarness started.": "معيّن بواسطة {variable} حيث بدأ تشغيل Haarness.",

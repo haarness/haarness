@@ -1823,7 +1823,7 @@
   "Detailed logging off · /logs detail on · /logs export [path]": "ปิดการบันทึกแบบละเอียด · /logs detail on · /logs export [พาธ]",
   "Detailed logging on until {time} · /logs detail off stops it": "เปิดการบันทึกแบบละเอียดถึง {time} · /logs detail off เพื่อหยุด",
   "Detailed logging on until stopped · /logs detail off stops it": "เปิดการบันทึกแบบละเอียดจนกว่าจะหยุด · /logs detail off เพื่อหยุด",
-  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "จำนวนรายวันของแชท เทิร์น โทเค็น โมเดล และการเรียกใช้เครื่องมือ เชื่อมโยงกับบัญชี Haarness ของคุณเมื่อลงชื่อเข้าใช้แล้ว จะไม่รวมพร้อมท์ โค้ด ชื่อไฟล์ หรือพาธเด็ดขาด",
+  "Daily counts of chats, turns, tokens, models and tool calls, with the error messages of failed turns and tools, linked to your Haarness account when you're signed in. Never prompts or code; file names, paths and keys are taken out of error messages.": "จำนวนรายวันของแชท เทิร์น โทเค็น โมเดล และการเรียกใช้เครื่องมือ พร้อมข้อความแสดงข้อผิดพลาดของเทิร์นและเครื่องมือที่ล้มเหลว เชื่อมโยงกับบัญชี Haarness ของคุณเมื่อลงชื่อเข้าใช้แล้ว จะไม่รวมพร้อมท์หรือโค้ดเด็ดขาด และชื่อไฟล์ พาธ และคีย์จะถูกนำออกจากข้อความแสดงข้อผิดพลาด",
   "See what's shared": "ดูสิ่งที่แชร์",
   "Off because DO_NOT_TRACK is set where Haarness started.": "ปิดอยู่เพราะมีการกำหนด DO_NOT_TRACK ไว้ในสภาพแวดล้อมที่เริ่ม Haarness",
   "Set by {variable} where Haarness started.": "กำหนดโดย {variable} ในสภาพแวดล้อมที่เริ่ม Haarness",

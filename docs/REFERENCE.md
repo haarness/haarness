@@ -56,7 +56,8 @@ publishing, platform validation and rollback.
   The TUI exposes `/stats` and `/insights`. See [Insights](INSIGHTS.md).
 
 - Usage statistics, on by default: a daily summary of chats, turns, tokens, models and
-  tool calls (never prompts, code, file names or paths) shared with Haarness Cloud.
+  tool calls, with each failed turn's kind, model, version and scrubbed error message (never
+  prompts, code, file names or paths) shared with Haarness Cloud.
   `haarness telemetry preview` shows exactly what is sent;
   `haarness telemetry off`, `HAARNESS_TELEMETRY=0` or `DO_NOT_TRACK=1` turns it off.
   See [Usage statistics](USAGE-STATISTICS.md).
