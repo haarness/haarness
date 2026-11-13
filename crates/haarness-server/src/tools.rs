@@ -349,9 +349,9 @@ impl NativeToolRegistry {
 /// turn says what is in view, so a file compaction or an undo took out of
 /// the conversation comes back with the next read; elsewhere, once per
 /// thread. Such a file is judged where it really is: one a link leads out of
-/// the workspace, a secret or sign-in file, one the chat's `read` rules deny
-/// and one over 40 KiB are left out (see
-/// [`haarness_core::instructions::nested_left_out`]), and the log says so
+/// the project that is not a plain Markdown note, a secret or sign-in file,
+/// one the chat's `read` rules deny and one over 40 KiB are left out (see
+/// [`haarness_core::instructions::nested_left_out`]), and the log warns so
 /// once for each.
 #[derive(Default)]
 struct InstructionDiscovery {
@@ -382,6 +382,10 @@ impl InstructionDiscovery {
             return;
         }
         let rules = rules();
+        let personal = haarness_core::instructions::personal_folders(
+            haarness_core::global_config_dir().as_deref(),
+            haarness_protocol::home_dir().as_deref(),
+        );
         let denied = |path: &Path| {
             rules
                 .as_ref()
@@ -412,11 +416,11 @@ impl InstructionDiscovery {
                 continue;
             }
             seen.insert(key.clone());
-            if let Some(reason) =
-                haarness_core::instructions::nested_left_out(&candidate, workspace, &denied)
-            {
+            if let Some(reason) = haarness_core::instructions::nested_left_out(
+                &candidate, workspace, &personal, &denied,
+            ) {
                 if self.left_out.lock().insert(key.clone()) {
-                    tracing::info!(
+                    tracing::warn!(
                         path = %candidate.display(),
                         reason,
                         "read did not attach an instruction file"
@@ -6857,11 +6861,14 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("haarness-read-nested-out-{}", uuid::Uuid::now_v7()));
         let project = root.join("project");
-        for folder in ["kept", "linked", "secret", "denied", "huge", "large"] {
+        for folder in [
+            "kept", "note", "linked", "secret", "denied", "huge", "large",
+        ] {
             std::fs::create_dir_all(project.join(folder)).unwrap();
             std::fs::write(project.join(folder).join("a.rs"), "fn a() {}").unwrap();
         }
-        std::fs::write(root.join("outside.md"), "OUTSIDE_RULES").unwrap();
+        std::fs::write(root.join("notes.md"), "NOTE_RULES").unwrap();
+        std::fs::write(root.join(".zsh_history"), "HISTORY_LINES").unwrap();
         std::fs::write(project.join(".env"), "ENV_SECRET").unwrap();
         std::fs::write(project.join("kept/AGENTS.md"), "KEPT_RULES").unwrap();
         std::fs::write(project.join("denied/AGENTS.md"), "DENIED_RULES").unwrap();
@@ -6873,7 +6880,8 @@ mod tests {
             .unwrap();
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink("../../outside.md", project.join("linked/AGENTS.md"))
+            std::os::unix::fs::symlink("../../notes.md", project.join("note/AGENTS.md")).unwrap();
+            std::os::unix::fs::symlink("../../.zsh_history", project.join("linked/AGENTS.md"))
                 .unwrap();
             std::os::unix::fs::symlink("../.env", project.join("secret/AGENTS.md")).unwrap();
         }
@@ -6889,8 +6897,17 @@ mod tests {
             .unwrap();
         assert!(kept.text.contains("KEPT_RULES"), "{}", kept.text);
         assert_eq!(kept.metadata["loaded"].as_array().unwrap().len(), 1);
+        // A personal note a link leads to outside the project still attaches.
+        #[cfg(unix)]
+        {
+            let note = read
+                .execute(json!({"path":"note/a.rs"}), context.clone())
+                .await
+                .unwrap();
+            assert!(note.text.contains("NOTE_RULES"), "{}", note.text);
+        }
         for (folder, hidden) in [
-            ("linked", "OUTSIDE_RULES"),
+            ("linked", "HISTORY_LINES"),
             ("secret", "ENV_SECRET"),
             ("denied", "DENIED_RULES"),
             ("large", "LARGE_RULES"),
@@ -6915,6 +6932,38 @@ mod tests {
             .await
             .unwrap();
         assert!(plain.text.contains("DENIED_RULES"), "{}", plain.text);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A repository opened at a subfolder: a folder's AGENTS.md that links to
+    /// a file elsewhere in the repository attaches as before.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_attaches_a_nested_file_linked_elsewhere_in_the_repository() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-read-nested-repo-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let repository = root.join("mono");
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        std::fs::create_dir_all(repository.join("shared")).unwrap();
+        std::fs::create_dir_all(repository.join("app/pkg")).unwrap();
+        std::fs::write(repository.join("shared/pkg-rules.md"), "SHARED_RULES").unwrap();
+        std::fs::write(repository.join("app/pkg/a.rs"), "fn a() {}").unwrap();
+        std::os::unix::fs::symlink(
+            "../../shared/pkg-rules.md",
+            repository.join("app/pkg/AGENTS.md"),
+        )
+        .unwrap();
+        let workspace = haarness_core::paths::canonicalize(repository.join("app")).unwrap();
+        let read = NativeToolRegistry::new(workspace.clone())
+            .get("read")
+            .unwrap();
+        let output = read
+            .execute(json!({"path":"pkg/a.rs"}), tool_context(&workspace))
+            .await
+            .unwrap();
+        assert!(output.text.contains("SHARED_RULES"), "{}", output.text);
         std::fs::remove_dir_all(root).unwrap();
     }
 

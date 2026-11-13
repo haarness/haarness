@@ -389,15 +389,25 @@ pub fn load_layers_with_system(
     // Instructions: global files, then project instruction files from the
     // worktree root down, then configured `instructions` entries and URLs.
     let claude = compat.project.instructions();
-    let mut local_files: Vec<(PathBuf, bool)> = Vec::new();
+    let own = |file: PathBuf| Candidate {
+        file,
+        trusted: true,
+        project: false,
+    };
+    let projects = |file: PathBuf| Candidate {
+        file,
+        trusted: false,
+        project: true,
+    };
+    let mut local_files: Vec<Candidate> = Vec::new();
     if let Some(file) = base.and_then(|base| base.entry("AGENTS.md")) {
-        local_files.push((file, true));
+        local_files.push(own(file));
     }
-    local_files.push((config_dir.join("AGENTS.md"), true));
+    local_files.push(own(config_dir.join("AGENTS.md")));
     if compat.person.instructions()
         && let Some(home) = home
     {
-        local_files.push((home.join(".claude/CLAUDE.md"), true));
+        local_files.push(own(home.join(".claude/CLAUDE.md")));
     }
     for directory in crate::layout::project_directories(workspace)
         .into_iter()
@@ -407,20 +417,22 @@ pub fn load_layers_with_system(
             local_files.extend(
                 instruction_files::find_in(&directory, true)
                     .into_iter()
-                    .map(|file| (file, false)),
+                    .map(projects),
             );
         } else {
-            local_files.push((directory.join("AGENTS.md"), false));
+            local_files.push(projects(directory.join("AGENTS.md")));
         }
     }
-    let trusted_roots = trusted_instruction_roots(config_dir, home);
+    // The person's instruction folders: what their own configuration names
+    // there may import from anywhere, and a link into them is a personal one.
+    let trusted_roots = instruction_files::personal_folders(Some(config_dir), home);
     // A project's own entries name files of the project only: a cloned
     // repository never puts the person's other files into the prompt.
     let project_roots = crate::layout::project_roots(workspace);
     let mut urls = Vec::new();
     let mut seen: HashSet<PathBuf> = local_files
         .iter()
-        .filter_map(|(file, _)| dunce::canonicalize(file).ok())
+        .filter_map(|candidate| dunce::canonicalize(&candidate.file).ok())
         .collect();
     for InstructionSource { entry, project } in &layers.instruction_sources {
         if entry.starts_with("https://") || entry.starts_with("http://") {
@@ -432,7 +444,7 @@ pub fn load_layers_with_system(
             instruction_entry_files(entry, home, workspace, trust, fence, &mut layers.warnings)
         else {
             if let Some(named_by) = project {
-                layers.notices.push(format!(
+                layers.warnings.push(format!(
                     "{}: ignored instructions {entry:?}: it points outside the project; \
                      a file of your own belongs in {}",
                     named_by.display(),
@@ -441,38 +453,49 @@ pub fn load_layers_with_system(
             }
             continue;
         };
+        // A relative entry's matches lie in the project, whoever named it, so
+        // the project decides where a link among them leads.
+        let relative = !entry.starts_with("~/") && !Path::new(entry).is_absolute();
         let mut outside = Vec::new();
         for file in files {
             let Ok(canonical) = dunce::canonicalize(&file) else {
                 continue;
             };
-            // A link (or a `..` after a wildcard) may lead a match out.
+            if seen.contains(&canonical) {
+                continue;
+            }
+            // A link may lead a match of a project's entry out of it.
             if fence.is_some_and(|roots| !roots.iter().any(|root| canonical.starts_with(root))) {
                 outside.push(file);
                 continue;
             }
-            if !seen.insert(canonical.clone()) {
-                continue;
-            }
+            seen.insert(canonical.clone());
             // Only the person's own entries are trusted for where their files
             // are, never a project's.
-            let trusted =
-                project.is_none() && trusted_roots.iter().any(|root| canonical.starts_with(root));
-            local_files.push((file, trusted));
+            let project = project.is_some() || relative;
+            let trusted = !project && trusted_roots.iter().any(|root| canonical.starts_with(root));
+            local_files.push(Candidate {
+                file,
+                trusted,
+                project,
+            });
         }
         if let (Some(named_by), Some(first)) = (project, outside.first()) {
             let more = match outside.len() - 1 {
                 0 => String::new(),
                 more => format!(" and {more} more"),
             };
-            layers.notices.push(format!(
+            layers.warnings.push(format!(
                 "{}: instructions {entry:?}: left out {}{more}: its real path is outside the project",
                 named_by.display(),
                 first.display()
             ));
         }
     }
-    layers.instruction_files = local_files.iter().map(|(file, _)| file.clone()).collect();
+    layers.instruction_files = local_files
+        .iter()
+        .map(|candidate| candidate.file.clone())
+        .collect();
     let mut segments = Vec::new();
     let mut import_budget = ImportBudget::default();
     // Nothing asks before instructions load, so an import a configured
@@ -506,18 +529,37 @@ pub fn load_layers_with_system(
     // Files that found no room left: the first few by name, then a count, so
     // a glob over a large folder does not fill the log.
     let mut no_room = Vec::new();
-    for (file, trusted) in local_files {
+    for Candidate {
+        file,
+        trusted,
+        project,
+    } in local_files
+    {
+        // A file the project controls may be a link to anywhere: one that
+        // leaves the project loads only as a personal note would.
+        let linked_out = project
+            .then(|| dunce::canonicalize(&file).ok())
+            .flatten()
+            .and_then(|real| instruction_files::linked_out(&real, &project_roots, &trusted_roots));
         // Said to the person too, as a remote file that cannot be read is.
-        if let Some(reason) = instruction_files::file_left_out(&file, workspace, trusted, &denied) {
+        if let Some(reason) = linked_out
+            .or_else(|| instruction_files::file_left_out(&file, workspace, trusted, &denied))
+        {
             layers
-                .notices
+                .warnings
                 .push(format!("skipped instructions {}: {reason}", file.display()));
-        } else if let Some(reason) = instruction_files::size_left_out(&file, &import_budget) {
+            segments.push(instruction_files::segment(
+                &file.display().to_string(),
+                &instruction_files::omitted_file(&file, reason),
+            ));
+            continue;
+        }
+        if let Some(reason) = instruction_files::size_left_out(&file, &import_budget) {
             if reason == instruction_files::NO_ROOM {
                 no_room.push(file);
             } else {
                 layers
-                    .notices
+                    .warnings
                     .push(format!("skipped instructions {}: {reason}", file.display()));
             }
             continue;
@@ -536,14 +578,14 @@ pub fn load_layers_with_system(
         }
     }
     for file in no_room.iter().take(NAMED_LEFT_OUT) {
-        layers.notices.push(format!(
+        layers.warnings.push(format!(
             "skipped instructions {}: {}",
             file.display(),
             instruction_files::NO_ROOM
         ));
     }
     if no_room.len() > NAMED_LEFT_OUT {
-        layers.notices.push(format!(
+        layers.warnings.push(format!(
             "skipped {} further instruction files: {}",
             no_room.len() - NAMED_LEFT_OUT,
             instruction_files::NO_ROOM
@@ -687,20 +729,15 @@ pub(super) fn configured_skill_paths(
         .collect()
 }
 
-/// Roots whose instruction files may `@import` from outside the workspace.
-fn trusted_instruction_roots(config_dir: &Path, home: Option<&Path>) -> Vec<PathBuf> {
-    let mut roots = vec![config_dir.to_path_buf()];
-    if let Some(home) = home {
-        roots.extend(
-            [".haarness", ".opencode", ".claude"]
-                .iter()
-                .map(|name| home.join(name)),
-        );
-    }
-    roots
-        .into_iter()
-        .filter_map(|root| dunce::canonicalize(&root).ok())
-        .collect()
+/// An instruction file the assembly considers: whether the person's own
+/// configuration named it in one of their instruction folders (`trusted`, so
+/// its imports may leave the workspace), and whether the project controls it
+/// (`project`: its own `AGENTS.md` family, a match of a relative entry or an
+/// entry a project's file names), so a link may lead it anywhere.
+struct Candidate {
+    file: PathBuf,
+    trusted: bool,
+    project: bool,
 }
 
 /// How many instruction files that found no room left the log names one by
@@ -722,9 +759,9 @@ const INSTRUCTION_GLOB_ENTRIES: usize = 1_000_000;
 /// With a `fence` (the project's real roots, for an entry a project's file
 /// named) nothing outside it is read: a `~/` entry, and an absolute or
 /// relative one whose fixed start (the folders before its first wildcard)
-/// leads out of the project through `..` or a link, give `None`. A relative
-/// entry is read from each folder where it starts inside; its matches are
-/// still the caller's to check, since a wildcard may match a link.
+/// leads out of the project through `..` or a link, give `None`. A relative entry is read from each folder where it
+/// starts inside; its matches are still the caller's to check, since a
+/// wildcard may match a link.
 fn instruction_entry_files(
     entry: &str,
     home: Option<&Path>,
@@ -3754,11 +3791,11 @@ mod tests {
         }
         let layers = load_layers(&config, Some(&home), &web, true, &[]);
         let ignored: Vec<&String> = layers
-            .notices
+            .warnings
             .iter()
             .filter(|notice| notice.contains(": ignored instructions "))
             .collect();
-        assert_eq!(ignored.len(), entries.len(), "{:?}", layers.notices);
+        assert_eq!(ignored.len(), entries.len(), "{:?}", layers.warnings);
         for entry in &entries {
             assert!(
                 ignored
@@ -3775,32 +3812,30 @@ mod tests {
         assert!(instructions.contains("GLOBAL_BODY"), "{instructions}");
         #[cfg(unix)]
         {
-            assert!(
-                instructions.contains(&format!(
-                    "[Instruction file omitted: {} (Haarness keeps sign-ins there)]",
-                    project.join("AGENTS.md").display()
-                )),
-                "{instructions}"
-            );
-            // The person is told too.
-            assert!(
-                layers.notices.contains(&format!(
-                    "skipped instructions {}: Haarness keeps sign-ins there",
-                    project.join("AGENTS.md").display()
-                )),
-                "{:?}",
-                layers.notices
-            );
-            // A private key is left out as credentials, rule or no rule;
-            // another file by its read rule.
-            assert!(
-                instructions.contains("(it holds credentials)]"),
-                "{instructions}"
-            );
-            assert!(
-                instructions.contains("(a read rule denies it)]"),
-                "{instructions}"
-            );
+            // The store and the key are no Markdown notes; the private note
+            // is one, which its read rule keeps out.
+            for (file, reason) in [
+                (project.join("AGENTS.md"), instruction_files::LINKED_OUT),
+                (project.join("app/AGENTS.md"), instruction_files::LINKED_OUT),
+                (web.join("AGENTS.md"), "a read rule denies it"),
+            ] {
+                assert!(
+                    instructions.contains(&format!(
+                        "[Instruction file omitted: {} ({reason})]",
+                        file.display()
+                    )),
+                    "{instructions}"
+                );
+                // The person is told too.
+                assert!(
+                    layers.warnings.contains(&format!(
+                        "skipped instructions {}: {reason}",
+                        file.display()
+                    )),
+                    "{:?}",
+                    layers.warnings
+                );
+            }
         }
         // A project's own AGENTS.md loads as before under a read rule that
         // covers it.
@@ -4035,11 +4070,11 @@ mod tests {
         );
         assert!(
             !layers
-                .notices
+                .warnings
                 .iter()
                 .any(|notice| notice.contains("ignored instructions")),
             "{:?}",
-            layers.notices
+            layers.warnings
         );
         assert!(
             layers
@@ -4113,11 +4148,11 @@ mod tests {
         // One notice for each entry, naming the file that named it and where
         // the person's own files go.
         let ignored: Vec<&String> = layers
-            .notices
+            .warnings
             .iter()
             .filter(|notice| notice.contains(": ignored instructions "))
             .collect();
-        assert_eq!(ignored.len(), entries.len(), "{:?}", layers.notices);
+        assert_eq!(ignored.len(), entries.len(), "{:?}", layers.warnings);
         for entry in &entries {
             let notice = ignored
                 .iter()
@@ -4135,12 +4170,15 @@ mod tests {
         // A match a link leads out of the project is left out, and said once.
         #[cfg(unix)]
         assert!(
-            layers.notices.iter().any(|notice| notice.contains(&format!(
-                "instructions \"docs/*.md\": left out {}: its real path is outside the project",
-                project.join("docs/link.md").display()
-            ))),
+            layers
+                .warnings
+                .iter()
+                .any(|notice| notice.contains(&format!(
+                    "instructions \"docs/*.md\": left out {}: its real path is outside the project",
+                    project.join("docs/link.md").display()
+                ))),
             "{:?}",
-            layers.notices
+            layers.warnings
         );
         assert!(
             !layers
@@ -4211,8 +4249,127 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn instruction_files_too_large_or_without_room_are_named_in_the_notices() {
+    fn a_projects_instruction_file_linked_out_of_it_loads_only_as_a_personal_note() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-linked-out-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let home = root.join("home");
+        let repository = root.join("repo");
+        let workspace = repository.join("app");
+        for dir in [
+            config.clone(),
+            home.join("notes"),
+            home.join(".claude"),
+            repository.join(".git"),
+            workspace.join("web"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(home.join(".zsh_history"), "HISTORY_LINES").unwrap();
+        fs::write(home.join("notes/rules.md"), "PERSONAL_NOTE").unwrap();
+        fs::write(home.join(".claude/CLAUDE.md"), "CLAUDE_NOTE").unwrap();
+        fs::write(workspace.join("web/AGENTS.md"), "NUL\0BYTES").unwrap();
+        let link = |target: &Path, at: &Path| {
+            let _ = fs::remove_file(at);
+            std::os::unix::fs::symlink(target, at).unwrap();
+        };
+        // The repository's root file is a link to a shell history, the
+        // opened folder's a link to the person's own note.
+        link(&home.join(".zsh_history"), &repository.join("AGENTS.md"));
+        link(&home.join("notes/rules.md"), &workspace.join("AGENTS.md"));
+        let layers = load_layers(&config, Some(&home), &workspace.join("web"), true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(!instructions.contains("HISTORY_LINES"), "{instructions}");
+        assert!(!instructions.contains("NUL"), "text only: {instructions}");
+        assert!(instructions.contains("PERSONAL_NOTE"), "{instructions}");
+        let reason = instruction_files::LINKED_OUT;
+        let history = repository.join("AGENTS.md");
+        assert!(
+            instructions.contains(&format!(
+                "[Instruction file omitted: {} ({reason})]",
+                history.display()
+            )),
+            "{instructions}"
+        );
+        assert!(
+            layers.warnings.contains(&format!(
+                "skipped instructions {}: {reason}",
+                history.display()
+            )),
+            "{:?}",
+            layers.warnings
+        );
+        // A link into the person's own instruction folder loads too.
+        link(
+            &home.join(".claude/CLAUDE.md"),
+            &repository.join("AGENTS.md"),
+        );
+        let layers = load_layers(&config, Some(&home), &workspace, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(instructions.contains("CLAUDE_NOTE"), "{instructions}");
+        assert!(instructions.contains("PERSONAL_NOTE"), "{instructions}");
+        assert!(layers.warnings.is_empty(), "{:?}", layers.warnings);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_persons_relative_entry_meets_a_projects_link_as_the_project_would() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-person-link-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let home = root.join("home");
+        let cloned = root.join("cloned");
+        let own = root.join("own");
+        for dir in [
+            config.clone(),
+            home.join("notes"),
+            cloned.join(".git"),
+            own.join(".git"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(home.join(".zsh_history"), "HISTORY_LINES").unwrap();
+        fs::write(home.join("notes/conventions.md"), "MY_CONVENTIONS").unwrap();
+        // Each repository's conventions, by the person's own entry.
+        fs::write(
+            config.join("haarness.json"),
+            serde_json::json!({"instructions": ["CONTRIBUTING.md"]}).to_string(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../home/.zsh_history", cloned.join("CONTRIBUTING.md")).unwrap();
+        std::os::unix::fs::symlink("../home/notes/conventions.md", own.join("CONTRIBUTING.md"))
+            .unwrap();
+        let layers = load_layers(&config, Some(&home), &cloned, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(!instructions.contains("HISTORY_LINES"), "{instructions}");
+        assert!(
+            layers.warnings.contains(&format!(
+                "skipped instructions {}: {}",
+                cloned.join("CONTRIBUTING.md").display(),
+                instruction_files::LINKED_OUT
+            )),
+            "{:?}",
+            layers.warnings
+        );
+        let layers = load_layers(&config, Some(&home), &own, true, &[]);
+        assert!(
+            layers
+                .instructions
+                .expect("instructions")
+                .contains("MY_CONVENTIONS")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn instruction_files_too_large_or_without_room_are_named_in_the_log() {
         let root = std::env::temp_dir().join(format!(
             "haarness-instruction-sizes-{}",
             uuid::Uuid::now_v7()
@@ -4253,9 +4410,9 @@ mod tests {
                 project.join(native(large)).display()
             );
             assert!(
-                layers.notices.contains(&notice),
+                layers.warnings.contains(&notice),
                 "{notice}\n{:?}",
-                layers.notices
+                layers.warnings
             );
         }
         assert!(instructions.contains("DOC_20") && !instructions.contains("DOC_21"));
@@ -4266,22 +4423,22 @@ mod tests {
                 project.join(native(&format!("docs/{index}.md"))).display()
             );
             assert!(
-                layers.notices.contains(&notice),
+                layers.warnings.contains(&notice),
                 "{notice}\n{:?}",
-                layers.notices
+                layers.warnings
             );
         }
         assert!(
             layers
-                .notices
+                .warnings
                 .contains(&format!("skipped 2 further instruction files: {no_room}")),
             "{:?}",
-            layers.notices
+            layers.warnings
         );
         // Files that fit load as before, and nothing names them.
         assert!(
             !layers
-                .notices
+                .warnings
                 .iter()
                 .any(|notice| notice.contains("docs/01.md") || notice.contains("docs\\01.md"))
         );

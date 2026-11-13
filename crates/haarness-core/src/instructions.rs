@@ -369,12 +369,18 @@ pub fn read_with_imports(
         omit,
     };
     if let Some(reason) = file_left_out(path, workspace, trusted, omit) {
-        return Some(format!(
-            "[Instruction file omitted: {} ({reason})]\n",
-            path.display()
-        ));
+        return Some(omitted_file(path, reason));
     }
     resolve(path, &scope, budget, 0)
+}
+
+/// The line that stands in the prompt for an instruction file left out.
+#[must_use]
+pub fn omitted_file(path: &Path, reason: &str) -> String {
+    format!(
+        "[Instruction file omitted: {} ({reason})]\n",
+        path.display()
+    )
 }
 
 /// Why [`read_with_imports`] leaves the instruction file itself out, if it
@@ -417,8 +423,82 @@ pub const TOO_LARGE: &str = "it is larger than 40 KiB";
 pub const NO_ROOM: &str =
     "the files before it used up the room for instructions (200 KiB, 20 files)";
 
-/// Why a nested instruction file is left out when it really is elsewhere.
-pub const OUTSIDE_PROJECT: &str = "a link leads it outside the project";
+/// Why [`linked_out`] leaves out a file a link leads out of the project.
+pub const LINKED_OUT: &str =
+    "a link leads it out of the project to a file that is not a plain Markdown note";
+
+/// The real roots of `workspace`'s project, where a cloned repository puts
+/// what it likes: the worktree root (the nearest folder above it, or itself,
+/// that holds `.git`) and the workspace itself. Outside Git, the workspace.
+#[must_use]
+pub fn project_roots(workspace: &Path) -> Vec<PathBuf> {
+    let top = workspace
+        .ancestors()
+        .find(|folder| folder.join(".git").exists())
+        .unwrap_or(workspace);
+    let mut roots: Vec<PathBuf> = [top, workspace]
+        .into_iter()
+        .filter_map(|path| crate::paths::canonicalize(path).ok())
+        .collect();
+    roots.dedup();
+    roots
+}
+
+/// The person's own instruction folders, where they really are: the global
+/// configuration folder and `~/.haarness`, `~/.opencode` and `~/.claude`.
+#[must_use]
+pub fn personal_folders(config_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    config_dir
+        .map(Path::to_path_buf)
+        .into_iter()
+        .chain(home.into_iter().flat_map(|home| {
+            [".haarness", ".opencode", ".claude"]
+                .iter()
+                .map(move |name| home.join(name))
+        }))
+        .filter_map(|folder| crate::paths::canonicalize(&folder).ok())
+        .collect()
+}
+
+/// Why an instruction file the project controls (its own `AGENTS.md`
+/// family, a nested one, a match of a relative `instructions` entry) is left
+/// out when a link leads it out of the project's `roots`, if it is. A
+/// personal note stays welcome (`AGENTS.md -> ~/notes/rules.md`, or a link
+/// into `personal`, the person's instruction folders), so only a Markdown
+/// file (`.md`, `.mdx`, `.markdown`) whose name does not start with a dot,
+/// in no hidden folder but those, may load: a shell history, `.env`,
+/// `/proc/self/environ` or a file under `~/.config` never does. The usual
+/// checks ([`file_left_out`], [`nested_left_out`]) still follow.
+#[must_use]
+pub fn linked_out(
+    canonical: &Path,
+    roots: &[PathBuf],
+    personal: &[PathBuf],
+) -> Option<&'static str> {
+    if roots.iter().any(|root| canonical.starts_with(root)) {
+        return None;
+    }
+    let name = canonical
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let markdown = !name.starts_with('.')
+        && [".md", ".mdx", ".markdown"]
+            .iter()
+            .any(|extension| name.ends_with(extension));
+    // Hidden folders count below the person's folder that holds it, if any.
+    let below = personal
+        .iter()
+        .find_map(|folder| canonical.strip_prefix(folder).ok())
+        .unwrap_or(canonical);
+    let hidden = below.parent().is_some_and(|folders| {
+        folders.components().any(|part| {
+            matches!(part, std::path::Component::Normal(name)
+                if name.to_string_lossy().starts_with('.'))
+        })
+    });
+    (!markdown || hidden).then_some(LINKED_OUT)
+}
 
 /// Why the instruction assembly will leave `path` out for its size, if it
 /// will: larger than [`MAX_FILE_BYTES`], or with no room left in `budget`.
@@ -434,24 +514,29 @@ pub fn size_left_out(path: &Path, budget: &ImportBudget) -> Option<&'static str>
     (budget.files == 0 || size > budget.bytes as u64).then_some(NO_ROOM)
 }
 
-/// Why a nested instruction file that a `read` found is left out, if it is:
-/// where it really is must be inside `workspace`, it must be a file Haarness
-/// puts in a prompt ([`left_out`], with `omit` judging it both as named and
-/// where it leads), and no larger than [`MAX_FILE_BYTES`], measured rather
-/// than read.
+/// Why a nested instruction file that a `read` found is left out, if it is,
+/// judged where it really is: one a link leads out of the project (its
+/// worktree root and `workspace`) must pass [`linked_out`] and hold no
+/// credentials; any must be a file Haarness puts in a prompt ([`left_out`],
+/// with `omit` judging it both as named and where it leads), and no larger
+/// than [`MAX_FILE_BYTES`], measured rather than read.
 #[must_use]
 pub fn nested_left_out(
     path: &Path,
     workspace: &Path,
+    personal: &[PathBuf],
     omit: ImportFilter<'_>,
 ) -> Option<&'static str> {
     let root = crate::paths::canonicalize(workspace).ok();
     let canonical = crate::paths::canonicalize(path).ok();
     let (Some(root), Some(canonical)) = (root, canonical) else {
-        return Some(OUTSIDE_PROJECT);
+        return Some(LINKED_OUT);
     };
-    if !canonical.starts_with(&root) {
-        return Some(OUTSIDE_PROJECT);
+    if let Some(reason) = linked_out(&canonical, &project_roots(workspace), personal) {
+        return Some(reason);
+    }
+    if !canonical.starts_with(&root) && holds_credentials(&canonical) {
+        return Some(CREDENTIALS_FILE);
     }
     if let Some(reason) = left_out(&canonical, Some(&root), omit)
         .or_else(|| (path != canonical).then(|| omit(path)).flatten())
@@ -594,6 +679,11 @@ fn resolve(
         return None;
     }
     let content = read_within(path, MAX_FILE_BYTES.min(budget.bytes))?;
+    // Text only: a file of NUL bytes (a device, `/proc/self/environ`) is no
+    // instruction.
+    if content.contains('\0') {
+        return None;
+    }
     budget.files -= 1;
     budget.bytes = budget.bytes.saturating_sub(content.len());
     let base = path.parent().unwrap_or(workspace);
@@ -798,22 +888,47 @@ mod tests {
     #[test]
     fn nested_files_are_judged_where_they_really_are_and_by_their_size() {
         let root = crate::paths::canonicalize(temp("nested-judged")).unwrap();
-        let workspace = root.join("project");
-        fs::create_dir_all(workspace.join("sub")).unwrap();
-        fs::create_dir_all(workspace.join("private")).unwrap();
-        fs::write(root.join("outside.md"), "OUTSIDE").unwrap();
+        // A repository opened at a subfolder: its worktree root is the
+        // project too.
+        let repository = root.join("repo");
+        let workspace = repository.join("app");
+        for folder in [
+            repository.join(".git"),
+            repository.join("shared"),
+            workspace.join("sub"),
+            workspace.join("private"),
+            root.join("notes"),
+            root.join("home/.claude"),
+            root.join("home/.config/gh"),
+        ] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        fs::write(repository.join("shared/rules.md"), "SHARED").unwrap();
+        fs::write(root.join("notes/rules.md"), "NOTES").unwrap();
+        fs::write(root.join("notes/history"), "HISTORY").unwrap();
+        fs::write(root.join(".zsh_history"), "HISTORY").unwrap();
+        fs::write(root.join("home/.claude/CLAUDE.md"), "PERSONAL").unwrap();
+        fs::write(root.join("home/.config/gh/hosts.md"), "TOKEN").unwrap();
+        fs::write(root.join("notes/id_rules.md"), "KEY").unwrap();
         fs::write(workspace.join(".env"), "ENV_SECRET").unwrap();
         fs::write(workspace.join("private/rules.md"), "PRIVATE").unwrap();
         let plain = workspace.join("sub/AGENTS.md");
         fs::write(&plain, "PLAIN").unwrap();
+        let personal = personal_folders(None, Some(&root.join("home")));
         let none: ImportFilter<'_> = &|_| None;
-        assert_eq!(nested_left_out(&plain, &workspace, none), None);
+        assert_eq!(nested_left_out(&plain, &workspace, &personal, none), None);
         // Over 40 KiB, measured: a sparse 2 GiB file is never read.
         let large = workspace.join("sub/CLAUDE.md");
         fs::write(&large, "x".repeat(MAX_FILE_BYTES + 1)).unwrap();
-        assert_eq!(nested_left_out(&large, &workspace, none), Some(TOO_LARGE));
+        assert_eq!(
+            nested_left_out(&large, &workspace, &personal, none),
+            Some(TOO_LARGE)
+        );
         fs::File::create(&large).unwrap().set_len(2 << 30).unwrap();
-        assert_eq!(nested_left_out(&large, &workspace, none), Some(TOO_LARGE));
+        assert_eq!(
+            nested_left_out(&large, &workspace, &personal, none),
+            Some(TOO_LARGE)
+        );
         assert_eq!(read_small(&large), None);
         // A read rule, on the file as named or where a link leads it.
         let private = workspace.join("private");
@@ -821,14 +936,25 @@ mod tests {
             (file.starts_with(&private) || file == plain).then_some("a read rule denies it")
         };
         assert_eq!(
-            nested_left_out(&plain, &workspace, &deny),
+            nested_left_out(&plain, &workspace, &personal, &deny),
             Some("a read rule denies it")
         );
         #[cfg(unix)]
         for (target, reason) in [
-            (root.join("outside.md"), OUTSIDE_PROJECT),
-            (workspace.join(".env"), SECRET_FILE),
-            (workspace.join("private/rules.md"), "a read rule denies it"),
+            // Inside the repository, beside the opened folder.
+            (repository.join("shared/rules.md"), None),
+            // A personal note, also in the person's own instruction folder.
+            (root.join("notes/rules.md"), None),
+            (root.join("home/.claude/CLAUDE.md"), None),
+            (root.join(".zsh_history"), Some(LINKED_OUT)),
+            (root.join("notes/history"), Some(LINKED_OUT)),
+            (root.join("home/.config/gh/hosts.md"), Some(LINKED_OUT)),
+            (root.join("notes/id_rules.md"), Some(CREDENTIALS_FILE)),
+            (workspace.join(".env"), Some(SECRET_FILE)),
+            (
+                workspace.join("private/rules.md"),
+                Some("a read rule denies it"),
+            ),
         ] {
             let link = workspace.join("sub/AGENTS.md");
             fs::remove_file(&link).unwrap();
@@ -838,13 +964,44 @@ mod tests {
                     .then_some("a read rule denies it")
             };
             assert_eq!(
-                nested_left_out(&link, &workspace, &deny),
-                Some(reason),
+                nested_left_out(&link, &workspace, &personal, &deny),
+                reason,
                 "{}",
                 target.display()
             );
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_link_out_of_the_project_loads_only_a_plain_markdown_note() {
+        let roots = [PathBuf::from("/work/repo")];
+        let personal = [
+            PathBuf::from("/home/me/.claude"),
+            PathBuf::from("/home/me/.config/haarness"),
+        ];
+        for (file, reason) in [
+            ("/work/repo/.env", None),
+            ("/work/repo/docs/x.txt", None),
+            ("/home/me/notes/rules.md", None),
+            ("/home/me/notes/Rules.MDX", None),
+            ("/home/me/notes/rules.markdown", None),
+            ("/home/me/.claude/CLAUDE.md", None),
+            ("/home/me/.config/haarness/AGENTS.md", None),
+            ("/home/me/.zsh_history", Some(LINKED_OUT)),
+            ("/proc/self/environ", Some(LINKED_OUT)),
+            ("/dev/zero", Some(LINKED_OUT)),
+            ("/home/me/notes/.hidden.md", Some(LINKED_OUT)),
+            ("/home/me/notes/codes.txt", Some(LINKED_OUT)),
+            ("/home/me/.config/gh/hosts.md", Some(LINKED_OUT)),
+            ("/home/me/.claude/.cache/x.md", Some(LINKED_OUT)),
+        ] {
+            assert_eq!(
+                linked_out(Path::new(file), &roots, &personal),
+                reason,
+                "{file}"
+            );
+        }
     }
 
     #[test]
