@@ -1116,13 +1116,13 @@ fn rule_names(
     if is_exact_rule(&rule.pattern) {
         return false;
     }
-    if wildcard_match(&rule.pattern, operation) {
+    if rule_covers(&rule.pattern, operation) {
         return true;
     }
     if operation.starts_with(EXTERNAL_DIRECTORY)
         && real_folders
             .get(&rule.pattern)
-            .is_some_and(|real| wildcard_match(real, operation))
+            .is_some_and(|real| path_rule_matches(real, operation))
     {
         return true;
     }
@@ -1137,7 +1137,7 @@ fn rule_names(
     }
     let absolute = Path::new(target).is_absolute();
     spellings.iter().any(|(spelled, spelled_absolute)| {
-        *spelled_absolute == absolute && wildcard_match(&rule.pattern, spelled)
+        *spelled_absolute == absolute && path_rule_matches(&rule.pattern, spelled)
     })
 }
 
@@ -1197,16 +1197,37 @@ pub fn forget_rule_links() {
 /// macOS's `/tmp` (really `/private/tmp`) or a linked home folder, in the
 /// form the asks use: they name the folder a path really reaches. `None`
 /// when the rule's folder is not absolute, does not exist or is no link.
+/// The folder is the rule's start up to its first wildcard (an escaped `\*`
+/// or `\?` is part of a name, see [`path_rule_matches`]), and the folder it
+/// leads to is named literally.
 fn real_folder_rule(pattern: &str) -> Option<String> {
     let target = pattern.strip_prefix(EXTERNAL_DIRECTORY)?;
-    let literal = &target[..target.find(['*', '?']).unwrap_or(target.len())];
-    let (folder, rest) = target.split_at(literal.rfind(['/', '\\'])?);
-    if folder.is_empty() || !Path::new(folder).is_absolute() {
+    let escapes = !cfg!(windows) && holds_literal_wildcard(target);
+    let mut end = None;
+    let mut characters = target.char_indices().peekable();
+    while let Some((at, character)) = characters.next() {
+        match character {
+            '\\' if escapes
+                && characters
+                    .next_if(|(_, next)| matches!(next, '*' | '?'))
+                    .is_some() => {}
+            '*' | '?' => break,
+            '/' | '\\' => end = Some(at),
+            _ => {}
+        }
+    }
+    let (folder, rest) = target.split_at(end?);
+    let folder = if escapes {
+        without_literal_escapes(folder)
+    } else {
+        folder.to_owned()
+    };
+    if folder.is_empty() || !Path::new(&folder).is_absolute() {
         return None;
     }
-    let real = crate::paths::canonicalize(Path::new(folder)).ok()?;
+    let real = crate::paths::canonicalize(Path::new(&folder)).ok()?;
     let real = real.to_string_lossy();
-    (real != folder).then(|| format!("{EXTERNAL_DIRECTORY}{real}{rest}"))
+    (real != folder).then(|| format!("{EXTERNAL_DIRECTORY}{}{rest}", literal_path(&real)))
 }
 
 /// The rule that refuses every `<name>:<method>:…` operation: the last rule naming that permission and method (or the
@@ -1301,7 +1322,13 @@ fn normalize_rule_aliases(mut rule: PermissionRule) -> PermissionRule {
     if let Some((permission, target)) = rule.pattern.split_once(':')
         && let Some(home) = home_folder()
     {
-        let home = home.to_string_lossy().into_owned();
+        let home = home.to_string_lossy();
+        // A path rule names the home folder itself, whatever its name holds.
+        let home = if is_path_permission(permission) {
+            literal_path(&home)
+        } else {
+            home.into_owned()
+        };
         let expanded = if let Some(suffix) = target.strip_prefix("~/") {
             Some(format!("{home}/{suffix}"))
         } else if target == "~" {
@@ -1725,24 +1752,114 @@ pub fn plan_ceiling() -> Vec<PermissionRule> {
 /// also matches the bare form without arguments — the rule that makes
 /// `bash:git status *` cover both `git status` and `git status --short`.
 pub fn wildcard_match(pattern: &str, value: &str) -> bool {
+    pattern_match(&pattern.replace('\\', "/"), value)
+}
+
+/// Whether the rule `pattern` covers `operation`: as [`path_rule_matches`]
+/// reads it for an operation on a file path (`read`, `edit` and its aliases,
+/// `list`, `external_directory`), as [`wildcard_match`] does for any other.
+#[must_use]
+pub fn rule_covers(pattern: &str, operation: &str) -> bool {
+    let path = operation
+        .split_once(':')
+        .is_some_and(|(permission, _)| is_path_permission(permission));
+    if path {
+        path_rule_matches(pattern, operation)
+    } else {
+        wildcard_match(pattern, operation)
+    }
+}
+
+/// Whether rules for `permission` name file paths: `read`, `list`,
+/// `external_directory`, and `edit` under each of its names (see
+/// [`normalize_operation_alias`]).
+fn is_path_permission(permission: &str) -> bool {
+    matches!(
+        permission,
+        "read"
+            | "list"
+            | "external_directory"
+            | "edit"
+            | "write"
+            | "apply_patch"
+            | "patch"
+            | "multiedit"
+    )
+}
+
+/// [`wildcard_match`] for a rule about file paths. Outside Windows `\*` and
+/// `\?` in the pattern match that character itself, so a rule names a folder
+/// or file whose name holds one (`/work/a\*b/*` covers `/work/a*b/notes`, not
+/// `/work/a-old-b/notes`), and any other backslash is `/` as before. On
+/// Windows, where `\` separates folders and no name may hold `*` or `?`, it is
+/// [`wildcard_match`].
+#[must_use]
+pub fn path_rule_matches(pattern: &str, value: &str) -> bool {
+    if cfg!(windows) || !holds_literal_wildcard(pattern) {
+        return wildcard_match(pattern, value);
+    }
+    pattern_match(pattern, value)
+}
+
+/// `path` as a path rule names it alone (see [`path_rule_matches`]): outside
+/// Windows each `*` and `?` in it escaped with `\`. On Windows it is `path` as
+/// written: no name there holds either, and `\` separates folders.
+#[must_use]
+pub fn literal_path(path: &str) -> String {
+    if cfg!(windows) {
+        return path.to_owned();
+    }
+    let mut literal = String::with_capacity(path.len());
+    for character in path.chars() {
+        if matches!(character, '*' | '?') {
+            literal.push('\\');
+        }
+        literal.push(character);
+    }
+    literal
+}
+
+/// `pattern` with each `\*` and `\?` read as the character it names, as a
+/// path a rule names is shown or looked up on disk.
+fn without_literal_escapes(pattern: &str) -> String {
+    pattern.replace("\\*", "*").replace("\\?", "?")
+}
+
+/// Whether a path rule's `pattern` names a literal `*` or `?`.
+fn holds_literal_wildcard(pattern: &str) -> bool {
+    pattern.contains("\\*") || pattern.contains("\\?")
+}
+
+/// Match `value` against `pattern`, compiled once: a backslash in `pattern`
+/// is only ever there for [`path_rule_matches`], before a `*` or `?` it
+/// names, and `/` before anything else. [`wildcard_match`] passes patterns
+/// without backslashes, so the two never share a cached pattern.
+fn pattern_match(pattern: &str, value: &str) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<String, regex::Regex>>> = OnceLock::new();
 
-    let pattern = pattern.replace('\\', "/");
     let value = value.replace('\\', "/");
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     {
         let cache = cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(compiled) = cache.get(&pattern) {
+        if let Some(compiled) = cache.get(pattern) {
             return compiled.is_match(&value);
         }
     }
     let mut escaped = String::with_capacity(pattern.len() + 8);
-    for character in pattern.chars() {
+    let mut characters = pattern.chars().peekable();
+    while let Some(character) = characters.next() {
         match character {
+            '\\' => match characters.next_if(|next| matches!(next, '*' | '?')) {
+                Some(named) => {
+                    escaped.push('\\');
+                    escaped.push(named);
+                }
+                None => escaped.push('/'),
+            },
             '*' => escaped.push_str(".*"),
             '?' => escaped.push('.'),
             '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '[' | ']' => {
@@ -1768,7 +1885,7 @@ pub fn wildcard_match(pattern: &str, value: &str) -> bool {
     if cache.len() > 512 {
         cache.clear();
     }
-    cache.insert(pattern, compiled);
+    cache.insert(pattern.to_owned(), compiled);
     matched
 }
 
@@ -2249,6 +2366,157 @@ mod tests {
     }
 
     #[test]
+    fn a_path_rule_names_a_literal_star_or_question_mark_with_a_backslash() {
+        // Everything asks but what an Always answer allows.
+        let engine = |rules: &[&str]| {
+            let mut engine = PermissionEngine::new(vec![rule("*", PermissionDecision::Ask)]);
+            for pattern in rules {
+                engine.add_grant(rule(pattern, PermissionDecision::Allow));
+            }
+            engine
+        };
+        if cfg!(windows) {
+            // `\` separates folders there and no name holds `*` or `?`:
+            // path rules match as every rule does.
+            assert_eq!(literal_path(r"C:\work\a*b"), r"C:\work\a*b");
+            for (pattern, value) in [
+                (r"read:C:\dir\*", "read:C:/dir/file"),
+                (
+                    r"external_directory:C:\a\?b\*",
+                    r"external_directory:C:\a\xb\c",
+                ),
+            ] {
+                assert_eq!(
+                    path_rule_matches(pattern, value),
+                    wildcard_match(pattern, value)
+                );
+            }
+            return;
+        }
+        assert_eq!(literal_path("/work/a*b/c?d"), r"/work/a\*b/c\?d");
+        assert_eq!(literal_path("/work/plain"), "/work/plain");
+        let outside = engine(&[r"external_directory:/tmp/a\*b/*"]);
+        assert_eq!(
+            outside.evaluate("external_directory:/tmp/a*b/*"),
+            PermissionDecision::Allow
+        );
+        for other in [
+            "/tmp/aXb/*",
+            "/tmp/a/c/b/*",
+            "/tmp/ab/*",
+            "/tmp/a*b-other/*",
+        ] {
+            assert_eq!(
+                outside.evaluate(&format!("external_directory:{other}")),
+                PermissionDecision::Ask,
+                "{other}"
+            );
+        }
+        // The same for every permission about file paths, `write` and the
+        // other names of `edit` included, and for `?`.
+        for permission in ["read", "edit", "write", "list", "external_directory"] {
+            let named = engine(&[&format!(r"{permission}:/work/build\?/repo/*")]);
+            assert_eq!(
+                named.evaluate(&format!("{permission}:/work/build?/repo/x")),
+                PermissionDecision::Allow,
+                "{permission}"
+            );
+            assert_eq!(
+                named.evaluate(&format!("{permission}:/work/build2/repo/x")),
+                PermissionDecision::Ask,
+                "{permission}"
+            );
+        }
+        // Escapes before, between and after wildcards, and at the end.
+        assert!(path_rule_matches(r"/w/\*/*/\?/*", "/w/*/q/?/z"));
+        assert!(!path_rule_matches(r"/w/\*/*/\?/*", "/w/x/q/?/z"));
+        assert!(path_rule_matches(r"/w/build\*", "/w/build*"));
+        assert!(!path_rule_matches(r"/w/build\*", "/w/buildx"));
+        // An escaped `*` after a space is that character, not the optional
+        // arguments a trailing ` *` reads as.
+        assert!(!path_rule_matches(r"read:/w/notes \*", "read:/w/notes"));
+        // Any other backslash is still `/`.
+        assert!(path_rule_matches(r"\w\a\*b/*", "/w/a*b/x"));
+        assert!(!path_rule_matches(r"\w\a\*b/*", "/w/axb/x"));
+    }
+
+    #[test]
+    fn rules_without_an_escape_and_command_rules_match_as_before() {
+        // An Always an earlier version saved for a folder whose name holds a
+        // `*` keeps the wildcard it was read with.
+        let mut saved = PermissionEngine::build_defaults();
+        saved.add_grant(rule(
+            "external_directory:/Users/me/*/*",
+            PermissionDecision::Allow,
+        ));
+        assert_eq!(
+            saved.evaluate("external_directory:/Users/me/.ssh/*"),
+            PermissionDecision::Allow
+        );
+        let cases = [
+            (
+                "external_directory:/work/build*/repo/*",
+                "external_directory:/work/build-x/repo/y",
+            ),
+            ("read:*.env", "read:deep/.env"),
+            ("read:src/*", "read:src\\main.rs"),
+            ("edit:\\a/*", "edit:/a/b"),
+            (r"bash:find . -name \*.ts", r"bash:find . -name \*.ts"),
+            (r"bash:find . -name \*.ts", "bash:find . -name /x.ts"),
+            (r"bash:echo \?", "bash:echo /x"),
+            ("bash:git status *", "bash:git status"),
+            (r"webfetch:https://a.test/\*", "webfetch:https://a.test//x"),
+        ];
+        for (pattern, value) in cases {
+            assert_eq!(
+                rule_covers(pattern, value),
+                wildcard_match(pattern, value),
+                "{pattern} {value}"
+            );
+        }
+        // A shell command rule keeps reading `\*` as `/*`.
+        let mut commands = PermissionEngine::build_defaults();
+        commands.add_rule(rule("bash:*", PermissionDecision::Ask));
+        commands.add_rule(rule(r"bash:find . -name \*.ts", PermissionDecision::Allow));
+        assert_eq!(
+            commands.evaluate(r"bash:find . -name \*.ts"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            commands.evaluate("bash:find . -name /x.ts"),
+            PermissionDecision::Allow
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rule_names_the_home_folder_itself_whatever_its_name_holds() {
+        let home = std::env::temp_dir().join(format!("haarness-home-a*b-{}", uuid::Uuid::now_v7()));
+        let _guard = TestHome::set(&home);
+        let engine = PermissionEngine::new(vec![rule(
+            "external_directory:~/.cache/*",
+            PermissionDecision::Allow,
+        )]);
+        let named = home.display().to_string();
+        assert_eq!(
+            engine.evaluate(&format!("external_directory:{named}/.cache/x")),
+            PermissionDecision::Allow
+        );
+        let other = named.replace("a*b", "a-other-b");
+        assert_eq!(
+            engine.evaluate(&format!("external_directory:{other}/.cache/x")),
+            PermissionDecision::Ask
+        );
+        // A command rule's `~` stays as it was.
+        let commands =
+            PermissionEngine::new(vec![rule("bash:~/bin/run *", PermissionDecision::Deny)]);
+        assert_eq!(
+            commands.evaluate(&format!("bash:{other}/bin/run x")),
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
     fn config_rules_override_defaults_with_last_match_wins() {
         let mut engine = PermissionEngine::build_defaults();
         engine.add_rule(rule("bash:*", PermissionDecision::Ask));
@@ -2402,6 +2670,34 @@ mod tests {
                 PermissionDecision::Allow
             );
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rule_through_a_link_names_a_literal_star_where_the_link_leads_and_beyond() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let root =
+            std::env::temp_dir().join(format!("haarness-linked-literal-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("re*al/a*b")).unwrap();
+        std::os::unix::fs::symlink(root.join("re*al"), root.join("link")).unwrap();
+        std::os::unix::fs::symlink(root.join("re*al"), root.join("li*nk")).unwrap();
+        let real = crate::paths::canonicalize(root.join("re*al")).unwrap();
+        let real = real.to_string_lossy();
+        let sibling = real.replace("re*al", "re-other-al");
+        let link = root.join("link").display().to_string();
+        let starred = literal_path(&root.join("li*nk").display().to_string());
+        let engine = PermissionEngine::new(vec![
+            // A link to a folder whose name holds a `*`.
+            rule(&format!("external_directory:{link}/*"), Allow),
+            // A link whose own name holds one, to a folder named with one.
+            rule(&format!(r"external_directory:{starred}/a\*b/*"), Deny),
+        ]);
+        let ask = |folder: &str| engine.evaluate(&format!("external_directory:{folder}/*"));
+        assert_eq!(ask(&real), Allow);
+        assert_eq!(ask(&sibling), Ask);
+        assert_eq!(ask(&format!("{real}/a*b")), Deny);
+        assert_eq!(ask(&format!("{real}/aXb")), Allow);
         std::fs::remove_dir_all(root).unwrap();
     }
 

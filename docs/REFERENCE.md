@@ -695,6 +695,7 @@ timeout_ms = 5000
 edit = "ask"
 [permissions.external_directory]
 "~/Downloads/*" = "ask"       # ~ and $HOME expand in permission patterns
+'/srv/out\*/*' = "allow"      # in a path rule \* and \? are a literal * or ? (not on Windows)
 [permissions.bash]
 "git status*" = "allow"
 "git push*" = "ask"
