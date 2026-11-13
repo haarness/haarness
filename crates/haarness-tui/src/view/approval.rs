@@ -431,6 +431,27 @@ fn link_targets(pending: &PendingPermissionInfo) -> impl Iterator<Item = &str> {
         .filter(move |pattern| file && path.is_some_and(|path| path != *pattern))
 }
 
+/// `rule` with each `\*` and `\?` a path rule writes for a `*` or `?` in a
+/// name read as that character. A backslash before one is a separator
+/// (`\\?\C:\…` on Windows), so that pair stays.
+fn named_path(rule: &str) -> String {
+    let mut named = String::with_capacity(rule.len());
+    let mut characters = rule.chars().peekable();
+    let mut after_backslash = false;
+    while let Some(character) = characters.next() {
+        if character == '\\'
+            && !after_backslash
+            && let Some(escaped) = characters.next_if(|next| matches!(next, '*' | '?'))
+        {
+            named.push(escaped);
+            continue;
+        }
+        after_backslash = character == '\\';
+        named.push(character);
+    }
+    named
+}
+
 /// The rules an "always" would persist, worth a row only where they say more
 /// than the subject already did (`subject` as sent). The stored rule carries
 /// a `category:` prefix that the headline has just spelled out in words, so
@@ -458,13 +479,20 @@ fn always_rules(
         ];
     }
     let prefix = format!("{}:", category(pending));
+    let first = subject.and_then(|subject| subject.lines().next());
     pending
         .always_patterns
         .iter()
         .map(|rule| rule.strip_prefix(&prefix).unwrap_or(rule).to_owned())
-        .filter(|rule| Some(rule.as_str()) != subject.and_then(|subject| subject.lines().next()))
-        // A link's target already has its own subject row.
-        .filter(|rule| !link_targets(pending).any(|target| target == rule))
+        // A path rule that only escapes a `*` or `?` in a name (`a\*b`) says
+        // no more than the path itself, nor does a link's target, which has
+        // its own subject row.
+        .filter(|rule| {
+            let named = named_path(rule);
+            ![rule.as_str(), named.as_str()].iter().any(|spelled| {
+                Some(*spelled) == first || link_targets(pending).any(|target| target == *spelled)
+            })
+        })
         // A bare `*` is the whole category; say so rather than print a glob.
         .map(|rule| {
             if rule == "*" {
