@@ -595,54 +595,83 @@ where
     }
 }
 
-/// Search only enabled, currently deferred tools. Exact id matches win;
-/// wildcard and text matches are deterministic and bounded. A query that
-/// is the id of a tool the model has this round finds only the deferred
-/// tools whose ids begin or end with it (`bash_output` and `bash_stop` for
-/// `bash`, `skill_manage` for `skill`), not an MCP tool holding it inside
-/// its id (`mcp__github__list_issues` for `list`) or every one whose
-/// description mentions it; [`already_available`] names the tool it has.
+/// The deferred tools one `load_tool` call matched: those it loads, at most
+/// [`MAX_LOAD_MATCHES`], and the matches past that, which it leaves out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeferredMatches {
+    pub found: Vec<String>,
+    pub left_out: Vec<String>,
+}
+
+/// Search only enabled, currently deferred tools. A query that is a
+/// deferred tool's exact id is found first, whatever query comes before
+/// it, so a wildcard or a word in the same call cannot crowd that tool
+/// out; wildcard and text matches follow, deterministic, in the order of
+/// the queries. A query that is the id of a tool the model has this round
+/// finds only the deferred tools whose ids begin or end with it
+/// (`bash_output` and `bash_stop` for `bash`, `skill_manage` for `skill`),
+/// not an MCP tool holding it inside its id (`mcp__github__list_issues` for
+/// `list`) or every one whose description mentions it; [`already_available`]
+/// names the tool it has. Past [`MAX_LOAD_MATCHES`], matches are left out
+/// and returned as such, for the answer to name.
 #[must_use]
-pub fn search_deferred_tools(
+pub fn find_deferred_tools(
     definitions: &[ToolDefinition],
     catalog: &ToolCatalogResponse,
     queries: &[String],
-) -> Vec<String> {
+) -> DeferredMatches {
     let by_id = definitions
         .iter()
         .map(|tool| (tool.name.as_str(), tool))
         .collect::<HashMap<_, _>>();
     let deferred = deferred_entries(catalog, &by_id);
+    let queries = queries
+        .iter()
+        .take(10)
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .filter(|query| !query.is_empty())
+        .collect::<Vec<_>>();
     let mut matched = Vec::new();
-    for raw in queries.iter().take(10) {
-        let query = raw.trim().to_ascii_lowercase();
-        if query.is_empty() {
-            continue;
+    let mut seen = HashSet::new();
+    let mut add = |id: String| {
+        if seen.insert(id.clone()) {
+            matched.push(id);
         }
-        let found = if offered(catalog, &query).is_some() {
+    };
+    for query in &queries {
+        if let Some(entry) = deferred
+            .iter()
+            .find(|entry| entry.id.eq_ignore_ascii_case(query))
+        {
+            add(entry.id.clone());
+        }
+    }
+    for query in &queries {
+        let found = if offered(catalog, query).is_some() {
             let mut ids = deferred
                 .iter()
                 .filter(|entry| {
                     let id = entry.id.to_ascii_lowercase();
-                    id.starts_with(&query) || id.ends_with(&query)
+                    id.starts_with(query.as_str()) || id.ends_with(query.as_str())
                 })
                 .map(|entry| entry.id.clone())
                 .collect::<Vec<_>>();
             ids.sort();
             ids
         } else {
-            query_matches(&deferred, &by_id, &query)
+            query_matches(&deferred, &by_id, query)
         };
-        for id in found {
-            if !matched.contains(&id) {
-                matched.push(id);
-                if matched.len() == MAX_LOAD_MATCHES {
-                    return matched;
-                }
-            }
-        }
+        found.into_iter().for_each(&mut add);
     }
-    matched
+    let left_out = if matched.len() > MAX_LOAD_MATCHES {
+        matched.split_off(MAX_LOAD_MATCHES)
+    } else {
+        Vec::new()
+    };
+    DeferredMatches {
+        found: matched,
+        left_out,
+    }
 }
 
 /// The tools a query names exactly among those the model has this round,
@@ -744,14 +773,21 @@ fn query_matches(
     candidates
 }
 
+/// The most bytes the names of the matches one call left out may take in
+/// its answer (about 500 tokens).
+const LEFT_OUT_ROOM: usize = 2 * 1024;
+
 /// What `load_tool` answers: the tools it `loaded`, those the model
-/// `already` has, and matches it left out because the chat holds
-/// [`MAX_PROMOTED_TOOLS`] loaded tools (`full`).
+/// `already` has, matches it left out because the chat holds
+/// [`MAX_PROMOTED_TOOLS`] loaded tools (`full`), and those past the
+/// [`MAX_LOAD_MATCHES`] one call loads (`left_out`), named so the model can
+/// load the ones it needs by id.
 #[must_use]
 pub fn load_tool_result(
     loaded: &[String],
     already: &[String],
     full: &[String],
+    left_out: &[String],
     catalog: &ToolCatalogResponse,
 ) -> Value {
     let tools = loaded
@@ -783,6 +819,13 @@ pub fn load_tool_result(
         message.push(format!(
             "Not loaded, because this session already holds the most loaded tools it can ({MAX_PROMOTED_TOOLS}): {}. Use the tools you have.",
             full.join(", ")
+        ));
+    }
+    if !left_out.is_empty() {
+        let names = left_out.iter().map(String::as_str).collect::<Vec<_>>();
+        message.push(format!(
+            "Also matched, past the {MAX_LOAD_MATCHES} tools one call loads, so not loaded: {}. Load the ones you need by exact id.",
+            some_names(&names, LEFT_OUT_ROOM)
         ));
     }
     if message.is_empty() {
@@ -997,6 +1040,15 @@ mod tests {
         }
     }
     use super::*;
+
+    /// [`find_deferred_tools`] without the matches it left out.
+    fn search_deferred_tools(
+        definitions: &[ToolDefinition],
+        catalog: &ToolCatalogResponse,
+        queries: &[String],
+    ) -> Vec<String> {
+        find_deferred_tools(definitions, catalog, queries).found
+    }
 
     fn definition(name: &str, description: &str) -> ToolDefinition {
         ToolDefinition {
@@ -1817,7 +1869,7 @@ mod tests {
         // A text search is no claim about one tool.
         assert!(already_available(&definitions, catalog, &["run a command".into()]).is_empty());
 
-        let only = load_tool_result(&[], &["bash".to_owned()], &[], catalog);
+        let only = load_tool_result(&[], &["bash".to_owned()], &[], &[], catalog);
         assert_eq!(only["loaded"], json!([]));
         assert_eq!(only["available"], json!(["bash"]));
         let message = only["message"].as_str().unwrap();
@@ -1830,6 +1882,7 @@ mod tests {
         let both = load_tool_result(
             &["memory_read".to_owned()],
             &["bash".to_owned(), "mcp__github__issues".to_owned()],
+            &[],
             &[],
             catalog,
         );
@@ -1886,7 +1939,7 @@ mod tests {
             ["bash_output", "bash_stop", "multiedit", "memory_list"]
         );
         assert_eq!(already, ["bash", "edit", "list"]);
-        let result = load_tool_result(&loaded, &already, &[], &tight.response);
+        let result = load_tool_result(&loaded, &already, &[], &[], &tight.response);
         assert_eq!(result["available"], json!(["bash", "edit", "list"]));
         let message = result["message"].as_str().unwrap();
         assert!(
@@ -1932,7 +1985,7 @@ mod tests {
         let already = already_available(&definitions, &selection.response, &queries);
         assert_eq!(loaded, ["skill_manage"]);
         assert_eq!(already, [SKILL_TOOL_NAME]);
-        let result = load_tool_result(&loaded, &already, &[], &selection.response);
+        let result = load_tool_result(&loaded, &already, &[], &[], &selection.response);
         assert_eq!(result["loaded"][0]["id"], "skill_manage");
         assert_eq!(result["available"], json!([SKILL_TOOL_NAME]));
     }
@@ -1952,7 +2005,13 @@ mod tests {
             None,
             false,
         );
-        let value = load_tool_result(&[], &[], &["memory_read".to_owned()], &selection.response);
+        let value = load_tool_result(
+            &[],
+            &[],
+            &["memory_read".to_owned()],
+            &[],
+            &selection.response,
+        );
         assert_eq!(value["notLoaded"], json!(["memory_read"]));
         let message = value["message"].as_str().unwrap();
         assert!(
@@ -1963,12 +2022,121 @@ mod tests {
 
         // What a miss always said, unchanged.
         assert_eq!(
-            load_tool_result(&[], &[], &[], &selection.response),
+            load_tool_result(&[], &[], &[], &[], &selection.response),
             json!({
                 "loaded": [],
                 "message": "No deferred tools matched. Try a functional term such as sessions, memory, extensions, automation, or an exact/wildcard tool id.",
             })
         );
+    }
+
+    fn deferred_docs(count: usize) -> (Vec<ToolDefinition>, ToolSelection) {
+        let mut definitions = (1..=count)
+            .map(|index| definition(&format!("mcp__docs__t{index:02}"), "a documentation tool"))
+            .collect::<Vec<_>>();
+        definitions.push(definition("memory_read", "read durable notes"));
+        definitions.push(definition("read", "read a file"));
+        let selection = select_tools(
+            definitions.clone(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::new(),
+            Some(200_000),
+            false,
+        );
+        (definitions, selection)
+    }
+
+    /// A tool named by its exact id loads even when a wildcard in the same
+    /// call matches more than one call loads, whichever query comes first.
+    #[test]
+    fn an_exact_id_loads_ahead_of_a_wildcard_in_the_same_call() {
+        let (definitions, selection) = deferred_docs(25);
+        let docs = |range: std::ops::RangeInclusive<usize>| {
+            range
+                .map(|index| format!("mcp__docs__t{index:02}"))
+                .collect::<Vec<_>>()
+        };
+        for queries in [
+            ["mcp__docs__*", "memory_read"],
+            ["memory_read", "mcp__docs__*"],
+        ] {
+            let queries = queries.map(String::from);
+            let matches = find_deferred_tools(&definitions, &selection.response, &queries);
+            assert_eq!(matches.found.len(), MAX_LOAD_MATCHES, "{queries:?}");
+            assert_eq!(matches.found[0], "memory_read", "{queries:?}");
+            assert_eq!(matches.found[1..], docs(1..=19), "{queries:?}");
+            assert_eq!(matches.left_out, docs(20..=25), "{queries:?}");
+        }
+        // An exact id in other letters is still that tool.
+        let matches = find_deferred_tools(
+            &definitions,
+            &selection.response,
+            &["mcp__docs__*".into(), "MEMORY_READ".into()],
+        );
+        assert_eq!(matches.found[0], "memory_read");
+    }
+
+    /// One wildcard over more tools than a call loads: the first twenty
+    /// load, and the answer names the rest and how to load them.
+    #[test]
+    fn a_load_past_twenty_names_what_it_left_out() {
+        let (definitions, selection) = deferred_docs(25);
+        let matches =
+            find_deferred_tools(&definitions, &selection.response, &["mcp__docs__*".into()]);
+        assert_eq!(matches.found.len(), MAX_LOAD_MATCHES);
+        assert_eq!(
+            matches.left_out,
+            ["t21", "t22", "t23", "t24", "t25"].map(|tool| format!("mcp__docs__{tool}"))
+        );
+        let value = load_tool_result(
+            &matches.found,
+            &[],
+            &[],
+            &matches.left_out,
+            &selection.response,
+        );
+        assert_eq!(value["loaded"].as_array().unwrap().len(), MAX_LOAD_MATCHES);
+        let message = value["message"].as_str().unwrap();
+        assert!(
+            message.contains(
+                "past the 20 tools one call loads, so not loaded: mcp__docs__t21, mcp__docs__t22, mcp__docs__t23, mcp__docs__t24, mcp__docs__t25."
+            ) && message.ends_with("Load the ones you need by exact id."),
+            "{message}"
+        );
+        // Under the limit, nothing more is said.
+        let (definitions, selection) = deferred_docs(5);
+        let matches =
+            find_deferred_tools(&definitions, &selection.response, &["mcp__docs__*".into()]);
+        assert!(matches.left_out.is_empty());
+        let value = load_tool_result(&matches.found, &[], &[], &[], &selection.response);
+        assert_eq!(
+            value["message"],
+            "The matching tool schemas will be available on the next model round."
+        );
+    }
+
+    /// Hundreds left out: the answer names what fits its room and counts
+    /// the rest.
+    #[test]
+    fn the_names_left_out_are_bounded() {
+        let (definitions, selection) = deferred_docs(99);
+        let mut left_out = (0..400)
+            .map(|index| format!("mcp__a_server_with_a_long_name__tool_{index:03}"))
+            .collect::<Vec<_>>();
+        left_out.extend(definitions.iter().map(|tool| tool.name.clone()));
+        let value = load_tool_result(&[], &[], &[], &left_out, &selection.response);
+        let message = value["message"].as_str().unwrap();
+        assert!(message.len() <= LEFT_OUT_ROOM + 200, "{}", message.len());
+        assert!(
+            message.contains(" more. Load the ones you need"),
+            "{message}"
+        );
+        assert!(message.contains("mcp__a_server_with_a_long_name__tool_000"));
     }
 
     #[test]

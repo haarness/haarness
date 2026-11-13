@@ -30,8 +30,8 @@ use tracing::{Instrument as _, error, info, instrument, warn};
 use crate::agents::custom_system_prompt_with_context;
 use crate::background::{BackgroundHandoff, BackgroundLedger, BackgroundProbe};
 use crate::tool_catalog::{
-    LOAD_TOOL_NAME, MAX_PROMOTED_TOOLS, already_available, is_essential_tool, load_tool_result,
-    search_deferred_tools, select_tools,
+    LOAD_TOOL_NAME, MAX_PROMOTED_TOOLS, already_available, find_deferred_tools, is_essential_tool,
+    load_tool_result, select_tools,
 };
 use crate::tool_validation::{unknown_tool, validate_arguments};
 use crate::{
@@ -14258,14 +14258,15 @@ impl RunnerTask {
                 "lazy tool loading is not active for this provider round".into(),
             ));
         }
-        let matched = search_deferred_tools(&definitions, &catalog, &queries);
-        let loaded = self.promote_tools(matched.clone());
-        let full = matched
+        let matches = find_deferred_tools(&definitions, &catalog, &queries);
+        let loaded = self.promote_tools(matches.found.clone());
+        let full = matches
+            .found
             .into_iter()
             .filter(|id| !loaded.contains(id))
             .collect::<Vec<_>>();
         let already = already_available(&definitions, &catalog, &queries);
-        let value = load_tool_result(&loaded, &already, &full, &catalog);
+        let value = load_tool_result(&loaded, &already, &full, &matches.left_out, &catalog);
         Ok(ToolOutput {
             text: serde_json::to_string_pretty(&value)
                 .map_err(|error| CoreError::Tool(error.to_string()))?,
