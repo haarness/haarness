@@ -1421,6 +1421,9 @@ impl Reader<'_> {
         let mut folders = HashMap::new();
         // The steps where a `cd` would be followed: none in text run again.
         let mut open = HashSet::new();
+        // What is read from where the shell started as well (see
+        // [`chain_folders`]).
+        let mut twice = HashSet::new();
         if depth.text == 0 {
             let mut statements = tree.root_node().walk();
             let statements: Vec<_> = tree
@@ -1442,7 +1445,7 @@ impl Reader<'_> {
                 && !tree.root_node().has_error()
                 && joined_continuations(command, true).is_none()
             {
-                (folders, open) = chain_folders(*statement, command, self.start);
+                (folders, open, twice) = chain_folders(*statement, command, self.start);
             } else if statements.len() > 1
                 && whole
                 && self.reading != Reading::Cmd
@@ -1522,6 +1525,11 @@ impl Reader<'_> {
             self.folder.clone_from(&here);
             let named_from = self.analysis.paths.len();
             self.check_paths(&words, command);
+            let again = here.is_some() && twice.contains(&node.id());
+            if again {
+                self.folder = None;
+                self.check_paths(&words, command);
+            }
             self.folder = None;
             if depth.text == 0 {
                 self.source = None;
@@ -1585,6 +1593,12 @@ impl Reader<'_> {
             self.here = here;
             self.lost = !open.contains(&node.id());
             self.unwrap(&words, Some(stdin), command, depth);
+            if again {
+                // What it runs, read from where the shell started too.
+                self.here = None;
+                self.carried = None;
+                self.unwrap(&words, Some(stdin), command, depth);
+            }
             self.here = None;
             self.carried = None;
             self.work_trees.clear();
@@ -1713,7 +1727,6 @@ impl Reader<'_> {
                     moved: false,
                 });
             }
-            self.folder = folders.get(&redirect.id()).cloned();
             // cmd.exe writes to the file named as written.
             let (value, complete) = if self.reading == Reading::Cmd {
                 let raw = node_text(dest, command);
@@ -1721,30 +1734,37 @@ impl Reader<'_> {
             } else {
                 (value, complete)
             };
-            let outside = external_dir(
-                self.workspace,
-                self.from(),
-                &node_text(dest, command),
-                &value,
-                complete,
-            );
             // `<` and `<>` read the file.
             let reads = (0..redirect.child_count())
                 .filter_map(|i| redirect.child(i))
                 .any(|child| matches!(node_text(child, command).as_str(), "<" | "<>"));
-            self.name_path(
-                &node_text(dest, command),
-                &value,
-                complete,
-                outside.as_deref(),
-                reads,
-            );
-            if reads && complete {
-                self.name_glob_secrets(&node_text(dest, command), &value);
-            }
-            self.folder = None;
-            if let Some(dir) = outside {
-                push_unique(&mut self.analysis.external_dirs, glob(&dir));
+            let placed = folders.get(&redirect.id()).cloned();
+            // Where the shell started as well, for one read from both (see
+            // [`chain_folders`]).
+            let also = placed.is_some() && twice.contains(&redirect.id());
+            for folder in std::iter::once(placed).chain(also.then_some(None)) {
+                self.folder = folder;
+                let outside = external_dir(
+                    self.workspace,
+                    self.from(),
+                    &node_text(dest, command),
+                    &value,
+                    complete,
+                );
+                self.name_path(
+                    &node_text(dest, command),
+                    &value,
+                    complete,
+                    outside.as_deref(),
+                    reads,
+                );
+                if reads && complete {
+                    self.name_glob_secrets(&node_text(dest, command), &value);
+                }
+                self.folder = None;
+                if let Some(dir) = outside {
+                    push_unique(&mut self.analysis.external_dirs, glob(&dir));
+                }
             }
         }
         self.folder = outer_folder;
@@ -6183,23 +6203,36 @@ const RUNS_IN_SHELL: &[&str] = &["time", "trap", "mapfile", "readarray", "enable
 /// Also the steps where a `cd` would be followed, by the node id of their
 /// command: each plain step before any other step ran. A wrapper's folder is
 /// followed there only (see [`Reader::wrapper_folder`]).
+///
+/// And what is also read from where the shell started, by node id: from the
+/// first step with a `&>` or `&>>` redirect on, its redirects and every
+/// command and redirect after it. Bash runs the whole chain where the `cd`s
+/// went, while dash reads `&>` as `&` and `>`: it runs the chain up to that
+/// step's command in the background, and the redirect's target and what
+/// follows where the shell started. Read from both, neither shell gets past
+/// the check.
 fn chain_folders(
     chain: tree_sitter::Node<'_>,
     source: &str,
     workspace: &Path,
-) -> (HashMap<usize, Rc<Path>>, HashSet<usize>) {
+) -> (HashMap<usize, Rc<Path>>, HashSet<usize>, HashSet<usize>) {
     let mut folders = HashMap::new();
     let mut open = HashSet::new();
+    let mut twice = HashSet::new();
     let mut folder: Rc<Path> = Rc::from(workspace);
     let (mut moves, mut ran) = (0, false);
+    let mut split = false;
     for (node, outer) in steps(chain) {
-        // Dash reads `&>` as `&` and `>`: the chain up to it runs in the
-        // background, and what follows where the shell was.
-        if std::iter::once(node)
-            .chain(outer.iter().copied())
-            .any(|node| dash_backgrounds(node, source))
-        {
-            break;
+        let step = || std::iter::once(node).chain(outer.iter().copied());
+        if split {
+            for node in step() {
+                mark(&mut twice, node, &["command", "file_redirect"]);
+            }
+        } else if step().any(|node| dash_backgrounds(node, source)) {
+            split = true;
+            for node in step() {
+                mark(&mut twice, node, &["file_redirect"]);
+            }
         }
         // A pipeline's stages each run in a subshell started where the shell
         // is, and leave it there. A redirect the tree hangs on the list
@@ -6295,7 +6328,18 @@ fn chain_folders(
             _ => break,
         }
     }
-    (folders, open)
+    (folders, open, twice)
+}
+
+/// Adds the node id of `node` and of every node under it of one of `kinds`.
+fn mark(ids: &mut HashSet<usize>, node: tree_sitter::Node<'_>, kinds: &[&str]) {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if kinds.contains(&node.kind()) {
+            ids.insert(node.id());
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
 }
 
 /// Where the relative paths of the reading steps of a line of several
@@ -8698,6 +8742,67 @@ mod regression {
                 placed: false,
                 effect: Effect::Deletes,
             }]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Bash runs an `&&` chain with `&>` in it where its `cd`s went; dash
+    /// runs it up to that step's command in the background and the rest
+    /// where the shell started. Read from both, neither gets past the check.
+    #[cfg(unix)]
+    #[test]
+    fn after_a_redirect_dash_reads_as_a_background_the_chain_is_read_from_both_folders() {
+        let root = std::env::temp_dir().join(format!("haarness-amp-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
+        std::fs::create_dir_all(root.join("away/.ssh")).unwrap();
+        std::fs::write(root.join("away/.ssh/config"), "x").unwrap();
+        let real = crate::paths::canonicalize(&root).unwrap();
+        let away = real.join("away").display().to_string();
+        let parent = vec![glob(&real)];
+        // What the line asks without `&>`, in the folder the `cd` went to, it
+        // still asks with it.
+        for (with, without) in [
+            (
+                format!("cd {away} && rm -rf x &>/dev/null"),
+                format!("cd {away} && rm -rf x"),
+            ),
+            (
+                format!("cd {away} && true &>/dev/null && cat .ssh/config"),
+                format!("cd {away} && true && cat .ssh/config"),
+            ),
+            (
+                format!(
+                    "cd {away} && cp .ssh/config ../project/leak.txt &>/dev/null && cat ../project/leak.txt"
+                ),
+                format!(
+                    "cd {away} && cp .ssh/config ../project/leak.txt && cat ../project/leak.txt"
+                ),
+            ),
+        ] {
+            let asked = analyze(&with, &workspace).external_dirs;
+            for folder in analyze(&without, &workspace).external_dirs {
+                assert!(asked.contains(&folder), "{with}: {asked:?} lacks {folder}");
+            }
+        }
+        // The `&>` target and the steps after it are read where the shell
+        // started too, the step's own words only where the `cd` went.
+        for command in [
+            "cd sub && true &> ../amp.log",
+            "cd sub && true &>/dev/null && cat ../x",
+            "cd sub &>/dev/null && cat ../x",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        assert!(
+            analyze("cd sub && cat ../README.md &>/dev/null", &workspace)
+                .external_dirs
+                .is_empty()
         );
         std::fs::remove_dir_all(root).unwrap();
     }

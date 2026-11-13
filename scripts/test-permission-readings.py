@@ -28,7 +28,8 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    leaves the file out, and a project's own `auth.json` reads as before.
 9. holding_always: through a server, Always on `cat ~/.gitconfig` from a project under the home folder
    remembers that file alone (saved for the folder), and Always on `cd ~ && ls` the home folder alone, so
-   both run again without asking while `cat ~/.ssh/config` and `cat ~/.netrc` still ask.
+   both run again without asking while `cat ~/.ssh/config` and `cat ~/.netrc` still ask, and so do the
+   files a `cd ~ && … &>/dev/null && …` chain names there.
 10. workdir_home: a line run with `~` as its `workdir`, from a project under the home folder, asks for the
    home folder alone beside the file it names there, with no rule and with only `~/.gitconfig` allowed.
 11. wrappers: an `rm *` deny refuses `rm` after `time A=1`, `env A+=1`, `env 'A B=1'`, `coproc`, and on the line
@@ -442,6 +443,18 @@ def case_holding_always():
             assert request['patterns'] == [pattern], (command, request)
             answer(request, 'reject')
             finished(turn_id)
+        # Also after a `&>` in the chain, which dash reads as `&` and `>`: what
+        # the line names in the home folder still asks, in either shell.
+        for command in ['cd ~ && true &>/dev/null && cat .ssh/config',
+                        'cd ~ && rm -rf amp-nosuch &>/dev/null',
+                        'cd ~ && cp .ssh/config work/app/amp-leak.txt &>/dev/null']:
+            turn_id = turn(command)
+            request = asked()[0]
+            assert any(pattern.startswith(str(real) + '/') and pattern != f'{real}/'
+                       for pattern in request['patterns']), (command, request)
+            answer(request, 'reject')
+            finished(turn_id)
+        assert not (folder / 'amp-leak.txt').exists()
     finally:
         stop(env, folder)
     saved = set()
