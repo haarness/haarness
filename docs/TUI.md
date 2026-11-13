@@ -69,8 +69,10 @@ the TUI draws on the terminal, or the editor it handed the terminal to does, not
   lines, without a terminal; where a test needs the API it answers from a small local HTTP stub, not
   a Haarness server. They keep their files in a temporary folder of their own.
 - Real terminals: `scripts/test-tmux.sh` and the `scripts/test-*-tmux.*` scripts start an isolated
-  server and drive the TUI in tmux, reading the screen. `scripts/e2e_tmux.py` makes a tmux pane run
-  with the script's environment instead of the tmux server's. `scripts/test-tui-cursor.py` runs in CI.
+  server and drive the TUI in tmux, reading the screen; `test-tmux.sh` runs a tmux server of its
+  own, so your own tmux and its paste buffers are left alone. `scripts/e2e_tmux.py` makes a tmux
+  pane run with the script's environment instead of the tmux server's. `scripts/test-tui-cursor.py`
+  runs in CI.
 - Useful environment: `HAARNESS_DATA_DIR` or `HAARNESS_HOME` for an isolated install,
   `HAARNESS_TEST_PROVIDER=1` for the deterministic `echo` provider, `HAARNESS_SCHEDULE_SKIP_INSTALL=1`
   so no schedule reaches the operating system, and `HAARNESS_E2E_KEEP=1` to keep a passing Python
