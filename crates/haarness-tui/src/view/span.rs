@@ -579,6 +579,7 @@ fn push_run(spans: &mut Vec<Span>, span: Span) {
         && previous.bg == span.bg
         && previous.attributes == span.attributes
         && previous.selectable == span.selectable
+        && previous.opens == span.opens
     {
         previous.text.push_str(&span.text);
     } else {
@@ -594,6 +595,7 @@ fn styled_run(template: &Span, text: String) -> Span {
         attributes: template.attributes,
         selectable: template.selectable,
         tab: false,
+        opens: template.opens.clone(),
     }
 }
 

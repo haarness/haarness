@@ -505,6 +505,11 @@ pub struct Span {
     /// The spaces one tab character is drawn as, up to its stop: a
     /// selection copies the tab, not the spaces. The renderer ignores it.
     pub tab: bool,
+    /// What a click on this text opens, in the drawing view's own encoding
+    /// (a project file an answer mentions). Never drawn: the renderer writes
+    /// no terminal hyperlink, so a terminal has nothing to pass to the
+    /// system's opener.
+    pub opens: Option<std::sync::Arc<str>>,
 }
 
 impl Span {
@@ -517,12 +522,19 @@ impl Span {
             attributes: attr::NONE,
             selectable: true,
             tab: false,
+            opens: None,
         }
     }
     /// The same text as decoration: drawn, never copied by a selection.
     #[must_use]
     pub fn unselectable(mut self) -> Self {
         self.selectable = false;
+        self
+    }
+    /// The same text, opening `target` when clicked (see [`Self::opens`]).
+    #[must_use]
+    pub fn opening(mut self, target: std::sync::Arc<str>) -> Self {
+        self.opens = Some(target);
         self
     }
     #[must_use]
