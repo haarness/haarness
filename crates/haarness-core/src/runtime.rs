@@ -785,6 +785,8 @@ fn unconsumed_queued(items: &[Item], turn_id: TurnId) -> Vec<ItemId> {
 /// Whether the user's latest steering in this turn still has no reply. Being
 /// sent to the model is not enough: a stop can cancel that request, so it
 /// counts as answered only once model output (text or a tool call) follows it.
+/// A note written before a call is not an answer: stopped before its call
+/// came, the steering is still owed one.
 fn unanswered_steering(items: &[Item], turn_id: TurnId) -> bool {
     let consumed: HashMap<ItemId, u64> = items
         .iter()
@@ -822,7 +824,7 @@ fn unanswered_steering(items: &[Item], turn_id: TurnId) -> bool {
             && item.sequence > reference
             && matches!(
                 item.data,
-                ItemData::AssistantMessage { .. } | ItemData::ToolCall { .. }
+                ItemData::AssistantMessage { note: false, .. } | ItemData::ToolCall { .. }
             )
     })
 }
@@ -22474,6 +22476,41 @@ mod tests {
             super::subagent_reply(&items, turn, Some(&round(false))),
             "The subagent's last step wrote no text (finish reason: stop). The last text it wrote, before its final tool calls, follows; it may be its answer or only narration:\n\nLet me look."
         );
+    }
+
+    /// Steering the model only wrote a note after (stopped before the call
+    /// the note was for) is still unanswered; words or a call answer it.
+    #[test]
+    fn a_note_does_not_answer_steering() {
+        let turn = TurnId::new();
+        let item = |sequence, data| Item {
+            id: ItemId::new(),
+            thread_id: ThreadId::new(),
+            turn_id: Some(turn),
+            sequence,
+            data,
+            created_at: Utc::now(),
+        };
+        let steer = ItemData::UserMessage {
+            text: "Use the other config file.".into(),
+            attachments: Vec::new(),
+            queued: true,
+            synthetic: false,
+            command_line: None,
+            hook: None,
+        };
+        let reply = |note| ItemData::AssistantMessage {
+            text: "I'll open the other one now.".into(),
+            note,
+        };
+        assert!(super::unanswered_steering(
+            &[item(1, steer.clone()), item(2, reply(true))],
+            turn
+        ));
+        assert!(!super::unanswered_steering(
+            &[item(1, steer), item(2, reply(false))],
+            turn
+        ));
     }
 
     /// A note written before a later call is never what the subagent hands

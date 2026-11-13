@@ -2572,3 +2572,135 @@ async fn a_note_is_reply_text_the_model_gets_back_only_as_its_thinking_block() {
         "{replayed:?}"
     );
 }
+
+/// A note followed by words and no call (the call never came) is shown, and
+/// the next turn's request is the one it was before notes were told apart:
+/// with no call to carry its block, nothing of the note goes back.
+#[tokio::test]
+async fn a_note_without_its_call_is_not_sent_back() {
+    async fn next_request(first: Vec<ProviderEvent>) -> (Vec<Item>, ProviderRequest) {
+        let (directory, runtime, provider, _) = setup(
+            vec![
+                first,
+                vec![text("Second answer."), usage(), finish("end_turn")],
+            ],
+            RuntimeConfig::default(),
+        );
+        let thread = echo_thread(&runtime).await;
+        for prompt in ["check the config", "and now?"] {
+            let turn = runtime
+                .start_turn(thread.id, turn_request(prompt))
+                .await
+                .unwrap();
+            assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+        }
+        let items = runtime.items(thread.id, None).await.unwrap();
+        let request = provider.requests.lock().unwrap()[1].clone();
+        std::fs::remove_dir_all(directory).unwrap();
+        (items, request)
+    }
+    let words = || [text("The config is fine."), usage(), finish("end_turn")];
+    let mut noted = vec![
+        ProviderEvent::ReasoningDelta("Checking.".into()),
+        ProviderEvent::Note {
+            text: "I'll check the config.".into(),
+            streamed_as_reasoning: false,
+        },
+    ];
+    noted.extend(words());
+    let mut before = vec![ProviderEvent::ReasoningDelta(
+        "Checking.\n\nI'll check the config.".into(),
+    )];
+    before.extend(words());
+    let (items, request) = next_request(noted).await;
+    assert_eq!(
+        shown(&items)[..3],
+        [
+            ("reasoning", "Checking.".into()),
+            ("note", "I'll check the config.".into()),
+            ("reply", "The config is fine.".into()),
+        ]
+    );
+    let (_, before_request) = next_request(before).await;
+    assert_eq!(request.messages, before_request.messages);
+    assert!(
+        !format!("{:?}", request.messages).contains("I'll check the config."),
+        "{:?}",
+        request.messages
+    );
+}
+
+/// A provider whose answer stops in the middle of a thinking block whose
+/// text waits to be told from a note, after some thinking was shown.
+struct Waiting;
+#[async_trait]
+impl ModelProvider for Waiting {
+    fn id(&self) -> &str {
+        "echo"
+    }
+    fn info(&self) -> ProviderInfo {
+        Echo.info()
+    }
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        if let Some(title) = title_fixture(&request) {
+            return title;
+        }
+        Ok(Box::pin(
+            stream::iter([
+                Ok(ProviderEvent::ReasoningDelta("Shown so far.".into())),
+                Ok(ProviderEvent::ContentStarted),
+            ])
+            .chain(stream::pending()),
+        ))
+    }
+}
+
+/// Stop while a block waits keeps the thinking that was shown and nothing
+/// else: the text that waited was never shown, so no note or reply appears.
+#[tokio::test]
+async fn stop_while_thinking_waits_keeps_what_was_shown() {
+    let directory =
+        std::env::temp_dir().join(format!("haarness-reliability-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Waiting) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(NativeToolRegistry::new(directory.clone())),
+        EventBus::new(128),
+        directory.clone(),
+        String::new(),
+        RuntimeConfig::default(),
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("think it over"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !runtime
+            .events()
+            .subscribe(None)
+            .replay
+            .iter()
+            .any(|event| event.event_type == "turn.reasoning_delta")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the shown thinking");
+    runtime.interrupt(turn.id).await.unwrap();
+    assert_eq!(
+        settled(&runtime, &turn).await.status,
+        TurnStatus::Interrupted
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert_eq!(shown(&items), [("reasoning", "Shown so far.".into())]);
+    std::fs::remove_dir_all(directory).unwrap();
+}
