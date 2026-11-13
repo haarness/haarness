@@ -60,6 +60,7 @@ import {
   nativeImage,
   globalShortcut,
   net,
+  systemPreferences,
   type BaseWindow,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
@@ -857,6 +858,7 @@ function installHandlers() {
     servers: data().servers,
     version: app.getVersion(),
     platform: process.platform,
+    doubleClick: doubleClickInterval(),
     fullScreen: win.isFullScreen(),
     // Settings shows this computer's own paths under it as ~.
     home: homedir(),
@@ -2376,6 +2378,18 @@ function checkForUpdates() {
   open.show();
   open.focus();
   send(open, { kind: "menu", data: "about" });
+}
+/**
+ * The longest a double click may take, in milliseconds: on macOS the time set
+ * in System Settings, elsewhere the common default (Windows and most Linux
+ * desktops start there too).
+ */
+function doubleClickInterval() {
+  if (process.platform === "darwin") {
+    const seconds = systemPreferences.getUserDefault("com.apple.mouse.doubleClickThreshold", "double");
+    if (typeof seconds === "number" && seconds > 0 && seconds <= 5) return Math.round(seconds * 1000);
+  }
+  return 500;
 }
 /**
  * Starts Desktop's updater (see updater.ts) against the Haarness release

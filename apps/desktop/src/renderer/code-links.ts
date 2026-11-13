@@ -171,12 +171,28 @@ export function codeFilesChanged(scope: string, change: ProjectFilesChange) {
 }
 onProjectChange(codeFilesChanged);
 
+/** The connections that are up, whose projects' folders may be listed. */
+const up = new Set<string>();
+/** The connection a project (or a chat's own folder) is reached through. */
+const connectionOf = (scope: string) => scope.split("\n")[0];
+/** The lister each project was last asked through, which a listing uses when it starts. */
+const listers = new Map<string, FolderLister>();
+
 /**
- * The connection is back (connected again, or caught up after a gap in its
- * events): its projects' files may have changed meanwhile, so their folders
- * are listed again as after a turn, a listing that got no answer included.
+ * Whether `connection` is up. While it is down nothing of its projects is
+ * listed: a listing due then is dropped, and the replies waiting keep their
+ * last answers. Once it is back (connected again, or caught up after a gap
+ * in its events), its projects' files may have changed meanwhile, so their
+ * folders are listed again as after a turn, a listing that got no answer
+ * included, and the replies on screen look again.
  */
-export function codeLinksReconnected(connection: string) {
+export function codeLinksConnection(connection: string, connected: boolean) {
+  if (!connected) {
+    up.delete(connection);
+    return;
+  }
+  if (up.has(connection)) return;
+  up.add(connection);
   for (const scope of scopes) {
     if (scope !== connection && !scope.startsWith(connection + "\n")) continue;
     urgents.set(scope, urgent(scope) + 1);
@@ -223,8 +239,8 @@ type Job = { waiters: Set<AbortSignal>; start: () => void };
 const pending = new Map<string, Job>();
 const waiting: Job[] = [];
 let active = 0;
-/** The listing each folder waits for until its time comes, with the replies waiting on it. */
-const later = new Map<string, { timer: ReturnType<typeof setTimeout>; waiters: Set<AbortSignal> }>();
+/** The listing each folder waits for until its time (`due`) comes, with the replies waiting on it. */
+const later = new Map<string, { timer: ReturnType<typeof setTimeout>; due: number; waiters: Set<AbortSignal> }>();
 
 /** Starts the listings that wait, a few at a time; one whose replies have all gone is never started. */
 function pump() {
@@ -235,9 +251,12 @@ function pump() {
 const same = (a: ReadonlyMap<string, boolean> | undefined, b: ReadonlyMap<string, boolean>) =>
   [...new Set([...(a?.keys() ?? []), ...b.keys()])].every((name) => (a?.get(name) === true) === (b.get(name) === true));
 
-/** Lists `folder` of project `scope` for a reply that waits until `signal` ends, when `due` says so. */
-function ask(scope: string, folder: string, list: FolderLister, signal: AbortSignal) {
-  if (signal.aborted) return;
+/**
+ * Lists `folder` of project `scope` for a reply that waits until `signal`
+ * ends, when `due` says so, and only while its connection is up.
+ */
+function ask(scope: string, folder: string, signal: AbortSignal) {
+  if (signal.aborted || !up.has(connectionOf(scope))) return;
   const entry = key(scope, folder);
   const known = folders.get(entry);
   const current = known?.listing;
@@ -249,26 +268,38 @@ function ask(scope: string, folder: string, list: FolderLister, signal: AbortSig
     queued.waiters.add(signal);
     return;
   }
+  const waited = later.get(entry);
   if (when !== "now") {
-    let wait = later.get(entry);
-    if (!wait) {
-      const waiters = new Set<AbortSignal>();
-      wait = {
-        waiters,
-        timer: setTimeout(() => {
-          later.delete(entry);
-          for (const waiter of waiters) ask(scope, folder, list, waiter);
-        }, when + 5),
-      };
-      later.set(entry, wait);
+    // One wait per folder, ending at the soonest time asked for: a change
+    // that lists at once is not held back by one that waits.
+    const at = performance.now() + when;
+    if (waited && waited.due <= at) {
+      waited.waiters.add(signal);
+      return;
     }
-    wait.waiters.add(signal);
+    if (waited) clearTimeout(waited.timer);
+    const waiters = new Set([...(waited?.waiters ?? []), signal]);
+    later.set(entry, {
+      waiters,
+      due: at,
+      timer: setTimeout(() => {
+        later.delete(entry);
+        for (const waiter of waiters) ask(scope, folder, waiter);
+      }, when + 5),
+    });
     return;
   }
+  // Listed now: a wait for later has nothing left to do.
+  if (waited) {
+    clearTimeout(waited.timer);
+    later.delete(entry);
+  }
   const job: Job = {
-    waiters: new Set([signal]),
+    waiters: new Set([signal, ...(waited?.waiters ?? [])]),
     start: () => {
-      if ([...job.waiters].every((waiter) => waiter.aborted)) {
+      // The lister as the replies last gave it, and only while the connection is up.
+      const list = listers.get(scope);
+      if ([...job.waiters].every((waiter) => waiter.aborted) || !list || !up.has(connectionOf(scope))) {
         if (pending.get(entry) === job) pending.delete(entry);
         return;
       }
@@ -318,7 +349,7 @@ function ask(scope: string, folder: string, list: FolderLister, signal: AbortSig
           // The project changed while it was listed, a name was asked about
           // meanwhile, or the listing got no answer: list it again for the
           // replies still waiting, when due.
-          for (const waiter of job.waiters) ask(scope, folder, list, waiter);
+          for (const waiter of job.waiters) ask(scope, folder, waiter);
         });
     },
   };
@@ -330,12 +361,12 @@ function ask(scope: string, folder: string, list: FolderLister, signal: AbortSig
 /**
  * Whether `path` names a file of project `scope`, as far as is known: from
  * the last listing of its folder, or undefined before any answer for it.
- * Unless `list` is left out (the connection is not up), lists the folder
- * (again) when it has no answer for the name yet or the project changed since,
- * as `due` says; `signal` ends when the reply asking is gone, so a listing
- * only it waited for never starts.
+ * Lists the folder through `list` (again) when it has no answer for the name
+ * yet or the project changed since, as `due` says, while the connection is
+ * up (`codeLinksConnection`); `signal` ends when the reply asking is gone, so
+ * a listing only it waited for never starts.
  */
-export function codeFileKnown(scope: string, path: string, list: FolderLister | undefined, signal: AbortSignal) {
+export function codeFileKnown(scope: string, path: string, list: FolderLister, signal: AbortSignal) {
   const { folder, name } = fileFolder(path);
   const kept = folderAt(key(scope, folder));
   kept.names.delete(name);
@@ -345,8 +376,9 @@ export function codeFileKnown(scope: string, path: string, list: FolderLister | 
     kept.names.delete(oldest);
   }
   scopes.add(scope);
+  listers.set(scope, list);
   const known = kept.listing?.answers.get(name);
-  if (list) ask(scope, folder, list, signal);
+  ask(scope, folder, signal);
   return known;
 }
 
@@ -354,6 +386,8 @@ export function codeFileKnown(scope: string, path: string, list: FolderLister | 
 export function forgetCodeLinks() {
   folders.clear();
   scopes.clear();
+  up.clear();
+  listers.clear();
   epochs.clear();
   urgents.clear();
   touches.clear();
@@ -365,12 +399,6 @@ export function forgetCodeLinks() {
 
 /** The class of inline code the app made a link. */
 export const CODE_LINK = "code-link";
-/**
- * How long (in milliseconds) a click on a code link waits before it opens,
- * so the second press of a double click, which selects a word, can call it
- * off.
- */
-export const CODE_LINK_CLICK = 300;
 /** The file each code link the app made opens. */
 const linked = new WeakMap<Element, CodeReference>();
 

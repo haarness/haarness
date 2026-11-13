@@ -31,7 +31,6 @@ import {
   codeLinkTarget,
   folderLister,
   linkCodeSpans,
-  CODE_LINK_CLICK,
   onCodeLinksChanged,
   pressCodeLink,
 } from "./code-links";
@@ -208,14 +207,10 @@ export function Markdown(props: {
     if (!codeLinks || disposed || !host) return;
     const project = imageProject(app.state);
     if (project) watchProject(project);
-    // Folders are listed only while the connection is up; meanwhile the last answers stand.
-    const list =
-      project && app.state.connectionStatus === "Connected"
-        ? folderLister(project.connection, project.threadId)
-        : undefined;
+    const list = project && folderLister(project.connection, project.threadId);
     linkCodeSpans(host, {
       roots: project?.roots ?? [],
-      known: (path) => (project ? codeFileKnown(project.scope, path, list, reading.signal) : false),
+      known: (path) => (project && list ? codeFileKnown(project.scope, path, list, reading.signal) : false),
       asked: codeAsked,
       live: !written,
     });
@@ -230,11 +225,18 @@ export function Markdown(props: {
   let pressed: { code: Element; mark: SelectionMark } | undefined;
   /** A click's opening, waiting until no second click can follow. */
   let clicked: ReturnType<typeof setTimeout> | undefined;
+  function callOff() {
+    clearTimeout(clicked);
+    clicked = undefined;
+    window.removeEventListener("pointerdown", callOff, true);
+  }
   /**
    * Opens the file a code link names, on a plain click or Enter. Enter opens
-   * at once. A click opens once a double-click could no longer follow, and a
-   * second press calls it off: a double or triple click selects the code's
-   * words, as in plain code, and opens nothing.
+   * at once. A click opens once a double click could no longer follow (the
+   * system's double-click time), and any press meanwhile calls it off: a
+   * double or triple click selects the code's words, as in plain code, and
+   * opens nothing, and a press elsewhere is not disturbed by the panel
+   * opening under it. It opens only in the project and chat it was clicked in.
    */
   function openCode(event: MouseEvent | KeyboardEvent) {
     if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return false;
@@ -242,7 +244,7 @@ export function Markdown(props: {
     const file = codeLinkTarget(code);
     if (!code || !file || !host.contains(code)) return false;
     event.preventDefault();
-    clearTimeout(clicked);
+    callOff();
     if (!(event instanceof MouseEvent)) {
       openFile(file.path, file.line);
       return true;
@@ -250,13 +252,16 @@ export function Markdown(props: {
     // A click that ends a selection made in the code (its path, to copy) only selects.
     if (event.detail > 1 || selectedByClick(code, event, pressed?.code === code ? pressed.mark : undefined))
       return true;
+    const where = `${app.state.connection?.id ?? ""}\n${app.state.selected ?? ""}`;
     clicked = setTimeout(() => {
-      clicked = undefined;
-      if (!disposed && code.isConnected && codeLinkTarget(code)) openFile(file.path, file.line);
-    }, CODE_LINK_CLICK);
+      callOff();
+      const still = `${app.state.connection?.id ?? ""}\n${app.state.selected ?? ""}` === where;
+      if (still && !disposed && code.isConnected && codeLinkTarget(code)) openFile(file.path, file.line);
+    }, app.state.doubleClick);
+    window.addEventListener("pointerdown", callOff, true);
     return true;
   }
-  onCleanup(() => clearTimeout(clicked));
+  onCleanup(callOff);
   /** Images from another host are remembered for the chat they were loaded in. */
   const scope = () => `${app.state.connection?.id ?? ""}\n${app.state.selected ?? ""}`;
   /**
@@ -489,10 +494,6 @@ export function Markdown(props: {
             ? { code, mark: markSelection({ clientX: event.clientX, clientY: event.clientY, currentTarget: code }) }
             : undefined;
         if (pressed) pressCodeLink(pressed.code);
-      }}
-      onMouseDown={(event) => {
-        // The second press of a double click: what it selects stays, and nothing opens.
-        if (event.detail > 1) clearTimeout(clicked);
       }}
       onKeyDown={(event) => {
         if (event.key === "Enter" && !event.repeat && !event.isComposing) openCode(event);

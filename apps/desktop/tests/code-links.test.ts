@@ -4,7 +4,7 @@ import {
   CODE_LINK,
   CODE_LINK_LIMITS,
   codeFileKnown,
-  codeLinksReconnected,
+  codeLinksConnection,
   codeLinkTarget,
   codeReference,
   fileFolder,
@@ -21,6 +21,8 @@ const LIMITS = { ...CODE_LINK_LIMITS };
 let reply = new AbortController();
 beforeEach(() => {
   reply = new AbortController();
+  // The connections these tests list through are up.
+  for (const connection of ["p", "q", "c1", "c2"]) codeLinksConnection(connection, true);
   // A listing held past its test ends unanswered soon after.
   CODE_LINK_LIMITS.wait = 300;
 });
@@ -211,18 +213,39 @@ test("only the names asked about are kept; one asked later has its folder listed
   assert.deepEqual(listed, ["src", "src"]);
 });
 
-test("without a lister, as while the connection is down, the last answers stand and nothing is listed", async () => {
+test("while the connection is down nothing is listed and the last answers stand; once it is back, its folders are listed again at once", async () => {
+  CODE_LINK_LIMITS.again = 0;
+  CODE_LINK_LIMITS.recheck = 40;
   const signal = reply.signal;
   const { list, listed, release } = project({ src: ["a.ts"] });
-  assert.equal(codeFileKnown("p", "src/a.ts", undefined, signal), undefined);
+  codeLinksConnection("p", false);
+  assert.equal(codeFileKnown("p", "src/a.ts", list, signal), undefined);
   await release();
   assert.deepEqual(listed, []);
+  codeLinksConnection("p", true);
   codeFileKnown("p", "src/a.ts", list, signal);
   await release();
+  assert.deepEqual(listed, ["src"]);
+  // Down again: a turn's end, a change that waits, and the time passing list nothing.
+  codeLinksConnection("p", false);
   projectChanged("p", true);
-  assert.equal(codeFileKnown("p", "src/a.ts", undefined, signal), true);
+  projectChanged("p");
+  assert.equal(codeFileKnown("p", "src/a.ts", list, signal), true);
+  await sleep(60);
   await release();
   assert.deepEqual(listed, ["src"]);
+  // Back up: the replies on screen are told, and the folder is listed at once.
+  const told: string[] = [];
+  const stop = onCodeLinksChanged((scope) => told.push(scope));
+  try {
+    codeLinksConnection("p", true);
+    assert.deepEqual(told, ["p"]);
+  } finally {
+    stop();
+  }
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await release();
+  assert.deepEqual(listed, ["src", "src"]);
 });
 
 test("a few listings run at a time, and one whose replies have all gone never starts", async () => {
@@ -242,7 +265,8 @@ test("a few listings run at a time, and one whose replies have all gone never st
   assert.equal(codeFileKnown("p", "d6/a.ts", list, live), true);
 });
 
-test("a listing that gets no answer keeps the last answer and is taken again after the recheck time", async () => {
+test("a listing that gets no answer keeps the last answer; it is taken again after the recheck time while the connection is up, and not while it is down", async () => {
+  CODE_LINK_LIMITS.again = 0;
   CODE_LINK_LIMITS.recheck = 40;
   const signal = reply.signal;
   const failing: Record<string, Error> = {};
@@ -250,7 +274,7 @@ test("a listing that gets no answer keeps the last answer and is taken again aft
   codeFileKnown("p", "src/a.ts", list, signal);
   await release();
   assert.equal(codeFileKnown("p", "src/a.ts", list, signal), true);
-  // The window came to the front: listed again, and the connection drops.
+  // The window came to the front: listed again, and the server fails.
   failing.src = new Error("Error invoking remote method 'files': fetch failed");
   projectChanged("p");
   await sleep(60);
@@ -259,10 +283,46 @@ test("a listing that gets no answer keeps the last answer and is taken again aft
   assert.equal(codeFileKnown("p", "src/a.ts", list, signal), true, "the link stays while nothing is learned");
   assert.equal(listed.length, 2);
   // Tried again once the recheck time is up, while a reply still asks.
-  delete failing.src;
   await sleep(60);
   await release();
   assert.equal(listed.length, 3);
+  // The connection is down: the retries stop, and the link stays.
+  codeLinksConnection("p", false);
+  await sleep(60);
+  await release();
+  await sleep(60);
+  await release();
+  assert.equal(listed.length, 3);
+  assert.equal(codeFileKnown("p", "src/a.ts", list, signal), true);
+  // Back up: listed at once.
+  delete failing.src;
+  codeLinksConnection("p", true);
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await release();
+  assert.equal(listed.length, 4);
+});
+
+test("a listing due at once is not held back by a wait for a change that waits", async () => {
+  CODE_LINK_LIMITS.again = 100;
+  CODE_LINK_LIMITS.recheck = 3_000;
+  const signal = reply.signal;
+  const { list, listed, release } = project({ src: ["a.ts"] });
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await release();
+  // Another chat's turn ends: listed again once the recheck time is up.
+  projectChanged("p");
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await sleep(20);
+  // The viewed chat's turn ends: listed once the least time between listings is up, not at the recheck time.
+  projectChanged("p", true);
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await sleep(200);
+  await release();
+  assert.deepEqual(listed, ["src", "src"]);
+  // And the wait it replaced lists nothing more.
+  await sleep(100);
+  await release();
+  assert.deepEqual(listed, ["src", "src"]);
 });
 
 test("the project changing has a folder listed again: at once after a turn or a file write, else after the recheck time", async () => {
@@ -392,7 +452,10 @@ test("a connection back up has its projects' folders listed again at once, after
     assert.equal(listed.length, 2);
     delete failing.src;
     told.length = 0;
-    codeLinksReconnected("c1");
+    codeLinksConnection("c1", false);
+    codeLinksConnection("c1", true);
+    // Still up: nothing changes.
+    codeLinksConnection("c2", true);
     assert.deepEqual(told, ["c1\n/chats/trip"], "only that connection's projects look again");
     codeFileKnown("c1\n/chats/trip", "src/a.ts", list, signal);
     codeFileKnown("c2", "src/a.ts", list, signal);

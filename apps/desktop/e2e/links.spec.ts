@@ -364,6 +364,30 @@ test("inline code that names a project file opens it at its line; other code sta
   expect("src/a.ts:150").toContain(word);
   await page.waitForTimeout(700);
   await expect(activeTab).toContainText("README.md");
+  // So does a slow one, its second press well inside this computer's double-click time.
+  const interval = (await page.evaluate(() => window.haarness.boot())).doubleClick ?? 500;
+  const gap = Math.max(50, Math.min(400, interval - 100));
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  const middle = (await source.boundingBox())!;
+  const point = { x: middle.x + middle.width / 2, y: middle.y + middle.height / 2 };
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(gap);
+  await page.mouse.down({ clickCount: 2 });
+  await page.mouse.up({ clickCount: 2 });
+  const slow = await page.evaluate(() => getSelection()?.toString() ?? "");
+  expect(slow.length).toBeGreaterThan(0);
+  expect("src/a.ts:150").toContain(slow);
+  await page.waitForTimeout(interval + 300);
+  await expect(activeTab).toContainText("README.md");
+  // A press elsewhere right after a click calls its opening off.
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  await source.click();
+  const prose = (await reply.locator("p").first().boundingBox())!;
+  await page.mouse.click(prose.x + 4, prose.y + 8);
+  await page.waitForTimeout(interval + 300);
+  await expect(activeTab).toContainText("README.md");
   await page.evaluate(() => getSelection()?.removeAllRanges());
   await source.click();
   await expect(activeTab).toContainText("a.ts");
