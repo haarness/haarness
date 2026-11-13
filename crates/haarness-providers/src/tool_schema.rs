@@ -400,11 +400,18 @@ mod tests {
             "anthropic/claude-sonnet-5.5",
             "us.anthropic.claude-fable-5-1-v1:0",
             "claude-mythos-5-1",
+            // Vertex AI's dated ids and a context mark name the same release.
+            "claude-opus-5-5@20260901",
+            "claude-sonnet-5-5[1m]",
+            "claude-fable-5-1@20260801",
         ] {
             assert!(refuses_forced_tool_choice(model), "{model}");
         }
         for model in [
             "claude-sonnet-5",
+            "claude-sonnet-5@20260301",
+            "claude-opus-4-7[1m]",
+            "claude-haiku-5-5@20260901",
             "anthropic/claude-haiku-5.5",
             "gpt-6.1-sol",
             "claude-3-5-sonnet-20241022",

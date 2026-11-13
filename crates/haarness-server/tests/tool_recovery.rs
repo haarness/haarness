@@ -321,7 +321,7 @@ async fn gemini_malformed_call_alone_is_retried_with_the_recovery_note() {
     });
     let items = fixture.run(vec![vec![malformed()]]).await;
     assert!(items.iter().any(
-        |item| matches!(&item.data, ItemData::AssistantMessage { text } if text == "Recovered")
+        |item| matches!(&item.data, ItemData::AssistantMessage { text, .. } if text == "Recovered")
     ));
     assert!(
         !items
@@ -350,7 +350,7 @@ async fn gemini_malformed_call_runs_the_valid_calls_before_it_and_continues() {
         ItemData::ToolResult { call_id, output, is_error: false, .. }
             if call_id == "valid" && output.contains("real file contents"))));
     assert!(items.iter().any(
-        |item| matches!(&item.data, ItemData::AssistantMessage { text } if text == "Recovered")
+        |item| matches!(&item.data, ItemData::AssistantMessage { text, .. } if text == "Recovered")
     ));
     let requests = fixture.provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);

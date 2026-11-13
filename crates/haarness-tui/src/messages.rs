@@ -56,7 +56,9 @@ pub(crate) fn message_text(item: &Item) -> Option<(&str, &str)> {
             synthetic: false,
             ..
         } => Some(("You", command_line.as_deref().unwrap_or(text))),
-        ItemData::AssistantMessage { text } if !text.trim().is_empty() => Some(("Assistant", text)),
+        ItemData::AssistantMessage { text, .. } if !text.trim().is_empty() => {
+            Some(("Assistant", text))
+        }
         _ => None,
     }
 }

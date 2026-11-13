@@ -2949,6 +2949,10 @@
           },
           {
             "properties": {
+              "note": {
+                "description": "A short line the model wrote for the person just before a tool\ncall, which Claude sends as a thinking block of its own. Clients\nshow it as reply text between the tool rows; it is never the\nturn's answer, and the model gets it back only as the thinking\nblock it came in (with the call), never as text. Absent for every\nother reply, so older clients draw a note as ordinary text.",
+                "type": "boolean"
+              },
               "text": {
                 "type": "string"
               },

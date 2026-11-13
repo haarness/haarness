@@ -66,10 +66,10 @@ export class Haarness extends Api {
     const items = (await this.listItems(id, {}, options)).filter(
       (item) => item.turnId === turn.id,
     );
+    // The reply, without the notes the model wrote before its tool calls.
     const output = items
-      .filter((item) => item.data.type === "assistant_message")
       .map((item) =>
-        item.data.type === "assistant_message" ? item.data.text : "",
+        item.data.type === "assistant_message" && !item.data.note ? item.data.text : "",
       )
       .join("");
     return { turn: result, items, text: output };

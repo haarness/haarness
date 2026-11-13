@@ -1945,7 +1945,7 @@ async fn child_failure_recovers_queued_input_before_releasing_turn_admission() {
     assert!(
         root_items.iter().any(|item| matches!(
             &item.data,
-            ItemData::AssistantMessage { text }
+            ItemData::AssistantMessage { text, .. }
                 if text == "parent observed child result"
         )),
         "the parent provider must receive the failed task result and continue its loop"

@@ -674,6 +674,7 @@ mod tests {
             ItemData::QueueConsumed { item_id: item.id },
             ItemData::AssistantMessage {
                 text: "Docs updated".into(),
+                note: false,
             },
         ] {
             store
@@ -1135,6 +1136,7 @@ mod tests {
                     ItemId::new(),
                     ItemData::AssistantMessage {
                         text: "x".repeat(2_048),
+                        note: false,
                     },
                 );
             }

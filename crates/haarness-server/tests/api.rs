@@ -1586,6 +1586,7 @@ async fn restart_recovery_reports_background_tasks_to_the_chat_that_launched_the
                     Some(child_turn.id),
                     haarness_protocol::ItemData::AssistantMessage {
                         text: "LOGS_SUMMARY".into(),
+                        note: false,
                     },
                 )
                 .await
@@ -2264,7 +2265,7 @@ async fn default_agent_loop_is_not_cut_off_after_thirty_two_tool_rounds() {
             .unwrap()
             .iter()
             .any(|item| {
-                matches!(&item.data, haarness_protocol::ItemData::AssistantMessage { text }
+                matches!(&item.data, haarness_protocol::ItemData::AssistantMessage { text, .. }
                 if text == "Recovered after forty tool rounds")
             })
     );
@@ -3263,7 +3264,7 @@ async fn authenticated_rest_turn_runs_end_to_end() {
         .json()
         .await
         .unwrap();
-    assert!(items.iter().any(|item|matches!(&item.data,haarness_protocol::ItemData::AssistantMessage{text}if text=="Echo: tested")));
+    assert!(items.iter().any(|item|matches!(&item.data,haarness_protocol::ItemData::AssistantMessage{text, .. }if text=="Echo: tested")));
     let todos: Vec<haarness_protocol::TodoEntry> = client
         .get(format!("{base}/v1/threads/{}/todos", thread.id))
         .send()
@@ -3551,6 +3552,7 @@ async fn semantic_fork_remaps_consumed_queue_and_excludes_selected_prompt() {
             None,
             haarness_protocol::ItemData::AssistantMessage {
                 text: "answer after steer".into(),
+                note: false,
             },
         )
         .await
@@ -5016,7 +5018,7 @@ async fn a_busy_provider_is_retried_instead_of_failing_the_turn() {
     let items = runtime.items(thread.id, None).await.unwrap();
     assert!(items.iter().any(|item| matches!(
         &item.data,
-        haarness_protocol::ItemData::AssistantMessage { text } if text == "answered after a busy moment"
+        haarness_protocol::ItemData::AssistantMessage { text, .. } if text == "answered after a busy moment"
     )));
     // The person saw that it was retrying rather than a silent pause.
     let retrying = events.subscribe(None).replay.iter().any(|event| {
@@ -5119,7 +5121,7 @@ async fn a_response_the_providers_server_failed_is_retried_instead_of_failing_th
         let items = runtime.items(thread.id, None).await.unwrap();
         assert!(items.iter().any(|item| matches!(
             &item.data,
-            haarness_protocol::ItemData::AssistantMessage { text } if text.contains("answered after a server error")
+            haarness_protocol::ItemData::AssistantMessage { text, .. } if text.contains("answered after a server error")
         )));
     }
 }
@@ -5238,7 +5240,7 @@ async fn structured_output_in_the_wrong_shape_is_asked_for_again() {
     assert_eq!(corrections, 2);
     assert!(items.iter().any(|item| matches!(
         &item.data,
-        haarness_protocol::ItemData::AssistantMessage { text } if text == r#"{"count":2}"#
+        haarness_protocol::ItemData::AssistantMessage { text, .. } if text == r#"{"count":2}"#
     )));
     // A model that keeps answering in prose fails after two corrections.
     let (status, rounds, _) = run(vec![ProviderEvent::TextDelta("Two.".into())]).await;
@@ -5740,7 +5742,7 @@ async fn context_overflow_compacts_once_and_the_retry_keeps_the_requests_image()
     )));
     assert!(items.iter().any(|item| matches!(
         &item.data,
-        haarness_protocol::ItemData::AssistantMessage { text }
+        haarness_protocol::ItemData::AssistantMessage { text, .. }
             if text == "recovered after compaction"
     )));
 
@@ -8993,7 +8995,7 @@ async fn assistant_preface_is_persisted_before_its_tool_activity() {
         .iter()
         .find(|item| {
             matches!(&item.data,
-            haarness_protocol::ItemData::AssistantMessage { text }
+            haarness_protocol::ItemData::AssistantMessage { text, .. }
                 if text == "I’ll inspect the repository first.")
         })
         .expect("assistant preface");
@@ -11348,7 +11350,7 @@ async fn queued_message_during_text_stream_runs_in_a_follow_up_round() {
     assert_eq!(marker.turn_id, Some(turn.id));
     assert!(
         items.iter().any(|item| matches!(&item.data,
-            haarness_protocol::ItemData::AssistantMessage { text }
+            haarness_protocol::ItemData::AssistantMessage { text, .. }
                 if text == "Follow-up response")),
         "the follow-up provider round completed"
     );
@@ -11490,7 +11492,7 @@ async fn queue_input_on_idle_thread_starts_a_turn() {
     assert_eq!(done.status, TurnStatus::Completed);
     let items = runtime.items(thread.id, None).await.unwrap();
     assert!(items.iter().any(|item| matches!(&item.data,
-        haarness_protocol::ItemData::AssistantMessage { text }
+        haarness_protocol::ItemData::AssistantMessage { text, .. }
             if text.contains("hello there"))));
 }
 
@@ -15709,7 +15711,7 @@ async fn stop_answers_steering_sent_into_a_request_the_stop_cancelled() {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let items = runtime.items(thread.id, None).await.unwrap();
-            if items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage { text } if text.contains("stopped your previous work")))
+            if items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage { text, .. } if text.contains("stopped your previous work")))
             {
                 break;
             }

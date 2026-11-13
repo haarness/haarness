@@ -194,7 +194,7 @@ async fn reliability_recovers_missing_and_unknown_finishes_preserving_output_and
                 .count(),
             2
         );
-        assert!(items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage {text} if text == "partial answer")));
+        assert!(items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage {text, .. } if text == "partial answer")));
         assert!(provider.requests.lock().unwrap()[1].messages.iter().any(|message| matches!(message, ProviderMessage::Text {content,..} if content.contains("Continue from the saved partial response"))));
         assert!(hooks.failures.lock().unwrap().is_empty());
         std::fs::remove_dir_all(directory).unwrap();
@@ -236,11 +236,9 @@ async fn reliability_explicit_error_preserves_text_without_retry() {
     assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Failed);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert_eq!(hooks.failures.lock().unwrap().len(), 1);
-    assert!(
-        runtime.items(thread.id, None).await.unwrap().iter().any(
-            |item| matches!(&item.data, ItemData::AssistantMessage {text} if text == "partial")
-        )
-    );
+    assert!(runtime.items(thread.id, None).await.unwrap().iter().any(
+        |item| matches!(&item.data, ItemData::AssistantMessage {text, .. } if text == "partial")
+    ));
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -338,7 +336,7 @@ async fn reliability_connection_cut_after_output_continues_from_the_partial_answ
         let answers = items
             .iter()
             .filter_map(|item| match &item.data {
-                ItemData::AssistantMessage { text } => Some(text.as_str()),
+                ItemData::AssistantMessage { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -468,7 +466,7 @@ async fn reliability_connection_cut_after_the_response_finished_loses_nothing() 
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let items = runtime.items(thread.id, None).await.unwrap();
     assert!(items.iter().any(
-        |item| matches!(&item.data, ItemData::AssistantMessage {text} if text == "whole answer")
+        |item| matches!(&item.data, ItemData::AssistantMessage {text, .. } if text == "whole answer")
     ));
     assert!(
         !items
@@ -577,7 +575,7 @@ async fn reliability_error_the_provider_sends_after_output_is_not_retried() {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1, "{message}");
         assert_eq!(hooks.failures.lock().unwrap()[0]["error"], "provider");
         assert!(runtime.items(thread.id, None).await.unwrap().iter().any(
-            |item| matches!(&item.data, ItemData::AssistantMessage {text} if text == "partial")
+            |item| matches!(&item.data, ItemData::AssistantMessage {text, .. } if text == "partial")
         ));
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1050,7 +1048,7 @@ async fn reliability_rate_limits_spread_over_tool_rounds_each_get_their_own_retr
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 10);
     assert!(runtime.items(thread.id, None).await.unwrap().iter().any(
-        |item| matches!(&item.data, ItemData::AssistantMessage {text} if text == "all rounds done")
+        |item| matches!(&item.data, ItemData::AssistantMessage {text, .. } if text == "all rounds done")
     ));
     assert!(hooks.failures.lock().unwrap().is_empty());
     std::fs::remove_dir_all(directory).unwrap();
@@ -1166,7 +1164,7 @@ async fn reliability_an_empty_reply_after_a_failed_tool_is_asked_to_explain_it_o
     assert!(items.iter().any(|item| matches!(&item.data,
         ItemData::ToolResult {call_id,is_error:true,..} if call_id == "missing")));
     assert!(items.iter().any(|item| matches!(&item.data,
-        ItemData::AssistantMessage {text} if text == "The file is not there.")));
+        ItemData::AssistantMessage {text, .. } if text == "The file is not there.")));
     assert!(hooks.failures.lock().unwrap().is_empty());
     std::fs::remove_dir_all(directory).unwrap();
 
@@ -1263,7 +1261,7 @@ async fn reliability_a_retry_still_asks_the_model_to_explain_the_failure() {
             .unwrap()
             .iter()
             .any(|item| matches!(&item.data,
-                ItemData::AssistantMessage {text} if text == "The file is not there."))
+                ItemData::AssistantMessage {text, .. } if text == "The file is not there."))
     );
     assert!(hooks.failures.lock().unwrap().is_empty());
     std::fs::remove_dir_all(directory).unwrap();
@@ -1319,7 +1317,7 @@ async fn reliability_a_cut_before_any_reply_still_asks_the_model_to_explain_the_
             .unwrap()
             .iter()
             .any(|item| matches!(&item.data,
-                ItemData::AssistantMessage {text} if text == "The file is not there."))
+                ItemData::AssistantMessage {text, .. } if text == "The file is not there."))
     );
     assert!(hooks.failures.lock().unwrap().is_empty());
     std::fs::remove_dir_all(directory).unwrap();
@@ -1381,7 +1379,7 @@ async fn reliability_a_cut_after_only_reasoning_or_blank_text_still_asks_the_mod
         let said = items
             .iter()
             .filter_map(|item| match &item.data {
-                ItemData::AssistantMessage { text } => Some(text.as_str()),
+                ItemData::AssistantMessage { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1635,7 +1633,7 @@ async fn reliability_the_step_limit_round_keeps_the_tools_and_closes_a_call_unru
     }
     let items = runtime.items(thread.id, None).await.unwrap();
     assert!(items.iter().any(|item| matches!(&item.data,
-        ItemData::AssistantMessage {text} if text == "Here is where things stand.")));
+        ItemData::AssistantMessage {text, .. } if text == "Here is where things stand.")));
     // Marked as never run, so nothing reads it back as the call's outcome.
     assert!(items.iter().any(|item| matches!(&item.data,
         ItemData::ToolResult {call_id,is_error:true,metadata,..}
@@ -1718,7 +1716,7 @@ async fn reliability_tool_calls_alone_at_the_step_limit_are_asked_once_more_for_
                 if call_id == "only-calls" && metadata["notRun"] == true)));
         assert_eq!(
             items.iter().any(|item| matches!(&item.data,
-                ItemData::AssistantMessage {text} if text == "Here is the summary.")),
+                ItemData::AssistantMessage {text, .. } if text == "Here is the summary.")),
             summarises
         );
         assert!(
@@ -1778,7 +1776,7 @@ async fn reliability_an_explained_failure_still_leaves_the_step_limit_its_summar
             .unwrap()
             .iter()
             .any(|item| matches!(&item.data,
-        ItemData::AssistantMessage {text} if text == "Here is the summary."))
+        ItemData::AssistantMessage {text, .. } if text == "Here is the summary."))
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -2323,6 +2321,7 @@ async fn long_chat(provider: Arc<ToolCallingSummarizer>) -> (AgentRuntime, Threa
             None,
             ItemData::AssistantMessage {
                 text: "Read it all.".into(),
+                note: false,
             },
         )
         .await
@@ -2402,7 +2401,7 @@ async fn reliability_a_summary_answered_with_a_tool_call_is_asked_for_again() {
     );
     let items = runtime.items(thread.id, None).await.unwrap();
     assert_eq!(compactions(&items), 1);
-    assert!(items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage { text } if text == "normal response")));
+    assert!(items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage { text, .. } if text == "normal response")));
 }
 
 /// When even the second request brings no summary, the chat is near its
@@ -2426,7 +2425,7 @@ async fn reliability_an_automatic_compaction_without_a_summary_does_not_fail_the
     assert_eq!(summary_requests(&provider).len(), 2);
     let items = runtime.items(thread.id, None).await.unwrap();
     assert_eq!(compactions(&items), 0);
-    assert!(items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage { text } if text == "normal response")));
+    assert!(items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage { text, .. } if text == "normal response")));
 }
 
 /// A chat the provider refuses as longer than the window can't go on
@@ -2454,5 +2453,179 @@ async fn reliability_a_chat_over_its_window_without_a_summary_ends_in_plain_word
         error.contains("didn't write a summary of this chat")
             && !error.contains("compaction model"),
         "{error}"
+    );
+}
+
+/// Claude 5.5's round: its thinking, the note it wrote for the person (a
+/// thinking block of its own, told apart by the provider), and the call they
+/// both go back with. `note` is how the provider passed the note on.
+fn noted_round(note: Vec<ProviderEvent>) -> Vec<ProviderEvent> {
+    let mut round = vec![ProviderEvent::ReasoningDelta(
+        "Checking the failing test.".into(),
+    )];
+    round.extend(note);
+    round.extend([
+        ProviderEvent::ToolCall {
+            call_id: "noted-call".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command":"printf ok"}),
+            provider_metadata: serde_json::json!({"anthropic_thinking":[
+                {"type":"thinking","thinking":"Checking the failing test.","signature":"thinking-signature"},
+                {"type":"thinking","thinking":"I'll run the tests now.","signature":"note-signature"},
+            ]}),
+        },
+        usage(),
+        finish("tool_use"),
+    ]);
+    round
+}
+
+/// Runs the noted round then a reply, and gives the turn's items and the
+/// second request.
+async fn noted_turn(note: Vec<ProviderEvent>) -> (Vec<Item>, ProviderRequest) {
+    let (directory, runtime, provider, _) = setup(
+        vec![
+            noted_round(note),
+            vec![text("All tests pass."), usage(), finish("end_turn")],
+        ],
+        RuntimeConfig::default(),
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("the tests fail"))
+        .await
+        .unwrap();
+    let finished = settled(&runtime, &turn).await;
+    assert_eq!(
+        finished.status,
+        TurnStatus::Completed,
+        "{:?}",
+        finished.error
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let request = provider.requests.lock().unwrap()[1].clone();
+    std::fs::remove_dir_all(directory).unwrap();
+    (items, request)
+}
+
+fn shown(items: &[Item]) -> Vec<(&'static str, String)> {
+    items
+        .iter()
+        .filter_map(|item| match &item.data {
+            ItemData::Reasoning { text, .. } => Some(("reasoning", text.clone())),
+            ItemData::AssistantMessage { text, note: true } => Some(("note", text.clone())),
+            ItemData::AssistantMessage { text, note: false } => Some(("reply", text.clone())),
+            ItemData::ToolCall { name, .. } => Some(("call", name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The note shows as reply text between the thinking and the call, the
+/// reply after the call is the answer, and the model's next request is the
+/// one it was before notes were told apart: the note goes back only inside
+/// its thinking block, with the call.
+#[tokio::test]
+async fn a_note_is_reply_text_the_model_gets_back_only_as_its_thinking_block() {
+    let note = |streamed_as_reasoning| ProviderEvent::Note {
+        text: "I'll run the tests now.".into(),
+        streamed_as_reasoning,
+    };
+    let (items, request) = noted_turn(vec![note(false)]).await;
+    assert_eq!(
+        shown(&items),
+        [
+            ("reasoning", "Checking the failing test.".into()),
+            ("note", "I'll run the tests now.".into()),
+            ("call", "bash".into()),
+            ("reply", "All tests pass.".into()),
+        ]
+    );
+    // A long note first streamed as reasoning: it leaves the thought.
+    let (moved, moved_request) = noted_turn(vec![
+        ProviderEvent::ReasoningDelta("\n\nI'll run the tests now.".into()),
+        note(true),
+    ])
+    .await;
+    assert_eq!(shown(&moved), shown(&items));
+    // Before notes were told apart, the note was the end of the thought.
+    let (before, before_request) = noted_turn(vec![ProviderEvent::ReasoningDelta(
+        "\n\nI'll run the tests now.".into(),
+    )])
+    .await;
+    assert_eq!(
+        shown(&before)[0],
+        (
+            "reasoning",
+            "Checking the failing test.\n\nI'll run the tests now.".into()
+        )
+    );
+    assert_eq!(request.messages, before_request.messages);
+    assert_eq!(moved_request.messages, before_request.messages);
+    let replayed: Vec<_> = request
+        .messages
+        .iter()
+        .filter(|message| format!("{message:?}").contains("I'll run the tests now."))
+        .collect();
+    assert!(
+        matches!(replayed.as_slice(), [ProviderMessage::ToolCall { .. }]),
+        "{replayed:?}"
+    );
+}
+
+/// A note followed by words and no call (the call never came) is shown, and
+/// the next turn's request is the one it was before notes were told apart:
+/// with no call to carry its block, nothing of the note goes back.
+#[tokio::test]
+async fn a_note_without_its_call_is_not_sent_back() {
+    async fn next_request(first: Vec<ProviderEvent>) -> (Vec<Item>, ProviderRequest) {
+        let (directory, runtime, provider, _) = setup(
+            vec![
+                first,
+                vec![text("Second answer."), usage(), finish("end_turn")],
+            ],
+            RuntimeConfig::default(),
+        );
+        let thread = echo_thread(&runtime).await;
+        for prompt in ["check the config", "and now?"] {
+            let turn = runtime
+                .start_turn(thread.id, turn_request(prompt))
+                .await
+                .unwrap();
+            assert_eq!(settled(&runtime, &turn).await.status, TurnStatus::Completed);
+        }
+        let items = runtime.items(thread.id, None).await.unwrap();
+        let request = provider.requests.lock().unwrap()[1].clone();
+        std::fs::remove_dir_all(directory).unwrap();
+        (items, request)
+    }
+    let words = || [text("The config is fine."), usage(), finish("end_turn")];
+    let mut noted = vec![
+        ProviderEvent::ReasoningDelta("Checking.".into()),
+        ProviderEvent::Note {
+            text: "I'll check the config.".into(),
+            streamed_as_reasoning: false,
+        },
+    ];
+    noted.extend(words());
+    let mut before = vec![ProviderEvent::ReasoningDelta(
+        "Checking.\n\nI'll check the config.".into(),
+    )];
+    before.extend(words());
+    let (items, request) = next_request(noted).await;
+    assert_eq!(
+        shown(&items)[..3],
+        [
+            ("reasoning", "Checking.".into()),
+            ("note", "I'll check the config.".into()),
+            ("reply", "The config is fine.".into()),
+        ]
+    );
+    let (_, before_request) = next_request(before).await;
+    assert_eq!(request.messages, before_request.messages);
+    assert!(
+        !format!("{:?}", request.messages).contains("I'll check the config."),
+        "{:?}",
+        request.messages
     );
 }

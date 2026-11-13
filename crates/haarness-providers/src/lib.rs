@@ -19,6 +19,7 @@ mod live_models;
 mod log_capture;
 mod media;
 mod model_order;
+mod notes;
 mod ollama;
 mod openai;
 mod openai_compatible;

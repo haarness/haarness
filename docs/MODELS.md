@@ -121,6 +121,14 @@ but never a provider's page: confirming a price is a person's job. Fix or add th
 entry in haarness-cloud from the provider's page with today's `checked` date,
 then `--sync` copies the table here.
 
+## Claude's notes before tool calls: 2026-11-13
+
+| Provider | Change |
+| --- | --- |
+| Anthropic, Bedrock, Haarness Cloud, OpenRouter | Claude 5.5 and later, Fable and Mythos 5 write the line meant for the person before a tool call ("I'll run the tests now") as a thinking block of its own, which only the block's signature tells from reasoning. Haarness reads each signature as its block ends (a protobuf header whose kind names a note; anything it can't read is reasoning) and stores the line as reply text marked `note`, shown between the tool rows on every surface; the block itself goes back with the call as before, so the next request is byte for byte what it was. These models' thinking text waits up to 3 seconds or 600 characters for its block's end, so a note never shows as thinking first (`crates/haarness-providers/src/notes.rs`); a route that sends no signatures (GitHub Copilot) stops waiting after the model's first thinking block there and remembers it, so the model's later answers through that provider do not wait. Model ids are read in every vendor spelling, Vertex AI's `claude-opus-5-5@20260901` and a `[1m]` mark included. Those forms used to read as an older release or none, so they now get every rule their plain id gets: adaptive thinking with its effort levels, no sampling parameters and built-in JSON output (Claude 5 and Opus 4.7 onwards), prompt-bound thinking (Claude 5.5, Fable and Mythos 5.1 onwards, Haiku 5.5 included), no forced tool choice for structured output (Opus and Sonnet 5.5, Fable and Mythos 5.1 onwards), and the wait for notes. Before, the lines sat inside a closed "Thought" row, or vanished with thinking hidden, and the tool rows followed each other with no words between them. |
+| Haarness Cloud | A Claude thinking block of more than one piece showed twice: the router sends the block's whole text again with its signature, and only a repeat of the last piece was recognised as one. The repeat is kept for the next request and no longer shown. |
+| Chat Completions | A chunk that carries reasoning and words together gives the reasoning first when a thought was already open before it (a gateway that packs a block's end with the first words) or when the server sent the reply whole; before, the words came first and the reasoning showed after them, splitting the reply. Words that open a streamed chunk before any thinking still come first. |
+
 ## Local models' failed turns: 2026-11-10
 
 Found by running two-message coding chats on every model Ollama 0.40.6 had on a Mac, on the released 0.1.19, with a

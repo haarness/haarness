@@ -391,6 +391,14 @@ pub enum ItemData {
     },
     AssistantMessage {
         text: String,
+        /// A short line the model wrote for the person just before a tool
+        /// call, which Claude sends as a thinking block of its own. Clients
+        /// show it as reply text between the tool rows; it is never the
+        /// turn's answer, and the model gets it back only as the thinking
+        /// block it came in (with the call), never as text. Absent for every
+        /// other reply, so older clients draw a note as ordinary text.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        note: bool,
     },
     Reasoning {
         text: String,
@@ -1807,6 +1815,24 @@ mod tests {
         CommandExecutionResponse, CompactRequest, ExecuteCommandRequest, ItemData, ModelInfo,
         StartTurnRequest,
     };
+
+    /// A reply stored before notes existed reads as a reply, and only a note
+    /// carries the flag, so older clients draw it as reply text.
+    #[test]
+    fn a_reply_is_a_note_only_when_marked() {
+        let reply = json!({"type": "assistant_message", "text": "Done."});
+        let decoded: ItemData = serde_json::from_value(reply.clone()).unwrap();
+        assert!(
+            matches!(&decoded, ItemData::AssistantMessage { text, note: false } if text == "Done.")
+        );
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), reply);
+        let note = json!({"type": "assistant_message", "text": "I'll run it.", "note": true});
+        let decoded: ItemData = serde_json::from_value(note.clone()).unwrap();
+        assert!(
+            matches!(&decoded, ItemData::AssistantMessage { text, note: true } if text == "I'll run it.")
+        );
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), note);
+    }
 
     #[test]
     fn command_execution_contract_is_tagged_and_defaults_request_metadata() {

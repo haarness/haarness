@@ -40,10 +40,11 @@ def result(turn: Turn, items: list[Item]) -> ChatResult:
     return {
         "turn": turn,
         "items": selected,
+        # The reply, without the notes the model wrote before its tool calls.
         "text": "".join(
             item["data"]["text"]
             for item in selected
-            if item["data"]["type"] == "assistant_message"
+            if item["data"]["type"] == "assistant_message" and not item["data"].get("note")
         ),
     }
 

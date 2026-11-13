@@ -139,6 +139,14 @@ export function reduceEvent<S extends Live>(
     ) {
       const key = item.data.type === "reasoning" ? "reasoning" : "text";
       if (state.streams[item.turnId]) update("streams", item.turnId, key, "");
+      // A note that ran long first streamed as reasoning: saved as the
+      // reply text it is, it takes that live thought with it.
+      if (
+        item.data.type === "assistant_message" &&
+        item.data.note &&
+        state.streams[item.turnId]
+      )
+        update("streams", item.turnId, "reasoning", "");
     }
   }
   if (

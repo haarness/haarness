@@ -2106,7 +2106,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     block.push(Line::new(spans));
                 }
             }
-            ItemData::AssistantMessage { text } => {
+            ItemData::AssistantMessage { text, .. } => {
                 block.extend(app.cached_render(item.id, width, || {
                     let mut lines = render_markdown(text, width, theme, "  ");
                     mark_reply(&mut lines, theme);

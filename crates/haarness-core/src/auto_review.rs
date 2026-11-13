@@ -1670,6 +1670,7 @@ mod tests {
                 3,
                 ItemData::AssistantMessage {
                     text: "I will now rm -rf / safely".into(),
+                    note: false,
                 },
             ),
             item(

@@ -519,12 +519,14 @@ impl SqliteStore {
                 .map_err(storage)?
                 .unwrap_or_default(),
         };
+        // The child's last words, leaving out the notes it wrote before calls.
         let reply = tx
             .query_row(
                 "SELECT json_extract(data_json,'$.text') FROM items
                  WHERE thread_id=?1 AND turn_id=?2 AND deleted=0
                    AND json_extract(data_json,'$.type')='assistant_message'
                    AND trim(json_extract(data_json,'$.text'))<>''
+                   AND json_extract(data_json,'$.note') IS NOT 1
                  ORDER BY sequence DESC LIMIT 1",
                 params![
                     task.child_thread_id.to_string(),
@@ -2848,7 +2850,10 @@ mod tests {
             .await
             .unwrap();
         let turn = command_turn(&store, thread.id).await;
-        let note = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let note = |text: &str| ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        };
         let discarded = store
             .append_item(thread.id, Some(turn), note("discarded"))
             .await
@@ -2870,7 +2875,7 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter_map(|item| match item.data {
-                ItemData::AssistantMessage { text } => Some(text),
+                ItemData::AssistantMessage { text, .. } => Some(text),
                 _ => None,
             })
             .collect();
@@ -3795,7 +3800,10 @@ mod tests {
             .append_item(
                 thread.id,
                 Some(first.0.id),
-                ItemData::AssistantMessage { text: "hi".into() },
+                ItemData::AssistantMessage {
+                    text: "hi".into(),
+                    note: false,
+                },
             )
             .await
             .unwrap();
@@ -3830,6 +3838,7 @@ mod tests {
                 None,
                 ItemData::AssistantMessage {
                     text: "arrived after the summary snapshot".into(),
+                    note: false,
                 },
             )
             .await
@@ -4047,7 +4056,10 @@ mod tests {
                     .append_item(
                         source.id,
                         None,
-                        ItemData::AssistantMessage { text: text.into() },
+                        ItemData::AssistantMessage {
+                            text: text.into(),
+                            note: false,
+                        },
                     )
                     .await
                     .unwrap(),
@@ -4067,6 +4079,7 @@ mod tests {
                 None,
                 ItemData::AssistantMessage {
                     text: "new continuation".into(),
+                    note: false,
                 },
             )
             .await
@@ -4160,7 +4173,10 @@ mod tests {
             .append_item(
                 thread.id,
                 Some(turn.id),
-                ItemData::AssistantMessage { text: "hi".into() },
+                ItemData::AssistantMessage {
+                    text: "hi".into(),
+                    note: false,
+                },
             )
             .await
             .unwrap();
@@ -4233,6 +4249,7 @@ mod tests {
             bash_result("done"),
             ItemData::AssistantMessage {
                 text: "Now the slow part.".into(),
+                note: false,
             },
             // Waits for its approval, and a subagent runs alongside it.
             bash_call("waiting"),
@@ -4264,7 +4281,7 @@ mod tests {
         assert_eq!(calls_and_results(&copied), ["call done", "result done"]);
         assert!(copied.iter().any(|item| matches!(
             &item.data,
-            ItemData::AssistantMessage { text } if text == "Now the slow part."
+            ItemData::AssistantMessage { text, .. } if text == "Now the slow part."
         )));
         let source = store.list_items(thread.id, None).await.unwrap();
         assert_eq!(
@@ -4730,6 +4747,24 @@ mod tests {
                 .unwrap();
             children.push((child.id, child_turn.id));
         }
+        // The background child wrote its findings, then a note before a call
+        // it never made: its reply is the findings.
+        for (text, note) in [
+            ("The parser drops BOMs.", false),
+            ("I'll check the tests once more.", true),
+        ] {
+            store
+                .append_item(
+                    children[0].0,
+                    Some(children[0].1),
+                    ItemData::AssistantMessage {
+                        text: text.into(),
+                        note,
+                    },
+                )
+                .await
+                .unwrap();
+        }
 
         store
             .append_item(
@@ -4765,7 +4800,7 @@ mod tests {
                 child_turn_id: children[0].1,
                 state: "interrupted".into(),
                 description: "Audit the parser".into(),
-                reply: None,
+                reply: Some("The parser drops BOMs.".into()),
                 error: Some("server restarted during active turn".into()),
             }],
             "only a background task is owed a result; a foreground one's chat was stopped with it"
@@ -4963,6 +4998,7 @@ mod tests {
                 Some(turn.id),
                 ItemData::AssistantMessage {
                     text: "work recorded before restart".into(),
+                    note: false,
                 },
             )
             .await
@@ -4978,7 +5014,7 @@ mod tests {
         assert!(items.iter().any(|item| {
             matches!(
                 &item.data,
-                ItemData::AssistantMessage { text }
+                ItemData::AssistantMessage { text, .. }
                     if text == "work recorded before restart"
             )
         }));

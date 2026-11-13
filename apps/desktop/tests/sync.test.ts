@@ -60,6 +60,44 @@ test("replayed durable items replace streamed text without duplicating the conve
   assert.equal(state.permissions.length, 0);
 });
 
+test("a note saved before a call takes the live reply and the live thought it first streamed as", () => {
+  const [state, set] = createStore<Live>({
+    selected: "thread",
+    threads: [],
+    items: [],
+    turns: [],
+    streams: {},
+    permissions: [],
+    questions: [],
+  });
+  let eventId = 0;
+  const event = (type: string, payload: unknown) =>
+    reduceEvent(state, set, {
+      eventId: ++eventId,
+      type,
+      payload,
+      threadId: "thread",
+      turnId: "turn",
+      serverInstanceId: "instance",
+    } as EventEnvelope);
+  const saved = (id: string, sequence: number, note: boolean) => ({
+    id,
+    threadId: "thread",
+    turnId: "turn",
+    sequence,
+    data: { type: "assistant_message", text: "I'll run the tests now.", ...(note ? { note } : {}) },
+  });
+  event("turn.reasoning_delta", { delta: "Checking the failing test." });
+  event("turn.text_delta", { delta: "I'll run the tests now." });
+  // An ordinary reply leaves the thought streaming beside it.
+  event("item.created", saved("reply", 1, false));
+  assert.deepEqual(state.streams.turn, { text: "", reasoning: "Checking the failing test." });
+  // A long note streamed as reasoning first; saved, it is reply text.
+  event("turn.reasoning_delta", { delta: "\n\nI'll run the tests now." });
+  event("turn.text_delta", { delta: "I'll run the tests now." });
+  event("item.created", saved("note", 2, true));
+  assert.deepEqual(state.streams.turn, { text: "", reasoning: "" });
+});
 test("a chat created moments ago opens without a history request, unless late or after a reconnect", () => {
   const created = { at: 10_000, stream: 4 };
   assert.equal(freshChat(created, 10_000, 4), true);

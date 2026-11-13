@@ -798,6 +798,12 @@ impl App {
                         let live = self.live_threads.entry(thread_id).or_default();
                         match &item.data {
                             ItemData::Reasoning { .. } => live.reasoning_preview.clear(),
+                            // A note that first streamed as reasoning (it
+                            // ran long) leaves that preview too.
+                            ItemData::AssistantMessage { note: true, .. } => {
+                                live.preview.clear();
+                                live.reasoning_preview.clear();
+                            }
                             ItemData::AssistantMessage { .. } => live.preview.clear(),
                             _ => {}
                         }
@@ -888,8 +894,11 @@ impl App {
                                 // The durable item supersedes the live preview.
                                 self.reasoning_preview.clear();
                             }
-                            ItemData::AssistantMessage { .. } => {
+                            ItemData::AssistantMessage { note, .. } => {
                                 self.preview.clear();
+                                if note {
+                                    self.reasoning_preview.clear();
+                                }
                             }
                             ItemData::TaskLink {
                                 call_id,

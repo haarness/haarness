@@ -780,7 +780,9 @@ impl App {
             value: "current".into(),
         }];
         entries.extend(self.items.iter().rev().filter_map(|item| {
-            let haarness_protocol::ItemData::AssistantMessage { text, .. } = &item.data else {
+            // A note before a call is no reply to fork through.
+            let haarness_protocol::ItemData::AssistantMessage { text, note: false } = &item.data
+            else {
                 return None;
             };
             let label = text
@@ -3316,7 +3318,10 @@ impl App {
             }
             "copy" => {
                 let text = self.items.iter().rev().find_map(|item| match &item.data {
-                    haarness_protocol::ItemData::AssistantMessage { text } => Some(text.clone()),
+                    // The reply, not a note written before a call.
+                    haarness_protocol::ItemData::AssistantMessage { text, note: false } => {
+                        Some(text.clone())
+                    }
                     _ => None,
                 });
                 match text {
@@ -4053,7 +4058,7 @@ impl App {
                     let text = command_line.as_ref().unwrap_or(text);
                     let _ = write!(out, "## User\n\n{text}\n\n");
                 }
-                haarness_protocol::ItemData::AssistantMessage { text } => {
+                haarness_protocol::ItemData::AssistantMessage { text, .. } => {
                     let _ = write!(out, "## Assistant\n\n{text}\n\n");
                 }
                 haarness_protocol::ItemData::ToolCall {

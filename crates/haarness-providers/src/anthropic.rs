@@ -1,6 +1,5 @@
 use async_stream::try_stream;
 use async_trait::async_trait;
-use futures::StreamExt;
 use haarness_core::{
     CoreError, CoreResult, KeyCheck, ModelProvider, ProviderEvent, ProviderMessage,
     ProviderRequest, ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, structured_output_tool,
@@ -568,6 +567,9 @@ impl ModelProvider for AnthropicProvider {
         let trace = crate::RequestTrace::of(&response);
         let provider_id = self.id.clone();
         let mut events = json_stream(response, &trace, cancel, limits);
+        // A thinking block's text waits for its signature, which says
+        // whether the block is a note for the person (see `crate::notes`).
+        let mut hold = crate::notes::NoteHold::new(crate::notes::writes_notes(&request.model));
         Ok(Box::pin(try_stream! {
             let mut tool: Option<(String,String,String,Value)> = None;
             // message_delta carries why the response ended; message_stop reports it.
@@ -595,8 +597,21 @@ impl ModelProvider for AnthropicProvider {
             let mut cache_read = 0_u64;
             let mut cache_write = 0_u64;
             let mut output_tokens = 0_u64;
-            while let Some(event) = events.next().await {
-                let event = event?;
+            loop {
+                let Some(event) = crate::notes::next_before(&mut events, hold.due()).await else {
+                    if let Some(event) = hold.release() { yield event; }
+                    continue;
+                };
+                let Some(event) = event else { break };
+                let event = match event {
+                    Ok(event) => event,
+                    // What waited was thought before the answer broke off:
+                    // it goes out first, as a cut answer's thinking always did.
+                    Err(error) => {
+                        if let Some(event) = hold.release() { yield event; }
+                        Err::<Value, _>(error)?
+                    }
+                };
                 match event["type"].as_str().unwrap_or_default() {
                     "message_start" => {
                         message_id = event.pointer("/message/id").and_then(Value::as_str).map(str::to_owned);
@@ -646,11 +661,9 @@ impl ModelProvider for AnthropicProvider {
                                 value.push_str(text);
                                 block["thinking"] = json!(value);
                             }
-                            if std::mem::take(&mut thinking_break) {
-                                yield ProviderEvent::ReasoningDelta("\n\n".into());
-                            }
+                            let lead = if std::mem::take(&mut thinking_break) { "\n\n" } else { "" };
                             thinking_seen = true;
-                            yield ProviderEvent::ReasoningDelta(text.into());
+                            for event in hold.push(lead, text) { yield event; }
                         },
                         "input_json_delta" => if let (Some((_,_,buffer,_)), Some(json)) = (&mut tool, event["delta"]["partial_json"].as_str()) { buffer.push_str(json); },
                         "signature_delta" => if let (Some(block), Some(signature)) = (&mut thinking_block, event["delta"]["signature"].as_str()) {
@@ -661,7 +674,17 @@ impl ModelProvider for AnthropicProvider {
                         _ => {}
                     },
                     "content_block_stop" => {
-                        if let Some(block) = thinking_block.take() { thinking_blocks.push(block); }
+                        if let Some(block) = thinking_block.take() {
+                            match hold.end(block["signature"].as_str()) {
+                                // A note leaves the reasoning, so the next
+                                // thought starts without a break.
+                                Some(event @ ProviderEvent::Note { .. }) => { thinking_seen = false; yield event; }
+                                Some(event) => yield event,
+                                None => {}
+                            }
+                            // Note or not, the block goes back as it came.
+                            thinking_blocks.push(block);
+                        }
                         if let Some((call_id,name,arguments,initial_input)) = tool.take() {
                         let arguments = if arguments.is_empty() { initial_input } else {
                             haarness_core::tool_call_arguments(&arguments)
@@ -711,11 +734,14 @@ impl ModelProvider for AnthropicProvider {
                     "error" => {
                         let error = CoreError::Provider(event.to_string());
                         trace.failed(&error);
+                        if let Some(event) = hold.release() { yield event; }
                         Err(error)?;
                     }
                     _ => {}
                 }
             }
+            // An answer that ended in the middle of a block.
+            if let Some(event) = hold.release() { yield event; }
         }))
     }
 }
@@ -726,8 +752,10 @@ pub(crate) const NEWEST_CLAUDE: (u32, u32) = (5, 5);
 
 /// A Claude release read from its id under any vendor spelling:
 /// `claude-opus-5-5`, `anthropic/claude-sonnet-5.5`,
-/// `us.anthropic.claude-fable-5-1-v1:0` and the older `claude-3-5-sonnet`.
-/// A dated snapshot (`-20250514`) is not a minor version.
+/// `us.anthropic.claude-fable-5-1-v1:0`, Vertex AI's
+/// `claude-opus-5-5@20260901`, `claude-sonnet-5-5[1m]` and the older
+/// `claude-3-5-sonnet`. A dated snapshot (`-20250514`, `@20260901`) is not a
+/// minor version, nor is a bracketed context mark.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ClaudeRelease {
     pub family: String,
@@ -735,6 +763,7 @@ pub(crate) struct ClaudeRelease {
 }
 
 pub(crate) fn claude_release(id: &str) -> Option<ClaudeRelease> {
+    let id = id.split('[').next().unwrap_or(id);
     let lower = id.to_ascii_lowercase().replace('.', "-");
     let (_, rest) = lower.split_once("claude-")?;
     let number = |part: &str| {
@@ -742,7 +771,7 @@ pub(crate) fn claude_release(id: &str) -> Option<ClaudeRelease> {
             .then(|| part.parse::<u32>().ok())
             .flatten()
     };
-    let parts: Vec<&str> = rest.split(['-', ':']).collect();
+    let parts: Vec<&str> = rest.split(['-', ':', '@']).collect();
     let (family, numbers) = match parts.first().copied().and_then(number) {
         // The older spelling puts the version first: `claude-3-5-sonnet`.
         Some(_) => {
@@ -980,7 +1009,7 @@ fn provider_error(error: impl std::fmt::Display) -> CoreError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
     use axum::{
@@ -1735,6 +1764,18 @@ mod tests {
             claude_release("claude-3-5-sonnet-20241022"),
             release("sonnet", (3, 5))
         );
+        assert_eq!(
+            claude_release("claude-opus-5-5@20260901"),
+            release("opus", (5, 5))
+        );
+        assert_eq!(
+            claude_release("claude-sonnet-5-5[1m]"),
+            release("sonnet", (5, 5))
+        );
+        assert_eq!(
+            claude_release("claude-opus-4-1@20250805"),
+            release("opus", (4, 1))
+        );
         assert_eq!(claude_release("claude-test"), None);
         assert_eq!(claude_release("MiniMax-M3"), None);
         // Listed releases keep their answers; a newer one takes the newest.
@@ -1748,6 +1789,14 @@ mod tests {
             "claude-opus-4-8",
             "claude-opus-6",
             "claude-nova-7",
+            // Vertex AI's dated ids and a context mark name the same release.
+            "claude-opus-5@20260301",
+            "claude-sonnet-5@20260301",
+            "claude-fable-5@20260301",
+            "claude-mythos-5@20260301",
+            "claude-opus-4-7@20260101",
+            "claude-opus-4-7[1m]",
+            "claude-haiku-5-5@20260901",
         ] {
             assert!(adaptive_thinking(id), "{id}");
         }
@@ -1766,10 +1815,19 @@ mod tests {
             "claude-sonnet-5-5",
             "claude-haiku-5-5",
             "claude-sonnet-6",
+            "claude-opus-5-5@20260901",
+            "claude-sonnet-5-5[1m]",
+            "claude-haiku-5-5@20260901",
         ] {
             assert!(binds_thinking(id), "{id}");
         }
-        for id in ["claude-fable-5", "claude-opus-5", "claude-mythos-5"] {
+        for id in [
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-mythos-5",
+            "claude-opus-5@20260301",
+            "claude-opus-4-6@20251101",
+        ] {
             assert!(!binds_thinking(id), "{id}");
         }
     }
@@ -2401,5 +2459,356 @@ mod tests {
             serde_json::to_value(provider.info().models).unwrap(),
             serde_json::to_value(before).unwrap()
         );
+    }
+
+    /// Claude 5.5 thinks, writes its note for the person as a thinking block
+    /// of its own, then calls a tool. Each block's signature says its kind.
+    fn noted_call_events() -> Vec<String> {
+        let thinking = crate::notes::tests::thinking_signature();
+        let note = crate::notes::tests::note_signature();
+        [
+            r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":12,"output_tokens":1}}}"#.to_owned(),
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#.into(),
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Checking the failing test."}}"#.into(),
+            format!(r#"{{"type":"content_block_delta","index":0,"delta":{{"type":"signature_delta","signature":"{thinking}"}}}}"#),
+            r#"{"type":"content_block_stop","index":0}"#.into(),
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#.into(),
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"I'll run "}}"#.into(),
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"the tests now."}}"#.into(),
+            format!(r#"{{"type":"content_block_delta","index":1,"delta":{{"type":"signature_delta","signature":"{note}"}}}}"#),
+            r#"{"type":"content_block_stop","index":1}"#.into(),
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"bash"}}"#.into(),
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"cargo test\"}"}}"#.into(),
+            r#"{"type":"content_block_stop","index":2}"#.into(),
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":30}}"#.into(),
+            r#"{"type":"message_stop"}"#.into(),
+        ]
+        .into()
+    }
+
+    async fn noted_call(
+        State(state): State<FixtureState>,
+        Json(request): Json<Value>,
+    ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        state.0.lock().push(request);
+        let stream = noted_call_events()
+            .iter()
+            .fold(String::new(), |mut stream, event| {
+                use std::fmt::Write as _;
+                let _ = write!(stream, "data: {event}\n\n");
+                stream
+            });
+        ([(CONTENT_TYPE, "text/event-stream")], stream)
+    }
+
+    async fn noted_call_stream(model: &str) -> Vec<ProviderEvent> {
+        let router = Router::new()
+            .route("/messages", post(noted_call))
+            .with_state(FixtureState::default());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        provider
+            .stream(
+                ProviderRequest {
+                    model: model.into(),
+                    system: "test".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "the tests fail".into(),
+                    }],
+                    tools: Vec::new(),
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+            .await
+    }
+
+    fn reasoning_text(events: &[ProviderEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ReasoningDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn notes(events: &[ProviderEvent]) -> Vec<(&str, bool)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::Note {
+                    text,
+                    streamed_as_reasoning,
+                } => Some((text.as_str(), *streamed_as_reasoning)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn call_metadata(events: &[ProviderEvent]) -> Value {
+        events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::ToolCall {
+                    provider_metadata, ..
+                } => Some(provider_metadata.clone()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    /// The note Claude 5.5 writes before a call reaches the person as a note,
+    /// whole, and never as reasoning; the thinking before it stays reasoning.
+    #[tokio::test]
+    async fn a_note_block_becomes_a_note_and_thinking_stays_reasoning() {
+        let events = noted_call_stream("claude-opus-5-5").await;
+        assert_eq!(reasoning_text(&events), "Checking the failing test.");
+        assert_eq!(notes(&events), [("I'll run the tests now.", false)]);
+        let at = |wanted: fn(&ProviderEvent) -> bool| events.iter().position(wanted).unwrap();
+        assert!(
+            at(|event| matches!(event, ProviderEvent::ReasoningDelta(_)))
+                < at(|event| matches!(event, ProviderEvent::Note { .. }))
+        );
+        assert!(
+            at(|event| matches!(event, ProviderEvent::Note { .. }))
+                < at(|event| matches!(event, ProviderEvent::ToolCall { .. }))
+        );
+    }
+
+    /// Both blocks go back with the call exactly as they came, the note's
+    /// signature included, whether its text waited or streamed.
+    #[tokio::test]
+    async fn the_note_block_goes_back_with_the_call_unchanged() {
+        let waited = noted_call_stream("claude-sonnet-5-5").await;
+        let streamed = noted_call_stream("claude-sonnet-4-5").await;
+        let metadata = call_metadata(&waited);
+        assert_eq!(metadata, call_metadata(&streamed));
+        assert_eq!(
+            metadata,
+            json!({"anthropic_thinking":[
+                {"type":"thinking","thinking":"Checking the failing test.","signature":crate::notes::tests::thinking_signature()},
+                {"type":"thinking","thinking":"I'll run the tests now.","signature":crate::notes::tests::note_signature()},
+            ]})
+        );
+        // A model that writes no notes does not wait: its thinking streams,
+        // and a note, should one come, is moved after.
+        assert_eq!(
+            reasoning_text(&streamed),
+            "Checking the failing test.\n\nI'll run the tests now."
+        );
+        assert_eq!(notes(&streamed), [("I'll run the tests now.", true)]);
+    }
+
+    /// Thinking that waits to be told from a note shows as reasoning once it
+    /// has waited a few seconds, with the block still open.
+    #[tokio::test]
+    async fn waiting_thinking_shows_before_its_block_ends() {
+        async fn slow(
+            State(state): State<FixtureState>,
+            Json(request): Json<Value>,
+        ) -> (
+            [(axum::http::HeaderName, &'static str); 1],
+            axum::body::Body,
+        ) {
+            state.0.lock().push(request);
+            let events = noted_call_events();
+            let body = async_stream::stream! {
+                for (index, event) in events.into_iter().enumerate() {
+                    // The first block's signature comes long after its text.
+                    if index == 3 {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                    yield Ok::<_, std::convert::Infallible>(format!("data: {event}\n\n"));
+                }
+            };
+            (
+                [(CONTENT_TYPE, "text/event-stream")],
+                axum::body::Body::from_stream(body),
+            )
+        }
+        let router = Router::new()
+            .route("/messages", post(slow))
+            .with_state(FixtureState::default());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        let started = std::time::Instant::now();
+        let mut stream = provider
+            .stream(
+                ProviderRequest {
+                    model: "claude-opus-5-5".into(),
+                    system: "test".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "the tests fail".into(),
+                    }],
+                    tools: Vec::new(),
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        let mut shown = None;
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(event, ProviderEvent::ReasoningDelta(_)) {
+                shown.get_or_insert_with(|| started.elapsed());
+            }
+            events.push(event);
+        }
+        let shown = shown.unwrap();
+        assert!(
+            shown >= std::time::Duration::from_millis(2_900)
+                && shown < std::time::Duration::from_millis(4_500),
+            "{shown:?}"
+        );
+        assert_eq!(reasoning_text(&events), "Checking the failing test.");
+        assert_eq!(notes(&events), [("I'll run the tests now.", false)]);
+    }
+
+    /// A real Claude Sonnet 5.5 answer, recorded live: it thought, said in
+    /// words what it would do, and called `bash`.
+    const RECORDED: &str = include_str!("testdata/claude-sonnet-5-5-thinking-call.sse");
+
+    /// The signature of the recorded answer's thinking block.
+    pub(crate) fn recorded_signature() -> String {
+        RECORDED
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .filter_map(|event| {
+                event
+                    .pointer("/delta/signature")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// Its thinking stays reasoning, its words stay reply text, and the block
+    /// goes back with the call as it came.
+    #[tokio::test]
+    async fn a_recorded_claude_5_5_answer_keeps_its_thinking_as_reasoning() {
+        async fn recorded() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+            ([(CONTENT_TYPE, "text/event-stream")], RECORDED)
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/messages", post(recorded)))
+                .await
+                .unwrap()
+        });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        let events: Vec<_> = provider
+            .stream(
+                ProviderRequest {
+                    model: "claude-sonnet-5-5".into(),
+                    system: "test".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "add figs".into(),
+                    }],
+                    tools: Vec::new(),
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+            .await;
+        assert!(notes(&events).is_empty(), "{events:?}");
+        let thinking = reasoning_text(&events);
+        assert!(thinking.starts_with("I need to add a line"), "{thinking}");
+        let words: String = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(words.starts_with("I'll append"), "{words}");
+        let metadata = call_metadata(&events);
+        assert_eq!(
+            metadata["anthropic_thinking"][0]["thinking"],
+            json!(thinking)
+        );
+        assert_eq!(
+            metadata["anthropic_thinking"][0]["signature"],
+            json!(recorded_signature())
+        );
+    }
+
+    /// Thinking that waits to be told from a note is shown before an error
+    /// that ends the answer, as it was before the wait.
+    #[tokio::test]
+    async fn waiting_thinking_goes_out_before_an_error() {
+        async fn failing() -> ([(axum::http::HeaderName, &'static str); 1], String) {
+            let events = [
+                r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":12,"output_tokens":1}}}"#,
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Weighing two fixes."}}"#,
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            ];
+            let body = events.iter().fold(String::new(), |mut body, event| {
+                use std::fmt::Write as _;
+                let _ = write!(body, "data: {event}\n\n");
+                body
+            });
+            ([(CONTENT_TYPE, "text/event-stream")], body)
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/messages", post(failing)))
+                .await
+                .unwrap()
+        });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        let events: Vec<_> = provider
+            .stream(
+                ProviderRequest {
+                    model: "claude-opus-5-5".into(),
+                    system: "test".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "the tests fail".into(),
+                    }],
+                    tools: Vec::new(),
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        let thought = events
+            .iter()
+            .position(|event| matches!(event, Ok(ProviderEvent::ReasoningDelta(text)) if text == "Weighing two fixes."))
+            .expect("the thought before the error");
+        let error = events.iter().position(Result::is_err).expect("the error");
+        assert!(thought < error, "{events:?}");
     }
 }

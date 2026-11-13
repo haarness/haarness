@@ -6,7 +6,6 @@ use crate::{
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
-use futures::StreamExt;
 use haarness_core::{
     CoreError, CoreResult, KeyCheck, ModelProvider, ProviderEvent, ProviderMessage,
     ProviderRequest, ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, structured_output_tool,
@@ -61,6 +60,9 @@ pub struct OpenAiCompatibleProvider {
     /// Whether each model takes audio, for the models the last listing gave
     /// input modalities for (see [`takes_audio`]).
     listed_audio: ListedAudio,
+    /// The models whose thinking came here without signatures (see
+    /// [`crate::notes::NoteHold::remembering`]).
+    unsigned_routes: crate::notes::UnsignedRoutes,
 }
 
 /// Whether each listed model takes audio, by the input modalities its
@@ -190,6 +192,7 @@ impl OpenAiCompatibleProvider {
             headers: instance.headers,
             replay_observed_reasoning: instance.replay_observed_reasoning,
             listed_audio: ListedAudio::default(),
+            unsigned_routes: crate::notes::UnsignedRoutes::default(),
         }
     }
 
@@ -200,6 +203,14 @@ impl OpenAiCompatibleProvider {
     }
 
     /// Reads and writes what listings say of audio in `listed`.
+    /// Shares `routes`, the models whose route sends no thinking
+    /// signatures, with a provider that makes a transport like this one for
+    /// every request, so what one request learnt holds for the next.
+    pub(crate) fn with_unsigned_routes(mut self, routes: crate::notes::UnsignedRoutes) -> Self {
+        self.unsigned_routes = routes;
+        self
+    }
+
     pub(crate) fn with_listed_audio(mut self, listed: ListedAudio) -> Self {
         self.listed_audio = listed;
         self
@@ -640,6 +651,7 @@ impl OpenAiCompatibleProvider {
             headers: crate::ProviderHeaders::default(),
             replay_observed_reasoning: false,
             listed_audio: ListedAudio::default(),
+            unsigned_routes: crate::notes::UnsignedRoutes::default(),
         }
     }
 
@@ -1375,6 +1387,35 @@ fn discovered_model_info(
             });
     }
     Some(apply_model_defaults(info, defaults))
+}
+
+/// The events of a reply's words, which end the thinking block before them:
+/// text, or the start of structured output the reply is written as.
+fn reply_words(
+    hold: &mut crate::notes::NoteHold,
+    native_json: bool,
+    json_output: &mut String,
+    text: &str,
+) -> Vec<ProviderEvent> {
+    let mut events: Vec<ProviderEvent> = hold.end_unsigned().into_iter().collect();
+    if native_json {
+        if json_output.is_empty() {
+            events.push(ProviderEvent::ContentStarted);
+        }
+        json_output.push_str(text);
+    } else {
+        events.push(ProviderEvent::TextDelta(text.into()));
+    }
+    events
+}
+
+/// The signature of a reasoning block's text detail, which comes with the
+/// block's last one.
+fn block_signature(detail: &Value) -> Option<&str> {
+    (detail.get("type").and_then(Value::as_str) == Some("reasoning.text"))
+        .then(|| detail.get("signature").and_then(Value::as_str))
+        .flatten()
+        .filter(|signature| !signature.is_empty())
 }
 
 /// The text a reasoning detail shows the person: a `reasoning.text`'s text or
@@ -2870,6 +2911,14 @@ impl ModelProvider for OpenAiCompatibleProvider {
         };
         let provider_id = self.id.clone();
         let reasoning_model = model.clone();
+        // Claude's thinking reaches this API with its signatures in
+        // `reasoning_details`; a signature says whether its block is a note
+        // for the person (see `crate::notes`).
+        let mut hold = crate::notes::NoteHold::remembering(
+            crate::notes::writes_notes(&model),
+            &self.unsigned_routes,
+            &model,
+        );
         // The DeepSeek model whose rates price this request: its own
         // provider's, or one behind a self-hosted router, which reports no
         // price (a Cloud router prices its own).
@@ -2937,7 +2986,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
             // response is complete, so it finishes first and this follows,
             // for the runtime to judge.
             let mut broken_after_finish = None;
-            while let Some(event)=events.next().await{
+            loop {
+                let Some(event) = crate::notes::next_before(&mut events, hold.due()).await else {
+                    if let Some(event) = hold.release() { yield event; }
+                    continue;
+                };
+                let Some(event) = event else { break };
                 let event = match event {
                     Ok(event) => event,
                     Err(error) if finish_reason.is_some() => {
@@ -2945,6 +2999,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         break;
                     }
                     Err(error) => {
+                        // Reasoning that waited was thought before the break.
+                        if let Some(event) = hold.release() { yield event; }
                         // Usage that already arrived was billed; keep it.
                         if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
                             yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }; if let Some(usd) = charged.take() { yield ProviderEvent::Cost { usd }; }
@@ -2988,10 +3044,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     };
                     let error = CoreError::Provider(message);
                     trace.failed(&error);
+                    if let Some(event) = hold.release() { yield event; }
                     Err(error)?;
                 }
                 // A reply sent whole carries `message` where a stream's
                 // chunks carry `delta`.
+                let sent_whole = event["choices"][0].get("message").is_some()
+                    && event["choices"][0].get("delta").is_none();
                 let whole;
                 let delta = match event["choices"][0].get("message") {
                     Some(message) if event["choices"][0].get("delta").is_none() => {
@@ -3000,11 +3059,14 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     }
                     _ => &event["choices"][0]["delta"],
                 };
-                if let Some(text)=delta["content"].as_str().filter(|text| !text.is_empty()){
-                    if native_json {
-                        if json_output.is_empty() { yield ProviderEvent::ContentStarted; }
-                        json_output.push_str(text);
-                    } else { yield ProviderEvent::TextDelta(text.into()); }
+                // Words that open a streamed chunk before any thinking go
+                // first; with a thought open before the chunk (its end packed
+                // with the first words after it) or a reply sent whole, the
+                // reasoning goes first.
+                let words = delta["content"].as_str().filter(|text| !text.is_empty());
+                let words_first = !sent_whole && hold.text().is_empty();
+                if words_first && let Some(text) = words {
+                    for event in reply_words(&mut hold, native_json, &mut json_output, text) { yield event; }
                 }
                 if let Some(parts) = delta["content"].as_array() {
                     for part in parts {
@@ -3025,7 +3087,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 if let Some((field, reasoning)) = direct_reasoning {
                     reasoning_field.get_or_insert(field);
                     reasoning_content.push_str(reasoning);
-                    yield ProviderEvent::ReasoningDelta(reasoning.into());
+                    for event in hold.push("", reasoning) { yield event; }
                 } else if named_reasoning_field.is_none() {
                     named_reasoning_field = REASONING_FIELDS
                         .into_iter()
@@ -3044,25 +3106,39 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         let text: String = details.iter().filter_map(visible_reasoning).collect();
                         !text.is_empty() && text == previous_direct
                     });
-                    if direct_reasoning.is_none()
-                        && !repeated
-                        && let Some(details) = details.as_array()
-                    {
-                        for detail in details {
-                            if let Some(text) = visible_reasoning(detail) {
-                                if emitted_reasoning
-                                    .as_ref()
-                                    .is_some_and(|previous| starts_new_reasoning_block(previous, detail))
-                                {
-                                    yield ProviderEvent::ReasoningDelta("\n\n".into());
-                                }
-                                emitted_reasoning = Some(detail.clone());
-                                yield ProviderEvent::ReasoningDelta(text.into());
+                    for detail in details.as_array().into_iter().flatten() {
+                        // A Haarness router sends a Claude block's whole text
+                        // again with its signature: kept for replay only.
+                        let signed = block_signature(detail).is_some();
+                        if direct_reasoning.is_none()
+                            && !repeated
+                            && let Some(text) = visible_reasoning(detail).filter(|text| !signed || *text != hold.text())
+                        {
+                            let lead = if emitted_reasoning
+                                .as_ref()
+                                .is_some_and(|previous| starts_new_reasoning_block(previous, detail))
+                            { "\n\n" } else { "" };
+                            emitted_reasoning = Some(detail.clone());
+                            for event in hold.push(lead, text) { yield event; }
+                        }
+                        // The signature comes with a block's last detail.
+                        if let Some(signature) = block_signature(detail)
+                            && let Some(event) = hold.end(Some(signature))
+                        {
+                            // A note leaves the reasoning, so the next
+                            // thought starts without a break.
+                            if matches!(event, ProviderEvent::Note { .. }) {
+                                emitted_reasoning = None;
                             }
+                            yield event;
                         }
                     }
                 }
+                if !words_first && let Some(text) = words {
+                    for event in reply_words(&mut hold, native_json, &mut json_output, text) { yield event; }
+                }
                 if let Some(deltas)=delta["tool_calls"].as_array(){
+                    if !deltas.is_empty() && let Some(event) = hold.end_unsigned() { yield event; }
                     for tool in deltas {
                         let index = streamed_call_slot(&calls, tool);
                         // A call's arguments are held until the stream ends;
@@ -3083,6 +3159,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 if let Some(reason)=event["choices"][0]["finish_reason"].as_str().filter(|reason| !reason.is_empty()){finish_reason = Some(reason.to_owned()); trace.mark_finished();}
                 if response_id.is_none() { response_id = event["id"].as_str().map(str::to_owned); }
             }
+            // The answer ended: what still waited is reasoning. A stream
+            // that ended mid-block says nothing of the route's signatures.
+            if let Some(event) = hold.end(None) { yield event; }
             let mut provider_metadata = json!({});
             if !reasoning_details.is_empty() {
                 provider_metadata["reasoning_details"] = json!(reasoning_details);
@@ -8202,5 +8281,366 @@ mod tests {
         assert_eq!(parts[0], json!({"type": "text", "text": "And the tests"}));
         assert_eq!(parts[1]["text"], "This picture shows the failure");
         assert_eq!(parts[2]["type"], "image_url");
+    }
+
+    /// Claude 5.5's thinking and its note before a call, as an
+    /// OpenAI-compatible router relays them: `stream` is the chunks' deltas.
+    async fn noted_claude_events(stream: Vec<Value>) -> Vec<ProviderEvent> {
+        let body: String = stream
+            .iter()
+            .map(|delta| {
+                format!(
+                    "data: {}\n\n",
+                    json!({"choices":[{"index":0,"delta":delta}]})
+                )
+            })
+            .chain([
+                format!(
+                    "data: {}\n\n",
+                    json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]})
+                ),
+                "data: [DONE]\n\n".into(),
+            ])
+            .collect();
+        let (provider, _) = openrouter_fixture(post(move || {
+            let body = body.clone();
+            async move { ([(CONTENT_TYPE, "text/event-stream")], body) }
+        }))
+        .await;
+        let mut request = short_request();
+        request.model = "anthropic/claude-opus-5.5".into();
+        provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+            .await
+    }
+
+    fn noted_call() -> [Value; 2] {
+        [
+            json!({"tool_calls":[{"index":2,"id":"toolu_1","type":"function","function":{"name":"bash","arguments":""}}]}),
+            json!({"tool_calls":[{"index":2,"function":{"arguments":"{\"command\":\"cargo test\"}"}}]}),
+        ]
+    }
+
+    fn reasoning_and_notes(events: &[ProviderEvent]) -> (String, Vec<(String, bool)>) {
+        let mut reasoning = String::new();
+        let mut notes = Vec::new();
+        for event in events {
+            match event {
+                ProviderEvent::ReasoningDelta(text) => reasoning.push_str(text),
+                ProviderEvent::Note {
+                    text,
+                    streamed_as_reasoning,
+                } => notes.push((text.clone(), *streamed_as_reasoning)),
+                _ => {}
+            }
+        }
+        (reasoning, notes)
+    }
+
+    fn call_details(events: &[ProviderEvent]) -> Value {
+        events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::ToolCall {
+                    provider_metadata, ..
+                } => Some(provider_metadata["reasoning_details"].clone()),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    /// A Haarness router streams Claude's thinking as text and sends each
+    /// block's whole text again with its signature at the block's end. The
+    /// note block becomes a note, the thinking shows once, and both blocks go
+    /// back with the call.
+    #[tokio::test]
+    async fn a_routed_claude_note_becomes_a_note_and_its_thinking_shows_once() {
+        let thinking = crate::notes::tests::thinking_signature();
+        let note = crate::notes::tests::note_signature();
+        let first = json!({"type":"reasoning.text","format":"anthropic-claude-v1","index":0,"text":"Checking the failing test.","signature":thinking});
+        let second = json!({"type":"reasoning.text","format":"anthropic-claude-v1","index":1,"text":"I'll run the tests now.","signature":note});
+        let [start, arguments] = noted_call();
+        let events = noted_claude_events(vec![
+            json!({"role":"assistant","reasoning":"Checking the ","reasoning_content":"Checking the "}),
+            json!({"reasoning":"failing test.","reasoning_content":"failing test."}),
+            json!({"reasoning_details":[first]}),
+            json!({"reasoning":"I'll run ","reasoning_content":"I'll run "}),
+            json!({"reasoning":"the tests now.","reasoning_content":"the tests now."}),
+            json!({"reasoning_details":[second]}),
+            start,
+            arguments,
+        ])
+        .await;
+        assert_eq!(
+            reasoning_and_notes(&events),
+            (
+                "Checking the failing test.".to_owned(),
+                vec![("I'll run the tests now.".to_owned(), false)]
+            )
+        );
+        assert_eq!(call_details(&events), json!([first, second]));
+    }
+
+    /// OpenRouter sends each piece of Claude's thinking as text and as a
+    /// detail, and a block's signature in a detail of its own.
+    #[tokio::test]
+    async fn an_openrouter_claude_note_becomes_a_note() {
+        let thinking = crate::notes::tests::thinking_signature();
+        let note = crate::notes::tests::note_signature();
+        let piece = |index: u8, text: &str| json!({"reasoning":text,"reasoning_details":[{"type":"reasoning.text","text":text,"signature":null,"format":"anthropic-claude-v1","index":index}]});
+        let signed = |index: u8, signature: &str| json!({"reasoning":"","reasoning_details":[{"type":"reasoning.text","text":"","signature":signature,"format":"anthropic-claude-v1","index":index}]});
+        let [start, arguments] = noted_call();
+        let events = noted_claude_events(vec![
+            piece(0, "Checking the failing test."),
+            signed(0, &thinking),
+            piece(1, "I'll run "),
+            piece(1, "the tests now."),
+            signed(1, &note),
+            start,
+            arguments,
+        ])
+        .await;
+        assert_eq!(
+            reasoning_and_notes(&events),
+            (
+                "Checking the failing test.".to_owned(),
+                vec![("I'll run the tests now.".to_owned(), false)]
+            )
+        );
+        let details = call_details(&events);
+        assert_eq!(details[1]["text"], "I'll run the tests now.");
+        assert_eq!(details[1]["signature"], json!(note));
+        assert_eq!(details[0]["signature"], json!(thinking));
+    }
+
+    /// The events a stream of `chunks` (each a whole chunk, a `data:` line)
+    /// gives for `model`, errors kept.
+    async fn chunk_events(
+        model: &str,
+        chunks: Vec<Value>,
+    ) -> Vec<haarness_core::CoreResult<ProviderEvent>> {
+        let body: String = chunks
+            .iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .chain(["data: [DONE]\n\n".to_owned()])
+            .collect();
+        let (provider, _) = openrouter_fixture(post(move || {
+            let body = body.clone();
+            async move { ([(CONTENT_TYPE, "text/event-stream")], body) }
+        }))
+        .await;
+        let mut request = short_request();
+        request.model = model.into();
+        provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect()
+            .await
+    }
+
+    fn delta(delta: Value) -> Value {
+        json!({"choices":[{"index":0,"delta":delta}]})
+    }
+
+    /// Claude 5.5 reached through a gateway that drops signatures (GitHub
+    /// Copilot's `reasoning_text`): only its first thinking waits; once a
+    /// block ends with no signature, the rest streams as it comes.
+    #[tokio::test]
+    async fn a_stream_without_signatures_stops_waiting_after_its_first_block() {
+        let events: Vec<ProviderEvent> = chunk_events(
+            "claude-opus-5.5",
+            vec![
+                delta(json!({"reasoning_text":"Checking."})),
+                delta(json!({"content":"Let me look."})),
+                delta(json!({"reasoning_text":"Now the tests."})),
+                delta(json!({"content":" Done."})),
+                json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+            ],
+        )
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|event| !matches!(event, ProviderEvent::Finished { .. }))
+        .collect();
+        let shown: Vec<String> = events.iter().map(|event| format!("{event:?}")).collect();
+        assert_eq!(
+            shown,
+            [
+                "ContentStarted",
+                r#"ReasoningDelta("Checking.")"#,
+                r#"TextDelta("Let me look.")"#,
+                r#"ReasoningDelta("Now the tests.")"#,
+                r#"TextDelta(" Done.")"#,
+            ]
+        );
+    }
+
+    /// Unsigned details that happen to equal the thought so far are shown:
+    /// only a signed detail repeats a block's whole text.
+    #[tokio::test]
+    async fn unsigned_details_are_never_taken_for_a_repeat() {
+        let piece = |text: &str| {
+            delta(json!({"reasoning_details":[{"type":"reasoning.text","text":text,"index":0}]}))
+        };
+        let events = chunk_events(
+            "google/gemini-3.5-flash-lite",
+            vec![
+                piece("\n"),
+                piece("\n"),
+                piece("Plan."),
+                json!({"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}),
+            ],
+        )
+        .await;
+        let reasoning: String = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ProviderEvent::ReasoningDelta(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, "\n\nPlan.");
+    }
+
+    /// A gateway may pack a note's signed detail and the first words of the
+    /// reply into one chunk: the note still comes whole, once, before them.
+    #[tokio::test]
+    async fn a_signed_detail_packed_with_words_ends_its_block_first() {
+        let note = crate::notes::tests::note_signature();
+        let events: Vec<ProviderEvent> = chunk_events(
+            "anthropic/claude-sonnet-5.5",
+            vec![
+                delta(json!({"reasoning":"I'll run ","reasoning_content":"I'll run "})),
+                delta(json!({"reasoning":"the tests now.","reasoning_content":"the tests now."})),
+                delta(json!({
+                    "reasoning_details":[{"type":"reasoning.text","format":"anthropic-claude-v1","index":0,"text":"I'll run the tests now.","signature":note}],
+                    "content":"Running them."
+                })),
+                json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+            ],
+        )
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+        assert_eq!(
+            reasoning_and_notes(&events),
+            (
+                String::new(),
+                vec![("I'll run the tests now.".to_owned(), false)]
+            )
+        );
+        let at = |wanted: fn(&ProviderEvent) -> bool| events.iter().position(wanted).unwrap();
+        assert!(
+            at(|event| matches!(event, ProviderEvent::Note { .. }))
+                < at(|event| matches!(event, ProviderEvent::TextDelta(_)))
+        );
+    }
+
+    /// Thinking that waited is shown before an error the stream reports
+    /// ends it, as it was before the wait.
+    #[tokio::test]
+    async fn waiting_thinking_goes_out_before_an_error() {
+        let events = chunk_events(
+            "anthropic/claude-opus-5.5",
+            vec![
+                delta(json!({"reasoning":"Weighing two fixes.","reasoning_content":"Weighing two fixes."})),
+                json!({"error":{"message":"Overloaded","code":529}}),
+            ],
+        )
+        .await;
+        let reasoning = events
+            .iter()
+            .position(|event| matches!(event, Ok(ProviderEvent::ReasoningDelta(text)) if text == "Weighing two fixes."))
+            .expect("the thought before the error");
+        let error = events.iter().position(Result::is_err).expect("the error");
+        assert!(reasoning < error, "{events:?}");
+    }
+
+    /// In a stream, words a chunk opens with, before any thinking, come first,
+    /// even when the chunk also starts a thought; a reply sent whole gives its
+    /// reasoning first.
+    #[tokio::test]
+    async fn words_before_any_thinking_come_first_in_a_stream() {
+        let shown = |events: Vec<haarness_core::CoreResult<ProviderEvent>>| -> Vec<String> {
+            events
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|event| {
+                    matches!(
+                        event,
+                        ProviderEvent::TextDelta(_) | ProviderEvent::ReasoningDelta(_)
+                    )
+                })
+                .map(|event| format!("{event:?}"))
+                .collect()
+        };
+        let streamed = chunk_events(
+            "google/gemini-3.5-flash-lite",
+            vec![
+                delta(json!({"content":"Let me look.","reasoning_content":"Weighing it."})),
+                json!({"choices":[{"index":0,"delta":{"content":" Done."},"finish_reason":"stop"}]}),
+            ],
+        )
+        .await;
+        assert_eq!(
+            shown(streamed),
+            [
+                r#"TextDelta("Let me look.")"#,
+                r#"ReasoningDelta("Weighing it.")"#,
+                r#"TextDelta(" Done.")"#,
+            ]
+        );
+        let whole = chunk_events(
+            "google/gemini-3.5-flash-lite",
+            vec![json!({"choices":[{"index":0,"message":{"role":"assistant","content":"Done.","reasoning_content":"Weighing it."},"finish_reason":"stop"}]})],
+        )
+        .await;
+        assert_eq!(
+            shown(whole),
+            [r#"ReasoningDelta("Weighing it.")"#, r#"TextDelta("Done.")"#]
+        );
+    }
+
+    /// Once a route showed it sends Claude's thinking without signatures,
+    /// the model's later answers there stream their thinking at once.
+    #[tokio::test]
+    async fn a_route_without_signatures_does_not_wait_on_later_requests() {
+        let body: String = [
+            delta(json!({"reasoning_text":"Checking."})),
+            json!({"choices":[{"index":0,"delta":{"content":"Done."},"finish_reason":"stop"}]}),
+        ]
+        .iter()
+        .map(|chunk| format!("data: {chunk}\n\n"))
+        .chain(["data: [DONE]\n\n".to_owned()])
+        .collect();
+        let (provider, _) = openrouter_fixture(post(move || {
+            let body = body.clone();
+            async move { ([(CONTENT_TYPE, "text/event-stream")], body) }
+        }))
+        .await;
+        let waited = |events: Vec<haarness_core::CoreResult<ProviderEvent>>| {
+            events
+                .iter()
+                .any(|event| matches!(event, Ok(ProviderEvent::ContentStarted)))
+        };
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            let mut request = short_request();
+            request.model = "claude-sonnet-5.5".into();
+            let events: Vec<_> = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            results.push(waited(events));
+        }
+        assert_eq!(results, [true, false]);
     }
 }

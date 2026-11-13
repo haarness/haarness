@@ -50,6 +50,9 @@ export function contextUsage(items: Item[], thread: Thread) {
         attachments += data.attachments?.length ?? 0;
         break;
       case "assistant_message":
+        // A note goes back to the model only as the thinking block it
+        // came in, which this estimate cannot see.
+        if (data.note) continue;
         kind = "Assistant messages";
         text = data.text;
         break;
@@ -96,8 +99,10 @@ export function contextUsage(items: Item[], thread: Thread) {
         (!summary || item.sequence > summary.sequence),
     ),
     reports: history.filter((item) => item.data.type === "usage").length,
-    messages: visible.filter((item) =>
-      ["user_message", "assistant_message"].includes(item.data.type),
+    messages: visible.filter(
+      (item) =>
+        ["user_message", "assistant_message"].includes(item.data.type) &&
+        !(item.data.type === "assistant_message" && item.data.note),
     ).length,
     compacted: !!summary,
   };

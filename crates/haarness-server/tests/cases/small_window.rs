@@ -166,7 +166,7 @@ async fn a_cloud_model_whose_output_takes_half_its_window_keeps_the_request_besi
     let items = runtime.items(thread.id, None).await.unwrap();
     assert!(items.iter().any(|item| matches!(
         &item.data,
-        ItemData::AssistantMessage { text } if text == "The backoff is bounded by max_delay."
+        ItemData::AssistantMessage { text, .. } if text == "The backoff is bounded by max_delay."
     )));
     std::fs::remove_dir_all(&workspace).ok();
 }

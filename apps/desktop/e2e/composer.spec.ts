@@ -506,6 +506,94 @@ test("thinking is Compact by default: one ticking activity line, then a Thought 
   }
 });
 
+test("Claude's note before a call is reply text between the tool rows, whatever the thinking display", async ({}, info) => {
+  const { app, page, errors, close } = await launch(info, async (workspace) => {
+    await writeFile(join(workspace, "notes.txt"), "apples\npears\n");
+  });
+  try {
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    const transcript = page.locator(".transcript");
+    // The echo provider thinks, writes a note and reads the file; then a
+    // second note (one that first streamed as thinking) and a second read;
+    // then answers.
+    await input.fill('!note read {"path":"notes.txt"}');
+    await input.press("Enter");
+    const reply = page.locator(".message.assistant").last();
+    await expect(reply).toContainText("Tool read =>");
+    await expect(page.locator(".assistant-activity")).toHaveCount(0);
+    const rows = () =>
+      page.evaluate(() =>
+        Array.from(document.querySelectorAll(".transcript article.message"))
+          .map((row) => [(row as HTMLElement).dataset.type, row.textContent?.replace(/\s+/g, " ").trim().slice(0, 32)])
+          .filter(([type]) => type !== "user_message"),
+      );
+    const notes = page.locator(".message.assistant").filter({ hasText: /First I'll run it once\.|Once more, to be sure\./ });
+
+    // Compact: one Thought step, then each note as reply text before its call.
+    expect((await rows()).map(([type]) => type)).toEqual([
+      "reasoning",
+      "assistant_message",
+      "tool_call",
+      "assistant_message",
+      "tool_call",
+      "assistant_message",
+    ]);
+    await expect(notes).toHaveCount(2);
+    await expect(notes.nth(0)).toHaveText("First I'll run it once.");
+    await expect(notes.nth(1)).toHaveText("Once more, to be sure.");
+    const thought = page.locator(".tool-call.thought");
+    await expect(thought).toHaveCount(1);
+    await thought.locator("summary").click();
+    await expect(thought.locator(".thought-body")).toHaveText("Planning the check.");
+    await thought.locator("summary").click();
+    // A note is no answer: Copy and Fork are only under the reply, and Copy
+    // leaves the notes out.
+    await expect(notes.getByRole("button", { name: "Copy message", exact: true })).toHaveCount(0);
+    await reply.hover();
+    const text = await copied(app, page, reply.getByRole("button", { name: "Copy message", exact: true }));
+    expect(text).toContain("Tool read =>");
+    expect(text).not.toContain("First I'll run it once.");
+    expect(text).not.toContain("Once more");
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await transcript.screenshot({ path: info.outputPath(`notes-compact-${value}.png`) });
+    }
+    await theme(page, "light");
+
+    // Show: the thought in full, the notes as before, never inside it.
+    await chooseThinking(page, "Show");
+    await expect(page.locator(".message.reasoning")).toHaveCount(1);
+    await expect(page.locator(".message.reasoning")).toContainText("Planning the check.");
+    await expect(page.locator(".message.reasoning")).not.toContainText("Once more");
+    await expect(notes).toHaveCount(2);
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await transcript.screenshot({ path: info.outputPath(`notes-show-${value}.png`) });
+    }
+    await theme(page, "light");
+
+    // Hide: no thinking, the notes still there.
+    await chooseThinking(page, "Hide");
+    await expect(page.locator(".message.reasoning")).toHaveCount(0);
+    await expect(page.locator(".tool-call.thought")).toHaveCount(0);
+    expect((await rows()).map(([type]) => type)).toEqual([
+      "assistant_message",
+      "tool_call",
+      "assistant_message",
+      "tool_call",
+      "assistant_message",
+    ]);
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await transcript.screenshot({ path: info.outputPath(`notes-hide-${value}.png`) });
+    }
+    await theme(page, "light");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test("someone who had turned Show reasoning on keeps seeing thinking in full", async ({}, info) => {
   const { page, errors, close } = await launch(info, undefined, { showReasoning: true });
   try {

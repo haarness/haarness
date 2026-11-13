@@ -96,7 +96,7 @@ async fn filtered_turn_preserves_partial_output_and_usage_without_tools_or_queue
     assert!(runtime.active_turns().await.unwrap().is_empty());
     let items = runtime.items(thread.id, None).await.unwrap();
     assert!(items.iter().any(
-        |item| matches!(&item.data, ItemData::AssistantMessage { text } if text == "partial answer")
+        |item| matches!(&item.data, ItemData::AssistantMessage { text, .. } if text == "partial answer")
     ));
     assert!(items.iter().any(|item| matches!(
         &item.data,

@@ -1535,7 +1535,8 @@ impl Service {
             } => Some(SessionUpdate::UserMessageChunk(ContentChunk::new(
                 ContentBlock::Text(TextContent::new(text)),
             ))),
-            ItemData::AssistantMessage { text } => Some(SessionUpdate::AgentMessageChunk(
+            // A note before a call is reply text, as it was live.
+            ItemData::AssistantMessage { text, .. } => Some(SessionUpdate::AgentMessageChunk(
                 ContentChunk::new(ContentBlock::Text(TextContent::new(text))),
             )),
             ItemData::Reasoning { text, .. } => Some(SessionUpdate::AgentThoughtChunk(
