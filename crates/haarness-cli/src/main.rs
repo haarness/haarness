@@ -15059,11 +15059,10 @@ fn remove_runtime_if_owner(paths: &Paths, pid: u32) {
 }
 /// Raw auth.json contents. Entries are kept as JSON values so record types
 /// this build does not understand survive read→write round trips untouched.
+/// The saved provider credentials as stored. A missing or empty file holds
+/// none; a damaged one is an error naming the file.
 fn read_auth(paths: &Paths) -> Result<BTreeMap<String, serde_json::Value>> {
-    if !paths.auth.exists() {
-        return Ok(BTreeMap::new());
-    }
-    Ok(serde_json::from_slice(&fs::read(&paths.auth)?)?)
+    Ok(CredentialStore::new(paths.auth.clone()).all_raw()?)
 }
 fn resolved_credentials(value: &BTreeMap<String, serde_json::Value>) -> HashMap<String, String> {
     value

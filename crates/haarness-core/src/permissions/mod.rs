@@ -99,7 +99,8 @@ pub fn record_credential_files_below(folder: &Path, name: &str) {
 /// Whether `path` is where Haarness keeps sign-ins or tokens: a file
 /// [`record_credential_store`] named, a temporary copy written while saving
 /// it (`auth.tmp-…`, `auth.json.tmp-…` or `.auth.json-…`), its lock
-/// (`auth.json.lock`), anything in a folder of them, or a file of a name
+/// (`auth.json.lock`), the copy kept of a damaged one
+/// (`auth.json.unreadable-…`), anything in a folder of them, or a file of a name
 /// [`record_credential_files_below`] gave below its folder. Compared as full
 /// paths, after `.` and `..`, as written and through links in the folders
 /// (letter case aside), never by name alone: a project's own `auth.json` is
@@ -187,8 +188,8 @@ fn names_a_store(stores: &[(PathBuf, Store)], candidate: &Path) -> bool {
     })
 }
 
-/// Whether `candidate`'s name is the store file's, its temporary copy's or
-/// its lock's.
+/// Whether `candidate`'s name is the store file's, its temporary copy's, its
+/// lock's or that of the copy kept of it when it was damaged.
 fn store_file_name(store: &Path, candidate: &Path) -> bool {
     let (Some(store), Some(name)) = (store.file_name(), candidate.file_name()) else {
         return false;
@@ -201,6 +202,7 @@ fn store_file_name(store: &Path, candidate: &Path) -> bool {
     name == store
         || name == format!("{store}.lock")
         || name.starts_with(&format!("{store}.tmp-"))
+        || name.starts_with(&format!("{store}.unreadable-"))
         || name.starts_with(&format!("{stem}.tmp-"))
         || name.starts_with(&format!(".{store}-"))
 }
@@ -2882,6 +2884,7 @@ mod tests {
             root.join("auth.tmp-41-x2Yz"),
             root.join(".auth.json-01a1"),
             root.join("auth.json.lock"),
+            root.join("auth.json.unreadable-1763000000000"),
             root.join("cache/runtime.json"),
             root.join("cache/workspaces/01a1/runtime.json"),
             root.join("cache/workspaces/01a1/runtime.tmp-42"),

@@ -44,10 +44,28 @@ pub type AuthResult<T> = Result<T, AuthError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
-    #[error("could not read provider credentials: {0}")]
-    Read(#[source] std::io::Error),
-    #[error("could not decode provider credentials: {0}")]
-    Decode(#[source] serde_json::Error),
+    /// The file is there but cannot be read (its permissions, a disk error):
+    /// nothing replaces it until it can be.
+    #[error(
+        "cannot read the saved provider keys in {} ({source}), so nothing was saved. Make the file readable to you again, or rename it to start a new one",
+        path.display()
+    )]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The file holds something other than saved keys. The next save keeps a
+    /// copy of it beside it and starts a new file.
+    #[error(
+        "the saved provider keys in {} are damaged ({source}). Connect a provider again to start a new file; Haarness keeps a copy of this one beside it",
+        path.display()
+    )]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("could not write provider credentials: {0}")]
     Write(#[source] std::io::Error),
     #[error("could not encode provider credentials: {0}")]
@@ -196,12 +214,70 @@ impl CredentialStore {
         &self.path
     }
 
+    /// Every saved record by provider id. A missing file, or one that holds
+    /// nothing but white space (as an interrupted copy or an editor can
+    /// leave), holds none.
     pub fn all_raw(&self) -> AuthResult<BTreeMap<String, serde_json::Value>> {
-        if !self.path.exists() {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(source) => {
+                return Err(AuthError::Read {
+                    path: self.path.clone(),
+                    source,
+                });
+            }
+        };
+        if bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(BTreeMap::new());
         }
-        serde_json::from_slice(&fs::read(&self.path).map_err(AuthError::Read)?)
-            .map_err(AuthError::Decode)
+        serde_json::from_slice(&bytes).map_err(|source| AuthError::Decode {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
+    /// The saved records, read to be changed. A damaged file is copied
+    /// aside first (`auth.json.unreadable-<ms>`, readable by its owner only)
+    /// and the change starts from none, so connecting a provider works again
+    /// and what the file held is not lost; a file that cannot be read stops
+    /// the change.
+    fn records_to_change(&self) -> AuthResult<BTreeMap<String, serde_json::Value>> {
+        match self.all_raw() {
+            Err(AuthError::Decode { .. }) => {
+                let copy = self.keep_aside()?;
+                tracing::warn!(
+                    copy = %copy.display(),
+                    "the saved provider keys were damaged; kept a copy and started a new file"
+                );
+                Ok(BTreeMap::new())
+            }
+            records => records,
+        }
+    }
+
+    fn keep_aside(&self) -> AuthResult<PathBuf> {
+        let bytes = fs::read(&self.path).map_err(|source| AuthError::Read {
+            path: self.path.clone(),
+            source,
+        })?;
+        let mut name = self.path.as_os_str().to_os_string();
+        name.push(format!(".unreadable-{}", unix_millis()));
+        let copy = PathBuf::from(name);
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&copy).map_err(AuthError::Write)?;
+        set_private(&file)?;
+        file.write_all(&bytes).map_err(AuthError::Write)?;
+        file.sync_all().map_err(AuthError::Write)?;
+        Ok(copy)
     }
 
     pub fn all(&self) -> AuthResult<BTreeMap<String, Credential>> {
@@ -231,7 +307,7 @@ impl CredentialStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _file_lock = self.lock_mutations()?;
         let provider = normalize(provider);
-        let mut raw = self.all_raw()?;
+        let mut raw = self.records_to_change()?;
         raw.remove(&format!("{provider}/"));
         raw.insert(
             provider.to_owned(),
@@ -247,7 +323,7 @@ impl CredentialStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _file_lock = self.lock_mutations()?;
         let provider = normalize(provider);
-        let mut raw = self.all_raw()?;
+        let mut raw = self.records_to_change()?;
         let removed =
             raw.remove(provider).is_some() | raw.remove(&format!("{provider}/")).is_some();
         self.write_raw(&raw)?;
@@ -1990,6 +2066,93 @@ mod tests {
         );
         assert!(store.get("openai").unwrap().is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An empty file (white space only) holds no keys and takes a new one.
+    #[test]
+    fn an_empty_key_file_reads_as_none() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        for text in ["", " \n\t\r\n"] {
+            std::fs::write(&path, text).unwrap();
+            let store = CredentialStore::new(path.clone());
+            assert!(store.all_raw().unwrap().is_empty());
+            assert!(store.get("openai").unwrap().is_none());
+            store.set("openai", &Credential::api("sk".into())).unwrap();
+            assert_eq!(store.get("openai").unwrap().unwrap().api_key(), Some("sk"));
+        }
+        let kept: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains("unreadable"))
+            .collect();
+        assert!(kept.is_empty(), "an empty file is not kept");
+    }
+
+    /// A damaged file says so, naming itself; the next save keeps a private
+    /// copy of it before starting a new one.
+    #[test]
+    fn a_damaged_key_file_is_kept_aside_before_a_key_replaces_it() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        let damaged = b"{\"openai\": {\"type\": \"api\", \"key\": \"sk-old\"";
+        std::fs::write(&path, damaged).unwrap();
+        let store = CredentialStore::new(path.clone());
+        let error = store.get("openai").unwrap_err().to_string();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains("damaged"), "{error}");
+        store
+            .set("anthropic", &Credential::api("sk-new".into()))
+            .unwrap();
+        assert_eq!(
+            store.get("anthropic").unwrap().unwrap().api_key(),
+            Some("sk-new")
+        );
+        let copies: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("auth.json.unreadable-")
+            })
+            .collect();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(std::fs::read(copies[0].path()).unwrap(), damaged);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = copies[0].metadata().unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    /// A file that cannot be read is never replaced, and the refusal names it.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_key_file_stops_a_save_and_names_itself() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        std::fs::write(&path, r#"{"openai":{"type":"api","key":"sk"}}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Running as root: nothing is unreadable.
+            return;
+        }
+        let store = CredentialStore::new(path.clone());
+        let error = store
+            .set("anthropic", &Credential::api("sk-new".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains("nothing was saved"), "{error}");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"openai":{"type":"api","key":"sk"}}"#
+        );
     }
 
     #[test]
