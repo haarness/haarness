@@ -555,6 +555,50 @@ impl Drop for LentTerminal {
     }
 }
 
+/// The terminal's settings as the shell uses them, read once the TUI has
+/// left raw mode to lend the terminal to a program, and set again when the
+/// program is done. A program killed in raw mode leaves raw mode behind,
+/// and the TUI's own raw mode would otherwise take that for the shell's and
+/// put it back when the TUI exits.
+pub(crate) struct Settings {
+    #[cfg(unix)]
+    saved: Option<nix::sys::termios::Termios>,
+}
+
+impl Settings {
+    pub(crate) fn now() -> Self {
+        #[cfg(unix)]
+        let saved = if cfg!(test) {
+            None
+        } else {
+            std::fs::File::open("/dev/tty")
+                .ok()
+                .and_then(|tty| nix::sys::termios::tcgetattr(&tty).ok())
+        };
+        Self {
+            #[cfg(unix)]
+            saved,
+        }
+    }
+
+    /// Set the settings read by [`Self::now`] again, and pop a keyboard mode
+    /// the program may have pushed and not popped.
+    #[cfg_attr(not(unix), allow(clippy::unused_self))] // the settings are Unix's
+    pub(crate) fn put_back(&self) {
+        // Unit tests that lend the terminal never touch the real one.
+        if cfg!(test) {
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(saved) = &self.saved
+            && let Ok(tty) = std::fs::File::open("/dev/tty")
+        {
+            let _ = nix::sys::termios::tcsetattr(&tty, nix::sys::termios::SetArg::TCSANOW, saved);
+        }
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
+}
+
 /// Whether the TUI, or a program it handed the terminal to, is drawing on it.
 pub(crate) fn in_use() -> bool {
     on_screen() || LENT.load(Ordering::Relaxed)

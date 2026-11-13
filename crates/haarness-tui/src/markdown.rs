@@ -58,7 +58,8 @@ struct Renderer<'a> {
     italic: u32,
     code_block: Option<(String, String)>,
     list_stack: Vec<Option<u64>>,
-    link: Option<String>,
+    /// The open link's target, and the first of its spans in `inline`.
+    link: Option<(String, usize)>,
     prefix_override: Option<String>,
     quote_depth: u32,
     /// Collecting table cells while inside a table.
@@ -114,6 +115,10 @@ impl Renderer<'_> {
         }
         self.lines.extend(wrapped);
         self.prefix_override = None;
+        // A link that goes on past a line break starts again on the next.
+        if let Some((_, start)) = &mut self.link {
+            *start = 0;
+        }
     }
 
     fn prefixes(&self) -> (String, String) {
@@ -249,8 +254,13 @@ impl Renderer<'_> {
                 } else {
                     format!(" {code} ")
                 };
-                self.inline
-                    .push(Span::new(text, self.theme.accent).on(self.theme.surface));
+                let mut span = Span::new(text, self.theme.accent).on(self.theme.surface);
+                // Code shaped like a path may be a project file, which a
+                // click then opens (see `reply_files`).
+                if let Some(reference) = crate::reply_files::code_reference(&code, cfg!(windows)) {
+                    span = span.opening(reference.encode());
+                }
+                self.inline.push(span);
             }
             // Terminal agent output relies on its line structure; treat soft
             // breaks as real breaks instead of collapsing them to spaces.
@@ -319,7 +329,9 @@ impl Renderer<'_> {
                 };
                 self.prefix_override = Some(marker);
             }
-            Tag::Link { dest_url, .. } => self.link = Some(dest_url.to_string()),
+            Tag::Link { dest_url, .. } => {
+                self.link = Some((dest_url.to_string(), self.inline.len()));
+            }
             Tag::Table(_) => {
                 self.flush_inline();
                 self.table = Some(TableState::default());
@@ -410,7 +422,21 @@ impl Renderer<'_> {
                 }
             }
             TagEnd::Link => {
-                if let Some(url) = self.link.take() {
+                if let Some((url, start)) = self.link.take() {
+                    // A table cell is plain text: the address goes after the
+                    // link's words in the cell itself (added to the running
+                    // text, it would land in the paragraph after the table).
+                    if let Some(table) = &mut self.table {
+                        if table.in_cell
+                            && let Some(cell) = table.current_row.last_mut()
+                            && !cell.contains(&url)
+                        {
+                            cell.push_str(" (");
+                            cell.push_str(&url);
+                            cell.push(')');
+                        }
+                        return;
+                    }
                     let shows_url = self
                         .inline
                         .last()
@@ -418,9 +444,26 @@ impl Renderer<'_> {
                     if let Some(last) = self.inline.last_mut() {
                         last.attributes |= attr::UNDERLINE;
                     }
+                    // A link to a path opens its file from the link's words
+                    // and from the path shown after them alike.
+                    let Some(reference) = crate::reply_files::link_reference(&url) else {
+                        if !shows_url {
+                            self.inline
+                                .push(Span::new(format!(" ({url})"), self.theme.muted));
+                        }
+                        return;
+                    };
+                    let link = reference.encode();
+                    let from = start.min(self.inline.len());
+                    for span in &mut self.inline[from..] {
+                        span.opens = Some(std::sync::Arc::clone(&link));
+                    }
                     if !shows_url {
-                        self.inline
-                            .push(Span::new(format!(" ({url})"), self.theme.muted));
+                        self.inline.extend([
+                            Span::new(" (", self.theme.muted),
+                            Span::new(url, self.theme.muted).opening(link),
+                            Span::new(")", self.theme.muted),
+                        ]);
                     }
                 }
             }
@@ -766,6 +809,34 @@ mod table_tests {
         assert!(
             separators.windows(2).all(|pair| pair[0] == pair[1]),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_link_in_a_table_keeps_its_address_in_its_cell() {
+        let theme = Theme::editorial_dark();
+        let lines = render_markdown(
+            "| docs |\n|---|\n| [guide](https://example.com/guide) |\n\
+             | <https://example.com/faq> |\n\nAfter the table.",
+            80,
+            &theme,
+            "  ",
+        );
+        let rows: Vec<String> = lines.iter().map(haarness_opentui::Line::text).collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.trim() == "guide (https://example.com/guide)"),
+            "{rows:?}"
+        );
+        // An address that is the link's own words is not written twice.
+        assert!(
+            rows.iter()
+                .any(|row| row.trim() == "https://example.com/faq"),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.trim() == "After the table."),
+            "{rows:?}"
         );
     }
 

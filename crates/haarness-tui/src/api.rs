@@ -411,6 +411,16 @@ impl ApiClient {
         self.local_workspace_switching
     }
 
+    /// Whether the server's files are on this computer: true for a local
+    /// server this client started or found and for one at a loopback
+    /// address; false through Haarness Cloud or at any other address, even
+    /// when the same paths happen to exist here.
+    #[must_use]
+    pub(crate) fn files_on_this_computer(&self) -> bool {
+        self.local_workspace_switching
+            || reqwest::Url::parse(&self.server_url()).is_ok_and(|url| loopback(&url))
+    }
+
     #[must_use]
     pub fn with_endpoint_resolver(mut self, resolver: EndpointResolver) -> Self {
         self.endpoint_resolver = Some(resolver);
@@ -2631,14 +2641,7 @@ fn unanswered_error(error: reqwest::Error) -> anyhow::Error {
     tracing::warn!(detail, "a request to the server got no answer");
     // A server on this computer that does not answer is Haarness's, not the
     // internet's.
-    let local = error
-        .url()
-        .and_then(reqwest::Url::host)
-        .is_some_and(|host| match host {
-            url::Host::Domain(name) => name == "localhost",
-            url::Host::Ipv4(address) => address.is_loopback(),
-            url::Host::Ipv6(address) => address.is_loopback(),
-        });
+    let local = error.url().is_some_and(loopback);
     let message = if error.is_timeout() {
         TIMED_OUT
     } else if local {
@@ -2647,6 +2650,15 @@ fn unanswered_error(error: reqwest::Error) -> anyhow::Error {
         CANNOT_CONNECT
     };
     Unanswered { message }.into()
+}
+
+/// Whether `url` is on this computer: `localhost` or a loopback address.
+fn loopback(url: &reqwest::Url) -> bool {
+    url.host().is_some_and(|host| match host {
+        url::Host::Domain(name) => name == "localhost",
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+    })
 }
 
 /// `send`, with a request that got no answer in plain words: see

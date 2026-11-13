@@ -1184,6 +1184,13 @@ pub struct App {
     /// workspace path. Attached clients may create/reset/remove remotely but
     /// must not be offered an Open action they cannot complete.
     pub workspace_local_switching: bool,
+    /// Whether the server's files are on this computer (see
+    /// [`crate::api::ApiClient::files_on_this_computer`]): only then can a
+    /// click open a project file an answer mentions.
+    pub files_local: bool,
+    /// Lookups behind the paths in answers on screen. Boxed: `App` lives in
+    /// the futures of its async handlers, which are kept small.
+    pub(crate) reply_files: Box<crate::reply_files::ReplyFiles>,
     pub workspace_selected: Option<String>,
     pub workspace_create_name: Option<String>,
     /// Last successfully discovered ref catalog. `None` deliberately renders
@@ -1456,6 +1463,8 @@ impl App {
             // relaunch into another local directory. run_with_client sets the
             // capability from the resolver-backed ApiClient at startup.
             workspace_local_switching: false,
+            files_local: false,
+            reply_files: Box::default(),
             workspace_selected: None,
             workspace_create_name: None,
             workspace_refs: None,
