@@ -301,8 +301,8 @@ DTOs, MCP SDK types, CLI parsing or OpenTUI; outer crates implement those ports,
 | **[haarness](https://github.com/haarness/haarness)** | This repository: the agent, terminal UI, Desktop, server and SDKs. Apache 2.0. |
 | **[haarness-router](https://github.com/haarness/haarness-router)** | A stateless, OpenAI-compatible model router you can host yourself. MIT. |
 
-[Haarness Cloud](https://haarness.ai/product/cloud) is the hosted service at haarness.ai. The phone apps for
-[iPhone and iPad](https://haarness.ai/product/ios) and [Android](https://haarness.ai/product/android) are coming soon.
+[Haarness Cloud](https://haarness.ai/product/cloud) is the hosted service at haarness.ai. Haarness for
+[iPhone and iPad](https://apps.apple.com/app/haarness/id6824975500) is free on the App Store, and [Android](https://haarness.ai/product/android) is coming soon.
 
 ## Contributing
 
