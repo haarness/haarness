@@ -1116,13 +1116,13 @@ fn rule_names(
     if is_exact_rule(&rule.pattern) {
         return false;
     }
-    if rule_covers(&rule.pattern, operation) {
+    if rule_covers(&rule.pattern, operation) || separators_cover(rule, &rule.pattern, operation) {
         return true;
     }
     if operation.starts_with(EXTERNAL_DIRECTORY)
-        && real_folders
-            .get(&rule.pattern)
-            .is_some_and(|real| path_rule_matches(real, operation))
+        && real_folders.get(&rule.pattern).is_some_and(|real| {
+            path_rule_matches(real, operation) || separators_cover(rule, real, operation)
+        })
     {
         return true;
     }
@@ -1137,8 +1137,25 @@ fn rule_names(
     }
     let absolute = Path::new(target).is_absolute();
     spellings.iter().any(|(spelled, spelled_absolute)| {
-        *spelled_absolute == absolute && path_rule_matches(&rule.pattern, spelled)
+        *spelled_absolute == absolute
+            && (path_rule_matches(&rule.pattern, spelled)
+                || separators_cover(rule, &rule.pattern, spelled))
     })
+}
+
+/// Whether a deny or ask about file paths that writes `\*` or `\?` covers
+/// `value` when each backslash in `pattern` is read as `/`, as before path
+/// rules named a literal `*` or `?`: a rule written with Windows separators
+/// (`secrets\*`, `**\*.pem`) keeps refusing or asking for what it did. An
+/// allow, saved answers included, names the literal character only, so
+/// reading it as a name never widens one nor lifts a deny.
+fn separators_cover(rule: &PermissionRule, pattern: &str, value: &str) -> bool {
+    rule.decision != PermissionDecision::Allow
+        && holds_literal_wildcard(pattern)
+        && value
+            .split_once(':')
+            .is_some_and(|(permission, _)| is_path_permission(permission))
+        && wildcard_match(pattern, value)
 }
 
 const EXTERNAL_DIRECTORY: &str = "external_directory:";
@@ -1789,8 +1806,8 @@ fn is_path_permission(permission: &str) -> bool {
 
 /// [`wildcard_match`] for a rule about file paths. Outside Windows `\*` and
 /// `\?` in the pattern match that character itself, so a rule names a folder
-/// or file whose name holds one (`/work/a\*b/*` covers `/work/a*b/notes`, not
-/// `/work/a-old-b/notes`), and any other backslash is `/` as before. On
+/// or file whose name holds one (`/srv/drop\*/*` covers `/srv/drop*/notes`,
+/// not `/srv/dropbox/notes`), and any other backslash is `/` as before. On
 /// Windows, where `\` separates folders and no name may hold `*` or `?`, it is
 /// [`wildcard_match`].
 #[must_use]
@@ -2393,8 +2410,8 @@ mod tests {
             }
             return;
         }
-        assert_eq!(literal_path("/work/a*b/c?d"), r"/work/a\*b/c\?d");
-        assert_eq!(literal_path("/work/plain"), "/work/plain");
+        assert_eq!(literal_path("/srv/m*n/p?q"), r"/srv/m\*n/p\?q");
+        assert_eq!(literal_path("/srv/plain"), "/srv/plain");
         let outside = engine(&[r"external_directory:/tmp/a\*b/*"]);
         assert_eq!(
             outside.evaluate("external_directory:/tmp/a*b/*"),
@@ -2415,29 +2432,30 @@ mod tests {
         // The same for every permission about file paths, `write` and the
         // other names of `edit` included, and for `?`.
         for permission in ["read", "edit", "write", "list", "external_directory"] {
-            let named = engine(&[&format!(r"{permission}:/work/build\?/repo/*")]);
+            let named = engine(&[&format!(r"{permission}:/srv/v\?/docs/*")]);
             assert_eq!(
-                named.evaluate(&format!("{permission}:/work/build?/repo/x")),
+                named.evaluate(&format!("{permission}:/srv/v?/docs/x")),
                 PermissionDecision::Allow,
                 "{permission}"
             );
             assert_eq!(
-                named.evaluate(&format!("{permission}:/work/build2/repo/x")),
+                named.evaluate(&format!("{permission}:/srv/v2/docs/x")),
                 PermissionDecision::Ask,
                 "{permission}"
             );
         }
         // Escapes before, between and after wildcards, and at the end.
-        assert!(path_rule_matches(r"/w/\*/*/\?/*", "/w/*/q/?/z"));
-        assert!(!path_rule_matches(r"/w/\*/*/\?/*", "/w/x/q/?/z"));
-        assert!(path_rule_matches(r"/w/build\*", "/w/build*"));
-        assert!(!path_rule_matches(r"/w/build\*", "/w/buildx"));
+        assert!(path_rule_matches(r"/m/*/\?k/\*", "/m/p/q/?k/*"));
+        assert!(!path_rule_matches(r"/m/*/\?k/\*", "/m/p/q/zk/*"));
+        assert!(!path_rule_matches(r"/m/*/\?k/\*", "/m/p/?k/z"));
+        assert!(path_rule_matches(r"/m/cache\?", "/m/cache?"));
+        assert!(!path_rule_matches(r"/m/cache\?", "/m/cache1"));
         // An escaped `*` after a space is that character, not the optional
         // arguments a trailing ` *` reads as.
-        assert!(!path_rule_matches(r"read:/w/notes \*", "read:/w/notes"));
+        assert!(!path_rule_matches(r"read:/m/notes \*", "read:/m/notes"));
         // Any other backslash is still `/`.
-        assert!(path_rule_matches(r"\w\a\*b/*", "/w/a*b/x"));
-        assert!(!path_rule_matches(r"\w\a\*b/*", "/w/axb/x"));
+        assert!(path_rule_matches(r"\m\k\*v/*", "/m/k*v/x"));
+        assert!(!path_rule_matches(r"\m\k\*v/*", "/m/kzv/x"));
     }
 
     #[test]
@@ -2455,14 +2473,14 @@ mod tests {
         );
         let cases = [
             (
-                "external_directory:/work/build*/repo/*",
-                "external_directory:/work/build-x/repo/y",
+                "external_directory:/srv/drop*/in/*",
+                "external_directory:/srv/dropbox/in/y",
             ),
             ("read:*.env", "read:deep/.env"),
             ("read:src/*", "read:src\\main.rs"),
-            ("edit:\\a/*", "edit:/a/b"),
-            (r"bash:find . -name \*.ts", r"bash:find . -name \*.ts"),
-            (r"bash:find . -name \*.ts", "bash:find . -name /x.ts"),
+            ("edit:\\opt/*", "edit:/opt/q"),
+            (r"bash:ls -d \*.log", r"bash:ls -d \*.log"),
+            (r"bash:ls -d \*.log", "bash:ls -d /app.log"),
             (r"bash:echo \?", "bash:echo /x"),
             ("bash:git status *", "bash:git status"),
             (r"webfetch:https://a.test/\*", "webfetch:https://a.test//x"),
@@ -2477,15 +2495,57 @@ mod tests {
         // A shell command rule keeps reading `\*` as `/*`.
         let mut commands = PermissionEngine::build_defaults();
         commands.add_rule(rule("bash:*", PermissionDecision::Ask));
-        commands.add_rule(rule(r"bash:find . -name \*.ts", PermissionDecision::Allow));
+        commands.add_rule(rule(r"bash:ls -d \*.log", PermissionDecision::Allow));
         assert_eq!(
-            commands.evaluate(r"bash:find . -name \*.ts"),
+            commands.evaluate(r"bash:ls -d \*.log"),
             PermissionDecision::Allow
         );
         assert_eq!(
-            commands.evaluate("bash:find . -name /x.ts"),
+            commands.evaluate("bash:ls -d /app.log"),
             PermissionDecision::Allow
         );
+    }
+
+    // On Windows `\` separates folders, and every rule reads as it did.
+    #[cfg(unix)]
+    #[test]
+    fn a_deny_or_ask_written_with_windows_separators_keeps_what_it_covered() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let mut engine = PermissionEngine::build_defaults();
+        engine.set_workspace(Path::new("/srv/app"));
+        for (pattern, decision) in [
+            (r"read:keys\*", Deny),
+            (r"read:**\*.crt", Deny),
+            (r"edit:keys\*", Deny),
+            (r"edit:out\*", Ask),
+        ] {
+            engine.add_rule(rule(pattern, decision));
+        }
+        for (operation, decision) in [
+            ("read:keys/id.txt", Deny),
+            ("read:/srv/app/keys/id.txt", Deny),
+            ("read:certs/web.crt", Deny),
+            ("write:keys/new.txt", Deny),
+            ("edit:out/report.md", Ask),
+            // The literal name too.
+            ("read:keys*", Deny),
+            ("read:notes.txt", Allow),
+        ] {
+            assert_eq!(engine.evaluate(operation), decision, "{operation}");
+        }
+        // An allow of that shape, configured or remembered, names the literal
+        // character only.
+        let mut allows = PermissionEngine::new(vec![rule("*", Ask)]);
+        allows.add_rule(rule(r"read:keys\*", Allow));
+        allows.add_grant(rule(r"external_directory:/srv/cache\*/*", Allow));
+        for (operation, decision) in [
+            ("read:keys*", Allow),
+            ("read:keys/id.txt", Ask),
+            ("external_directory:/srv/cache*/*", Allow),
+            ("external_directory:/srv/cache/x/*", Ask),
+        ] {
+            assert_eq!(allows.evaluate(operation), decision, "{operation}");
+        }
     }
 
     #[cfg(unix)]
