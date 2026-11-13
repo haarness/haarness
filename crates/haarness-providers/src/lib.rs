@@ -2275,6 +2275,25 @@ mod tests {
             "https://gw.example/v1",
             "http://gw.example/v1/models"
         ));
+        // A Location as servers write it, resolved against the request.
+        let request = url::Url::parse("http://gw.example/v1/acct/models").unwrap();
+        for location in [
+            "../other/models",
+            "/v1/acct/../other/models",
+            "/v1/acct/%2e%2e/other/models",
+            "/v1/acct/.%2E/other/models",
+            "/v1/acct/..%2fother/models",
+            "/v1/acct/..%5Cother/models",
+            "//evil.example/v1/acct/models",
+        ] {
+            let next = request.join(location).unwrap();
+            assert!(
+                !super::redirect_covered("http://gw.example/v1/acct", &next),
+                "{location}"
+            );
+        }
+        let next = request.join("./models/v2").unwrap();
+        assert!(super::redirect_covered("http://gw.example/v1/acct", &next));
     }
 
     /// A chat on a provider whose saved key is for another address fails

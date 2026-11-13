@@ -205,7 +205,7 @@ fn withheld_words(address: &str, credential: &Credential) -> (String, String) {
     if credential.addresses_pending() {
         return (
             format!(
-                "Haarness is still checking which addresses the saved key was used at, so it was not sent to {address} yet."
+                "The saved key's addresses are still being looked for, so it was not sent to {address} yet."
             ),
             format!("Still checking where the saved key was used. {connect}"),
         );
@@ -416,13 +416,10 @@ fn addresses_here(paths: &Paths, workspace: &Path, pending: &BTreeMap<String, St
         &crate::scoped_config_files(paths, Path::new("."), false),
         None,
     );
-    let same = |path: &str| {
-        Path::new(path) == workspace
-            || dunce::canonicalize(path)
-                .ok()
-                .zip(dunce::canonicalize(workspace).ok())
-                .is_some_and(|(registered, here)| registered == here)
-    };
+    // Registered paths are stored resolved; only this one is resolved here,
+    // so a folder on a volume that does not answer is never touched.
+    let here = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let same = |path: &str| Path::new(path) == here;
     let before = paths
         .workspace_manager()
         .and_then(|manager| Ok(manager.registered()?))
@@ -1071,6 +1068,25 @@ mod tests {
             fence.notice("team").unwrap(),
             format!(
                 "Still checking where the saved key was used. Connect to save a key for {c}/v1."
+            )
+        );
+        // `haarness run` and the log say so in the same words.
+        assert_eq!(
+            fence.log_lines(),
+            [format!(
+                "Provider team: the saved key's addresses are still being looked for, so it was not sent to {c}/v1 yet. Connect it in this project to save a key for that address."
+            )]
+        );
+        let team = haarness_protocol::ProviderInfo {
+            id: "team".into(),
+            name: "Team".into(),
+            authenticated: false,
+            models: Vec::new(),
+        };
+        assert_eq!(
+            crate::not_connected_provider(&team, fence.reasons()),
+            format!(
+                "Team is not connected here: the saved key's addresses are still being looked for, so it was not sent to {c}/v1 yet. Connect it with `haarness auth login team` in this project, then run this again."
             )
         );
         // Connected again in A meanwhile, with the same key.

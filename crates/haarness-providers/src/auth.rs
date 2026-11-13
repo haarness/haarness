@@ -697,14 +697,17 @@ pub fn key_address(url: &str) -> Option<String> {
 }
 
 /// Whether a key saved for `address` (see [`key_address`]) may go to `url`:
-/// the same server, at that path or below it.
+/// the same server, at that path or below it. A slash or backslash written
+/// encoded below it (`%2f`, `%5c`) is refused: a server that decodes it
+/// before it resolves `..` would take the request above the address.
 #[must_use]
 pub fn address_covers(address: &str, url: &str) -> bool {
     key_address(url).is_some_and(|url| {
         url == address
-            || url
-                .strip_prefix(address)
-                .is_some_and(|rest| rest.starts_with('/'))
+            || url.strip_prefix(address).is_some_and(|rest| {
+                let lower = rest.to_ascii_lowercase();
+                rest.starts_with('/') && !lower.contains("%2f") && !lower.contains("%5c")
+            })
     })
 }
 
@@ -2716,6 +2719,20 @@ mod tests {
             "https://gw.example",
             "https://gw.example/anything"
         ));
+        for below in [
+            "/..%2facct-other/openai",
+            "/..%2Facct-other",
+            "/x%5c..%5cother",
+            "/%2F",
+        ] {
+            assert!(
+                !address_covers(
+                    "https://gw.example/v1/acct",
+                    &format!("https://gw.example/v1/acct{below}")
+                ),
+                "{below}"
+            );
+        }
     }
 
     #[test]
