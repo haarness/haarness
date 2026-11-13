@@ -473,6 +473,7 @@ async fn prepare(client: ApiClient, previous: &App) -> Result<Connection> {
     app.yolo = client.auto_approves();
     app.original_client = previous.original_client.clone();
     app.workspace_local_switching = client.supports_local_workspace_switch();
+    app.files_local = client.files_on_this_computer();
     app.server_info = Some(info);
     crate::management::send_computer_words(&mut app, &client).await;
     app.server_commands = client.commands().await?;

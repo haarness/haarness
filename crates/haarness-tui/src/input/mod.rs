@@ -623,6 +623,8 @@ pub enum AppAction {
     StartWorkspaceMutation(WorkspaceMutation),
     /// Discover or validate a workspace base ref without blocking input/SSE.
     StartWorkspaceRefOperation(WorkspaceRefOperation),
+    /// Open a project file an answer mentions in the person's editor.
+    OpenFile(crate::reply_files::Opening),
 }
 
 /// [`handle_key_at`] for a key read just now, as tests press them.

@@ -3081,6 +3081,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
             for row in &mut live {
                 for span in &mut row.spans {
                     span.fg = theme.muted;
+                    span.opens = None;
                 }
             }
             block.extend(live);
@@ -3098,6 +3099,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         // so it cannot change how a partial fence/emphasis token parses.
         let trailing_break = app.preview.ends_with('\n');
         let mut live = render_markdown(&app.preview, width, theme, "  ");
+        // Paths open once the answer is complete: while it streams, the
+        // text moves under a resting pointer and a link would flicker.
+        for span in live.iter_mut().flat_map(|row| &mut row.spans) {
+            span.opens = None;
+        }
         if live.is_empty() || trailing_break {
             live.push(line("  ", theme.text));
         }

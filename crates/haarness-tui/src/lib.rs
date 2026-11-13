@@ -24,6 +24,7 @@ mod preferences;
 mod prompt_context;
 mod pty_view;
 mod remote_control;
+mod reply_files;
 mod resource_mentions;
 mod servers;
 mod side_chat;
@@ -232,6 +233,53 @@ fn edit_draft(app: &mut App, renderer: &mut Renderer, last_title: &mut String, e
             }
         }
         _ => app.notice = "Editor cancelled".into(),
+    }
+}
+
+/// A project file an answer mentions, opened at its line (see
+/// [`reply_files::launch`]). A GUI editor is started and the TUI keeps
+/// drawing; a terminal editor is lent the terminal as Alt+E's is, and the
+/// TUI redraws when it quits.
+fn open_file_in_editor(
+    app: &mut App,
+    renderer: &mut Renderer,
+    last_title: &mut String,
+    file: &reply_files::Opening,
+) {
+    let launch = reply_files::launch(
+        reply_files::configured_editor().as_deref(),
+        std::env::consts::OS,
+        &file.path,
+        file.line,
+    );
+    if launch.gui {
+        let started = launch
+            .command()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match started {
+            Ok(child) => {
+                app.reply_files
+                    .started(child, launch.editor.clone(), file.shown.clone());
+            }
+            Err(_) => app.notice = app.editor_failed(launch.editor.as_deref(), &file.shown),
+        }
+        return;
+    }
+    let status = lend_terminal(renderer, last_title, || launch.command().status());
+    // The pointer has been elsewhere meanwhile.
+    app.hovered_cell = None;
+    app.mouse_down = None;
+    // Exit 126 or 127 is the shell saying the editor is not there; any
+    // other ending is the person's own, such as quitting without saving.
+    let missing = match status {
+        Ok(status) => matches!(status.code(), Some(126 | 127)),
+        Err(_) => true,
+    };
+    if missing {
+        app.notice = app.editor_failed(launch.editor.as_deref(), &file.shown);
     }
 }
 
@@ -523,6 +571,7 @@ async fn run_with_client(
     app.input_delivery = client.input_delivery().await.ok();
     app.original_client = Some(client.clone());
     app.workspace_local_switching = client.supports_local_workspace_switch();
+    app.files_local = client.files_on_this_computer();
     if let Ok(todos) = client.todos(app.thread.id).await {
         app.todos = todos;
     }
@@ -863,6 +912,10 @@ async fn run_with_client(
                                 open_external_editor(&mut app, &mut renderer, &mut last_title);
                                 force_redraw = true;
                             }
+                            Ok(AppAction::OpenFile(file)) => {
+                                open_file_in_editor(&mut app, &mut renderer, &mut last_title, &file);
+                                force_redraw = true;
+                            }
                             Ok(AppAction::Suspend) => {
                                 suspend_terminal(&mut renderer, &mut last_title)?;
                                 force_redraw = true;
@@ -988,6 +1041,10 @@ async fn run_with_client(
                             }
                             Ok(AppAction::OpenEditor) => {
                                 open_external_editor(&mut app, &mut renderer, &mut last_title);
+                                force_redraw = true;
+                            }
+                            Ok(AppAction::OpenFile(file)) => {
+                                open_file_in_editor(&mut app, &mut renderer, &mut last_title, &file);
                                 force_redraw = true;
                             }
                             Ok(AppAction::Suspend) => {
@@ -1227,6 +1284,7 @@ async fn run_with_client(
             () = &mut shutdown => break,
             _ = tick.tick() => {
                 app.tick = app.tick.wrapping_add(1);
+                app.report_failed_editors();
                 replay.extend(app.file_search.overdue());
                 if follow_again_at.is_some_and(|at| std::time::Instant::now() >= at) {
                     follow_again_at = None;

@@ -471,6 +471,13 @@ impl App {
                 });
             }
         }
+        reply_file_hits(
+            self,
+            &lines[window_base..],
+            window_base,
+            transcript_end,
+            &mut hits,
+        );
         for _ in 0..transcript_height.saturating_sub(window_len) {
             lines.push(Line::empty());
         }
@@ -590,6 +597,19 @@ impl App {
                 // item, and painting it again would highlight both the
                 // selected and stale row.
                 frame::HitTarget::DialogSurface | frame::HitTarget::MenuRow(_) => {}
+                // Under the pointer, the path is underlined on each row it
+                // wraps over; another mention of the same file is not.
+                frame::HitTarget::ReplyFile(link) => {
+                    let same = |region: &&frame::HitRegion| match &region.target {
+                        frame::HitTarget::ReplyFile(other) => std::sync::Arc::ptr_eq(other, link),
+                        _ => false,
+                    };
+                    for region in hits.iter().filter(same) {
+                        if let Some(line) = lines.get_mut(region.row) {
+                            span::underline_range(line, region.start, region.end);
+                        }
+                    }
+                }
                 frame::HitTarget::DialogItem(_) => {
                     let target = hit.target.clone();
                     for region in hits
@@ -725,6 +745,71 @@ impl App {
             .find(|hit| hit.row == row && column >= hit.start && column < hit.end)
             .map(|hit| hit.target.clone())
     }
+
+    /// [`Self::hit_at`] ignoring paths in answers: where a click on a path
+    /// that no longer points at a project file lands instead.
+    pub fn hit_beneath_files(&self, row: usize, column: usize) -> Option<frame::HitTarget> {
+        self.hit_rows
+            .borrow()
+            .iter()
+            .rev()
+            .filter(|hit| !matches!(hit.target, frame::HitTarget::ReplyFile(_)))
+            .find(|hit| hit.row == row && column >= hit.start && column < hit.end)
+            .map(|hit| hit.target.clone())
+    }
+}
+
+/// Add a click target for each path in `lines` (drawn from screen row `top`,
+/// clipped to `end` columns) that points at a project file: one per run of
+/// the path's cells, the code chip's padding excluded. Nothing while the
+/// chat's files are on another computer. The answer comes from the lookup
+/// thread of [`crate::reply_files::ReplyFiles`], never from the disk here.
+fn reply_file_hits(
+    app: &App,
+    lines: &[Line],
+    top: usize,
+    end: usize,
+    hits: &mut Vec<frame::HitRegion>,
+) {
+    let Some(root) = app.local_project() else {
+        return;
+    };
+    let mut found = Vec::new();
+    for (offset, line) in lines.iter().enumerate() {
+        if line.spans.iter().all(|span| span.opens.is_none()) {
+            continue;
+        }
+        let mut column = 0;
+        for span in &line.spans {
+            let width = span.width();
+            if let Some(link) = &span.opens {
+                let lead = span.text.len() - span.text.trim_start_matches(' ').len();
+                let trail = span.text.len() - span.text.trim_end_matches(' ').len();
+                let from = column + lead;
+                let to = (column + width).saturating_sub(trail).min(end);
+                if from < to {
+                    found.push((top + offset, from, to, link));
+                }
+            }
+            column += width;
+        }
+    }
+    if found.is_empty() {
+        return;
+    }
+    let targets: Vec<_> = found.iter().map(|(_, _, _, link)| *link).collect();
+    let files = app.reply_files.are_files(root, &targets);
+    for ((row, start, end, link), file) in found.into_iter().zip(files) {
+        if file {
+            hits.push(frame::HitRegion {
+                row,
+                start,
+                end,
+                target: frame::HitTarget::ReplyFile(std::sync::Arc::clone(link)),
+                paint_hover: true,
+            });
+        }
+    }
 }
 
 fn compact_frame(
@@ -777,6 +862,7 @@ fn compact_frame(
                 });
             }
         }
+        reply_file_hits(app, &lines[..end - start], 0, width, hits);
     }
     let notice = app.permission_notice();
     if height >= 3 {

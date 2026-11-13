@@ -62,6 +62,11 @@ pub enum HitTarget {
     QueueEditCancel,
     /// `/mac resume` on a step paused on computer use's strip: the agent goes on.
     ComputerResume,
+    /// A project file an answer mentions, by its span's encoded reference
+    /// (see `crate::reply_files`): open it in the person's editor. Each run of
+    /// its cells is a region; the runs of one mention share one `Arc`, which
+    /// sets it apart from the same file mentioned again elsewhere.
+    ReplyFile(std::sync::Arc<str>),
 }
 
 /// One clickable horizontal region in the final terminal frame. `start` is

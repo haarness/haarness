@@ -8,6 +8,7 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 use crate::api::ApiClient;
 use crate::input::AppAction;
+use crate::reply_files::ClickCheck;
 use crate::state::{App, Overlay};
 use crate::view::frame::HitTarget;
 
@@ -183,7 +184,24 @@ fn request_of(app: &App, target: Option<&HitTarget>) -> Option<String> {
 }
 
 async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> Result<AppAction> {
-    let Some(target) = app.hit_at(row, column) else {
+    // A path in an answer opens in the editor. If it no longer points at a
+    // project file, the click goes to whatever lies under it; if the disk
+    // does not answer in time, it does nothing but say so.
+    let target = match app.hit_at(row, column) {
+        Some(HitTarget::ReplyFile(link)) => match app.file_to_open(&link) {
+            ClickCheck::Open(file) => return Ok(AppAction::OpenFile(file)),
+            ClickCheck::Slow(path) => {
+                app.notice = app.language.format(
+                    "{file} did not open: the disk was too slow to answer",
+                    &[("file", &path)],
+                );
+                return Ok(AppAction::Continue);
+            }
+            ClickCheck::Gone => app.hit_beneath_files(row, column),
+        },
+        target => target,
+    };
+    let Some(target) = target else {
         if app.workspace_mutation.is_some() || app.workspace_ref_operation.is_some() {
             app.notice = "Folder operation is still running · it cannot be safely cancelled".into();
         } else if !matches!(app.overlay, Overlay::None) {
@@ -321,7 +339,7 @@ async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> 
         HitTarget::ComputerResume => {
             crate::management::resume_computer(app, client).await?;
         }
-        HitTarget::DialogSurface | HitTarget::DialogItem(_) => {}
+        HitTarget::DialogSurface | HitTarget::DialogItem(_) | HitTarget::ReplyFile(_) => {}
         HitTarget::ToastDismiss => {
             app.notification_toast = None;
         }

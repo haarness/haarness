@@ -51,6 +51,19 @@ shows comes from that server over REST and SSE, and quitting it never stops the 
   by its English text, so every new string needs a key in each catalog (see
   [Supported languages](../locales/README.md)).
 - `terminal.rs`: raw mode and the alternate screen, restored however the process ends.
+- `reply_files.rs`: clickable project paths in answers. The Markdown renderer stores an encoded
+  reference on the spans of path-shaped inline code and of links to paths (`Span::opens`, which OpenTUI
+  never turns into a terminal hyperlink); answers still streaming carry none. Each frame, the visible
+  references that point at a project file become hit regions. A lookup thread of its own answers
+  whether they do, and only for a path whose text already sits inside the project (shares and
+  Windows device paths are refused before the disk is asked); symbolic links on the way are read, not
+  followed, and their targets must pass the same test. Answers (the file's resolved path) are reused
+  for two seconds and refreshed in the background, a lookup that has run for a second withdraws the
+  links waiting on it, and the drawing thread never reads the disk. A click on a path answered within
+  two seconds opens it at once; an older one is checked again on another thread for at most 300 ms,
+  and the status line says so when the disk is slower. The editor gets the resolved absolute path. GUI editors are spawned in a process group of their own; terminal editors get the terminal
+  through `lend_terminal`, shared with Alt+E, which puts the terminal's settings back afterwards. Only
+  while the server's files are on this computer (`ApiClient::files_on_this_computer`).
 
 ## Files the TUI keeps
 

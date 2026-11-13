@@ -551,6 +551,38 @@ fn style_cells(
     line.spans = rebuilt;
 }
 
+/// Underline the cells `from..to` of `line` and keep their colours: the
+/// path under the pointer that a click opens.
+pub fn underline_range(line: &mut Line, from: usize, to: usize) {
+    if from >= to {
+        return;
+    }
+    let mut rebuilt: Vec<Span> = Vec::with_capacity(line.spans.len() + 2);
+    let mut column = 0usize;
+    for span in line.spans.drain(..) {
+        let width = span.width();
+        if column >= to || column + width <= from {
+            rebuilt.push(span);
+            column += width;
+            continue;
+        }
+        for (mut styled, cell_width) in style_pieces(span) {
+            let end = column.saturating_add(cell_width);
+            let inside = if cell_width == 0 {
+                column > from && column <= to
+            } else {
+                column < to && end > from
+            };
+            if inside {
+                styled.attributes |= attr::UNDERLINE;
+            }
+            push_run(&mut rebuilt, styled);
+            column = end;
+        }
+    }
+    line.spans = rebuilt;
+}
+
 /// Make the `prefix` a row was drawn with decoration: a selection copies the
 /// text after it, never the margin or the bar. The row's first span must
 /// start with it, as [`wrap_spans`] draws it.
