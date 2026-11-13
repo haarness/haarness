@@ -19113,6 +19113,150 @@ request_timeout = 0
         }
     }
 
+    /// Stop while Claude 5.5's thinking waits to be told from a note keeps
+    /// the thinking that was shown and nothing else: the text that waited was
+    /// never shown, so no thought, note or reply holds it. Claude is a stand-in
+    /// that thinks once, starts a second thought and then says nothing more.
+    #[tokio::test]
+    async fn stop_while_thinking_waits_keeps_what_was_shown() {
+        use futures::StreamExt as _;
+        async fn messages(
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> axum::response::Response {
+            let events: Vec<String> = if body["tools"].as_array().is_none_or(Vec::is_empty) {
+                // A title or another side request.
+                vec![
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.into(),
+                    r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Title"}}"#.into(),
+                    r#"{"type":"content_block_stop","index":0}"#.into(),
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#.into(),
+                    r#"{"type":"message_stop"}"#.into(),
+                ]
+            } else {
+                vec![
+                    r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":12,"output_tokens":1}}}"#.into(),
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#.into(),
+                    r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Checked the parser."}}"#.into(),
+                    r#"{"type":"content_block_stop","index":0}"#.into(),
+                    r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#.into(),
+                    r#"{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"I'll run the"}}"#.into(),
+                ]
+            };
+            let frames = futures::stream::iter(
+                events
+                    .into_iter()
+                    .map(|event| Ok::<_, std::convert::Infallible>(format!("data: {event}\n\n"))),
+            );
+            let body = if body["tools"].as_array().is_none_or(Vec::is_empty) {
+                axum::body::Body::from_stream(frames)
+            } else {
+                axum::body::Body::from_stream(frames.chain(futures::stream::pending()))
+            };
+            axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(body)
+                .unwrap()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route("/v1/messages", axum::routing::post(messages)),
+            )
+            .await
+            .unwrap()
+        });
+        let root = std::env::temp_dir().join(format!("haarness-cli-held-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let provider =
+            haarness_providers::AnthropicProvider::new(haarness_providers::NativeInstance {
+                id: "anthropic".into(),
+                name: "Anthropic".into(),
+                base_url: format!("http://{address}/v1"),
+                api_key: Some("fixture-key".into()),
+                models: vec!["claude-opus-5-5".into()],
+                discover_models: false,
+                model_defaults: haarness_providers::CompatibleModelDefaults::default(),
+                assume_authenticated: true,
+                headers: haarness_providers::ProviderHeaders::default(),
+            });
+        let runtime = haarness_core::AgentRuntime::new(
+            std::sync::Arc::new(haarness_store::SqliteStore::in_memory().unwrap()),
+            std::sync::Arc::new(haarness_core::StaticProviderRegistry::new(vec![
+                std::sync::Arc::new(provider) as std::sync::Arc<dyn haarness_core::ModelProvider>,
+            ])),
+            std::sync::Arc::new(haarness_server::NativeToolRegistry::new(root.clone())),
+            haarness_core::EventBus::new(64),
+        );
+        let thread = runtime
+            .create_thread(haarness_protocol::CreateThreadRequest {
+                provider: Some("anthropic".into()),
+                model: Some("claude-opus-5-5".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                haarness_protocol::StartTurnRequest {
+                    request_id: haarness_protocol::RequestId::new(),
+                    text: "why do the tests fail?".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // The first thought ended and showed; the second waits.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !runtime
+                .events()
+                .subscribe(None)
+                .replay
+                .iter()
+                .any(|event| event.event_type == "turn.reasoning_delta")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first thought");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        runtime.interrupt(turn.id).await.unwrap();
+        // Its end is published once what it wrote is saved.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !runtime
+                .events()
+                .subscribe(None)
+                .replay
+                .iter()
+                .any(|event| event.event_type == "turn.finished")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the turn stopped");
+        assert_eq!(
+            runtime.turn(turn.id).await.unwrap().status,
+            haarness_protocol::TurnStatus::Interrupted
+        );
+        let written: Vec<_> = runtime
+            .items(thread.id, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|item| match item.data {
+                haarness_protocol::ItemData::Reasoning { text, .. } => Some(("reasoning", text)),
+                haarness_protocol::ItemData::AssistantMessage { text, .. } => Some(("reply", text)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(written, [("reasoning", "Checked the parser.".to_owned())]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn an_unattended_run_refuses_a_permission_prompt_and_stops() {
         let root =
