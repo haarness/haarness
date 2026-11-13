@@ -1052,7 +1052,8 @@ test("a message sent while the chat before it is still being made is never lost:
     // It reaches the turn still running, as a message sent then does, or
     // starts the next one: either way the reply takes it up.
     await expect(page.locator(".message.assistant").last()).toContainText(`More words while it is made, ${place}`, { timeout: 60000 });
-    await expect(transcript).toContainText(`Echo: First words in the ${place}`);
+    // The echo model answers the latest words it was given: the first message may be answered with the next.
+    await expect(page.locator(".message.user").filter({ hasText: `First words in the ${place}` })).toHaveCount(1);
     await expect(listed()).toHaveCount(1);
     await expect(composer()).toHaveValue("");
     const said = await userMessages();
