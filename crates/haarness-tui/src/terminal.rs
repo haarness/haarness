@@ -232,8 +232,10 @@ fn native_notification(message: String) {
 #[cfg(not(unix))]
 fn native_notification(_message: String) {}
 
-/// Copy text for the user: OSC 52 (works over SSH and inside tmux with
-/// passthrough) plus the native clipboard tool when one exists.
+/// Copy text for the user: OSC 52, which reaches a terminal over SSH too,
+/// plus the native clipboard tool when one exists and, inside tmux, tmux's
+/// paste buffer, which tmux passes on to the terminal it runs in (or, from a
+/// tmux too old for that, the OSC 52 wrapped to pass through it).
 pub fn copy_to_clipboard(text: &str) {
     // Unit tests read what was copied instead of replacing the clipboard of
     // whoever runs them.
@@ -258,45 +260,176 @@ pub(crate) fn take_copied() -> Vec<String> {
 
 #[cfg(not(test))]
 fn copy_for_real(text: &str) {
-    // The helpers run on a thread of their own, one copy after another, so
-    // one that never exits cannot hold up the TUI; a copy still waiting when
-    // a newer one comes is dropped for it.
-    static COPIES: std::sync::OnceLock<std::sync::mpsc::Sender<String>> =
-        std::sync::OnceLock::new();
+    static WORKERS: std::sync::OnceLock<ClipboardWorkers> = std::sync::OnceLock::new();
+    let tmux = in_tmux();
+    let commands = clipboard_commands(std::env::consts::OS, tmux);
+    let workers = (!commands.is_empty()).then(|| {
+        WORKERS.get_or_init(|| {
+            let term_program = std::env::var_os("TERM_PROGRAM");
+            let refuses_w = tmux_refuses_w_until_known(term_program.as_deref());
+            ClipboardWorkers::start(commands, CLIPBOARD_HELPER_WAIT, None, refuses_w)
+        })
+    });
     let encoded = base64(text.as_bytes());
     // Cap pathological sizes; terminals commonly reject huge OSC payloads.
     if encoded.len() < 100_000 {
-        let _ = write!(io::stdout(), "\x1b]52;c;{encoded}\x07");
+        let wrapped = workers
+            .is_some_and(|workers| wrap_for_tmux(tmux, in_screen(), workers.tmux_refuses_w()));
+        let _ = write!(io::stdout(), "{}", clipboard_sequences(&encoded, wrapped));
         let _ = io::stdout().flush();
     }
-    let helpers = clipboard_helpers(std::env::consts::OS);
-    if helpers.is_empty() {
-        return;
+    if let Some(workers) = workers {
+        workers.copy(text);
     }
-    let copies = COPIES.get_or_init(|| {
-        let (sender, receiver) = std::sync::mpsc::channel::<String>();
-        let _ = std::thread::Builder::new()
-            .name("clipboard".into())
-            .spawn(move || {
-                while let Ok(mut text) = receiver.recv() {
-                    while let Ok(newer) = receiver.try_recv() {
-                        text = newer;
-                    }
-                    for helper in helpers {
-                        if run_clipboard_helper(helper, &text, CLIPBOARD_HELPER_WAIT) {
-                            break;
-                        }
-                    }
-                }
-            });
-        sender
-    });
-    let _ = copies.send(text.to_owned());
 }
 
 /// How long a clipboard helper may take before it is killed.
 #[cfg(not(test))]
 const CLIPBOARD_HELPER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether the TUI runs inside tmux, which names its server in `TMUX`.
+#[cfg(not(test))]
+fn in_tmux() -> bool {
+    std::env::var_os("TMUX").is_some_and(|value| !value.is_empty())
+}
+
+/// Whether the TUI runs inside GNU screen, which names its session in `STY`
+/// (inherited by a tmux started in it, and by a screen started in tmux).
+#[cfg(not(test))]
+fn in_screen() -> bool {
+    std::env::var_os("STY").is_some_and(|value| !value.is_empty())
+}
+
+/// Whether a copy's OSC 52 also goes wrapped to pass through tmux: only
+/// inside tmux, only while this tmux is taken to refuse `load-buffer -w`
+/// (older than 3.2), when nothing else reaches the terminal around it, and
+/// never inside GNU screen, which hands the wrapper on as it is, so that
+/// `tmux;` lands on screen as text and shifts the row being drawn.
+fn wrap_for_tmux(in_tmux: bool, in_screen: bool, tmux_refuses_w: bool) -> bool {
+    in_tmux && !in_screen && tmux_refuses_w
+}
+
+/// Whether this tmux is taken to refuse `load-buffer -w` until a copy finds
+/// out, from the `TERM_PROGRAM` its panes get: tmux 3.2, the first with
+/// `-w`, is also the first to set it to `tmux`, so a tmux that leaves it
+/// alone is taken to be older and gets the wrapped OSC 52 from the first
+/// copy on.
+fn tmux_refuses_w_until_known(term_program: Option<&std::ffi::OsStr>) -> bool {
+    term_program != Some(std::ffi::OsStr::new("tmux"))
+}
+
+/// What a copy writes to the terminal: OSC 52 carrying `encoded` (the text
+/// in base64) and, when `wrapped` (see [`wrap_for_tmux`]), the same sequence
+/// again, wrapped to pass through tmux to the terminal it runs in. Under its
+/// default `set-clipboard external` tmux drops the bare form, and a tmux
+/// before 3.3 lets the wrapped one through always. Where `load-buffer -w`
+/// works the wrapped form is left out: a newer tmux would drop it unless
+/// `allow-passthrough` is on, and otherwise the terminal would be handed the
+/// copy twice, which a terminal that asks before each clipboard write would
+/// ask about twice.
+fn clipboard_sequences(encoded: &str, wrapped: bool) -> String {
+    let bare = format!("\x1b]52;c;{encoded}\x07");
+    if !wrapped {
+        return bare;
+    }
+    // Every ESC inside the wrapper is doubled.
+    let wrapped = bare.replace('\x1b', "\x1b\x1b");
+    format!("{bare}\x1bPtmux;{wrapped}\x1b\\")
+}
+
+/// tmux's paste buffer, filled from stdin. Under tmux's default
+/// `set-clipboard external` the OSC 52 a program in a pane writes is dropped,
+/// while `-w` has tmux pass the text on to the clipboard of the terminal tmux
+/// runs in, whatever `set-clipboard` says: over SSH, the one on the person's
+/// own machine. A tmux older than 3.2 refuses `-w` and gets the plain form,
+/// which fills its paste buffer alone.
+const TMUX_PASTE_BUFFER: &[&[&str]] = &[
+    &["tmux", "load-buffer", "-w", "-"],
+    &["tmux", "load-buffer", "-"],
+];
+
+/// Where a copy goes on `os` (as [`std::env::consts::OS`] names it): the
+/// native helpers of [`clipboard_helpers`] and, inside tmux (`in_tmux`),
+/// [`TMUX_PASTE_BUFFER`] whatever the native helpers did, since the clipboard
+/// of the machine the TUI runs on is not the one in front of a person who
+/// reached it over SSH. Each group's helpers are tried in turn until one
+/// takes the text.
+fn clipboard_commands(os: &str, in_tmux: bool) -> Vec<&'static [&'static [&'static str]]> {
+    let mut commands = vec![clipboard_helpers(os)];
+    if in_tmux {
+        commands.push(TMUX_PASTE_BUFFER);
+    }
+    commands.retain(|group| !group.is_empty());
+    commands
+}
+
+/// The threads that hand copies to the clipboard helpers, off the TUI's
+/// thread: one for each group of [`clipboard_commands`], so a helper that
+/// hangs (until it is killed after `wait`) holds up no other group, this
+/// copy's or a later one's. A worker still busy when copies come takes only
+/// the newest of them next. Whether this tmux refuses `load-buffer -w`
+/// starts as a guess, which the tmux worker corrects with what each copy
+/// finds.
+#[cfg_attr(all(test, not(unix)), allow(dead_code))]
+struct ClipboardWorkers {
+    queues: Vec<std::sync::mpsc::Sender<String>>,
+    tmux_refuses_w: std::sync::Arc<AtomicBool>,
+}
+
+#[cfg_attr(all(test, not(unix)), allow(dead_code))]
+impl ClipboardWorkers {
+    /// Start a worker for each group of `commands`, taking this tmux to
+    /// refuse `load-buffer -w` (`tmux_refuses_w`) until a copy finds out.
+    /// `path`, when given, is searched for the helpers instead of `PATH`.
+    fn start(
+        commands: Vec<&'static [&'static [&'static str]]>,
+        wait: std::time::Duration,
+        path: Option<std::ffi::OsString>,
+        tmux_refuses_w: bool,
+    ) -> Self {
+        let tmux_refuses_w = std::sync::Arc::new(AtomicBool::new(tmux_refuses_w));
+        let queues = commands.into_iter().filter_map(|group| {
+            let (sender, receiver) = std::sync::mpsc::channel::<String>();
+            let path = path.clone();
+            let refuses_w = (group == TMUX_PASTE_BUFFER).then(|| tmux_refuses_w.clone());
+            std::thread::Builder::new()
+                .name("clipboard".into())
+                .spawn(move || {
+                    while let Ok(mut text) = receiver.recv() {
+                        while let Ok(newer) = receiver.try_recv() {
+                            text = newer;
+                        }
+                        let taker = group.iter().position(|helper| {
+                            run_clipboard_helper(helper, &text, wait, path.as_deref())
+                        });
+                        // `load-buffer -w` took it, or the plain form after
+                        // `-w` was refused.
+                        if let (Some(taker @ (0 | 1)), Some(refuses_w)) = (taker, &refuses_w) {
+                            refuses_w.store(taker == 1, Ordering::Relaxed);
+                        }
+                    }
+                })
+                .ok()
+                .map(|_| sender)
+        });
+        Self {
+            queues: queues.collect(),
+            tmux_refuses_w,
+        }
+    }
+
+    fn copy(&self, text: &str) {
+        for queue in &self.queues {
+            let _ = queue.send(text.to_owned());
+        }
+    }
+
+    /// Whether this tmux refuses `load-buffer -w`, as the last copy found
+    /// or, before any did, as guessed.
+    fn tmux_refuses_w(&self) -> bool {
+        self.tmux_refuses_w.load(Ordering::Relaxed)
+    }
+}
 
 /// The clipboard tools tried in turn on `os` (as [`std::env::consts::OS`]
 /// names it), each reading the text on stdin so it never shows on a command
@@ -315,20 +448,28 @@ fn clipboard_helpers(os: &str) -> &'static [&'static [&'static str]] {
 }
 
 /// Hand `text` to the clipboard tool `command` on its stdin; true when it took
-/// it. A tool that has not exited after `wait` is killed.
+/// it. A tool that has not exited after `wait` is killed. `path`, when given,
+/// is searched for the tool instead of `PATH`.
 #[cfg_attr(all(test, not(unix)), allow(dead_code))]
-fn run_clipboard_helper(command: &[&str], text: &str, wait: std::time::Duration) -> bool {
+fn run_clipboard_helper(
+    command: &[&str],
+    text: &str,
+    wait: std::time::Duration,
+    path: Option<&std::ffi::OsStr>,
+) -> bool {
     use std::process::{Command, Stdio};
     let Some((program, arguments)) = command.split_first() else {
         return false;
     };
-    let Ok(mut child) = Command::new(program)
-        .args(arguments)
+    let mut tool = Command::new(program);
+    tool.args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+        .stderr(Stdio::null());
+    if let Some(path) = path {
+        tool.env("PATH", path);
+    }
+    let Ok(mut child) = tool.spawn() else {
         return false;
     };
     if let Some(mut stdin) = child.stdin.take() {
@@ -660,10 +801,11 @@ fn launch(target: &std::ffi::OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
-    use super::run_clipboard_helper;
+    use super::{ClipboardWorkers, run_clipboard_helper};
     use super::{
-        MOUSE_TRACKING_DISABLE, MOUSE_TRACKING_ENABLE, NUMERIC_KEYPAD, clipboard_helpers, osc_text,
-        panic_ends_the_tui, parse_background_variant, parse_terminal_rgb,
+        MOUSE_TRACKING_DISABLE, MOUSE_TRACKING_ENABLE, NUMERIC_KEYPAD, clipboard_commands,
+        clipboard_helpers, clipboard_sequences, osc_text, panic_ends_the_tui,
+        parse_background_variant, parse_terminal_rgb, tmux_refuses_w_until_known, wrap_for_tmux,
     };
 
     /// X11 gets the CLIPBOARD selection that Ctrl+Shift+V pastes, from xclip
@@ -700,7 +842,8 @@ mod tests {
         assert!(run_clipboard_helper(
             &["sh", "-c", &script],
             "copied text",
-            Duration::from_secs(10)
+            Duration::from_secs(10),
+            None
         ));
         assert_eq!(std::fs::read_to_string(&sink).unwrap(), "copied text");
 
@@ -710,7 +853,8 @@ mod tests {
             assert!(!run_clipboard_helper(
                 &["sh", "-c", "sleep 30"],
                 text,
-                Duration::from_millis(200)
+                Duration::from_millis(200),
+                None
             ));
             assert!(
                 started.elapsed() < Duration::from_secs(5),
@@ -721,14 +865,286 @@ mod tests {
         assert!(!run_clipboard_helper(
             &["sh", "-c", "exit 1"],
             "x",
-            Duration::from_secs(5)
+            Duration::from_secs(5),
+            None
         ));
         assert!(!run_clipboard_helper(
             &["haarness-no-such-clipboard-tool"],
             "x",
-            Duration::from_secs(5)
+            Duration::from_secs(5),
+            None
         ));
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Inside tmux, and only there, a copy also goes to tmux's paste buffer,
+    /// beside the native helpers, or alone where there are none (Windows).
+    #[test]
+    fn inside_tmux_a_copy_also_goes_to_its_paste_buffer() {
+        let tmux = [
+            ["tmux", "load-buffer", "-w", "-"].as_slice(),
+            ["tmux", "load-buffer", "-"].as_slice(),
+        ];
+        for os in ["macos", "linux"] {
+            assert_eq!(clipboard_commands(os, false), [clipboard_helpers(os)]);
+            assert_eq!(
+                clipboard_commands(os, true),
+                [clipboard_helpers(os), tmux.as_slice()]
+            );
+        }
+        assert!(clipboard_commands("windows", false).is_empty());
+        assert_eq!(clipboard_commands("windows", true), [tmux.as_slice()]);
+    }
+
+    /// What the stand-ins copy: a shell line with both kinds of quote, a
+    /// line that starts like an option, and letters outside ASCII.
+    #[cfg(unix)]
+    const COPIED: &str = "echo \"$HOME\" 'naïve café'\n--target-client=Ωmega";
+
+    /// Stand-in helpers in a folder of their own, which is the whole search
+    /// path a copy gets, so neither the clipboard nor a tmux server of the
+    /// person running the tests is reached. Each adds its arguments as a line
+    /// to `<name>.runs` beside it before doing what it was given.
+    #[cfg(unix)]
+    struct StandIns(std::path::PathBuf);
+
+    /// Reads the text into `<name>.input` and exits 0.
+    #[cfg(unix)]
+    const TAKES: &str = "exec /bin/cat > \"$0.input\"";
+    /// A tmux older than 3.2, which knows no `load-buffer -w`.
+    #[cfg(unix)]
+    const REFUSES_W: &str =
+        "[ \"$1 $2\" = 'load-buffer -w' ] && exit 1\nexec /bin/cat > \"$0.input\"";
+    #[cfg(unix)]
+    const FAILS: &str = "exit 1";
+    /// Reads the text, then runs on until `<name>.release` appears (or the
+    /// stand-ins' folder is gone, so a failed test leaves nothing running).
+    #[cfg(unix)]
+    const WAITS: &str = "/bin/cat > \"$0.input\"
+while [ ! -e \"$0.release\" ] && [ -e \"$0\" ]; do /bin/sleep 0.02; done";
+
+    #[cfg(unix)]
+    impl StandIns {
+        fn new() -> Self {
+            let directory =
+                std::env::temp_dir().join(format!("haarness-clipboard-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&directory).unwrap();
+            Self(directory)
+        }
+
+        fn add(&self, name: &str, then: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.0.join(name);
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.runs\"\n{then}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn runs(&self, name: &str) -> Vec<String> {
+            std::fs::read_to_string(self.0.join(format!("{name}.runs")))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+
+        fn input(&self, name: &str) -> Option<String> {
+            std::fs::read_to_string(self.0.join(format!("{name}.input"))).ok()
+        }
+
+        /// The workers a copy on `os` inside a tmux of 3.2 or later gets,
+        /// with these stand-ins as the whole search path.
+        fn workers(&self, os: &str) -> ClipboardWorkers {
+            self.workers_guessing(os, false)
+        }
+
+        /// The same, taking tmux to refuse `load-buffer -w` (`refuses_w`)
+        /// until a copy finds out.
+        fn workers_guessing(&self, os: &str, refuses_w: bool) -> ClipboardWorkers {
+            ClipboardWorkers::start(
+                clipboard_commands(os, true),
+                std::time::Duration::from_secs(60),
+                Some(self.0.clone().into_os_string()),
+                refuses_w,
+            )
+        }
+    }
+
+    /// Whether `done` holds within 20 seconds: the workers hand copies over
+    /// on threads of their own.
+    #[cfg(unix)]
+    fn until(done: impl Fn() -> bool) -> bool {
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(20) {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        done()
+    }
+
+    #[cfg(unix)]
+    impl Drop for StandIns {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// tmux reads the copy from stdin, its arguments `load-buffer -w -` and
+    /// nothing more, for a few words and for some hundreds of kilobytes
+    /// alike, after every native helper failed and after one took the copy.
+    #[cfg(unix)]
+    #[test]
+    fn tmux_reads_the_copy_from_stdin_beside_any_native_helper() {
+        let tools = StandIns::new();
+        for helper in ["wl-copy", "xclip", "xsel"] {
+            tools.add(helper, FAILS);
+        }
+        tools.add("tmux", TAKES);
+        let workers = tools.workers("linux");
+        let long = format!("{COPIED}\n").repeat(9_000);
+        for (copies, text) in [COPIED, long.as_str()].into_iter().enumerate() {
+            workers.copy(text);
+            assert!(until(|| tools.input("tmux").as_deref() == Some(text)));
+            assert!(until(|| tools.runs("xsel").len() == copies + 1));
+        }
+        assert_eq!(tools.runs("tmux"), ["load-buffer -w -"; 2]);
+        assert_eq!(tools.runs("xclip"), ["-selection clipboard"; 2]);
+        assert_eq!(tools.runs("xsel"), ["--clipboard --input"; 2]);
+
+        let tools = StandIns::new();
+        tools.add("pbcopy", TAKES);
+        tools.add("tmux", TAKES);
+        tools.workers("macos").copy(COPIED);
+        assert!(until(|| tools.input("pbcopy").as_deref() == Some(COPIED)));
+        assert!(until(|| tools.input("tmux").as_deref() == Some(COPIED)));
+        assert_eq!(tools.runs("tmux"), ["load-buffer -w -"]);
+    }
+
+    /// A tmux that refuses `-w` gets the plain `load-buffer -`; one that
+    /// fails both, or none at all, leaves the native helper's copy as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_tmux_that_refuses_or_fails_leaves_the_copy_to_the_rest() {
+        for (tmux, runs, input) in [
+            (
+                Some(REFUSES_W),
+                ["load-buffer -w -", "load-buffer -"].as_slice(),
+                Some(COPIED),
+            ),
+            (
+                Some(FAILS),
+                ["load-buffer -w -", "load-buffer -"].as_slice(),
+                None,
+            ),
+            (None, [].as_slice(), None),
+        ] {
+            let tools = StandIns::new();
+            tools.add("pbcopy", TAKES);
+            if let Some(tmux) = tmux {
+                tools.add("tmux", tmux);
+            }
+            tools.workers("macos").copy(COPIED);
+            assert!(until(|| tools.input("pbcopy").as_deref() == Some(COPIED)));
+            assert!(until(|| tools.runs("tmux").len() == runs.len()));
+            assert!(until(|| tools.input("tmux").as_deref() == input));
+            assert_eq!(tools.runs("tmux"), runs);
+        }
+    }
+
+    /// A native helper still running holds up no copy to tmux, neither its
+    /// own nor the ones after it, and once it ends its worker goes on with
+    /// only the newest copy that came meanwhile.
+    #[cfg(unix)]
+    #[test]
+    fn a_native_helper_still_running_holds_up_no_copy_to_tmux() {
+        let tools = StandIns::new();
+        tools.add("wl-copy", WAITS);
+        tools.add("tmux", TAKES);
+        let workers = tools.workers("linux");
+        workers.copy("first copy");
+        assert!(until(
+            || tools.input("wl-copy").as_deref() == Some("first copy")
+        ));
+        for text in ["first copy", "second copy", "third copy"] {
+            if text != "first copy" {
+                workers.copy(text);
+            }
+            assert!(
+                until(|| tools.input("tmux").as_deref() == Some(text)),
+                "{text:?} waited for the native helper"
+            );
+        }
+        assert_eq!(tools.runs("wl-copy").len(), 1);
+        std::fs::write(tools.0.join("wl-copy.release"), "").unwrap();
+        assert!(until(
+            || tools.input("wl-copy").as_deref() == Some("third copy")
+        ));
+        assert_eq!(tools.runs("wl-copy").len(), 2);
+        assert_eq!(tools.runs("tmux"), ["load-buffer -w -"; 3]);
+    }
+
+    /// The wrapped OSC 52 follows the bare one, every ESC inside the wrapper
+    /// doubled; without the need, the bare one goes alone.
+    #[test]
+    fn a_wrapped_osc_52_follows_the_bare_one_only_when_asked() {
+        assert_eq!(clipboard_sequences("aGk=", false), "\x1b]52;c;aGk=\x07");
+        assert_eq!(
+            clipboard_sequences("aGk=", true),
+            "\x1b]52;c;aGk=\x07\x1bPtmux;\x1b\x1b]52;c;aGk=\x07\x1b\\"
+        );
+    }
+
+    /// The OSC 52 goes wrapped only from inside tmux, outside GNU screen,
+    /// once this tmux has refused `load-buffer -w`.
+    #[test]
+    fn the_osc_52_goes_wrapped_only_where_tmux_cannot_pass_a_copy_on() {
+        assert!(wrap_for_tmux(true, false, true));
+        assert!(!wrap_for_tmux(true, false, false));
+        assert!(!wrap_for_tmux(true, true, true));
+        assert!(!wrap_for_tmux(false, false, true));
+    }
+
+    /// Before any copy, a tmux that set `TERM_PROGRAM=tmux` (3.2 and later)
+    /// is taken to take `load-buffer -w`; any other is taken to be older.
+    #[test]
+    fn term_program_says_whether_tmux_is_new_enough_for_w() {
+        use std::ffi::OsStr;
+        assert!(!tmux_refuses_w_until_known(Some(OsStr::new("tmux"))));
+        assert!(tmux_refuses_w_until_known(Some(OsStr::new("iTerm.app"))));
+        assert!(tmux_refuses_w_until_known(None));
+    }
+
+    /// Whatever the guess, the copy that finds out sets it right: a tmux
+    /// that takes `load-buffer -w` gets the bare OSC 52 alone, one that
+    /// refuses it gets the wrapped one too (never in screen).
+    #[cfg(unix)]
+    #[test]
+    fn each_copy_sets_right_whether_tmux_refuses_w() {
+        for (guess, tmux, refuses) in [
+            (false, TAKES, false),
+            (true, TAKES, false),
+            (false, REFUSES_W, true),
+            (true, REFUSES_W, true),
+        ] {
+            let tools = StandIns::new();
+            tools.add("pbcopy", TAKES);
+            tools.add("tmux", tmux);
+            let workers = tools.workers_guessing("macos", guess);
+            assert_eq!(wrap_for_tmux(true, false, workers.tmux_refuses_w()), guess);
+            workers.copy(COPIED);
+            assert!(until(|| tools.input("tmux").as_deref() == Some(COPIED)));
+            assert!(until(|| workers.tmux_refuses_w() == refuses));
+            assert_eq!(
+                wrap_for_tmux(true, false, workers.tmux_refuses_w()),
+                refuses
+            );
+            assert!(!wrap_for_tmux(true, true, workers.tmux_refuses_w()));
+        }
     }
 
     #[test]

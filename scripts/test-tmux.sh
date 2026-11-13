@@ -12,14 +12,47 @@ export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 COLORTERM=truecolor
 unset SSH_TTY SSH_CONNECTION SSH_CLIENT
 pane_env="env -u SSH_TTY -u SSH_CONNECTION -u SSH_CLIENT COLORTERM=truecolor LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8"
 test_root="$(mktemp -d)"
+# The gate runs a tmux server of its own, so its sessions and what the TUI
+# copies into tmux's paste buffer never reach the tmux server of the person
+# running it, nor through that server their terminal's clipboard; it reads no
+# tmux configuration, so theirs changes nothing either. A socket's path holds
+# about 100 bytes, so a long temporary folder gets a short one.
+tmux_folder=''
+tmux_socket="$test_root/tmux"
+if [ "$(printf '%s' "$tmux_socket" | wc -c)" -gt 100 ]; then
+  tmux_folder="$(mktemp -d /tmp/hx-XXXXXX)"
+  tmux_socket="$tmux_folder/tmux"
+fi
+tmux() { command tmux -S "$tmux_socket" -f /dev/null "$@"; }
 clipboard_saved=0
 managed_workspace_path=''
 if command -v pbpaste >/dev/null 2>&1 && command -v pbcopy >/dev/null 2>&1; then
   pbpaste > "$test_root/original-clipboard" 2>/dev/null || true
   clipboard_saved=1
 fi
+# Off macOS the TUI's clipboard tools are stand-ins that keep what they get in
+# a file, so a Linux desktop's own clipboard is never replaced.
+clipboard_tools=''
+if [ "$(uname)" != Darwin ]; then
+  clipboard_tools="$test_root/clipboard-tools"
+  mkdir "$clipboard_tools"
+  for tool in wl-copy xclip xsel; do
+    printf '#!/bin/sh\ncat > "%s"\n' "$test_root/clipboard-copied" > "$clipboard_tools/$tool"
+    chmod 755 "$clipboard_tools/$tool"
+  done
+  pane_env="$pane_env PATH=\"$clipboard_tools:\$PATH\""
+fi
+# What the system clipboard tool was given: the clipboard on macOS (kept and
+# put back around the run), the stand-ins' file elsewhere.
+system_copy() {
+  if [ -n "$clipboard_tools" ]; then
+    cat "$test_root/clipboard-copied" 2>/dev/null || true
+  elif [ "$clipboard_saved" -eq 1 ]; then
+    pbpaste 2>/dev/null || true
+  fi
+}
 cleanup() {
-  tmux kill-session -t "$session" 2>/dev/null || true
+  command tmux -S "$tmux_socket" kill-server 2>/dev/null || true
   # The TUI is a client of a persistent execution server. Stop both isolated
   # servers explicitly before deleting their data directories so this gate
   # never leaves detached test daemons behind.
@@ -41,6 +74,10 @@ cleanup() {
   fi
   if [ "$clipboard_saved" -eq 1 ]; then
     pbcopy < "$test_root/original-clipboard" 2>/dev/null || true
+  fi
+  if [ -n "$tmux_folder" ]; then
+    rm -f "$tmux_socket"
+    rmdir "$tmux_folder" 2>/dev/null || true
   fi
   rm -rf "$test_root"
 }
@@ -147,6 +184,8 @@ if [ "$(git -C "$test_root/ws" branch --show-current)" = "$workspace_base_ref" ]
   exit 1
 fi
 
+# The server stays up between the TUI sessions this script ends and starts.
+tmux start-server \; set-option -s exit-empty off
 tmux new-session -d -x 100 -y 30 -s "$session" "$pane_env HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --workspace '$test_root/ws'"
 
 attempt=0
@@ -833,39 +872,57 @@ if ! echo "$pane" | grep -q "▎ hello from tmux"; then
   exit 1
 fi
 
-# Drag-select real transcript cells. Mouse release must copy immediately;
-# preserve and restore the user's clipboard around the test.
-if [ "$clipboard_saved" -eq 1 ]; then
-  selection_row="$(echo "$pane" | awk '/▸ Echo: hello from tmux/ { print NR; exit }')"
-  if [ -z "$selection_row" ]; then
-    echo "$pane" >&2
-    echo "Could not locate assistant text for selection testing" >&2
-    exit 1
-  fi
+# Drag-select real transcript cells. The release must copy at once: into the
+# paste buffer of the gate's own tmux server, which tmux passes on to the
+# terminal it runs in (the way to a clipboard over SSH, or on Linux without a
+# clipboard tool), and through the system clipboard tool. tmux's default
+# `set-clipboard external` drops the OSC 52 the TUI writes, so only the TUI's
+# own hand-off fills the buffer.
+selection_row="$(echo "$pane" | awk '/▸ Echo: hello from tmux/ { print NR; exit }')"
+if [ -z "$selection_row" ]; then
+  echo "$pane" >&2
+  echo "Could not locate assistant text for selection testing" >&2
+  exit 1
+fi
+tmux set-option -s set-clipboard external
+tmux set-buffer 'haarness-selection-sentinel'
+system_copy_read=0
+if [ -n "$clipboard_tools" ]; then
+  system_copy_read=1
+elif [ "$clipboard_saved" -eq 1 ]; then
+  system_copy_read=1
   printf 'haarness-selection-sentinel' | pbcopy
-  mouse_down="$(printf '\033[<0;3;%sM' "$selection_row")"
-  mouse_drag="$(printf '\033[<32;18;%sM' "$selection_row")"
-  mouse_up="$(printf '\033[<0;18;%sm' "$selection_row")"
-  tmux send-keys -l -t "$session":0.0 "$mouse_down"
-  tmux send-keys -l -t "$session":0.0 "$mouse_drag"
-  tmux send-keys -l -t "$session":0.0 "$mouse_up"
-  attempt=0
-  while [ "$attempt" -lt 30 ]; do
-    clipboard="$(pbpaste 2>/dev/null || true)"
-    echo "$clipboard" | grep -q "Echo: hello" && break
-    attempt=$((attempt + 1))
-    sleep 0.1
-  done
-  if ! echo "$clipboard" | grep -q "Echo: hello"; then
-    echo "Mouse selection was not copied on release" >&2
-    exit 1
-  fi
-  pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  if ! echo "$pane" | grep -q "Copied selection"; then
-    echo "$pane" >&2
-    echo "Selection copy toast did not render" >&2
-    exit 1
-  fi
+fi
+mouse_down="$(printf '\033[<0;3;%sM' "$selection_row")"
+mouse_drag="$(printf '\033[<32;18;%sM' "$selection_row")"
+mouse_up="$(printf '\033[<0;18;%sm' "$selection_row")"
+tmux send-keys -l -t "$session":0.0 "$mouse_down"
+tmux send-keys -l -t "$session":0.0 "$mouse_drag"
+tmux send-keys -l -t "$session":0.0 "$mouse_up"
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+  paste_buffer="$(tmux show-buffer 2>/dev/null || true)"
+  copied="$(system_copy)"
+  echo "$paste_buffer" | grep -q "Echo: hello" \
+    && { [ "$system_copy_read" -eq 0 ] || echo "$copied" | grep -q "Echo: hello"; } \
+    && break
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+if ! echo "$paste_buffer" | grep -q "Echo: hello"; then
+  echo "tmux paste buffer: $paste_buffer" >&2
+  echo "Mouse selection did not reach tmux's paste buffer on release" >&2
+  exit 1
+fi
+if [ "$system_copy_read" -eq 1 ] && ! echo "$copied" | grep -q "Echo: hello"; then
+  echo "Mouse selection was not copied on release" >&2
+  exit 1
+fi
+pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
+if ! echo "$pane" | grep -q "Copied selection"; then
+  echo "$pane" >&2
+  echo "Selection copy toast did not render" >&2
+  exit 1
 fi
 
 # Preserve the provider's semantic stream order in the actual terminal: prose
