@@ -21637,6 +21637,63 @@ mod shell_reading_tests {
             ),
             Ask
         );
+        // An unquoted glob is the shell's to expand: `a*` there may be `ab`,
+        // so the line is asked about the folder before it, which no answer
+        // for the folder named `a*` covers.
+        let out_folder = format!("{}/*", out.display());
+        for (command, saved) in [
+            (format!("cat {starred}/f"), &always),
+            (format!("cat {}/a?/f", out.display()), &always),
+            (format!("cat {}/[a]b/f", out.display()), &always),
+            (
+                format!("cat {}/x?y/f", out.display()),
+                &marked.always_rules(),
+            ),
+            (format!("cd {starred} && cat f"), &always),
+        ] {
+            let plan = bash(command.clone());
+            assert_eq!(plan.patterns, vec![out_folder.clone()], "{command}");
+            assert_eq!(verdict(saved, &plan), Ask, "{command}");
+        }
+        // In a folder that holds the project, the whole folder, as for
+        // `~/*/x` in the home folder; the folder named `*` stays its own.
+        let holder = crate::paths::canonicalize(&made).unwrap();
+        std::fs::create_dir_all(made.join("*")).unwrap();
+        std::fs::write(made.join("*/n"), "x\n").unwrap();
+        let named_star = bash(format!("cat '{}/*/n'", holder.display()));
+        assert_eq!(
+            named_star.always_rules(),
+            vec![format!(r"external_directory:{}/\*/*", holder.display())]
+        );
+        let star = named_star.always_rules();
+        assert_eq!(verdict(&star, &named_star), Allow);
+        for command in [
+            format!("cat {}/*/n", holder.display()),
+            format!("shopt -s dotglob; cat {}/*/config", holder.display()),
+            format!("bash -O dotglob -c 'cat {}/*/config'", holder.display()),
+        ] {
+            let plan = bash(command.clone());
+            assert_eq!(
+                plan.patterns,
+                vec![format!("{}/*", holder.display())],
+                "{command}"
+            );
+            assert_eq!(verdict(&star, &plan), Ask, "{command}");
+        }
+        // A glob inside the project asks nothing, as before.
+        for command in [
+            "cat src/*/main.rs",
+            "cat */README.md",
+            "cat ?.txt",
+            "ls -d out*",
+        ] {
+            assert!(
+                plans("bash", json!({ "command": command }))
+                    .iter()
+                    .all(|plan| plan.permission != "external_directory"),
+                "{command}"
+            );
+        }
         // A read inside the project remembers the file it read and no other
         // file its name matches.
         let read = plans("read", json!({ "path": "*.env" }))

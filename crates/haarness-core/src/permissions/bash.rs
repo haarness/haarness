@@ -1711,12 +1711,13 @@ impl Reader<'_> {
             } else {
                 (value, complete)
             };
+            let (reached, whole) = self.before_glob(&node_text(dest, command), &value, complete);
             let outside = external_dir(
                 self.workspace,
                 self.from(),
                 &node_text(dest, command),
-                &value,
-                complete,
+                &reached,
+                whole,
             );
             // `<` and `<>` read the file.
             let reads = (0..redirect.child_count())
@@ -2491,6 +2492,34 @@ impl Reader<'_> {
         self.check_folder_as(name, raw, value, complete, false);
     }
 
+    /// What of a path word a POSIX shell reaches for certain, for the
+    /// folder it is asked about: a glob it expands in the word (an
+    /// unquoted, unescaped `*`, `?` or `[`) may match any name there, so
+    /// only the folders before it are known (`/tmp/a*/f` reaches
+    /// `/tmp/ab/f`, and `~/*/f` anything in the home folder), as for a
+    /// value known only up to an expansion. A quoted or escaped one is part
+    /// of a name (`'/tmp/a*'/f`), which an Always then names alone. Git's
+    /// bash and cmd.exe on Windows, where no name holds `*` or `?`, read
+    /// words as before.
+    fn before_glob<'a>(
+        &self,
+        raw: &str,
+        value: &'a str,
+        complete: bool,
+    ) -> (std::borrow::Cow<'a, str>, bool) {
+        let at = (self.reading == Reading::Posix && shell_expands_glob(raw))
+            .then(|| value.find(['*', '?', '[']))
+            .flatten();
+        match at {
+            // The folders before the glob, or the folder the shell is in.
+            Some(at) => match value[..at].rfind('/') {
+                Some(end) => (value[..=end].into(), false),
+                None => ("./".into(), false),
+            },
+            None => (value.into(), complete),
+        }
+    }
+
     /// [`Self::check_folder`], told whether the path is where a copy or a
     /// move writes (`written`, see [`copy_destination`]): that carries off
     /// nothing already there, so it is no read of a secret file.
@@ -2514,7 +2543,8 @@ impl Reader<'_> {
         } else {
             (value, complete)
         };
-        let outside = external_dir(self.workspace, self.from(), raw, value, complete);
+        let (reached, whole) = self.before_glob(raw, value, complete);
+        let outside = external_dir(self.workspace, self.from(), raw, &reached, whole);
         // Of these, only `cat`, `cp` and `mv` (in cmd.exe `type`, `more`,
         // `copy`, `xcopy`, `robocopy` and `move`) read or carry off what a
         // file holds.
@@ -2533,7 +2563,7 @@ impl Reader<'_> {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
         if (matches!(name, "cd" | "pushd") || (self.reading == Reading::Cmd && name == "chdir"))
-            && let Some(dir) = cd_dir(self.workspace, self.from(), raw, value, complete)
+            && let Some(dir) = cd_dir(self.workspace, self.from(), raw, &reached, whole)
         {
             push_unique(&mut self.analysis.external_dirs, glob(&dir));
         }
@@ -3432,6 +3462,27 @@ pub(crate) fn may_match_secret(part: &str) -> bool {
 /// `[`, in a word with no quote or escape (a quoted one is taken as it is).
 fn unquoted_glob(raw: &str) -> bool {
     raw.contains(['*', '?', '[']) && !raw.contains(['\'', '"', '\\', '$', '`'])
+}
+
+/// Whether a word as written holds a glob the shell expands: an `*`, `?` or
+/// `[` outside quotes and not after a backslash, wherever it stands in the
+/// word (`/tmp/a*'/b c'`, `~/*/x`).
+fn shell_expands_glob(raw: &str) -> bool {
+    let mut characters = raw.chars();
+    let mut quote = None;
+    while let Some(character) = characters.next() {
+        match (quote, character) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('\''), _) => {}
+            (_, '\\') => {
+                characters.next();
+            }
+            (None, '\'' | '"') => quote = Some(character),
+            (None, '*' | '?' | '[') => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whether a file `name` matches one part of a glob (`*`, `?`, and a `[…]`

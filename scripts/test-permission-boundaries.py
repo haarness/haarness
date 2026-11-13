@@ -25,9 +25,9 @@
    `..` pattern and leaves out what `**` finds through a link out of the project; an
    `external_directory` deny written through a folder link refuses a read of the folder it leads to.
 9. (November 13) Always for a folder whose name holds a `*` saves it with the `*` escaped: the folder runs
-   again and a neighbour its name matches (`a*` and `ab`) still asks, headless too; an Always saved
-   before without the escape keeps covering what it matched; a data folder named with a `*` opens its
-   own tool output and not a neighbour's.
+   again, and a neighbour its name matches (`a*` and `ab`) or an unquoted `a*` glob still asks, headless
+   too; an Always saved before without the escape keeps covering what it matched; a data folder named
+   with a `*` opens its own tool output and not a neighbour's.
 
 Usage: python3 scripts/test-permission-boundaries.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset
@@ -463,13 +463,16 @@ def case_literal_names():
     until(lambda: api(connection, f'/turns/{turn["id"]}')['status'] not in ('running', 'queued'), 'the turn did not end')
     # A run nobody can answer: the folder answered runs, its neighbour still stops at the question.
     assert 'IN-a*' in haarness(literal, 'run', '!tool bash ' + json.dumps({'command': starred})).stdout
-    for call in ['!tool bash ' + json.dumps({'command': f'cat {outside}/ab/f'}),
-                 '!tool read ' + json.dumps({'path': f'{outside}/ab/f'})]:
+    # An unquoted `a*` is the shell's glob, which reaches `ab` too: it asks about the folder holding both.
+    for call, asked in [('!tool bash ' + json.dumps({'command': f'cat {outside}/ab/f'}), f'{outside}/ab/*'),
+                        ('!tool read ' + json.dumps({'path': f'{outside}/ab/f'}), f'{outside}/ab/*'),
+                        ('!tool bash ' + json.dumps({'command': f'cat {outside}/a*/f'}), f'"{outside}/*"')]:
         result = haarness(literal, 'run', call, check=False)
         assert result.returncode != 0 and 'Stopped: the agent asked' in result.stderr, result.stdout + result.stderr
         assert 'IN-ab' not in result.stdout, result.stdout
-        assert f'{outside}/ab/*' in result.stderr, result.stderr
-    passed('Always on cat a*/f saves the folder a* alone: a* runs again, ab still asks, headless too')
+        assert asked in result.stderr, result.stderr
+    passed('Always on cat a*/f saves the folder a* alone: a* runs again, while ab and an unquoted a* glob still '
+           'ask, headless too')
     # What an earlier version saved for such a folder keeps the wildcard it was read with.
     haarness(literal, 'serve', '--stop')
     databases = list(data.rglob('haarness.db'))
