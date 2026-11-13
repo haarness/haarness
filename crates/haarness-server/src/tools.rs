@@ -3987,6 +3987,7 @@ impl Tool for BuiltinTool {
                 let requested_path = string(&args, "path")?;
                 let new_contents = string(&args, "content")?;
                 let path = resolve_new(requested_path, &context)?;
+                text::refuse_special(&path, requested_path).await?;
                 let existing = existing_diff_body(&path).await;
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent)
@@ -4585,6 +4586,9 @@ async fn plan_patch(
         match operation {
             haarness_core::patch::FileOp::Add { path, content } => {
                 let resolved = planned_target(&path, &planned, context)?;
+                if planned.get(&resolved).is_none() {
+                    text::refuse_special(&resolved, &path).await?;
+                }
                 let existing = planned_body(&planned, &resolved).await;
                 push_tool_diff(
                     &mut plan.diffs,
@@ -4647,6 +4651,9 @@ async fn plan_patch(
                         _ => entry_diff_body(&entry).await,
                     };
                     let destination = planned_target(&target, &planned, context)?;
+                    if planned.get(&destination).is_none() {
+                        text::refuse_special(&destination, &target).await?;
+                    }
                     let target_entry =
                         haarness_core::resolve_permission_entry(&context.workspace, &target);
                     // A file the patch adds earlier is checked here.
@@ -6011,6 +6018,15 @@ enum ExistingDiffBody {
 }
 
 async fn existing_diff_body(path: &Path) -> ExistingDiffBody {
+    // A pipe or a device is never opened for its diff: the open of a pipe
+    // waits for the other end, and a device may never end. A folder reads
+    // as opaque too, as its failed read always did.
+    if tokio::fs::metadata(path)
+        .await
+        .is_ok_and(|metadata| !metadata.is_file())
+    {
+        return ExistingDiffBody::Opaque { binary: false };
+    }
     match tokio::fs::read(path).await {
         // As the text tools read it: no byte order mark, UTF-16 as its text.
         Ok(bytes) => text::decode(&bytes)
@@ -10261,6 +10277,156 @@ export default workflow({
         assert!(
             refused.to_string().contains("is not a regular file"),
             "{refused}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// What `call` answers within a second. A call still waiting on `pipe`
+    /// after that is let go by opening the pipe's other end, so a failing
+    /// test leaves no thread blocked in an open.
+    #[cfg(unix)]
+    async fn answered_at_once(
+        pipe: &Path,
+        call: impl std::future::Future<Output = CoreResult<ToolOutput>>,
+    ) -> CoreResult<ToolOutput> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        match tokio::time::timeout(Duration::from_secs(1), call).await {
+            Ok(answer) => answer,
+            Err(_) => {
+                let other_end = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(nix::libc::O_NONBLOCK)
+                    .open(pipe);
+                drop(other_end);
+                panic!("the call still waited on {} after a second", pipe.display());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_changes_refuse_a_pipe_or_device_rather_than_waiting_on_it() {
+        let root = std::env::temp_dir().join(format!("haarness-pipe-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = haarness_core::paths::canonicalize(&root).unwrap();
+        let pipe = root.join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&pipe)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(root.join("note.txt"), "a\n").unwrap();
+        let calls = [
+            ("write", json!({"path":"pipe","content":"hi\n"})),
+            ("edit", json!({"path":"pipe","old":"a","new":"b"})),
+            (
+                "multiedit",
+                json!({"path":"pipe","edits":[{"old":"a","new":"b"}]}),
+            ),
+            (
+                "apply_patch",
+                json!({"input":"*** Begin Patch\n*** Update File: pipe\n@@\n-a\n+b\n*** End Patch\n"}),
+            ),
+            (
+                "apply_patch",
+                json!({"input":"*** Begin Patch\n*** Add File: pipe\n+hi\n*** End Patch\n"}),
+            ),
+            (
+                "apply_patch",
+                json!({"input":"*** Begin Patch\n*** Update File: note.txt\n*** Move to: pipe\n@@\n-a\n+b\n*** End Patch\n"}),
+            ),
+        ];
+        // As the tools are offered, with formatting and diagnostics around
+        // them (whose diff preview reads the file first too), and bare.
+        let registries = [
+            NativeToolRegistry::new(root.clone()).with_language(language_test_service(&root)),
+            NativeToolRegistry::new(root.clone()),
+        ];
+        for registry in &registries {
+            for (name, arguments) in &calls {
+                let tool = registry.get(name).unwrap();
+                let refused =
+                    answered_at_once(&pipe, tool.execute(arguments.clone(), tool_context(&root)))
+                        .await
+                        .unwrap_err()
+                        .to_string();
+                assert!(
+                    refused.contains("pipe is not a regular file"),
+                    "{name} {arguments}: {refused}"
+                );
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join("note.txt")).unwrap(),
+            "a\n"
+        );
+
+        // A device outside the project the person allowed is refused
+        // before it is opened: /dev/zero, read, would never end.
+        for device in ["/dev/zero", "/dev/null"] {
+            let mut context = tool_context(&root);
+            context.authorized_external_paths = vec![PathBuf::from(device)];
+            let refused = registries[1]
+                .get("edit")
+                .unwrap()
+                .execute(json!({"path":device,"old":"a","new":"b"}), context)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                refused.contains(&format!("{device} is not a regular file")),
+                "{refused}"
+            );
+        }
+
+        // A new file, and a file reached through a link, are written as
+        // before; the link stays a link.
+        let write = registries[0].get("write").unwrap();
+        write
+            .execute(
+                json!({"path":"new.txt","content":"new\n"}),
+                tool_context(&root),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("new.txt")).unwrap(),
+            "new\n"
+        );
+        std::os::unix::fs::symlink(root.join("note.txt"), root.join("link.txt")).unwrap();
+        let written = write
+            .execute(
+                json!({"path":"link.txt","content":"through\n"}),
+                tool_context(&root),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("note.txt")).unwrap(),
+            "through\n"
+        );
+        assert!(
+            std::fs::symlink_metadata(root.join("link.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(written.metadata["diffs"][0]["before"], "a\n");
+        registries[0]
+            .get("edit")
+            .unwrap()
+            .execute(
+                json!({"path":"link.txt","old":"through","new":"edited"}),
+                tool_context(&root),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("note.txt")).unwrap(),
+            "edited\n"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

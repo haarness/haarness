@@ -574,7 +574,7 @@ Latin-1 file) shows `�` for what does not decode, with a note that `edit`
 cannot change it and `write` would replace those bytes (`edit` and `multiedit`
 refuse it as not UTF-8 text). A file with a NUL byte in its first 8 KiB counts
 as binary data: its lines are shown only when they are UTF-8, and a read that
-meets one that is not is refused (`… holds binary data, not text`). A folder, pipe or device is refused instead of waited on. A
+meets one that is not is refused (`… holds binary data, not text`). A folder, pipe or device is refused instead of waited on. `write`, `edit`, `multiedit` and `apply_patch` look before they open a path too: a pipe, socket or device there, or a link to one, is refused in the same words (`… is not a regular file`), so a call never waits on a pipe nothing writes to or reads `/dev/zero` without end; a new file, and a file a link leads to, are written as before. A
 `read` of a name that is not there, when exactly one file in that folder has the same name once
 each no-break space (U+00A0, U+202F) counts as a space, reads that file: macOS names screenshots
 and recordings with U+202F before AM or PM, so `Screenshot 2026-11-05 at 10.00.00 PM.png` typed

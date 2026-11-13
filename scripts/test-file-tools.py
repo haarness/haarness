@@ -24,11 +24,14 @@
    reads the screenshot; a read rule, or a PreToolUse hook, written for the real name applies to it,
    and a typed name a hook rewrites the path to is recovered; two files that both fit, or a write,
    keep the name as typed.
+9. write_pipe: write, edit, multiedit and apply_patch refuse a pipe at once, as read does, rather
+   than wait on it with the chat held (an edit of /dev/zero the person allowed too); a new file,
+   and one reached through a link, are written as before.
 
 Usage: python3 scripts/test-file-tools.py   (HAARNESS_BIN picks the binary, HAARNESS_E2E_ROOT a
 folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of read_line,
 read_budget, read_text, read_pipe, grep_line, grep_limit, home, edit_crlf, rg, instructions,
-read_end, edit_empty and read_twin). No model is
+read_end, edit_empty, read_twin and write_pipe). No model is
 called.
 """
 import json
@@ -383,9 +386,37 @@ def case_read_twin():
     passed('a write keeps the name it was given and leaves the file that differs by a no-break space alone')
 
 
+def case_write_pipe():
+    pipes = project('pipes', {'permission': {'external_directory': {'/dev/*': 'allow'}}})
+    pipe = pipes / 'ctl.pipe'
+    if not pipe.exists():
+        os.mkfifo(pipe)
+    (pipes / 'note.txt').write_text('a\n')
+    calls = [('write', {'path': 'ctl.pipe', 'content': 'hi\n'}),
+             ('edit', {'path': 'ctl.pipe', 'old': 'a', 'new': 'b'}),
+             ('multiedit', {'path': 'ctl.pipe', 'edits': [{'old': 'a', 'new': 'b'}]}),
+             ('apply_patch', {'input': '*** Begin Patch\n*** Update File: ctl.pipe\n@@\n-a\n+b\n*** End Patch\n'}),
+             ('apply_patch', {'input': '*** Begin Patch\n*** Add File: ctl.pipe\n+hi\n*** End Patch\n'})]
+    for name, arguments in calls:
+        started = time.monotonic()
+        output = tool(pipes, name, arguments, timeout=60)
+        assert 'ctl.pipe is not a regular file' in output, (name, output)
+        print(f'  {name}: refused in {time.monotonic() - started:.1f} s', flush=True)
+    output = tool(pipes, 'edit', {'path': '/dev/zero', 'old': 'a', 'new': 'b'}, timeout=60)
+    assert '/dev/zero is not a regular file' in output, output
+    tool(pipes, 'write', {'path': 'fresh.txt', 'content': 'fresh\n'})
+    assert (pipes / 'fresh.txt').read_text() == 'fresh\n'
+    link = pipes / 'link.txt'
+    link.symlink_to('note.txt')
+    tool(pipes, 'write', {'path': 'link.txt', 'content': 'through\n'})
+    assert link.is_symlink() and (pipes / 'note.txt').read_text() == 'through\n'
+    passed('write, edit, multiedit and apply_patch refuse a pipe (and edit /dev/zero) at once; new and linked files write')
+
+
 CASES = {name: globals()['case_' + name] for name in ['read_line', 'read_budget', 'read_text', 'read_pipe',
                                                        'grep_line', 'grep_limit', 'home', 'edit_crlf', 'rg',
-                                                       'instructions', 'read_end', 'edit_empty', 'read_twin']}
+                                                       'instructions', 'read_end', 'edit_empty', 'read_twin',
+                                                       'write_pipe']}
 selected = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
 try:
     for name in selected:

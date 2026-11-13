@@ -259,10 +259,7 @@ pub(super) fn open_text(path: &Path) -> CoreResult<(Box<dyn BufRead>, bool)> {
     }
     // A pipe or a device (`/dev/zero`) may never end.
     if !metadata.is_file() {
-        return Err(CoreError::Tool(format!(
-            "{} is not a regular file",
-            path.display()
-        )));
+        return Err(not_regular(path.display()));
     }
     let mut file = File::open(path).map_err(tool)?;
     let mut head = Vec::with_capacity(BINARY_PROBE_BYTES);
@@ -376,6 +373,24 @@ pub(super) fn read_text(
     })
 }
 
+/// The refusal of a pipe, socket or device, which `shown` names.
+fn not_regular(shown: impl std::fmt::Display) -> CoreError {
+    CoreError::Tool(format!("{shown} is not a regular file"))
+}
+
+/// Refuses a pipe, socket or device at `path` (or a link to one) before
+/// anything opens it, in the words `read` uses: opening a pipe waits for
+/// the other end, so a call would run until Stop could not end it, and a
+/// device (`/dev/zero`) may never end. Nothing there, a folder or a regular
+/// file passes, and is then met as before. `named` is the path as the call
+/// gave it.
+pub(super) async fn refuse_special(path: &Path, named: &str) -> CoreResult<()> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) if !metadata.is_file() && !metadata.is_dir() => Err(not_regular(named)),
+        _ => Ok(()),
+    }
+}
+
 /// A file's text for `edit`, `multiedit` and `apply_patch`, without a byte
 /// order mark, and how the file spells it, so the change is written back
 /// the same way. They change UTF-8 and UTF-16 text (see [`decode`]); a file
@@ -386,6 +401,7 @@ pub(super) async fn read_text_file(
     named: &str,
     tool: &str,
 ) -> CoreResult<(String, Spelling)> {
+    refuse_special(path, named).await?;
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|error| super::io_error(named, path, &error))?;
