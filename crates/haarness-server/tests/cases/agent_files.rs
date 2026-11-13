@@ -631,6 +631,80 @@ async fn a_subagent_s_children_stay_in_the_foreground_and_it_is_not_offered_back
     );
 }
 
+/// The `task` description `request` offers.
+fn task_description(request: &ProviderRequest) -> String {
+    request
+        .tools
+        .iter()
+        .find(|tool| tool.name == "task")
+        .map(|tool| tool.description.clone())
+        .unwrap_or_default()
+}
+
+/// A chat's `task` tool names the custom subagents it can start, the same
+/// bytes on every turn; its subagent's `task` keeps its own description.
+#[tokio::test]
+async fn a_chats_task_tool_names_its_custom_subagents_and_a_subagents_does_not() {
+    let fixture = Fixture::new("subagent-list");
+    let provider = Arc::new(Capturing::default());
+    let mut config = review();
+    config.execution.subagent_depth = 2;
+    let agent =
+        |id: &str, description: &str, mode: &str, hidden: bool| haarness_core::CustomAgent {
+            id: id.into(),
+            description: description.into(),
+            prompt: "Do the work.".into(),
+            mode: Some(mode.into()),
+            hidden,
+            ..haarness_core::CustomAgent::default()
+        };
+    config.custom_agents = vec![
+        agent(
+            "reviewer",
+            "Review diffs\nafter code changes",
+            "subagent",
+            false,
+        ),
+        agent("lead", "Leads the chat", "primary", false),
+        agent("quiet", "Not offered", "subagent", true),
+        agent("helper", "Helps with anything", "all", false),
+    ];
+    let runtime = Arc::new(runtime_with(
+        &fixture,
+        provider.clone(),
+        Arc::new(NativeToolRegistry::new(fixture.0.clone())),
+        config,
+    ));
+    let chat = echo_thread(&runtime).await;
+    let child_prompt = "CHILD_PROMPT answer briefly";
+    let task = json!({"prompt": child_prompt, "description": "child", "agent": "reviewer"});
+    let parent_prompt = format!("!tool task {task}");
+    for prompt in [parent_prompt.as_str(), "SECOND_TURN plain"] {
+        let turn = runtime
+            .start_turn(chat.id, turn_request(prompt))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+    }
+    let requests = provider.requests.lock().unwrap().clone();
+    let parent = task_description(&request_for(&requests, &parent_prompt));
+    assert!(
+        parent.ends_with(
+            "\n\nCustom subagents you can name in agent:\n- helper: Helps with anything\n- reviewer: Review diffs after code changes"
+        ),
+        "{parent}"
+    );
+    assert_eq!(
+        task_description(&request_for(&requests, "SECOND_TURN")),
+        parent
+    );
+    let child = task_description(&request_for(&requests, child_prompt));
+    assert_eq!(child, haarness_core::SUBAGENT_TASK_DESCRIPTION);
+}
+
 /// Echo, with a second model to tell runs apart.
 struct TwoModels(Capturing);
 #[async_trait]

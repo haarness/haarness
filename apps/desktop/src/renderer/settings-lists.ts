@@ -58,6 +58,13 @@ export const OPEN_GROUP_LIMIT = 6;
 const PART_TITLES: Record<string, string> = { extensions: "Manage extensions" };
 /** Tools of one catalog group sharing a name prefix this often are their own part. */
 const FAMILY_SIZE = 5;
+/**
+ * Catalog groups that list one family of tools Core once held, by the family's
+ * prefix: the browser's, which servers put in groups of their own (its
+ * developer tools apart) so some can wait to be loaded. They read as one
+ * family split out of Core does: right after it, titled by their prefix.
+ */
+const CORE_FAMILIES: Record<string, string> = { browser: "browser", devtools: "browser" };
 
 function sourceOf(tool: ToolCatalogEntry): { kind: ToolGroupKind; name: string } {
   const [kind, ...rest] = tool.source.split(":");
@@ -73,7 +80,8 @@ const byTitle = (prefix?: string) => (a: ToolCatalogEntry, b: ToolCatalogEntry) 
 /**
  * The built-in tools by the catalog's own groups (the TUI's), Core first. A
  * family a group holds, such as the browser_* tools in Core, is a part of its
- * own after its group, named by its prefix.
+ * own after its group, named by its prefix; so is a group in
+ * {@link CORE_FAMILIES}, after Core.
  */
 function builtinParts(tools: ToolCatalogEntry[]): ToolGroup[] {
   const buckets = new Map<string, { title: string; tools: ToolCatalogEntry[] }>();
@@ -84,9 +92,22 @@ function builtinParts(tools: ToolCatalogEntry[]): ToolGroup[] {
     buckets.set(key, bucket);
   }
   const parts: ToolGroup[] = [];
-  const order = [...buckets.keys()].sort((a, b) =>
-    a === "core" ? -1 : b === "core" ? 1 : buckets.get(a)!.title.localeCompare(buckets.get(b)!.title),
-  );
+  const order = [...buckets.keys()]
+    .filter((key) => !(key in CORE_FAMILIES))
+    .sort((a, b) =>
+      a === "core" ? -1 : b === "core" ? 1 : buckets.get(a)!.title.localeCompare(buckets.get(b)!.title),
+    );
+  const family = (prefix: string, members: ToolCatalogEntry[]): ToolGroup => ({
+    key: "builtin/" + prefix,
+    kind: "builtin",
+    name: humanize([prefix]),
+    prefix,
+    tools: members.sort(byTitle(prefix)),
+  });
+  const familyTools = new Map<string, ToolCatalogEntry[]>();
+  for (const [key, prefix] of Object.entries(CORE_FAMILIES))
+    if (buckets.has(key)) familyTools.set(prefix, [...(familyTools.get(prefix) ?? []), ...buckets.get(key)!.tools]);
+  const coreFamilies = [...familyTools].map(([prefix, members]) => family(prefix, members));
   for (const key of order) {
     const bucket = buckets.get(key)!;
     const families = new Map<string, ToolCatalogEntry[]>();
@@ -100,15 +121,10 @@ function builtinParts(tools: ToolCatalogEntry[]): ToolGroup[] {
     const rest = bucket.tools.filter((tool) => !split.some(([, members]) => members.includes(tool)));
     if (rest.length)
       parts.push({ key: "builtin/" + key, kind: "builtin", name: bucket.title, tools: rest.sort(byTitle()) });
-    for (const [prefix, members] of split.sort(([a], [b]) => a.localeCompare(b)))
-      parts.push({
-        key: "builtin/" + prefix,
-        kind: "builtin",
-        name: humanize([prefix]),
-        prefix,
-        tools: members.sort(byTitle(prefix)),
-      });
+    for (const [prefix, members] of split.sort(([a], [b]) => a.localeCompare(b))) parts.push(family(prefix, members));
+    if (key === "core") parts.push(...coreFamilies);
   }
+  if (!buckets.has("core")) parts.unshift(...coreFamilies);
   return parts;
 }
 

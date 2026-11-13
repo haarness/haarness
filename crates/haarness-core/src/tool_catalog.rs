@@ -164,6 +164,16 @@ fn classify(name: &str) -> Classification {
         ("computer", "Computer use", true)
     } else if matches!(name, "image_generate" | "video_generate") {
         ("media", "Media", false)
+    } else if name.starts_with("browser_") {
+        // Offered only while a browser can serve the chat. The few that
+        // open, read and work a page stay; the rest wait to be loaded, those
+        // for looking into a page and moving files in a group of their own,
+        // so the model asking for the browser's tools gets the everyday ones.
+        if is_browser_devtool(name) {
+            ("devtools", "Browser developer tools", false)
+        } else {
+            ("browser", "Browser", BROWSER_RESIDENT.contains(&name))
+        }
     } else if name.starts_with("ext__")
         || name.starts_with("mcp__")
         || matches!(
@@ -196,11 +206,71 @@ fn classify(name: &str) -> Classification {
     }
 }
 
-/// The window at or under which a chat leaves the browser's tools out until
-/// the model loads them, as it does other optional groups. Chrome's and
-/// Desktop's browser take some 45 schemas, about 9K tokens: a quarter of a
-/// local model's 32K, which Haarness's other instructions and tools already
-/// share with the chat, for tools a small model seldom needs.
+/// The browser tools a chat keeps while lazy loading is on, above
+/// [`SMALL_WINDOW`]: enough to find and open a tab, read a page, click,
+/// type, press keys, answer a dialog and see it, about 2.2K tokens, and
+/// every browser tool their descriptions and errors send the model to. The
+/// browser's other 33 tools (some 6.3K tokens) wait to be loaded: 13 in the
+/// `browser` group, 20 in `devtools`, each group one load.
+const BROWSER_RESIDENT: [&str; 11] = [
+    "browser_tabs_open",
+    "browser_tabs_list",
+    "browser_tabs_focus",
+    "browser_navigate",
+    "browser_frames",
+    "browser_snapshot",
+    "browser_click",
+    "browser_fill",
+    "browser_press",
+    "browser_dialog",
+    "browser_screenshot",
+];
+
+/// The browser tools a page flow needs next after [`BROWSER_RESIDENT`], in
+/// that order: a window of 64K or less defers all 24 of the browser group,
+/// and asked for it, the loader brings these 20 first.
+const BROWSER_NEXT: [&str; 9] = [
+    "browser_wait",
+    "browser_scroll",
+    "browser_select",
+    "browser_check",
+    "browser_fill_form",
+    "browser_back",
+    "browser_hover",
+    "browser_find",
+    "browser_reload",
+];
+
+/// Where a group's tools come in a load: the browser's by
+/// [`BROWSER_RESIDENT`] then [`BROWSER_NEXT`], every other tool after them.
+fn browser_rank(name: &str) -> usize {
+    BROWSER_RESIDENT
+        .iter()
+        .chain(&BROWSER_NEXT)
+        .position(|tool| *tool == name)
+        .unwrap_or(usize::MAX)
+}
+
+/// Whether `name` is a browser tool for looking into a page or moving
+/// files rather than working it: scripts, console, network, traces,
+/// profiles, audits, uploads and downloads (group `devtools`).
+fn is_browser_devtool(name: &str) -> bool {
+    name == "browser_evaluate"
+        || name == "browser_console"
+        || name == "browser_lighthouse"
+        || ["network_", "trace_", "cpu_", "heap_", "files_"]
+            .iter()
+            .any(|family| {
+                name.strip_prefix("browser_")
+                    .is_some_and(|rest| rest.starts_with(family))
+            })
+}
+
+/// The window at or under which a chat leaves all the browser's tools out
+/// until the model loads them, as it does other optional groups. Chrome's
+/// and Desktop's browser take some 45 schemas, about 9K tokens: a quarter of
+/// a local model's 32K, which Haarness's other instructions and tools
+/// already share with the chat, for tools a small model seldom needs.
 pub const SMALL_WINDOW: u64 = 65_536;
 
 /// The window at or under which only the tools that read, search, change and
@@ -226,18 +296,18 @@ fn tight(context_window: Option<u64>) -> bool {
     context_window.is_some_and(|window| window > 0 && window <= TIGHT_WINDOW)
 }
 
-/// [`classify`] for a model with `context_window`: the browser's tools are
-/// optional in a small window, and all but the project's own in a tight one.
+/// [`classify`] for a model with `context_window`: all the browser's tools
+/// are optional in a small window, and all but the project's own in a tight
+/// one.
 fn classify_in(name: &str, context_window: Option<u64>) -> Classification {
     let window = context_window.filter(|window| *window > 0);
+    let classification = classify(name);
     if name.starts_with("browser_") && window.is_some_and(|window| window <= SMALL_WINDOW) {
         return Classification {
-            group: "browser",
-            title: "Browser",
             essential: false,
+            ..classification
         };
     }
-    let classification = classify(name);
     // Computer use's tools are offered only while it is on; then they are
     // the point.
     if tight(context_window) && !TIGHT_RESIDENT.contains(&name) && !name.starts_with("mac_") {
@@ -390,7 +460,7 @@ pub fn some_names(names: &[&str], room: usize) -> String {
 
 /// `description` cut to [`SKILL_DESCRIPTION_LIMIT`] characters, ending
 /// with an ellipsis where it was cut.
-fn shortened(description: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn shortened(description: &str) -> std::borrow::Cow<'_, str> {
     if description.chars().count() <= SKILL_DESCRIPTION_LIMIT {
         return description.into();
     }
@@ -492,6 +562,11 @@ pub fn lazy_active(
 pub struct ToolSelection {
     pub response: ToolCatalogResponse,
     pub advertised: Vec<ToolDefinition>,
+    /// While lazy loading is active, the tools it leaves for the model to
+    /// load: those deferred now and those the model has loaded since, but
+    /// not a pinned one. What the model is told is deferred (see
+    /// [`deferred_sources`]) follows them, so a load changes nothing there.
+    pub optional: Vec<String>,
 }
 
 /// Build both the public catalog and the exact provider-facing schema list
@@ -548,14 +623,18 @@ where
 
     let mut entries = Vec::with_capacity(definitions.len());
     let mut advertised = Vec::new();
+    let mut optional = Vec::new();
     let mut total = 0_u64;
     let mut visible = 0_u64;
     for tool in definitions {
         let classification = classify_tool(&tool, context_window);
         let enabled = effective_enabled(configured, live, &tool.name);
         let loaded = promoted.contains(&tool.name);
-        let is_advertised = enabled
-            && (!active || classification.essential || pinned(settings, &tool.name) || loaded);
+        let is_pinned = pinned(settings, &tool.name);
+        let is_advertised = enabled && (!active || classification.essential || is_pinned || loaded);
+        if active && enabled && !classification.essential && !is_pinned {
+            optional.push(tool.name.clone());
+        }
         let estimate = estimated_tokens(&tool);
         if enabled {
             total = total.saturating_add(estimate);
@@ -592,57 +671,161 @@ where
             estimated_saved_tokens: total.saturating_sub(visible),
         },
         advertised,
+        optional,
     }
 }
 
-/// Search only enabled, currently deferred tools. Exact id matches win;
-/// wildcard and text matches are deterministic and bounded. A query that
-/// is the id of a tool the model has this round finds only the deferred
-/// tools whose ids begin or end with it (`bash_output` and `bash_stop` for
-/// `bash`, `skill_manage` for `skill`), not an MCP tool holding it inside
-/// its id (`mcp__github__list_issues` for `list`) or every one whose
-/// description mentions it; [`already_available`] names the tool it has.
+/// The most bytes the list of deferred sources may take (about 500 tokens).
+const DEFERRED_SOURCES_ROOM: usize = 2 * 1024;
+
+/// Where the tools lazy loading leaves for the model to load come from, one
+/// line each: each MCP server (named by `server_of` when it knows the tool's
+/// server) and extension with its count of tools, then each group of
+/// Haarness's own tools, each kind sorted by name. Empty when nothing is
+/// deferred. Names are kept on one line and can't close the reminder the
+/// list is sent in. Past [`DEFERRED_SOURCES_ROOM`], the rest are counted.
 #[must_use]
-pub fn search_deferred_tools(
+pub fn deferred_sources(
+    selection: &ToolSelection,
+    server_of: impl Fn(&str) -> Option<String>,
+) -> String {
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
+    let groups = selection
+        .response
+        .tools
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry.group.as_str()))
+        .collect::<HashMap<_, _>>();
+    // Kind (servers, extensions, groups), name: count.
+    let mut sources = BTreeMap::<(u8, String), usize>::new();
+    for id in &selection.optional {
+        let source = tool_source(id);
+        let key = if let Some(server) = source.strip_prefix("mcp:") {
+            (0, server_of(id).unwrap_or_else(|| server.to_owned()))
+        } else if let Some(extension) = source.strip_prefix("extension:") {
+            (1, extension.to_owned())
+        } else {
+            (
+                2,
+                groups
+                    .get(id.as_str())
+                    .copied()
+                    .unwrap_or("core")
+                    .to_owned(),
+            )
+        };
+        *sources.entry(key).or_default() += 1;
+    }
+    let lines = sources
+        .into_iter()
+        .map(|((kind, name), count)| {
+            let name = name
+                .chars()
+                .filter(|character| !character.is_control() && !matches!(character, '<' | '>'))
+                .take(100)
+                .collect::<String>();
+            let kind = match kind {
+                0 => " (MCP server)",
+                1 => " (extension)",
+                _ => "",
+            };
+            let tools = if count == 1 { "tool" } else { "tools" };
+            format!("- {name}{kind}: {count} {tools}")
+        })
+        .collect::<Vec<_>>();
+    let mut text = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        let rest = lines.len() - index;
+        if text.len() + line.len() + 1 > DEFERRED_SOURCES_ROOM && rest > 1 {
+            let _ = write!(text, "\n- {rest} more sources");
+            break;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(line);
+    }
+    text.trim_start().to_owned()
+}
+
+/// The deferred tools one `load_tool` call matched: those it loads, at most
+/// [`MAX_LOAD_MATCHES`], and the matches past that, which it leaves out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeferredMatches {
+    pub found: Vec<String>,
+    pub left_out: Vec<String>,
+}
+
+/// Search only enabled, currently deferred tools. A query that is a
+/// deferred tool's exact id is found first, whatever query comes before
+/// it, so a wildcard or a word in the same call cannot crowd that tool
+/// out; wildcard and text matches follow, deterministic, in the order of
+/// the queries. A query that is the id of a tool the model has this round
+/// finds only the deferred tools whose ids begin or end with it
+/// (`bash_output` and `bash_stop` for `bash`, `skill_manage` for `skill`),
+/// not an MCP tool holding it inside its id (`mcp__github__list_issues` for
+/// `list`) or every one whose description mentions it; [`already_available`]
+/// names the tool it has. Past [`MAX_LOAD_MATCHES`], matches are left out
+/// and returned as such, for the answer to name.
+#[must_use]
+pub fn find_deferred_tools(
     definitions: &[ToolDefinition],
     catalog: &ToolCatalogResponse,
     queries: &[String],
-) -> Vec<String> {
+) -> DeferredMatches {
     let by_id = definitions
         .iter()
         .map(|tool| (tool.name.as_str(), tool))
         .collect::<HashMap<_, _>>();
     let deferred = deferred_entries(catalog, &by_id);
+    let queries = queries
+        .iter()
+        .take(10)
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .filter(|query| !query.is_empty())
+        .collect::<Vec<_>>();
     let mut matched = Vec::new();
-    for raw in queries.iter().take(10) {
-        let query = raw.trim().to_ascii_lowercase();
-        if query.is_empty() {
-            continue;
+    let mut seen = HashSet::new();
+    let mut add = |id: String| {
+        if seen.insert(id.clone()) {
+            matched.push(id);
         }
-        let found = if offered(catalog, &query).is_some() {
+    };
+    for query in &queries {
+        if let Some(entry) = deferred
+            .iter()
+            .find(|entry| entry.id.eq_ignore_ascii_case(query))
+        {
+            add(entry.id.clone());
+        }
+    }
+    for query in &queries {
+        let found = if offered(catalog, query).is_some() {
             let mut ids = deferred
                 .iter()
                 .filter(|entry| {
                     let id = entry.id.to_ascii_lowercase();
-                    id.starts_with(&query) || id.ends_with(&query)
+                    id.starts_with(query.as_str()) || id.ends_with(query.as_str())
                 })
                 .map(|entry| entry.id.clone())
                 .collect::<Vec<_>>();
             ids.sort();
             ids
         } else {
-            query_matches(&deferred, &by_id, &query)
+            query_matches(&deferred, &by_id, query)
         };
-        for id in found {
-            if !matched.contains(&id) {
-                matched.push(id);
-                if matched.len() == MAX_LOAD_MATCHES {
-                    return matched;
-                }
-            }
-        }
+        found.into_iter().for_each(&mut add);
     }
-    matched
+    let left_out = if matched.len() > MAX_LOAD_MATCHES {
+        matched.split_off(MAX_LOAD_MATCHES)
+    } else {
+        Vec::new()
+    };
+    DeferredMatches {
+        found: matched,
+        left_out,
+    }
 }
 
 /// The tools a query names exactly among those the model has this round,
@@ -710,12 +893,40 @@ fn deferred_entries<'a>(
         .collect()
 }
 
-/// The deferred tools one (lowercased) query matches, exact ids first.
+/// The deferred tools one (lowercased) query matches, exact ids first. A
+/// query that names a group holding deferred tools (`browser`, `devtools`,
+/// `cloud`, as the model is told them) finds that group's, the browser's
+/// in the order a page needs them, and then those of an MCP server or
+/// extension of that name (a `memory` server beside Haarness's memory
+/// tools); not every tool that mentions the word: asked for the browser,
+/// the model gets its everyday tools, not the profilers whose ids hold the
+/// word too.
 fn query_matches(
     deferred: &[&ToolCatalogEntry],
     by_id: &HashMap<&str, &ToolDefinition>,
     query: &str,
 ) -> Vec<String> {
+    let mut group = deferred
+        .iter()
+        .filter(|entry| entry.group.eq_ignore_ascii_case(query))
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    if !group.is_empty() {
+        group.sort_by_key(|id| (browser_rank(id), id.clone()));
+        let mut named = deferred
+            .iter()
+            .filter(|entry| {
+                !entry.group.eq_ignore_ascii_case(query)
+                    && entry.source.split_once(':').is_some_and(|(kind, name)| {
+                        matches!(kind, "mcp" | "extension") && name.eq_ignore_ascii_case(query)
+                    })
+            })
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        named.sort();
+        group.extend(named);
+        return group;
+    }
     let mut candidates = deferred
         .iter()
         .filter(|entry| {
@@ -744,14 +955,21 @@ fn query_matches(
     candidates
 }
 
+/// The most bytes the names of the matches one call left out may take in
+/// its answer (about 500 tokens).
+const LEFT_OUT_ROOM: usize = 2 * 1024;
+
 /// What `load_tool` answers: the tools it `loaded`, those the model
-/// `already` has, and matches it left out because the chat holds
-/// [`MAX_PROMOTED_TOOLS`] loaded tools (`full`).
+/// `already` has, matches it left out because the chat holds
+/// [`MAX_PROMOTED_TOOLS`] loaded tools (`full`), and those past the
+/// [`MAX_LOAD_MATCHES`] one call loads (`left_out`), named so the model can
+/// load the ones it needs by id.
 #[must_use]
 pub fn load_tool_result(
     loaded: &[String],
     already: &[String],
     full: &[String],
+    left_out: &[String],
     catalog: &ToolCatalogResponse,
 ) -> Value {
     let tools = loaded
@@ -783,6 +1001,19 @@ pub fn load_tool_result(
         message.push(format!(
             "Not loaded, because this session already holds the most loaded tools it can ({MAX_PROMOTED_TOOLS}): {}. Use the tools you have.",
             full.join(", ")
+        ));
+    }
+    if !left_out.is_empty() {
+        let names = left_out.iter().map(String::as_str).collect::<Vec<_>>();
+        // A chat that holds the most loaded tools it can loads no more.
+        let next = if full.is_empty() {
+            " Load the ones you need by exact id."
+        } else {
+            ""
+        };
+        message.push(format!(
+            "Also matched, past the {MAX_LOAD_MATCHES} tools one call loads, so not loaded: {}.{next}",
+            some_names(&names, LEFT_OUT_ROOM)
         ));
     }
     if message.is_empty() {
@@ -998,6 +1229,15 @@ mod tests {
     }
     use super::*;
 
+    /// [`find_deferred_tools`] without the matches it left out.
+    fn search_deferred_tools(
+        definitions: &[ToolDefinition],
+        catalog: &ToolCatalogResponse,
+        queries: &[String],
+    ) -> Vec<String> {
+        find_deferred_tools(definitions, catalog, queries).found
+    }
+
     fn definition(name: &str, description: &str) -> ToolDefinition {
         ToolDefinition {
             name: name.into(),
@@ -1094,6 +1334,178 @@ mod tests {
                 .any(|tool| tool.name == "browser_snapshot")
         );
         assert!(!large.response.lazy_active);
+    }
+
+    /// The model is told where the deferred tools come from: each MCP server
+    /// (by its own name) and extension with its count, then Haarness's own
+    /// groups. A load changes nothing there; a pinned tool is not deferred.
+    #[test]
+    fn the_deferred_sources_name_servers_extensions_and_groups() {
+        let mut definitions = vec![
+            definition("read", "read a file"),
+            definition("memory_read", "read notes"),
+            definition("memory_save", "save notes"),
+            definition("session_manage", "sessions"),
+            definition("ext__lint__run", "lint"),
+            definition("mcp__docs__search", "search"),
+            definition("mcp__docs__read", "read"),
+            definition("mcp__a__b__one", "a tool of the server a__b"),
+            definition("mcp__odd__x", "a server whose name has odd characters"),
+            definition("browser_navigate", "navigate"),
+            definition("browser_wait", "wait"),
+        ];
+        definitions.extend(
+            (0..3).map(|index| definition(&format!("mcp__tracker__t{index}"), "an issue tool")),
+        );
+        let select = |mode, promoted: &[&str]| {
+            select_tools(
+                definitions.clone(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &LazyToolSettings {
+                    mode,
+                    pin: vec!["session_*".into()],
+                    ..LazyToolSettings::default()
+                },
+                &promoted
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<HashSet<_>>(),
+                Some(200_000),
+                false,
+            )
+        };
+        let server_of = |tool: &str| {
+            if tool.starts_with("mcp__a__b__") {
+                Some("a__b".to_owned())
+            } else if tool.starts_with("mcp__odd__") {
+                Some("odd <server>\nname".to_owned())
+            } else {
+                None
+            }
+        };
+        let expected = "- a__b (MCP server): 1 tool\n- docs (MCP server): 2 tools\n- odd servername (MCP server): 1 tool\n- tracker (MCP server): 3 tools\n- lint (extension): 1 tool\n- browser: 1 tool\n- memory: 2 tools";
+        let selection = select(LazyToolMode::Always, &[]);
+        assert_eq!(deferred_sources(&selection, server_of), expected);
+        // The model loaded some: the same words, so nothing is told again.
+        let loaded = select(LazyToolMode::Always, &["memory_read", "mcp__docs__search"]);
+        assert!(names(&loaded.advertised).contains(&"memory_read"));
+        assert_eq!(deferred_sources(&loaded, server_of), expected);
+        // Lazy loading off: nothing is deferred.
+        assert_eq!(
+            deferred_sources(&select(LazyToolMode::Off, &[]), server_of),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_long_list_of_deferred_sources_stays_within_its_room() {
+        let definitions = (0..400)
+            .map(|index| {
+                definition(
+                    &format!("mcp__server_with_a_long_name_{index:03}__tool"),
+                    "a tool",
+                )
+            })
+            .collect::<Vec<_>>();
+        let selection = select_tools(
+            definitions,
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::new(),
+            Some(200_000),
+            false,
+        );
+        let sources = deferred_sources(&selection, |_| None);
+        assert!(
+            sources.len() <= DEFERRED_SOURCES_ROOM + 30,
+            "{}",
+            sources.len()
+        );
+        let last = sources.lines().last().unwrap();
+        let shown = sources.lines().count() - 1;
+        assert_eq!(last, format!("- {} more sources", 400 - shown));
+        assert!(sources.starts_with("- server_with_a_long_name_000 (MCP server): 1 tool\n"));
+    }
+
+    /// While lazy loading is on, a large window keeps the browser tools that
+    /// open, read and work a page, and the others wait in the browser group:
+    /// asked for the group, the loader loads twenty and names the rest, and
+    /// one called by name is read back from the history after a restart.
+    #[test]
+    fn a_large_window_keeps_a_few_browser_tools_and_defers_the_rest() {
+        let mut definitions = BROWSER_RESIDENT
+            .iter()
+            .map(|name| definition(name, &"a browser tool ".repeat(20)))
+            .collect::<Vec<_>>();
+        definitions.extend((0..30).map(|index| {
+            definition(
+                &format!("browser_more_{index:02}"),
+                &"another browser tool ".repeat(20),
+            )
+        }));
+        definitions.push(definition("read", "read a file"));
+        definitions.push(definition("browser_console", "read the browser console"));
+        let select = |window| {
+            select_tools(
+                definitions.clone(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &LazyToolSettings::default(),
+                &HashSet::new(),
+                Some(window),
+                false,
+            )
+        };
+        let large = select(200_000);
+        assert!(large.response.lazy_active);
+        let mut resident = BROWSER_RESIDENT.to_vec();
+        resident.sort_unstable();
+        resident.extend(["read", LOAD_TOOL_NAME]);
+        assert_eq!(names(&large.advertised), resident);
+        // Asked for the browser group, the loader loads its tools, never
+        // those of the developer tools' group, whose ids hold the word too.
+        let matches = find_deferred_tools(&definitions, &large.response, &["browser".into()]);
+        assert_eq!(matches.found.len(), MAX_LOAD_MATCHES);
+        assert_eq!(matches.left_out.len(), 10);
+        assert!(
+            matches
+                .found
+                .iter()
+                .chain(&matches.left_out)
+                .all(|id| id.starts_with("browser_more_"))
+        );
+        assert_eq!(
+            search_deferred_tools(&definitions, &large.response, &["devtools".into()]),
+            ["browser_console"]
+        );
+        // A window of 64K or less: every browser tool waits, as before.
+        assert_eq!(
+            names(&select(SMALL_WINDOW).advertised),
+            ["read", LOAD_TOOL_NAME]
+        );
+        // A deferred browser tool the model called by name stays loaded
+        // after a restart; one always at hand needs no record.
+        assert!(!is_essential_tool("browser_more_00") && is_essential_tool("browser_click"));
+        let tools = definitions
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let items = [
+            ran("1", "browser_more_07", false, Value::Null),
+            ran("2", "browser_click", false, Value::Null),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        assert_eq!(
+            promoted_in(&items, &tools),
+            HashSet::from(["browser_more_07".to_owned()])
+        );
     }
 
     /// An 8K window, or an account allowing 8,000 tokens a minute: the tools
@@ -1197,6 +1609,54 @@ mod tests {
         assert!(
             search_deferred_tools(&definitions, &selection.response, &["memory".into()]).is_empty()
         );
+    }
+
+    /// Asked for a group by name, the loader brings that group's tools, then
+    /// those of an MCP server or extension of the same name, which it would
+    /// otherwise hide: a `memory` server beside Haarness's memory tools, a
+    /// `devtools` server beside the browser's.
+    #[test]
+    fn a_group_query_also_brings_a_server_of_that_name() {
+        let definitions = vec![
+            definition("read", "read a file"),
+            definition("memory_read", "read durable notes"),
+            definition("mcp__memory__create_entities", "store entities"),
+            definition("mcp__memory__read_graph", "read the graph"),
+            definition("mcp__other__remember", "mentions memory in its description"),
+            definition("browser_wait", "wait for a page"),
+            definition("browser_console", "read the console"),
+            definition("mcp__devtools__take_trace", "trace a page"),
+            definition("ext__browser__open", "an extension named browser"),
+        ];
+        let selection = select_tools(
+            definitions.clone(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::new(),
+            Some(200_000),
+            false,
+        );
+        let search =
+            |query: &str| search_deferred_tools(&definitions, &selection.response, &[query.into()]);
+        assert_eq!(
+            search("memory"),
+            [
+                "memory_read",
+                "mcp__memory__create_entities",
+                "mcp__memory__read_graph"
+            ]
+        );
+        assert_eq!(
+            search("devtools"),
+            ["browser_console", "mcp__devtools__take_trace"]
+        );
+        assert_eq!(search("browser"), ["browser_wait", "ext__browser__open"]);
+        // A server's own name, no group's, still finds it by its tools' ids.
+        assert_eq!(search("other"), ["mcp__other__remember"]);
     }
 
     #[test]
@@ -1817,7 +2277,7 @@ mod tests {
         // A text search is no claim about one tool.
         assert!(already_available(&definitions, catalog, &["run a command".into()]).is_empty());
 
-        let only = load_tool_result(&[], &["bash".to_owned()], &[], catalog);
+        let only = load_tool_result(&[], &["bash".to_owned()], &[], &[], catalog);
         assert_eq!(only["loaded"], json!([]));
         assert_eq!(only["available"], json!(["bash"]));
         let message = only["message"].as_str().unwrap();
@@ -1830,6 +2290,7 @@ mod tests {
         let both = load_tool_result(
             &["memory_read".to_owned()],
             &["bash".to_owned(), "mcp__github__issues".to_owned()],
+            &[],
             &[],
             catalog,
         );
@@ -1886,7 +2347,7 @@ mod tests {
             ["bash_output", "bash_stop", "multiedit", "memory_list"]
         );
         assert_eq!(already, ["bash", "edit", "list"]);
-        let result = load_tool_result(&loaded, &already, &[], &tight.response);
+        let result = load_tool_result(&loaded, &already, &[], &[], &tight.response);
         assert_eq!(result["available"], json!(["bash", "edit", "list"]));
         let message = result["message"].as_str().unwrap();
         assert!(
@@ -1932,7 +2393,7 @@ mod tests {
         let already = already_available(&definitions, &selection.response, &queries);
         assert_eq!(loaded, ["skill_manage"]);
         assert_eq!(already, [SKILL_TOOL_NAME]);
-        let result = load_tool_result(&loaded, &already, &[], &selection.response);
+        let result = load_tool_result(&loaded, &already, &[], &[], &selection.response);
         assert_eq!(result["loaded"][0]["id"], "skill_manage");
         assert_eq!(result["available"], json!([SKILL_TOOL_NAME]));
     }
@@ -1952,7 +2413,13 @@ mod tests {
             None,
             false,
         );
-        let value = load_tool_result(&[], &[], &["memory_read".to_owned()], &selection.response);
+        let value = load_tool_result(
+            &[],
+            &[],
+            &["memory_read".to_owned()],
+            &[],
+            &selection.response,
+        );
         assert_eq!(value["notLoaded"], json!(["memory_read"]));
         let message = value["message"].as_str().unwrap();
         assert!(
@@ -1963,12 +2430,136 @@ mod tests {
 
         // What a miss always said, unchanged.
         assert_eq!(
-            load_tool_result(&[], &[], &[], &selection.response),
+            load_tool_result(&[], &[], &[], &[], &selection.response),
             json!({
                 "loaded": [],
                 "message": "No deferred tools matched. Try a functional term such as sessions, memory, extensions, automation, or an exact/wildcard tool id.",
             })
         );
+    }
+
+    fn deferred_docs(count: usize) -> (Vec<ToolDefinition>, ToolSelection) {
+        let mut definitions = (1..=count)
+            .map(|index| definition(&format!("mcp__docs__t{index:02}"), "a documentation tool"))
+            .collect::<Vec<_>>();
+        definitions.push(definition("memory_read", "read durable notes"));
+        definitions.push(definition("read", "read a file"));
+        let selection = select_tools(
+            definitions.clone(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::new(),
+            Some(200_000),
+            false,
+        );
+        (definitions, selection)
+    }
+
+    /// A tool named by its exact id loads even when a wildcard in the same
+    /// call matches more than one call loads, whichever query comes first.
+    #[test]
+    fn an_exact_id_loads_ahead_of_a_wildcard_in_the_same_call() {
+        let (definitions, selection) = deferred_docs(25);
+        let docs = |range: std::ops::RangeInclusive<usize>| {
+            range
+                .map(|index| format!("mcp__docs__t{index:02}"))
+                .collect::<Vec<_>>()
+        };
+        for queries in [
+            ["mcp__docs__*", "memory_read"],
+            ["memory_read", "mcp__docs__*"],
+        ] {
+            let queries = queries.map(String::from);
+            let matches = find_deferred_tools(&definitions, &selection.response, &queries);
+            assert_eq!(matches.found.len(), MAX_LOAD_MATCHES, "{queries:?}");
+            assert_eq!(matches.found[0], "memory_read", "{queries:?}");
+            assert_eq!(matches.found[1..], docs(1..=19), "{queries:?}");
+            assert_eq!(matches.left_out, docs(20..=25), "{queries:?}");
+        }
+        // An exact id in other letters is still that tool.
+        let matches = find_deferred_tools(
+            &definitions,
+            &selection.response,
+            &["mcp__docs__*".into(), "MEMORY_READ".into()],
+        );
+        assert_eq!(matches.found[0], "memory_read");
+    }
+
+    /// One wildcard over more tools than a call loads: the first twenty
+    /// load, and the answer names the rest and how to load them.
+    #[test]
+    fn a_load_past_twenty_names_what_it_left_out() {
+        let (definitions, selection) = deferred_docs(25);
+        let matches =
+            find_deferred_tools(&definitions, &selection.response, &["mcp__docs__*".into()]);
+        assert_eq!(matches.found.len(), MAX_LOAD_MATCHES);
+        assert_eq!(
+            matches.left_out,
+            ["t21", "t22", "t23", "t24", "t25"].map(|tool| format!("mcp__docs__{tool}"))
+        );
+        let value = load_tool_result(
+            &matches.found,
+            &[],
+            &[],
+            &matches.left_out,
+            &selection.response,
+        );
+        assert_eq!(value["loaded"].as_array().unwrap().len(), MAX_LOAD_MATCHES);
+        let message = value["message"].as_str().unwrap();
+        assert!(
+            message.contains(
+                "past the 20 tools one call loads, so not loaded: mcp__docs__t21, mcp__docs__t22, mcp__docs__t23, mcp__docs__t24, mcp__docs__t25."
+            ) && message.ends_with("Load the ones you need by exact id."),
+            "{message}"
+        );
+        // A chat at the loaded-tool limit is not told to load more.
+        let full = load_tool_result(
+            &[],
+            &[],
+            &matches.found,
+            &matches.left_out,
+            &selection.response,
+        );
+        let message = full["message"].as_str().unwrap();
+        assert!(
+            message.contains("Use the tools you have.")
+                && message.contains("so not loaded: mcp__docs__t21")
+                && !message.contains("Load the ones you need"),
+            "{message}"
+        );
+        // Under the limit, nothing more is said.
+        let (definitions, selection) = deferred_docs(5);
+        let matches =
+            find_deferred_tools(&definitions, &selection.response, &["mcp__docs__*".into()]);
+        assert!(matches.left_out.is_empty());
+        let value = load_tool_result(&matches.found, &[], &[], &[], &selection.response);
+        assert_eq!(
+            value["message"],
+            "The matching tool schemas will be available on the next model round."
+        );
+    }
+
+    /// Hundreds left out: the answer names what fits its room and counts
+    /// the rest.
+    #[test]
+    fn the_names_left_out_are_bounded() {
+        let (definitions, selection) = deferred_docs(99);
+        let mut left_out = (0..400)
+            .map(|index| format!("mcp__a_server_with_a_long_name__tool_{index:03}"))
+            .collect::<Vec<_>>();
+        left_out.extend(definitions.iter().map(|tool| tool.name.clone()));
+        let value = load_tool_result(&[], &[], &[], &left_out, &selection.response);
+        let message = value["message"].as_str().unwrap();
+        assert!(message.len() <= LEFT_OUT_ROOM + 200, "{}", message.len());
+        assert!(
+            message.contains(" more. Load the ones you need"),
+            "{message}"
+        );
+        assert!(message.contains("mcp__a_server_with_a_long_name__tool_000"));
     }
 
     #[test]

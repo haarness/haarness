@@ -2446,6 +2446,182 @@ mod tests {
         assert_eq!(navigate.unavailable_to(other).as_deref(), Some(NOT_OFFERED));
     }
 
+    /// While lazy loading is on, a chat whose model has a large window is
+    /// sent the browser tools that find, open, read and work a page (the
+    /// names must stay those of the real catalog), and the rest wait: the
+    /// everyday ones in the browser group, which one load brings, and those
+    /// that look into a page or move files in the developer tools' group. A
+    /// small window waits for them all, and with lazy loading off every one
+    /// is sent, as before.
+    #[test]
+    fn a_large_window_keeps_a_few_browser_tools_at_hand_and_defers_the_rest() {
+        use haarness_protocol::LazyToolMode;
+        let definitions = super::tools(BrowserBroker::new())
+            .iter()
+            .map(|tool| tool.definition())
+            .collect::<Vec<_>>();
+        let select = |mode, window| {
+            haarness_core::select_tools(
+                definitions.clone(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &haarness_core::LazyToolSettings {
+                    mode,
+                    ..haarness_core::LazyToolSettings::default()
+                },
+                &std::collections::HashSet::new(),
+                Some(window),
+                false,
+            )
+        };
+        let names = |tools: &[ToolDefinition]| {
+            tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>()
+        };
+        let large = select(LazyToolMode::Auto, 200_000);
+        assert!(large.response.lazy_active);
+        let resident = [
+            "browser_click",
+            "browser_dialog",
+            "browser_fill",
+            "browser_frames",
+            "browser_navigate",
+            "browser_press",
+            "browser_screenshot",
+            "browser_snapshot",
+            "browser_tabs_focus",
+            "browser_tabs_list",
+            "browser_tabs_open",
+        ];
+        let mut sent = resident.map(str::to_owned).to_vec();
+        sent.push(haarness_core::LOAD_TOOL_NAME.to_owned());
+        assert_eq!(names(&large.advertised), sent);
+        let group = |name: &str| {
+            let mut ids = large
+                .response
+                .tools
+                .iter()
+                .filter(|entry| entry.group == name && !entry.advertised)
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        };
+        let everyday = group("browser");
+        assert_eq!(
+            everyday,
+            [
+                "browser_back",
+                "browser_check",
+                "browser_drag",
+                "browser_fill_form",
+                "browser_find",
+                "browser_forward",
+                "browser_hover",
+                "browser_reload",
+                "browser_scroll",
+                "browser_select",
+                "browser_stop",
+                "browser_tabs_close",
+                "browser_wait",
+            ]
+        );
+        let devtools = group("devtools");
+        assert_eq!(devtools.len(), 20, "{devtools:?}");
+        assert!(devtools.iter().all(|id| {
+            id.starts_with("browser_files_")
+                || [
+                    "console",
+                    "evaluate",
+                    "lighthouse",
+                    "network",
+                    "trace",
+                    "cpu",
+                    "heap",
+                ]
+                .iter()
+                .any(|family| id["browser_".len()..].starts_with(family))
+        }));
+        // One load each: the group the model is told of, and nothing else.
+        for (query, ids) in [("browser", &everyday), ("devtools", &devtools)] {
+            let matches = haarness_core::find_deferred_tools(
+                &definitions,
+                &large.response,
+                &[query.to_owned()],
+            );
+            let mut found = matches.found.clone();
+            found.sort();
+            assert_eq!(&found, ids, "{query}");
+            assert!(matches.left_out.is_empty(), "{query}");
+        }
+        let tokens = |advertised: bool| {
+            large
+                .response
+                .tools
+                .iter()
+                .filter(|entry| entry.advertised == advertised)
+                .map(|entry| entry.estimated_tokens)
+                .sum::<u64>()
+        };
+        // About 2.2K tokens go with each request; some 6.3K wait.
+        assert!((1_900..2_500).contains(&tokens(true)), "{}", tokens(true));
+        assert!((5_900..6_800).contains(&tokens(false)), "{}", tokens(false));
+        // What the tools at hand send the model to is at hand too. A
+        // snapshot's description names browser_find only as one more thing
+        // that makes refs expire.
+        let tools_in = |text: &str| {
+            text.split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .filter(|word| word.starts_with("browser_"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        for tool in &large.advertised {
+            for name in tools_in(&tool.description) {
+                assert!(
+                    resident.contains(&name.as_str()) || name == "browser_find",
+                    "{} sends the model to {name}",
+                    tool.name
+                );
+            }
+        }
+        let failures = ["not-in-group", "background-tab", "restricted-page"]
+            .map(|code| chrome_failure(code).unwrap());
+        for message in [NOT_OWNED, RECOVERY].into_iter().chain(failures) {
+            for name in tools_in(message) {
+                assert!(resident.contains(&name.as_str()), "{message}");
+            }
+        }
+        // A local model's 32K: all of them wait, as before, and asked for
+        // the browser group the loader brings first what a page flow needs.
+        let small = select(LazyToolMode::Auto, 32_768);
+        assert_eq!(names(&small.advertised), [haarness_core::LOAD_TOOL_NAME]);
+        let matches = haarness_core::find_deferred_tools(
+            &definitions,
+            &small.response,
+            &["browser".to_owned()],
+        );
+        assert_eq!(matches.found.len(), 20);
+        for tool in resident.iter().chain(&["browser_wait", "browser_scroll"]) {
+            assert!(matches.found.iter().any(|id| id == tool), "{tool}");
+        }
+        assert_eq!(
+            matches.left_out,
+            [
+                "browser_drag",
+                "browser_forward",
+                "browser_stop",
+                "browser_tabs_close"
+            ]
+        );
+        // Lazy loading off: every one is sent.
+        assert_eq!(
+            select(LazyToolMode::Off, 200_000).advertised.len(),
+            definitions.len()
+        );
+    }
+
     // ---- Chrome extension hosts ----------------------------------------
 
     use crate::browser_policy::{ChromeAccess, ChromeSite};

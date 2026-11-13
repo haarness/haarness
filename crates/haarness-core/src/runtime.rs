@@ -30,8 +30,8 @@ use tracing::{Instrument as _, error, info, instrument, warn};
 use crate::agents::custom_system_prompt_with_context;
 use crate::background::{BackgroundHandoff, BackgroundLedger, BackgroundProbe};
 use crate::tool_catalog::{
-    LOAD_TOOL_NAME, MAX_PROMOTED_TOOLS, already_available, is_essential_tool, load_tool_result,
-    search_deferred_tools, select_tools,
+    LOAD_TOOL_NAME, MAX_PROMOTED_TOOLS, already_available, find_deferred_tools, is_essential_tool,
+    load_tool_result, select_tools,
 };
 use crate::tool_validation::{unknown_tool, validate_arguments};
 use crate::{
@@ -333,6 +333,15 @@ type ToolPromotions = DashMap<ThreadId, ChatTools>;
 type ToolExecutionGates = DashMap<String, Arc<AsyncRwLock<()>>>;
 /// Subagent slot pools by (depth, concurrency limit), shared by a runtime and its turns.
 type SubagentSlots = Arc<Mutex<HashMap<(u8, usize), Arc<Semaphore>>>>;
+
+/// What a request may offer, before lazy loading picks (see
+/// `RunnerTask::round_offer`).
+struct RoundOffer {
+    catalog: Vec<crate::ToolDefinition>,
+    eligible: Vec<crate::ToolDefinition>,
+    lazy: crate::LazyToolSettings,
+    context_window: Option<u64>,
+}
 
 /// What a chat's tool list holds beyond its catalog. Kept while this process
 /// runs; for a chat it has none of (after a restart, or a fork) the loads
@@ -4026,11 +4035,21 @@ impl AgentRuntime {
         if let Some(mode) = *self.lazy_tool_mode.read() {
             lazy_tools.mode = mode;
         }
+        let agents = self.live_agents.read().clone();
         let mut response = select_tools(
             match thread_id {
                 Some(thread) => components.tools.list_for(thread),
                 None => components.tools.list(),
-            },
+            }
+            .into_iter()
+            .map(|tool| {
+                if tool.name == "task" {
+                    task_with_subagents(tool, &agents)
+                } else {
+                    tool
+                }
+            })
+            .collect(),
             &components.config.tool_availability,
             &live,
             &lazy_tools,
@@ -5211,10 +5230,13 @@ impl AgentRuntime {
         let turn_id = items.iter().rev().find_map(|item| item.turn_id);
         // What the next turn would tell the model first; only a cold
         // question, which has no prepared turn to reuse, adds it.
+        // Side questions can't load tools, so they say nothing of those
+        // deferred.
         let reminder = crate::turn_context::reminder(
             &items,
             crate::turn_context::local_date(thread.created_at),
             crate::turn_context::today(),
+            None,
             &self.memory_context.read(),
             None,
         );
@@ -5312,11 +5334,20 @@ impl AgentRuntime {
                         .and_then(|model| model.context_window),
                 );
             let tools = self.chat_tools(&thread, &components).await?;
+            let agents = self.live_agents.read().clone();
             let selection = select_tools(
                 catalog
                     .iter()
                     .filter(|tool| !engine.disables_tool(&tool.name) && !is_goal_tool(&tool.name))
                     .cloned()
+                    // As a turn started in the chat sends it.
+                    .map(|tool| {
+                        if tool.name == "task" {
+                            task_with_subagents(tool, &agents)
+                        } else {
+                            tool
+                        }
+                    })
                     .collect(),
                 &components.config.tool_availability,
                 &self.tool_availability.read(),
@@ -11851,14 +11882,19 @@ impl RunnerTask {
                     () = starting => {}
                 }
             }
-            // A changed date or memory index and this prompt's hook context
-            // reach the model in a hidden message stored with the turn, so the
-            // system prompt and every earlier message stay byte-identical.
+            // A changed date, set of deferred tools or memory index and this
+            // prompt's hook context reach the model in a hidden message stored
+            // with the turn, so the system prompt, the tools and every earlier
+            // message stay byte-identical.
+            let deferred = self
+                .deferred_sources(agent, provider_id, &model, &provider_models)
+                .await?;
             let items = self.repository.list_items(self.thread.id, None).await?;
             let reminder = crate::turn_context::reminder(
                 &items,
                 crate::turn_context::local_date(self.thread.created_at),
                 crate::turn_context::today(),
+                Some(&deferred),
                 &self.memory_context.read(),
                 prompt_context.as_deref(),
             );
@@ -12238,51 +12274,19 @@ impl RunnerTask {
                         content: self.config.prompts.text(crate::PromptName::MaxSteps),
                     });
                 }
-                // Apply disabled-tool filtering before the
-                // provider sees the schema. Execution-time permission checks
-                // remain authoritative, but advertising a categorically
-                // denied tool only invites guaranteed failures. Default child
-                // agents also cannot recursively spawn tasks, so hide `task`
-                // rather than letting the model discover that ceiling by
-                // repeatedly calling it. A boundary inherited from the chat
-                // that started this one never hides a tool: it differs
-                // between sessions of one agent, and the tools lead the
-                // cached prompt prefix those sessions share. Such a tool is
-                // refused when called, naming the parent's rule.
-                let permission_engine = self.permission_engine(agent);
-                let catalog = self.request_tools();
-                // The resource tools reach only servers whose tools this
-                // agent may have; with none left they would only fail.
-                let resources_open = self.tools.resource_servers().iter().any(|server| {
-                    let tools = mcp_server_tools(server);
-                    self.tool_enabled(&tools) && !permission_engine.hides_tool(&tools)
-                });
-                let eligible_tools = catalog
-                    .clone()
-                    .into_iter()
-                    .filter(|tool| {
-                        self.tool_enabled(&tool.name)
-                            && !(self.depth >= self.config.execution.subagent_depth
-                                && tool.name == "task")
-                            && !permission_engine.hides_tool(&tool.name)
-                            && (goal_for_request.is_some() || !is_goal_tool(&tool.name))
-                            && (resources_open || !is_resource_tool(&tool.name))
-                            // The patch tool goes to the models trained on
-                            // its format; every model has edit and write.
-                            && (tool.name != "apply_patch"
-                                || crate::tool_catalog::writes_patches(&model))
-                    })
-                    .map(|tool| {
-                        if self.depth > 0 && tool.name == "task" {
-                            foreground_task(tool)
-                        } else {
-                            tool
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                // Code Mode reaches only the MCP and browser tools this
-                // agent may use; with none, it is not offered.
-                let eligible_tools = crate::tool_catalog::without_idle_code_tool(eligible_tools);
+                let RoundOffer {
+                    catalog,
+                    eligible: eligible_tools,
+                    lazy: lazy_settings,
+                    context_window,
+                } = self.round_offer(
+                    agent,
+                    provider_id,
+                    &model,
+                    &provider_models,
+                    goal_for_request.is_some(),
+                    true,
+                );
                 if eligible_tools.iter().any(|tool| tool.name == "preview") {
                     // A line break before and after, as the built-in
                     // section has always been sent.
@@ -12298,26 +12302,7 @@ impl RunnerTask {
                     system.push_str(&self.config.prompts.text(crate::PromptName::ComputerUse));
                     system.push('\n');
                 }
-                let mut lazy_settings = self.config.lazy_tools.clone();
-                if let Some(mode) = *self.lazy_tool_mode.read() {
-                    lazy_settings.mode = mode;
-                }
-                // Deferring an allowed tool is only useful when its loader is
-                // callable under this turn's permissions and explicit mask.
-                if !self.tool_enabled(LOAD_TOOL_NAME)
-                    || permission_engine.hides_tool(LOAD_TOOL_NAME)
-                {
-                    lazy_settings.mode = haarness_protocol::LazyToolMode::Off;
-                }
-                // An account whose plan allows fewer tokens a minute than
-                // this model's window holds gets its tools sized for that.
                 let ceiling = self.request_ceilings.get(provider_id, &model);
-                let context_window = ceiling.tool_window(
-                    provider_models
-                        .iter()
-                        .find(|candidate| candidate.id == model)
-                        .and_then(|candidate| candidate.context_window),
-                );
                 let selection = self
                     .round_tools(
                         eligible_tools,
@@ -13669,8 +13654,9 @@ impl RunnerTask {
     /// (see [`ToolRegistry::list_for`]) and those an earlier request of the
     /// turn offered. A browser attached mid-turn adds its tools from the next
     /// request; one that goes away mid-turn leaves them until the turn ends,
-    /// and a call is then answered by the tool, in plain words.
-    fn request_tools(&self) -> Vec<crate::ToolDefinition> {
+    /// and a call is then answered by the tool, in plain words. `offer`:
+    /// the request will offer them, so later requests of the turn do too.
+    fn request_tools(&self, offer: bool) -> Vec<crate::ToolDefinition> {
         let usable: HashSet<String> = self
             .tools
             .list_for(self.thread.id)
@@ -13684,8 +13670,129 @@ impl RunnerTask {
             .into_iter()
             .filter(|tool| usable.contains(&tool.name) || offered.contains(&tool.name))
             .collect();
-        offered.extend(tools.iter().map(|tool| tool.name.clone()));
+        if offer {
+            offered.extend(tools.iter().map(|tool| tool.name.clone()));
+        }
         tools
+    }
+
+    /// What a request of this turn may offer `agent` on `model`: the tools
+    /// it is built from (`catalog`), those of them the agent may be offered
+    /// (`eligible`), and how lazy loading chooses among them for the model's
+    /// window. `goal`: the chat has an active goal. `offer`: see
+    /// [`Self::request_tools`].
+    fn round_offer(
+        &self,
+        agent: &str,
+        provider_id: &str,
+        model: &str,
+        provider_models: &[haarness_protocol::ModelInfo],
+        goal: bool,
+        offer: bool,
+    ) -> RoundOffer {
+        // Apply disabled-tool filtering before the
+        // provider sees the schema. Execution-time permission checks
+        // remain authoritative, but advertising a categorically
+        // denied tool only invites guaranteed failures. Default child
+        // agents also cannot recursively spawn tasks, so hide `task`
+        // rather than letting the model discover that ceiling by
+        // repeatedly calling it. A boundary inherited from the chat
+        // that started this one never hides a tool: it differs
+        // between sessions of one agent, and the tools lead the
+        // cached prompt prefix those sessions share. Such a tool is
+        // refused when called, naming the parent's rule.
+        let permission_engine = self.permission_engine(agent);
+        let catalog = self.request_tools(offer);
+        // The resource tools reach only servers whose tools this
+        // agent may have; with none left they would only fail.
+        let resources_open = self.tools.resource_servers().iter().any(|server| {
+            let tools = mcp_server_tools(server);
+            self.tool_enabled(&tools) && !permission_engine.hides_tool(&tools)
+        });
+        let eligible = catalog
+            .clone()
+            .into_iter()
+            .filter(|tool| {
+                self.tool_enabled(&tool.name)
+                    && !(self.depth >= self.config.execution.subagent_depth && tool.name == "task")
+                    && !permission_engine.hides_tool(&tool.name)
+                    && (goal || !is_goal_tool(&tool.name))
+                    && (resources_open || !is_resource_tool(&tool.name))
+                    // The patch tool goes to the models trained on
+                    // its format; every model has edit and write.
+                    && (tool.name != "apply_patch" || crate::tool_catalog::writes_patches(model))
+            })
+            .map(|tool| match (tool.name.as_str(), self.depth) {
+                ("task", 0) => task_with_subagents(tool, &self.live_agents.read()),
+                ("task", _) => foreground_task(tool),
+                _ => tool,
+            })
+            .collect::<Vec<_>>();
+        // Code Mode reaches only the MCP and browser tools this
+        // agent may use; with none, it is not offered.
+        let eligible = crate::tool_catalog::without_idle_code_tool(eligible);
+        let mut lazy = self.config.lazy_tools.clone();
+        if let Some(mode) = *self.lazy_tool_mode.read() {
+            lazy.mode = mode;
+        }
+        // Deferring an allowed tool is only useful when its loader is
+        // callable under this turn's permissions and explicit mask.
+        if !self.tool_enabled(LOAD_TOOL_NAME) || permission_engine.hides_tool(LOAD_TOOL_NAME) {
+            lazy.mode = haarness_protocol::LazyToolMode::Off;
+        }
+        // An account whose plan allows fewer tokens a minute than
+        // this model's window holds gets its tools sized for that.
+        let context_window = self.request_ceilings.get(provider_id, model).tool_window(
+            provider_models
+                .iter()
+                .find(|candidate| candidate.id == model)
+                .and_then(|candidate| candidate.context_window),
+        );
+        RoundOffer {
+            catalog,
+            eligible,
+            lazy,
+            context_window,
+        }
+    }
+
+    /// Where the tools this turn's first request will leave for the model to
+    /// load come from (see [`crate::tool_catalog::deferred_sources`]), chosen
+    /// as that request will choose them; empty when lazy loading defers none.
+    async fn deferred_sources(
+        &self,
+        agent: &str,
+        provider_id: &str,
+        model: &str,
+        provider_models: &[haarness_protocol::ModelInfo],
+    ) -> CoreResult<String> {
+        let goal = self.depth == 0
+            && self
+                .repository
+                .goal_state(self.thread.id)
+                .await?
+                .is_some_and(|state| state.status == GoalStatus::Active);
+        let offer = self.round_offer(agent, provider_id, model, provider_models, goal, false);
+        let (promoted, deferring) = self.chat_promotions(provider_id, model).await?;
+        let mut selection = select_tools(
+            offer.eligible,
+            &self.config.tool_availability,
+            &self.tool_availability.read(),
+            &offer.lazy,
+            &promoted,
+            offer.context_window,
+            deferring,
+        );
+        // Those on only because this prompt's words ask for them come and go
+        // turn by turn: named, they would have the list told again as often.
+        // Those a turn has whatever it says (memory tools while the project
+        // has saved memory, every tool in Ultracode) are named.
+        selection
+            .optional
+            .retain(|name| self.tool_enabled_for(name, ""));
+        Ok(crate::tool_catalog::deferred_sources(&selection, |tool| {
+            self.tools.tool_server(tool)
+        }))
     }
 
     fn check_tool_name(&self, agent: &str, name: &str, require_advertised: bool) -> CoreResult<()> {
@@ -13857,8 +13964,13 @@ impl RunnerTask {
     }
 
     fn tool_enabled(&self, name: &str) -> bool {
+        self.tool_enabled_for(name, &self.request.text)
+    }
+
+    /// [`Self::tool_enabled`] for a turn whose prompt is `text`.
+    fn tool_enabled_for(&self, name: &str, text: &str) -> bool {
         // Following and stopping commands goes with running them.
-        if matches!(name, "bash_output" | "bash_stop") && !self.tool_enabled("bash") {
+        if matches!(name, "bash_output" | "bash_stop") && !self.tool_enabled_for("bash", text) {
             return false;
         }
         // A published chat's viewers see its transcript: this Mac's screen stays out of it.
@@ -13901,7 +14013,7 @@ impl RunnerTask {
                 self.request.tools.as_ref(),
                 self.turn.ultracode,
                 self.depth,
-                &self.request.text,
+                text,
             );
         }
         if is_intent_gated_tool(name) {
@@ -13921,7 +14033,7 @@ impl RunnerTask {
                 self.request.tools.as_ref(),
                 self.turn.ultracode,
                 self.depth,
-                &self.request.text,
+                text,
                 name,
             );
         }
@@ -14214,24 +14326,7 @@ impl RunnerTask {
         model: &str,
         context_window: Option<u64>,
     ) -> CoreResult<crate::tool_catalog::ToolSelection> {
-        if !self.tool_promotions.contains_key(&self.thread.id) {
-            let rebuilt = ChatTools::from_history(
-                self.repository.as_ref(),
-                self.thread.id,
-                &self.tools.list(),
-                provider,
-                model,
-            )
-            .await?;
-            self.tool_promotions
-                .entry(self.thread.id)
-                .or_insert(rebuilt);
-        }
-        let (promoted, deferring) = self
-            .tool_promotions
-            .get(&self.thread.id)
-            .map(|tools| (tools.promoted.clone(), tools.defers(provider, model)))
-            .unwrap_or_default();
+        let (promoted, deferring) = self.chat_promotions(provider, model).await?;
         let selection = select_tools(
             eligible,
             &self.config.tool_availability,
@@ -14248,6 +14343,34 @@ impl RunnerTask {
             && selection.response.lazy_active)
             .then(|| (provider.to_owned(), model.to_owned()));
         Ok(selection)
+    }
+
+    /// The tools the chat has loaded, and whether Auto goes on deferring
+    /// tools for `provider`'s `model`, read back from its history when this
+    /// process has no record of them.
+    async fn chat_promotions(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> CoreResult<(HashSet<String>, bool)> {
+        if !self.tool_promotions.contains_key(&self.thread.id) {
+            let rebuilt = ChatTools::from_history(
+                self.repository.as_ref(),
+                self.thread.id,
+                &self.tools.list(),
+                provider,
+                model,
+            )
+            .await?;
+            self.tool_promotions
+                .entry(self.thread.id)
+                .or_insert(rebuilt);
+        }
+        Ok(self
+            .tool_promotions
+            .get(&self.thread.id)
+            .map(|tools| (tools.promoted.clone(), tools.defers(provider, model)))
+            .unwrap_or_default())
     }
 
     fn promote_tools(&self, names: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -14301,24 +14424,34 @@ impl RunnerTask {
             .iter()
             .map(|query| names.own(query).to_owned())
             .collect();
-        let catalog = self
+        let mut catalog = self
             .last_tool_catalog
             .lock()
             .clone()
             .ok_or_else(|| CoreError::Conflict("tool catalog is not ready".into()))?;
+        // An MCP tool's server as it is named (`a__b`'s tools read
+        // `mcp__a__b__…`), so a query naming the server finds its tools.
+        for entry in &mut catalog.tools {
+            if entry.source.starts_with("mcp:")
+                && let Some(server) = self.tools.tool_server(&entry.id)
+            {
+                entry.source = format!("mcp:{server}");
+            }
+        }
         if !catalog.lazy_active {
             return Err(CoreError::Invalid(
                 "lazy tool loading is not active for this provider round".into(),
             ));
         }
-        let matched = search_deferred_tools(&definitions, &catalog, &queries);
-        let loaded = self.promote_tools(matched.clone());
-        let full = matched
+        let matches = find_deferred_tools(&definitions, &catalog, &queries);
+        let loaded = self.promote_tools(matches.found.clone());
+        let full = matches
+            .found
             .into_iter()
             .filter(|id| !loaded.contains(id))
             .collect::<Vec<_>>();
         let already = already_available(&definitions, &catalog, &queries);
-        let value = load_tool_result(&loaded, &already, &full, &catalog);
+        let value = load_tool_result(&loaded, &already, &full, &matches.left_out, &catalog);
         Ok(ToolOutput {
             text: serde_json::to_string_pretty(&value)
                 .map_err(|error| CoreError::Tool(error.to_string()))?,
@@ -17013,6 +17146,19 @@ The call waits for the child's result. \
 Usage rules: (1) Multiple task calls emitted in one assistant response already start concurrently, including foreground tasks. \
 (2) Once work is delegated, the parent must not duplicate it. For concurrent sibling tasks, define mutually exclusive file/topic boundaries and tell each child to stay within its assigned scope; if cross-scope evidence is needed, the child should report that dependency for the parent to reconcile instead of auditing a sibling's scope. For a broad audit, split distinct scopes across foreground task calls in one response, wait for their concurrently produced results, and synthesize directly from those reports. After children return, do not re-read every delegated file or repeat their searches merely for reassurance. Inspect a specific delegated location only when a report lacks evidence required for the answer or two reports conflict, and keep that validation narrowly targeted. Cross-cutting tests that validate the combined conclusion are allowed. \
 Omit task_id for each independent assignment, including separate scopes in a parallel audit. Reusing one task_id never creates separate agents: pass it only to continue that exact child session; when it is still running, the new prompt joins it.";
+
+/// The `task` tool as a chat sees it: its description ends with the custom
+/// subagents it can start (see [`crate::agents::subagent_list`]). The list
+/// follows the agents defined, not the chat's own rules, so chats of one
+/// workspace send the same bytes and share the cached prompt.
+fn task_with_subagents(
+    mut tool: crate::ToolDefinition,
+    agents: &[crate::CustomAgent],
+) -> crate::ToolDefinition {
+    tool.description
+        .push_str(&crate::agents::subagent_list(agents));
+    tool
+}
 
 /// The `task` tool as a subagent sees it: without `background`, and with a
 /// description that does not offer it, since a subagent's own task always

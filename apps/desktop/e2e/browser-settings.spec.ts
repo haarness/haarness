@@ -681,6 +681,22 @@ test("a search jump marks its row without moving it, and Providers, Models and T
   await expect(toggle).toBeChecked();
   await builtIn.click();
   await expect(bash).toHaveCount(0);
+  // The browser's part, which servers that defer most browser tools send as a group of its own,
+  // still reads as Core's family, right after Core, in light and dark.
+  for (const theme of ["Light", "Dark"] as const) {
+    await openSettings("General");
+    await choose("Appearance", theme);
+    await openSettings("Tools");
+    const group = settings().getByRole("button", { name: /^Built-in\b/ });
+    if ((await group.getAttribute("aria-expanded")) === "false") await group.click();
+    const toggles = settings().locator(".tool-group-part > .tool-group-toggle");
+    await expect(toggles.nth(0)).toContainText(/^Core/);
+    await expect(toggles.nth(1)).toContainText(/^Browser/);
+    if ((await toggles.nth(1).getAttribute("aria-expanded")) === "false") await toggles.nth(1).click();
+    await expect(settings().locator('[data-setting="tool:browser_click"] strong')).toHaveText("Click");
+    const name = `tools-browser-part-${theme.toLowerCase()}.png`;
+    await settings().screenshot({ path: evidence ? join(evidence, name) : test.info().outputPath(name) });
+  }
 
   // A jump to a row whose only control is off (the global shortcut's field)
   // waits on the row, but never takes the keyboard back once it has moved on.

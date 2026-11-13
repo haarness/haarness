@@ -11,7 +11,10 @@ over the server's own WebSocket routes:
 - that browser gone: the next turn sends none;
 - a Chrome profile connected: sent again, to another chat too; gone with it;
 - Desktop's new-chat browser attached: a chat whose first turn starts before its own
-  browser is attached is sent them already.
+  browser is attached is sent them already;
+- with lazy loading on (this model's window is above 64K), a request carries only the
+  eleven browser tools that find, open, read and work a page, beside `load_tool`; a deferred
+  browser tool the model calls by name still reaches the browser, and goes with the next request.
 
 Needs the `websockets` package (run it with a venv that has it).
 """
@@ -38,6 +41,10 @@ import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this 
 BINARY = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 REQUESTS = []
 SCRIPT = []
+# The browser tools a request carries while lazy loading defers the others.
+AT_HAND = sorted(['browser_tabs_open', 'browser_tabs_list', 'browser_tabs_focus', 'browser_navigate', 'browser_frames',
+                  'browser_snapshot', 'browser_click', 'browser_fill', 'browser_press', 'browser_dialog',
+                  'browser_screenshot'])
 
 
 class Provider(http.server.BaseHTTPRequestHandler):
@@ -142,6 +149,22 @@ async def scenario(url, token):
     def browser(requests):
         return [any(name.startswith('browser_') for name in request['tools']) for request in requests]
 
+    def browser_tools(request):
+        return sorted(name for name in request['tools'] if name.startswith('browser_'))
+
+    async def answer_commands(host, seen):
+        """Answer each command the server sends this browser host, as Desktop would."""
+        async for raw in host:
+            message = json.loads(raw)
+            if message.get('type') == 'command':
+                command = message['command']
+                seen.append(command)
+                # First the server asks what the call would touch, then it runs it.
+                value = ({'resources': [], 'key': command['action']['type']} if command.get('inspect')
+                         else {'tabs': [], 'focusedTabID': None, 'browsers': []})
+                await host.send(json.dumps({'type': 'result', 'id': message['id'],
+                                            'outcome': {'type': 'success', 'result': {'value': value, 'files': []}}}))
+
     ws = url.replace('http://', 'ws://') + '/v1'
     chat = (await asyncio.to_thread(api, '/threads', {'title': 'browser offer'}))['id']
 
@@ -159,6 +182,25 @@ async def scenario(url, token):
     requests = await turn(chat, 'with Desktop')
     assert browser(requests) == [True], browser(requests)
     with_browser = requests[0]['bytes']
+    # Lazy loading on: eleven browser tools at hand, the rest behind load_tool.
+    assert browser_tools(requests[0]) == AT_HAND, browser_tools(requests[0])
+    assert 'load_tool' in requests[0]['tools'], requests[0]['tools']
+    # A deferred browser tool called by name still runs in the browser, and stays.
+    tab = 'tab_' + str(uuid.uuid4())
+    await desktop.send(json.dumps({'type': 'state', 'state': {
+        'tabs': [{'id': tab, 'generation': 1, 'url': 'https://example.test/'}], 'focusedTabID': tab}}))
+    await asyncio.sleep(0.3)
+    seen = []
+    answering = asyncio.create_task(answer_commands(desktop, seen))
+    SCRIPT[:] = [{'call': 'browser_back', 'arguments': {'tabID': tab}}, 'went back']
+    requests = await turn(chat, 'go back')
+    answering.cancel()
+    assert 'browser_back' not in requests[0]['tools'], requests[0]['tools']
+    answer = next(message for message in reversed(requests[1]['messages']) if message['role'] == 'tool')
+    assert not answer['content'].startswith('tool error') and 'not advertised' not in answer['content'], answer
+    assert [(command['action']['type'], bool(command.get('inspect'))) for command in seen] == \
+        [('back', True), ('back', False)], seen
+    assert 'browser_back' in requests[1]['tools'], requests[1]['tools']
 
     # Desktop closed the chat: the next turn sends none.
     await desktop.close()
@@ -172,7 +214,9 @@ async def scenario(url, token):
     await chrome.send(json.dumps({'type': 'hello', 'browser': {'id': str(uuid.uuid4()), 'kind': 'chrome', 'name': 'Google Chrome', 'label': None, 'version': '154.0.8037.98'}, 'extension': {'version': '0.1.1'}}))
     await asyncio.sleep(0.3)
     other = (await asyncio.to_thread(api, '/threads', {'title': 'another chat'}))['id']
-    assert browser(await turn(other, 'with Chrome')) == [True]
+    requests = await turn(other, 'with Chrome')
+    assert browser(requests) == [True]
+    assert browser_tools(requests[0]) == AT_HAND, browser_tools(requests[0])
     assert browser(await turn(chat, 'with Chrome too')) == [True]
     await chrome.close()
     await asyncio.sleep(0.3)

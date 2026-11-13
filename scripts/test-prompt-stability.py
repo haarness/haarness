@@ -32,7 +32,13 @@ daemon in a private data folder shows that:
    chat's requests send byte-identical tools before that load and after it;
 9. an agent whose file lists `skills` sends their text after its own prompt, with the skill's
    folder and the chat's id filled in and its command named rather than run, leaves out a
-   manual-only and a missing skill, and sends a byte-identical system prompt on the next turn.
+   manual-only and a missing skill, and sends a byte-identical system prompt on the next turn;
+10. with an MCP server of 25 tools and custom agent files, the chat's `task` tool names the
+   custom subagent (not a primary or hidden agent) with the same bytes on every turn; the first
+   turn stores one reminder naming the server and its 25 deferred tools, which later turns (a
+   load among them) replay unchanged without adding another, so turn 2 starts with turn 1's
+   request; and `load_tool` asked for the server's wildcard and one native tool's exact id loads
+   that tool first and 19 of the server's, and its answer names the matches it left out.
 
 With --system-folder the daemon also starts with a system configuration folder
 (HAARNESS_SYSTEM_CONFIG_DIR) whose prompt files add to the main instructions and the
@@ -66,6 +72,8 @@ EVIDENCE.mkdir(parents=True, exist_ok=True)
 MODEL = 'claude-sonnet-4-6'
 # A schema lazy loading defers by default: `load_tool` loads it in section 6.
 LOADED = 'schedule'
+# How the reminder naming where deferred tools come from begins.
+DEFERRED_REMINDER = '<system-reminder>\nMore tools wait to be loaded with load_tool;'
 REQUESTS = []
 SYSTEM_FOLDER = '--system-folder' in sys.argv[1:]
 if SYSTEM_FOLDER:
@@ -108,17 +116,22 @@ def last_typed(body):
     return ''
 
 
-def loaded_last(body):
-    """The ids the newest `load_tool` result loaded."""
+def load_answer(body):
+    """The newest `load_tool` result, read as JSON."""
     for block in reversed(body['messages'][-1]['content']):
         if block.get('type') == 'tool_result':
             content = block.get('content')
             text = content if isinstance(content, str) else ''.join(part.get('text', '') for part in content or [])
             try:
-                return json.loads(text).get('loaded', [])
+                return json.loads(text)
             except ValueError:
-                return []
-    return []
+                return {}
+    return {}
+
+
+def loaded_last(body):
+    """The ids the newest `load_tool` result loaded."""
+    return load_answer(body).get('loaded', [])
 
 
 def texts(body):
@@ -147,6 +160,8 @@ class Anthropic(http.server.BaseHTTPRequestHandler):
             return self.task(body, 'CHILD_FROM_' + dispatch.split('_')[1] + ' list the project files')
         if 'LOAD_A_TOOL' in prompt and not answered:
             return self.call('load_tool', {'queries': [LOADED]})
+        if 'LOAD_MANY' in prompt and not answered:
+            return self.call('load_tool', {'queries': ['mcp__docs__*', LOADED]})
         if 'ASK_FOR_SKILLS' in prompt and not answered:
             return self.call('load_tool', {'queries': ['skill']})
         if 'WRONG_SKILL' in prompt and not answered:
@@ -632,6 +647,72 @@ for line in sys.stdin:
                                         'its command named, not run', 'manual-only and missing left out',
                                         'system byte-identical across turns']})
     print('PASS an agent starts with the skills it lists, the same on every request', flush=True)
+
+    # 10. Custom agents and an MCP server with more tools than one load takes: the task tool names
+    # the custom subagent on every turn; a tool named by its exact id loads ahead of the server's
+    # wildcard in the same call, and the answer names what it left out.
+    many_workspace = root / 'many-workspace'
+    (many_workspace / '.haarness').mkdir(parents=True, exist_ok=True)
+    (many_workspace / '.haarness/config.toml').write_text(
+        f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\n[lsp]\nenabled=false\n')
+    many_server = root / 'mcp-many.py'
+    many_server.write_text(server.read_text().replace('range(10)', 'range(25)'))
+    (many_workspace / '.haarness/haarness.json').write_text(
+        json.dumps({'mcp': {'docs': {'type': 'local', 'command': [sys.executable, str(many_server)]}}}))
+    (many_workspace / '.haarness/agents').mkdir(parents=True, exist_ok=True)
+    for name, front in [('reviewer', 'description: Review diffs after code changes\nmode: subagent'),
+                        ('lead', 'description: LEAD_ONLY_PRIMARY\nmode: primary'),
+                        ('quiet', 'description: QUIET_HIDDEN\nmode: subagent\nhidden: true')]:
+        (many_workspace / f'.haarness/agents/{name}.md').write_text(f'---\n{front}\n---\nDo the work.\n')
+    run(['git', 'init', '-q', str(many_workspace)])
+    many_args = [str(BINARY), '--workspace', str(many_workspace), '--trust-project']
+    first_connection = connection
+    try:
+        connection = json.loads(run(many_args + ['desktop'], input='{"action":"connect"}', env=env, timeout=120))
+        until(lambda: any(item['name'] == 'docs' and item['status'] == 'connected' for item in api('/mcp')),
+              'the MCP fixture with many tools did not connect')
+        many = chat('Many tools fixture')
+        offset = len(REQUESTS)
+        assert turn(many, 'FIRST many turn')['status'] == 'completed'
+        assert turn(many, 'LOAD_MANY please')['status'] == 'completed'
+        assert turn(many, 'THIRD many turn')['status'] == 'completed'
+        sent = tool_requests(offset)
+        assert len(sent) == 4, [names(body) for body in sent]
+        # The model is told once where the deferred tools come from; loads and later turns
+        # tell it nothing new, and the reminder stays where it was stored.
+        told = [[text for text in texts(body) if text.startswith(DEFERRED_REMINDER)] for body in sent]
+        assert all(found == told[0] for found in told) and len(told[0]) == 1, told
+        assert '\n- docs (MCP server): 25 tools\n' in told[0][0], told[0][0]
+        assert 'browser' not in told[0][0], told[0][0]
+        (EVIDENCE / 'deferred-tools-reminder.txt').write_text(told[0][0] + '\n')
+        # The chat's task tool names the custom subagent it can start, the same bytes each turn.
+        task = next(tool['description'] for tool in sent[0]['tools'] if tool['name'] == 'task')
+        assert task.endswith('\n\nCustom subagents you can name in agent:\n- reviewer: Review diffs after code changes'), task[-300:]
+        assert 'LEAD_ONLY_PRIMARY' not in task and 'QUIET_HIDDEN' not in task, task[-300:]
+        assert json.dumps(sent[1]['tools']) == json.dumps(sent[0]['tools']), 'the tools changed between turns'
+        assert json.dumps(clean(sent[1]['system'])) == json.dumps(clean(sent[0]['system'])), 'the system prompt changed'
+        assert clean(sent[1]['messages'][:len(sent[0]['messages'])]) == clean(sent[0]['messages']), 'an earlier message changed'
+        assert clean(sent[3]['messages'][:len(sent[2]['messages'])]) == clean(sent[2]['messages']), 'an earlier message changed'
+        sent = sent[1:]
+        answer = load_answer(sent[1])
+        ids = [tool['id'] for tool in answer['loaded']]
+        lookups = [f'mcp__docs__lookup_{index}' for index in range(25)]
+        assert ids == [LOADED] + sorted(lookups)[:19], ids
+        # The word also finds cloud_schedule, after the server's tools.
+        left_out = ', '.join(sorted(lookups)[19:] + ['cloud_schedule'])
+        assert f'past the 20 tools one call loads, so not loaded: {left_out}. Load the ones you need by exact id.' \
+            in answer['message'], answer['message']
+        assert set(ids) <= set(names(sent[1])), sorted(set(ids) - set(names(sent[1])))
+        (EVIDENCE / 'many-tools-requests.json').write_text(json.dumps(sent, indent=2))
+    finally:
+        subprocess.run(many_args + ['serve', '--stop'], env=env, capture_output=True, timeout=60)
+        connection = first_connection
+    checks.append({'many tools': ['task names the custom subagent, not the primary or hidden one',
+                                  'deferred sources told once in turn 1, docs (MCP server): 25 tools; not again after a load',
+                                  'turns 1 and 2 send byte-identical tools and system, messages a prefix',
+                                  f'{LOADED} named exactly loads ahead of mcp__docs__*',
+                                  '20 loaded, the 7 left out named']})
+    print('PASS an exact id loads ahead of a wildcard, and the matches past twenty are named', flush=True)
     (EVIDENCE / 'results.json').write_text(json.dumps(checks, indent=2))
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)
