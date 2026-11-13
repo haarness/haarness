@@ -566,10 +566,21 @@ export function Session() {
 
   /** The new chat a first message is making, which the message box's text
    * moves to with the view: the box it moves from and where it lands, by
-   * owner, draft key and stored draft. */
+   * owner, draft key and stored draft, and the send making it. */
   let carriedTo:
-    | { from: string; fromKey: string; fromStored: string; to: string; toKey: string; toStored: string }
+    | {
+        from: string;
+        fromKey: string;
+        fromStored: string;
+        to: string;
+        toKey: string;
+        toStored: string;
+        flight: Promise<boolean>;
+      }
     | undefined;
+  /** Where the box went with the view while a send made its new chat (that
+   * chat's owner), by send: an Enter waiting there follows it. */
+  const carriedBy = new WeakMap<Promise<boolean>, string>();
   /** The chat the message box was drawn for last. */
   let shownOwner = "";
   /** Text on its way, by stored draft: it stays stored there (ahead of what
@@ -1804,7 +1815,16 @@ export function Session() {
             change(draft());
             set("drafts", carry.fromKey, "");
             void app.run(() => window.haarness.storage(carry.fromStored, ""));
-          } else setDraft(state.drafts[draftKey()] ?? "");
+            carriedBy.set(carry.flight, carry.to);
+          } else {
+            // The box showed another page then: the new chat has the
+            // page's text as state.tsx gave it, which leaves the page.
+            setDraft(state.drafts[draftKey()] ?? "");
+            if (draft().trim() && state.drafts[carry.fromKey] === draft()) {
+              set("drafts", carry.fromKey, "");
+              void app.run(() => window.haarness.storage(carry.fromStored, ""));
+            }
+          }
         } else setDraft(state.drafts[draftKey()] ?? "");
         shownOwner = owner();
         fileDrop.reset();
@@ -1965,13 +1985,17 @@ export function Session() {
       const pressed = owner();
       if (waitingForSend.has(pressed)) return;
       waitingForSend.add(pressed);
+      const flight = inFlight.get(pressed);
       let went = false;
       try {
-        went = (await inFlight.get(pressed)) ?? false;
+        went = (await flight) ?? false;
       } finally {
         waitingForSend.delete(pressed);
       }
-      if (!went || owner() !== pressed || submitting()) return;
+      // A first message's new chat took the box with the view, this
+      // message in it: it goes there.
+      const here = flight && carriedBy.get(flight) === owner() ? owner() : pressed;
+      if (!went || owner() !== here || submitting()) return;
       return send(delivery);
     }
     if (queue.editing()) {
@@ -2190,6 +2214,7 @@ export function Session() {
               to: createdOwner,
               toKey: sessionKey(connection!, id),
               toStored: "draft:" + connection + ":" + id,
+              flight,
             };
           // Commit the destination before removing the persisted starter
           // attachments. A failed disk write must leave the original recoverable.
@@ -2244,12 +2269,13 @@ export function Session() {
         (!document.activeElement || document.activeElement === document.body)
       )
         composer.focus({ preventScroll: true });
-      // What was typed while that chat was being made went to it with the
-      // view (state.tsx), so the new-chat draft starts empty again.
-      if (!selected && shown) {
-        set("drafts", "new:" + originProject, "");
+      // The new-chat page keeps what it holds now, stored without the
+      // message that went: what was typed while its chat was being made
+      // left the page with the view, and what was typed there after New
+      // chat is the next message (a second Enter sends it).
+      if (!selected) {
         if (draftSave?.key === storedKey) draftSave = undefined;
-        await window.haarness.storage(storedKey, "");
+        await window.haarness.storage(storedKey, state.drafts["new:" + originProject] ?? "");
       }
       // app.send already clears the shared text draft. Attachments have
       // their own lifecycle, and files added during the request must survive.
@@ -2260,8 +2286,6 @@ export function Session() {
         "draft:" + connection + ":" + threadId,
         state.drafts[sessionKey(connection!, threadId)] ?? "",
       );
-      if (!selected && !state.drafts["new:" + originProject])
-        await window.haarness.storage("draft:" + originProject + ":", "");
     } finally {
       setSubmissions((items) =>
         items.filter((item) => item !== origin && item !== createdOwner),
