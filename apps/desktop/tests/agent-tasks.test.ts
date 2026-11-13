@@ -213,6 +213,19 @@ test("a delegation Stop reached before it began reads stopped, not failed", () =
     assert.equal(agentTaskStatus(task), "stopped");
     assert.equal(agentTaskError(task), "");
   }
+  // Not run for another reason (the turn's step limit) is no stop: the row
+  // says so in the refusal's words.
+  const refused = {
+    type: "tool_result",
+    call_id: "task",
+    name: "task",
+    output: "This call was not run: the turn reached its step limit, so no more tools run in it.",
+    is_error: true,
+    metadata: { notRun: true },
+  } as const;
+  const [task] = [...agentTasks([item(1, call), item(2, refused)]).values()];
+  assert.equal(agentTaskStatus(task), "failed");
+  assert.equal(agentTaskError(task), refused.output);
 });
 
 test("a delegation keeps its first result, and a call made again under its key starts over", () => {

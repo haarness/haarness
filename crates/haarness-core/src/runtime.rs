@@ -806,6 +806,13 @@ fn stopped_call_result(call_id: String, name: String, began: bool) -> ItemData {
     }
 }
 
+tokio::task_local! {
+    /// The `abandoned` token (see `RunnerTask::abandoned`) of the run whose
+    /// round spawned a delegation, taken as it did and carried by the task
+    /// that runs the call.
+    static ROUND_ABANDONED: CancellationToken;
+}
+
 /// The calls of a tool round that run in tasks of their own, by their place
 /// in the round: delegations, and reads that run beside each other. When the
 /// round breaks off before it took their results (one could not be stored,
@@ -13495,13 +13502,17 @@ impl RunnerTask {
                         let call_id = call_id.clone();
                         let arguments = arguments.clone();
                         let agent = agent.to_owned();
+                        // The run as the round starts it: a retry that
+                        // begins before the call runs has its own.
+                        let abandoned = self.abandoned.lock().clone();
                         task_handles.delegate(
                             index,
                             tokio::spawn(
-                                async move {
-                                    this.execute_call(&agent, &call_id, "task", arguments).await
-                                }
-                                .in_current_span(),
+                                ROUND_ABANDONED
+                                    .scope(abandoned, async move {
+                                        this.execute_call(&agent, &call_id, "task", arguments).await
+                                    })
+                                    .in_current_span(),
                             ),
                         );
                     }
@@ -15919,8 +15930,11 @@ impl RunnerTask {
         call_id: &str,
         arguments: &serde_json::Value,
     ) -> CoreResult<String> {
-        // Ends the waits before the agent starts when this run fails first.
-        let abandoned = self.abandoned.lock().clone();
+        // Ends the waits before the agent starts when this run fails first:
+        // the run whose round started this call, taken when it did.
+        let abandoned = ROUND_ABANDONED
+            .try_with(CancellationToken::clone)
+            .unwrap_or_else(|_| self.abandoned.lock().clone());
         if self.depth >= self.config.execution.subagent_depth {
             return Err(CoreError::PermissionDenied(
                 "task depth limit reached; configure execution.subagent_depth to permit deeper delegation".into(),
@@ -16080,8 +16094,9 @@ impl RunnerTask {
         // parallel task calls may all have observed this child while idle.
         let admission_guard = loop {
             let guard = tokio::select! {
-                guard = admission_lock.lock() => guard,
+                biased;
                 () = abandoned.cancelled() => return Err(CoreError::Cancelled),
+                guard = admission_lock.lock() => guard,
             };
             let existing = self
                 .background_tasks
@@ -16174,8 +16189,9 @@ impl RunnerTask {
             // may have installed a newer run in the meantime.
             drop(guard);
             tokio::select! {
-                () = existing.wait_delivery() => {},
+                biased;
                 () = abandoned.cancelled() => return Err(CoreError::Cancelled),
+                () = existing.wait_delivery() => {},
             }
         };
         // Separate pools per depth prevent parents holding every slot while
@@ -16187,9 +16203,15 @@ impl RunnerTask {
             .or_insert_with(|| Arc::new(Semaphore::new(self.config.execution.subagent_concurrency)))
             .clone();
         let permit = tokio::select! {
-            permit = slots.acquire_owned() => permit.map_err(|_| CoreError::Cancelled)?,
+            biased;
             () = abandoned.cancelled() => return Err(CoreError::Cancelled),
+            permit = slots.acquire_owned() => permit.map_err(|_| CoreError::Cancelled)?,
         };
+        // The run failed while the place was free: nothing of this agent
+        // shows, and it does not start.
+        if abandoned.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
         self.events.publish_scoped(
             "thread.updated",
             Some(child.id),
