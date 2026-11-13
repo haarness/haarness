@@ -2220,6 +2220,15 @@ mod tests {
         std::fs::create_dir(real.join("shared")).unwrap();
         std::fs::write(real.join("shared/person-work.txt"), "x").unwrap();
         assert!(unnamed_deletion(&request("rm -rf <r>/shared", chat), &workspace, "go").is_some());
+        // Made by the chat, then holding the person's older folder that a
+        // later call moved in: theirs too.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let boxed = crate::made_paths::before_files(&[real.join("box")]);
+        std::fs::create_dir(real.join("box")).unwrap();
+        crate::made_paths::note(chat, &boxed, &workspace);
+        assert!(unnamed_deletion(&request("rm -rf <r>/box", chat), &workspace, "go").is_none());
+        std::fs::rename(real.join("kept"), real.join("box/kept")).unwrap();
+        assert!(unnamed_deletion(&request("rm -rf <r>/box", chat), &workspace, "go").is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
 

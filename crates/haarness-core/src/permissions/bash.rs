@@ -5605,11 +5605,11 @@ const MAX_CREATIONS: usize = 256;
 ///
 /// They are for noting what a chat made (see [`crate::made_paths`]), so
 /// where something else in the line may have put a path there, none is
-/// given: a path another command names (`mv ~/data /tmp/x; mkdir -p
-/// /tmp/x`), any path when such a command has a word nobody can place, and
-/// every path in a line with a wrapper or text a shell runs again, whose
-/// commands are not all in view. Commands that only look, delete or change
-/// directory put nothing anywhere.
+/// given: a path another command names, or a folder above it (`mv
+/// ~/data /tmp/; mkdir -p /tmp/data`), any path when such a command has a
+/// word nobody can place, and every path in a line with a wrapper or text a
+/// shell runs again, whose commands are not all in view. Commands that only
+/// look, delete or change directory put nothing anywhere.
 #[must_use]
 pub fn creations(command: &str, workspace: &Path, workdir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -5679,11 +5679,11 @@ pub fn creations(command: &str, workspace: &Path, workdir: &Path) -> Vec<PathBuf
             if word.value.starts_with('-') {
                 continue;
             }
+            // A word nobody can place (a glob, `~`, a relative one after a
+            // `cd`) may name anything.
             match place(&word.raw, &word.value, word.literal) {
                 Some(path) => named.push(path),
-                // A relative word after a `cd` may name anything.
-                None if moves && Path::new(&word.value).is_relative() => return found,
-                None => {}
+                None => return found,
             }
         }
     }
@@ -5693,7 +5693,10 @@ pub fn creations(command: &str, workspace: &Path, workdir: &Path) -> Vec<PathBuf
         };
         if !placed.starts_with(&project)
             && !in_system_folder(&placed)
-            && !named.iter().any(|named| named.starts_with(&placed))
+            // Named itself, inside or above: a folder a `mv` fills.
+            && !named
+                .iter()
+                .any(|named| named.starts_with(&placed) || placed.starts_with(named))
             && !found.contains(&placed)
             && found.len() < MAX_CREATIONS
         {
@@ -10139,6 +10142,11 @@ mod readings {
             &format!("f() {{ mkdir {}/b; }}", x.display()),
             &format!("true || mkdir {}/b", x.display()),
             &format!("mkdir $\"{}/b\"", x.display()),
+            // A word nobody can place may name the folder, and a folder
+            // named above it may have been filled.
+            &format!("mkdir {x}/own && mv ../data {x}/ow[n]/", x = x.display()),
+            &format!("mkdir {}/s && mv ../data ~/s/", x.display()),
+            &format!("mv ../data {x}/; mkdir -p {x}/data", x = x.display()),
             &format!("echo x 2>&1 >&2; cat {}/f", x.display()),
         ] {
             assert!(made(command).is_empty(), "{command}: {:?}", made(command));

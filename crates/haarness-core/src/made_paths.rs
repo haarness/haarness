@@ -10,7 +10,11 @@
 //! where the system keeps no birth time, nothing is noted. Each path is kept
 //! with what it is (its device, inode and birth time): once something else
 //! stands there, because the chat or the person or another program deleted
-//! and made it again, the note no longer holds and is dropped.
+//! and made it again, the note no longer holds and is dropped. What a delete
+//! would take away is looked at whole before the note covers it: anything in
+//! it born before the call that made the folder was moved in from somewhere
+//! else, and then the folder is not the chat's to take away unasked, nor is
+//! one too large to look through.
 //!
 //! Notes are kept for the chat at the root of the conversation, so what an
 //! agent it delegated to made is that chat's too, and in memory only: after
@@ -30,12 +34,24 @@ use haarness_protocol::ThreadId;
 /// How many paths are kept in all; past it the oldest is forgotten first.
 const MAX_PATHS: usize = 5000;
 
+/// How many files and folders [`holds`] looks at in what a delete would
+/// take away; past it the delete is not the chat's own.
+const MAX_LOOKED_AT: usize = 10_000;
+
 /// What stood at a noted path when it was noted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Identity {
     device: u64,
     inode: u64,
     born: SystemTime,
+}
+
+/// A noted path: what stood there, and since when the call that made it
+/// ran (to the second).
+#[derive(Clone, Copy, Debug)]
+struct Noted {
+    identity: Identity,
+    since: SystemTime,
 }
 
 /// What is at `path` now, the path itself (a link is the link), when the
@@ -60,7 +76,7 @@ fn identity(path: &Path) -> Option<Identity> {
 
 /// The paths each chat made, with at most `cap` of them in all.
 struct Store {
-    by_chat: HashMap<ThreadId, HashMap<PathBuf, Identity>>,
+    by_chat: HashMap<ThreadId, HashMap<PathBuf, Noted>>,
     /// Every kept path in the order it was noted, for `cap`.
     order: VecDeque<(ThreadId, PathBuf)>,
     cap: usize,
@@ -75,9 +91,9 @@ impl Store {
         }
     }
 
-    fn insert(&mut self, root: ThreadId, path: PathBuf, identity: Identity) {
+    fn insert(&mut self, root: ThreadId, path: PathBuf, noted: Noted) {
         let paths = self.by_chat.entry(root).or_default();
-        if paths.insert(path.clone(), identity).is_some() {
+        if paths.insert(path.clone(), noted).is_some() {
             return;
         }
         self.order.push_back((root, path));
@@ -106,27 +122,26 @@ impl Store {
             .retain(|(chat, path)| *chat != root || !drop(path));
     }
 
-    /// Whether `root`'s chat made `target` or a folder above it, and the same
-    /// thing still stands there; a note it no longer matches is dropped.
-    fn holds(&mut self, root: ThreadId, target: &Path) -> bool {
-        let Some(paths) = self.by_chat.get(&root) else {
-            return false;
-        };
-        let noted: Vec<(PathBuf, Identity)> = target
+    /// Since when the note covering `target` (the path itself or a folder
+    /// above it) holds, when `root`'s chat made one and the same thing still
+    /// stands there; a note it no longer matches is dropped.
+    fn covering(&mut self, root: ThreadId, target: &Path) -> Option<SystemTime> {
+        let paths = self.by_chat.get(&root)?;
+        let noted: Vec<(PathBuf, Noted)> = target
             .ancestors()
             .filter_map(|folder| {
                 paths
                     .get(folder)
-                    .map(|identity| (folder.to_path_buf(), *identity))
+                    .map(|noted| (folder.to_path_buf(), *noted))
             })
             .collect();
         for (folder, noted) in noted {
-            if identity(&folder) == Some(noted) {
-                return true;
+            if identity(&folder) == Some(noted.identity) {
+                return Some(noted.since);
             }
             self.remove(root, |path| path == folder);
         }
-        false
+        None
     }
 }
 
@@ -253,21 +268,60 @@ pub fn note(root: ThreadId, before: &Before, workspace: &Path) {
         .filter_map(|path| {
             identity(path)
                 .filter(|identity| identity.born >= since)
-                .map(|identity| (path.clone(), identity))
+                .map(|identity| (path.clone(), Noted { identity, since }))
         })
         .collect();
     let mut store = MADE.lock();
-    for (path, identity) in made {
-        store.insert(root, path, identity);
+    for (path, noted) in made {
+        store.insert(root, path, noted);
     }
 }
 
 /// Whether the chat at `root` made `target` (a path as a delete reaches
-/// it, every link followed) or a folder above it, and the same thing still
-/// stands there.
+/// it, every link followed) or a folder above it, the same thing still
+/// stands there, and all a delete of `target` takes away was born since the
+/// call that made it.
 #[must_use]
 pub fn holds(root: ThreadId, target: &Path) -> bool {
-    MADE.lock().holds(root, target)
+    let Some(since) = MADE.lock().covering(root, target) else {
+        return false;
+    };
+    born_since(target, since, MAX_LOOKED_AT)
+}
+
+/// Whether everything at and under `path`, links not followed, was born no
+/// earlier than `since`: within `limit` entries, each with a birth time the
+/// system keeps.
+fn born_since(path: &Path, since: SystemTime, limit: usize) -> bool {
+    let mut stack = vec![path.to_path_buf()];
+    let mut looked = 0;
+    while let Some(path) = stack.pop() {
+        looked += 1;
+        if looked > limit {
+            return false;
+        }
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            // Gone already: nothing there to take away.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return false,
+        };
+        if metadata.created().map_or(true, |born| born < since) {
+            return false;
+        }
+        if metadata.is_dir() {
+            let Ok(entries) = std::fs::read_dir(&path) else {
+                return false;
+            };
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    return false;
+                };
+                stack.push(entry.path());
+            }
+        }
+    }
+    true
 }
 
 /// Forgets what the chat at `root` made at or under each of `gone` that is
@@ -419,6 +473,40 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_holding_what_was_moved_in_or_too_much_to_look_through_is_not_the_chat_s() {
+        let root = std::env::temp_dir().join(format!("haarness-moved-in-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let root = crate::paths::canonicalize(&root).unwrap();
+        let theirs = root.join("theirs");
+        std::fs::create_dir_all(theirs.join("deep")).unwrap();
+        std::fs::write(theirs.join("deep/notes.txt"), "x").unwrap();
+        if !births(&theirs) {
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1100));
+        let chat = ThreadId::new();
+        let own = root.join("box");
+        let before = Before::now(missing(std::slice::from_ref(&own)));
+        std::fs::create_dir(&own).unwrap();
+        std::fs::write(own.join("made.txt"), "x").unwrap();
+        note(chat, &before, &workspace);
+        assert!(holds(chat, &own));
+        // A later call moves the person's older folder in.
+        std::fs::rename(&theirs, own.join("theirs")).unwrap();
+        assert!(!holds(chat, &own));
+        assert!(!holds(chat, &own.join("theirs/deep/notes.txt")));
+        // What the chat made beside it is still its own.
+        assert!(holds(chat, &own.join("made.txt")));
+        // Past the limit of what is looked at, nothing is.
+        let since = SystemTime::UNIX_EPOCH;
+        assert!(born_since(&own.join("made.txt"), since, 1));
+        assert!(!born_since(&own, since, 2));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn the_root_the_home_folder_the_project_and_their_parents_are_never_noted() {
         let workspace =
             std::env::temp_dir().join(format!("haarness-made-{}", uuid::Uuid::now_v7()));
@@ -444,6 +532,10 @@ mod tests {
         let Some(identity) = identity(&folder) else {
             std::fs::remove_dir_all(folder).unwrap();
             return;
+        };
+        let identity = Noted {
+            identity,
+            since: SystemTime::UNIX_EPOCH,
         };
         let mut store = Store::new(3);
         let (one, two) = (ThreadId::new(), ThreadId::new());
