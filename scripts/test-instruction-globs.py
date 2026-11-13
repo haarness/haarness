@@ -10,7 +10,15 @@ a loop too. The script proves that:
    `"docs/**/*.md"` answers within seconds, and its prompt carries each file those globs match once:
    the linked folder's and the linked file included, nothing from the version control folder;
 2. the log has no warning about a glob that stopped early;
-3. the terminal UI opens on the same configuration and answers a message (echo provider, tmux).
+3. the terminal UI opens on the same configuration and answers a message (echo provider, tmux);
+4. the project's own file points only at files the project holds: its `~/` entry, an absolute path outside it,
+   a `../` entry and a `..` after a wildcard never reach the prompt, each with one warning in the log, while
+   its absolute path inside the project loads, and an `AGENTS.md` over 40 KiB is left out with a warning;
+5. the person's own relative entry meets the project's link to a history file: left out, with a line in the
+   prompt and a warning;
+6. the folders' `AGENTS.md` that the scripted `read` calls find attach as before, a link to a personal note
+   and one to `~/.claude/CLAUDE.md` that a dotfiles folder holds included, except a link out of the project
+   to a file that is not Markdown and one over 40 KiB, which the log warns about once each.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-instruction-globs.py
 """
@@ -32,6 +40,8 @@ binary = Path(os.environ.get("HAARNESS_BIN", repo / "target/debug/haarness")).re
 root = Path(tempfile.mkdtemp(prefix="haarness-instruction-globs-", dir=os.environ.get("HAARNESS_E2E_DIR"))).resolve()
 MODEL = "claude-sonnet-4-6"
 REQUESTS = []
+# The files the scripted turn reads, one in each folder of the project.
+READS = []
 checks = []
 session = f"haarness-instruction-globs-{os.getpid()}"
 
@@ -52,12 +62,25 @@ class Anthropic(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
-        events = [{"type": "message_start", "message": {"id": f"msg_{len(REQUESTS)}", "usage": {"input_tokens": 9, "output_tokens": 0}}},
-                  {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
-                  {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Fixture answer"}},
-                  {"type": "content_block_stop", "index": 0},
-                  {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 2}},
-                  {"type": "message_stop"}]
+        events = [{"type": "message_start", "message": {"id": f"msg_{len(REQUESTS)}", "usage": {"input_tokens": 9, "output_tokens": 0}}}]
+        last = (body.get("messages") or [{}])[-1].get("content")
+        answered = isinstance(last, list) and any(block.get("type") == "tool_result" for block in last)
+        if body.get("tools") and READS and not answered:
+            # The model's turn reads one file in each folder, all at once.
+            for index, path in enumerate(READS):
+                events += [{"type": "content_block_start", "index": index,
+                            "content_block": {"type": "tool_use", "id": f"toolu_read_{index}", "name": "read", "input": {}}},
+                           {"type": "content_block_delta", "index": index,
+                            "delta": {"type": "input_json_delta", "partial_json": json.dumps({"path": path})}},
+                           {"type": "content_block_stop", "index": index}]
+            stop = "tool_use"
+        else:
+            events += [{"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                       {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Fixture answer"}},
+                       {"type": "content_block_stop", "index": 0}]
+            stop = "end_turn"
+        events += [{"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None}, "usage": {"output_tokens": 2}},
+                   {"type": "message_stop"}]
         for event in events:
             self.wfile.write(("event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n").encode())
         self.wfile.flush()
@@ -113,13 +136,45 @@ try:
     os.symlink("../elsewhere/legal", handbook / "legal")
     (handbook / "linked").mkdir()
     os.symlink("../../elsewhere/RULES.md", handbook / "linked/RULES.md")
-    write(data / "config/haarness.json", json.dumps({"instructions": ["~/handbook/**/RULES.md"]}))
+    write(data / "config/haarness.json", json.dumps({"instructions": ["~/handbook/**/RULES.md", "CONVENTIONS.md"]}))
     project.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(project)], check=True)
     write(project / ".haarness/config.toml", f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\n[lsp]\nenabled=false\n')
-    write(project / "haarness.json", json.dumps({"instructions": ["docs/**/*.md"]}))
+    # The project's file also names the person's notes, files beside the project and one of its own by its
+    # absolute path: only its own may load.
+    write(home / "private-notes.md", "MARK_HOME_PRIVATE\n")
+    write(root / "outside/abs.md", "MARK_OUTSIDE_ABSOLUTE\n")
+    write(root / "outside/up.md", "MARK_OUTSIDE_UP\n")
+    write(project / "guide/inside.md", "MARK_PROJECT_ABSOLUTE\n")
+    outside_entries = ["~/private-notes.md", str(root / "outside/abs.md"), "../outside/up.md",
+                       "*/../../outside/up.md"]
+    # Whoever names it, a file the project links out of itself loads only as a personal note would.
+    write(root / "outside/history", "MARK_HISTORY\n")
+    os.symlink("../outside/history", project / "CONVENTIONS.md")
+    write(project / "haarness.json", json.dumps({"instructions": [
+        "docs/**/*.md", *outside_entries, str(project / "guide/inside.md")]}))
     write(project / "docs/guide.md", "MARK_PROJECT_DOC\n")
     os.symlink("..", project / "docs/loop")
+    # Too large for the prompt: left out whole, and named in the log.
+    write(project / "AGENTS.md", "MARK_ROOT_LARGE " * 2700)
+    # Folders the scripted turn reads in: a plain AGENTS.md, a link to a personal note, a link out of the
+    # project to a file that is no note, and one too large.
+    write(root / "outside/note.md", "MARK_NESTED_NOTE\n")
+    write(root / "outside/nested-history", "MARK_NESTED_OUTSIDE\n")
+    write(project / "kept/AGENTS.md", "MARK_NESTED_KEPT\n")
+    for folder, target in [("note", "note.md"), ("linked", "nested-history")]:
+        (project / folder).mkdir()
+        os.symlink(f"../../outside/{target}", project / folder / "AGENTS.md")
+    # The person's CLAUDE.md as a dotfiles manager links it into place.
+    write(home / ".dotfiles/claude/.claude/CLAUDE.md", "MARK_NESTED_STOWED\n")
+    (home / ".claude").mkdir()
+    os.symlink(home / ".dotfiles/claude/.claude/CLAUDE.md", home / ".claude/CLAUDE.md")
+    (project / "stowed").mkdir()
+    os.symlink(home / ".claude/CLAUDE.md", project / "stowed/AGENTS.md")
+    write(project / "large/AGENTS.md", "MARK_NESTED_LARGE " * 2500)
+    for folder in ["kept", "note", "stowed", "linked", "large"]:
+        write(project / folder / "code.rs", f"fn {folder}() {{}} // CODE_{folder.upper()}\n")
+        READS.append(f"{folder}/code.rs")
 
     started = time.monotonic()
     answer = subprocess.run([str(binary), "--workspace", str(project), "--trust-project", "run", "hello",
@@ -137,6 +192,48 @@ try:
 
     logs = "".join(path.read_text(errors="replace") for path in data.rglob("haarness.log*") if path.is_file())
     check("the log has no warning about a glob that stopped early", "stopped after reading" not in logs)
+
+    for mark in ["MARK_HOME_PRIVATE", "MARK_OUTSIDE_ABSOLUTE", "MARK_OUTSIDE_UP"]:
+        assert mark not in json.dumps(REQUESTS), mark
+    assert prompt.count("MARK_PROJECT_ABSOLUTE") == 1, prompt[-3000:]
+    for entry in outside_entries:
+        line = f"{project / 'haarness.json'}: ignored instructions {json.dumps(entry)}: "
+        rows = [row for row in logs.splitlines() if line in row]
+        assert len(rows) == 1 and " WARN " in rows[0], (entry, [row for row in logs.splitlines() if "ignored instructions" in row])
+    assert str(data / "config/haarness.json") in logs, "the notice says where the person's own files go"
+    check("a project's `~/`, outside absolute, `../` and wildcard-then-`..` entries reach no request, each with "
+          "one warning, while its own absolute path and the person's handbook load")
+
+    assert "MARK_ROOT_LARGE" not in json.dumps(REQUESTS)
+    rows = [row for row in logs.splitlines()
+            if f"skipped instructions {project / 'AGENTS.md'}: it is larger than 40 KiB" in row]
+    assert len(rows) == 1 and " WARN " in rows[0], logs[-3000:]
+    check("an AGENTS.md over 40 KiB is left out of the prompt with a warning")
+
+    linked_out = "a link leads it out of the project to a file that is not Markdown"
+    assert "MARK_HISTORY" not in json.dumps(REQUESTS)
+    assert f"[Instruction file omitted: {project / 'CONVENTIONS.md'} ({linked_out})]" in prompt, prompt[-3000:]
+    rows = [row for row in logs.splitlines() if f"skipped instructions {project / 'CONVENTIONS.md'}: {linked_out}" in row]
+    assert len(rows) == 1 and " WARN " in rows[0], rows
+    check("the person's relative entry meets the project's link to a history file: left out, said in the "
+          "prompt and warned about")
+
+    results = next(body for body in REQUESTS if "tool_result" in json.dumps(body.get("messages", [])[-1:]))
+    sent = json.dumps(results["messages"])
+    for folder in ["KEPT", "NOTE", "STOWED", "LINKED", "LARGE"]:
+        assert f"CODE_{folder}" in sent, (folder, sent[:3000])
+    for mark in ["MARK_NESTED_KEPT", "MARK_NESTED_NOTE", "MARK_NESTED_STOWED"]:
+        assert sent.count(mark) == 1, (mark, sent[:3000])
+    for mark in ["MARK_NESTED_OUTSIDE", "MARK_NESTED_LARGE"]:
+        assert mark not in json.dumps(REQUESTS), mark
+    left_out = [line for line in logs.splitlines() if "read did not attach an instruction file" in line]
+    for name, reason in [("linked", linked_out), ("large", "it is larger than 40 KiB")]:
+        rows = [line for line in left_out if str(project / name / "AGENTS.md") in line]
+        assert len(rows) == 1 and reason in rows[0] and " WARN " in rows[0], (name, left_out)
+    assert len(left_out) == 2, left_out
+    check("reads attach a folder's AGENTS.md as before, links to a personal note and to a dotfiles-managed "
+          "~/.claude/CLAUDE.md included, but not a link out to a file that is not Markdown or one over 40 KiB, "
+          "each warned about once")
 
     # The person's glob loads for any project: a plain one, on the echo provider.
     plain = root / "plain"

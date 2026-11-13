@@ -142,7 +142,7 @@ haarness browser setup                  # let agents use your own Chrome
 haarness mac on                         # let agents see and use this Mac (macOS; agree to the terms first)
 haarness remote enable --name "Studio Mac"
 haarness models openai --verbose
-haarness doctor                         # install check and where files live
+haarness doctor                         # install check, where files live, configuration warnings
 haarness providers
 haarness agents
 haarness agent create reviewer --description 'Review changes' --model anthropic/claude-sonnet-5-5 --tool bash=false --permission 'edit:*=deny' --prompt 'Review for correctness.' --project
