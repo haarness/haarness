@@ -10,7 +10,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Largest instruction file that is inlined; bigger files are skipped.
+/// Largest instruction file that is inlined; bigger files are skipped, by
+/// their size on disk, without being read.
 pub const MAX_FILE_BYTES: usize = 40 * 1024;
 /// Maximum `@import` nesting depth.
 pub const MAX_DEPTH: usize = 5;
@@ -408,6 +409,88 @@ pub fn file_left_out(
 /// Why [`file_left_out`] leaves out a file that holds credentials.
 pub const CREDENTIALS_FILE: &str = "it holds credentials";
 
+/// Why an instruction file over [`MAX_FILE_BYTES`] is left out.
+pub const TOO_LARGE: &str = "it is larger than 40 KiB";
+
+/// Why an instruction file is left out once the files before it took the
+/// assembly's room ([`ImportBudget`]).
+pub const NO_ROOM: &str =
+    "the files before it used up the room for instructions (200 KiB, 20 files)";
+
+/// Why a nested instruction file is left out when it really is elsewhere.
+pub const OUTSIDE_PROJECT: &str = "a link leads it outside the project";
+
+/// Why the instruction assembly will leave `path` out for its size, if it
+/// will: larger than [`MAX_FILE_BYTES`], or with no room left in `budget`.
+/// The size is the one on disk, so a large file is never read to find out.
+/// A file that does not exist, or is not a regular file, gets no reason: the
+/// assembly skips it quietly, as it always has.
+#[must_use]
+pub fn size_left_out(path: &Path, budget: &ImportBudget) -> Option<&'static str> {
+    let size = fs::metadata(path).ok().filter(fs::Metadata::is_file)?.len();
+    if size > MAX_FILE_BYTES as u64 {
+        return Some(TOO_LARGE);
+    }
+    (budget.files == 0 || size > budget.bytes as u64).then_some(NO_ROOM)
+}
+
+/// Why a nested instruction file that a `read` found is left out, if it is:
+/// where it really is must be inside `workspace`, it must be a file Haarness
+/// puts in a prompt ([`left_out`], with `omit` judging it both as named and
+/// where it leads), and no larger than [`MAX_FILE_BYTES`], measured rather
+/// than read.
+#[must_use]
+pub fn nested_left_out(
+    path: &Path,
+    workspace: &Path,
+    omit: ImportFilter<'_>,
+) -> Option<&'static str> {
+    let root = crate::paths::canonicalize(workspace).ok();
+    let canonical = crate::paths::canonicalize(path).ok();
+    let (Some(root), Some(canonical)) = (root, canonical) else {
+        return Some(OUTSIDE_PROJECT);
+    };
+    if !canonical.starts_with(&root) {
+        return Some(OUTSIDE_PROJECT);
+    }
+    if let Some(reason) = left_out(&canonical, Some(&root), omit)
+        .or_else(|| (path != canonical).then(|| omit(path)).flatten())
+    {
+        return Some(reason);
+    }
+    let size = fs::metadata(&canonical)
+        .ok()
+        .filter(fs::Metadata::is_file)
+        .map_or(u64::MAX, |metadata| metadata.len());
+    (size > MAX_FILE_BYTES as u64).then_some(TOO_LARGE)
+}
+
+/// The text of an instruction file of at most [`MAX_FILE_BYTES`], reading no
+/// more than that: `None` for a larger file (one that grew after it was
+/// measured too), one that is not UTF-8, or one that cannot be read.
+#[must_use]
+pub fn read_small(path: &Path) -> Option<String> {
+    read_within(path, MAX_FILE_BYTES)
+}
+
+fn read_within(path: &Path, limit: usize) -> Option<String> {
+    use std::io::Read as _;
+    // Measured first; and opening a pipe would wait for a writer, so only a
+    // regular file is read.
+    if !fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= limit as u64)
+    {
+        return None;
+    }
+    let mut text = String::new();
+    fs::File::open(path)
+        .ok()?
+        .take(limit as u64 + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() <= limit).then_some(text)
+}
+
 /// Files where tools keep keys and credentials: SSH, cloud and cluster tools, package registries, Git, and key
 /// files by their extension.
 fn holds_credentials(canonical: &Path) -> bool {
@@ -510,10 +593,7 @@ fn resolve(
     if depth > MAX_DEPTH || budget.files == 0 {
         return None;
     }
-    let content = fs::read_to_string(path).ok()?;
-    if content.len() > MAX_FILE_BYTES || content.len() > budget.bytes {
-        return None;
-    }
+    let content = read_within(path, MAX_FILE_BYTES.min(budget.bytes))?;
     budget.files -= 1;
     budget.bytes = budget.bytes.saturating_sub(content.len());
     let base = path.parent().unwrap_or(workspace);
@@ -712,6 +792,94 @@ mod tests {
         );
         assert!(nested(&root.join("AGENTS.md"), &root, true).is_empty());
         assert!(nested(&std::env::temp_dir().join("elsewhere.rs"), &root, true).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_files_are_judged_where_they_really_are_and_by_their_size() {
+        let root = crate::paths::canonicalize(temp("nested-judged")).unwrap();
+        let workspace = root.join("project");
+        fs::create_dir_all(workspace.join("sub")).unwrap();
+        fs::create_dir_all(workspace.join("private")).unwrap();
+        fs::write(root.join("outside.md"), "OUTSIDE").unwrap();
+        fs::write(workspace.join(".env"), "ENV_SECRET").unwrap();
+        fs::write(workspace.join("private/rules.md"), "PRIVATE").unwrap();
+        let plain = workspace.join("sub/AGENTS.md");
+        fs::write(&plain, "PLAIN").unwrap();
+        let none: ImportFilter<'_> = &|_| None;
+        assert_eq!(nested_left_out(&plain, &workspace, none), None);
+        // Over 40 KiB, measured: a sparse 2 GiB file is never read.
+        let large = workspace.join("sub/CLAUDE.md");
+        fs::write(&large, "x".repeat(MAX_FILE_BYTES + 1)).unwrap();
+        assert_eq!(nested_left_out(&large, &workspace, none), Some(TOO_LARGE));
+        fs::File::create(&large).unwrap().set_len(2 << 30).unwrap();
+        assert_eq!(nested_left_out(&large, &workspace, none), Some(TOO_LARGE));
+        assert_eq!(read_small(&large), None);
+        // A read rule, on the file as named or where a link leads it.
+        let private = workspace.join("private");
+        let deny = |file: &Path| {
+            (file.starts_with(&private) || file == plain).then_some("a read rule denies it")
+        };
+        assert_eq!(
+            nested_left_out(&plain, &workspace, &deny),
+            Some("a read rule denies it")
+        );
+        #[cfg(unix)]
+        for (target, reason) in [
+            (root.join("outside.md"), OUTSIDE_PROJECT),
+            (workspace.join(".env"), SECRET_FILE),
+            (workspace.join("private/rules.md"), "a read rule denies it"),
+        ] {
+            let link = workspace.join("sub/AGENTS.md");
+            fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let deny = |file: &Path| {
+                file.starts_with(&private)
+                    .then_some("a read rule denies it")
+            };
+            assert_eq!(
+                nested_left_out(&link, &workspace, &deny),
+                Some(reason),
+                "{}",
+                target.display()
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_size_reason_comes_from_the_file_size_and_the_room_left() {
+        let root = temp("sizes");
+        let small = root.join("small.md");
+        fs::write(&small, "x".repeat(1024)).unwrap();
+        let large = root.join("large.md");
+        fs::File::create(&large).unwrap().set_len(2 << 30).unwrap();
+        let budget = ImportBudget::default();
+        assert_eq!(size_left_out(&small, &budget), None);
+        assert_eq!(size_left_out(&large, &budget), Some(TOO_LARGE));
+        assert_eq!(size_left_out(&root.join("missing.md"), &budget), None);
+        assert_eq!(
+            size_left_out(&root, &budget),
+            None,
+            "a folder is skipped quietly"
+        );
+        let spent = ImportBudget {
+            files: 3,
+            bytes: 512,
+        };
+        assert_eq!(size_left_out(&small, &spent), Some(NO_ROOM));
+        let counted = ImportBudget {
+            files: 0,
+            bytes: 200 * 1024,
+        };
+        assert_eq!(size_left_out(&small, &counted), Some(NO_ROOM));
+        // The assembly leaves the large file out without reading it.
+        let mut budget = ImportBudget::default();
+        assert_eq!(
+            read_with_imports(&large, &root, &mut budget, true, &|_| None),
+            None
+        );
+        assert_eq!(budget.files, ImportBudget::default().files);
         fs::remove_dir_all(root).unwrap();
     }
 

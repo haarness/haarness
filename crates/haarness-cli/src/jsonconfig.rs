@@ -458,12 +458,24 @@ pub fn load_layers_with_system(
             })
             .then_some("a read rule denies it")
     };
+    // Files that found no room left: the first few by name, then a count, so
+    // a glob over a large folder does not fill the log.
+    let mut no_room = Vec::new();
     for (file, trusted) in local_files {
         // Said to the person too, as a remote file that cannot be read is.
         if let Some(reason) = instruction_files::file_left_out(&file, workspace, trusted, &denied) {
             layers
                 .notices
                 .push(format!("skipped instructions {}: {reason}", file.display()));
+        } else if let Some(reason) = instruction_files::size_left_out(&file, &import_budget) {
+            if reason == instruction_files::NO_ROOM {
+                no_room.push(file);
+            } else {
+                layers
+                    .notices
+                    .push(format!("skipped instructions {}: {reason}", file.display()));
+            }
+            continue;
         }
         if let Some(content) = instruction_files::read_with_imports(
             &file,
@@ -477,6 +489,20 @@ pub fn load_layers_with_system(
                 &content,
             ));
         }
+    }
+    for file in no_room.iter().take(NAMED_LEFT_OUT) {
+        layers.notices.push(format!(
+            "skipped instructions {}: {}",
+            file.display(),
+            instruction_files::NO_ROOM
+        ));
+    }
+    if no_room.len() > NAMED_LEFT_OUT {
+        layers.notices.push(format!(
+            "skipped {} further instruction files: {}",
+            no_room.len() - NAMED_LEFT_OUT,
+            instruction_files::NO_ROOM
+        ));
     }
     for url in urls {
         // The address can carry a key in its user name or query: the prompt
@@ -631,6 +657,10 @@ fn trusted_instruction_roots(config_dir: &Path, home: Option<&Path>) -> Vec<Path
         .filter_map(|root| dunce::canonicalize(&root).ok())
         .collect()
 }
+
+/// How many instruction files that found no room left the log names one by
+/// one; the rest are counted.
+const NAMED_LEFT_OUT: usize = 5;
 
 /// How many folder entries one `instructions` glob reads at most: a safety
 /// net far above any folder of instructions (a cache folder beside them
@@ -3872,6 +3902,83 @@ mod tests {
         let instructions = global_only.instructions.unwrap();
         assert!(instructions.contains("HOME_RULES"));
         assert!(!instructions.contains("APP_DOCS"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn instruction_files_too_large_or_without_room_are_named_in_the_notices() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-sizes-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let project = root.join("project");
+        for dir in [config.clone(), project.join(".git"), project.join("docs")] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        // Just over 40 KiB, and a sparse 2 GiB file that is never read.
+        fs::write(project.join("AGENTS.md"), "LARGE_RULES ".repeat(3500)).unwrap();
+        fs::File::create(project.join("docs/00-huge.md"))
+            .unwrap()
+            .set_len(2 << 30)
+            .unwrap();
+        // 27 small files: twenty fit, seven find no room.
+        for index in 1..=27 {
+            fs::write(
+                project.join(format!("docs/{index:02}.md")),
+                format!("DOC_{index:02}"),
+            )
+            .unwrap();
+        }
+        fs::write(
+            project.join("haarness.json"),
+            serde_json::json!({"instructions": ["docs/*.md"]}).to_string(),
+        )
+        .unwrap();
+        let layers = load_layers(&config, None, &project, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(
+            !instructions.contains("LARGE_RULES"),
+            "the file is left out whole"
+        );
+        for large in ["AGENTS.md", "docs/00-huge.md"] {
+            let notice = format!(
+                "skipped instructions {}: it is larger than 40 KiB",
+                project.join(native(large)).display()
+            );
+            assert!(
+                layers.notices.contains(&notice),
+                "{notice}\n{:?}",
+                layers.notices
+            );
+        }
+        assert!(instructions.contains("DOC_20") && !instructions.contains("DOC_21"));
+        let no_room = "the files before it used up the room for instructions (200 KiB, 20 files)";
+        for index in 21..=25 {
+            let notice = format!(
+                "skipped instructions {}: {no_room}",
+                project.join(native(&format!("docs/{index}.md"))).display()
+            );
+            assert!(
+                layers.notices.contains(&notice),
+                "{notice}\n{:?}",
+                layers.notices
+            );
+        }
+        assert!(
+            layers
+                .notices
+                .contains(&format!("skipped 2 further instruction files: {no_room}")),
+            "{:?}",
+            layers.notices
+        );
+        // Files that fit load as before, and nothing names them.
+        assert!(
+            !layers
+                .notices
+                .iter()
+                .any(|notice| notice.contains("docs/01.md") || notice.contains("docs\\01.md"))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
