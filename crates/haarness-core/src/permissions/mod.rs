@@ -1878,7 +1878,13 @@ fn pattern_match(pattern: &str, value: &str) -> bool {
                 None => escaped.push('/'),
             },
             '*' => escaped.push_str(".*"),
-            '?' => escaped.push('.'),
+            // One character, but not a glob's any name (see
+            // `bash::BashAnalysis::globbed`), which only `*` matches.
+            '?' => {
+                escaped.push_str("[^");
+                escaped.push(bash::ANY_NAME);
+                escaped.push(']');
+            }
             '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '[' | ']' => {
                 escaped.push('\\');
                 escaped.push(character);

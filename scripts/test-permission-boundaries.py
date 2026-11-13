@@ -463,10 +463,11 @@ def case_literal_names():
     until(lambda: api(connection, f'/turns/{turn["id"]}')['status'] not in ('running', 'queued'), 'the turn did not end')
     # A run nobody can answer: the folder answered runs, its neighbour still stops at the question.
     assert 'IN-a*' in haarness(literal, 'run', '!tool bash ' + json.dumps({'command': starred})).stdout
-    # An unquoted `a*` is the shell's glob, which reaches `ab` too: it asks about the folder holding both.
+    # An unquoted `a*` is the shell's glob, which reaches `ab` too: it asks about the glob, and an Always
+    # for the folder named `a*` does not answer it.
     for call, asked in [('!tool bash ' + json.dumps({'command': f'cat {outside}/ab/f'}), f'{outside}/ab/*'),
                         ('!tool read ' + json.dumps({'path': f'{outside}/ab/f'}), f'{outside}/ab/*'),
-                        ('!tool bash ' + json.dumps({'command': f'cat {outside}/a*/f'}), f'"{outside}/*"')]:
+                        ('!tool bash ' + json.dumps({'command': f'cat {outside}/a*/f'}), f'"{outside}/a*/*"')]:
         result = haarness(literal, 'run', call, check=False)
         assert result.returncode != 0 and 'Stopped: the agent asked' in result.stderr, result.stdout + result.stderr
         assert 'IN-ab' not in result.stdout, result.stdout

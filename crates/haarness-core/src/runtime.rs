@@ -7432,6 +7432,7 @@ impl AgentRuntime {
                     operation: operation.clone(),
                     permission: plan.permission.clone(),
                     patterns: asked.clone(),
+                    globbed: plan.globbed.clone(),
                     always_rules: always_rules.clone(),
                     exact_rules: plan.exact_rules(),
                     detail: card.clone(),
@@ -9857,6 +9858,9 @@ struct PendingPermission {
     permission: String,
     /// Exact things being asked about (command texts, paths, globs).
     patterns: Vec<String>,
+    /// For a folder a glob picks, the pattern rules are matched against
+    /// (see `AskPlan::globbed`).
+    globbed: HashMap<String, String>,
     /// Full rules an "always" answer persists, e.g. `bash:git status *`.
     always_rules: Vec<String>,
     /// The exact commands it also persists, unshown (see
@@ -10575,6 +10579,9 @@ impl PendingPermission {
                 })
             })
             && self.patterns.iter().all(|pattern| {
+                // A folder a glob picks, as rules read it: an allow that
+                // covers that covers the folder's own name too.
+                let pattern = self.globbed.get(pattern).unwrap_or(pattern);
                 let operation = if self.permission == "multiple" {
                     pattern.clone()
                 } else {
@@ -15181,6 +15188,7 @@ impl RunnerTask {
                     operation: operation.clone(),
                     permission: plan.permission.clone(),
                     patterns: plan.patterns.clone(),
+                    globbed: plan.globbed.clone(),
                     always_rules: always_rules.clone(),
                     exact_rules: plan.exact_rules(),
                     detail: detail.clone(),
@@ -18664,6 +18672,11 @@ struct AskPlan {
     /// For a bash group, which patterns are commands as written and which
     /// are read from inside them: see [`AskPlan::evaluate`].
     shell: Option<ShellReadings>,
+    /// The folders a glob the shell expands picks (`/tmp/a*/*` for
+    /// `cat /tmp/a*/f`), each with the pattern rules are matched against
+    /// for it (see `permissions::bash::BashAnalysis::globbed`): a rule
+    /// answers for it only when it covers every name the glob may pick.
+    globbed: HashMap<String, String>,
 }
 
 /// What a bash group read from inside its written commands (see
@@ -18932,7 +18945,15 @@ impl AskPlan {
     fn evaluate(&self, engine: &PermissionEngine, pattern: &str) -> crate::permissions::Evaluation {
         let operation = self.operation(pattern);
         let Some(shell) = &self.shell else {
-            return engine.evaluate_detailed(&operation);
+            let evaluation = engine.evaluate_detailed(&operation);
+            // A folder a glob picks needs a rule for every name the glob
+            // may pick, and a deny for a folder of that very name counts.
+            return match self.globbed.get(pattern) {
+                Some(ruled) => {
+                    stricter(evaluation, engine.evaluate_detailed(&self.operation(ruled)))
+                }
+                None => evaluation,
+            };
         };
         if let Some(sources) = shell.sources.get(pattern)
             && !shell.own.contains(pattern)
@@ -19147,7 +19168,26 @@ impl AskPlan {
             external_paths: Vec::new(),
             resolved,
             shell: self.shell,
+            globbed: self.globbed,
         }
+    }
+}
+
+/// Of two verdicts on one request, the one that lets less through: a deny,
+/// else an ask, else the first.
+fn stricter(
+    first: crate::permissions::Evaluation,
+    second: crate::permissions::Evaluation,
+) -> crate::permissions::Evaluation {
+    let weight = |evaluation: &crate::permissions::Evaluation| match evaluation.decision {
+        PermissionDecision::Allow => 0,
+        PermissionDecision::Ask => 1,
+        PermissionDecision::Deny => 2,
+    };
+    if weight(&second) > weight(&first) {
+        second
+    } else {
+        first
     }
 }
 
@@ -19563,12 +19603,18 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
         external_paths: Vec::new(),
         resolved: Vec::new(),
         shell: None,
+        globbed: HashMap::new(),
     };
     for plan in plans {
         combined
             .patterns
             .extend(plan.patterns.iter().map(|pattern| plan.operation(pattern)));
         combined.always.extend(plan.always_rules());
+        combined.globbed.extend(
+            plan.globbed
+                .iter()
+                .map(|(pattern, ruled)| (plan.operation(pattern), plan.operation(ruled))),
+        );
         combined.resolved.extend(
             plan.resolved
                 .iter()
@@ -19668,6 +19714,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             external_paths: Vec::new(),
             resolved: Vec::new(),
             shell: None,
+            globbed: HashMap::new(),
         }];
     }
     if matches!(
@@ -19692,6 +19739,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             external_paths: Vec::new(),
             resolved: Vec::new(),
             shell: None,
+            globbed: HashMap::new(),
         }];
     }
     if name.starts_with("mac_") {
@@ -19715,6 +19763,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             external_paths: Vec::new(),
             resolved: Vec::new(),
             shell: None,
+            globbed: HashMap::new(),
         }];
     }
     if name.starts_with("browser_") {
@@ -19744,6 +19793,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             external_paths: Vec::new(),
             resolved: Vec::new(),
             shell: None,
+            globbed: HashMap::new(),
         }];
         let remember = arguments["__browser"]["remember"]
             .as_array()
@@ -19760,6 +19810,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 external_paths: Vec::new(),
                 resolved: Vec::new(),
                 shell: None,
+                globbed: HashMap::new(),
             });
         }
         if matches!(name, "browser_files_upload" | "browser_files_drop") {
@@ -19807,6 +19858,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             external_paths: Vec::new(),
             resolved: Vec::new(),
             shell: None,
+            globbed: HashMap::new(),
         }];
     }
     if matches!(name, "image_generate" | "video_generate") {
@@ -19822,6 +19874,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             external_paths: Vec::new(),
             resolved: Vec::new(),
             shell: None,
+            globbed: HashMap::new(),
         }];
     }
     if name == "workflow" {
@@ -19839,6 +19892,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             external_paths: Vec::new(),
             resolved: Vec::new(),
             shell: None,
+            globbed: HashMap::new(),
         }];
         if arguments.get("action").and_then(serde_json::Value::as_str) == Some("create") {
             // The new file also meets the rules for where a linked
@@ -19857,6 +19911,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 external_paths: Vec::new(),
                 resolved,
                 shell: None,
+                globbed: HashMap::new(),
             });
         }
         return plans;
@@ -19937,16 +19992,25 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                     }
                 }
             }
+            // A folder a glob picks is matched against rules as the glob,
+            // and Always keeps the glob's shape, as the card shows it.
+            let globbed: HashMap<String, String> = analysis
+                .globbed
+                .iter()
+                .filter(|(pattern, _)| asked.contains(pattern))
+                .cloned()
+                .collect();
             plans.push(AskPlan {
                 permission: "external_directory".into(),
                 always: asked
                     .iter()
-                    .map(|pattern| remembered_outside(pattern))
+                    .flat_map(|pattern| remembered_glob(pattern, globbed.get(pattern)))
                     .collect(),
                 patterns: asked,
                 external_paths,
                 resolved: Vec::new(),
                 shell: None,
+                globbed,
             });
         }
         if !analysis.patterns.is_empty() {
@@ -19958,6 +20022,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 external_paths: Vec::new(),
                 resolved: Vec::new(),
                 shell: Some(shell),
+                globbed: HashMap::new(),
             });
         }
         return plans;
@@ -20006,6 +20071,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             external_paths,
             resolved,
             shell: None,
+            globbed: HashMap::new(),
         });
     }
     if name == "apply_patch" {
@@ -20042,6 +20108,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                     external_paths: Vec::new(),
                     resolved,
                     shell: None,
+                    globbed: HashMap::new(),
                 });
                 return plans;
             }
@@ -20053,6 +20120,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             external_paths: Vec::new(),
             resolved: Vec::new(),
             shell: None,
+            globbed: HashMap::new(),
         });
         return plans;
     }
@@ -20113,6 +20181,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         external_paths: Vec::new(),
         resolved,
         shell: None,
+        globbed: HashMap::new(),
     });
     plans
 }
@@ -20794,6 +20863,7 @@ mod shell_reading_tests {
             operation: plan.describe(&plan.patterns),
             permission: plan.permission.clone(),
             patterns: plan.patterns.clone(),
+            globbed: plan.globbed.clone(),
             always_rules: plan.always_rules(),
             exact_rules: plan.exact_rules(),
             detail: json!({}),
@@ -21637,49 +21707,164 @@ mod shell_reading_tests {
             ),
             Ask
         );
-        // An unquoted glob is the shell's to expand: `a*` there may be `ab`,
-        // so the line is asked about the folder before it, which no answer
-        // for the folder named `a*` covers.
-        let out_folder = format!("{}/*", out.display());
-        for (command, saved) in [
-            (format!("cat {starred}/f"), &always),
-            (format!("cat {}/a?/f", out.display()), &always),
-            (format!("cat {}/[a]b/f", out.display()), &always),
+        // An unquoted glob is the shell's to expand: `a*` there may be `ab`.
+        // The card names the glob, and rules read it as the glob: no answer
+        // for the folder named `a*` covers it.
+        let o = out.display().to_string();
+        for (command, folder, saved) in [
+            (format!("cat {starred}/f"), format!("{o}/a*/*"), &always),
+            (format!("cat {o}/a?/f"), format!("{o}/a?/*"), &always),
+            (format!("cat {o}/[a]b/f"), format!("{o}/[a]b/*"), &always),
             (
-                format!("cat {}/x?y/f", out.display()),
+                format!("cat {o}/x?y/f"),
+                format!("{o}/x?y/*"),
                 &marked.always_rules(),
             ),
-            (format!("cd {starred} && cat f"), &always),
+            (format!("cd {starred} && cat f"), format!("{o}/*"), &always),
         ] {
             let plan = bash(command.clone());
-            assert_eq!(plan.patterns, vec![out_folder.clone()], "{command}");
+            assert_eq!(plan.patterns, vec![folder], "{command}");
             assert_eq!(verdict(saved, &plan), Ask, "{command}");
         }
-        // In a folder that holds the project, the whole folder, as for
-        // `~/*/x` in the home folder; the folder named `*` stays its own.
+        // A class is kept as `?`, beside the word as written, which the
+        // shell keeps when nothing matches.
+        assert_eq!(
+            bash(format!("cat {o}/[a]b/f")).always_rules(),
+            vec![
+                format!("external_directory:{o}/?b/*"),
+                format!("external_directory:{o}/[a]b/*")
+            ]
+        );
+        let class = bash(format!("cat {o}/[a]b/f"));
+        assert_eq!(verdict(&class.always_rules(), &class), Allow);
+        // Its Always keeps the glob, and a literal name beside it escaped.
+        assert_eq!(
+            bash(format!("cat {starred}/f")).always_rules(),
+            vec![format!("external_directory:{o}/a*/*")]
+        );
+        assert_eq!(
+            bash(format!("cat '{starred}'/x*/f")).always_rules(),
+            vec![format!(r"external_directory:{o}/a\*/x*/*")]
+        );
+        // A rule with a wildcard there answers when it covers every name
+        // the glob may pick, and only then.
+        let configured = |pattern: String, command: String| {
+            let mut engine = PermissionEngine::build_defaults();
+            engine.add_rule(PermissionRule {
+                pattern: format!("external_directory:{pattern}"),
+                decision: Allow,
+            });
+            let plan = bash(command);
+            plan.evaluate(&engine, &plan.patterns[0]).decision
+        };
+        for (pattern, command, decision) in [
+            (format!("{o}/a*/*"), format!("cat {o}/a*/f"), Allow),
+            (format!("{o}/a*/*"), format!("cat {o}/ab*/f"), Allow),
+            (format!("{o}/*b/*"), format!("cat {o}/[a]b/f"), Allow),
+            // Where no name matches, the shell reads the word as written.
+            (format!("{o}/?b/*"), format!("cat {o}/[a]b/f"), Ask),
+            (format!("{o}/x?y/*"), format!("cat {o}/x?y/f"), Allow),
+            (format!("{o}/*"), format!("cat {o}/a*/f"), Allow),
+            (format!("{o}/a?/*"), format!("cat {o}/a*/f"), Ask),
+            (format!("{o}/ab/*"), format!("cat {o}/a*/f"), Ask),
+            (format!(r"{o}/a\*/*"), format!("cat {o}/a*/f"), Ask),
+        ] {
+            assert_eq!(
+                configured(pattern.clone(), command.clone()),
+                decision,
+                "{pattern} {command}"
+            );
+        }
+        // In a folder that holds the project: the folder named `*` is its
+        // own, and the glob `*` there is any folder in it.
         let holder = crate::paths::canonicalize(&made).unwrap();
-        std::fs::create_dir_all(made.join("*")).unwrap();
+        let h = holder.display().to_string();
+        for folder in ["*", ".ssh", "real"] {
+            std::fs::create_dir_all(made.join(folder)).unwrap();
+        }
         std::fs::write(made.join("*/n"), "x\n").unwrap();
-        let named_star = bash(format!("cat '{}/*/n'", holder.display()));
+        std::fs::write(made.join(".ssh/config"), "x\n").unwrap();
+        std::os::unix::fs::symlink(made.join("out/ab"), made.join("linked")).unwrap();
+        let named_star = bash(format!("cat '{h}/*/n'"));
         assert_eq!(
             named_star.always_rules(),
-            vec![format!(r"external_directory:{}/\*/*", holder.display())]
+            vec![format!(r"external_directory:{h}/\*/*")]
         );
         let star = named_star.always_rules();
         assert_eq!(verdict(&star, &named_star), Allow);
         for command in [
-            format!("cat {}/*/n", holder.display()),
-            format!("shopt -s dotglob; cat {}/*/config", holder.display()),
-            format!("bash -O dotglob -c 'cat {}/*/config'", holder.display()),
+            format!("cat {h}/*/n"),
+            format!("shopt -s dotglob; cat {h}/*/config"),
+            format!("bash -O dotglob -c 'cat {h}/*/config'"),
         ] {
             let plan = bash(command.clone());
-            assert_eq!(
-                plan.patterns,
-                vec![format!("{}/*", holder.display())],
-                "{command}"
-            );
+            assert_eq!(plan.patterns, vec![format!("{h}/*/*")], "{command}");
             assert_eq!(verdict(&star, &plan), Ask, "{command}");
         }
+        // A path a glob names there is any path, never the folder alone,
+        // even when a folder of that very name is there.
+        let mut alone = PermissionEngine::build_defaults();
+        alone.add_grant(PermissionRule {
+            pattern: format!("external_directory:{h}/"),
+            decision: Allow,
+        });
+        for command in [format!("cat {h}/*"), format!("cd {h} && cat *")] {
+            let plan = bash(command.clone());
+            assert!(plan.patterns.contains(&format!("{h}/*")), "{command}");
+            assert!(
+                plan.patterns
+                    .iter()
+                    .any(|pattern| plan.evaluate(&alone, pattern).decision == Ask),
+                "{command}"
+            );
+        }
+        // A `..` after a glob climbs back where every name it picks is a
+        // folder, so the line is asked about where it lands; out of one
+        // that may be a link, or after `.*` (which also matches `..`), it
+        // may land anywhere, so the whole disk is asked about.
+        let ssh = format!("{h}/.ssh/*");
+        for command in [
+            "cat */../../.ssh/config".to_owned(),
+            "cat ./*.env/../../.ssh/config".to_owned(),
+            "rm -rf */../../.ssh".to_owned(),
+            "rm -f */../../.ssh/zz-none".to_owned(),
+            "cp */../../.ssh/config copied".to_owned(),
+            "mv */../../.ssh/config moved".to_owned(),
+            "cat < */../../.ssh/config".to_owned(),
+            "cd */../../.ssh && cat config".to_owned(),
+            "bash -c 'cat */../../.ssh/config'".to_owned(),
+            format!("cat {h}/r*/../.ssh/config"),
+            format!("cat {o}/a*/../../.ssh/config"),
+        ] {
+            let plan = bash(command.clone());
+            assert_eq!(plan.patterns, vec![ssh.clone()], "{command}");
+            let mut saved_out = PermissionEngine::build_defaults();
+            saved_out.add_grant(PermissionRule {
+                pattern: format!("external_directory:{o}/*"),
+                decision: Allow,
+            });
+            assert_eq!(
+                plan.evaluate(&saved_out, &plan.patterns[0]).decision,
+                Ask,
+                "{command}"
+            );
+        }
+        for command in [
+            format!("cat {h}/l*/../.ssh/config"),
+            "cat .*/../.ssh/config".to_owned(),
+            "cat */.*/../x".to_owned(),
+        ] {
+            assert_eq!(
+                bash(command.clone()).patterns,
+                vec!["/*".to_owned()],
+                "{command}"
+            );
+        }
+        // `.*` in a folder's place also reaches the folder above.
+        assert_eq!(
+            bash("cat .*/config".to_owned()).patterns,
+            vec![format!("{h}/*")]
+        );
         // A glob inside the project asks nothing, as before.
         for command in [
             "cat src/*/main.rs",
@@ -22084,14 +22269,37 @@ fn outside_pattern(workspace: &Path, folder: &str, named: Option<(&Path, Named)>
 }
 
 /// The rule Always keeps for an `external_directory` pattern an ask names
-/// (see [`outside_pattern`]): a folder and all in it (`/tmp/build/*`), the
-/// folder alone (`/home/me/`) or a file. A `*` or `?` in a name stands for
-/// itself there (see [`crate::permissions::literal_path`]), so the rule
-/// covers what the card showed and no other folder whose name it matches.
+/// (see [`outside_pattern`]), as rules read it (see [`AskPlan::globbed`]): a
+/// folder and all in it (`/tmp/build/*`), the folder alone (`/home/me/`) or
+/// a file. A `*` or `?` in a name stands for itself there (see
+/// [`crate::permissions::literal_path`]), so the rule covers what the card
+/// showed and no other folder whose name it matches, while a glob the
+/// shell expands stays a wildcard (`/tmp/a*/*` for `cat /tmp/a*/f`).
 fn remembered_outside(pattern: &str) -> String {
-    match pattern.strip_suffix("/*") {
+    use crate::permissions::bash::{ANY_NAME, ONE_CHARACTER};
+    let rule = match pattern.strip_suffix("/*") {
         Some(folder) => format!("{}/*", crate::permissions::literal_path(folder)),
         None => crate::permissions::literal_path(pattern),
+    };
+    // A glob the shell expands is kept as the wildcard it is.
+    rule.replace(ANY_NAME, "*").replace(ONE_CHARACTER, "?")
+}
+
+/// What Always keeps for an `external_directory` pattern of a shell line:
+/// [`remembered_outside`] of it, as rules read it (`ruled`) when a glob the
+/// shell expands picks the folder, and then also of the word as written,
+/// which the shell keeps when the glob matches nothing, unless the first
+/// covers it already (a `[…]` class, kept as `?`, does not).
+fn remembered_glob(pattern: &str, ruled: Option<&String>) -> Vec<String> {
+    let Some(ruled) = ruled else {
+        return vec![remembered_outside(pattern)];
+    };
+    let glob = remembered_outside(ruled);
+    let operation = |pattern: &str| format!("external_directory:{pattern}");
+    if crate::permissions::rule_covers(&operation(&glob), &operation(pattern)) {
+        vec![glob]
+    } else {
+        vec![glob, remembered_outside(pattern)]
     }
 }
 
