@@ -411,6 +411,20 @@ impl Renderer<'_> {
             }
             TagEnd::Link => {
                 if let Some(url) = self.link.take() {
+                    // A table cell is plain text: the address goes after the
+                    // link's words in the cell itself (added to the running
+                    // text, it would land in the paragraph after the table).
+                    if let Some(table) = &mut self.table {
+                        if table.in_cell
+                            && let Some(cell) = table.current_row.last_mut()
+                            && !cell.contains(&url)
+                        {
+                            cell.push_str(" (");
+                            cell.push_str(&url);
+                            cell.push(')');
+                        }
+                        return;
+                    }
                     let shows_url = self
                         .inline
                         .last()
@@ -766,6 +780,34 @@ mod table_tests {
         assert!(
             separators.windows(2).all(|pair| pair[0] == pair[1]),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_link_in_a_table_keeps_its_address_in_its_cell() {
+        let theme = Theme::editorial_dark();
+        let lines = render_markdown(
+            "| docs |\n|---|\n| [guide](https://example.com/guide) |\n\
+             | <https://example.com/faq> |\n\nAfter the table.",
+            80,
+            &theme,
+            "  ",
+        );
+        let rows: Vec<String> = lines.iter().map(haarness_opentui::Line::text).collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.trim() == "guide (https://example.com/guide)"),
+            "{rows:?}"
+        );
+        // An address that is the link's own words is not written twice.
+        assert!(
+            rows.iter()
+                .any(|row| row.trim() == "https://example.com/faq"),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.trim() == "After the table."),
+            "{rows:?}"
         );
     }
 
