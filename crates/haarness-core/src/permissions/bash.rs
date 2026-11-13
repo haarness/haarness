@@ -2514,10 +2514,17 @@ impl Reader<'_> {
         }
         let marked = pattern_marks(raw, value);
         let parts: Vec<&[(char, bool)]> = marked.split(|(c, _)| *c == '/').collect();
-        let Some((name, folders)) = parts.split_last() else {
+        let text = |part: &[(char, bool)]| part.iter().map(|(c, _)| *c).collect::<String>();
+        let Some((last, before)) = parts.split_last() else {
             return GlobReach::AsWritten;
         };
-        let text = |part: &[(char, bool)]| part.iter().map(|(c, _)| *c).collect::<String>();
+        // A last `..` climbs as one before it would.
+        let climbs_last = text(last) == "..";
+        let (name, folders) = if climbs_last {
+            (&[][..], &parts[..])
+        } else {
+            (*last, before)
+        };
         let absolute = value.starts_with('/');
         // The folders as written up to the first one a glob names, and,
         // below it, each folder with whether it is laid on the card's
@@ -2745,11 +2752,14 @@ impl Reader<'_> {
         } else {
             (value, complete)
         };
-        // The word of a `cd` is a folder, its last name too.
+        let reach = self.glob_reach(raw, value);
+        // A `cd` into a folder a glob picks is not followed, so what the line
+        // names after it is read from where the shell was: it is asked about
+        // the folder before the glob, whatever a rule for the glob says.
         let reach = if matches!(name, "cd" | "pushd") {
-            self.glob_reach(&format!("{raw}/"), &format!("{value}/"))
+            reach.before_glob()
         } else {
-            self.glob_reach(raw, value)
+            reach
         };
         let (folder, whole) = reach.folder(value, complete);
         let outside = external_dir(self.workspace, self.from(), raw, &folder, whole)
@@ -3725,6 +3735,17 @@ impl GlobReach {
     /// one: a glob's picks are still part of where it leads.
     fn picks(&self) -> bool {
         matches!(self, Self::Under { .. } | Self::Anywhere)
+    }
+
+    /// This reach, under the folder before its first glob alone.
+    fn before_glob(self) -> Self {
+        match self {
+            Self::Under { known, .. } => Self::Under {
+                known,
+                folders: Vec::new(),
+            },
+            other => other,
+        }
     }
 }
 

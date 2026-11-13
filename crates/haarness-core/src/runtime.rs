@@ -21729,17 +21729,12 @@ mod shell_reading_tests {
                 format!("{o}/x?y/*"),
                 &marked.always_rules(),
             ),
-            // A `cd`'s word is a folder, its last name too.
-            (
-                format!("cd {starred} && cat f"),
-                format!("{o}/a*/*"),
-                &always,
-            ),
-            (
-                format!("cd {o}/x?y && pwd"),
-                format!("{o}/x?y/*"),
-                &marked.always_rules(),
-            ),
+            // A `cd` into a folder a glob picks is asked about the folder
+            // before the glob, as what the line names after it is read from
+            // where the shell was.
+            (format!("cd {starred} && cat f"), format!("{o}/*"), &always),
+            (format!("cd {starred}/ && pwd"), format!("{o}/*"), &always),
+            (format!("cd {o}/a*/x && pwd"), format!("{o}/*"), &always),
         ] {
             let plan = bash(command.clone());
             assert_eq!(plan.patterns, vec![folder], "{command}");
@@ -21804,12 +21799,12 @@ mod shell_reading_tests {
         };
         for (pattern, command, decision) in [
             (format!("{o}/a*/*"), format!("cat {o}/a*/f"), Allow),
+            (format!("{o}/a*/*"), format!("cd {o}/a*/ && cat ../x"), Ask),
             (format!("{o}/a*/*"), format!("cat {o}/ab*/f"), Allow),
             (format!("{o}/*b/*"), format!("cat {o}/[a]b/f"), Allow),
             // Where no name matches, the shell reads the word as written.
             (format!("{o}/?b/*"), format!("cat {o}/[a]b/f"), Ask),
             (format!("{o}/x?y/*"), format!("cat {o}/x?y/f"), Allow),
-            (format!("{o}/x?y/*"), format!("cd {o}/x?y && pwd"), Allow),
             (format!("{o}/*"), format!("cat {o}/a*/f"), Allow),
             (format!("{o}/a?/*"), format!("cat {o}/a*/f"), Ask),
             (format!("{o}/ab/*"), format!("cat {o}/a*/f"), Ask),
@@ -21900,6 +21895,8 @@ mod shell_reading_tests {
         }
         for command in [
             format!("cat {h}/l*/../.ssh/config"),
+            // A last `..` climbs too.
+            format!("cd {h}/l*/.. && pwd"),
             format!("cat {h}/hid/*/../../.ssh/config"),
             "cat .*/../.ssh/config".to_owned(),
             "cat */.*/../x".to_owned(),
