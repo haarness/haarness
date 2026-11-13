@@ -11,6 +11,8 @@
 //! a short while: a note then goes out whole as reply text and never shows
 //! inside "Thinking" first.
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
@@ -103,6 +105,10 @@ pub(crate) fn writes_notes(model: &str) -> bool {
     })
 }
 
+/// The models a provider's route was seen to send without signatures: their
+/// thinking never waits there again, as no note can be told.
+pub(crate) type UnsignedRoutes = Arc<Mutex<HashSet<String>>>;
+
 /// The open thinking block's text on its way out. While the model writes
 /// notes, the text waits until the block ends, runs past [`HOLD_CHARS`] or
 /// has waited [`HOLD_TIME`]; at its end the signature decides whether it was
@@ -120,6 +126,9 @@ pub(crate) struct NoteHold {
     since: Option<Instant>,
     /// Some of the open block already went out as reasoning.
     released: bool,
+    /// Where to remember, under the model's id, that the route sends no
+    /// signatures.
+    route: Option<(UnsignedRoutes, String)>,
 }
 
 impl NoteHold {
@@ -127,6 +136,17 @@ impl NoteHold {
         Self {
             wait: if waits { HOLD_TIME } else { Duration::ZERO },
             ..Self::default()
+        }
+    }
+
+    /// For `model` on a route that may drop signatures: it waits only while
+    /// `unsigned` does not name the model, and names it once a block ends
+    /// without one.
+    pub(crate) fn remembering(waits: bool, unsigned: &UnsignedRoutes, model: &str) -> Self {
+        let known = unsigned.lock().is_ok_and(|models| models.contains(model));
+        Self {
+            route: Some((Arc::clone(unsigned), model.to_owned())),
+            ..Self::new(waits && !known)
         }
     }
 
@@ -188,8 +208,13 @@ impl NoteHold {
     /// waits for a note that cannot be told. What waited goes out as
     /// reasoning.
     pub(crate) fn end_unsigned(&mut self) -> Option<ProviderEvent> {
-        if !self.text.is_empty() {
+        if !self.text.is_empty() && !self.wait.is_zero() {
             self.wait = Duration::ZERO;
+            if let Some((unsigned, model)) = &self.route
+                && let Ok(mut models) = unsigned.lock()
+            {
+                models.insert(model.clone());
+            }
         }
         self.end(None)
     }
@@ -475,6 +500,23 @@ pub(crate) mod tests {
         // The rest of the stream streams as it comes.
         assert_eq!(reasoning(hold.push("", "More.")).as_deref(), Some("More."));
         assert!(hold.due().is_none());
+    }
+
+    #[test]
+    fn a_route_without_signatures_is_remembered_for_its_model() {
+        let unsigned = UnsignedRoutes::default();
+        let mut hold = NoteHold::remembering(true, &unsigned, "claude-opus-5-5");
+        hold.push("", "Reading.");
+        hold.end_unsigned();
+        // The next answer from the model there streams as it comes; another
+        // model still waits.
+        let mut next = NoteHold::remembering(true, &unsigned, "claude-opus-5-5");
+        assert_eq!(reasoning(next.push("", "More.")).as_deref(), Some("More."));
+        let mut other = NoteHold::remembering(true, &unsigned, "claude-sonnet-5-5");
+        assert!(matches!(
+            other.push("", "Hm.").as_slice(),
+            [ProviderEvent::ContentStarted]
+        ));
     }
 
     #[test]

@@ -1789,6 +1789,14 @@ pub(crate) mod tests {
             "claude-opus-4-8",
             "claude-opus-6",
             "claude-nova-7",
+            // Vertex AI's dated ids and a context mark name the same release.
+            "claude-opus-5@20260301",
+            "claude-sonnet-5@20260301",
+            "claude-fable-5@20260301",
+            "claude-mythos-5@20260301",
+            "claude-opus-4-7@20260101",
+            "claude-opus-4-7[1m]",
+            "claude-haiku-5-5@20260901",
         ] {
             assert!(adaptive_thinking(id), "{id}");
         }
@@ -1809,10 +1817,17 @@ pub(crate) mod tests {
             "claude-sonnet-6",
             "claude-opus-5-5@20260901",
             "claude-sonnet-5-5[1m]",
+            "claude-haiku-5-5@20260901",
         ] {
             assert!(binds_thinking(id), "{id}");
         }
-        for id in ["claude-fable-5", "claude-opus-5", "claude-mythos-5"] {
+        for id in [
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-mythos-5",
+            "claude-opus-5@20260301",
+            "claude-opus-4-6@20251101",
+        ] {
             assert!(!binds_thinking(id), "{id}");
         }
     }

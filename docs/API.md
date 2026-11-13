@@ -804,7 +804,11 @@ only reads the line twice. Live, a note arrives as
 text reaches `turn.reasoning_delta` up to 3 seconds or 600 characters late,
 so that a note is never streamed as reasoning; a note longer than that has
 already streamed as reasoning, and is taken out of the thought (the
-`reasoning` item that follows leaves it out) when its item is saved.
+`reasoning` item that follows leaves it out) when its item is saved. A route
+that drops the blocks' signatures (GitHub Copilot, for one) cannot tell a
+note at all: there only the model's first thinking block waits, until it
+ends without a signature, and the model's later answers through that
+provider do not wait.
 
 A `usage` item records one model request: `input_tokens`, `output_tokens`,
 `cache_read_tokens`, `cache_write_tokens`, `cost_usd` (null when unpriced),
