@@ -10,6 +10,8 @@ an ask a person configured never reaches the reviewer, a switch to Review or
 Stop mid-review settles the request at once, and `haarness run --auto` asks
 at a terminal with the note, or without one refuses each such request with
 its reason and goes on (exit status 3), stopping after five in a row.
+A folder the chat made outside the project is taken away again without a
+card, while deleting one it did not make shows the Destructive action card.
 
 HAARNESS_E2E_FRAMES names a folder for captured frames (ANSI and text);
 by default they land beside the other evidence."""
@@ -101,6 +103,19 @@ def save(label, window=0):
 def start(thread, command, verdict=None):
     text = '!tool bash ' + json.dumps({'command': command}) + (f' [review:{verdict}]' if verdict else '')
     return api('/v1/threads/' + thread + '/turns', {'requestId': str(uuid.uuid4()), 'text': text})
+
+
+def start_text(thread, text):
+    return api('/v1/threads/' + thread + '/turns', {'requestId': str(uuid.uuid4()), 'text': text})
+
+
+def unnamed(command, name):
+    """A scripted bash call whose message never spells `name`: JSON escapes one of its letters, so the
+    person's words do not name the folder and only Haarness's own record of what the chat made can let a
+    delete of it run."""
+    escaped = json.dumps({'command': command}).replace(name, name[:-1] + '\\u%04x' % ord(name[-1]))
+    # The reviewer approves: the last verdict marker in its prompt is this one.
+    return '!tool bash ' + escaped + ' [review:allow]'
 
 
 def finished():
@@ -226,6 +241,31 @@ try:
     keys('C-y')
     until(lambda: '  auto' in capture(), 'Ctrl+Y did not return to Auto')
     check('switching to Review mid-review ends the review and shows the prompt; nothing is approved')
+
+    # A scratch folder outside the project that the chat made is its own to take away.
+    own = root / 'benchscratch'
+    start_text(thread, unnamed(f'mkdir -p {own}/sub && touch {own}/sub/run.txt', 'benchscratch'))
+    until(lambda: (own / 'sub' / 'run.txt').exists(), 'the reviewer did not approve the mkdir')
+    finished()
+    start_text(thread, unnamed(f'rm -rf {own}', 'benchscratch'))
+    never_reviewing('the cleanup of the chat\'s own folder')
+    finished()
+    assert not pending() and not own.exists(), pending()
+    check('a folder the chat made outside the project is deleted again without a card')
+
+    theirs = root / 'keepfolder'
+    (theirs / 'sub').mkdir(parents=True)
+    start_text(thread, unnamed(f'rm -rf {theirs}', 'keepfolder'))
+    until(lambda: len(pending()) == 1, 'deleting a folder the chat did not make did not ask')
+    note = pending()[0].get('review') or {}
+    assert note.get('rule') == 'Destructive action' and note.get('status') == 'asked', note
+    until(lambda: 'Destructive action' in card(capture()), 'the card did not say Destructive action')
+    save('destructive-card')
+    time.sleep(.3)
+    keys('n')
+    finished()
+    assert (theirs / 'sub').is_dir()
+    check('deleting a folder outside the project the chat did not make still shows the Destructive action card')
 
     turn = start(thread, 'printf stopped > stopped.txt', 'stall')
     time.sleep(1)

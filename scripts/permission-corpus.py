@@ -5,15 +5,18 @@
 `crates/haarness-core/src/runtime/permission_corpus.rs`) in a fixture project and writes one JSON
 object per line: the shell reading (patterns, readings, outside folders, deletions, the script card,
 the read-only check) and the decision under three configurations (defaults; `"*": "ask"` with an
-allowlist; an `rm *` deny), each with and without remembered Always answers. Nothing is run.
+allowlist; an `rm *` deny), each with and without remembered Always answers, and whether Auto brings
+the line to a person once its reviewer allows it (`auto`). Nothing is run.
 
 `diff` compares two such files and lists every line whose reading or decision changed, marking a
 decision that moved from allow to ask or deny under the defaults.
 
 Usage:
   cargo test -p haarness-core --lib --no-run      # prints the test binary's path
-  python3 scripts/permission-corpus.py run <test binary> <out.jsonl> [--root <folder>]
+  python3 scripts/permission-corpus.py run <test binary> <out.jsonl> [--root <folder>] [--lines <file.json>]
   python3 scripts/permission-corpus.py diff <before.jsonl> <after.jsonl>
+
+`--lines` reads the lines from a JSON list instead of the corpus below.
 """
 import json
 import os
@@ -234,17 +237,21 @@ def fixture(root):
         link.symlink_to('../deep/er/x')
     for name in ['secret', 'a', 'x']:
         (outside / name).write_text('outside\n')
+    # A folder the shell cannot enter.
+    (project / 'locked').mkdir(exist_ok=True)
+    (project / 'locked').chmod(0o000)
     return project
 
 
-def run(binary, out, root=None):
+def run(binary, out, root=None, lines=None):
     holder = None if root else tempfile.TemporaryDirectory(prefix='haarness-permission-corpus-')
     root = Path(root or holder.name)
     root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
     project = fixture(root)
+    lines = json.loads(Path(lines).read_text()) if lines else CORPUS
     corpus = root / 'corpus.json'
-    corpus.write_text(json.dumps(CORPUS))
+    corpus.write_text(json.dumps(lines))
     raw = root / 'raw.jsonl'
     env = {**os.environ, 'HAARNESS_PERMISSION_CORPUS': str(corpus),
            'HAARNESS_PERMISSION_CORPUS_PROJECT': str(project), 'HAARNESS_PERMISSION_CORPUS_OUT': str(raw)}
@@ -255,7 +262,8 @@ def run(binary, out, root=None):
     for path, name in [(str(root), '<root>'), (str(Path.home()), '<home>')]:
         text = text.replace(json.dumps(path)[1:-1], name)
     Path(out).write_text(text)
-    print(f'{len(CORPUS)} lines read into {out}')
+    (project / 'locked').chmod(0o755)
+    print(f'{len(lines)} lines read into {out}')
 
 
 def changes(before, after, path=''):
@@ -303,7 +311,8 @@ def diff(before_file, after_file):
 if __name__ == '__main__':
     if len(sys.argv) >= 4 and sys.argv[1] == 'run':
         root = sys.argv[sys.argv.index('--root') + 1] if '--root' in sys.argv else None
-        run(sys.argv[2], sys.argv[3], root)
+        lines = sys.argv[sys.argv.index('--lines') + 1] if '--lines' in sys.argv else None
+        run(sys.argv[2], sys.argv[3], root, lines)
     elif len(sys.argv) == 4 and sys.argv[1] == 'diff':
         diff(sys.argv[2], sys.argv[3])
     else:

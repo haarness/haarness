@@ -1,5 +1,6 @@
 //! A corpus of shell lines read and decided the way a `bash` call is, under
-//! three configurations with and without remembered answers, so one build's
+//! three configurations with and without remembered answers, and what Auto
+//! brings to a person after its reviewer allows the line, so one build's
 //! reading of them can be compared with another's
 //! (`scripts/permission-corpus.py` runs it and compares two runs).
 //!
@@ -104,6 +105,28 @@ fn decide(engine: &PermissionEngine, command: &str, workspace: &Path) -> serde_j
     })
 }
 
+/// What Auto does with `command` once its reviewer allows it, in a chat
+/// whose person named nothing: `allow`, or `ask` with the deletion outside
+/// the project that brings it to them.
+fn auto(command: &str, workspace: &Path) -> serde_json::Value {
+    let request = crate::auto_review::ReviewRequest {
+        permission: "bash".into(),
+        patterns: Vec::new(),
+        detail: json!({ "command": command }),
+        tool: Some(("bash".into(), "corpus".into())),
+        thread_id: ThreadId::new(),
+        root_thread_id: ThreadId::new(),
+        turn_id: None,
+    };
+    match crate::auto_review::unnamed_deletion(&request, workspace, "") {
+        Some(target) => json!({
+            "decision": "ask",
+            "target": [target.path, target.placed, format!("{:?}", target.effect)],
+        }),
+        None => json!({ "decision": "allow" }),
+    }
+}
+
 /// Everything the shell reading says about `command`.
 fn reading(command: &str, workspace: &Path) -> serde_json::Value {
     let analysis = bash::analyze(command, workspace);
@@ -189,6 +212,7 @@ fn permission_corpus() {
                 decisions.insert(key, decide(&engine, line, &project));
             }
         }
+        decisions.insert("auto".into(), auto(line, &project));
         output.push_str(
             &json!({
                 "line": line,

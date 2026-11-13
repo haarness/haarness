@@ -912,12 +912,15 @@ fn note(status: PermissionReviewStatus, reason: ReviewReason) -> PermissionRevie
 /// The first path outside the project that a shell command deletes or
 /// overwrites, or that cannot be placed (see `bash::outside_deletions`),
 /// while no message of the person names it, whatever kind of request the
-/// command raised.
-fn unnamed_deletion(
+/// command raised. A line that does nothing but take paths away (see
+/// `bash::cleans_up`) may take away what the chat itself put there (see
+/// [`crate::made_paths`]) without the person's word.
+pub(crate) fn unnamed_deletion(
     request: &ReviewRequest,
     workspace: &Path,
     said: &str,
 ) -> Option<crate::permissions::bash::OutsideDeletion> {
+    use crate::permissions::bash;
     let command = request.detail.get("command")?.as_str()?;
     let workdir = request
         .detail
@@ -927,10 +930,27 @@ fn unnamed_deletion(
         .map(|dir| crate::permissions::resolve_permission_path(workspace, dir));
     let home = haarness_protocol::home_dir();
     let kept = Kept::new(home.as_deref(), workspace);
-    crate::permissions::bash::outside_deletions(command, workspace, workdir.as_deref())
+    let root = request.root_thread_id;
+    let mut cleanup = None;
+    bash::outside_deletions(command, workspace, workdir.as_deref())
         .into_iter()
         // A path nobody can place is never one the person named.
-        .find(|target| !target.placed || !named(said, &target.path, home.as_deref(), &kept))
+        .find(|target| {
+            if !target.placed {
+                return true;
+            }
+            if named(said, &target.path, home.as_deref(), &kept) {
+                return false;
+            }
+            let path = Path::new(&target.path);
+            // The line's shape first: looking through what the chat made may
+            // take longer.
+            let own = target.effect == bash::Effect::Deletes
+                && !kept.holds(path)
+                && *cleanup.get_or_insert_with(|| bash::cleans_up(command, workspace))
+                && crate::made_paths::holds(root, path);
+            !own
+        })
 }
 
 /// Folders no message names for deletion: the root, the home folder, the
@@ -1334,9 +1354,27 @@ impl Reviewer {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let target = (stricter == Decision::Allow)
-            .then(|| unnamed_deletion(request, &self.workspace, &said))
-            .flatten();
+        let target = if stricter == Decision::Allow {
+            // It may look through a folder the chat made: off the async
+            // workers. Should that fail, the deletion is the person's.
+            let (request, workspace) = (request.clone(), self.workspace.clone());
+            let command = request
+                .detail
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let failed = crate::permissions::bash::OutsideDeletion {
+                path: command,
+                placed: false,
+                effect: crate::permissions::bash::Effect::Deletes,
+            };
+            tokio::task::spawn_blocking(move || unnamed_deletion(&request, &workspace, &said))
+                .await
+                .unwrap_or(Some(failed))
+        } else {
+            None
+        };
         let rule = verdict.rule.as_deref().map(|rule| clip(rule, RULE));
         // Haarness's own words when it decided, or the reviewer gave none.
         let (rationale, reason) = match (&target, verdict.rationale.as_deref()) {
@@ -2086,6 +2124,132 @@ mod tests {
             )
             .is_none()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chat_cleaning_up_what_it_made_outside_the_project_names_nothing() {
+        let root = std::env::temp_dir().join(format!("haarness-own-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(root.join("kept")).unwrap();
+        let real = crate::paths::canonicalize(&root).unwrap();
+        // Without birth times nothing is ever the chat's own.
+        if std::fs::symlink_metadata(&real)
+            .and_then(|metadata| metadata.created())
+            .is_err()
+        {
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let chat = ThreadId::new();
+        // The chat made `scratch` (and a folder in it) where `kept` was
+        // there already.
+        let made = crate::made_paths::before_command(
+            &format!(
+                "mkdir -p {r}/scratch/sub {r}/kept && touch {r}/scratch/sub/a",
+                r = real.display()
+            ),
+            &workspace,
+            &workspace,
+        );
+        assert_eq!(made.paths(), [real.join("scratch")]);
+        std::fs::create_dir_all(real.join("scratch/sub")).unwrap();
+        std::fs::write(real.join("scratch/sub/a"), "").unwrap();
+        crate::made_paths::note(chat, &made, &workspace);
+        // A link in it to a folder the chat did not make, and one beside it.
+        std::os::unix::fs::symlink(real.join("kept"), real.join("scratch/l")).unwrap();
+        let link = crate::made_paths::before_files(&[real.join("l")]);
+        std::os::unix::fs::symlink(real.join("kept"), real.join("l")).unwrap();
+        crate::made_paths::note(chat, &link, &workspace);
+        // What another command of the line may have put there, or a branch
+        // that may not run names, is never the chat's.
+        for command in [
+            "mv <r>/kept <r>/moved; mkdir -p <r>/moved",
+            "if false; then mkdir <r>/moved; fi",
+            "f() { mkdir <r>/moved; }",
+            "true || mkdir <r>/moved",
+            "mv \"$SRC\" <r>/elsewhere; mkdir <r>/moved",
+            "sudo mkdir <r>/moved",
+        ] {
+            let command = command.replace("<r>", &real.display().to_string());
+            let before = crate::made_paths::before_command(&command, &workspace, &workspace);
+            assert!(before.paths().is_empty(), "{command}: {before:?}");
+        }
+        let request = |command: &str, root_thread_id: ThreadId| ReviewRequest {
+            permission: "bash".into(),
+            patterns: Vec::new(),
+            detail: json!({ "command": command.replace("<r>", &real.display().to_string()) }),
+            tool: Some(("bash".into(), "c1".into())),
+            thread_id: ThreadId::new(),
+            root_thread_id,
+            turn_id: None,
+        };
+        for command in [
+            "rm -rf <r>/scratch",
+            "rm -rf <r>/scratch 2>/dev/null || true",
+            "ls <r>/scratch && rm -rf <r>/scratch/sub/a\necho done",
+            "cd <r> && rm -rf scratch",
+        ] {
+            let found = unnamed_deletion(&request(command, chat), &workspace, "run the bench");
+            assert!(found.is_none(), "{command}: {found:?}");
+        }
+        // Still the person's to name: a glob or a variable, a delete
+        // through a link to elsewhere (a link is placed where it leads), a
+        // step that may change what a delete reaches, a folder that was
+        // there before, another chat's call.
+        for (command, chat) in [
+            ("rm -rf <r>/scratch/*", chat),
+            ("rm -rf <r>/scratch/l", chat),
+            ("rm -rf \"$D\"/scratch", chat),
+            ("rm -rf <r>/scratch/l/", chat),
+            ("rm -rf <r>/l/", chat),
+            ("rm -rf <r>/scratch/l/x", chat),
+            ("make; rm -rf <r>/scratch", chat),
+            ("rm -rf <r>/scratch &", chat),
+            ("sudo rm -rf <r>/scratch", chat),
+            ("cd <r>; rm -rf scratch", chat),
+            ("rm -rf <r>/kept", chat),
+            ("rm -rf <r>/scratch <r>/kept", chat),
+            ("rm -rf <r>/scratch", ThreadId::new()),
+        ] {
+            assert!(
+                unnamed_deletion(&request(command, chat), &workspace, "run the bench").is_some(),
+                "{command}"
+            );
+        }
+        // Once the chat took its folder away, it is forgotten: whatever is
+        // made there next is not its own.
+        std::fs::remove_dir_all(real.join("scratch")).unwrap();
+        crate::made_paths::after_command(
+            chat,
+            &format!("rm -rf {}/scratch", real.display()),
+            &workspace,
+            &workspace,
+            &crate::made_paths::before_files(&[]),
+        );
+        std::fs::create_dir_all(real.join("scratch")).unwrap();
+        assert!(unnamed_deletion(&request("rm -rf <r>/scratch", chat), &workspace, "go").is_some());
+        // Made by the chat, then deleted and made again by the person: theirs.
+        let shared = crate::made_paths::before_files(&[real.join("shared")]);
+        std::fs::create_dir(real.join("shared")).unwrap();
+        crate::made_paths::note(chat, &shared, &workspace);
+        assert!(unnamed_deletion(&request("rm -rf <r>/shared", chat), &workspace, "go").is_none());
+        std::fs::remove_dir(real.join("shared")).unwrap();
+        std::fs::create_dir(real.join("other")).unwrap();
+        std::fs::create_dir(real.join("shared")).unwrap();
+        std::fs::write(real.join("shared/person-work.txt"), "x").unwrap();
+        assert!(unnamed_deletion(&request("rm -rf <r>/shared", chat), &workspace, "go").is_some());
+        // Made by the chat, then holding the person's older folder that a
+        // later call moved in: theirs too.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let boxed = crate::made_paths::before_files(&[real.join("box")]);
+        std::fs::create_dir(real.join("box")).unwrap();
+        crate::made_paths::note(chat, &boxed, &workspace);
+        assert!(unnamed_deletion(&request("rm -rf <r>/box", chat), &workspace, "go").is_none());
+        std::fs::rename(real.join("kept"), real.join("box/kept")).unwrap();
+        assert!(unnamed_deletion(&request("rm -rf <r>/box", chat), &workspace, "go").is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
 

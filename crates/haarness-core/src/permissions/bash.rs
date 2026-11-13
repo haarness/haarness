@@ -1421,6 +1421,9 @@ impl Reader<'_> {
         let mut folders = HashMap::new();
         // The steps where a `cd` would be followed: none in text run again.
         let mut open = HashSet::new();
+        // What is read from where the shell started as well (see
+        // [`chain_folders`]).
+        let mut twice = HashSet::new();
         if depth.text == 0 {
             let mut statements = tree.root_node().walk();
             let statements: Vec<_> = tree
@@ -1428,8 +1431,11 @@ impl Reader<'_> {
                 .named_children(&mut statements)
                 .filter(|node| node.kind() != "comment")
                 .collect();
+            // Under dash, `&>` sends the chain before it to the background.
             self.analysis.directories = match statements.as_slice() {
-                [statement] if and_chain(*statement) => Some(Vec::new()),
+                [statement] if and_chain(*statement) && !dash_backgrounds(*statement, command) => {
+                    Some(Vec::new())
+                }
                 _ => None,
             };
             // Not for a line the parser cannot read whole, or one whose
@@ -1439,7 +1445,14 @@ impl Reader<'_> {
                 && !tree.root_node().has_error()
                 && joined_continuations(command, true).is_none()
             {
-                (folders, open) = chain_folders(*statement, command, self.start);
+                (folders, open, twice) = chain_folders(*statement, command, self.start);
+            } else if statements.len() > 1
+                && whole
+                && self.reading != Reading::Cmd
+                && !tree.root_node().has_error()
+                && joined_continuations(command, true).is_none()
+            {
+                folders = reading_folders(tree.root_node(), command, self.start, self.workspace);
             }
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
@@ -1512,6 +1525,11 @@ impl Reader<'_> {
             self.folder.clone_from(&here);
             let named_from = self.analysis.paths.len();
             self.check_paths(&words, command);
+            let again = here.is_some() && twice.contains(&node.id());
+            if again {
+                self.folder = None;
+                self.check_paths(&words, command);
+            }
             self.folder = None;
             if depth.text == 0 {
                 self.source = None;
@@ -1575,6 +1593,12 @@ impl Reader<'_> {
             self.here = here;
             self.lost = !open.contains(&node.id());
             self.unwrap(&words, Some(stdin), command, depth);
+            if again {
+                // What it runs, read from where the shell started too.
+                self.here = None;
+                self.carried = None;
+                self.unwrap(&words, Some(stdin), command, depth);
+            }
             self.here = None;
             self.carried = None;
             self.work_trees.clear();
@@ -1703,7 +1727,6 @@ impl Reader<'_> {
                     moved: false,
                 });
             }
-            self.folder = folders.get(&redirect.id()).cloned();
             // cmd.exe writes to the file named as written.
             let (value, complete) = if self.reading == Reading::Cmd {
                 let raw = node_text(dest, command);
@@ -1711,30 +1734,37 @@ impl Reader<'_> {
             } else {
                 (value, complete)
             };
-            let outside = external_dir(
-                self.workspace,
-                self.from(),
-                &node_text(dest, command),
-                &value,
-                complete,
-            );
             // `<` and `<>` read the file.
             let reads = (0..redirect.child_count())
                 .filter_map(|i| redirect.child(i))
                 .any(|child| matches!(node_text(child, command).as_str(), "<" | "<>"));
-            self.name_path(
-                &node_text(dest, command),
-                &value,
-                complete,
-                outside.as_deref(),
-                reads,
-            );
-            if reads && complete {
-                self.name_glob_secrets(&node_text(dest, command), &value);
-            }
-            self.folder = None;
-            if let Some(dir) = outside {
-                push_unique(&mut self.analysis.external_dirs, glob(&dir));
+            let placed = folders.get(&redirect.id()).cloned();
+            // Where the shell started as well, for one read from both (see
+            // [`chain_folders`]).
+            let also = placed.is_some() && twice.contains(&redirect.id());
+            for folder in std::iter::once(placed).chain(also.then_some(None)) {
+                self.folder = folder;
+                let outside = external_dir(
+                    self.workspace,
+                    self.from(),
+                    &node_text(dest, command),
+                    &value,
+                    complete,
+                );
+                self.name_path(
+                    &node_text(dest, command),
+                    &value,
+                    complete,
+                    outside.as_deref(),
+                    reads,
+                );
+                if reads && complete {
+                    self.name_glob_secrets(&node_text(dest, command), &value);
+                }
+                self.folder = None;
+                if let Some(dir) = outside {
+                    push_unique(&mut self.analysis.external_dirs, glob(&dir));
+                }
             }
         }
         self.folder = outer_folder;
@@ -5302,11 +5332,79 @@ fn read_only_invocation(tokens: &[String]) -> bool {
         return false;
     }
     let args = &tokens[1..];
+    // Whether a short option written alone or clustered with others (`-uo`)
+    // is one of `letters`.
+    let short = |letters: &str| {
+        args.iter().any(|arg| {
+            arg.strip_prefix('-')
+                .filter(|cluster| !cluster.starts_with('-'))
+                .is_some_and(|cluster| cluster.contains(|letter| letters.contains(letter)))
+        })
+    };
+    // Whether a long option is one of `names` or may be read as one, written
+    // shortened as programs that take abbreviations do (`--outp=f`).
+    let long = |names: &[&str]| {
+        args.iter().any(|arg| {
+            let name = arg.split('=').next().unwrap_or_default();
+            name.len() > 2
+                && name.starts_with("--")
+                && names.iter().any(|full| full.starts_with(name))
+        })
+    };
+    // Whether an option is exactly one of `names`, alone or with `=value`.
+    let exact = |names: &[&str]| {
+        args.iter().any(|arg| {
+            let name = arg.split('=').next().unwrap_or_default();
+            names.contains(&name)
+        })
+    };
     match program {
-        ":" | "true" | "false" | "pwd" | "printf" | "echo" | "cat" | "head" | "tail" | "wc"
-        | "cut" | "tr" | "uniq" | "grep" | "ls" | "stat" | "file" | "du" | "df" | "basename"
-        | "dirname" | "realpath" | "cmp" | "comm" | "md5" | "md5sum" | "sha1sum" | "sha256sum"
-        | "shasum" | "uname" | "date" | "which" | "type" | "test" | "[" | "jq" | "cd" => true,
+        ":" | "true" | "false" | "pwd" | "echo" | "cat" | "head" | "tail" | "cut" | "tr"
+        | "grep" | "ls" | "stat" | "df" | "basename" | "dirname" | "realpath" | "cmp" | "comm"
+        | "md5" | "md5sum" | "sha1sum" | "sha256sum" | "shasum" | "uname" | "which" | "type"
+        | "test" | "[" | "jq" | "cd" => true,
+        // `printf -v` sets a variable of the shell, which may be `PATH`.
+        "printf" => !short("v"),
+        // `uniq in out` writes `out`; `-f`, `-s` and `-w` take a number.
+        "uniq" => {
+            let mut files = 0;
+            let mut value = false;
+            for arg in args {
+                if std::mem::take(&mut value) {
+                    continue;
+                }
+                if matches!(
+                    arg.as_str(),
+                    "-f" | "-s" | "-w" | "--skip-fields" | "--skip-chars" | "--check-chars"
+                ) {
+                    value = true;
+                } else if !arg.starts_with('-') || arg == "-" {
+                    files += 1;
+                }
+            }
+            files <= 1
+        }
+        // `file -C` writes a compiled magic file.
+        "file" => !short("C") && !long(&["--compile"]),
+        // They read the files to look at from a list in a file.
+        "wc" | "du" => !long(&["--files0-from"]),
+        // What only shows a time; any other word may set the clock.
+        "date" => {
+            let mut value = false;
+            args.iter().all(|arg| {
+                if std::mem::take(&mut value) {
+                    return true;
+                }
+                value = matches!(arg.as_str(), "-r" | "--reference");
+                value
+                    || arg.starts_with('+')
+                    || arg.starts_with("-I")
+                    || arg.starts_with("--iso-8601")
+                    || arg.starts_with("--rfc-")
+                    || arg.starts_with("--reference=")
+                    || matches!(arg.as_str(), "-u" | "-R" | "--utc" | "--universal")
+            })
+        }
         "sleep" => {
             args.len() == 1
                 && !args[0].is_empty()
@@ -5314,17 +5412,21 @@ fn read_only_invocation(tokens: &[String]) -> bool {
                     byte.is_ascii_digit() || matches!(byte, b'.' | b's' | b'm' | b'h' | b'd')
                 })
         }
-        "sort" => !args.iter().any(|arg| {
-            arg == "-o"
-                || (arg.starts_with("-o") && arg.len() > 2)
-                || arg == "--output"
-                || arg.starts_with("--output=")
-                || arg == "--compress-program"
-                || arg.starts_with("--compress-program=")
-        }),
-        "rg" => !args
-            .iter()
-            .any(|arg| arg == "--pre" || arg.starts_with("--pre=")),
+        // `-o` writes, `-T` keeps temporary files in a folder, and
+        // `--compress-program` runs a program. GNU sort takes a long option
+        // shortened as long as no other starts the same way: `--o` is
+        // `--output`, `--t` `--temporary-directory`, `--co` the program
+        // (`--c` alone is ambiguous with `--check`).
+        "sort" => {
+            !short("oT")
+                && !long(&["--output", "--temporary-directory"])
+                && !args.iter().any(|arg| {
+                    let name = arg.split('=').next().unwrap_or_default();
+                    name.len() > 3 && "--compress-program".starts_with(name)
+                })
+        }
+        // `--pre` and `--hostname-bin` run a program.
+        "rg" => !long(&["--pre", "--pre-glob", "--hostname-bin"]),
         "find" => !args.iter().any(|arg| {
             matches!(
                 arg.as_str(),
@@ -5339,11 +5441,7 @@ fn read_only_invocation(tokens: &[String]) -> bool {
                     | "-fls"
             )
         }),
-        "fd" => !args.iter().any(|arg| {
-            matches!(arg.as_str(), "-x" | "--exec" | "-X" | "--exec-batch")
-                || arg.starts_with("--exec=")
-                || arg.starts_with("--exec-batch=")
-        }),
+        "fd" => !short("xX") && !long(&["--exec", "--exec-batch"]),
         "git" => {
             args.first().is_some_and(|subcommand| {
                 matches!(
@@ -5366,12 +5464,17 @@ fn read_only_invocation(tokens: &[String]) -> bool {
                         | "count-objects"
                         | "version"
                 )
-            }) && !args.iter().skip(1).any(|arg| {
-                arg == "--output"
-                    || arg.starts_with("--output=")
-                    || arg == "--ext-diff"
-                    || arg == "--textconv"
-            })
+            }) && match args[0].as_str() {
+                // These read their options as git's option parser does,
+                // which takes a long one shortened: `--te` is `--textconv`.
+                "cat-file" => !long(&["--textconv", "--filters"]),
+                // `-O` and `--open-files-in-pager` run a program, also in a
+                // cluster of short options (`-iO`).
+                "grep" => !short("O") && !long(&["--open-files-in-pager"]),
+                // Diff and log options are taken only as written: `--text`
+                // is not `--textconv`.
+                _ => !exact(&["--output", "--ext-diff", "--textconv"]),
+            }
         }
         _ => false,
     }
@@ -5506,6 +5609,344 @@ pub struct OutsideDeletion {
     /// What the command does to it. For inline code and an unread script,
     /// `path` names the program.
     pub effect: Effect,
+}
+
+/// How many paths [`creations`] gives for a line.
+const MAX_CREATIONS: usize = 256;
+
+/// The paths outside `workspace` that `command` may bring into being when
+/// it runs from `workdir`, placed as the system reaches them: what `mkdir`,
+/// `touch` and `tee` are given, where `cp` copies to, and the files output
+/// redirects write, each written as one literal path, in the steps the line
+/// runs (its statements, their `&&` steps and pipeline stages; not a branch,
+/// a loop, a function's body or what follows `||`). A word with a variable,
+/// a glob, a brace list or a leading `~` or `-` is left out, and so is a
+/// relative one in a line where anything may change directory.
+///
+/// They are for noting what a chat made (see [`crate::made_paths`]), so
+/// where something else in the line may have put a path there, none is
+/// given: a path another command names, or a folder above it (`mv
+/// ~/data /tmp/; mkdir -p /tmp/data`), any path when such a command has a
+/// word nobody can place, and every path in a line with a wrapper or text a
+/// shell runs again, whose commands are not all in view. Commands that only
+/// look, delete or change directory put nothing anywhere.
+#[must_use]
+pub fn creations(command: &str, workspace: &Path, workdir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if cfg!(windows) || command.len() > MAX_COMMAND_BYTES {
+        return found;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+        || joined_continuations(command, true).is_some()
+    {
+        return found;
+    }
+    let (reading, whole, tree) = parser_input(command);
+    let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
+        return found;
+    };
+    if !whole || tree.root_node().has_error() {
+        return found;
+    }
+    let analysis = analyze(command, workspace);
+    if analysis.unreadable || !analysis.derived.is_empty() {
+        return found;
+    }
+    let moves = moves_shell(tree.root_node(), command);
+    let project = resolve(workspace, Path::new(""));
+    // Where a literal word leads, when it can be told.
+    let place = |raw: &str, value: &str, complete: bool| -> Option<PathBuf> {
+        let plain = complete
+            && !value.is_empty()
+            && !value.starts_with(['~', '-'])
+            && !raw.contains(['*', '?', '[', '{', '$', '`'])
+            && !value.chars().any(char::is_control);
+        if !plain || (moves && Path::new(value).is_relative()) {
+            return None;
+        }
+        Some(resolve(workdir, Path::new(value)))
+    };
+    // What the commands that may put something somewhere name.
+    let mut named = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        stack.extend(node.children(&mut node.walk()));
+        if node.kind() != "command" {
+            continue;
+        }
+        let words = words(node, command);
+        let Some((program, arguments)) = words.split_first() else {
+            continue;
+        };
+        // The parser may leave the `$` of `$"…"` out of a word.
+        let dollar = node_text(node, command).contains('$');
+        let values: Vec<String> = words.iter().map(|word| word.value.clone()).collect();
+        if program.literal
+            && (matches!(
+                program_name(&program.value).as_str(),
+                "mkdir" | "touch" | "tee" | "cp" | "cd" | "rm" | "rmdir" | "unlink"
+            ) || read_only_invocation(&values))
+        {
+            continue;
+        }
+        for word in arguments {
+            if dollar || !word.literal || word.raw.contains(['$', '`']) {
+                return found;
+            }
+            if word.value.starts_with('-') {
+                continue;
+            }
+            // A word nobody can place (a glob, `~`, a relative one after a
+            // `cd`) may name anything.
+            match place(&word.raw, &word.value, word.literal) {
+                Some(path) => named.push(path),
+                None => return found,
+            }
+        }
+    }
+    let mut add = |raw: &str, value: &str, complete: bool| {
+        let Some(placed) = place(raw, value, complete) else {
+            return;
+        };
+        if !placed.starts_with(&project)
+            && !in_system_folder(&placed)
+            // Named itself, inside or above: a folder a `mv` fills.
+            && !named
+                .iter()
+                .any(|named| named.starts_with(&placed) || placed.starts_with(named))
+            && !found.contains(&placed)
+            && found.len() < MAX_CREATIONS
+        {
+            found.push(placed);
+        }
+    };
+    for line in statements(tree.root_node()) {
+        for (node, outer) in &line.steps {
+            let mut redirects: Vec<_> = outer.clone();
+            // A redirect written after a pipeline is its last stage's.
+            let mut body = *node;
+            if node.kind() == "redirected_statement"
+                && let Some(pipeline) = node
+                    .child_by_field_name("body")
+                    .filter(|body| body.kind() == "pipeline")
+            {
+                redirects.extend(node.children_by_field_name("redirect", &mut node.walk()));
+                body = pipeline;
+            }
+            let stages: Vec<_> = if body.kind() == "pipeline" {
+                body.named_children(&mut body.walk()).collect()
+            } else {
+                vec![body]
+            };
+            for stage in stages {
+                let (Some(command_node), own) = statement(stage, &[]) else {
+                    continue;
+                };
+                redirects.extend(own);
+                let words = words(command_node, command);
+                let Some((program, arguments)) = words.split_first() else {
+                    continue;
+                };
+                let name = program_name(&program.value);
+                let operands: Vec<&Word<'_>> = match name.as_str() {
+                    _ if !program.literal || node_text(command_node, command).contains('$') => {
+                        Vec::new()
+                    }
+                    "mkdir" | "touch" | "tee" => {
+                        // The words an option takes are no operands.
+                        let takes: &[&str] = match name.as_str() {
+                            "mkdir" => &["-m", "--mode"],
+                            "touch" => &["-d", "-r", "-t", "--date", "--reference"],
+                            _ => &[],
+                        };
+                        let mut operands = Vec::new();
+                        let (mut ended, mut skip) = (false, false);
+                        for word in arguments {
+                            if std::mem::take(&mut skip) {
+                                continue;
+                            }
+                            if !ended && ends_options(word) {
+                                ended = true;
+                            } else if !ended && word.value.starts_with('-') {
+                                skip = takes.contains(&word.value.as_str());
+                            } else {
+                                operands.push(word);
+                            }
+                        }
+                        operands
+                    }
+                    "cp" => copy_destination("cp", arguments)
+                        .and_then(|index| arguments.get(index))
+                        .into_iter()
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                for word in operands {
+                    add(&word.raw, &word.value, word.literal);
+                }
+            }
+            for redirect in redirects {
+                if redirect.kind() != "file_redirect"
+                    || !matches!(
+                        operator(redirect, command).as_str(),
+                        ">" | ">>" | "&>" | "&>>" | ">|"
+                    )
+                {
+                    continue;
+                }
+                if let Some(destination) = redirect.child_by_field_name("destination") {
+                    let (value, complete) = literal(destination, command);
+                    add(&node_text(destination, command), &value, complete);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// What one step of a line is to [`cleans_up`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cleanup {
+    /// A plain `cd` to one folder [`plain_path`] takes.
+    Cd,
+    /// A plain `rm`, `rmdir` or `unlink` of literal paths, maybe followed by
+    /// `|| true` or another [`Self::Inert`] step.
+    Delete,
+    /// A command that leaves every file as it was and the shell where it is.
+    Inert,
+    Other,
+}
+
+/// Whether `command` only cleans up: up to its last delete, every step is a
+/// plain `cd` to one folder [`plain_path`] takes, a plain `rm`, `rmdir` or
+/// `unlink` of literal paths, or one of `echo`, `printf` (without `-v`),
+/// `ls`, `pwd`, `true`, `false`, `:`, `test` and `[`, which leave every file
+/// as it was; each in literal words with no assignment or substitution
+/// and redirects that at most silence its output or read a file, and each
+/// running once the one before it ended (`&&`, `;`, a line break; a delete
+/// may be followed by `|| true`). Every path the line deletes is a word of
+/// those deletes: none behind a wrapper, in text run again, or in a step
+/// after the last one. A glob, a variable, a `~`, a step that may move the
+/// shell or make a link before a delete: what it reaches then cannot be told
+/// from its words, so it is no cleanup. Auto lets a cleanup take away paths
+/// the chat itself made without asking (see [`crate::made_paths`]).
+#[must_use]
+pub fn cleans_up(command: &str, workspace: &Path) -> bool {
+    if cfg!(windows) || command.len() > MAX_COMMAND_BYTES {
+        return false;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+        || joined_continuations(command, true).is_some()
+    {
+        return false;
+    }
+    let (reading, whole, tree) = parser_input(command);
+    let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
+        return false;
+    };
+    if !whole || tree.root_node().has_error() {
+        return false;
+    }
+    let mut kinds = Vec::new();
+    for statement in statements(tree.root_node()) {
+        for (node, outer) in &statement.steps {
+            let kind = cleanup_step(*node, outer, command);
+            kinds.push((kind, node.byte_range(), statement.background));
+        }
+    }
+    let Some(last) = kinds
+        .iter()
+        .rposition(|(kind, ..)| *kind == Cleanup::Delete)
+    else {
+        return false;
+    };
+    if !kinds[..=last]
+        .iter()
+        .all(|(kind, _, background)| *kind != Cleanup::Other && !background)
+    {
+        return false;
+    }
+    let analysis = analyze(command, workspace);
+    !analysis.unreadable
+        && analysis.deletions.iter().all(|deletion| {
+            deletion.effect == Effect::Deletes
+                && deletion.at.is_some_and(|at| {
+                    kinds
+                        .iter()
+                        .any(|(kind, range, _)| *kind == Cleanup::Delete && range.contains(&at))
+                })
+        })
+}
+
+/// What a step of a line is to [`cleans_up`].
+fn cleanup_step(
+    node: tree_sitter::Node<'_>,
+    outer: &[tree_sitter::Node<'_>],
+    source: &str,
+) -> Cleanup {
+    // `rm -rf x || true`: what follows `||` runs only when the delete failed.
+    if node.kind() == "list" && outer.is_empty() {
+        let parts: Vec<_> = node.named_children(&mut node.walk()).collect();
+        let or = node
+            .children(&mut node.walk())
+            .filter(|child| !child.is_named())
+            .all(|child| child.kind() == "||");
+        return match parts.as_slice() {
+            [delete, after]
+                if or
+                    && cleanup_step(*delete, &[], source) == Cleanup::Delete
+                    && cleanup_step(*after, &[], source) == Cleanup::Inert =>
+            {
+                Cleanup::Delete
+            }
+            _ => Cleanup::Other,
+        };
+    }
+    let (Some(command), redirects) = statement(node, outer) else {
+        return Cleanup::Other;
+    };
+    if heredoc_holds_more(node)
+        || has_substitution(node)
+        || command
+            .named_children(&mut command.walk())
+            .any(|child| child.kind() == "variable_assignment")
+        || !redirects
+            .iter()
+            .all(|redirect| reads_or_silences(*redirect, source))
+    {
+        return Cleanup::Other;
+    }
+    let words = words(command, source);
+    let Some((program, arguments)) = words.split_first() else {
+        return Cleanup::Other;
+    };
+    // The parser may leave the `$` of `$"…"` out of a word.
+    if !words.iter().all(|word| word.literal) || node_text(command, source).contains('$') {
+        return Cleanup::Other;
+    }
+    match program.raw.as_str() {
+        "cd" => match arguments {
+            [folder] if plain_path(folder) && !names_no_path("cd", &folder.value) => Cleanup::Cd,
+            _ => Cleanup::Other,
+        },
+        "rm" | "rmdir" | "unlink"
+            if arguments.iter().all(|word| {
+                !word.raw.contains(['*', '?', '[', '{', '~'])
+                    && !word.value.chars().any(char::is_control)
+            }) =>
+        {
+            Cleanup::Delete
+        }
+        "printf" if arguments.iter().any(|word| word.value.starts_with("-v")) => Cleanup::Other,
+        "echo" | "printf" | "ls" | "pwd" | "true" | "false" | ":" | "test" | "[" => Cleanup::Inert,
+        _ => Cleanup::Other,
+    }
 }
 
 /// Whether the literal start of a word nobody can place leads away from
@@ -5714,6 +6155,21 @@ fn and_chain(node: tree_sitter::Node<'_>) -> bool {
     true
 }
 
+/// Whether a redirect under `node` is written `&>` or `&>>`, which dash
+/// reads as `&` and `>`: what comes before it runs in the background, and
+/// the shell goes on where it was.
+fn dash_backgrounds(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "file_redirect" && matches!(operator(node, source).as_str(), "&>" | "&>>")
+        {
+            return true;
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
+    false
+}
+
 /// Builtins that run text or another command in the line's own shell, which
 /// [`moves_shell`] does not name: `time cd /x` moves it, a `trap`, `mapfile
 /// -C` or `readarray -C` runs text there later, and `enable -f` loads a
@@ -5747,16 +6203,37 @@ const RUNS_IN_SHELL: &[&str] = &["time", "trap", "mapfile", "readarray", "enable
 /// Also the steps where a `cd` would be followed, by the node id of their
 /// command: each plain step before any other step ran. A wrapper's folder is
 /// followed there only (see [`Reader::wrapper_folder`]).
+///
+/// And what is also read from where the shell started, by node id: from the
+/// first step with a `&>` or `&>>` redirect on, its redirects and every
+/// command and redirect after it. Bash runs the whole chain where the `cd`s
+/// went, while dash reads `&>` as `&` and `>`: it runs the chain up to that
+/// step's command in the background, and the redirect's target and what
+/// follows where the shell started. Read from both, neither shell gets past
+/// the check.
 fn chain_folders(
     chain: tree_sitter::Node<'_>,
     source: &str,
     workspace: &Path,
-) -> (HashMap<usize, Rc<Path>>, HashSet<usize>) {
+) -> (HashMap<usize, Rc<Path>>, HashSet<usize>, HashSet<usize>) {
     let mut folders = HashMap::new();
     let mut open = HashSet::new();
+    let mut twice = HashSet::new();
     let mut folder: Rc<Path> = Rc::from(workspace);
     let (mut moves, mut ran) = (0, false);
+    let mut split = false;
     for (node, outer) in steps(chain) {
+        let step = || std::iter::once(node).chain(outer.iter().copied());
+        if split {
+            for node in step() {
+                mark(&mut twice, node, &["command", "file_redirect"]);
+            }
+        } else if step().any(|node| dash_backgrounds(node, source)) {
+            split = true;
+            for node in step() {
+                mark(&mut twice, node, &["file_redirect"]);
+            }
+        }
         // A pipeline's stages each run in a subshell started where the shell
         // is, and leave it there. A redirect the tree hangs on the list
         // around it (`cd sub && a | b > f`) is its last stage's.
@@ -5851,7 +6328,355 @@ fn chain_folders(
             _ => break,
         }
     }
-    (folders, open)
+    (folders, open, twice)
+}
+
+/// Adds the node id of `node` and of every node under it of one of `kinds`.
+fn mark(ids: &mut HashSet<usize>, node: tree_sitter::Node<'_>, kinds: &[&str]) {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if kinds.contains(&node.kind()) {
+            ids.insert(node.id());
+        }
+        stack.extend(node.children(&mut node.walk()));
+    }
+}
+
+/// Where the relative paths of the reading steps of a line of several
+/// statements start once its first statement opens with plain `cd`s: the
+/// folder they reached, by the node id of each such step's command and of
+/// the redirects that belong to it (`cd src; cat ../README.md` reads the
+/// project's `README.md`).
+///
+/// What follows `;` or a line break runs even when the `cd` before it
+/// failed, so the folder is followed only for steps that read: a read
+/// checked where the `cd` would have gone is at worst one read placed
+/// elsewhere, while a write or a delete stays checked from where the shell
+/// started. So the `cd`s it follows must not fail for any reason the line
+/// itself holds (see [`entered`]): plain `cd`s joined by `&&`, as
+/// [`chain_folders`] follows them, into folders that exist now, may be
+/// searched and lie in the project. Not `pushd`, which `sh` may lack (dash
+/// has none). From the step after them, each step is read from the folder
+/// they reached while it only reads (see [`only_reads`]). The first one that does
+/// anything else (writes, deletes, runs any other program, may move the
+/// shell, is another `cd`, a subshell, a group, an `||` list) or is sent to
+/// the background ends it: it and every step after it are read from where
+/// the shell started, as for any line.
+fn reading_folders(
+    root: tree_sitter::Node<'_>,
+    source: &str,
+    start: &Path,
+    workspace: &Path,
+) -> HashMap<usize, Rc<Path>> {
+    let mut folders = HashMap::new();
+    let statements = statements(root);
+    let Some(first) = statements.first().filter(|first| !first.background) else {
+        return folders;
+    };
+    let mut folder = start.to_path_buf();
+    let mut moves = 0;
+    let mut targets = Vec::new();
+    for (node, outer) in &first.steps {
+        let Some((next, target)) = entered(*node, outer, source, &folder) else {
+            break;
+        };
+        moves += 1;
+        if moves > MAX_MOVES {
+            return folders;
+        }
+        folder = next;
+        targets.push(target);
+    }
+    // The parser takes a carriage return, a form feed or a backslash before
+    // a tab for a blank where the shell keeps it in the word: the line's own
+    // bytes must say the same `cd`s.
+    if opening_cds(source).is_none_or(|written| written != targets) {
+        return folders;
+    }
+    let inside = |folder: &Path| {
+        let project = crate::paths::canonicalize(workspace);
+        crate::paths::canonicalize(folder)
+            .is_ok_and(|folder| project.is_ok_and(|project| folder.starts_with(project)))
+    };
+    if moves == 0 || !inside(&folder) {
+        return folders;
+    }
+    let folder: Rc<Path> = Rc::from(folder);
+    let later = statements[1..]
+        .iter()
+        .take_while(|statement| !statement.background)
+        .flat_map(|statement| &statement.steps);
+    for (node, outer) in first.steps[moves..].iter().chain(later) {
+        if !only_reads(*node, outer, source) {
+            break;
+        }
+        for node in std::iter::once(node).chain(outer) {
+            place(&mut folders, *node, &folder);
+        }
+    }
+    folders
+}
+
+/// The folders of the plain `cd`s a line opens with, joined by `&&`, read
+/// from its bytes: `cd`, spaces or tabs, one word of letters, digits and
+/// `.`, `_`, `-`, `/`, `+`, `@` or `,`, then at most redirects that cannot
+/// fail in any shell (`>/dev/null`, `2>>/dev/null`, `2>&1`, `>&2`: a
+/// descriptor of 0 to 2 or none, onto `/dev/null` or standard output or
+/// error), each after a space or a tab, and then `&&`, `;`, a line break
+/// or a comment. `None` when the line does not open so: any other byte
+/// there, a carriage return, a form feed, a backslash, a quote or `&>`
+/// (which dash reads as `&` and `>`), may leave the shell where it was.
+fn opening_cds(line: &str) -> Option<Vec<String>> {
+    let bytes = line.as_bytes();
+    let blanks = |at: &mut usize| {
+        let start = *at;
+        while bytes
+            .get(*at)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
+            *at += 1;
+        }
+        *at > start
+    };
+    let mut at = 0;
+    while bytes
+        .get(at)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+    {
+        at += 1;
+    }
+    let mut folders = Vec::new();
+    loop {
+        let mut next = at;
+        if !line[next..].starts_with("cd") {
+            return Some(folders).filter(|folders| !folders.is_empty());
+        }
+        next += 2;
+        if !blanks(&mut next) {
+            return Some(folders).filter(|folders| !folders.is_empty());
+        }
+        let word: String = line[next..]
+            .chars()
+            .take_while(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '.' | '_' | '-' | '/' | '+' | '@' | ',')
+                    || (!c.is_ascii() && c.is_alphabetic())
+            })
+            .collect();
+        if word.is_empty() {
+            return None;
+        }
+        next += word.len();
+        folders.push(word);
+        loop {
+            let before = next;
+            if !blanks(&mut next) {
+                break;
+            }
+            // A descriptor of 0 to 2, or none, then `>&1`, `>&2`, or `>` or
+            // `>>` onto `/dev/null`, blanks allowed before it.
+            let mut end = next + usize::from(line[next..].starts_with(['0', '1', '2']));
+            let redirect = &line[end..];
+            if redirect.starts_with(">&1") || redirect.starts_with(">&2") {
+                end += 3;
+            } else if redirect.starts_with('>') {
+                end += if redirect.starts_with(">>") { 2 } else { 1 };
+                blanks(&mut end);
+                if !line[end..].starts_with("/dev/null") {
+                    next = before;
+                    break;
+                }
+                end += "/dev/null".len();
+            } else {
+                next = before;
+                break;
+            }
+            next = end;
+        }
+        let spaced = blanks(&mut next);
+        let rest = &line[next..];
+        if rest.starts_with("&&") {
+            at = next + 2;
+            while bytes
+                .get(at)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+            {
+                at += 1;
+            }
+        } else if rest.starts_with([';', '\n']) || (rest.starts_with('#') && spaced) {
+            return Some(folders);
+        } else {
+            return None;
+        }
+    }
+}
+
+/// Where a plain `cd` step goes from `from`, for [`reading_folders`]: one
+/// folder [`plain_path`] takes and written with no `$` (a `$'…'` or `$"…"`
+/// word is no quoting at all to dash), with no assignment or substitution
+/// and no redirect that may fail (see [`cannot_fail`]), whose folder exists
+/// now and may be searched. `None` for any other step.
+fn entered(
+    node: tree_sitter::Node<'_>,
+    outer: &[tree_sitter::Node<'_>],
+    source: &str,
+    from: &Path,
+) -> Option<(PathBuf, String)> {
+    let (Some(command), redirects) = statement(node, outer) else {
+        return None;
+    };
+    if heredoc_holds_more(node)
+        || has_substitution(command)
+        || command
+            .named_children(&mut command.walk())
+            .any(|child| child.kind() == "variable_assignment")
+        || !redirects
+            .iter()
+            .all(|redirect| cannot_fail(*redirect, source))
+    {
+        return None;
+    }
+    // The parser may leave the `$` of `$"…"` out of the word.
+    if node_text(command, source).contains('$') {
+        return None;
+    }
+    let words = words(command, source);
+    let [program, target] = words.as_slice() else {
+        return None;
+    };
+    if program.raw != "cd" || !plain_path(target) || names_no_path(&program.value, &target.value) {
+        return None;
+    }
+    let written = target.raw.clone();
+    let target =
+        home_expansion(&target.raw, &target.value).unwrap_or_else(|| PathBuf::from(&target.value));
+    let next = from.join(target);
+    (next.as_os_str().len() <= MAX_PLACED_BYTES && enterable(&next)).then_some((next, written))
+}
+
+/// Whether `folder` is a folder this process may search, as `cd` needs.
+fn enterable(folder: &Path) -> bool {
+    #[cfg(unix)]
+    if nix::unistd::access(folder, nix::unistd::AccessFlags::X_OK).is_err() {
+        return false;
+    }
+    folder.is_dir()
+}
+
+/// Whether a step of a line only reads: a command, or a pipeline of
+/// commands, each of them one of the inspection commands
+/// [`read_only_invocation`] takes, written in literal words with no `$`,
+/// assignment, substitution or `cd`, and with redirects that only read a
+/// file or silence its output (see [`reads_or_silences`]). A glob or a
+/// brace list, which may turn into an option, is taken only by the programs
+/// none of whose options writes or runs anything.
+fn only_reads(node: tree_sitter::Node<'_>, outer: &[tree_sitter::Node<'_>], source: &str) -> bool {
+    if !outer
+        .iter()
+        .all(|redirect| reads_or_silences(*redirect, source))
+    {
+        return false;
+    }
+    let stages: Vec<_> = if node.kind() == "pipeline" {
+        node.named_children(&mut node.walk()).collect()
+    } else {
+        vec![node]
+    };
+    stages.iter().all(|stage| {
+        let (Some(command), redirects) = statement(*stage, &[]) else {
+            return false;
+        };
+        // The parser may leave the `$` of `$"…"` out of a word.
+        if has_substitution(*stage)
+            || node_text(*stage, source).contains('$')
+            || command
+                .named_children(&mut command.walk())
+                .any(|child| child.kind() == "variable_assignment")
+            || !redirects
+                .iter()
+                .all(|redirect| reads_or_silences(*redirect, source))
+        {
+            return false;
+        }
+        let words = words(command, source);
+        let Some((program, arguments)) = words.split_first() else {
+            return false;
+        };
+        let name = program.value.as_str();
+        // A glob may expand to an option, as may a brace list.
+        let globbed = arguments
+            .iter()
+            .any(|word| word.raw.contains(['*', '?', '[', '{']));
+        words.iter().all(|word| word.literal)
+            && !matches!(name, "cd" | "pushd")
+            && (!globbed
+                || matches!(
+                    name,
+                    "cat" | "head" | "tail" | "wc" | "ls" | "grep" | "du" | "stat"
+                ))
+            && read_only_invocation(
+                &words
+                    .iter()
+                    .map(|word| word.value.clone())
+                    .collect::<Vec<_>>(),
+            )
+    })
+}
+
+/// Whether a redirect only reads a literal file (`<`) or silences output:
+/// to `/dev/null`, or onto another descriptor (`2>&1`).
+fn reads_or_silences(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
+    redirect.kind() == "file_redirect"
+        && !has_substitution(redirect)
+        && redirect
+            .children_by_field_name("destination", &mut redirect.walk())
+            .count()
+            == 1
+        && redirect
+            .child_by_field_name("destination")
+            .is_some_and(|destination| {
+                let (value, complete) = literal(destination, source);
+                complete
+                    && match operator(redirect, source).as_str() {
+                        "<" => !value.is_empty(),
+                        ">&" | "<&" => {
+                            value == "-"
+                                || (!value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+                        }
+                        ">" | ">>" | ">|" => value == "/dev/null",
+                        _ => false,
+                    }
+            })
+}
+
+/// Whether a redirect on a `cd` can never keep it from running: standard
+/// input, output or error (or no descriptor written) sent to `/dev/null` or
+/// copied onto standard output or error. A file to read may be missing,
+/// another descriptor may not be open or be past the shell's limit, and
+/// dash reads `&>` as `&` and `>`, running the `cd` in the background: then
+/// the shell runs what follows `;` where it was.
+fn cannot_fail(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
+    let descriptor = redirect
+        .child_by_field_name("descriptor")
+        .map(|descriptor| node_text(descriptor, source));
+    redirect.kind() == "file_redirect"
+        && descriptor.is_none_or(|descriptor| matches!(descriptor.as_str(), "0" | "1" | "2"))
+        && !has_substitution(redirect)
+        && redirect
+            .children_by_field_name("destination", &mut redirect.walk())
+            .count()
+            == 1
+        && redirect
+            .child_by_field_name("destination")
+            .is_some_and(|destination| {
+                let (value, complete) = literal(destination, source);
+                complete
+                    && match operator(redirect, source).as_str() {
+                        ">&" => matches!(value.as_str(), "1" | "2"),
+                        ">" | ">>" => value == "/dev/null",
+                        _ => false,
+                    }
+            })
 }
 
 /// `text` kept to [`CLIPPED_PATTERN_BYTES`], with `…` when cut.
@@ -6068,6 +6893,12 @@ const MAX_LINKS: u8 = 40;
 /// resolve to `/`, outside every project.
 fn resolve(workspace: &Path, argument: impl AsRef<Path>) -> PathBuf {
     resolve_path(&workspace.join(argument), 0)
+}
+
+/// An absolute `path` as [`resolve`] places it: where a delete of it
+/// reaches.
+pub(crate) fn reached(path: &Path) -> PathBuf {
+    resolve_path(path, 0)
 }
 
 fn resolve_path(path: &Path, depth: u8) -> PathBuf {
@@ -7277,6 +8108,26 @@ mod tests {
             "rg --pre 'touch changed' needle",
             "git diff --output=changed",
             "git diff --ext-diff",
+            // Options written shortened or clustered, and the other ones that
+            // write, keep files or run a program.
+            "sort -uo output input",
+            "sort -ro output input",
+            "sort --outp=output input",
+            "sort --compress-prog=gzip input",
+            "sort -T tmp input",
+            "uniq input output",
+            "file -C -m magic",
+            "wc --files0-from=list",
+            "du --files0-f=list",
+            "printf -v PATH %s ..",
+            "date 010100002000",
+            "rg --pr='touch changed' needle",
+            "rg --hostname-bin=tool needle",
+            "fd -Hx touch",
+            "git grep -Oless needle",
+            "git log --output=changed",
+            "git cat-file --te HEAD:x",
+            "git cat-file --filters HEAD:x",
             "echo changed > file",
             "./looks-safe status",
             "cargo test",
@@ -7651,15 +8502,14 @@ mod regression {
             );
         }
         // Read from the project, as before, where the folder is not known
-        // for sure: after `;`, in a subshell, a `cd` to a folder nobody can
-        // tell or that is not there, a `cd` after another step (which may
-        // have made a link where it goes), a step that may move the shell, a
-        // pipeline, an `||` list, `cd` run by another program, and a word the
-        // shell joins across lines.
+        // for sure: in a subshell, a `cd` to a folder nobody can tell or that
+        // is not there, a `cd` after another step (which may have made a
+        // link where it goes), a step that may move the shell, a pipeline,
+        // an `||` list, `cd` run by another program, and a word the shell
+        // joins across lines.
         let today = analyze("cat ../x", &workspace).external_dirs;
         assert_eq!(today, parent);
         for command in [
-            "cd sub; cat ../x",
             "(cd sub) && cat ../x",
             "cd \"$D\" && cat ../x",
             "cd sub/../src && cat ../x",
@@ -7679,6 +8529,9 @@ mod regression {
             "cd sub > >(cat) && cat ../x",
             "cd sub 2> \"$(mktemp)\" && cat ../x",
             "cd sub || cat ../x",
+            // Dash runs a chain up to `&>` in the background.
+            "cd sub &>/dev/null && cat ../x",
+            "cd sub && cat x &>/dev/null && cat ../x",
             "env cd sub && cat ../x",
             "/usr/bin/cd sub && cat ../x",
             &format!("cd sub && c\\\nd {} && cat ../x", workspace.display()),
@@ -7698,7 +8551,6 @@ mod regression {
             "cd sub && env -C \"$D\" cat ../x",
             "cd sub && bash -c 'cat ../x'",
             "cd sub && sudo pkexec cat ../x",
-            "cd sub; cat ../x | head",
         ] {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
@@ -7706,6 +8558,181 @@ mod regression {
                 "{command}"
             );
         }
+        // Past `;` and line breaks, a `cd` the line opens with into a folder
+        // in the project is followed for the steps that only read, up to the
+        // first that does anything else.
+        for command in [
+            "cd sub; cat ../README.md",
+            "cd sub\ncat ../README.md",
+            "cd sub && wc -l x; cat ../README.md",
+            "cd sub;\n\ncat ../README.md",
+            "cd sub; cat ../README.md | head",
+            "cd sub; git status --short; cat ../README.md",
+            "cd sub; ls; cat < ../README.md 2>/dev/null",
+            "cd sub && cd deeper; cat ../../README.md",
+            "cd sub > /dev/null; cat ../README.md",
+            "cd sub >/dev/null 2>&1; cat ../README.md",
+            "cd sub 2>&1 >&2; cat ../README.md",
+            "cd sub 2>/dev/null >> /dev/null 1>&2; cat ../README.md",
+            "cd sub # into it\ncat ../README.md",
+            "cd a/l\ncat ../../../README.md",
+            "cd sub; cat ../README.md\ncat ../README.md",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        // A path that leaves the project from there still asks.
+        for command in ["cd sub; cat ../../x", "cd sub\ncat ../README.md ../../x"] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        // Anything else is read from where the shell started, as before: a
+        // `cd` that may fail, does not open the line, runs in the background
+        // or a subshell or leaves the project, and every step from the first
+        // one that writes, deletes, runs another program, may move the shell
+        // or is another `cd`.
+        std::fs::create_dir_all(workspace.join("locked")).unwrap();
+        std::fs::set_permissions(
+            workspace.join("locked"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o000),
+        )
+        .unwrap();
+        let locked =
+            nix::unistd::access(&workspace.join("locked"), nix::unistd::AccessFlags::X_OK).is_err();
+        for command in [
+            "cd nosuch; cat ../x",
+            "true; cd sub; cat ../x",
+            "cd sub & cat ../x",
+            "(cd sub); cat ../x",
+            "cd sub || true; cat ../x",
+            "cd sub; rm -rf ../x",
+            "cd sub; echo x > ../x",
+            "cd sub; cat ../README.md > ../x",
+            "cd sub; touch ../x",
+            "cd sub; make; cat ../x",
+            "cd sub; cat ../README.md | tee ../x",
+            "cd sub; cd deeper; cat ../x",
+            "cd sub && cd nosuch; cat ../x",
+            "cd sub && make; cat ../x",
+            "cd sub; sudo cat ../x",
+            "cd sub; A=1 cat ../x",
+            "cd sub; cat ../x \"$(echo y)\"",
+            "cd sub; cat ../x &",
+            "cd sub; { cat ../x; }",
+            "cd sub; cat <<'EOF' ../x\nbody\nEOF",
+            "cd \"$D\"; cat ../x",
+            "cd -P sub; cat ../x",
+            "pushd sub > ../log.txt; cat ../x",
+            // A `cd` that may fail every time: a redirect that may fail
+            // skips it, dash has no `pushd` and takes `$'…'` for `$` and a
+            // quoted word.
+            "cd sub <&9; cat ../x",
+            "cd sub < nosuch.txt; cat ../x",
+            "cd sub 2>&9; cat ../x",
+            "cd sub 9>&8; cat ../x",
+            // Bytes the parser takes for blanks and the shell keeps in the
+            // word, a descriptor past the shell's limit, and `&>`, which dash
+            // reads as `&` and `>`.
+            "cd sub\r; cat ../x",
+            "cd sub\r\ncat ../x",
+            "cd sub\x0c; cat ../x",
+            "cd sub\x0b; cat ../x",
+            "cd sub\\\t; cat ../x",
+            "cd sub \r; cat ../x",
+            "cd sub >/dev/null\r; cat ../x",
+            "cd sub && cd deeper\x0c; cat ../x",
+            "cd sub 99999999>/dev/null; cat ../x",
+            "cd sub 2147483647>&2; cat ../x",
+            "cd sub 2>/dev/null 99999999>&1; cat ../x",
+            "cd sub &>/dev/null; cat ../x",
+            "cd sub &>>/dev/null; cat ../x",
+            "cd sub >&-; cat ../x",
+            "cd sub#x; cat ../x",
+            "cd sub>/dev/null; cat ../x",
+            "cd 'sub'; cat ../x",
+            "pushd sub > /dev/null; cat ../x",
+            "cd $'sub'; cat ../x",
+            "cd $\"sub\"; cat ../x",
+            "cd sub; cat ../x $'y'",
+            "cd sub; cat ../x $\"y\"",
+            // A step one of whose options writes, keeps files or runs a
+            // program, however it is written.
+            "cd sub; sort -uo ../out x; cat ../x",
+            "cd sub; sort -ro../out x; cat ../x",
+            "cd sub; sort --outp=../out x; cat ../x",
+            "cd sub; sort --compress-prog=gzip x; cat ../x",
+            "cd sub; sort -T .. x; cat ../x",
+            "cd sub; echo x | sort -uo ../out; cat ../x",
+            "cd sub; uniq x ../out; cat ../x",
+            "cd sub; file -C -m x; cat ../x",
+            "cd sub; wc --files0-from=list; cat ../x",
+            "cd sub; du --files0-f=list; cat ../x",
+            "cd sub; printf -v PATH %s ..; cat ../x",
+            "cd sub; date 010100002000; cat ../x",
+            "cd sub; rg --pr=tool x; cat ../x",
+            "cd sub; fd -Hx echo; cat ../x",
+            "cd sub; git grep -Oless x; cat ../x",
+            "cd sub; git log --output=../out; cat ../x",
+            "cd sub; git cat-file --filt HEAD:x; cat ../x",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                today,
+                "{command}"
+            );
+        }
+        // A `cd` out of the project asks anyway; what follows it is not
+        // read there.
+        let away = analyze(
+            &format!("cd {}; cat x", root.join("outside").display()),
+            &workspace,
+        );
+        assert!(
+            away.paths
+                .iter()
+                .all(|named| !named.path.ends_with("outside/x")),
+            "{away:?}"
+        );
+        if locked {
+            assert_eq!(
+                analyze("cd locked; cat ../x", &workspace).external_dirs,
+                today
+            );
+            // Through `&&` the `cd` must have worked, as before.
+            assert!(
+                analyze("cd locked && cat ../README.md", &workspace)
+                    .external_dirs
+                    .is_empty()
+            );
+        }
+        std::fs::set_permissions(
+            workspace.join("locked"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        // Where Auto's reviewer places a deletion is as before: only a line
+        // that is one `&&` chain is followed.
+        // Nor one whose `cd` dash may send to the background.
+        for command in ["cd sub; rm -rf ../x", "cd sub &>/dev/null && rm -rf ../x"] {
+            assert_eq!(
+                outside_deletions(command, &workspace, None),
+                vec![OutsideDeletion {
+                    path: "../x".into(),
+                    placed: false,
+                    effect: Effect::Deletes,
+                }],
+                "{command}"
+            );
+        }
+        assert_eq!(
+            analyze("cd sub; cat ../README.md", &workspace).directories,
+            None
+        );
         // Where Auto's reviewer places a deletion is as before: only a line
         // that is one `&&` chain of commands is followed.
         assert_eq!(
@@ -7716,6 +8743,101 @@ mod regression {
                 effect: Effect::Deletes,
             }]
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Bash runs an `&&` chain with `&>` in it where its `cd`s went; dash
+    /// runs it up to that step's command in the background and the rest
+    /// where the shell started. Read from both, neither gets past the check.
+    #[cfg(unix)]
+    #[test]
+    fn after_a_redirect_dash_reads_as_a_background_the_chain_is_read_from_both_folders() {
+        let root = std::env::temp_dir().join(format!("haarness-amp-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
+        std::fs::create_dir_all(root.join("away/.ssh")).unwrap();
+        std::fs::write(root.join("away/.ssh/config"), "x").unwrap();
+        let real = crate::paths::canonicalize(&root).unwrap();
+        let away = real.join("away").display().to_string();
+        let parent = vec![glob(&real)];
+        // What the line asks without `&>`, in the folder the `cd` went to, it
+        // still asks with it.
+        for (with, without) in [
+            (
+                format!("cd {away} && rm -rf x &>/dev/null"),
+                format!("cd {away} && rm -rf x"),
+            ),
+            (
+                format!("cd {away} && true &>/dev/null && cat .ssh/config"),
+                format!("cd {away} && true && cat .ssh/config"),
+            ),
+            (
+                format!(
+                    "cd {away} && cp .ssh/config ../project/leak.txt &>/dev/null && cat ../project/leak.txt"
+                ),
+                format!(
+                    "cd {away} && cp .ssh/config ../project/leak.txt && cat ../project/leak.txt"
+                ),
+            ),
+        ] {
+            let asked = analyze(&with, &workspace).external_dirs;
+            for folder in analyze(&without, &workspace).external_dirs {
+                assert!(asked.contains(&folder), "{with}: {asked:?} lacks {folder}");
+            }
+        }
+        // The `&>` target and the steps after it are read where the shell
+        // started too, the step's own words only where the `cd` went.
+        for command in [
+            "cd sub && true &> ../amp.log",
+            "cd sub && true &>/dev/null && cat ../x",
+            "cd sub &>/dev/null && cat ../x",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        assert!(
+            analyze("cd sub && cat ../README.md &>/dev/null", &workspace)
+                .external_dirs
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Git Bash reads a line as the shell here does, so a `cd` before `;`
+    /// is followed, and refused, on the same terms; cmd.exe, whose `;` is no
+    /// separator, follows none.
+    #[cfg(unix)]
+    #[test]
+    fn git_bash_follows_a_cd_past_a_semicolon_on_the_same_terms() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-gitbash-cd-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
+        let read = |command: &str, reading: Reading| {
+            analyze_reading(command, &workspace, &workspace, reading).external_dirs
+        };
+        for command in [
+            "cd sub; cat ../README.md",
+            "cd sub\ncat ../README.md",
+            "cd sub <&9; cat ../README.md",
+            "pushd sub > /dev/null; cat ../README.md",
+            "cd sub; sort -uo ../out x; cat ../README.md",
+            "cd sub; rm -rf ../x",
+        ] {
+            assert_eq!(
+                read(command, Reading::GitBash),
+                read(command, Reading::Posix),
+                "{command}"
+            );
+        }
+        assert!(read("cd sub; cat ../README.md", Reading::GitBash).is_empty());
+        assert!(!read("cd sub <&9; cat ../README.md", Reading::GitBash).is_empty());
+        assert!(!read("cd sub; cat ../README.md", Reading::Cmd).is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -8076,6 +9198,17 @@ mod regression {
         }
         for command in [
             "git status '--short'",
+            "date -Iseconds",
+            "date -R",
+            "date -u +%s",
+            "date -r Cargo.toml",
+            "uniq -f 1 notes.txt",
+            "uniq -s 2 -c notes.txt",
+            "git diff --text",
+            "git log -SOpen --oneline",
+            "git diff -Oorder.txt",
+            "sort --check notes.txt",
+            "sort -c -t, -k2 notes.txt",
             "printf '%s' hello",
             "find . -name '*.rs'",
             "cat 'file with spaces'",
@@ -9060,6 +10193,117 @@ mod readings {
             );
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_a_line_may_make_outside_the_project_is_each_literal_target() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-creations-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let real = crate::paths::canonicalize(&root).unwrap();
+        let x = real.join("x");
+        let made = |command: &str| creations(command, &workspace, &workspace);
+        assert_eq!(
+            made(&format!(
+                "mkdir -p {x}/a/b && touch {x}/f; echo hi > {x}/out.txt; cp README.md {x}/copy\n\
+                 echo hi | tee -a {x}/t.log >> {x}/more.log",
+                x = x.display()
+            )),
+            ["a/b", "f", "out.txt", "copy", "t.log", "more.log"]
+                .map(|name| x.join(name))
+                .to_vec()
+        );
+        // A relative one leads where it lands; options take their words.
+        assert_eq!(made("touch ../rel"), vec![real.join("rel")]);
+        assert_eq!(
+            made(&format!(
+                "touch -d 2020-01-01 {x}/d; mkdir -m 755 {x}/m",
+                x = x.display()
+            )),
+            vec![x.join("d"), x.join("m")]
+        );
+        // Nothing in the project, nothing that is no literal path, nothing a
+        // wrapper or text run again names, no relative path once the line
+        // may change directory, and no move or link.
+        for command in [
+            "mkdir -p build && touch src/x && echo x > out.txt",
+            "mkdir \"$D\"",
+            "touch ~/x",
+            &format!("touch {}/*", x.display()),
+            &format!("touch {}/{{a,b}}", x.display()),
+            &format!("sudo mkdir {}/s", x.display()),
+            &format!("bash -c 'mkdir {}/s'", x.display()),
+            "cd /tmp && touch y",
+            "echo x > /dev/null 2>&1",
+            &format!("mv a {}/m", x.display()),
+            &format!("ln -s a {}/l", x.display()),
+            // What another command names or may have put there, a branch that
+            // may not run, and a word dash reads otherwise.
+            &format!("mv ../moved {x}/m; mkdir -p {x}/m", x = x.display()),
+            &format!("mv \"$S\" ../y; touch {}/t", x.display()),
+            &format!("if false; then mkdir {}/b; fi", x.display()),
+            &format!("f() {{ mkdir {}/b; }}", x.display()),
+            &format!("true || mkdir {}/b", x.display()),
+            &format!("mkdir $\"{}/b\"", x.display()),
+            // A word nobody can place may name the folder, and a folder
+            // named above it may have been filled.
+            &format!("mkdir {x}/own && mv ../data {x}/ow[n]/", x = x.display()),
+            &format!("mkdir {}/s && mv ../data ~/s/", x.display()),
+            &format!("mv ../data {x}/; mkdir -p {x}/data", x = x.display()),
+            &format!("echo x 2>&1 >&2; cat {}/f", x.display()),
+        ] {
+            assert!(made(command).is_empty(), "{command}: {:?}", made(command));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_line_that_only_takes_paths_away_cleans_up() {
+        let workspace = workspace();
+        for command in [
+            "rm -rf /tmp/x",
+            "rm -rf /tmp/x 2>/dev/null",
+            "rm -rf /tmp/x > /dev/null 2>&1",
+            "test -d /tmp/x && rm -rf /tmp/x",
+            "ls /tmp/x; rm -rf /tmp/x\necho done",
+            "cd /tmp && rm -rf x",
+            "rm -rf /tmp/x || true",
+            "rm -f /tmp/a /tmp/b; rmdir /tmp/c; unlink /tmp/d",
+            "echo cleaning; rm -rf /tmp/x; make",
+        ] {
+            assert!(cleans_up(command, &workspace), "{command}");
+        }
+        for command in [
+            "echo nothing to delete",
+            "rm -rf /tmp/x/*",
+            "rm -rf /tmp/{a,b}",
+            "rm -rf \"$D\"",
+            "rm -rf ~/x",
+            "make; rm -rf /tmp/x",
+            "rm -rf /tmp/x &",
+            "rm -rf /tmp/x | cat",
+            "(rm -rf /tmp/x)",
+            "sudo rm -rf /tmp/x",
+            "X=1 rm -rf /tmp/x",
+            "rm -rf /tmp/x > log.txt",
+            "bash -c 'rm -rf /tmp/x'",
+            "rm -rf /tmp/x; sudo rm -rf /tmp/y",
+            "rm -rf /tmp/x; find /tmp/y -delete",
+            "ln -s /etc /tmp/x/l && rm -rf /tmp/x",
+            "printf -v CDPATH / && cd tmp && rm -rf x",
+            "cd \"$D\" && rm -rf x",
+            "echo $HOME && rm -rf /tmp/x",
+            "rm -rf /tmp/x || rm -rf /tmp/y",
+            "\\rm -rf /tmp/x",
+            "rm -rf $\"/tmp/x\"",
+            "rm -rf $'/tmp/x'",
+            "cd /tmp &>/dev/null && rm -rf x",
+            "rm -rf /tmp/x &>/dev/null",
+        ] {
+            assert!(!cleans_up(command, &workspace), "{command}");
+        }
     }
 
     #[cfg(unix)]
