@@ -38,7 +38,7 @@ uuid.workspace = true
 vt100.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["poll", "signal"] }
+nix = { workspace = true, features = ["poll", "signal", "term"] }
 
 [lints]
 workspace = true

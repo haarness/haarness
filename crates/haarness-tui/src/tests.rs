@@ -26489,7 +26489,12 @@ fn the_editor_has_the_terminal_while_it_runs() {
             }
         })
     };
-    crate::edit_draft(&mut app, &mut renderer, "sleep 0.3; printf edited >");
+    crate::edit_draft(
+        &mut app,
+        &mut renderer,
+        &mut String::new(),
+        "sleep 0.3; printf edited >",
+    );
     running.store(false, Ordering::Relaxed);
     watcher.join().unwrap();
     assert!(

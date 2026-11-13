@@ -198,15 +198,15 @@ impl Drop for DraftFolder {
 
 /// $EDITOR round-trip: leave the alternate screen, run the user's editor on
 /// the composer text, and rebuild the renderer when they return.
-fn open_external_editor(app: &mut App, renderer: &mut Renderer) {
+fn open_external_editor(app: &mut App, renderer: &mut Renderer, last_title: &mut String) {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".into());
-    edit_draft(app, renderer, &editor);
+    edit_draft(app, renderer, last_title, &editor);
 }
 
 /// The composer's text through `editor`, with the terminal handed to it.
-fn edit_draft(app: &mut App, renderer: &mut Renderer, editor: &str) {
+fn edit_draft(app: &mut App, renderer: &mut Renderer, last_title: &mut String, editor: &str) {
     let folder = match DraftFolder::new() {
         Ok(folder) => folder,
         Err(error) => {
@@ -221,16 +221,9 @@ fn edit_draft(app: &mut App, renderer: &mut Renderer, editor: &str) {
             return;
         }
     };
-    let lent = crate::terminal::LentTerminal::new();
-    crate::terminal::restore_terminal();
-    let status = editor_command(editor, &file).status();
-    // Re-enter raw mode + alternate screen; the original guard still owns
-    // final cleanup, so resuming must not create and leak a second guard.
-    let _ = crate::terminal::resume_terminal();
-    drop(lent);
-    if let Ok((width, height)) = crossterm::terminal::size() {
-        renderer.resize(u32::from(width), u32::from(height));
-    }
+    let status = lend_terminal(renderer, last_title, || {
+        editor_command(editor, &file).status()
+    });
     match status {
         Ok(status) if status.success() => {
             if let Ok(content) = std::fs::read_to_string(&file) {
@@ -240,6 +233,32 @@ fn edit_draft(app: &mut App, renderer: &mut Renderer, editor: &str) {
         }
         _ => app.notice = "Editor cancelled".into(),
     }
+}
+
+/// Give the terminal to `program` (an editor) until it returns, then take it
+/// back as it was: the settings the shell had (a program killed while in raw
+/// mode would otherwise leave raw mode as what the TUI restores on exit),
+/// without a keyboard mode it left pushed, and with the window title set
+/// again on the next frame.
+fn lend_terminal<T>(
+    renderer: &mut Renderer,
+    last_title: &mut String,
+    program: impl FnOnce() -> T,
+) -> T {
+    let lent = crate::terminal::LentTerminal::new();
+    crate::terminal::restore_terminal();
+    let settings = crate::terminal::Settings::now();
+    let result = program();
+    settings.put_back();
+    // Re-enter raw mode + alternate screen; the original guard still owns
+    // final cleanup, so resuming must not create and leak a second guard.
+    let _ = crate::terminal::resume_terminal();
+    drop(lent);
+    if let Ok((width, height)) = crossterm::terminal::size() {
+        renderer.resize(u32::from(width), u32::from(height));
+    }
+    last_title.clear();
+    result
 }
 
 fn suspend_terminal(renderer: &mut Renderer, last_title: &mut String) -> Result<()> {
@@ -841,7 +860,7 @@ async fn run_with_client(
                                 break;
                             }
                             Ok(AppAction::OpenEditor) => {
-                                open_external_editor(&mut app, &mut renderer);
+                                open_external_editor(&mut app, &mut renderer, &mut last_title);
                                 force_redraw = true;
                             }
                             Ok(AppAction::Suspend) => {
@@ -968,7 +987,7 @@ async fn run_with_client(
                                 break;
                             }
                             Ok(AppAction::OpenEditor) => {
-                                open_external_editor(&mut app, &mut renderer);
+                                open_external_editor(&mut app, &mut renderer, &mut last_title);
                                 force_redraw = true;
                             }
                             Ok(AppAction::Suspend) => {
