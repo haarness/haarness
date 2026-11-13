@@ -425,7 +425,9 @@ pub fn load_layers_with_system(
     }
     // The person's instruction folders: what their own configuration names
     // there may import from anywhere, and a link into them is a personal one.
-    let trusted_roots = instruction_files::personal_folders(Some(config_dir), home);
+    let trusted_roots = instruction_files::instruction_folders(Some(config_dir), home);
+    // Where a link from the project may lead and still be a personal one.
+    let personal = instruction_files::personal_folders(Some(config_dir), home);
     // A project's own entries name files of the project only: a cloned
     // repository never puts the person's other files into the prompt.
     let project_roots = crate::layout::project_roots(workspace);
@@ -540,7 +542,9 @@ pub fn load_layers_with_system(
         let linked_out = project
             .then(|| dunce::canonicalize(&file).ok())
             .flatten()
-            .and_then(|real| instruction_files::linked_out(&real, &project_roots, &trusted_roots));
+            .and_then(|real| {
+                instruction_files::linked_out(&file, &real, &project_roots, &personal)
+            });
         // Said to the person too, as a remote file that cannot be read is.
         if let Some(reason) = linked_out
             .or_else(|| instruction_files::file_left_out(&file, workspace, trusted, &denied))

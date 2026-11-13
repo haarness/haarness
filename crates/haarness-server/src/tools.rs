@@ -349,7 +349,7 @@ impl NativeToolRegistry {
 /// turn says what is in view, so a file compaction or an undo took out of
 /// the conversation comes back with the next read; elsewhere, once per
 /// thread. Such a file is judged where it really is: one a link leads out of
-/// the project that is not a plain Markdown note, a secret or sign-in file,
+/// the project that is not a Markdown note of the person, a secret or sign-in file,
 /// one the chat's `read` rules deny and one over 40 KiB are left out (see
 /// [`haarness_core::instructions::nested_left_out`]), and the log warns so
 /// once for each.

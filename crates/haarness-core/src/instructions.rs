@@ -424,8 +424,15 @@ pub const NO_ROOM: &str =
     "the files before it used up the room for instructions (200 KiB, 20 files)";
 
 /// Why [`linked_out`] leaves out a file a link leads out of the project.
-pub const LINKED_OUT: &str =
-    "a link leads it out of the project to a file that is not a plain Markdown note";
+pub const LINKED_OUT: &str = "a link leads it out of the project to a file that is not Markdown";
+
+/// Why [`linked_out`] leaves out a Markdown file a link leads to, out of the
+/// project, that is hidden or in a hidden folder.
+pub const LINKED_HIDDEN: &str = "a link leads it out of the project into a hidden file or folder";
+
+/// The folders of a personal instruction folder that hold instructions,
+/// besides the files at its top.
+const INSTRUCTION_SUBFOLDERS: [&str; 4] = ["agents", "commands", "skills", "rules"];
 
 /// The real roots of `workspace`'s project, where a cloned repository puts
 /// what it likes: the worktree root (the nearest folder above it, or itself,
@@ -446,8 +453,10 @@ pub fn project_roots(workspace: &Path) -> Vec<PathBuf> {
 
 /// The person's own instruction folders, where they really are: the global
 /// configuration folder and `~/.haarness`, `~/.opencode` and `~/.claude`.
+/// What the person's configuration names in them may import from outside
+/// the workspace.
 #[must_use]
-pub fn personal_folders(config_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+pub fn instruction_folders(config_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
     config_dir
         .map(Path::to_path_buf)
         .into_iter()
@@ -460,17 +469,95 @@ pub fn personal_folders(config_dir: Option<&Path>, home: Option<&Path>) -> Vec<P
         .collect()
 }
 
+/// The folders a link from the project may lead into and still be a
+/// personal one ([`linked_out`]): the [`instruction_folders`], the other
+/// agents' `~/.codex` and `~/.config/opencode`, and the folder where an
+/// `AGENTS.md` or `CLAUDE.md` of any of them really is when it is a link (a
+/// dotfiles repository that GNU Stow, Home Manager or yadm manages).
+#[must_use]
+pub fn personal_folders(config_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut folders = instruction_folders(config_dir, home);
+    if let Some(home) = home {
+        folders.extend(
+            [".codex", ".config/opencode"]
+                .iter()
+                .filter_map(|name| crate::paths::canonicalize(home.join(name)).ok()),
+        );
+    }
+    let linked: Vec<PathBuf> = folders
+        .iter()
+        .flat_map(|folder| ["AGENTS.md", "CLAUDE.md"].map(|name| folder.join(name)))
+        .filter_map(|file| crate::paths::canonicalize(&file).ok())
+        .filter_map(|real| real.parent().map(Path::to_path_buf))
+        .collect();
+    for folder in linked {
+        if !folders.contains(&folder) {
+            folders.push(folder);
+        }
+    }
+    folders
+}
+
+/// Whether `place` is where a personal instruction folder keeps
+/// instructions: a file at its top, or anything under its `agents`,
+/// `commands`, `skills` or `rules` folder (not its caches, plans or notes
+/// about projects).
+fn instruction_place(place: &Path, personal: &[PathBuf]) -> bool {
+    personal.iter().any(|folder| {
+        place.strip_prefix(folder).is_ok_and(|below| {
+            let mut parts = below.components();
+            match (parts.next(), parts.next()) {
+                (Some(_), None) => true,
+                (Some(std::path::Component::Normal(first)), Some(_)) => INSTRUCTION_SUBFOLDERS
+                    .iter()
+                    .any(|name| first == std::ffi::OsStr::new(name)),
+                _ => false,
+            }
+        })
+    })
+}
+
+/// The places a chain of links starting at `path` passes through, each named
+/// by the folder it really is in and its own name: a link to
+/// `~/.claude/CLAUDE.md` passes through it even when that file is itself a
+/// link into a dotfiles folder.
+fn link_hops(path: &Path) -> Vec<PathBuf> {
+    let mut hops = Vec::new();
+    let mut current = path.to_path_buf();
+    // As many as the system follows before it gives up on a loop.
+    for _ in 0..40 {
+        let Ok(target) = fs::read_link(&current) else {
+            break;
+        };
+        let next = current
+            .parent()
+            .map_or_else(|| target.clone(), |folder| folder.join(&target));
+        let (Some(folder), Some(name)) = (next.parent(), next.file_name()) else {
+            break;
+        };
+        let Ok(folder) = crate::paths::canonicalize(folder) else {
+            break;
+        };
+        current = folder.join(name);
+        hops.push(current.clone());
+    }
+    hops
+}
+
 /// Why an instruction file the project controls (its own `AGENTS.md`
-/// family, a nested one, a match of a relative `instructions` entry) is left
-/// out when a link leads it out of the project's `roots`, if it is. A
-/// personal note stays welcome (`AGENTS.md -> ~/notes/rules.md`, or a link
-/// into `personal`, the person's instruction folders), so only a Markdown
-/// file (`.md`, `.mdx`, `.markdown`) whose name does not start with a dot,
-/// in no hidden folder but those, may load: a shell history, `.env`,
-/// `/proc/self/environ` or a file under `~/.config` never does. The usual
-/// checks ([`file_left_out`], [`nested_left_out`]) still follow.
+/// family, a nested one, a match of a relative `instructions` entry), named
+/// `path`, is left out when a link leads it out of the project's `roots` to
+/// `canonical`, if it is. A personal note stays welcome
+/// (`AGENTS.md -> ~/notes/rules.md`), so only a Markdown file (`.md`,
+/// `.mdx`, `.markdown`) whose name does not start with a dot may load, and
+/// only outside hidden folders unless it, or a link on the way to it, is
+/// where one of the `personal` folders keeps instructions
+/// ([`personal_folders`]): a shell history, `.env`, `/proc/self/environ`, a
+/// file under `~/.config` or Claude Code's notes about projects never load.
+/// The usual checks ([`file_left_out`], [`nested_left_out`]) still follow.
 #[must_use]
 pub fn linked_out(
+    path: &Path,
     canonical: &Path,
     roots: &[PathBuf],
     personal: &[PathBuf],
@@ -482,22 +569,28 @@ pub fn linked_out(
         .file_name()
         .map(|name| name.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    let markdown = !name.starts_with('.')
-        && [".md", ".mdx", ".markdown"]
-            .iter()
-            .any(|extension| name.ends_with(extension));
-    // Hidden folders count below the person's folder that holds it, if any.
-    let below = personal
+    if ![".md", ".mdx", ".markdown"]
         .iter()
-        .find_map(|folder| canonical.strip_prefix(folder).ok())
-        .unwrap_or(canonical);
-    let hidden = below.parent().is_some_and(|folders| {
+        .any(|extension| name.ends_with(extension))
+    {
+        return Some(LINKED_OUT);
+    }
+    if name.starts_with('.') {
+        return Some(LINKED_HIDDEN);
+    }
+    if std::iter::once(canonical.to_path_buf())
+        .chain(link_hops(path))
+        .any(|place| instruction_place(&place, personal))
+    {
+        return None;
+    }
+    let hidden = canonical.parent().is_some_and(|folders| {
         folders.components().any(|part| {
             matches!(part, std::path::Component::Normal(name)
                 if name.to_string_lossy().starts_with('.'))
         })
     });
-    (!markdown || hidden).then_some(LINKED_OUT)
+    hidden.then_some(LINKED_HIDDEN)
 }
 
 /// Why the instruction assembly will leave `path` out for its size, if it
@@ -532,7 +625,7 @@ pub fn nested_left_out(
     let (Some(root), Some(canonical)) = (root, canonical) else {
         return Some(LINKED_OUT);
     };
-    if let Some(reason) = linked_out(&canonical, &project_roots(workspace), personal) {
+    if let Some(reason) = linked_out(path, &canonical, &project_roots(workspace), personal) {
         return Some(reason);
     }
     if !canonical.starts_with(&root) && holds_credentials(&canonical) {
@@ -948,7 +1041,7 @@ mod tests {
             (root.join("home/.claude/CLAUDE.md"), None),
             (root.join(".zsh_history"), Some(LINKED_OUT)),
             (root.join("notes/history"), Some(LINKED_OUT)),
-            (root.join("home/.config/gh/hosts.md"), Some(LINKED_OUT)),
+            (root.join("home/.config/gh/hosts.md"), Some(LINKED_HIDDEN)),
             (root.join("notes/id_rules.md"), Some(CREDENTIALS_FILE)),
             (workspace.join(".env"), Some(SECRET_FILE)),
             (
@@ -974,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_out_of_the_project_loads_only_a_plain_markdown_note() {
+    fn a_link_out_of_the_project_loads_only_a_markdown_note_or_an_instruction_of_yours() {
         let roots = [PathBuf::from("/work/repo")];
         let personal = [
             PathBuf::from("/home/me/.claude"),
@@ -987,21 +1080,96 @@ mod tests {
             ("/home/me/notes/Rules.MDX", None),
             ("/home/me/notes/rules.markdown", None),
             ("/home/me/.claude/CLAUDE.md", None),
+            ("/home/me/.claude/agents/reviewer.md", None),
+            ("/home/me/.claude/skills/ship/SKILL.md", None),
             ("/home/me/.config/haarness/AGENTS.md", None),
             ("/home/me/.zsh_history", Some(LINKED_OUT)),
             ("/proc/self/environ", Some(LINKED_OUT)),
             ("/dev/zero", Some(LINKED_OUT)),
-            ("/home/me/notes/.hidden.md", Some(LINKED_OUT)),
             ("/home/me/notes/codes.txt", Some(LINKED_OUT)),
-            ("/home/me/.config/gh/hosts.md", Some(LINKED_OUT)),
-            ("/home/me/.claude/.cache/x.md", Some(LINKED_OUT)),
+            ("/home/me/notes/.hidden.md", Some(LINKED_HIDDEN)),
+            ("/home/me/.config/gh/hosts.md", Some(LINKED_HIDDEN)),
+            ("/home/me/.claude/.cache/x.md", Some(LINKED_HIDDEN)),
+            // Claude Code's notes about projects and its plans are not instructions.
+            (
+                "/home/me/.claude/projects/-work-repo/memory/MEMORY.md",
+                Some(LINKED_HIDDEN),
+            ),
+            ("/home/me/.claude/plans/next.md", Some(LINKED_HIDDEN)),
         ] {
+            let file = Path::new(file);
             assert_eq!(
-                linked_out(Path::new(file), &roots, &personal),
+                linked_out(file, file, &roots, &personal),
                 reason,
-                "{file}"
+                "{}",
+                file.display()
             );
         }
+    }
+
+    /// Instruction files a dotfiles manager links into place: the link from
+    /// the project passes through the person's folder, or ends where their
+    /// own instruction file really is.
+    #[cfg(unix)]
+    #[test]
+    fn links_into_dotfiles_managed_instruction_folders_are_personal() {
+        let root = crate::paths::canonicalize(temp("dotfiles")).unwrap();
+        let home = root.join("home");
+        let config = home.join(".config/haarness");
+        let project = root.join("project");
+        for folder in [
+            home.join(".dotfiles/claude/.claude"),
+            home.join(".dotfiles/agents"),
+            home.join(".claude/projects/-project/memory"),
+            home.join(".codex"),
+            home.join(".config/opencode"),
+            config.clone(),
+            project.join(".git"),
+        ] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let write = |path: PathBuf| {
+            fs::write(&path, "RULES").unwrap();
+            path
+        };
+        let stowed = write(home.join(".dotfiles/claude/.claude/CLAUDE.md"));
+        std::os::unix::fs::symlink(&stowed, home.join(".claude/CLAUDE.md")).unwrap();
+        let shared = write(home.join(".dotfiles/agents/AGENTS.md"));
+        std::os::unix::fs::symlink(&shared, config.join("AGENTS.md")).unwrap();
+        let codex = write(home.join(".codex/AGENTS.md"));
+        let opencode = write(home.join(".config/opencode/AGENTS.md"));
+        let memory = write(home.join(".claude/projects/-project/memory/MEMORY.md"));
+        let personal = personal_folders(Some(&config), Some(&home));
+        let roots = project_roots(&project);
+        let link = project.join("AGENTS.md");
+        for (target, reason) in [
+            (home.join(".claude/CLAUDE.md"), None),
+            (shared, None),
+            (codex, None),
+            (opencode, None),
+            (memory, Some(LINKED_HIDDEN)),
+        ] {
+            let _ = fs::remove_file(&link);
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let canonical = crate::paths::canonicalize(&link).unwrap();
+            assert_eq!(
+                linked_out(&link, &canonical, &roots, &personal),
+                reason,
+                "{}",
+                target.display()
+            );
+        }
+        // Without the dotfiles link the stowed file is only a hidden one.
+        assert_eq!(
+            linked_out(
+                &stowed,
+                &stowed,
+                &roots,
+                &instruction_folders(None, Some(&home))
+            ),
+            Some(LINKED_HIDDEN)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
