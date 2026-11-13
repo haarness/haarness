@@ -1738,6 +1738,7 @@ impl Reader<'_> {
                 complete,
                 outside.as_deref(),
                 reads,
+                reach.picks(),
             );
             if reads && complete {
                 self.name_glob_secrets(&node_text(dest, command), &value);
@@ -2517,12 +2518,12 @@ impl Reader<'_> {
             return GlobReach::AsWritten;
         };
         let text = |part: &[(char, bool)]| part.iter().map(|(c, _)| *c).collect::<String>();
+        let absolute = value.starts_with('/');
         // The folders as written up to the first one a glob names, and,
-        // below it, each folder with whether a `..` may climb back out of
-        // it: only a glob right under them whose names are all folders
-        // (no link, which `..` would leave from where it leads).
+        // below it, each folder with whether it is laid on the card's
+        // pattern (see [`GlobReach::Under`]).
         let mut known: Vec<String> = Vec::new();
-        let mut below: Vec<Option<String>> = Vec::new();
+        let mut below: Vec<(Below, bool)> = Vec::new();
         let mut folders_below: Vec<(String, String)> = Vec::new();
         let mut cut = false;
         let mut globbed = false;
@@ -2533,15 +2534,18 @@ impl Reader<'_> {
                 continue;
             }
             if written == ".." && !glob {
-                match below.pop() {
-                    None => known.push(written),
-                    Some(Some(pattern))
-                        if below.is_empty()
-                            && self.only_folders(raw, value.starts_with('/'), &known, &pattern) =>
-                    {
-                        folders_below.pop();
-                    }
-                    Some(_) => return GlobReach::Anywhere,
+                if below.is_empty() {
+                    known.push(written);
+                    continue;
+                }
+                // Back out of the folder below only where none of the names
+                // the shell may have gone through there is a link, which
+                // `..` would leave from where it leads.
+                if !self.climbs_back(raw, absolute, &known, &below) {
+                    return GlobReach::Anywhere;
+                }
+                if below.pop().is_some_and(|(_, laid)| laid) {
+                    folders_below.pop();
                 }
                 continue;
             }
@@ -2550,15 +2554,32 @@ impl Reader<'_> {
                 known.push(written);
                 continue;
             }
-            // `.*` also matches `..` under `/bin/sh` on macOS and in dash:
-            // the folder above, besides folders in this one.
-            if below.is_empty() && written.starts_with('.') && matches_two_dots(part) {
-                known.push("..".into());
-                below.push(None);
+            // `.*` (and `.?`, `.[.]`) also matches `..` under `/bin/sh` on
+            // macOS and in dash, and `**` may stand for no folder at all
+            // (zsh, `globstar`): under a glob that is anywhere; under the
+            // folders as written, `.*` is the folder above as well, and a
+            // `..` after either may be anywhere.
+            let dots = glob && written.starts_with('.') && matches_two_dots(part);
+            let any_depth = glob && written.contains("**");
+            if dots || any_depth {
+                if !below.is_empty() {
+                    return GlobReach::Anywhere;
+                }
+                if dots {
+                    known.push("..".into());
+                }
+                below.push((Below::Unknown, false));
                 cut = true;
                 continue;
             }
-            below.push((glob && below.is_empty()).then(|| written.clone()));
+            below.push((
+                if glob {
+                    Below::Glob(written.clone())
+                } else {
+                    Below::Name(written.clone())
+                },
+                !cut,
+            ));
             if !cut {
                 folders_below.push((written, rule_text(part)));
             }
@@ -2569,7 +2590,6 @@ impl Reader<'_> {
         if !globbed && !named {
             return GlobReach::AsWritten;
         }
-        let absolute = value.starts_with('/');
         let base = if absolute {
             format!("/{}", known.join("/"))
         } else {
@@ -2594,39 +2614,83 @@ impl Reader<'_> {
         }
     }
 
-    /// Whether every name the glob `pattern` matches in the folder `known`
-    /// names (as written, from where the shell is, or from `/` when
-    /// `absolute`) that a `..` can climb
-    /// out of is a folder there rather than a link to one elsewhere, as far
-    /// as [`MAX_GLOB_LOOKS`] entries tell.
-    fn only_folders(&self, raw: &str, absolute: bool, known: &[String], pattern: &str) -> bool {
+    /// Whether a `..` after the folders `below` the folder `known` names (as
+    /// written, from where the shell is, or from `/` when `absolute`) climbs
+    /// back to the folder before the last of them: no name the last one
+    /// stands for, in any folder the others may be, is a link to a folder
+    /// (hidden names included, which `dotglob` lets a glob pick), as far as
+    /// [`MAX_GLOB_LOOKS`] entries tell. A name created later in the line is
+    /// not there to be looked at.
+    fn climbs_back(
+        &self,
+        raw: &str,
+        absolute: bool,
+        known: &[String],
+        below: &[(Below, bool)],
+    ) -> bool {
+        let Some(((last, _), before)) = below.split_last() else {
+            return true;
+        };
         let written = if absolute {
             format!("/{}", known.join("/"))
         } else {
             known.join("/")
         };
-        let folder = match home_expansion(raw, &written) {
+        let start = match home_expansion(raw, &written) {
             Some(expanded) => resolve(self.from(), &expanded),
             None => resolve(self.from(), Path::new(&written)),
         };
-        let Ok(entries) = std::fs::read_dir(&folder) else {
-            return false;
+        let mut looks = 0;
+        // Each name `level` stands for in `folder`, with whether it is a link,
+        // or `None` past the looks or where the folder cannot be listed.
+        let mut names = |folder: &Path, level: &Below| -> Option<Vec<(PathBuf, bool)>> {
+            match level {
+                Below::Unknown => None,
+                Below::Name(name) => {
+                    let path = folder.join(name);
+                    let link = std::fs::symlink_metadata(&path)
+                        .is_ok_and(|metadata| metadata.file_type().is_symlink());
+                    Some(vec![(path, link)])
+                }
+                Below::Glob(pattern) => {
+                    let mut found = Vec::new();
+                    for entry in std::fs::read_dir(folder).ok()? {
+                        let entry = entry.ok()?;
+                        looks += 1;
+                        if looks > MAX_GLOB_LOOKS {
+                            return None;
+                        }
+                        let name = entry.file_name();
+                        if glob_part_matches(pattern, &name.to_string_lossy()) {
+                            let link = entry.file_type().is_ok_and(|kind| kind.is_symlink());
+                            found.push((entry.path(), link));
+                        }
+                    }
+                    Some(found)
+                }
+            }
         };
-        for (looked, entry) in entries.enumerate() {
-            let Ok(entry) = entry else {
+        let mut folders = vec![start];
+        for (level, _) in before {
+            let mut next = Vec::new();
+            for folder in &folders {
+                let Some(found) = names(folder, level) else {
+                    return false;
+                };
+                next.extend(
+                    found
+                        .into_iter()
+                        .map(|(path, _)| path)
+                        .filter(|path| path.is_dir()),
+                );
+            }
+            folders = next;
+        }
+        for folder in &folders {
+            let Some(found) = names(folder, last) else {
                 return false;
             };
-            if looked >= MAX_GLOB_LOOKS {
-                return false;
-            }
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let hidden = name.starts_with('.') && !pattern.starts_with('.');
-            if hidden || !glob_part_matches(pattern, &name) {
-                continue;
-            }
-            let link = entry.file_type().is_ok_and(|kind| kind.is_symlink());
-            if link && entry.path().is_dir() {
+            if found.iter().any(|(path, link)| *link && path.is_dir()) {
                 return false;
             }
         }
@@ -2681,7 +2745,12 @@ impl Reader<'_> {
         } else {
             (value, complete)
         };
-        let reach = self.glob_reach(raw, value);
+        // The word of a `cd` is a folder, its last name too.
+        let reach = if matches!(name, "cd" | "pushd") {
+            self.glob_reach(&format!("{raw}/"), &format!("{value}/"))
+        } else {
+            self.glob_reach(raw, value)
+        };
         let (folder, whole) = reach.folder(value, complete);
         let outside = external_dir(self.workspace, self.from(), raw, &folder, whole)
             .map(|dir| self.reached(&reach, dir));
@@ -2695,7 +2764,14 @@ impl Reader<'_> {
                         name,
                         "type" | "more" | "copy" | "xcopy" | "robocopy" | "move"
                     )));
-        self.name_path(raw, value, complete, outside.as_deref(), reads);
+        self.name_path(
+            raw,
+            value,
+            complete,
+            outside.as_deref(),
+            reads,
+            reach.picks(),
+        );
         if reads && complete {
             self.name_glob_secrets(raw, value);
         }
@@ -2736,6 +2812,7 @@ impl Reader<'_> {
         complete: bool,
         outside: Option<&Path>,
         reads: bool,
+        picked: bool,
     ) {
         // Every secret name holds `.env`; the test is cheap for the rest. A
         // link of another name (`notes.txt -> .env`) is judged by where it
@@ -2769,12 +2846,11 @@ impl Reader<'_> {
         if outside.is_none() && !secret && !credential {
             return;
         }
-        // A path a glob the shell expands names is any path there, never a
-        // file or folder of that name.
-        let expanded = self.reading == Reading::Posix && shell_expands_glob(raw);
+        // A path a glob the shell expands picks (`picked`) is any path
+        // there, never a file or folder of that name.
         self.analysis.paths.push(NamedPath {
-            file: complete && !expanded && !path.is_dir(),
-            literal: complete && !expanded,
+            file: complete && !picked && !path.is_dir(),
+            literal: complete && !picked,
             secret,
             path,
             outside: outside.map(glob),
@@ -3435,7 +3511,7 @@ impl Reader<'_> {
                     _ => value,
                 };
                 let named_from = self.analysis.paths.len();
-                self.name_path(&word.raw, &value, complete, None, true);
+                self.name_path(&word.raw, &value, complete, None, true, false);
                 // `echo` and `printf` print the names they are given, and
                 // `du` sums the sizes of what a glob matches.
                 if matches!(name.as_str(), "echo" | "printf") {
@@ -3608,6 +3684,17 @@ fn unquoted_glob(raw: &str) -> bool {
     raw.contains(['*', '?', '[']) && !raw.contains(['\'', '"', '\\', '$', '`'])
 }
 
+/// A folder below the folders a path word names as written, in
+/// [`Reader::glob_reach`].
+enum Below {
+    /// The names a glob picks there.
+    Glob(String),
+    /// One name, as written.
+    Name(String),
+    /// Nobody can tell which, or how deep (after `.*` or `**`).
+    Unknown,
+}
+
 /// Where a path word reaches when the shell expands a glob in one of its
 /// folders, from [`Reader::glob_reach`].
 enum GlobReach {
@@ -3628,8 +3715,17 @@ enum GlobReach {
         folders: Vec<(String, String)>,
     },
     /// Nobody can tell where: a `..` out of a folder a glob picked that may
-    /// be a link. The whole disk is asked about.
+    /// be a link, or a `.*` (which also matches `..`) under a glob. The
+    /// whole disk is asked about.
     Anywhere,
+}
+
+impl GlobReach {
+    /// Whether the word may name any of several paths there, rather than
+    /// one: a glob's picks are still part of where it leads.
+    fn picks(&self) -> bool {
+        matches!(self, Self::Under { .. } | Self::Anywhere)
+    }
 }
 
 impl GlobReach {
