@@ -1,7 +1,7 @@
 //! Router identity is independent of the wire protocol and connection credentials.
 //! Cloud can add its own deployment/login here without changing model routing.
 use anyhow::{Context, Result, bail, ensure};
-use haarness_providers::auth::{Credential, CredentialStore};
+use haarness_providers::auth::CredentialStore;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Mutex, time::Duration};
 
@@ -167,14 +167,16 @@ pub(crate) async fn connect(
             deployment: RouterDeployment::SelfHosted,
         }),
         name: Some(name.clone()),
-        base_url: Some(url),
+        base_url: Some(url.clone()),
         requires_auth,
         // An empty model list enables dynamic discovery; never freeze a live catalog.
         models: Vec::new(),
         ..crate::ProviderSection::default()
     };
     if requires_auth {
-        store.set(&id, &Credential::api(request.key.trim().to_owned()))?;
+        // Saved for the router's address: a project that defines this id
+        // elsewhere is not sent it.
+        store.set_api_key(&id, request.key.trim(), Some(&url))?;
     }
     let target = crate::provider_config_target(paths, workspace, request.project);
     let scope = crate::jsonconfig::SaveScope::of(request.project, workspace);
@@ -378,11 +380,21 @@ mod connection_tests {
                 .unwrap()
                 .contains("fixture-key")
         );
+        // Saved for the router's address, and for no other.
+        let saved = CredentialStore::new(paths.auth.clone());
         assert!(
-            CredentialStore::new(paths.auth.clone())
+            saved
+                .for_address(&config.providers[&id].base_url.clone().unwrap())
                 .get(&id)
                 .unwrap()
                 .is_some()
+        );
+        assert!(
+            saved
+                .for_address("http://127.0.0.1:1/v1")
+                .get(&id)
+                .unwrap()
+                .is_none()
         );
         task.abort();
         std::fs::remove_dir_all(root).unwrap();

@@ -286,6 +286,20 @@ pub enum ProviderInstance {
 }
 
 impl ProviderInstance {
+    /// Where its requests go.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        match self {
+            Self::OpenAiChatCompletions(instance) => &instance.base_url,
+            Self::AnthropicMessages(instance)
+            | Self::GeminiGenerateContent(instance)
+            | Self::AzureOpenAi(instance)
+            | Self::GoogleVertex(instance)
+            | Self::GithubCopilot(instance)
+            | Self::AmazonBedrock(instance) => &instance.base_url,
+        }
+    }
+
     #[must_use]
     pub fn id(&self) -> &str {
         match self {
@@ -299,6 +313,18 @@ impl ProviderInstance {
             | Self::AmazonBedrock(instance) => &instance.id,
         }
     }
+}
+
+/// Which configured providers a project's configuration defines, and what
+/// keeps them from credentials of other addresses. A project may define a
+/// provider under any id and at any address, while keys are saved under the
+/// id, so such a provider is sent a saved key only when it was saved for the
+/// provider's own address (see [`auth::key_origin`]), checked at every
+/// request.
+#[derive(Clone, Debug, Default)]
+pub struct CredentialFence {
+    /// Providers a project defines.
+    pub project: std::collections::HashSet<String>,
 }
 
 #[derive(Default)]
@@ -316,8 +342,10 @@ impl NativeProviderRegistry {
         instances: Vec<ProviderInstance>,
         disabled: &std::collections::HashSet<String>,
         credential_store: Arc<CredentialStore>,
+        fence: &CredentialFence,
     ) -> Self {
-        let registry = Self::with_providers_and_store(instances, disabled, credential_store).await;
+        let registry =
+            Self::with_providers_and_store(instances, disabled, credential_store, fence).await;
         futures::future::join_all(
             registry
                 .providers
@@ -336,6 +364,7 @@ impl NativeProviderRegistry {
         instances: Vec<ProviderInstance>,
         disabled: &std::collections::HashSet<String>,
         credential_store: Arc<CredentialStore>,
+        fence: &CredentialFence,
     ) -> Self {
         let mut registry = Self::default();
         let auth_store = Some(credential_store.clone());
@@ -450,7 +479,11 @@ impl NativeProviderRegistry {
             ));
         }
         for (instance, aliases) in configured {
-            let auth_store = auth_store.clone();
+            let auth_store = if fence.project.contains(instance.id()) {
+                Some(Arc::new(credential_store.for_address(instance.base_url())))
+            } else {
+                auth_store.clone()
+            };
             registry.insert(match instance {
                 ProviderInstance::OpenAiChatCompletions(instance) => Arc::new(
                     OpenAiCompatibleProvider::new(instance)
@@ -1536,6 +1569,7 @@ mod tests {
             vec![instance],
             &HashSet::new(),
             store,
+            &super::CredentialFence::default(),
         )
         .await;
         assert!(
@@ -1545,5 +1579,100 @@ mod tests {
         );
         let provider = haarness_core::ProviderRegistry::get(&registry, "stalled").unwrap();
         assert_eq!(provider.info().models[0].id, "fallback");
+    }
+
+    /// A provider a project defines is sent a saved key only at the address
+    /// it was saved for, checked at each request: a key saved for another
+    /// address, even one saved after the provider was built, never leaves.
+    #[tokio::test]
+    async fn a_project_provider_is_sent_only_a_key_saved_for_its_address() {
+        use axum::{Router, http::HeaderMap, routing::post};
+        use futures::StreamExt as _;
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<Option<String>>::new()));
+        let record = seen.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |headers: HeaderMap| {
+                let record = record.clone();
+                async move {
+                    record.lock().push(
+                        headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned),
+                    );
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(super::CredentialStore::new(root.path().join("auth.json")));
+        store
+            .set_api_key("router", "router-key", Some("http://127.0.0.1:1/v1"))
+            .unwrap();
+        let instance = super::ProviderInstance::OpenAiChatCompletions(CompatibleInstance {
+            id: "router".into(),
+            name: "Router".into(),
+            base_url: address.clone(),
+            api_key: None,
+            models: vec!["m".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: ProviderHeaders::default(),
+        });
+        let fence = super::CredentialFence {
+            project: HashSet::from(["router".to_owned()]),
+        };
+        let registry = super::NativeProviderRegistry::with_providers_and_store(
+            vec![instance],
+            &HashSet::new(),
+            store.clone(),
+            &fence,
+        )
+        .await;
+        let provider = haarness_core::ProviderRegistry::get(&registry, "router").unwrap();
+        assert!(!provider.info().authenticated);
+        let ask = async || {
+            let request = haarness_core::ProviderRequest {
+                model: "m".into(),
+                system: String::new(),
+                messages: vec![haarness_core::ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                tools: Vec::new(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            };
+            if let Ok(stream) = provider
+                .stream(request, tokio_util::sync::CancellationToken::new())
+                .await
+            {
+                let _ = stream.collect::<Vec<_>>().await;
+            }
+        };
+        ask().await;
+        assert_eq!(
+            seen.lock().pop(),
+            Some(None),
+            "no key at the project's address"
+        );
+        // Connected again for this address: the same provider sends it.
+        store
+            .set_api_key("router", "router-key", Some(&address))
+            .unwrap();
+        assert!(provider.info().authenticated);
+        ask().await;
+        assert_eq!(seen.lock().pop(), Some(Some("Bearer router-key".into())));
     }
 }

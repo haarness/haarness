@@ -1,8 +1,8 @@
 //! Native desktop operations remain in the CLI composition root. This process
 //! never owns conversation execution; connect reuses the canonical daemon.
 use super::{
-    Credential, CredentialStore, FileConfig, Paths, ensure_workspace_server,
-    inspect_workspace_server, replace_incompatible_workspace_server, server_activity,
+    CredentialStore, FileConfig, Paths, ensure_workspace_server, inspect_workspace_server,
+    replace_incompatible_workspace_server, server_activity,
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
@@ -254,7 +254,7 @@ async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request)
                 !key.trim().is_empty() && key.len() <= 65536 && !key.contains(['\r', '\n']),
                 "Invalid API key"
             );
-            CredentialStore::new(paths.auth.clone()).set(&provider, &Credential::api(key))?;
+            crate::key_addresses::save_key(paths, workspace, trust, &provider, &key)?;
             Ok(json!({"provider":provider,"connected":true}))
         }
         Request::RemoveCredential { provider } => {

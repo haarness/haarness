@@ -204,6 +204,8 @@ pub fn load_layers_with_system(
     layers.project = false;
     layers.native.provider_notices =
         super::guard_project_providers(&global_providers, &mut layers.native.providers);
+    layers.native.project_providers =
+        super::project_defined_providers(&global_providers, &layers.native.providers);
     // Plugin bundles: the user installed them, so their hooks/MCP are
     // trusted. Commands/agents merge like any other root.
     for root in plugin_roots {

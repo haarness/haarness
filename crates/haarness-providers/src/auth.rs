@@ -99,6 +99,13 @@ pub enum TypedCredential {
         key: String,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         metadata: BTreeMap<String, String>,
+        /// The addresses the key was saved for, each as scheme, host and
+        /// port (see [`key_origin`]): a provider a project's configuration
+        /// defines is sent the key only at one of them. `None` on a key an
+        /// earlier Haarness saved, before it recorded addresses; empty on
+        /// one saved for no address in particular.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origins: Option<Vec<String>>,
     },
     #[serde(rename = "oauth")]
     OAuth {
@@ -128,6 +135,36 @@ impl Credential {
         Self::Typed(TypedCredential::Api {
             key,
             metadata: BTreeMap::new(),
+            origins: None,
+        })
+    }
+
+    /// An API key saved for the addresses `origins` (see [`key_origin`]).
+    #[must_use]
+    pub fn api_for(key: String, origins: Vec<String>) -> Self {
+        Self::Typed(TypedCredential::Api {
+            key,
+            metadata: BTreeMap::new(),
+            origins: Some(origins),
+        })
+    }
+
+    /// The addresses an API key was saved for; `None` for a key an earlier
+    /// Haarness saved and for a sign-in.
+    #[must_use]
+    pub fn origins(&self) -> Option<&[String]> {
+        match self {
+            Self::Typed(TypedCredential::Api { origins, .. }) => origins.as_deref(),
+            Self::Typed(TypedCredential::OAuth { .. }) | Self::Legacy(_) => None,
+        }
+    }
+
+    /// Whether this is an API key saved for `url`'s address.
+    #[must_use]
+    pub fn saved_for(&self, url: &str) -> bool {
+        key_origin(url).is_some_and(|origin| {
+            self.origins()
+                .is_some_and(|origins| origins.contains(&origin))
         })
     }
 
@@ -198,6 +235,8 @@ pub struct OAuthCredential<'a> {
 pub struct CredentialStore {
     path: PathBuf,
     mutation: Mutex<()>,
+    /// The only address [`Self::get`] answers for (see [`Self::for_address`]).
+    address: Option<String>,
 }
 
 impl CredentialStore {
@@ -206,6 +245,19 @@ impl CredentialStore {
         Self {
             path,
             mutation: Mutex::new(()),
+            address: None,
+        }
+    }
+
+    /// The same store as a provider at `url` reads it: [`Self::get`] gives
+    /// only an API key saved for `url`'s address, and nothing for an address
+    /// that is no http or https URL.
+    #[must_use]
+    pub fn for_address(&self, url: &str) -> Self {
+        Self {
+            path: self.path.clone(),
+            mutation: Mutex::new(()),
+            address: Some(url.to_owned()),
         }
     }
 
@@ -285,11 +337,19 @@ impl CredentialStore {
             .all_raw()?
             .into_iter()
             .filter_map(|(id, value)| {
-                serde_json::from_value(value)
+                serde_json::from_value::<Credential>(value)
                     .ok()
+                    .filter(|credential| self.answers(credential))
                     .map(|credential| (id, credential))
             })
             .collect())
+    }
+
+    /// Whether lookups give `credential` (see [`Self::for_address`]).
+    fn answers(&self, credential: &Credential) -> bool {
+        self.address
+            .as_deref()
+            .is_none_or(|url| credential.saved_for(url))
     }
 
     pub fn get(&self, provider: &str) -> AuthResult<Option<Credential>> {
@@ -297,10 +357,41 @@ impl CredentialStore {
             .all_raw()?
             .get(normalize(provider))
             .cloned()
-            .and_then(|value| serde_json::from_value(value).ok()))
+            .and_then(|value| serde_json::from_value::<Credential>(value).ok())
+            .filter(|credential| self.answers(credential)))
     }
 
     pub fn set(&self, provider: &str, credential: &Credential) -> AuthResult<()> {
+        self.update(provider, |_| credential.clone())
+    }
+
+    /// Save `key` for `provider` and for the address `url` (see
+    /// [`key_origin`]), or for none in particular. The same key saved again
+    /// for another address keeps the addresses it had, so one key can serve
+    /// a provider that two projects define at different addresses; a new key
+    /// has only its own.
+    pub fn set_api_key(&self, provider: &str, key: &str, url: Option<&str>) -> AuthResult<()> {
+        self.update(provider, |current| {
+            let mut origins = current
+                .filter(|current| current.api_key() == Some(key))
+                .and_then(|current| current.origins().map(<[String]>::to_vec))
+                .unwrap_or_default();
+            if let Some(origin) = url.and_then(key_origin)
+                && !origins.contains(&origin)
+            {
+                origins.push(origin);
+            }
+            Credential::api_for(key.to_owned(), origins)
+        })
+    }
+
+    /// Add `url`'s address to those the saved API key of `provider` was saved
+    /// for, as when the person moves their provider to another address. Says
+    /// whether there was such a key.
+    pub fn allow_address(&self, provider: &str, url: &str) -> AuthResult<bool> {
+        let Some(origin) = key_origin(url) else {
+            return Ok(false);
+        };
         let _guard = self
             .mutation
             .lock()
@@ -308,10 +399,93 @@ impl CredentialStore {
         let _file_lock = self.lock_mutations()?;
         let provider = normalize(provider);
         let mut raw = self.records_to_change()?;
+        let Some(credential) = raw
+            .get(provider)
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Credential>(value).ok())
+        else {
+            return Ok(false);
+        };
+        let Some(key) = credential.api_key() else {
+            return Ok(false);
+        };
+        let mut origins = credential
+            .origins()
+            .map(<[String]>::to_vec)
+            .unwrap_or_default();
+        if origins.contains(&origin) {
+            return Ok(true);
+        }
+        origins.push(origin);
+        raw.insert(
+            provider.to_owned(),
+            serde_json::to_value(Credential::api_for(key.to_owned(), origins))
+                .map_err(AuthError::Encode)?,
+        );
+        self.write_raw(&raw)?;
+        Ok(true)
+    }
+
+    /// Record the addresses of API keys an earlier Haarness saved, before it
+    /// recorded any: each id of `found` whose key still has none gets the
+    /// addresses listed for it (none in particular when the list is empty).
+    /// A key saved meanwhile keeps its own.
+    pub fn record_origins(&self, found: &BTreeMap<String, Vec<String>>) -> AuthResult<()> {
+        let _guard = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _file_lock = self.lock_mutations()?;
+        let mut raw = self.records_to_change()?;
+        let mut changed = false;
+        for (provider, origins) in found {
+            let Some(credential) = raw
+                .get(provider.as_str())
+                .cloned()
+                .and_then(|value| serde_json::from_value::<Credential>(value).ok())
+            else {
+                continue;
+            };
+            let Some(key) = credential
+                .api_key()
+                .filter(|_| credential.origins().is_none())
+            else {
+                continue;
+            };
+            raw.insert(
+                provider.clone(),
+                serde_json::to_value(Credential::api_for(key.to_owned(), origins.clone()))
+                    .map_err(AuthError::Encode)?,
+            );
+            changed = true;
+        }
+        if changed {
+            self.write_raw(&raw)?;
+        }
+        Ok(())
+    }
+
+    /// Replace `provider`'s record with what `next` makes of the current one.
+    fn update(
+        &self,
+        provider: &str,
+        next: impl FnOnce(Option<Credential>) -> Credential,
+    ) -> AuthResult<()> {
+        let _guard = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _file_lock = self.lock_mutations()?;
+        let provider = normalize(provider);
+        let mut raw = self.records_to_change()?;
+        let current = raw
+            .get(provider)
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
         raw.remove(&format!("{provider}/"));
         raw.insert(
             provider.to_owned(),
-            serde_json::to_value(credential).map_err(AuthError::Encode)?,
+            serde_json::to_value(next(current)).map_err(AuthError::Encode)?,
         );
         self.write_raw(&raw)
     }
@@ -424,6 +598,17 @@ impl CredentialStore {
 
 fn normalize(provider: &str) -> &str {
     provider.trim_end_matches('/')
+}
+
+/// The address a key is saved for: `url`'s scheme, host and port
+/// (`https://models.example.com`, `http://127.0.0.1:8080`), the part that
+/// says which server gets it. `None` for what is not an http or https URL.
+#[must_use]
+pub fn key_origin(url: &str) -> Option<String> {
+    let url = Url::parse(url.trim()).ok()?;
+    matches!(url.scheme(), "http" | "https")
+        .then(|| url.origin().ascii_serialization())
+        .filter(|origin| origin != "null")
 }
 
 #[cfg(unix)]
@@ -1540,9 +1725,10 @@ mod tests {
     use super::{
         CallbackRequest, CopilotOAuthClient, CopilotOAuthConfig, Credential, CredentialStore,
         OpenAiOAuthClient, OpenAiOAuthConfig, XaiOAuthClient, XaiOAuthConfig,
-        answer_until_callback, openai_residency, query, read_callback,
+        answer_until_callback, key_origin, openai_residency, query, read_callback,
     };
     use haarness_account::loopback::AcceptFailures;
+    use std::collections::BTreeMap;
 
     #[tokio::test]
     async fn browser_login_uses_the_haarness_pkce_contract() {
@@ -2068,6 +2254,133 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A key saved for one address is not given out for another: a provider
+    /// a project defines reads the store through `for_address`.
+    #[test]
+    fn a_saved_key_is_given_only_for_the_address_it_was_saved_for() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(root.path().join("auth.json"));
+        store
+            .set_api_key("router", "key-a", Some("http://127.0.0.1:5000/v1"))
+            .unwrap();
+        let at = |url: &str| store.for_address(url).get("router").unwrap();
+        assert!(
+            at("http://127.0.0.1:5000/other/v1").is_some(),
+            "same server"
+        );
+        assert!(at("http://127.0.0.1:5001/v1").is_none(), "another port");
+        assert!(at("https://127.0.0.1:5000/v1").is_none(), "another scheme");
+        assert!(at("http://evil.example/v1").is_none());
+        assert!(at("not a url").is_none());
+        assert!(
+            store
+                .for_address("http://127.0.0.1:5001/v1")
+                .all()
+                .unwrap()
+                .is_empty()
+        );
+        // The person's own definitions read it as before.
+        assert_eq!(
+            store.get("router").unwrap().unwrap().api_key(),
+            Some("key-a")
+        );
+
+        // The same key saved again for another address serves both; a new
+        // key has only its own.
+        store
+            .set_api_key(
+                "router",
+                "key-a",
+                Some("https://router.example.com:8443/v1"),
+            )
+            .unwrap();
+        assert!(at("http://127.0.0.1:5000/v1").is_some());
+        assert!(at("https://router.example.com:8443").is_some());
+        store
+            .set_api_key(
+                "router",
+                "key-b",
+                Some("https://router.example.com:8443/v1"),
+            )
+            .unwrap();
+        assert!(at("http://127.0.0.1:5000/v1").is_none());
+        assert_eq!(
+            at("https://router.example.com:8443/v1").unwrap().api_key(),
+            Some("key-b")
+        );
+        // A key saved for no address in particular, and one an earlier
+        // Haarness saved, go to no project's provider.
+        store.set_api_key("spare", "key-c", None).unwrap();
+        store
+            .set("older", &Credential::api("key-d".into()))
+            .unwrap();
+        for id in ["spare", "older"] {
+            assert!(
+                store
+                    .for_address("http://127.0.0.1:5000")
+                    .get(id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(store.get(id).unwrap().is_some());
+        }
+        // A provider moved by the person takes its key along.
+        assert!(
+            store
+                .allow_address("router", "http://10.0.0.2:9000/v1")
+                .unwrap()
+        );
+        assert!(at("http://10.0.0.2:9000").is_some());
+        assert!(at("https://router.example.com:8443").is_some());
+        assert!(
+            !store
+                .allow_address("absent", "http://10.0.0.2:9000")
+                .unwrap()
+        );
+    }
+
+    /// The addresses found for keys saved before are recorded once: a key
+    /// saved meanwhile, or one already recorded, keeps its own.
+    #[test]
+    fn earlier_keys_get_their_addresses_once() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"team":"legacy-key","router":{"type":"api","key":"k"},"spare":{"type":"api","key":"s"},"anthropic":{"type":"api","key":"sk"}}"#,
+        )
+        .unwrap();
+        let store = CredentialStore::new(path);
+        store
+            .record_origins(&BTreeMap::from([
+                ("team".to_owned(), vec!["https://team.example".to_owned()]),
+                (
+                    "router".to_owned(),
+                    vec!["http://127.0.0.1:5000".to_owned()],
+                ),
+                ("spare".to_owned(), Vec::new()),
+            ]))
+            .unwrap();
+        let get = |id: &str| store.get(id).unwrap().unwrap();
+        assert_eq!(
+            get("team").origins(),
+            Some(&["https://team.example".to_owned()][..])
+        );
+        assert_eq!(get("team").api_key(), Some("legacy-key"));
+        assert_eq!(get("spare").origins(), Some(&[][..]));
+        assert_eq!(get("anthropic").origins(), None, "not named, not touched");
+        store
+            .record_origins(&BTreeMap::from([(
+                "router".to_owned(),
+                vec!["http://evil.example".to_owned()],
+            )]))
+            .unwrap();
+        assert_eq!(
+            get("router").origins(),
+            Some(&["http://127.0.0.1:5000".to_owned()][..])
+        );
+    }
+
     /// An empty file (white space only) holds no keys and takes a new one.
     #[test]
     fn an_empty_key_file_reads_as_none() {
@@ -2153,6 +2466,26 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             r#"{"openai":{"type":"api","key":"sk"}}"#
         );
+    }
+
+    #[test]
+    fn a_key_is_saved_for_its_servers_origin() {
+        for (url, origin) in [
+            (
+                "https://Models.Example.com/v1/",
+                Some("https://models.example.com"),
+            ),
+            (
+                "https://models.example.com:443/v1",
+                Some("https://models.example.com"),
+            ),
+            ("http://127.0.0.1:8080/v1", Some("http://127.0.0.1:8080")),
+            ("http://[::1]:11434", Some("http://[::1]:11434")),
+            ("file:///etc/passwd", None),
+            ("models.example.com/v1", None),
+        ] {
+            assert_eq!(key_origin(url).as_deref(), origin, "{url}");
+        }
     }
 
     #[test]
