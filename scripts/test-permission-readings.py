@@ -8,7 +8,9 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    (`cd a/l/../../..` with `a/l` leading deeper in) asks, so a headless run stops before it writes,
    while a path after a plain `cd` is read from where it went: `cd sub && cat ../README.md` and
    `cd sub && echo x > ../out.txt` run without asking, and so does `cat ../README.md` with `sub` as
-   the call's `workdir`; a `cd` with no folder goes home and asks.
+   the call's `workdir`; past `;` and a line break the `cd` is followed for reads only, so `cd sub; cat
+   ../README.md` and its two-line form run, while `cd sub; cat ../../x` and `cd sub; echo x > ../x` stop
+   before they run; a `cd` with no folder goes home and asks.
 3. resource_alias: a deny written in `opencode.json` under upstream OpenCode's name for the resource
    read tool refuses `mcp_resource_read`.
 4. backslash: a line that starts with a backslash is a command of its own (an `rm *` deny refuses
@@ -184,6 +186,15 @@ def case_cd_link():
         assert (folder / 'out.txt').read_text() == 'chained\n', output
         output = call(env, folder, 'bash', {'workdir': 'sub', 'command': 'cat ../README.md'}, code=0)
         assert '# chained read' in output and 'Stopped' not in output, output
+        # Past `;` and a line break, only what reads is followed into `sub`.
+        for line in ['cd sub; cat ../README.md', 'cd sub\ncat ../README.md', 'cd sub && pwd; cat ../README.md']:
+            output = bash(env, folder, line, code=0)
+            assert '# chained read' in output and 'Stopped' not in output, output
+        output = bash(env, folder, 'cd sub; cat ../../semicolon-read.txt', code=1)
+        assert 'Stopped:' in output and str(folder.parent) in output, output
+        output = bash(env, folder, 'cd sub; echo semicolon > ../semicolon-out.txt', code=1)
+        assert 'Stopped:' in output and str(folder.parent) in output, output
+        assert not (folder / 'semicolon-out.txt').exists() and not (folder.parent / 'semicolon-out.txt').exists()
         home = Path(env['HOME'])
         output = bash(env, folder, 'cd && touch bare-cd-probe', code=1)
         assert 'Stopped:' in output and str(home) in output, output
@@ -191,7 +202,8 @@ def case_cd_link():
     finally:
         stop(env, folder)
     passed('a cd or pushd out of the project through a link asks; one that stays inside runs, and so does a '
-           'path after a cd or from a workdir that stays in the project; a cd with no folder asks')
+           'path after a cd or from a workdir that stays in the project, and a read after `cd sub;`; a write '
+           'after `;` and a read that leaves the project stop; a cd with no folder asks')
 
 
 def case_resource_alias():

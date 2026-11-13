@@ -1440,6 +1440,13 @@ impl Reader<'_> {
                 && joined_continuations(command, true).is_none()
             {
                 (folders, open) = chain_folders(*statement, command, self.start);
+            } else if statements.len() > 1
+                && whole
+                && self.reading != Reading::Cmd
+                && !tree.root_node().has_error()
+                && joined_continuations(command, true).is_none()
+            {
+                folders = reading_folders(tree.root_node(), command, self.start, self.workspace);
             }
         }
         let outer_depth = std::mem::replace(&mut self.text_depth, depth.text);
@@ -5854,6 +5861,212 @@ fn chain_folders(
     (folders, open)
 }
 
+/// Where the relative paths of the reading steps of a line of several
+/// statements start once its first statement opens with plain `cd`s: the
+/// folder they reached, by the node id of each such step's command and of
+/// the redirects that belong to it (`cd src; cat ../README.md` reads the
+/// project's `README.md`).
+///
+/// What follows `;` or a line break runs even when the `cd` before it
+/// failed, so the folder is followed only for steps that read: a read
+/// checked where the `cd` would have gone is at worst one read placed
+/// elsewhere, while a write or a delete stays checked from where the shell
+/// started. The opening `cd`s and `pushd`s, joined by `&&`, are those
+/// [`chain_folders`] follows, into folders that are there now, can be
+/// entered and lie in the project, with redirects that at most silence
+/// them. From the step after them, each step is read from the folder they
+/// reached while it only reads (see [`only_reads`]). The first one that does
+/// anything else (writes, deletes, runs any other program, may move the
+/// shell, is another `cd`, a subshell, a group, an `||` list) or is sent to
+/// the background ends it: it and every step after it are read from where
+/// the shell started, as for any line.
+fn reading_folders(
+    root: tree_sitter::Node<'_>,
+    source: &str,
+    start: &Path,
+    workspace: &Path,
+) -> HashMap<usize, Rc<Path>> {
+    let mut folders = HashMap::new();
+    let statements = statements(root);
+    let Some(first) = statements.first().filter(|first| !first.background) else {
+        return folders;
+    };
+    let mut folder = start.to_path_buf();
+    let mut moves = 0;
+    for (node, outer) in &first.steps {
+        let Some(next) = entered(*node, outer, source, &folder) else {
+            break;
+        };
+        moves += 1;
+        if moves > MAX_MOVES {
+            return folders;
+        }
+        folder = next;
+    }
+    let inside = |folder: &Path| {
+        let project = crate::paths::canonicalize(workspace);
+        crate::paths::canonicalize(folder)
+            .is_ok_and(|folder| project.is_ok_and(|project| folder.starts_with(project)))
+    };
+    if moves == 0 || !inside(&folder) {
+        return folders;
+    }
+    let folder: Rc<Path> = Rc::from(folder);
+    let later = statements[1..]
+        .iter()
+        .take_while(|statement| !statement.background)
+        .flat_map(|statement| &statement.steps);
+    for (node, outer) in first.steps[moves..].iter().chain(later) {
+        if !only_reads(*node, outer, source) {
+            break;
+        }
+        for node in std::iter::once(node).chain(outer) {
+            place(&mut folders, *node, &folder);
+        }
+    }
+    folders
+}
+
+/// Where a plain `cd` or `pushd` step goes from `from`: one folder
+/// [`plain_path`] takes, with no assignment or substitution, whose
+/// redirects only read a file or silence it (see [`reads_or_silences`]),
+/// into a folder that is there and can be entered. `None` for any other
+/// step.
+fn entered(
+    node: tree_sitter::Node<'_>,
+    outer: &[tree_sitter::Node<'_>],
+    source: &str,
+    from: &Path,
+) -> Option<PathBuf> {
+    let (Some(command), redirects) = statement(node, outer) else {
+        return None;
+    };
+    if heredoc_holds_more(node)
+        || has_substitution(command)
+        || command
+            .named_children(&mut command.walk())
+            .any(|child| child.kind() == "variable_assignment")
+        || !redirects
+            .iter()
+            .all(|redirect| reads_or_silences(*redirect, source))
+    {
+        return None;
+    }
+    let words = words(command, source);
+    let [program, target] = words.as_slice() else {
+        return None;
+    };
+    if !program.literal
+        || !matches!(program.value.as_str(), "cd" | "pushd")
+        || !plain_path(target)
+        || names_no_path(&program.value, &target.value)
+    {
+        return None;
+    }
+    let target =
+        home_expansion(&target.raw, &target.value).unwrap_or_else(|| PathBuf::from(&target.value));
+    let next = from.join(target);
+    (next.as_os_str().len() <= MAX_PLACED_BYTES && enterable(&next)).then_some(next)
+}
+
+/// Whether the shell can enter `folder`: a folder it may search.
+fn enterable(folder: &Path) -> bool {
+    #[cfg(unix)]
+    if nix::unistd::access(folder, nix::unistd::AccessFlags::X_OK).is_err() {
+        return false;
+    }
+    folder.is_dir()
+}
+
+/// Whether a step of a line only reads: a command, or a pipeline of
+/// commands, each of them one of the inspection commands
+/// [`read_only_invocation`] takes, written in literal words with no
+/// assignment, substitution or `cd`, and with redirects that only read a
+/// file or silence its output (see [`reads_or_silences`]). A glob may stand
+/// in only for the files of a program with no option that writes or runs
+/// anything, and `uniq` writes its second file.
+fn only_reads(node: tree_sitter::Node<'_>, outer: &[tree_sitter::Node<'_>], source: &str) -> bool {
+    if !outer
+        .iter()
+        .all(|redirect| reads_or_silences(*redirect, source))
+    {
+        return false;
+    }
+    let stages: Vec<_> = if node.kind() == "pipeline" {
+        node.named_children(&mut node.walk()).collect()
+    } else {
+        vec![node]
+    };
+    stages.iter().all(|stage| {
+        let (Some(command), redirects) = statement(*stage, &[]) else {
+            return false;
+        };
+        if has_substitution(*stage)
+            || command
+                .named_children(&mut command.walk())
+                .any(|child| child.kind() == "variable_assignment")
+            || !redirects
+                .iter()
+                .all(|redirect| reads_or_silences(*redirect, source))
+        {
+            return false;
+        }
+        let words = words(command, source);
+        let Some((program, arguments)) = words.split_first() else {
+            return false;
+        };
+        let name = program.value.as_str();
+        // A glob may expand to an option, as may a brace list.
+        let globbed = arguments
+            .iter()
+            .any(|word| word.raw.contains(['*', '?', '[', '{']));
+        let files = arguments
+            .iter()
+            .filter(|word| !word.value.starts_with('-'))
+            .count();
+        words.iter().all(|word| word.literal)
+            && !matches!(name, "cd" | "pushd")
+            && (!globbed
+                || matches!(
+                    name,
+                    "cat" | "head" | "tail" | "wc" | "ls" | "grep" | "du" | "stat"
+                ))
+            && (name != "uniq" || files <= 1)
+            && read_only_invocation(
+                &words
+                    .iter()
+                    .map(|word| word.value.clone())
+                    .collect::<Vec<_>>(),
+            )
+    })
+}
+
+/// Whether a redirect only reads a literal file (`<`) or silences output:
+/// to `/dev/null`, or onto another descriptor (`2>&1`).
+fn reads_or_silences(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
+    redirect.kind() == "file_redirect"
+        && !has_substitution(redirect)
+        && redirect
+            .children_by_field_name("destination", &mut redirect.walk())
+            .count()
+            == 1
+        && redirect
+            .child_by_field_name("destination")
+            .is_some_and(|destination| {
+                let (value, complete) = literal(destination, source);
+                complete
+                    && match operator(redirect, source).as_str() {
+                        "<" => !value.is_empty(),
+                        ">&" | "<&" => {
+                            value == "-"
+                                || (!value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+                        }
+                        ">" | ">>" | "&>" | "&>>" | ">|" => value == "/dev/null",
+                        _ => false,
+                    }
+            })
+}
+
 /// `text` kept to [`CLIPPED_PATTERN_BYTES`], with `…` when cut.
 fn clipped(text: &str) -> String {
     if text.len() <= CLIPPED_PATTERN_BYTES {
@@ -7651,15 +7864,14 @@ mod regression {
             );
         }
         // Read from the project, as before, where the folder is not known
-        // for sure: after `;`, in a subshell, a `cd` to a folder nobody can
-        // tell or that is not there, a `cd` after another step (which may
-        // have made a link where it goes), a step that may move the shell, a
-        // pipeline, an `||` list, `cd` run by another program, and a word the
-        // shell joins across lines.
+        // for sure: in a subshell, a `cd` to a folder nobody can tell or that
+        // is not there, a `cd` after another step (which may have made a
+        // link where it goes), a step that may move the shell, a pipeline,
+        // an `||` list, `cd` run by another program, and a word the shell
+        // joins across lines.
         let today = analyze("cat ../x", &workspace).external_dirs;
         assert_eq!(today, parent);
         for command in [
-            "cd sub; cat ../x",
             "(cd sub) && cat ../x",
             "cd \"$D\" && cat ../x",
             "cd sub/../src && cat ../x",
@@ -7698,7 +7910,6 @@ mod regression {
             "cd sub && env -C \"$D\" cat ../x",
             "cd sub && bash -c 'cat ../x'",
             "cd sub && sudo pkexec cat ../x",
-            "cd sub; cat ../x | head",
         ] {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
@@ -7706,6 +7917,122 @@ mod regression {
                 "{command}"
             );
         }
+        // Past `;` and line breaks, a `cd` the line opens with into a folder
+        // in the project is followed for the steps that only read, up to the
+        // first that does anything else.
+        for command in [
+            "cd sub; cat ../README.md",
+            "cd sub\ncat ../README.md",
+            "cd sub && wc -l x; cat ../README.md",
+            "cd sub;\n\ncat ../README.md",
+            "cd sub; cat ../README.md | head",
+            "cd sub; git status --short; cat ../README.md",
+            "cd sub; ls; cat < ../README.md 2>/dev/null",
+            "cd sub && cd deeper; cat ../../README.md",
+            "pushd sub > /dev/null; cat ../README.md",
+            "cd a/l\ncat ../../../README.md",
+            "cd sub; cat ../README.md\ncat ../README.md",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        // A path that leaves the project from there still asks.
+        for command in ["cd sub; cat ../../x", "cd sub\ncat ../README.md ../../x"] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                parent,
+                "{command}"
+            );
+        }
+        // Anything else is read from where the shell started, as before: a
+        // `cd` that may fail, does not open the line, runs in the background
+        // or a subshell or leaves the project, and every step from the first
+        // one that writes, deletes, runs another program, may move the shell
+        // or is another `cd`.
+        std::fs::create_dir_all(workspace.join("locked")).unwrap();
+        std::fs::set_permissions(
+            workspace.join("locked"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o000),
+        )
+        .unwrap();
+        let locked =
+            nix::unistd::access(&workspace.join("locked"), nix::unistd::AccessFlags::X_OK).is_err();
+        for command in [
+            "cd nosuch; cat ../x",
+            "true; cd sub; cat ../x",
+            "cd sub & cat ../x",
+            "(cd sub); cat ../x",
+            "cd sub || true; cat ../x",
+            "cd sub; rm -rf ../x",
+            "cd sub; echo x > ../x",
+            "cd sub; cat ../README.md > ../x",
+            "cd sub; touch ../x",
+            "cd sub; make; cat ../x",
+            "cd sub; cat ../README.md | tee ../x",
+            "cd sub; cd deeper; cat ../x",
+            "cd sub && cd nosuch; cat ../x",
+            "cd sub && make; cat ../x",
+            "cd sub; sudo cat ../x",
+            "cd sub; A=1 cat ../x",
+            "cd sub; cat ../x \"$(echo y)\"",
+            "cd sub; cat ../x &",
+            "cd sub; { cat ../x; }",
+            "cd sub; cat <<'EOF' ../x\nbody\nEOF",
+            "cd \"$D\"; cat ../x",
+            "cd -P sub; cat ../x",
+            "pushd sub > ../log.txt; cat ../x",
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                today,
+                "{command}"
+            );
+        }
+        // A `cd` out of the project asks anyway; what follows it is not
+        // read there.
+        let away = analyze(
+            &format!("cd {}; cat x", root.join("outside").display()),
+            &workspace,
+        );
+        assert!(
+            away.paths
+                .iter()
+                .all(|named| !named.path.ends_with("outside/x")),
+            "{away:?}"
+        );
+        if locked {
+            assert_eq!(
+                analyze("cd locked; cat ../x", &workspace).external_dirs,
+                today
+            );
+            // Through `&&` the `cd` must have worked, as before.
+            assert!(
+                analyze("cd locked && cat ../README.md", &workspace)
+                    .external_dirs
+                    .is_empty()
+            );
+        }
+        std::fs::set_permissions(
+            workspace.join("locked"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        // Where Auto's reviewer places a deletion is as before: only a line
+        // that is one `&&` chain is followed.
+        assert_eq!(
+            outside_deletions("cd sub; rm -rf ../x", &workspace, None),
+            vec![OutsideDeletion {
+                path: "../x".into(),
+                placed: false,
+                effect: Effect::Deletes,
+            }]
+        );
+        assert_eq!(
+            analyze("cd sub; cat ../README.md", &workspace).directories,
+            None
+        );
         // Where Auto's reviewer places a deletion is as before: only a line
         // that is one `&&` chain of commands is followed.
         assert_eq!(
