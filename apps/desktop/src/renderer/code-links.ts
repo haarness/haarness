@@ -9,14 +9,16 @@
  * Only a file that is there becomes a link, so code that merely reads like a
  * path (`console.log`, a file the reply only plans to write) stays as it is.
  * The app lists the folder of each file named, through the server's file API,
- * which lists only inside the project or the chat's own folder. Each listing
- * is remembered per project and folder, a few run at a time, and one reply
- * looks up at most `CODE_LINK_LIMITS.paths` paths. A folder is listed again
- * on the occasions a reply's images are read again (project-images.ts): at
- * once after the chat being viewed ends a turn or the file API wrote a file
- * in it, and once `CODE_LINK_LIMITS.recheck` has passed since its last
- * listing for any other change. Until a new listing answers, the last answer
- * stands, so a link never blinks.
+ * which lists only inside the project or the chat's own folder, and keeps of
+ * each listing only whether the names replies asked about are files there. A
+ * few listings run at a time, and one reply looks up at most
+ * `CODE_LINK_LIMITS.paths` paths. A folder is listed again on the occasions a
+ * reply's images are read again (project-images.ts): at once after the chat
+ * being viewed ends a turn or the file API wrote a file in it, and for any
+ * other change once `CODE_LINK_LIMITS.recheck` has passed since its last
+ * listing; a large folder, whose listing is costly over a remote link, at
+ * most once in `CODE_LINK_LIMITS.largeRecheck`. Until a new listing answers,
+ * the last answer stands, so a link never blinks.
  *
  * The code keeps its own element and box: it only gains the link's role, a
  * tab stop and a class, so nothing moves when it becomes a link. Which code
@@ -32,17 +34,22 @@ import type { FileEntry } from "../shared";
 /**
  * The listings that run at once across every reply, how long one may run (in
  * milliseconds) before it ends unanswered, the paths one reply looks up, the
- * folders whose listing is remembered (the oldest goes first), how long a
- * listing stands after a change that waits, and the least time between two
- * listings of a folder, however often it changes.
+ * folders remembered (the oldest goes first) and the names remembered in each,
+ * how long a listing stands after a change that waits (and after a listing
+ * that got no answer), the least time between two listings of a folder,
+ * however often it changes, and the entries above which a folder is large,
+ * with the time a large folder's listing stands whatever changes.
  */
 export const CODE_LINK_LIMITS = {
   parallel: 3,
   wait: 30_000,
   paths: 20,
   folders: 256,
+  names: 200,
   recheck: 20_000,
   again: 1_000,
+  large: 2_000,
+  largeRecheck: 60_000,
 };
 
 /** A file of the project (relative, `/`-separated) and the line to open it at. */
@@ -50,26 +57,30 @@ export type CodeReference = { path: string; line?: number };
 
 /**
  * What inline code is never a file name with: a space, a quote, a backtick,
- * an operator, a glob, a variable, a backslash escape, a query or a fragment.
+ * an operator, a glob, a variable, a query or a fragment, and, unless the
+ * project is on a Windows drive, a backslash (an escape, a regular expression).
  */
-const NOT_A_PATH = /[\s"'`<>{}()|;,*?$!=&^%\\#]/;
+const NOT_A_PATH = /[\s"'`<>{}()|;,*?$!=&^%#]/;
 
 /**
  * The file and line inline code names, when it reads as a path inside the
  * project (one of `roots`) or the chat's own folder: no space or operator,
  * not a flag, a home path, a package or a web address, a colon only before
  * its line or after a drive letter, and a folder in it or a name with an
- * extension (`.env`, `main.rs`; `1.2.3`, `v2.0` and `Makefile` are not).
+ * extension (`.env`, `main.rs`; `1.2.3`, `v2.0` and `Makefile` are not). In a
+ * project on a Windows drive, `src\a.ts` and `C:\proj\src\a.ts` count too.
  * Whether the file is there is looked up separately.
  */
 export function codeReference(code: string, roots: readonly string[]): CodeReference | undefined {
   const text = code.trim();
+  const windows = roots.some((root) => /^[a-z]:[\\/]/i.test(root));
   if (!text || text.length > 300 || NOT_A_PATH.test(text) || /^[-~@+]/.test(text)) return undefined;
+  if (!windows && text.includes("\\")) return undefined;
   const line = /:\d+(?:[:-]\d+)?$/.exec(text);
   const path = line ? text.slice(0, line.index) : text;
-  if (!path || path.endsWith("/") || path.replace(/^[a-z]:\//i, "").includes(":")) return undefined;
-  const name = path.slice(path.lastIndexOf("/") + 1);
-  if (!path.includes("/") && !/\.[\w-]*[a-z][\w-]*$/i.test(name)) return undefined;
+  if (!path || /[\\/]$/.test(path) || path.replace(/^[a-z]:[\\/]/i, "").includes(":")) return undefined;
+  const name = path.split(/[\\/]/).at(-1)!;
+  if (!/[\\/]/.test(path) && !/\.[\w-]*[a-z][\w-]*$/i.test(name)) return undefined;
   for (const root of roots) {
     if (!root) continue;
     const target = linkTarget(text, { root });
@@ -91,16 +102,21 @@ export type FolderLister = (
 ) => Promise<{ entries?: readonly { name: string; directory?: boolean; symlink?: boolean }[] } | undefined>;
 
 /**
- * A listing: the files in the folder (undefined before any answer), the
- * project's changes it was taken after (those that wait for the recheck time
- * and those that do not, and the file API's writes in the folder), and when.
- * `transient` marks one that got no answer (a timeout, a dropped connection):
- * it is taken again as after a change.
+ * A listing: whether each name asked about is a file in the folder, how many
+ * entries it had, the project's changes it was taken after (those that wait
+ * for the recheck time and those that do not, and the file API's writes in
+ * the folder), and when. `transient` marks one that got no answer (a timeout,
+ * a dropped connection): it is taken again once the recheck time after it
+ * ended has passed.
  */
 type Marks = { epoch: number; urgent: number; touch: number; at: number; transient?: boolean };
-type Listing = Marks & { files?: ReadonlySet<string> };
+type Listing = Marks & { answers: ReadonlyMap<string, boolean>; size: number };
+/** A folder: the names replies asked about in it, and its last listing. */
+type Folder = { names: Set<string>; listing?: Listing };
 
-const listings = new Map<string, Listing>();
+const folders = new Map<string, Folder>();
+/** The projects asked about, which a reconnect marks as changed. */
+const scopes = new Set<string>();
 const epochs = new Map<string, number>();
 const urgents = new Map<string, number>();
 const touches = new Map<string, number>();
@@ -109,13 +125,16 @@ const epoch = (scope: string) => epochs.get(scope) ?? 0;
 const urgent = (scope: string) => urgents.get(scope) ?? 0;
 const touch = (entry: string) => touches.get(entry) ?? 0;
 
-function remember(entry: string, listing: Listing) {
-  listings.delete(entry);
-  listings.set(entry, listing);
-  for (const oldest of listings.keys()) {
-    if (listings.size <= CODE_LINK_LIMITS.folders) break;
-    listings.delete(oldest);
+/** The folder kept under `entry`, made the newest; the oldest go when there are too many. */
+function folderAt(entry: string) {
+  const found = folders.get(entry) ?? { names: new Set<string>() };
+  folders.delete(entry);
+  folders.set(entry, found);
+  for (const oldest of folders.keys()) {
+    if (folders.size <= CODE_LINK_LIMITS.folders) break;
+    folders.delete(oldest);
   }
+  return found;
 }
 
 type Changed = (scope: string) => void;
@@ -153,21 +172,40 @@ export function codeFilesChanged(scope: string, change: ProjectFilesChange) {
 onProjectChange(codeFilesChanged);
 
 /**
- * When the folder listed as `listing` is listed again: now, never (nothing
- * changed it), or in so many milliseconds. A file API write in it or the
- * viewed chat's turn end lists it at once, but not twice within
- * `CODE_LINK_LIMITS.again`; another change, or a listing that got no answer,
- * once the recheck time since the last listing ends.
+ * The connection is back (connected again, or caught up after a gap in its
+ * events): its projects' files may have changed meanwhile, so their folders
+ * are listed again as after a turn, a listing that got no answer included.
  */
-function due(scope: string, entry: string, listing: Listing): "fresh" | "now" | number {
-  const since = performance.now() - listing.at;
-  if (listing.touch !== touch(entry) || listing.urgent !== urgent(scope)) {
-    const wait = CODE_LINK_LIMITS.again - since;
-    return wait > 0 ? wait : "now";
+export function codeLinksReconnected(connection: string) {
+  for (const scope of scopes) {
+    if (scope !== connection && !scope.startsWith(connection + "\n")) continue;
+    urgents.set(scope, urgent(scope) + 1);
+    for (const [entry, folder] of folders)
+      if (entry.startsWith(scope + "\n") && folder.listing?.transient)
+        folder.listing = { ...folder.listing, transient: false };
+    tell(scope);
   }
-  if (listing.epoch === epoch(scope) && !listing.transient) return "fresh";
-  const wait = CODE_LINK_LIMITS.recheck - since;
-  return wait > 0 ? wait : "now";
+}
+
+/**
+ * When the folder listed as `listing` is listed again: now, never (nothing
+ * changed it), or in so many milliseconds. A listing that got no answer, once
+ * the recheck time since it ended has passed. A large folder, once
+ * `CODE_LINK_LIMITS.largeRecheck` has passed, whatever changed or was asked.
+ * Otherwise a name asked about that it has no answer for, a file API write in
+ * it or the viewed chat's turn end lists it at once, though not twice within
+ * `CODE_LINK_LIMITS.again`, and another change once the recheck time since the
+ * last listing ends.
+ */
+function due(scope: string, entry: string, listing: Listing, missing: boolean): "fresh" | "now" | number {
+  const since = performance.now() - listing.at;
+  const after = (wait: number) => (wait - since > 0 ? wait - since : "now");
+  if (listing.transient) return after(CODE_LINK_LIMITS.recheck);
+  const urgentChange = missing || listing.touch !== touch(entry) || listing.urgent !== urgent(scope);
+  const change = urgentChange || listing.epoch !== epoch(scope);
+  if (!change) return "fresh";
+  if (listing.size > CODE_LINK_LIMITS.large) return after(CODE_LINK_LIMITS.largeRecheck);
+  return after(urgentChange ? CODE_LINK_LIMITS.again : CODE_LINK_LIMITS.recheck);
 }
 
 /**
@@ -193,15 +231,18 @@ function pump() {
   while (active < CODE_LINK_LIMITS.parallel && waiting.length) waiting.shift()!.start();
 }
 
-const same = (a: ReadonlySet<string> | undefined, b: ReadonlySet<string> | undefined) =>
-  (a?.size ?? 0) === (b?.size ?? 0) && [...(a ?? [])].every((name) => b?.has(name));
+/** Whether the two answer the same: the same names are files. */
+const same = (a: ReadonlyMap<string, boolean> | undefined, b: ReadonlyMap<string, boolean>) =>
+  [...new Set([...(a?.keys() ?? []), ...b.keys()])].every((name) => (a?.get(name) === true) === (b.get(name) === true));
 
 /** Lists `folder` of project `scope` for a reply that waits until `signal` ends, when `due` says so. */
 function ask(scope: string, folder: string, list: FolderLister, signal: AbortSignal) {
   if (signal.aborted) return;
   const entry = key(scope, folder);
-  const current = listings.get(entry);
-  const when = current ? due(scope, entry, current) : "now";
+  const known = folders.get(entry);
+  const current = known?.listing;
+  const missing = !!current && [...(known?.names ?? [])].some((name) => !current.answers.has(name));
+  const when = current ? due(scope, entry, current, missing) : "now";
   if (when === "fresh") return;
   const queued = pending.get(entry);
   if (queued) {
@@ -241,31 +282,42 @@ function ask(scope: string, folder: string, list: FolderLister, signal: AbortSig
       const answer = Promise.resolve()
         .then(() => list(folder))
         .then(
-          (listed): ReadonlySet<string> =>
-            // A link opens only a file the project holds itself: a folder,
-            // and a link that may lead out of the project, are not linked.
-            new Set((listed?.entries ?? []).filter((item) => !item.directory && !item.symlink).map((item) => item.name)),
-          (error: unknown) => (noFolder(error) ? new Set<string>() : UNANSWERED),
+          (listed) => listed?.entries ?? [],
+          (error: unknown) => (noFolder(error) ? [] : UNANSWERED),
         )
         .catch((): typeof UNANSWERED => UNANSWERED);
       void Promise.race([answer, deadline])
-        .then((files) => {
-          const before = listings.get(entry);
-          if (files === UNANSWERED) {
-            // Nothing was learned: the last answer stands, and is asked again on the next occasion.
-            remember(entry, { ...asked, files: before?.files, transient: true });
+        .then((entries) => {
+          const kept = folderAt(entry);
+          const before = kept.listing;
+          if (entries === UNANSWERED) {
+            // Nothing was learned: the last answer stands, and the folder is
+            // listed again once the recheck time after this attempt is up.
+            kept.listing = {
+              ...asked,
+              at: performance.now(),
+              answers: before?.answers ?? new Map(),
+              size: before?.size ?? 0,
+              transient: true,
+            };
             return;
           }
-          remember(entry, { ...asked, files });
-          if (!same(before?.files, files)) tell(scope);
+          // A link opens only a file the project holds itself: a folder, and
+          // a link that may lead out of the project, are not linked. Only the
+          // names asked about are kept.
+          const files = new Set(entries.filter((item) => !item.directory && !item.symlink).map((item) => item.name));
+          const answers = new Map([...kept.names].map((name) => [name, files.has(name)] as const));
+          kept.listing = { ...asked, answers, size: entries.length };
+          if (!same(before?.answers, answers)) tell(scope);
         })
         .finally(() => {
           clearTimeout(timer);
           if (pending.get(entry) === job) pending.delete(entry);
           active--;
           pump();
-          // The project changed while it was listed, or the listing got no
-          // answer: list it again for the replies still waiting, when due.
+          // The project changed while it was listed, a name was asked about
+          // meanwhile, or the listing got no answer: list it again for the
+          // replies still waiting, when due.
           for (const waiter of job.waiters) ask(scope, folder, list, waiter);
         });
     },
@@ -277,21 +329,31 @@ function ask(scope: string, folder: string, list: FolderLister, signal: AbortSig
 
 /**
  * Whether `path` names a file of project `scope`, as far as is known: from
- * the last listing of its folder, or undefined before any answer. Lists the
- * folder (again) when it has no listing yet or the project changed since, as
- * `due` says; `signal` ends when the reply asking is gone, so a listing only
- * it waited for never starts.
+ * the last listing of its folder, or undefined before any answer for it.
+ * Unless `list` is left out (the connection is not up), lists the folder
+ * (again) when it has no answer for the name yet or the project changed since,
+ * as `due` says; `signal` ends when the reply asking is gone, so a listing
+ * only it waited for never starts.
  */
-export function codeFileKnown(scope: string, path: string, list: FolderLister, signal: AbortSignal) {
+export function codeFileKnown(scope: string, path: string, list: FolderLister | undefined, signal: AbortSignal) {
   const { folder, name } = fileFolder(path);
-  const known = listings.get(key(scope, folder))?.files?.has(name);
-  ask(scope, folder, list, signal);
+  const kept = folderAt(key(scope, folder));
+  kept.names.delete(name);
+  kept.names.add(name);
+  for (const oldest of kept.names) {
+    if (kept.names.size <= CODE_LINK_LIMITS.names) break;
+    kept.names.delete(oldest);
+  }
+  scopes.add(scope);
+  const known = kept.listing?.answers.get(name);
+  if (list) ask(scope, folder, list, signal);
   return known;
 }
 
 /** Forgets every listing, and listings in waiting. */
 export function forgetCodeLinks() {
-  listings.clear();
+  folders.clear();
+  scopes.clear();
   epochs.clear();
   urgents.clear();
   touches.clear();
@@ -303,6 +365,12 @@ export function forgetCodeLinks() {
 
 /** The class of inline code the app made a link. */
 export const CODE_LINK = "code-link";
+/**
+ * How long (in milliseconds) a click on a code link waits before it opens,
+ * so the second press of a double click, which selects a word, can call it
+ * off.
+ */
+export const CODE_LINK_CLICK = 300;
 /** The file each code link the app made opens. */
 const linked = new WeakMap<Element, CodeReference>();
 

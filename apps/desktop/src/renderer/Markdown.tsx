@@ -31,6 +31,7 @@ import {
   codeLinkTarget,
   folderLister,
   linkCodeSpans,
+  CODE_LINK_CLICK,
   onCodeLinksChanged,
   pressCodeLink,
 } from "./code-links";
@@ -207,10 +208,14 @@ export function Markdown(props: {
     if (!codeLinks || disposed || !host) return;
     const project = imageProject(app.state);
     if (project) watchProject(project);
-    const list = project && folderLister(project.connection, project.threadId);
+    // Folders are listed only while the connection is up; meanwhile the last answers stand.
+    const list =
+      project && app.state.connectionStatus === "Connected"
+        ? folderLister(project.connection, project.threadId)
+        : undefined;
     linkCodeSpans(host, {
       roots: project?.roots ?? [],
-      known: (path) => (project && list ? codeFileKnown(project.scope, path, list, reading.signal) : false),
+      known: (path) => (project ? codeFileKnown(project.scope, path, list, reading.signal) : false),
       asked: codeAsked,
       live: !written,
     });
@@ -223,19 +228,35 @@ export function Markdown(props: {
     );
   /** Where the pointer went down on a code link, and the selection then. */
   let pressed: { code: Element; mark: SelectionMark } | undefined;
-  /** Opens the file a code link names, on a plain click or Enter. */
+  /** A click's opening, waiting until no second click can follow. */
+  let clicked: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Opens the file a code link names, on a plain click or Enter. Enter opens
+   * at once. A click opens once a double-click could no longer follow, and a
+   * second press calls it off: a double or triple click selects the code's
+   * words, as in plain code, and opens nothing.
+   */
   function openCode(event: MouseEvent | KeyboardEvent) {
     if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return false;
     const code = (event.target as Element).closest?.("code");
     const file = codeLinkTarget(code);
     if (!code || !file || !host.contains(code)) return false;
     event.preventDefault();
-    // A click that ends a selection made in the code (its path, to copy) only selects.
-    if (event instanceof MouseEvent && selectedByClick(code, event, pressed?.code === code ? pressed.mark : undefined))
+    clearTimeout(clicked);
+    if (!(event instanceof MouseEvent)) {
+      openFile(file.path, file.line);
       return true;
-    openFile(file.path, file.line);
+    }
+    // A click that ends a selection made in the code (its path, to copy) only selects.
+    if (event.detail > 1 || selectedByClick(code, event, pressed?.code === code ? pressed.mark : undefined))
+      return true;
+    clicked = setTimeout(() => {
+      clicked = undefined;
+      if (!disposed && code.isConnected && codeLinkTarget(code)) openFile(file.path, file.line);
+    }, CODE_LINK_CLICK);
     return true;
   }
+  onCleanup(() => clearTimeout(clicked));
   /** Images from another host are remembered for the chat they were loaded in. */
   const scope = () => `${app.state.connection?.id ?? ""}\n${app.state.selected ?? ""}`;
   /**
@@ -468,6 +489,10 @@ export function Markdown(props: {
             ? { code, mark: markSelection({ clientX: event.clientX, clientY: event.clientY, currentTarget: code }) }
             : undefined;
         if (pressed) pressCodeLink(pressed.code);
+      }}
+      onMouseDown={(event) => {
+        // The second press of a double click: what it selects stays, and nothing opens.
+        if (event.detail > 1) clearTimeout(clicked);
       }}
       onKeyDown={(event) => {
         if (event.key === "Enter" && !event.repeat && !event.isComposing) openCode(event);

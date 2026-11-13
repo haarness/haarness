@@ -354,6 +354,23 @@ test("inline code that names a project file opens it at its line; other code sta
   await reply.screenshot({ path: join(shots, "code-links-focus-light.png") });
   await page.keyboard.press("Enter");
   await expect(activeTab).toContainText("README.md");
+  // A double click selects a word of it, as in plain code, and opens nothing; a single click
+  // then opens it.
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  await source.dblclick();
+  const word = await page.evaluate(() => getSelection()?.toString() ?? "");
+  expect(word.length).toBeGreaterThan(0);
+  expect("src/a.ts:150").toContain(word);
+  await page.waitForTimeout(700);
+  await expect(activeTab).toContainText("README.md");
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  await source.click();
+  await expect(activeTab).toContainText("a.ts");
+  await expect(activeLine).toHaveText("export const line150 = 150;");
+  await code("README.md").first().focus();
+  await page.keyboard.press("Enter");
+  await expect(activeTab).toContainText("README.md");
   // Selecting part of its path to copy it only selects. (It starts with nothing selected: a
   // press inside a selection would drag its text.)
   await page.evaluate(() => getSelection()?.removeAllRanges());
@@ -389,12 +406,18 @@ test("inline code that names a project file opens it at its line; other code sta
   await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
   await source.scrollIntoViewIfNeeded();
+  await page.mouse.move(0, 0);
   await reply.screenshot({ path: join(shots, "code-links-rtl-dark.png") });
-  await source.hover();
+  // The Arabic line's own link under the pointer.
+  const arabic = code("src/a.ts:150").nth(1);
+  await arabic.hover();
   await reply.screenshot({ path: join(shots, "code-links-hover-rtl-dark.png") });
   await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.mouse.move(0, 0);
   await reply.screenshot({ path: join(shots, "code-links-rtl-light.png") });
+  await arabic.hover();
+  await reply.screenshot({ path: join(shots, "code-links-hover-rtl-light.png") });
   await page.evaluate(() => window.haarness.preferences({ language: "en" }));
   await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
 

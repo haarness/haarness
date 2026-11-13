@@ -4,6 +4,7 @@ import {
   CODE_LINK,
   CODE_LINK_LIMITS,
   codeFileKnown,
+  codeLinksReconnected,
   codeLinkTarget,
   codeReference,
   fileFolder,
@@ -54,6 +55,22 @@ test("inline code that reads as a path in the project names its file and line", 
   ] as const)
     assert.deepEqual(codeReference(code, [root]), line ? { path, line } : { path }, code);
   assert.deepEqual(codeReference("C:/proj/app.ts:3", ["C:\\proj"]), { path: "app.ts", line: 3 });
+});
+
+test("in a project on a Windows drive, paths written with backslashes count too", () => {
+  const windows = ["C:\\Users\\Me\\app"];
+  for (const [code, path, line] of [
+    ["src\\a.ts", "src/a.ts"],
+    ["src\\a.ts:12", "src/a.ts", 12],
+    ["C:\\Users\\Me\\app\\src\\a.ts:7", "src/a.ts", 7],
+    ["c:\\users\\me\\app\\README.md", "README.md"],
+    [".\\main.rs", "main.rs"],
+  ] as const)
+    assert.deepEqual(codeReference(code, windows), line ? { path, line } : { path }, code);
+  for (const code of ["D:\\other\\a.ts", "..\\x.ts", "\\\\server\\share\\a.ts", "src\\", "\\d+\\.ts", "C:\\Users\\Me\\application\\a.ts"])
+    assert.equal(codeReference(code, windows), undefined, code);
+  // Elsewhere a backslash is an escape, not a folder.
+  assert.equal(codeReference("src\\a.ts", [root]), undefined);
 });
 
 test("code that is a command, a call, a word, an address or a path outside the project names no file", () => {
@@ -160,9 +177,8 @@ function project(files: Record<string, string[]>, failing: Record<string, Error>
 test("a file is known once its folder's listing answers, a folder is listed once for all its files, and folders and links do not count", async () => {
   const signal = reply.signal;
   const { list, listed, release } = project({ "": ["README.md", "src/", "linked.md@"], src: ["a.ts", "b.ts"] });
-  assert.equal(codeFileKnown("p", "src/a.ts", list, signal), undefined);
-  assert.equal(codeFileKnown("p", "src/b.ts", list, signal), undefined);
-  assert.equal(codeFileKnown("p", "README.md", list, signal), undefined);
+  for (const path of ["src/a.ts", "src/missing.ts", "README.md", "src", "linked.md"])
+    assert.equal(codeFileKnown("p", path, list, signal), undefined, path);
   await release();
   assert.deepEqual(listed, ["src", ""]);
   assert.equal(codeFileKnown("p", "src/a.ts", list, signal), true);
@@ -178,6 +194,35 @@ test("a file is known once its folder's listing answers, a folder is listed once
   assert.equal(codeFileKnown("q", "src/a.ts", list, signal), undefined);
   await release();
   assert.deepEqual(listed, ["src", "", "gone", "src"]);
+});
+
+test("only the names asked about are kept; one asked later has its folder listed again for it", async () => {
+  CODE_LINK_LIMITS.again = 0;
+  const signal = reply.signal;
+  const { list, listed, release } = project({ src: ["a.ts", "b.ts"] });
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await release();
+  assert.equal(codeFileKnown("p", "src/a.ts", list, signal), true);
+  // b.ts was listed too, but nothing asked about it, so nothing is known of it.
+  assert.equal(codeFileKnown("p", "src/b.ts", list, signal), undefined);
+  await release();
+  assert.equal(codeFileKnown("p", "src/b.ts", list, signal), true);
+  assert.equal(codeFileKnown("p", "src/a.ts", list, signal), true);
+  assert.deepEqual(listed, ["src", "src"]);
+});
+
+test("without a lister, as while the connection is down, the last answers stand and nothing is listed", async () => {
+  const signal = reply.signal;
+  const { list, listed, release } = project({ src: ["a.ts"] });
+  assert.equal(codeFileKnown("p", "src/a.ts", undefined, signal), undefined);
+  await release();
+  assert.deepEqual(listed, []);
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await release();
+  projectChanged("p", true);
+  assert.equal(codeFileKnown("p", "src/a.ts", undefined, signal), true);
+  await release();
+  assert.deepEqual(listed, ["src"]);
 });
 
 test("a few listings run at a time, and one whose replies have all gone never starts", async () => {
@@ -230,6 +275,7 @@ test("the project changing has a folder listed again: at once after a turn or a 
   const stop = onCodeLinksChanged((scope) => told.push(scope));
   try {
     codeFileKnown("p", "src/new.ts", list, signal);
+    codeFileKnown("p", "src/a.ts", list, signal);
     codeFileKnown("p", "docs/x.md", list, signal);
     await release();
     assert.equal(codeFileKnown("p", "src/new.ts", list, signal), false);
@@ -288,6 +334,75 @@ test("a folder is listed at most once in the least time between listings, howeve
   await sleep(350);
   await release();
   assert.equal(listed.length, 2);
+});
+
+test("a listing that runs out of time is not followed at once by another", async () => {
+  CODE_LINK_LIMITS.wait = 30;
+  CODE_LINK_LIMITS.recheck = 200;
+  const signal = reply.signal;
+  const { list, listed, release } = project({ src: ["a.ts"] });
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await sleep(60);
+  // The server never answered: the next listing waits the recheck time from when this one gave up.
+  assert.deepEqual(listed, ["src"]);
+  projectChanged("p");
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await sleep(60);
+  assert.deepEqual(listed, ["src"]);
+  await sleep(220);
+  assert.deepEqual(listed, ["src", "src"]);
+  await release();
+});
+
+test("a large folder is listed again at most once in the longer time, whatever changes", async () => {
+  CODE_LINK_LIMITS.again = 0;
+  CODE_LINK_LIMITS.large = 5;
+  CODE_LINK_LIMITS.largeRecheck = 200;
+  const signal = reply.signal;
+  const { list, listed, release } = project({ logs: Array.from({ length: 8 }, (_, index) => `${index}.log`), src: ["a.ts"] });
+  codeFileKnown("p", "logs/1.log", list, signal);
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await release();
+  assert.equal(codeFileKnown("p", "logs/1.log", list, signal), true);
+  // A turn ends and another name is asked about: the small folder is listed again, the large one waits.
+  projectChanged("p", true);
+  codeFileKnown("p", "logs/2.log", list, signal);
+  codeFileKnown("p", "src/a.ts", list, signal);
+  await release();
+  assert.deepEqual(listed, ["logs", "src", "src"]);
+  assert.equal(codeFileKnown("p", "logs/2.log", list, signal), undefined);
+  await sleep(240);
+  await release();
+  assert.deepEqual(listed, ["logs", "src", "src", "logs"]);
+  assert.equal(codeFileKnown("p", "logs/2.log", list, signal), true);
+});
+
+test("a connection back up has its projects' folders listed again at once, after a listing that got no answer too", async () => {
+  CODE_LINK_LIMITS.again = 0;
+  const signal = reply.signal;
+  const failing: Record<string, Error> = {};
+  const { list, listed, release } = project({ src: ["a.ts"] }, failing);
+  const told: string[] = [];
+  const stop = onCodeLinksChanged((scope) => told.push(scope));
+  try {
+    codeFileKnown("c1\n/chats/trip", "src/a.ts", list, signal);
+    codeFileKnown("c2", "src/a.ts", list, signal);
+    failing.src = new Error("fetch failed");
+    await release();
+    assert.equal(listed.length, 2);
+    delete failing.src;
+    told.length = 0;
+    codeLinksReconnected("c1");
+    assert.deepEqual(told, ["c1\n/chats/trip"], "only that connection's projects look again");
+    codeFileKnown("c1\n/chats/trip", "src/a.ts", list, signal);
+    codeFileKnown("c2", "src/a.ts", list, signal);
+    await release();
+    assert.equal(listed.length, 3);
+    assert.equal(codeFileKnown("c1\n/chats/trip", "src/a.ts", list, signal), true);
+    assert.equal(codeFileKnown("c2", "src/a.ts", list, signal), undefined);
+  } finally {
+    stop();
+  }
 });
 
 /** Just enough of the DOM for linkCodeSpans, which these tests have no browser for. */

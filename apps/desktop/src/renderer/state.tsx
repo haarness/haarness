@@ -119,6 +119,7 @@ import {
   moveInOrder,
   type Ordering,
 } from "./ordering";
+import { codeLinksReconnected } from "./code-links";
 /** Which surface the main column is showing. */
 export type Pane = "chat" | "files" | "diff";
 
@@ -1062,6 +1063,8 @@ function createApp(saved?: Preferences) {
     retryPending = false;
     recovering = false;
     set("connectionStatus", "Connected");
+    // Files may have changed while it was away: the replies' code links look again.
+    codeLinksReconnected(state.connection!.id);
   }
   createEffect(() => applyLanguage(state.preferences.language));
   createEffect(() => {

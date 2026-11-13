@@ -492,18 +492,21 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
   padding: 1px var(--s1);
   border-radius: var(--r-xs);
   border: 1px solid var(--hairline);
+  /* The underline a code link draws, set here so that becoming one turns the
+     line on without fading it in from the code's own colour. */
+  text-decoration-color: var(--accent-edge);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
 }
 /* Inline code that names a file of the project opens it in the Files panel
    (code-links.ts). Its chip stays exactly as it was, so nothing moves when it
    becomes a link: a faint underline in the code's own colour marks it, and
    under the pointer the underline and the chip's edge take that colour, as a
-   link's underline thickens. */
+   link's underline thickens. Keyboard focus rings the chip on its own edge,
+   clear of the words beside it. */
 .markdown code.code-link {
   cursor: pointer;
   text-decoration-line: underline;
-  text-decoration-color: var(--accent-edge);
-  text-decoration-thickness: 1px;
-  text-underline-offset: 2px;
   transition:
     text-decoration-color var(--fast) var(--ease),
     border-color var(--fast) var(--ease);
@@ -514,7 +517,7 @@ html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
 }
 :root:not([data-pointer-focus]) .markdown code.code-link:focus-visible {
   outline: 1px solid var(--muted);
-  outline-offset: 2px;
+  outline-offset: -1px;
 }
 
 /* Fenced code gets a quiet frame, its language, and a Copy control that only
