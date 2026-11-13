@@ -203,6 +203,14 @@ impl OpenAiCompatibleProvider {
     }
 
     /// Reads and writes what listings say of audio in `listed`.
+    /// Shares `routes`, the models whose route sends no thinking
+    /// signatures, with a provider that makes a transport like this one for
+    /// every request, so what one request learnt holds for the next.
+    pub(crate) fn with_unsigned_routes(mut self, routes: crate::notes::UnsignedRoutes) -> Self {
+        self.unsigned_routes = routes;
+        self
+    }
+
     pub(crate) fn with_listed_audio(mut self, listed: ListedAudio) -> Self {
         self.listed_audio = listed;
         self
@@ -1381,8 +1389,6 @@ fn discovered_model_info(
     Some(apply_model_defaults(info, defaults))
 }
 
-/// The text a reasoning detail shows the person: a `reasoning.text`'s text or
-/// a `reasoning.summary`'s summary.
 /// The events of a reply's words, which end the thinking block before them:
 /// text, or the start of structured output the reply is written as.
 fn reply_words(
@@ -1412,6 +1418,8 @@ fn block_signature(detail: &Value) -> Option<&str> {
         .filter(|signature| !signature.is_empty())
 }
 
+/// The text a reasoning detail shows the person: a `reasoning.text`'s text or
+/// a `reasoning.summary`'s summary.
 fn visible_reasoning(detail: &Value) -> Option<&str> {
     match detail.get("type").and_then(Value::as_str) {
         Some("reasoning.text") => detail.get("text"),

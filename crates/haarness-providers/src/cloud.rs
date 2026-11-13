@@ -154,6 +154,9 @@ pub struct AzureProvider {
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
     models: Vec<ModelInfo>,
+    /// Kept across the transport each request makes (see
+    /// [`crate::notes::NoteHold::remembering`]).
+    unsigned_routes: crate::notes::UnsignedRoutes,
 }
 
 impl AzureProvider {
@@ -182,6 +185,7 @@ impl AzureProvider {
             instance,
             auth_store,
             models,
+            unsigned_routes: crate::notes::UnsignedRoutes::default(),
         }
     }
 
@@ -270,6 +274,7 @@ impl ModelProvider for AzureProvider {
             headers,
         })
         .with_model_info(self.models.clone())
+        .with_unsigned_routes(Arc::clone(&self.unsigned_routes))
         .stream(request, cancel)
         .await
     }
@@ -283,6 +288,10 @@ pub struct CopilotProvider {
     /// The API each discovered model speaks. A model missing here (catalog
     /// not loaded, or configured by hand) goes to Chat Completions.
     wires: std::sync::RwLock<HashMap<String, CopilotWire>>,
+    /// Copilot sends Claude's thinking without signatures: kept across the
+    /// transport each request makes (see
+    /// [`crate::notes::NoteHold::remembering`]).
+    unsigned_routes: crate::notes::UnsignedRoutes,
 }
 
 /// Which Copilot API a model answers on, from its catalog entry's
@@ -327,6 +336,7 @@ impl CopilotProvider {
             models,
             live_models: crate::live_models::LiveModels::default(),
             wires: std::sync::RwLock::default(),
+            unsigned_routes: crate::notes::UnsignedRoutes::default(),
         }
     }
 
@@ -492,6 +502,7 @@ impl ModelProvider for CopilotProvider {
             headers,
         })
         .with_model_info(self.live_models.get(&self.models))
+        .with_unsigned_routes(Arc::clone(&self.unsigned_routes))
         .stream(request, cancel)
         .await
     }
@@ -1014,6 +1025,71 @@ mod tests {
             provider.request_headers(true, "user").unwrap().map()["copilot-vision-request"],
             "true"
         );
+    }
+
+    /// Copilot drops the signatures of Claude's thinking, so no note can be
+    /// told there: once a request showed it, the model's next request through
+    /// the provider streams its thinking at once, though each request makes
+    /// a transport of its own.
+    #[tokio::test]
+    async fn copilot_remembers_that_it_sends_no_signatures() {
+        async fn answer() -> ([(axum::http::HeaderName, &'static str); 1], String) {
+            let body = [
+                json!({"choices":[{"index":0,"delta":{"reasoning_text":"Checking."}}]}),
+                json!({"choices":[{"index":0,"delta":{"content":"Done."},"finish_reason":"stop"}]}),
+            ]
+            .iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .chain(["data: [DONE]\n\n".to_owned()])
+            .collect();
+            ([(CONTENT_TYPE, "text/event-stream")], body)
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/chat/completions", post(answer)),
+            )
+            .await
+            .unwrap()
+        });
+        let mut native = instance("github-copilot", format!("http://{address}"), "gh-token");
+        native.models = vec!["claude-sonnet-5.5".into()];
+        let provider = CopilotProvider::new(native, None);
+        let mut waited = Vec::new();
+        for _ in 0..2 {
+            let events: Vec<_> = provider
+                .stream(
+                    ProviderRequest {
+                        model: "claude-sonnet-5.5".into(),
+                        system: "test".into(),
+                        messages: vec![ProviderMessage::Text {
+                            role: "user".into(),
+                            content: "check".into(),
+                        }],
+                        tools: Vec::new(),
+                        reasoning_effort: None,
+                        parameters: haarness_core::RequestParameters::default(),
+                        output_schema: None,
+                    },
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            assert!(
+                events.iter().any(|event| matches!(event, Ok(ProviderEvent::ReasoningDelta(text)) if text == "Checking.")),
+                "{events:?}"
+            );
+            waited.push(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Ok(ProviderEvent::ContentStarted))),
+            );
+        }
+        assert_eq!(waited, [true, false]);
     }
 
     async fn copilot_catalog(State(capture): State<Capture>, headers: HeaderMap) -> Json<Value> {
