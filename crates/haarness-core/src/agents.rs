@@ -93,6 +93,82 @@ fn profile(
     }
 }
 
+/// The words before the custom subagents the `task` description lists.
+const SUBAGENT_LIST_OPENING: &str = "\n\nCustom subagents you can name in agent:";
+
+/// The words before the custom subagents named without a description.
+const SUBAGENT_NAMES_OPENING: &str = "\nMore custom subagents: ";
+
+/// The most bytes the custom subagent list may take (about 1K tokens): it
+/// goes with every request of a chat that can start subagents.
+pub const SUBAGENT_LIST_BUDGET: usize = 4 * 1024;
+
+/// What the `task` description ends with in a chat (not in a subagent):
+/// the custom agents it can start, one line each, so the model learns they
+/// exist without the person naming them. Those of mode `subagent` or `all`
+/// (the default) that are not hidden, sorted by id; a description is one
+/// line, cut to 250 characters. A list over [`SUBAGENT_LIST_BUDGET`]
+/// describes the first ones and names the rest, counting those that do not
+/// fit. The same agents give the same bytes, so the cached prompt holds.
+/// Empty when there is none.
+#[must_use]
+pub fn subagent_list(agents: &[crate::CustomAgent]) -> String {
+    let mut listed = agents
+        .iter()
+        .filter(|agent| {
+            !agent.hidden
+                && matches!(agent.mode.as_deref(), None | Some("subagent" | "all"))
+                && !agent.id.is_empty()
+                && !agent.id.chars().any(char::is_control)
+        })
+        .collect::<Vec<_>>();
+    if listed.is_empty() {
+        return String::new();
+    }
+    listed.sort_by(|left, right| left.id.cmp(&right.id));
+    listed.dedup_by(|left, right| left.id == right.id);
+    let lines = listed
+        .iter()
+        .map(|agent| {
+            let description = agent.description.split_whitespace().collect::<Vec<_>>();
+            if description.is_empty() {
+                format!("\n- {}", agent.id)
+            } else {
+                let description = description.join(" ");
+                format!(
+                    "\n- {}: {}",
+                    agent.id,
+                    crate::tool_catalog::shortened(&description)
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut text = String::from(SUBAGENT_LIST_OPENING);
+    if text.len() + lines.iter().map(String::len).sum::<usize>() <= SUBAGENT_LIST_BUDGET {
+        text.push_str(&lines.concat());
+        return text;
+    }
+    // Describe agents while a quarter of the budget is left to name the rest.
+    let room = SUBAGENT_LIST_BUDGET / 4;
+    let mut count = 0;
+    for line in &lines {
+        if text.len() + line.len() > SUBAGENT_LIST_BUDGET - room {
+            break;
+        }
+        text.push_str(line);
+        count += 1;
+    }
+    let rest = listed[count..]
+        .iter()
+        .map(|agent| agent.id.as_str())
+        .collect::<Vec<_>>();
+    let names_room = SUBAGENT_LIST_BUDGET - text.len() - SUBAGENT_NAMES_OPENING.len() - 1;
+    text.push_str(SUBAGENT_NAMES_OPENING);
+    text.push_str(&crate::tool_catalog::some_names(&rest, names_room));
+    text.push('.');
+    text
+}
+
 #[must_use]
 pub fn system_prompt_for(agent: &str) -> String {
     let role = match agent {
@@ -185,6 +261,100 @@ fn runtime_context_prompt(context: &SystemPromptContext<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn agent(id: &str, description: &str, mode: Option<&str>, hidden: bool) -> crate::CustomAgent {
+        crate::CustomAgent {
+            id: id.into(),
+            description: description.into(),
+            mode: mode.map(str::to_owned),
+            hidden,
+            ..crate::CustomAgent::default()
+        }
+    }
+
+    #[test]
+    fn the_subagent_list_names_the_agents_a_chat_can_start() {
+        let agents = [
+            agent(
+                "reviewer",
+                "Review diffs after code changes",
+                Some("subagent"),
+                false,
+            ),
+            agent("docs", "Write and check docs", None, false),
+            agent("helper", "Helps anywhere", Some("all"), false),
+            agent("lead", "A primary agent", Some("primary"), false),
+            agent("quiet", "Hidden from pickers", Some("subagent"), true),
+            agent("odd", "An unknown mode", Some("sometimes"), false),
+            agent("bare", "", Some("subagent"), false),
+        ];
+        assert_eq!(
+            subagent_list(&agents),
+            "\n\nCustom subagents you can name in agent:\n- bare\n- docs: Write and check docs\n- helper: Helps anywhere\n- reviewer: Review diffs after code changes"
+        );
+        // The order the agents were defined in does not change the bytes.
+        let mut reversed = agents.to_vec();
+        reversed.reverse();
+        assert_eq!(subagent_list(&reversed), subagent_list(&agents));
+        // None to list: nothing is added.
+        assert_eq!(subagent_list(&agents[3..6]), "");
+        assert_eq!(subagent_list(&[]), "");
+    }
+
+    #[test]
+    fn a_subagent_description_is_one_line_of_bounded_length() {
+        let long = "word ".repeat(200);
+        let agents = [
+            agent(
+                "lines",
+                "First line\nsecond line\r\n\n  third\tline  ",
+                None,
+                false,
+            ),
+            agent("long", &long, None, false),
+            agent("broken\nid", "A name across two lines", None, false),
+        ];
+        let list = subagent_list(&agents);
+        let lines = list.trim_start().lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            [
+                "Custom subagents you can name in agent:",
+                "- lines: First line second line third line",
+                &format!(
+                    "- long: {}",
+                    crate::tool_catalog::shortened(long.trim_end())
+                ),
+            ]
+        );
+        assert_eq!(lines[2].chars().count(), "- long: ".len() + 250);
+    }
+
+    #[test]
+    fn a_long_subagent_list_stays_within_its_budget() {
+        let description = "Reviews one part of the code base with care. ".repeat(4);
+        let agents = (0..300)
+            .map(|index| agent(&format!("agent-{index:03}"), &description, None, false))
+            .collect::<Vec<_>>();
+        let list = subagent_list(&agents);
+        assert!(list.len() <= SUBAGENT_LIST_BUDGET, "{}", list.len());
+        let (described, rest) = list.split_once(SUBAGENT_NAMES_OPENING).unwrap();
+        let shown = described.matches("\n- agent-").count();
+        assert!(shown > 5, "{shown}");
+        // The next ones by name, the rest counted.
+        let (ids, counted) = rest.trim_end_matches('.').rsplit_once(" and ").unwrap();
+        let ids = ids.split(", ").collect::<Vec<_>>();
+        assert_eq!(ids[0], format!("agent-{shown:03}"));
+        assert_eq!(
+            counted,
+            format!("{} more", agents.len() - shown - ids.len())
+        );
+        // Many names and no room to describe any: still within the budget.
+        let many = (0..2_000)
+            .map(|index| agent(&format!("agent-{index:04}"), "", None, false))
+            .collect::<Vec<_>>();
+        assert!(subagent_list(&many).len() <= SUBAGENT_LIST_BUDGET);
+    }
 
     #[test]
     fn contextual_prompt_is_provider_neutral_and_stable() {

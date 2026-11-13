@@ -604,3 +604,73 @@ async fn hook_context_memory_saves_and_a_new_day_keep_earlier_requests_a_prefix(
         .count();
     assert_eq!(hidden, 3);
 }
+
+/// A side question asked before any turn (or after a restart, with no
+/// prepared request to reuse) offers the `task` tool as the chat's turns
+/// do, the custom subagents it names included, so the two share a prefix.
+#[tokio::test]
+async fn a_cold_side_question_offers_the_task_tool_the_turns_offer() {
+    let provider = Arc::new(Probe::default());
+    let tools = Arc::new(Registry(vec![Arc::new(HeldTool {
+        entered: CancellationToken::new(),
+        release: CancellationToken::new(),
+        writes: Arc::new(AtomicUsize::new(0)),
+        name: "task",
+    }) as Arc<dyn Tool>]));
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            provider.clone() as Arc<dyn ModelProvider>
+        ])),
+        tools,
+        EventBus::new(64),
+        PathBuf::from("."),
+        String::new(),
+        RuntimeConfig {
+            custom_agents: vec![haarness_core::CustomAgent {
+                id: "reviewer".into(),
+                description: "Review diffs after code changes".into(),
+                mode: Some("subagent".into()),
+                ..haarness_core::CustomAgent::default()
+            }],
+            ..RuntimeConfig::default()
+        },
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("parity".into()),
+            model: Some("fixture".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    runtime
+        .btw(
+            thread.id,
+            BtwRequest {
+                request_id: RequestId::new(),
+                question: "Who can I delegate to?".into(),
+                history: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let turn = runtime.start_turn(thread.id, request()).await.unwrap();
+    done(&runtime, turn.id).await;
+    let requests = provider.requests.lock().unwrap().clone();
+    let task = |request: &ProviderRequest| {
+        request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "task")
+            .map(|tool| tool.description.clone())
+            .unwrap()
+    };
+    assert!(side(&requests[0]) && !side(&requests[1]));
+    assert!(
+        task(&requests[1]).ends_with("\n- reviewer: Review diffs after code changes"),
+        "{}",
+        task(&requests[1])
+    );
+    assert_eq!(task(&requests[0]), task(&requests[1]));
+}

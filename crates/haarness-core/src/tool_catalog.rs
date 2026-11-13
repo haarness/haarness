@@ -390,7 +390,7 @@ pub fn some_names(names: &[&str], room: usize) -> String {
 
 /// `description` cut to [`SKILL_DESCRIPTION_LIMIT`] characters, ending
 /// with an ellipsis where it was cut.
-fn shortened(description: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn shortened(description: &str) -> std::borrow::Cow<'_, str> {
     if description.chars().count() <= SKILL_DESCRIPTION_LIMIT {
         return description.into();
     }

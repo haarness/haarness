@@ -4024,11 +4024,21 @@ impl AgentRuntime {
         if let Some(mode) = *self.lazy_tool_mode.read() {
             lazy_tools.mode = mode;
         }
+        let agents = self.live_agents.read().clone();
         let mut response = select_tools(
             match thread_id {
                 Some(thread) => components.tools.list_for(thread),
                 None => components.tools.list(),
-            },
+            }
+            .into_iter()
+            .map(|tool| {
+                if tool.name == "task" {
+                    task_with_subagents(tool, &agents)
+                } else {
+                    tool
+                }
+            })
+            .collect(),
             &components.config.tool_availability,
             &live,
             &lazy_tools,
@@ -5310,11 +5320,20 @@ impl AgentRuntime {
                         .and_then(|model| model.context_window),
                 );
             let tools = self.chat_tools(&thread, &components).await?;
+            let agents = self.live_agents.read().clone();
             let selection = select_tools(
                 catalog
                     .iter()
                     .filter(|tool| !engine.disables_tool(&tool.name) && !is_goal_tool(&tool.name))
                     .cloned()
+                    // As the chat's own turns send it.
+                    .map(|tool| {
+                        if tool.name == "task" && thread.parent_id.is_none() {
+                            task_with_subagents(tool, &agents)
+                        } else {
+                            tool
+                        }
+                    })
                     .collect(),
                 &components.config.tool_availability,
                 &self.tool_availability.read(),
@@ -12265,12 +12284,10 @@ impl RunnerTask {
                             && (tool.name != "apply_patch"
                                 || crate::tool_catalog::writes_patches(&model))
                     })
-                    .map(|tool| {
-                        if self.depth > 0 && tool.name == "task" {
-                            foreground_task(tool)
-                        } else {
-                            tool
-                        }
+                    .map(|tool| match (tool.name.as_str(), self.depth) {
+                        ("task", 0) => task_with_subagents(tool, &self.live_agents.read()),
+                        ("task", _) => foreground_task(tool),
+                        _ => tool,
                     })
                     .collect::<Vec<_>>();
                 // Code Mode reaches only the MCP and browser tools this
@@ -16958,6 +16975,19 @@ The call waits for the child's result. \
 Usage rules: (1) Multiple task calls emitted in one assistant response already start concurrently, including foreground tasks. \
 (2) Once work is delegated, the parent must not duplicate it. For concurrent sibling tasks, define mutually exclusive file/topic boundaries and tell each child to stay within its assigned scope; if cross-scope evidence is needed, the child should report that dependency for the parent to reconcile instead of auditing a sibling's scope. For a broad audit, split distinct scopes across foreground task calls in one response, wait for their concurrently produced results, and synthesize directly from those reports. After children return, do not re-read every delegated file or repeat their searches merely for reassurance. Inspect a specific delegated location only when a report lacks evidence required for the answer or two reports conflict, and keep that validation narrowly targeted. Cross-cutting tests that validate the combined conclusion are allowed. \
 Omit task_id for each independent assignment, including separate scopes in a parallel audit. Reusing one task_id never creates separate agents: pass it only to continue that exact child session; when it is still running, the new prompt joins it.";
+
+/// The `task` tool as a chat sees it: its description ends with the custom
+/// subagents it can start (see [`crate::agents::subagent_list`]). The list
+/// follows the agents defined, not the chat's own rules, so chats of one
+/// workspace send the same bytes and share the cached prompt.
+fn task_with_subagents(
+    mut tool: crate::ToolDefinition,
+    agents: &[crate::CustomAgent],
+) -> crate::ToolDefinition {
+    tool.description
+        .push_str(&crate::agents::subagent_list(agents));
+    tool
+}
 
 /// The `task` tool as a subagent sees it: without `background`, and with a
 /// description that does not offer it, since a subagent's own task always
