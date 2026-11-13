@@ -2446,6 +2446,92 @@ mod tests {
         assert_eq!(navigate.unavailable_to(other).as_deref(), Some(NOT_OFFERED));
     }
 
+    /// While lazy loading is on, a chat whose model has a large window is
+    /// sent the six browser tools that open, read and work a page (the
+    /// names must stay those of the real catalog), and the rest wait in the
+    /// browser group; a small window waits for them all, and with lazy
+    /// loading off every one is sent, as before.
+    #[test]
+    fn a_large_window_keeps_a_few_browser_tools_at_hand_and_defers_the_rest() {
+        use haarness_protocol::LazyToolMode;
+        let definitions = super::tools(BrowserBroker::new())
+            .iter()
+            .map(|tool| tool.definition())
+            .collect::<Vec<_>>();
+        let select = |mode, window| {
+            haarness_core::select_tools(
+                definitions.clone(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &haarness_core::LazyToolSettings {
+                    mode,
+                    ..haarness_core::LazyToolSettings::default()
+                },
+                &std::collections::HashSet::new(),
+                Some(window),
+                false,
+            )
+        };
+        let names = |tools: &[ToolDefinition]| {
+            tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>()
+        };
+        let large = select(LazyToolMode::Auto, 200_000);
+        assert!(large.response.lazy_active);
+        assert_eq!(
+            names(&large.advertised),
+            [
+                "browser_click",
+                "browser_fill",
+                "browser_navigate",
+                "browser_screenshot",
+                "browser_snapshot",
+                "browser_tabs_open",
+                haarness_core::LOAD_TOOL_NAME,
+            ]
+        );
+        assert!(
+            large
+                .response
+                .tools
+                .iter()
+                .all(|entry| entry.group == "browser" && entry.group_title == "Browser")
+        );
+        let tokens = |advertised: bool| {
+            large
+                .response
+                .tools
+                .iter()
+                .filter(|entry| entry.advertised == advertised)
+                .map(|entry| entry.estimated_tokens)
+                .sum::<u64>()
+        };
+        // About 1.5K tokens go with each request; some 7K wait.
+        assert!((1_200..1_800).contains(&tokens(true)), "{}", tokens(true));
+        assert!((6_500..7_600).contains(&tokens(false)), "{}", tokens(false));
+        assert_eq!(
+            large
+                .response
+                .tools
+                .iter()
+                .filter(|entry| !entry.advertised)
+                .count(),
+            definitions.len() - 6
+        );
+        // A local model's 32K: all of them wait, as before.
+        assert_eq!(
+            names(&select(LazyToolMode::Auto, 32_768).advertised),
+            [haarness_core::LOAD_TOOL_NAME]
+        );
+        // Lazy loading off: every one is sent.
+        assert_eq!(
+            select(LazyToolMode::Off, 200_000).advertised.len(),
+            definitions.len()
+        );
+    }
+
     // ---- Chrome extension hosts ----------------------------------------
 
     use crate::browser_policy::{ChromeAccess, ChromeSite};

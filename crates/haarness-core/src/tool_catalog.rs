@@ -164,6 +164,10 @@ fn classify(name: &str) -> Classification {
         ("computer", "Computer use", true)
     } else if matches!(name, "image_generate" | "video_generate") {
         ("media", "Media", false)
+    } else if name.starts_with("browser_") {
+        // Offered only while a browser can serve the chat. The few that
+        // open, read and work a page stay; the rest wait to be loaded.
+        ("browser", "Browser", BROWSER_RESIDENT.contains(&name))
     } else if name.starts_with("ext__")
         || name.starts_with("mcp__")
         || matches!(
@@ -196,11 +200,24 @@ fn classify(name: &str) -> Classification {
     }
 }
 
-/// The window at or under which a chat leaves the browser's tools out until
-/// the model loads them, as it does other optional groups. Chrome's and
-/// Desktop's browser take some 45 schemas, about 9K tokens: a quarter of a
-/// local model's 32K, which Haarness's other instructions and tools already
-/// share with the chat, for tools a small model seldom needs.
+/// The browser tools a chat keeps while lazy loading is on, above
+/// [`SMALL_WINDOW`]: enough to open a page, read it, click, type and see
+/// it, about 1.5K tokens. The browser's other 38 tools (some 7K tokens of
+/// tabs, frames, files, network, profiling and more) wait to be loaded.
+const BROWSER_RESIDENT: [&str; 6] = [
+    "browser_tabs_open",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_fill",
+    "browser_screenshot",
+];
+
+/// The window at or under which a chat leaves all the browser's tools out
+/// until the model loads them, as it does other optional groups. Chrome's
+/// and Desktop's browser take some 45 schemas, about 9K tokens: a quarter of
+/// a local model's 32K, which Haarness's other instructions and tools
+/// already share with the chat, for tools a small model seldom needs.
 pub const SMALL_WINDOW: u64 = 65_536;
 
 /// The window at or under which only the tools that read, search, change and
@@ -226,8 +243,9 @@ fn tight(context_window: Option<u64>) -> bool {
     context_window.is_some_and(|window| window > 0 && window <= TIGHT_WINDOW)
 }
 
-/// [`classify`] for a model with `context_window`: the browser's tools are
-/// optional in a small window, and all but the project's own in a tight one.
+/// [`classify`] for a model with `context_window`: all the browser's tools
+/// are optional in a small window, and all but the project's own in a tight
+/// one.
 fn classify_in(name: &str, context_window: Option<u64>) -> Classification {
     let window = context_window.filter(|window| *window > 0);
     if name.starts_with("browser_") && window.is_some_and(|window| window <= SMALL_WINDOW) {
@@ -1146,6 +1164,84 @@ mod tests {
                 .any(|tool| tool.name == "browser_snapshot")
         );
         assert!(!large.response.lazy_active);
+    }
+
+    /// While lazy loading is on, a large window keeps the browser tools that
+    /// open, read and work a page, and the others wait in the browser group:
+    /// asked for the group, the loader loads twenty and names the rest, and
+    /// one called by name is read back from the history after a restart.
+    #[test]
+    fn a_large_window_keeps_a_few_browser_tools_and_defers_the_rest() {
+        let mut definitions = BROWSER_RESIDENT
+            .iter()
+            .map(|name| definition(name, &"a browser tool ".repeat(20)))
+            .collect::<Vec<_>>();
+        definitions.extend((0..30).map(|index| {
+            definition(
+                &format!("browser_more_{index:02}"),
+                &"another browser tool ".repeat(20),
+            )
+        }));
+        definitions.push(definition("read", "read a file"));
+        let select = |window| {
+            select_tools(
+                definitions.clone(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &LazyToolSettings::default(),
+                &HashSet::new(),
+                Some(window),
+                false,
+            )
+        };
+        let large = select(200_000);
+        assert!(large.response.lazy_active);
+        assert_eq!(
+            names(&large.advertised),
+            [
+                "browser_click",
+                "browser_fill",
+                "browser_navigate",
+                "browser_screenshot",
+                "browser_snapshot",
+                "browser_tabs_open",
+                "read",
+                LOAD_TOOL_NAME
+            ]
+        );
+        let matches = find_deferred_tools(&definitions, &large.response, &["browser".into()]);
+        assert_eq!(matches.found.len(), MAX_LOAD_MATCHES);
+        assert_eq!(matches.left_out.len(), 10);
+        assert!(
+            matches
+                .found
+                .iter()
+                .chain(&matches.left_out)
+                .all(|id| id.starts_with("browser_more_"))
+        );
+        // A window of 64K or less: every browser tool waits, as before.
+        assert_eq!(
+            names(&select(SMALL_WINDOW).advertised),
+            ["read", LOAD_TOOL_NAME]
+        );
+        // A deferred browser tool the model called by name stays loaded
+        // after a restart; one always at hand needs no record.
+        assert!(!is_essential_tool("browser_more_00") && is_essential_tool("browser_click"));
+        let tools = definitions
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let items = [
+            ran("1", "browser_more_07", false, Value::Null),
+            ran("2", "browser_click", false, Value::Null),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        assert_eq!(
+            promoted_in(&items, &tools),
+            HashSet::from(["browser_more_07".to_owned()])
+        );
     }
 
     /// An 8K window, or an account allowing 8,000 tokens a minute: the tools

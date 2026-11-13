@@ -94,6 +94,35 @@ test("tools group by source, and built-in tools by the catalog's groups with fam
   assert.ok(OPEN_GROUP_LIMIT >= 1);
 });
 
+test("the browser's own catalog group reads as the family Core held, right after Core", () => {
+  // Servers that keep a few browser tools at hand and defer the rest list them all in a browser group.
+  const browser = ["back", "click", "cpu_analyze", "fill", "tabs_open"].map((name) =>
+    tool("browser_" + name, "native", "", ["browser", "Browser"]),
+  );
+  const parts = (tools: ToolCatalogEntry[]) =>
+    toolGroups(tools)[0].groups!.map((part) => [part.key, part.name, part.prefix, part.tools.map((item) => item.id)]);
+  assert.deepEqual(
+    parts([
+      tool("write"),
+      tool("memory_save", "native", "", ["memory", "Memory"]),
+      tool("agent_manage", "native", "", ["agents", "Agents"]),
+      ...browser,
+    ]),
+    [
+      ["builtin/core", "Core", undefined, ["write"]],
+      ["builtin/browser", "Browser", "browser", ["browser_back", "browser_click", "browser_cpu_analyze", "browser_fill", "browser_tabs_open"]],
+      ["builtin/agents", "Agents", undefined, ["agent_manage"]],
+      ["builtin/memory", "Memory", undefined, ["memory_save"]],
+    ],
+  );
+  // Without Core, it comes first; however few, it is still its own part.
+  assert.deepEqual(parts([tool("memory_save", "native", "", ["memory", "Memory"]), ...browser.slice(0, 2)]), [
+    ["builtin/browser", "Browser", "browser", ["browser_back", "browser_click"]],
+    ["builtin/memory", "Memory", undefined, ["memory_save"]],
+  ]);
+  assert.deepEqual(toolGroupKeys(toolGroups(browser), "browser_fill"), ["builtin", "builtin/browser"]);
+});
+
 test("a tool reads by a careful title and the first sentence of its description", () => {
   assert.equal(toolTitle(tool("apply_patch")), "Apply patch");
   assert.equal(toolTitle(tool("bash")), "Bash");
