@@ -17,8 +17,8 @@ a loop too. The script proves that:
 5. the person's own relative entry meets the project's link to a history file: left out, with a line in the
    prompt and a warning;
 6. the folders' `AGENTS.md` that the scripted `read` calls find attach as before, a link to a personal note
-   included, except a link out of the project to a file that is not a Markdown note and one over 40 KiB,
-   which the log warns about once each.
+   and one to `~/.claude/CLAUDE.md` that a dotfiles folder holds included, except a link out of the project
+   to a file that is not Markdown and one over 40 KiB, which the log warns about once each.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-instruction-globs.py
 """
@@ -165,8 +165,14 @@ try:
     for folder, target in [("note", "note.md"), ("linked", "nested-history")]:
         (project / folder).mkdir()
         os.symlink(f"../../outside/{target}", project / folder / "AGENTS.md")
+    # The person's CLAUDE.md as a dotfiles manager links it into place.
+    write(home / ".dotfiles/claude/.claude/CLAUDE.md", "MARK_NESTED_STOWED\n")
+    (home / ".claude").mkdir()
+    os.symlink(home / ".dotfiles/claude/.claude/CLAUDE.md", home / ".claude/CLAUDE.md")
+    (project / "stowed").mkdir()
+    os.symlink(home / ".claude/CLAUDE.md", project / "stowed/AGENTS.md")
     write(project / "large/AGENTS.md", "MARK_NESTED_LARGE " * 2500)
-    for folder in ["kept", "note", "linked", "large"]:
+    for folder in ["kept", "note", "stowed", "linked", "large"]:
         write(project / folder / "code.rs", f"fn {folder}() {{}} // CODE_{folder.upper()}\n")
         READS.append(f"{folder}/code.rs")
 
@@ -191,7 +197,7 @@ try:
         assert mark not in json.dumps(REQUESTS), mark
     assert prompt.count("MARK_PROJECT_ABSOLUTE") == 1, prompt[-3000:]
     for entry in outside_entries:
-        line = f"{project / 'haarness.json'}: ignored instructions {json.dumps(entry)}: it points outside the project"
+        line = f"{project / 'haarness.json'}: ignored instructions {json.dumps(entry)}: "
         rows = [row for row in logs.splitlines() if line in row]
         assert len(rows) == 1 and " WARN " in rows[0], (entry, [row for row in logs.splitlines() if "ignored instructions" in row])
     assert str(data / "config/haarness.json") in logs, "the notice says where the person's own files go"
@@ -204,7 +210,7 @@ try:
     assert len(rows) == 1 and " WARN " in rows[0], logs[-3000:]
     check("an AGENTS.md over 40 KiB is left out of the prompt with a warning")
 
-    linked_out = "a link leads it out of the project to a file that is not a plain Markdown note"
+    linked_out = "a link leads it out of the project to a file that is not Markdown"
     assert "MARK_HISTORY" not in json.dumps(REQUESTS)
     assert f"[Instruction file omitted: {project / 'CONVENTIONS.md'} ({linked_out})]" in prompt, prompt[-3000:]
     rows = [row for row in logs.splitlines() if f"skipped instructions {project / 'CONVENTIONS.md'}: {linked_out}" in row]
@@ -214,9 +220,9 @@ try:
 
     results = next(body for body in REQUESTS if "tool_result" in json.dumps(body.get("messages", [])[-1:]))
     sent = json.dumps(results["messages"])
-    for folder in ["KEPT", "NOTE", "LINKED", "LARGE"]:
+    for folder in ["KEPT", "NOTE", "STOWED", "LINKED", "LARGE"]:
         assert f"CODE_{folder}" in sent, (folder, sent[:3000])
-    for mark in ["MARK_NESTED_KEPT", "MARK_NESTED_NOTE"]:
+    for mark in ["MARK_NESTED_KEPT", "MARK_NESTED_NOTE", "MARK_NESTED_STOWED"]:
         assert sent.count(mark) == 1, (mark, sent[:3000])
     for mark in ["MARK_NESTED_OUTSIDE", "MARK_NESTED_LARGE"]:
         assert mark not in json.dumps(REQUESTS), mark
@@ -225,8 +231,9 @@ try:
         rows = [line for line in left_out if str(project / name / "AGENTS.md") in line]
         assert len(rows) == 1 and reason in rows[0] and " WARN " in rows[0], (name, left_out)
     assert len(left_out) == 2, left_out
-    check("reads attach a folder's AGENTS.md as before, a link to a personal note included, but not a link out "
-          "to a file that is no note or one over 40 KiB, each warned about once")
+    check("reads attach a folder's AGENTS.md as before, links to a personal note and to a dotfiles-managed "
+          "~/.claude/CLAUDE.md included, but not a link out to a file that is not Markdown or one over 40 KiB, "
+          "each warned about once")
 
     # The person's glob loads for any project: a plain one, on the echo provider.
     plain = root / "plain"
