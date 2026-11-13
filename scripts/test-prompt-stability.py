@@ -684,6 +684,10 @@ for line in sys.stdin:
         assert all(found == told[0] for found in told) and len(told[0]) == 1, told
         assert '\n- docs (MCP server): 25 tools\n' in told[0][0], told[0][0]
         assert 'browser' not in told[0][0], told[0][0]
+        # It goes before the prompt that opened its turn, so the person's words stay the last.
+        opening = texts(sent[0])
+        assert opening.index(told[0][0]) + 1 == opening.index('FIRST many turn'), opening
+        assert last_typed(sent[0]) == 'FIRST many turn' and opening[-1] == 'FIRST many turn', opening[-3:]
         (EVIDENCE / 'deferred-tools-reminder.txt').write_text(told[0][0] + '\n')
         # The chat's task tool names the custom subagent it can start, the same bytes each turn.
         task = next(tool['description'] for tool in sent[0]['tools'] if tool['name'] == 'task')

@@ -100,14 +100,17 @@ and writes reports locally; it never opens the server's databases directly.
   (`synthetic`) user message after the prompt with whatever applies, each in a
   `<system-reminder>` block: `Today's date is now YYYY-MM-DD.` when the
   computer's local date differs from the date the model last saw (the system
-  prompt names the chat's start date, in local time), where the tools lazy
-  loading defers come from (each MCP server and extension with its count,
-  then Haarness's own groups) when that is not what the model last saw, the
-  project memory index when it is not the one the model last saw (the first turn, after a save, or
+  prompt names the chat's start date, in local time), the project memory index
+  when it is not the one the model last saw (the first turn, after a save, or
   after a compaction summarized it away; `The durable project memory index is
   now empty.` when it was cleared), and the turn's `UserPromptSubmit` and
-  command hook context. What the model last saw is read back from the stored
-  messages it can still see, so later requests replay them unchanged. The
+  command hook context. Where the tools lazy loading defers come from (each
+  MCP server and extension with its count, then Haarness's own groups), when
+  that is not what the model last saw, is a hidden message of its own stored
+  just before those, and requests send it just before the prompt that opened
+  its turn, so the person's words stay the last of it. What the model last
+  saw is read back from the stored messages it can still see, so later
+  requests replay them unchanged. The
   logic lives in `crates/haarness-core/src/turn_context.rs`. A compaction
   summary request has its own system prompt and no tools, so it shares no
   cached prefix and nothing reads its prefix back: providers that mark cache

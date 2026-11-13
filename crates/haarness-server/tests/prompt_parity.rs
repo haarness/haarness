@@ -881,7 +881,7 @@ async fn tools_every_turn_has_are_told_and_those_the_words_switch_on_are_not() {
                 text,
                 synthetic: true,
                 ..
-            } => Some(text),
+            } if text.contains("More tools wait to be loaded") => Some(text),
             _ => None,
         })
         .collect::<Vec<_>>();
