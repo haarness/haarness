@@ -1,5 +1,5 @@
 import DOMPurify from "dompurify";
-import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "./link-target";
+import { cssReferencesOutside, loadsNetworkPath, parsedAddress, sanitizedLink } from "./link-target";
 import type { MarkdownPatch } from "./markdown-project";
 import { holdRemoteImages, madeHere, markMade, replyAttribute, replyIds, type RemoteImageLabels } from "./remote-images";
 import { holdProjectImages, type ProjectImageLabels, type ShownImage } from "./project-images";
@@ -27,8 +27,9 @@ const purifier = DOMPurify(window);
 const written = new WeakMap<Element, string>();
 // Every link click goes through Markdown.tsx, which decides where it may go
 // and says why a link does not open. So a link keeps a `file:` address, a
-// file share's address or a Windows drive path, none of which can run
-// script, instead of losing it to the default rules; any other scheme those
+// file share's address, a Windows drive path or a top-level file with its
+// line (`README.md:3`), none of which can run script, instead of losing it
+// to the default rules (`sanitizedLink`); any other scheme those
 // rules would drop (`javascript:`, `vscode:`) becomes a placeholder that only
 // says it does not open. No other address may name a network path: an image
 // there would reach its host as soon as the reply is drawn, on Windows with
@@ -56,9 +57,9 @@ purifier.addHook("uponSanitizeAttribute", (node, data) => {
   }
   if (node.nodeName === "A" && data.attrName === "href") {
     const value = parsedAddress(data.attrValue);
-    if (/^(?:(?:file|smb|afp|nfs|cifs|dav|davs|webdav|webdavs):|[a-z]:[\\/])/i.test(value))
-      data.forceKeepAttr = true;
-    else if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^(?:https?|mailto):/i.test(value)) {
+    const rule = sanitizedLink(value);
+    if (rule === "keep") data.forceKeepAttr = true;
+    else if (rule === "placeholder") {
       // A kept attribute is not rewritten from `attrValue`, so replace it here.
       (node as Element).setAttribute("href", "unsupported:");
       data.forceKeepAttr = true;

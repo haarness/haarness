@@ -395,13 +395,41 @@ export function projectChanged(scope: string, now = false) {
   if (now) urgents.set(scope, urgent(scope) + 1);
   else epochs.set(scope, epoch(scope) + 1);
   for (const entry of [...askers.keys()]) if (entry.startsWith(`${scope}\n`)) askAgain(entry, now);
+  told(scope, { now });
 }
 
 /** The file was written: replies showing it, and the next one to draw it, read it again at once. */
 export function projectFileWritten(scope: string, path: string) {
-  const entry = key(scope, path.replace(/\\/g, "/").replace(/^\.\//, ""));
+  const file = path.replace(/\\/g, "/").replace(/^\.\//, "");
+  const entry = key(scope, file);
   touches.set(entry, (touches.get(entry) ?? 0) + 1);
   askAgain(entry, true);
+  told(scope, { now: true, path: file });
+}
+
+/** A change of a project's files: a file written (`path`), or any change, to look at again `now` or after the recheck time. */
+export type ProjectFilesChange = { now: boolean; path?: string };
+const changeListeners = new Set<(scope: string, change: ProjectFilesChange) => void>();
+
+/**
+ * Calls `listener` on each change `projectChanged` and `projectFileWritten`
+ * hear, so what else a reply shows of the project's files (the files its
+ * inline code names, code-links.ts) is looked at again on the same occasions
+ * as its images.
+ */
+export function onProjectChange(listener: (scope: string, change: ProjectFilesChange) => void): () => void {
+  changeListeners.add(listener);
+  return () => changeListeners.delete(listener);
+}
+
+function told(scope: string, change: ProjectFilesChange) {
+  for (const listener of [...changeListeners]) {
+    try {
+      listener(scope, change);
+    } catch {
+      /* One listener's trouble never keeps the others from hearing. */
+    }
+  }
 }
 
 /**
@@ -910,6 +938,8 @@ export interface ImageProject {
   /** A remote host's project, whose files the window coming to the front does not change. */
   remote: boolean;
   viewed: (thread?: string | null, root?: string | null) => ReturnType<typeof inViewedTree>;
+  /** In This computer, the folder a chat (or the chat a subagent works for) works in. */
+  folderOf?: (thread?: string | null) => string | undefined;
 }
 
 /** The project of the window's open chat, read from the app's state when an event arrives. */
@@ -933,6 +963,7 @@ export function imageProject(state: {
       threadId: state.selected,
       remote: false,
       viewed,
+      folderOf: (thread) => chatFolderOf(state.threads, thread),
     };
   }
   return { connection: connection.id, scope: connection.id, roots: projectRoots(connection), remote: connection.remote, viewed };
@@ -953,19 +984,40 @@ export function chatFolderOf(
   return undefined;
 }
 
+/**
+ * What a server event of `connection` concerns: in This computer, a chat's
+ * own folder, which a write names (`directory`) and any other event names by
+ * its chat, or the chat its subagent works for (`folderOf`, the chats'
+ * folders); anywhere else, or for a chat whose folder is not known, the
+ * connection's project.
+ */
+export function eventScope(
+  connection: string,
+  event: { payload?: unknown; threadId?: string | null; rootThreadId?: string | null },
+  folderOf?: ImageProject["folderOf"],
+): { scope: string; folder?: string } {
+  const named = (event.payload as { directory?: unknown } | undefined)?.directory;
+  const folder =
+    typeof named === "string" && named ? named : folderOf?.(event.rootThreadId ?? event.threadId) || undefined;
+  return folder ? { scope: connection + "\n" + folder, folder } : { scope: connection };
+}
+
 let watching = false;
 /** Each project's folders, which a tool's absolute path is read against. */
 const roots = new Map<string, string[]>();
+/** For each connection of This computer, the folders its chats work in. */
+const chatFolders = new Map<string, NonNullable<ImageProject["folderOf"]>>();
 /** Images read from a project are read again once its files may have changed (see `projectEvent`). */
 function watchProjects(viewed: ImageProject["viewed"]) {
   if (watching) return;
   watching = true;
   window.haarness.onEvent((event) => {
     if (event.kind !== "server" || !event.connection) return;
-    // A write in a chat's own folder (This computer) names its file from there.
-    const folder = (event.data as { payload?: { directory?: unknown } }).payload?.directory;
-    const scope = typeof folder === "string" && folder ? event.connection + "\n" + folder : event.connection;
-    applyProjectEvent(scope, event.data as Parameters<typeof projectEvent>[0], viewed, roots.get(event.connection));
+    // In This computer, a chat's event concerns its own folder, where its
+    // tools write and whose files its replies name.
+    const data = event.data as Parameters<typeof projectEvent>[0];
+    const { scope, folder } = eventScope(event.connection, data, chatFolders.get(event.connection));
+    applyProjectEvent(scope, data, viewed, folder ? [windowsPath(folder)] : roots.get(event.connection));
   });
   window.addEventListener("focus", windowFocused);
 }
@@ -1000,11 +1052,20 @@ async function decodeImage(data: string): Promise<boolean | "large"> {
   }
 }
 
-/** Reads one image of the project for a view that shows it until `signal` aborts. */
-export function readProjectImage(project: ImageProject, path: string, signal: AbortSignal) {
+/**
+ * Follows what changes `project`'s files: the server's events, and for a
+ * project on this computer the window coming back to the front.
+ */
+export function watchProject(project: ImageProject) {
   watchProjects(project.viewed);
+  if (project.folderOf) chatFolders.set(project.connection, project.folderOf);
   if (!project.threadId) roots.set(project.connection, project.roots);
   if (!project.remote) localProject(project.scope);
+}
+
+/** Reads one image of the project for a view that shows it until `signal` aborts. */
+export function readProjectImage(project: ImageProject, path: string, signal: AbortSignal) {
+  watchProject(project);
   requestProjectImage(project.scope, path, reader(project.connection, project.threadId), signal, decodeImage);
 }
 

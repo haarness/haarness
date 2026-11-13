@@ -119,6 +119,7 @@ import {
   moveInOrder,
   type Ordering,
 } from "./ordering";
+import { codeLinksConnection } from "./code-links";
 /** Which surface the main column is showing. */
 export type Pane = "chat" | "files" | "diff";
 
@@ -154,6 +155,8 @@ interface State extends Live {
   preferences: Preferences;
   version: string;
   platform: string;
+  /** The longest a double click may take on this computer, in milliseconds. */
+  doubleClick: number;
   /** The window fills its screen (macOS then hides its window buttons). */
   fullScreen: boolean;
   /** What Desktop knows about a newer version (see updates.ts). */
@@ -254,6 +257,7 @@ function createApp(saved?: Preferences) {
     preferences: { ...defaults, ...saved },
     version: "",
     platform: "",
+    doubleClick: 500,
     fullScreen: false,
     update: { method: "off", status: "idle", checking: false },
     selected: "",
@@ -1063,6 +1067,16 @@ function createApp(saved?: Preferences) {
     recovering = false;
     set("connectionStatus", "Connected");
   }
+  // Replies' code links list a project's folders only while its connection
+  // is up, and look again once it is back (code-links.ts).
+  let linksConnection: string | undefined;
+  createEffect(() => {
+    const id = state.connection?.id;
+    const connected = state.connectionStatus === "Connected";
+    if (linksConnection && linksConnection !== id) codeLinksConnection(linksConnection, false);
+    linksConnection = id;
+    if (id) codeLinksConnection(id, connected);
+  });
   createEffect(() => applyLanguage(state.preferences.language));
   createEffect(() => {
     if (
@@ -2592,6 +2606,7 @@ function createApp(saved?: Preferences) {
     applyRecent(value.recent);
     set("version", value.version);
     set("platform", value.platform);
+    if (value.doubleClick) set("doubleClick", value.doubleClick);
     set("fullScreen", !!value.fullScreen);
     if (value.update) set("update", reconcile(value.update));
     set("chatHomeAt", value.chatHome);

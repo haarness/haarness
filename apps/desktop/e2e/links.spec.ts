@@ -33,6 +33,7 @@ test.beforeAll(async () => {
     join(workspace, "src/a.ts"),
     Array.from({ length: 200 }, (_, index) => `export const line${index + 1} = ${index + 1};`).join("\n") + "\n",
   );
+  await writeFile(join(workspace, "README.md"), "# Link fixture\n\nThe third line.\n");
   await writeFile(join(workspace, "run.command"), "#!/bin/sh\necho linked script ran\n", { mode: 0o755 });
   await writeFile(
     join(workspace, "diagram.svg"),
@@ -121,6 +122,7 @@ test("file links in a reply open project files in the Files panel; others say wh
   await page.locator(".sessions").getByRole("button", { name: "Link fixture", exact: true }).click();
   const links = [
     "[source](src/a.ts:150)",
+    "[readme](README.md:3)",
     "[script](run.command)",
     "[diagram](diagram.svg)",
     "[guide](docs/guide.md)",
@@ -148,6 +150,11 @@ test("file links in a reply open project files in the Files panel; others say wh
   await expect(page.locator(".file-preview .cm-activeLine")).toBeInViewport();
   await link("absolute").click();
   await expect(page.locator(".file-preview .cm-activeLine")).toHaveText("export const line7 = 7;");
+  // A file at the project's top with its line, whose name reads like a scheme.
+  await expect(link("readme")).toHaveAttribute("href", "README.md:3");
+  await link("readme").click();
+  await expect(activeTab).toContainText("README.md");
+  await expect(page.locator(".file-preview .cm-activeLine")).toHaveText("The third line.");
 
   // A script opens as text, and an SVG only in the sandboxed preview.
   await link("script").click();
@@ -245,6 +252,201 @@ test("a link's label goes where its link points, and tags written in a reply sta
   }
   await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
   // Nothing went to the mail app or the web.
+  expect((await calls()).shell).toEqual([["openExternal", "mailto:me@example.test?subject=Hi"]]);
+  expect(errors).toEqual([]);
+});
+
+test("inline code that names a project file opens it at its line; other code stays as written, and nothing moves", async ({}, info) => {
+  test.setTimeout(180000);
+  const shots = process.env.HAARNESS_SCREENSHOTS ?? info.outputPath("");
+  const thread = await client.createThread({ title: "Code fixture", provider: "echo", model: "echo-1" });
+  await page.locator(".sessions").getByRole("button", { name: "Code fixture", exact: true }).click();
+  const text = [
+    "Line 150 of `src/a.ts:150` sets it, `README.md` says why, and `src/later.ts` will hold the rest.",
+    "Not files: `src/missing.ts`, `npm test`, `foo()`, `../outside.txt`, `~/notes.md` and [`src/a.ts`](docs/guide.md).",
+    "```\nsrc/a.ts:7\n```",
+    // Right to left, as a reply in Arabic names a file.
+    "يضبط `src/a.ts:150` القيمة، ويشرح `README.md` السبب.",
+  ].join("\n\n");
+  const turn = await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text });
+  await client.waitTurn(turn.id);
+  const reply = page.locator(".message.assistant .markdown").filter({ hasText: "Echo: Line 150" });
+  await expect(reply).toHaveCount(1);
+  const code = (name: string) => reply.getByRole("link", { name, exact: true });
+  const source = code("src/a.ts:150").first();
+  await expect(source).toBeVisible();
+  await expect(code("README.md").first()).toBeVisible();
+  // Only those, named again in the Arabic line: missing files, commands, paths outside, a code
+  // block and code inside the reply's own link stay as the reply wrote them.
+  await expect(reply.locator("code.code-link")).toHaveCount(4);
+  await expect(reply.locator("code[role=link]")).toHaveCount(4);
+  for (const plain of ["src/missing.ts", "npm test", "foo()", "../outside.txt", "~/notes.md", "src/later.ts"])
+    await expect(reply.locator("code", { hasText: plain }).first(), plain).not.toHaveAttribute("role", "link");
+  await expect(reply.locator("pre code")).not.toHaveAttribute("role", "link");
+  await expect(reply.getByRole("link", { name: "src/a.ts", exact: true })).toHaveAttribute("href", "docs/guide.md");
+  // A link the app made has no address: nothing to copy, drag or open elsewhere.
+  await expect(source).not.toHaveAttribute("href");
+
+  // Its chip keeps every measure, at rest and under the pointer; only its underline and edge colour say it opens.
+  const boxes = () =>
+    source.evaluate((element) => {
+      const box = () => {
+        const rect = element.getBoundingClientRect();
+        const line = element.closest("p")!.getBoundingClientRect();
+        return [rect.x, rect.y, rect.width, rect.height, line.height];
+      };
+      const linked = box();
+      element.classList.remove("code-link");
+      const plain = box();
+      element.classList.add("code-link");
+      return { linked, plain, cursor: getComputedStyle(element).cursor };
+    });
+  const resting = await boxes();
+  expect(resting.linked).toEqual(resting.plain);
+  expect(resting.cursor).toBe("pointer");
+  for (const theme of ["light", "dark"] as const) {
+    await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await page.mouse.move(0, 0);
+    await reply.screenshot({ path: join(shots, `code-links-${theme}.png`) });
+    await source.hover();
+    await expect.poll(() => source.evaluate((element) => getComputedStyle(element).textDecorationColor)).toBe(
+      await source.evaluate((element) => getComputedStyle(element).color),
+    );
+    const hovered = await boxes();
+    expect(hovered.linked).toEqual(resting.linked);
+    await reply.screenshot({ path: join(shots, `code-links-hover-${theme}.png`) });
+  }
+  await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+
+  // A right-click on it offers no address to copy, only the word it selects.
+  const input = page.getByRole("textbox", { name: "Message", exact: true });
+  const menus = () =>
+    app.evaluate(() => {
+      const record = globalThis as { haarnessContextMenus?: Electron.Menu[] };
+      const built = record.haarnessContextMenus ?? [];
+      record.haarnessContextMenus = [];
+      return built.map((menu) => menu.items.map((item) => (item.type === "separator" ? "-" : item.label)));
+    });
+  await menus();
+  await source.click({ button: "right" });
+  await input.click({ button: "right" });
+  let built: string[][] = [];
+  await expect.poll(async () => (built = [...built, ...(await menus())]).at(-1) ?? []).toContain("Paste");
+  for (const menu of built.slice(0, -1)) expect(menu.filter((label) => label !== "Copy")).toEqual([]);
+
+  // A click opens the file at its line in the Files panel, the word the right-click selected
+  // notwithstanding.
+  const activeTab = page.locator(".file-tabs .active");
+  const activeLine = page.locator(".file-preview .cm-activeLine");
+  await source.click();
+  await expect(activeTab).toContainText("a.ts");
+  await expect(activeLine).toHaveText("export const line150 = 150;");
+  await expect(activeLine).toBeInViewport();
+  await expect(toast()).toHaveCount(0, { timeout: 10_000 });
+  await page.screenshot({ path: join(shots, "code-links-files-panel-light.png") });
+  // Enter on it from the keyboard does too.
+  await page.mouse.move(0, 0);
+  await source.focus();
+  await page.keyboard.press("Tab");
+  await expect(code("README.md").first()).toBeFocused();
+  await reply.screenshot({ path: join(shots, "code-links-focus-light.png") });
+  await page.keyboard.press("Enter");
+  await expect(activeTab).toContainText("README.md");
+  // A double click selects a word of it, as in plain code, and opens nothing; a single click
+  // then opens it.
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  await source.dblclick();
+  const word = await page.evaluate(() => getSelection()?.toString() ?? "");
+  expect(word.length).toBeGreaterThan(0);
+  expect("src/a.ts:150").toContain(word);
+  await page.waitForTimeout(700);
+  await expect(activeTab).toContainText("README.md");
+  // So does a slow one, its second press well inside the wait (this computer's double-click
+  // time, at most 400 ms).
+  const interval = Math.min((await page.evaluate(() => window.haarness.boot())).doubleClick ?? 500, 400);
+  const gap = Math.max(50, Math.min(300, interval - 100));
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  const middle = (await source.boundingBox())!;
+  const point = { x: middle.x + middle.width / 2, y: middle.y + middle.height / 2 };
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(gap);
+  await page.mouse.down({ clickCount: 2 });
+  await page.mouse.up({ clickCount: 2 });
+  const slow = await page.evaluate(() => getSelection()?.toString() ?? "");
+  expect(slow.length).toBeGreaterThan(0);
+  expect("src/a.ts:150").toContain(slow);
+  await page.waitForTimeout(interval + 300);
+  await expect(activeTab).toContainText("README.md");
+  // A press elsewhere right after a click calls its opening off.
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  await source.click();
+  const prose = (await reply.locator("p").first().boundingBox())!;
+  await page.mouse.click(prose.x + 4, prose.y + 8);
+  await page.waitForTimeout(interval + 300);
+  await expect(activeTab).toContainText("README.md");
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  await source.click();
+  await expect(activeTab).toContainText("a.ts");
+  await expect(activeLine).toHaveText("export const line150 = 150;");
+  await code("README.md").first().focus();
+  await page.keyboard.press("Enter");
+  await expect(activeTab).toContainText("README.md");
+  // Selecting part of its path to copy it only selects. (It starts with nothing selected: a
+  // press inside a selection would drag its text.)
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  const at = (await source.boundingBox())!;
+  await page.mouse.move(at.x + 4, at.y + at.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(at.x + at.width - 4, at.y + at.height / 2, { steps: 6 });
+  await page.mouse.up();
+  const selected = await page.evaluate(() => getSelection()?.toString() ?? "");
+  expect(selected.length).toBeGreaterThan(4);
+  expect("src/a.ts:150").toContain(selected);
+  await page.waitForTimeout(300);
+  await expect(activeTab).toContainText("README.md");
+  // The keyboard's tab stop is back once the press ends.
+  await expect(source).toHaveAttribute("tabindex", "0");
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+
+  // A file made later links once the chat's next turn ends.
+  await writeFile(join(workspace, "src/later.ts"), "export const later = true;\n");
+  const next = await client.startTurn(thread.id, { requestId: crypto.randomUUID(), text: "And now?" });
+  await client.waitTurn(next.id);
+  await expect(page.locator(".message.assistant .markdown").last()).toContainText("Echo: And now?");
+  await expect(code("src/later.ts")).toBeVisible();
+  await code("src/later.ts").click();
+  await expect(activeTab).toContainText("later.ts");
+
+  // Dark, and right to left.
+  await page.evaluate(() => window.haarness.preferences({ theme: "dark" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await source.click();
+  await expect(activeLine).toHaveText("export const line150 = 150;");
+  await page.screenshot({ path: join(shots, "code-links-files-panel-dark.png") });
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await source.scrollIntoViewIfNeeded();
+  await page.mouse.move(0, 0);
+  await reply.screenshot({ path: join(shots, "code-links-rtl-dark.png") });
+  // The Arabic line's own link under the pointer.
+  const arabic = code("src/a.ts:150").nth(1);
+  await arabic.hover();
+  await reply.screenshot({ path: join(shots, "code-links-hover-rtl-dark.png") });
+  await page.evaluate(() => window.haarness.preferences({ theme: "light" }));
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.mouse.move(0, 0);
+  await reply.screenshot({ path: join(shots, "code-links-rtl-light.png") });
+  await arabic.hover();
+  await reply.screenshot({ path: join(shots, "code-links-hover-rtl-light.png") });
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+
+  // Nothing reached the system.
   expect((await calls()).shell).toEqual([["openExternal", "mailto:me@example.test?subject=Hi"]]);
   expect(errors).toEqual([]);
 });

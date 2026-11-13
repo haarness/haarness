@@ -75,13 +75,41 @@ export function cssReferencesOutside(value: string) {
   return /["']|image-set\(|\bsrc\(|\bimage\(|cross-fade\(|element\(/i.test(rest);
 }
 
+/**
+ * A file at the top of the project with its line, `README.md:3`,
+ * `main.rs:42-50` or `a.ts:12:4`: a name with a dot in it and no folder, then
+ * a colon and only the line. Its name reads like a URL scheme, but no scheme
+ * is followed by a bare line number, so this names a file; `tel:123` has no
+ * dot, and `x-acme.settings:privacy` names more than a line, so both stay
+ * schemes.
+ */
+export function topFileLine(address: string) {
+  return /^[a-z][a-z\d+-]*(?:\.[a-z\d+-]+)+:\d+(?:[:-]\d+)?$/i.test(address);
+}
+
+/**
+ * What Markdown's sanitizer does with a link's address, read as the URL
+ * parser reads it (markdown-dom.ts): "keep" it as written (a `file:` URL, a
+ * file share, a Windows drive path or a top-level file with its line, none of
+ * which can run script, and all of which the default rules would drop), make
+ * it a "placeholder" that only says it does not open (any other scheme but
+ * web and mail), or leave it to the default rules (undefined).
+ */
+export function sanitizedLink(address: string): "keep" | "placeholder" | undefined {
+  if (/^(?:(?:file|smb|afp|nfs|cifs|dav|davs|webdav|webdavs):|[a-z]:[\\/])/i.test(address) || topFileLine(address))
+    return "keep";
+  if (/^[a-z][a-z\d+.-]*:/i.test(address) && !/^(?:https?|mailto):/i.test(address)) return "placeholder";
+  return undefined;
+}
+
 export function linkTarget(href: string, place: LinkPlace): LinkTarget {
   const raw = parsedAddress(href);
   if (!raw || raw.startsWith("#")) return { kind: "none" };
   if (networkPath(raw)) return refused("network");
   const scheme = /^([a-z][a-z\d+.-]*):/i.exec(raw)?.[1]?.toLowerCase();
-  // A drive letter (`C:\`, `c:/`) starts a Windows path, not a scheme.
-  if (scheme && !(scheme.length === 1 && /^[a-z]:[\\/]/i.test(raw))) {
+  // A drive letter (`C:\`, `c:/`) starts a Windows path, not a scheme, and
+  // so does a top-level file's name before its line.
+  if (scheme && !(scheme.length === 1 && /^[a-z]:[\\/]/i.test(raw)) && !topFileLine(raw)) {
     if (scheme === "http" || scheme === "https" || scheme === "mailto")
       return { kind: "web", url: raw };
     if (scheme === "file") return fileURL(raw, place);

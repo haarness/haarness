@@ -387,6 +387,8 @@ export interface Bridge {
     servers: SavedServer[];
     version: string;
     platform: string;
+    /** The longest a double click may take on this computer, in milliseconds. */
+    doubleClick?: number;
     /** Whether the window fills its screen, which hides macOS's window buttons. */
     fullScreen: boolean;
     /** This computer's home folder. */

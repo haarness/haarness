@@ -187,9 +187,16 @@ test("chats without a project: a ready first launch, a folder of their own on on
   const threads = async () => (await client!.listThreads({ archived: true })) as (Thread & { directory?: string })[];
   const one = (await threads()).find((thread) => thread.directory === first);
   expect(one, "the chat reports its folder").toBeTruthy();
+  // Desktop starts the turn only once the chat is made and opened, so no
+  // turn running yet does not mean it ran: wait for its tool's result.
+  await expect
+    .poll(
+      async () =>
+        JSON.stringify((await client!.listItems(one!.id)).find((item) => item.data.type === "tool_result")?.data ?? ""),
+      { timeout: 60000 },
+    )
+    .toContain(first);
   await settled(one!.id);
-  const ran = (await client.listItems(one!.id)).find((item) => item.data.type === "tool_result");
-  expect(JSON.stringify(ran?.data)).toContain(first);
   await expect(chatFolder()).toHaveAccessibleName("Chat folder: tool-bash-command-pwd");
   await expect(page.locator(".titlebar-caption")).toHaveText("This computer");
 
@@ -885,4 +892,44 @@ test("with the terminal open, opening another chat by pointer or keyboard leaves
   await page.waitForTimeout(800);
   await expect(composer()).toBeFocused();
   for (const pty of await client!.listPtys()) await client!.deletePty(pty.id);
+});
+
+test("inline code in a chat of This computer links the files of the chat's own folder, and nothing outside it, as its turns end", async () => {
+  await launch();
+  await expect(composer()).toBeEnabled();
+  await send("Plan the trip");
+  await ready();
+  client = homeClient();
+  let folder = "";
+  await expect
+    .poll(async () => (folder = ((await client!.listThreads()) as (Thread & { directory?: string })[])[0]?.directory ?? ""))
+    .not.toBe("");
+  const one = (await client.listThreads())[0]!;
+  // The window's own first turn has ended.
+  await expect(page.locator(".transcript .markdown").filter({ hasText: "Echo: Plan the trip" })).toHaveCount(1);
+  await settled(one.id);
+  await writeFile(join(folder, "plan.md"), "# Plan\nsecond line\n");
+  // Another chat's file, and a link in this chat's folder that leads to it.
+  await mkdir(join(folder, "..", "other"), { recursive: true });
+  await writeFile(join(folder, "..", "other", "notes.md"), "theirs\n");
+  await symlink(join(folder, "..", "other", "notes.md"), join(folder, "sneaky.md"));
+  const turn = await client.startTurn(one.id, {
+    requestId: crypto.randomUUID(),
+    text: "Read `plan.md:2` and `budget.csv`, not `../other/notes.md` or `sneaky.md`.",
+  });
+  await client.waitTurn(turn.id);
+  const reply = page.locator(".transcript .markdown").filter({ hasText: "Echo: Read" });
+  const plan = reply.getByRole("link", { name: "plan.md:2", exact: true });
+  await expect(plan).toBeVisible();
+  for (const plain of ["budget.csv", "../other/notes.md", "sneaky.md"])
+    await expect(reply.locator("code", { hasText: plain }), plain).not.toHaveAttribute("role", "link");
+  // A file made in the chat's folder links in the reply on screen once the chat's next turn ends.
+  await writeFile(join(folder, "budget.csv"), "day,cost\n");
+  const next = await client.startTurn(one.id, { requestId: crypto.randomUUID(), text: "Done?" });
+  await client.waitTurn(next.id);
+  await expect(page.locator(".transcript .markdown").filter({ hasText: "Echo: Done?" })).toHaveCount(1);
+  await expect(reply.getByRole("link", { name: "budget.csv", exact: true })).toBeVisible();
+  await plan.click();
+  await expect(page.locator(".file-tabs .active")).toContainText("plan.md");
+  await expect(page.locator(".file-preview .cm-activeLine")).toHaveText("second line");
 });
