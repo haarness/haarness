@@ -2551,7 +2551,9 @@ mod tests {
                 &large.response,
                 &[query.to_owned()],
             );
-            assert_eq!(&matches.found, ids, "{query}");
+            let mut found = matches.found.clone();
+            found.sort();
+            assert_eq!(&found, ids, "{query}");
             assert!(matches.left_out.is_empty(), "{query}");
         }
         let tokens = |advertised: bool| {
@@ -2591,10 +2593,27 @@ mod tests {
                 assert!(resident.contains(&name.as_str()), "{message}");
             }
         }
-        // A local model's 32K: all of them wait, as before.
+        // A local model's 32K: all of them wait, as before, and asked for
+        // the browser group the loader brings first what a page flow needs.
+        let small = select(LazyToolMode::Auto, 32_768);
+        assert_eq!(names(&small.advertised), [haarness_core::LOAD_TOOL_NAME]);
+        let matches = haarness_core::find_deferred_tools(
+            &definitions,
+            &small.response,
+            &["browser".to_owned()],
+        );
+        assert_eq!(matches.found.len(), 20);
+        for tool in resident.iter().chain(&["browser_wait", "browser_scroll"]) {
+            assert!(matches.found.iter().any(|id| id == tool), "{tool}");
+        }
         assert_eq!(
-            names(&select(LazyToolMode::Auto, 32_768).advertised),
-            [haarness_core::LOAD_TOOL_NAME]
+            matches.left_out,
+            [
+                "browser_drag",
+                "browser_forward",
+                "browser_stop",
+                "browser_tabs_close"
+            ]
         );
         // Lazy loading off: every one is sent.
         assert_eq!(

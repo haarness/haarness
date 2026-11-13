@@ -14364,11 +14364,20 @@ impl RunnerTask {
             .iter()
             .map(|query| names.own(query).to_owned())
             .collect();
-        let catalog = self
+        let mut catalog = self
             .last_tool_catalog
             .lock()
             .clone()
             .ok_or_else(|| CoreError::Conflict("tool catalog is not ready".into()))?;
+        // An MCP tool's server as it is named (`a__b`'s tools read
+        // `mcp__a__b__…`), so a query naming the server finds its tools.
+        for entry in &mut catalog.tools {
+            if entry.source.starts_with("mcp:")
+                && let Some(server) = self.tools.tool_server(&entry.id)
+            {
+                entry.source = format!("mcp:{server}");
+            }
+        }
         if !catalog.lazy_active {
             return Err(CoreError::Invalid(
                 "lazy tool loading is not active for this provider round".into(),

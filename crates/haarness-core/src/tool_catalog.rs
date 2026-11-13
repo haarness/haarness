@@ -226,6 +226,31 @@ const BROWSER_RESIDENT: [&str; 11] = [
     "browser_screenshot",
 ];
 
+/// The browser tools a page flow needs next after [`BROWSER_RESIDENT`], in
+/// that order: a window of 64K or less defers all 24 of the browser group,
+/// and asked for it, the loader brings these 20 first.
+const BROWSER_NEXT: [&str; 9] = [
+    "browser_wait",
+    "browser_scroll",
+    "browser_select",
+    "browser_check",
+    "browser_fill_form",
+    "browser_back",
+    "browser_hover",
+    "browser_find",
+    "browser_reload",
+];
+
+/// Where a group's tools come in a load: the browser's by
+/// [`BROWSER_RESIDENT`] then [`BROWSER_NEXT`], every other tool after them.
+fn browser_rank(name: &str) -> usize {
+    BROWSER_RESIDENT
+        .iter()
+        .chain(&BROWSER_NEXT)
+        .position(|tool| *tool == name)
+        .unwrap_or(usize::MAX)
+}
+
 /// Whether `name` is a browser tool for looking into a page or moving
 /// files rather than working it: scripts, console, network, traces,
 /// profiles, audits, uploads and downloads (group `devtools`).
@@ -870,9 +895,12 @@ fn deferred_entries<'a>(
 
 /// The deferred tools one (lowercased) query matches, exact ids first. A
 /// query that names a group holding deferred tools (`browser`, `devtools`,
-/// `cloud`, as the model is told them) finds that group's, and not every
-/// tool that mentions the word: asked for the browser, the model gets its
-/// everyday tools, not the profilers whose ids hold the word too.
+/// `cloud`, as the model is told them) finds that group's, the browser's
+/// in the order a page needs them, and then those of an MCP server or
+/// extension of that name (a `memory` server beside Haarness's memory
+/// tools); not every tool that mentions the word: asked for the browser,
+/// the model gets its everyday tools, not the profilers whose ids hold the
+/// word too.
 fn query_matches(
     deferred: &[&ToolCatalogEntry],
     by_id: &HashMap<&str, &ToolDefinition>,
@@ -884,7 +912,19 @@ fn query_matches(
         .map(|entry| entry.id.clone())
         .collect::<Vec<_>>();
     if !group.is_empty() {
-        group.sort();
+        group.sort_by_key(|id| (browser_rank(id), id.clone()));
+        let mut named = deferred
+            .iter()
+            .filter(|entry| {
+                !entry.group.eq_ignore_ascii_case(query)
+                    && entry.source.split_once(':').is_some_and(|(kind, name)| {
+                        matches!(kind, "mcp" | "extension") && name.eq_ignore_ascii_case(query)
+                    })
+            })
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        named.sort();
+        group.extend(named);
         return group;
     }
     let mut candidates = deferred
@@ -1569,6 +1609,54 @@ mod tests {
         assert!(
             search_deferred_tools(&definitions, &selection.response, &["memory".into()]).is_empty()
         );
+    }
+
+    /// Asked for a group by name, the loader brings that group's tools, then
+    /// those of an MCP server or extension of the same name, which it would
+    /// otherwise hide: a `memory` server beside Haarness's memory tools, a
+    /// `devtools` server beside the browser's.
+    #[test]
+    fn a_group_query_also_brings_a_server_of_that_name() {
+        let definitions = vec![
+            definition("read", "read a file"),
+            definition("memory_read", "read durable notes"),
+            definition("mcp__memory__create_entities", "store entities"),
+            definition("mcp__memory__read_graph", "read the graph"),
+            definition("mcp__other__remember", "mentions memory in its description"),
+            definition("browser_wait", "wait for a page"),
+            definition("browser_console", "read the console"),
+            definition("mcp__devtools__take_trace", "trace a page"),
+            definition("ext__browser__open", "an extension named browser"),
+        ];
+        let selection = select_tools(
+            definitions.clone(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::new(),
+            Some(200_000),
+            false,
+        );
+        let search =
+            |query: &str| search_deferred_tools(&definitions, &selection.response, &[query.into()]);
+        assert_eq!(
+            search("memory"),
+            [
+                "memory_read",
+                "mcp__memory__create_entities",
+                "mcp__memory__read_graph"
+            ]
+        );
+        assert_eq!(
+            search("devtools"),
+            ["browser_console", "mcp__devtools__take_trace"]
+        );
+        assert_eq!(search("browser"), ["browser_wait", "ext__browser__open"]);
+        // A server's own name, no group's, still finds it by its tools' ids.
+        assert_eq!(search("other"), ["mcp__other__remember"]);
     }
 
     #[test]
