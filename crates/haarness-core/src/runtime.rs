@@ -24347,6 +24347,7 @@ mod tests {
                     4,
                     ItemData::AssistantMessage {
                         text: "answer".into(),
+                        note: false,
                     },
                 )
             },

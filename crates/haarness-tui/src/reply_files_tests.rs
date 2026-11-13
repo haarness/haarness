@@ -32,6 +32,7 @@ fn long_conversation(thread: &Thread, replies: usize) -> Vec<Item> {
                              [the notes](docs/notes.md#L3) and [the site](https://example.com).\n\n\
                              - one `README.md`\n- two `src/missing.rs:9`\n"
                         ),
+                        note: false,
                     },
                 ),
             ]
@@ -477,7 +478,10 @@ fn answer(text: &str, project: &Project) -> App {
     let items = vec![message_item(
         1,
         &thread,
-        ItemData::AssistantMessage { text: text.into() },
+        ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
     local(&mut app, project);
