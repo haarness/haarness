@@ -912,9 +912,9 @@ fn note(status: PermissionReviewStatus, reason: ReviewReason) -> PermissionRevie
 /// The first path outside the project that a shell command deletes or
 /// overwrites, or that cannot be placed (see `bash::outside_deletions`),
 /// while no message of the person names it, whatever kind of request the
-/// command raised. A path the chat itself made there (see
-/// [`crate::made_paths`]) needs no naming when the command only cleans up
-/// (see `bash::cleans_up`).
+/// command raised. A line that does nothing but take paths away (see
+/// `bash::cleans_up`) may take away what the chat itself put there (see
+/// [`crate::made_paths`]) without the person's word.
 pub(crate) fn unnamed_deletion(
     request: &ReviewRequest,
     workspace: &Path,
@@ -2114,6 +2114,14 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(root.join("kept")).unwrap();
         let real = crate::paths::canonicalize(&root).unwrap();
+        // Without birth times nothing is ever the chat's own.
+        if std::fs::symlink_metadata(&real)
+            .and_then(|metadata| metadata.created())
+            .is_err()
+        {
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
         let chat = ThreadId::new();
         // The chat made `scratch` (and a folder in it) where `kept` was
         // there already.
@@ -2125,14 +2133,29 @@ mod tests {
             &workspace,
             &workspace,
         );
-        assert_eq!(made, vec![real.join("scratch")]);
+        assert_eq!(made.paths(), [real.join("scratch")]);
         std::fs::create_dir_all(real.join("scratch/sub")).unwrap();
         std::fs::write(real.join("scratch/sub/a"), "").unwrap();
         crate::made_paths::note(chat, &made, &workspace);
         // A link in it to a folder the chat did not make, and one beside it.
         std::os::unix::fs::symlink(real.join("kept"), real.join("scratch/l")).unwrap();
+        let link = crate::made_paths::before_files(&[real.join("l")]);
         std::os::unix::fs::symlink(real.join("kept"), real.join("l")).unwrap();
-        crate::made_paths::note(chat, &[real.join("l")], &workspace);
+        crate::made_paths::note(chat, &link, &workspace);
+        // What another command of the line may have put there, or a branch
+        // that may not run names, is never the chat's.
+        for command in [
+            "mv <r>/kept <r>/moved; mkdir -p <r>/moved",
+            "if false; then mkdir <r>/moved; fi",
+            "f() { mkdir <r>/moved; }",
+            "true || mkdir <r>/moved",
+            "mv \"$SRC\" <r>/elsewhere; mkdir <r>/moved",
+            "sudo mkdir <r>/moved",
+        ] {
+            let command = command.replace("<r>", &real.display().to_string());
+            let before = crate::made_paths::before_command(&command, &workspace, &workspace);
+            assert!(before.paths().is_empty(), "{command}: {before:?}");
+        }
         let request = |command: &str, root_thread_id: ThreadId| ReviewRequest {
             permission: "bash".into(),
             patterns: Vec::new(),
@@ -2183,10 +2206,20 @@ mod tests {
             &format!("rm -rf {}/scratch", real.display()),
             &workspace,
             &workspace,
-            &[],
+            &crate::made_paths::before_files(&[]),
         );
         std::fs::create_dir_all(real.join("scratch")).unwrap();
         assert!(unnamed_deletion(&request("rm -rf <r>/scratch", chat), &workspace, "go").is_some());
+        // Made by the chat, then deleted and made again by the person: theirs.
+        let shared = crate::made_paths::before_files(&[real.join("shared")]);
+        std::fs::create_dir(real.join("shared")).unwrap();
+        crate::made_paths::note(chat, &shared, &workspace);
+        assert!(unnamed_deletion(&request("rm -rf <r>/shared", chat), &workspace, "go").is_none());
+        std::fs::remove_dir(real.join("shared")).unwrap();
+        std::fs::create_dir(real.join("other")).unwrap();
+        std::fs::create_dir(real.join("shared")).unwrap();
+        std::fs::write(real.join("shared/person-work.txt"), "x").unwrap();
+        assert!(unnamed_deletion(&request("rm -rf <r>/shared", chat), &workspace, "go").is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -5550,13 +5550,19 @@ const MAX_CREATIONS: usize = 256;
 /// The paths outside `workspace` that `command` may bring into being when
 /// it runs from `workdir`, placed as the system reaches them: what `mkdir`,
 /// `touch` and `tee` are given, where `cp` copies to, and the files output
-/// redirects write, each written as one literal path. A word with a
-/// variable, a glob, a brace list or a leading `~` or `-` is left out, and
-/// so is a relative one in a line where anything may change directory, and
-/// what a wrapper or text run again names. They are for noting what a chat
-/// made (see [`crate::made_paths`]), which counts only a path that was not
-/// there before the line ran and is there after: a `mv` or `ln` is no
-/// making of new files, so neither counts.
+/// redirects write, each written as one literal path, in the steps the line
+/// runs (its statements, their `&&` steps and pipeline stages; not a branch,
+/// a loop, a function's body or what follows `||`). A word with a variable,
+/// a glob, a brace list or a leading `~` or `-` is left out, and so is a
+/// relative one in a line where anything may change directory.
+///
+/// They are for noting what a chat made (see [`crate::made_paths`]), so
+/// where something else in the line may have put a path there, none is
+/// given: a path another command names (`mv ~/data /tmp/x; mkdir -p
+/// /tmp/x`), any path when such a command has a word nobody can place, and
+/// every path in a line with a wrapper or text a shell runs again, whose
+/// commands are not all in view. Commands that only look, delete or change
+/// directory put nothing anywhere.
 #[must_use]
 pub fn creations(command: &str, workspace: &Path, workdir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -5578,38 +5584,107 @@ pub fn creations(command: &str, workspace: &Path, workdir: &Path) -> Vec<PathBuf
     if !whole || tree.root_node().has_error() {
         return found;
     }
+    let analysis = analyze(command, workspace);
+    if analysis.unreadable || !analysis.derived.is_empty() {
+        return found;
+    }
     let moves = moves_shell(tree.root_node(), command);
     let project = resolve(workspace, Path::new(""));
-    let mut add = |raw: &str, value: &str, complete: bool| {
-        if !complete
-            || value.is_empty()
-            || value.starts_with(['~', '-'])
-            || raw.contains(['*', '?', '[', '{', '$', '`'])
-            || value.chars().any(char::is_control)
-            || (moves && Path::new(value).is_relative())
-        {
-            return;
+    // Where a literal word leads, when it can be told.
+    let place = |raw: &str, value: &str, complete: bool| -> Option<PathBuf> {
+        let plain = complete
+            && !value.is_empty()
+            && !value.starts_with(['~', '-'])
+            && !raw.contains(['*', '?', '[', '{', '$', '`'])
+            && !value.chars().any(char::is_control);
+        if !plain || (moves && Path::new(value).is_relative()) {
+            return None;
         }
-        let placed = resolve(workdir, Path::new(value));
+        Some(resolve(workdir, Path::new(value)))
+    };
+    // What the commands that may put something somewhere name.
+    let mut named = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        stack.extend(node.children(&mut node.walk()));
+        if node.kind() != "command" {
+            continue;
+        }
+        let words = words(node, command);
+        let Some((program, arguments)) = words.split_first() else {
+            continue;
+        };
+        // The parser may leave the `$` of `$"…"` out of a word.
+        let dollar = node_text(node, command).contains('$');
+        let values: Vec<String> = words.iter().map(|word| word.value.clone()).collect();
+        if program.literal
+            && (matches!(
+                program_name(&program.value).as_str(),
+                "mkdir" | "touch" | "tee" | "cp" | "cd" | "rm" | "rmdir" | "unlink"
+            ) || read_only_invocation(&values))
+        {
+            continue;
+        }
+        for word in arguments {
+            if dollar || !word.literal || word.raw.contains(['$', '`']) {
+                return found;
+            }
+            if word.value.starts_with('-') {
+                continue;
+            }
+            match place(&word.raw, &word.value, word.literal) {
+                Some(path) => named.push(path),
+                // A relative word after a `cd` may name anything.
+                None if moves && Path::new(&word.value).is_relative() => return found,
+                None => {}
+            }
+        }
+    }
+    let mut add = |raw: &str, value: &str, complete: bool| {
+        let Some(placed) = place(raw, value, complete) else {
+            return;
+        };
         if !placed.starts_with(&project)
             && !in_system_folder(&placed)
+            && !named.iter().any(|named| named.starts_with(&placed))
             && !found.contains(&placed)
             && found.len() < MAX_CREATIONS
         {
             found.push(placed);
         }
     };
-    let mut stack = vec![tree.root_node()];
-    while let Some(node) = stack.pop() {
-        match node.kind() {
-            "command" => {
-                let words = words(node, command);
+    for line in statements(tree.root_node()) {
+        for (node, outer) in &line.steps {
+            let mut redirects: Vec<_> = outer.clone();
+            // A redirect written after a pipeline is its last stage's.
+            let mut body = *node;
+            if node.kind() == "redirected_statement"
+                && let Some(pipeline) = node
+                    .child_by_field_name("body")
+                    .filter(|body| body.kind() == "pipeline")
+            {
+                redirects.extend(node.children_by_field_name("redirect", &mut node.walk()));
+                body = pipeline;
+            }
+            let stages: Vec<_> = if body.kind() == "pipeline" {
+                body.named_children(&mut body.walk()).collect()
+            } else {
+                vec![body]
+            };
+            for stage in stages {
+                let (Some(command_node), own) = statement(stage, &[]) else {
+                    continue;
+                };
+                redirects.extend(own);
+                let words = words(command_node, command);
                 let Some((program, arguments)) = words.split_first() else {
                     continue;
                 };
                 let name = program_name(&program.value);
                 let operands: Vec<&Word<'_>> = match name.as_str() {
-                    _ if !program.literal => Vec::new(),
+                    _ if !program.literal || node_text(command_node, command).contains('$') => {
+                        Vec::new()
+                    }
                     "mkdir" | "touch" | "tee" => {
                         // The words an option takes are no operands.
                         let takes: &[&str] = match name.as_str() {
@@ -5643,22 +5718,21 @@ pub fn creations(command: &str, workspace: &Path, workdir: &Path) -> Vec<PathBuf
                     add(&word.raw, &word.value, word.literal);
                 }
             }
-            "file_redirect"
-                if matches!(
-                    operator(node, command).as_str(),
-                    ">" | ">>" | "&>" | "&>>" | ">|"
-                ) =>
-            {
-                if let Some(destination) = node.child_by_field_name("destination") {
+            for redirect in redirects {
+                if redirect.kind() != "file_redirect"
+                    || !matches!(
+                        operator(redirect, command).as_str(),
+                        ">" | ">>" | "&>" | "&>>" | ">|"
+                    )
+                {
+                    continue;
+                }
+                if let Some(destination) = redirect.child_by_field_name("destination") {
                     let (value, complete) = literal(destination, command);
                     add(&node_text(destination, command), &value, complete);
                 }
             }
-            _ => {}
         }
-        let start = stack.len();
-        stack.extend(node.children(&mut node.walk()));
-        stack[start..].reverse();
     }
     found
 }
@@ -5671,7 +5745,7 @@ enum Cleanup {
     /// A plain `rm`, `rmdir` or `unlink` of literal paths, maybe followed by
     /// `|| true` or another [`Self::Inert`] step.
     Delete,
-    /// A program that changes nothing a delete reaches.
+    /// A command that leaves every file as it was and the shell where it is.
     Inert,
     Other,
 }
@@ -5679,8 +5753,8 @@ enum Cleanup {
 /// Whether `command` only cleans up: up to its last delete, every step is a
 /// plain `cd` to one folder [`plain_path`] takes, a plain `rm`, `rmdir` or
 /// `unlink` of literal paths, or one of `echo`, `printf` (without `-v`),
-/// `ls`, `pwd`, `true`, `false`, `:`, `test` and `[`, which change nothing a
-/// delete reaches; each in literal words with no assignment or substitution
+/// `ls`, `pwd`, `true`, `false`, `:`, `test` and `[`, which leave every file
+/// as it was; each in literal words with no assignment or substitution
 /// and redirects that at most silence its output or read a file, and each
 /// running once the one before it ended (`&&`, `;`, a line break; a delete
 /// may be followed by `|| true`). Every path the line deletes is a word of
@@ -5782,7 +5856,8 @@ fn cleanup_step(
     let Some((program, arguments)) = words.split_first() else {
         return Cleanup::Other;
     };
-    if !words.iter().all(|word| word.literal) {
+    // The parser may leave the `$` of `$"…"` out of a word.
+    if !words.iter().all(|word| word.literal) || node_text(command, source).contains('$') {
         return Cleanup::Other;
     }
     match program.raw.as_str() {
@@ -9844,6 +9919,14 @@ mod readings {
             "echo x > /dev/null 2>&1",
             &format!("mv a {}/m", x.display()),
             &format!("ln -s a {}/l", x.display()),
+            // What another command names or may have put there, a branch that
+            // may not run, and a word dash reads otherwise.
+            &format!("mv ../moved {x}/m; mkdir -p {x}/m", x = x.display()),
+            &format!("mv \"$S\" ../y; touch {}/t", x.display()),
+            &format!("if false; then mkdir {}/b; fi", x.display()),
+            &format!("f() {{ mkdir {}/b; }}", x.display()),
+            &format!("true || mkdir {}/b", x.display()),
+            &format!("mkdir $\"{}/b\"", x.display()),
             &format!("echo x 2>&1 >&2; cat {}/f", x.display()),
         ] {
             assert!(made(command).is_empty(), "{command}: {:?}", made(command));
@@ -9889,6 +9972,8 @@ mod readings {
             "echo $HOME && rm -rf /tmp/x",
             "rm -rf /tmp/x || rm -rf /tmp/y",
             "\\rm -rf /tmp/x",
+            "rm -rf $\"/tmp/x\"",
+            "rm -rf $'/tmp/x'",
         ] {
             assert!(!cleans_up(command, &workspace), "{command}");
         }
