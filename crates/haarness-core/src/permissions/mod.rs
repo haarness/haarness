@@ -1113,7 +1113,7 @@ fn rule_names(
     real_folders: &std::collections::BTreeMap<String, String>,
 ) -> bool {
     // A digest of one command is compared by equality alone, never matched.
-    if is_exact_rule(&rule.pattern) {
+    if is_exact_rule(&rule.pattern) || names_star_file(&rule.pattern, operation) {
         return false;
     }
     if rule_covers(&rule.pattern, operation) || separators_cover(rule, &rule.pattern, operation) {
@@ -1777,6 +1777,9 @@ pub fn wildcard_match(pattern: &str, value: &str) -> bool {
 /// `list`, `external_directory`), as [`wildcard_match`] does for any other.
 #[must_use]
 pub fn rule_covers(pattern: &str, operation: &str) -> bool {
+    if names_star_file(pattern, operation) {
+        return false;
+    }
     let path = operation
         .split_once(':')
         .is_some_and(|(permission, _)| is_path_permission(permission));
@@ -1785,6 +1788,16 @@ pub fn rule_covers(pattern: &str, operation: &str) -> bool {
     } else {
         wildcard_match(pattern, operation)
     }
+}
+
+/// Whether `pattern` names a file called `*` in a folder (`…/\*`) while
+/// `operation` asks about all that folder holds, as an outside-folder ask
+/// does with a trailing `/*`: such a rule never answers it.
+fn names_star_file(pattern: &str, operation: &str) -> bool {
+    !cfg!(windows)
+        && operation.starts_with(EXTERNAL_DIRECTORY)
+        && operation.ends_with("/*")
+        && pattern.ends_with("/\\*")
 }
 
 /// Whether rules for `permission` name file paths: `read`, `list`,
@@ -2401,12 +2414,12 @@ mod tests {
         if cfg!(windows) {
             // `\` separates folders there and no name holds `*` or `?`:
             // path rules match as every rule does.
-            assert_eq!(literal_path(r"C:\work\a*b"), r"C:\work\a*b");
+            assert_eq!(literal_path(r"E:\m*n\q"), r"E:\m*n\q");
             for (pattern, value) in [
-                (r"read:C:\dir\*", "read:C:/dir/file"),
+                (r"read:E:\logs\*", "read:E:/logs/today.txt"),
                 (
-                    r"external_directory:C:\a\?b\*",
-                    r"external_directory:C:\a\xb\c",
+                    r"external_directory:E:\m\?n\*",
+                    r"external_directory:E:\m\pn\q",
                 ),
             ] {
                 assert_eq!(
@@ -2462,6 +2475,13 @@ mod tests {
         // Any other backslash is still `/`.
         assert!(path_rule_matches(r"\m\k\*v/*", "/m/k*v/x"));
         assert!(!path_rule_matches(r"\m\k\*v/*", "/m/kzv/x"));
+        // A rule for a file called `*` is not all its folder holds.
+        let file = engine(&[r"external_directory:/srv/q/\*", r"read:/srv/q/\*"]);
+        assert_eq!(
+            file.evaluate("external_directory:/srv/q/*"),
+            PermissionDecision::Ask
+        );
+        assert_eq!(file.evaluate("read:/srv/q/*"), PermissionDecision::Allow);
     }
 
     #[test]
