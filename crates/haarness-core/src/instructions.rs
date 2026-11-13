@@ -431,8 +431,10 @@ pub const LINKED_OUT: &str = "a link leads it out of the project to a file that 
 pub const LINKED_HIDDEN: &str = "a link leads it out of the project into a hidden file or folder";
 
 /// The folders of a personal instruction folder that hold instructions,
-/// besides the files at its top.
-const INSTRUCTION_SUBFOLDERS: [&str; 4] = ["agents", "commands", "skills", "rules"];
+/// besides the files at its top, in both the spellings Haarness reads.
+const INSTRUCTION_SUBFOLDERS: [&str; 7] = [
+    "agents", "agent", "commands", "command", "skills", "skill", "rules",
+];
 
 /// The real roots of `workspace`'s project, where a cloned repository puts
 /// what it likes: the worktree root (the nearest folder above it, or itself,
@@ -470,32 +472,42 @@ pub fn instruction_folders(config_dir: Option<&Path>, home: Option<&Path>) -> Ve
 }
 
 /// The folders a link from the project may lead into and still be a
-/// personal one ([`linked_out`]): the [`instruction_folders`], the other
-/// agents' `~/.codex` and `~/.config/opencode`, and the folder where an
-/// `AGENTS.md` or `CLAUDE.md` of any of them really is when it is a link (a
-/// dotfiles repository that GNU Stow, Home Manager or yadm manages).
+/// personal one ([`linked_out`]).
+#[derive(Debug, Clone, Default)]
+pub struct PersonalFolders {
+    /// The [`instruction_folders`] and the other agents' `~/.codex` and
+    /// `~/.config/opencode`, real paths: a link may also pass through them.
+    pub own: Vec<PathBuf>,
+    /// Where an `AGENTS.md` or `CLAUDE.md` of those really is when it is a
+    /// link (a dotfiles repository that GNU Stow, Home Manager or yadm
+    /// manages): only a file that ends up there counts, since anyone's
+    /// repository may be such a folder.
+    pub linked: Vec<PathBuf>,
+}
+
+/// The person's [`PersonalFolders`].
 #[must_use]
-pub fn personal_folders(config_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
-    let mut folders = instruction_folders(config_dir, home);
+pub fn personal_folders(config_dir: Option<&Path>, home: Option<&Path>) -> PersonalFolders {
+    let mut own = instruction_folders(config_dir, home);
     if let Some(home) = home {
-        folders.extend(
+        own.extend(
             [".codex", ".config/opencode"]
                 .iter()
                 .filter_map(|name| crate::paths::canonicalize(home.join(name)).ok()),
         );
     }
-    let linked: Vec<PathBuf> = folders
+    let mut linked: Vec<PathBuf> = Vec::new();
+    for folder in own
         .iter()
         .flat_map(|folder| ["AGENTS.md", "CLAUDE.md"].map(|name| folder.join(name)))
         .filter_map(|file| crate::paths::canonicalize(&file).ok())
         .filter_map(|real| real.parent().map(Path::to_path_buf))
-        .collect();
-    for folder in linked {
-        if !folders.contains(&folder) {
-            folders.push(folder);
+    {
+        if !own.contains(&folder) && !linked.contains(&folder) {
+            linked.push(folder);
         }
     }
-    folders
+    PersonalFolders { own, linked }
 }
 
 /// Whether `place` is where a personal instruction folder keeps
@@ -550,17 +562,18 @@ fn link_hops(path: &Path) -> Vec<PathBuf> {
 /// `canonical`, if it is. A personal note stays welcome
 /// (`AGENTS.md -> ~/notes/rules.md`), so only a Markdown file (`.md`,
 /// `.mdx`, `.markdown`) whose name does not start with a dot may load, and
-/// only outside hidden folders unless it, or a link on the way to it, is
-/// where one of the `personal` folders keeps instructions
-/// ([`personal_folders`]): a shell history, `.env`, `/proc/self/environ`, a
-/// file under `~/.config` or Claude Code's notes about projects never load.
+/// only outside hidden folders unless it is where one of the `personal`
+/// folders keeps instructions, or a link on the way to it is where one of
+/// the person's own folders does ([`PersonalFolders`]): a shell history,
+/// `.env`, `/proc/self/environ`, a file under `~/.config` or Claude Code's
+/// notes about projects never load.
 /// The usual checks ([`file_left_out`], [`nested_left_out`]) still follow.
 #[must_use]
 pub fn linked_out(
     path: &Path,
     canonical: &Path,
     roots: &[PathBuf],
-    personal: &[PathBuf],
+    personal: &PersonalFolders,
 ) -> Option<&'static str> {
     if roots.iter().any(|root| canonical.starts_with(root)) {
         return None;
@@ -578,9 +591,11 @@ pub fn linked_out(
     if name.starts_with('.') {
         return Some(LINKED_HIDDEN);
     }
-    if std::iter::once(canonical.to_path_buf())
-        .chain(link_hops(path))
-        .any(|place| instruction_place(&place, personal))
+    if instruction_place(canonical, &personal.own)
+        || instruction_place(canonical, &personal.linked)
+        || link_hops(path)
+            .iter()
+            .any(|hop| instruction_place(hop, &personal.own))
     {
         return None;
     }
@@ -617,7 +632,7 @@ pub fn size_left_out(path: &Path, budget: &ImportBudget) -> Option<&'static str>
 pub fn nested_left_out(
     path: &Path,
     workspace: &Path,
-    personal: &[PathBuf],
+    personal: &PersonalFolders,
     omit: ImportFilter<'_>,
 ) -> Option<&'static str> {
     let root = crate::paths::canonicalize(workspace).ok();
@@ -1069,10 +1084,14 @@ mod tests {
     #[test]
     fn a_link_out_of_the_project_loads_only_a_markdown_note_or_an_instruction_of_yours() {
         let roots = [PathBuf::from("/work/repo")];
-        let personal = [
-            PathBuf::from("/home/me/.claude"),
-            PathBuf::from("/home/me/.config/haarness"),
-        ];
+        let personal = PersonalFolders {
+            own: vec![
+                PathBuf::from("/home/me/.claude"),
+                PathBuf::from("/home/me/.config/haarness"),
+                PathBuf::from("/home/me/.config/opencode"),
+            ],
+            linked: Vec::new(),
+        };
         for (file, reason) in [
             ("/work/repo/.env", None),
             ("/work/repo/docs/x.txt", None),
@@ -1081,6 +1100,8 @@ mod tests {
             ("/home/me/notes/rules.markdown", None),
             ("/home/me/.claude/CLAUDE.md", None),
             ("/home/me/.claude/agents/reviewer.md", None),
+            ("/home/me/.config/opencode/agent/review.md", None),
+            ("/home/me/.claude/command/ship.md", None),
             ("/home/me/.claude/skills/ship/SKILL.md", None),
             ("/home/me/.config/haarness/AGENTS.md", None),
             ("/home/me/.zsh_history", Some(LINKED_OUT)),
@@ -1160,13 +1181,27 @@ mod tests {
             );
         }
         // Without the dotfiles link the stowed file is only a hidden one.
+        let own_only = PersonalFolders {
+            own: instruction_folders(None, Some(&home)),
+            linked: Vec::new(),
+        };
         assert_eq!(
-            linked_out(
-                &stowed,
-                &stowed,
-                &roots,
-                &instruction_folders(None, Some(&home))
-            ),
+            linked_out(&stowed, &stowed, &roots, &own_only),
+            Some(LINKED_HIDDEN)
+        );
+        // A folder that counts only because one of the person's files links
+        // into it is no way through: a link via a file there to Claude Code's
+        // plans stays out, as a direct link to them does.
+        fs::create_dir_all(home.join(".claude/plans")).unwrap();
+        let plan = write(home.join(".claude/plans/secret.md"));
+        let via = home.join(".dotfiles/agents/via.md");
+        std::os::unix::fs::symlink(&plan, &via).unwrap();
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&via, &link).unwrap();
+        let canonical = crate::paths::canonicalize(&link).unwrap();
+        assert_eq!(canonical, crate::paths::canonicalize(&plan).unwrap());
+        assert_eq!(
+            linked_out(&link, &canonical, &roots, &personal),
             Some(LINKED_HIDDEN)
         );
         fs::remove_dir_all(root).unwrap();
