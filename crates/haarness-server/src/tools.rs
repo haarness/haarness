@@ -3988,6 +3988,12 @@ impl Tool for BuiltinTool {
                 let new_contents = string(&args, "content")?;
                 let path = resolve_new(requested_path, &context)?;
                 let existing = existing_diff_body(&path).await;
+                let made = context.execution.root_thread.map(|root| {
+                    (
+                        root,
+                        haarness_core::made_paths::before_files(std::slice::from_ref(&path)),
+                    )
+                });
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent)
                         .await
@@ -4002,9 +4008,13 @@ impl Tool for BuiltinTool {
                     .and_then(|bytes| text::decode(&bytes).map(|(_, spelling)| spelling))
                     .unwrap_or_default()
                     .for_new_text(new_contents);
-                tokio::fs::write(&path, spelling.encode(new_contents))
-                    .await
-                    .map_err(|error| io_error(requested_path, &path, &error))?;
+                let wrote = tokio::fs::write(&path, spelling.encode(new_contents)).await;
+                // A folder it made for the file counts even when the write
+                // failed.
+                if let Some((root, made)) = &made {
+                    haarness_core::made_paths::note(*root, made, &context.workspace);
+                }
+                wrote.map_err(|error| io_error(requested_path, &path, &error))?;
                 Ok(output_with_diffs(
                     format!("wrote {}", path.display()),
                     vec![replacement_diff(requested_path, existing, new_contents)],
@@ -4184,7 +4194,22 @@ impl Tool for BuiltinTool {
                     .iter()
                     .map(|(line, _)| line.clone())
                     .collect::<Vec<_>>();
-                write_patch(plan.steps).await?;
+                let made = context.execution.root_thread.map(|root| {
+                    let files: Vec<PathBuf> = plan
+                        .steps
+                        .iter()
+                        .filter_map(|(_, step)| match step {
+                            PatchStep::Write { path, .. } => Some(path.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    (root, haarness_core::made_paths::before_files(&files))
+                });
+                let wrote = write_patch(plan.steps).await;
+                if let Some((root, made)) = &made {
+                    haarness_core::made_paths::note(*root, made, &context.workspace);
+                }
+                wrote?;
                 Ok(output_with_diffs(
                     report.join("\n"),
                     plan.diffs,
@@ -4221,6 +4246,21 @@ impl Tool for BuiltinTool {
                     .and_then(Value::as_u64);
                 let (given, in_seconds) = shell_timeout(written);
                 let agent = (!context.execution.person_shell).then_some(context.thread_id);
+                // What the chat's command makes outside the project is its
+                // own to take away again (see `made_paths`); a person's own
+                // command is not the chat's.
+                let made = context
+                    .execution
+                    .root_thread
+                    .filter(|_| !context.execution.person_shell)
+                    .map(|root| {
+                        let before = haarness_core::made_paths::before_command(
+                            command,
+                            &context.workspace,
+                            &workdir,
+                        );
+                        (root, before)
+                    });
                 let ran = if let Some(call) = &context.execution.shell_call {
                     crate::shell::run_call(
                         call,
@@ -4252,6 +4292,15 @@ impl Tool for BuiltinTool {
                     )
                     .await
                 };
+                if let Some((root, before)) = &made {
+                    haarness_core::made_paths::after_command(
+                        *root,
+                        command,
+                        &context.workspace,
+                        &workdir,
+                        before,
+                    );
+                }
                 match (ran, in_seconds) {
                     (Ok(mut output), Some(seconds)) => {
                         use std::fmt::Write as _;
@@ -7816,6 +7865,71 @@ export default workflow({
             .await;
         assert!(matches!(escaped, Err(CoreError::PermissionDenied(_))));
         tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    /// What a chat's commands and file writes make outside the project is
+    /// noted for the chat at its root, so Auto lets it clean that up.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn what_a_chat_makes_outside_the_project_is_its_own() {
+        use haarness_core::made_paths::holds;
+        let root =
+            std::env::temp_dir().join(format!("haarness-made-tool-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let real = haarness_core::paths::canonicalize(&root).unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let chat = ThreadId::new();
+        let context = ToolContext {
+            execution: haarness_core::ExecutionSettings {
+                root_thread: Some(chat),
+                ..Default::default()
+            },
+            thread_id: ThreadId::new(),
+            turn_id: TurnId::new(),
+            workspace: workspace.clone(),
+            authorized_external_paths: vec![real.join("w/notes.md")],
+            cancel: CancellationToken::new(),
+            invoker: None,
+        };
+        let bash = |command: String, context: ToolContext| {
+            let tool = registry.get("bash").unwrap();
+            async move {
+                tool.execute(json!({ "command": command, "timeout": 10_000 }), context)
+                    .await
+                    .unwrap()
+            }
+        };
+        let x = real.join("x");
+        bash(
+            format!("mkdir {x} && touch {x}/a", x = x.display()),
+            context.clone(),
+        )
+        .await;
+        assert!(holds(chat, &x));
+        assert!(holds(chat, &x.join("a")));
+        assert!(!holds(ThreadId::new(), &x));
+        assert!(!holds(chat, &real));
+        // A file `write` makes there, with the folder it makes for it.
+        registry
+            .get("write")
+            .unwrap()
+            .execute(
+                json!({ "path": real.join("w/notes.md"), "content": "x" }),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(holds(chat, &real.join("w")));
+        // A person's own command is not the chat's.
+        let mut person = context.clone();
+        person.execution.person_shell = true;
+        bash(format!("mkdir {}/p", real.display()), person).await;
+        assert!(!holds(chat, &real.join("p")));
+        // Taken away by the chat, it is forgotten.
+        bash(format!("rm -rf {}", x.display()), context).await;
+        assert!(!holds(chat, &x));
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     /// A subagent's `task` text is the chat's without its advice on the

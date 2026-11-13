@@ -912,12 +912,15 @@ fn note(status: PermissionReviewStatus, reason: ReviewReason) -> PermissionRevie
 /// The first path outside the project that a shell command deletes or
 /// overwrites, or that cannot be placed (see `bash::outside_deletions`),
 /// while no message of the person names it, whatever kind of request the
-/// command raised.
-fn unnamed_deletion(
+/// command raised. A path the chat itself made there (see
+/// [`crate::made_paths`]) needs no naming when the command only cleans up
+/// (see `bash::cleans_up`).
+pub(crate) fn unnamed_deletion(
     request: &ReviewRequest,
     workspace: &Path,
     said: &str,
 ) -> Option<crate::permissions::bash::OutsideDeletion> {
+    use crate::permissions::bash;
     let command = request.detail.get("command")?.as_str()?;
     let workdir = request
         .detail
@@ -927,10 +930,25 @@ fn unnamed_deletion(
         .map(|dir| crate::permissions::resolve_permission_path(workspace, dir));
     let home = haarness_protocol::home_dir();
     let kept = Kept::new(home.as_deref(), workspace);
-    crate::permissions::bash::outside_deletions(command, workspace, workdir.as_deref())
+    let root = request.root_thread_id;
+    let mut cleanup = None;
+    bash::outside_deletions(command, workspace, workdir.as_deref())
         .into_iter()
         // A path nobody can place is never one the person named.
-        .find(|target| !target.placed || !named(said, &target.path, home.as_deref(), &kept))
+        .find(|target| {
+            if !target.placed {
+                return true;
+            }
+            if named(said, &target.path, home.as_deref(), &kept) {
+                return false;
+            }
+            let path = Path::new(&target.path);
+            let own = target.effect == bash::Effect::Deletes
+                && !kept.holds(path)
+                && crate::made_paths::holds(root, path)
+                && *cleanup.get_or_insert_with(|| bash::cleans_up(command, workspace));
+            !own
+        })
 }
 
 /// Folders no message names for deletion: the root, the home folder, the
@@ -2085,6 +2103,90 @@ mod tests {
             )
             .is_none()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chat_cleaning_up_what_it_made_outside_the_project_names_nothing() {
+        let root = std::env::temp_dir().join(format!("haarness-own-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(root.join("kept")).unwrap();
+        let real = crate::paths::canonicalize(&root).unwrap();
+        let chat = ThreadId::new();
+        // The chat made `scratch` (and a folder in it) where `kept` was
+        // there already.
+        let made = crate::made_paths::before_command(
+            &format!(
+                "mkdir -p {r}/scratch/sub {r}/kept && touch {r}/scratch/sub/a",
+                r = real.display()
+            ),
+            &workspace,
+            &workspace,
+        );
+        assert_eq!(made, vec![real.join("scratch")]);
+        std::fs::create_dir_all(real.join("scratch/sub")).unwrap();
+        std::fs::write(real.join("scratch/sub/a"), "").unwrap();
+        crate::made_paths::note(chat, &made, &workspace);
+        // A link in it to a folder the chat did not make, and one beside it.
+        std::os::unix::fs::symlink(real.join("kept"), real.join("scratch/l")).unwrap();
+        std::os::unix::fs::symlink(real.join("kept"), real.join("l")).unwrap();
+        crate::made_paths::note(chat, &[real.join("l")], &workspace);
+        let request = |command: &str, root_thread_id: ThreadId| ReviewRequest {
+            permission: "bash".into(),
+            patterns: Vec::new(),
+            detail: json!({ "command": command.replace("<r>", &real.display().to_string()) }),
+            tool: Some(("bash".into(), "c1".into())),
+            thread_id: ThreadId::new(),
+            root_thread_id,
+            turn_id: None,
+        };
+        for command in [
+            "rm -rf <r>/scratch",
+            "rm -rf <r>/scratch 2>/dev/null || true",
+            "ls <r>/scratch && rm -rf <r>/scratch/sub/a\necho done",
+            "cd <r> && rm -rf scratch",
+        ] {
+            let found = unnamed_deletion(&request(command, chat), &workspace, "run the bench");
+            assert!(found.is_none(), "{command}: {found:?}");
+        }
+        // Still the person's to name: a glob or a variable, a delete
+        // through a link to elsewhere (a link is placed where it leads), a
+        // step that may change what a delete reaches, a folder that was
+        // there before, another chat's call.
+        for (command, chat) in [
+            ("rm -rf <r>/scratch/*", chat),
+            ("rm -rf <r>/scratch/l", chat),
+            ("rm -rf \"$D\"/scratch", chat),
+            ("rm -rf <r>/scratch/l/", chat),
+            ("rm -rf <r>/l/", chat),
+            ("rm -rf <r>/scratch/l/x", chat),
+            ("make; rm -rf <r>/scratch", chat),
+            ("rm -rf <r>/scratch &", chat),
+            ("sudo rm -rf <r>/scratch", chat),
+            ("cd <r>; rm -rf scratch", chat),
+            ("rm -rf <r>/kept", chat),
+            ("rm -rf <r>/scratch <r>/kept", chat),
+            ("rm -rf <r>/scratch", ThreadId::new()),
+        ] {
+            assert!(
+                unnamed_deletion(&request(command, chat), &workspace, "run the bench").is_some(),
+                "{command}"
+            );
+        }
+        // Once the chat took its folder away, it is forgotten: whatever is
+        // made there next is not its own.
+        std::fs::remove_dir_all(real.join("scratch")).unwrap();
+        crate::made_paths::after_command(
+            chat,
+            &format!("rm -rf {}/scratch", real.display()),
+            &workspace,
+            &workspace,
+            &[],
+        );
+        std::fs::create_dir_all(real.join("scratch")).unwrap();
+        assert!(unnamed_deletion(&request("rm -rf <r>/scratch", chat), &workspace, "go").is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
 

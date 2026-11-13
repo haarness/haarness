@@ -5515,6 +5515,266 @@ pub struct OutsideDeletion {
     pub effect: Effect,
 }
 
+/// How many paths [`creations`] gives for a line.
+const MAX_CREATIONS: usize = 256;
+
+/// The paths outside `workspace` that `command` may bring into being when
+/// it runs from `workdir`, placed as the system reaches them: what `mkdir`,
+/// `touch` and `tee` are given, where `cp` copies to, and the files output
+/// redirects write, each written as one literal path. A word with a
+/// variable, a glob, a brace list or a leading `~` or `-` is left out, and
+/// so is a relative one in a line where anything may change directory, and
+/// what a wrapper or text run again names. They are for noting what a chat
+/// made (see [`crate::made_paths`]), which counts only a path that was not
+/// there before the line ran and is there after: a `mv` or `ln` is no
+/// making of new files, so neither counts.
+#[must_use]
+pub fn creations(command: &str, workspace: &Path, workdir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if cfg!(windows) || command.len() > MAX_COMMAND_BYTES {
+        return found;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+        || joined_continuations(command, true).is_some()
+    {
+        return found;
+    }
+    let (reading, whole, tree) = parser_input(command);
+    let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
+        return found;
+    };
+    if !whole || tree.root_node().has_error() {
+        return found;
+    }
+    let moves = moves_shell(tree.root_node(), command);
+    let project = resolve(workspace, Path::new(""));
+    let mut add = |raw: &str, value: &str, complete: bool| {
+        if !complete
+            || value.is_empty()
+            || value.starts_with(['~', '-'])
+            || raw.contains(['*', '?', '[', '{', '$', '`'])
+            || value.chars().any(char::is_control)
+            || (moves && Path::new(value).is_relative())
+        {
+            return;
+        }
+        let placed = resolve(workdir, Path::new(value));
+        if !placed.starts_with(&project)
+            && !in_system_folder(&placed)
+            && !found.contains(&placed)
+            && found.len() < MAX_CREATIONS
+        {
+            found.push(placed);
+        }
+    };
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "command" => {
+                let words = words(node, command);
+                let Some((program, arguments)) = words.split_first() else {
+                    continue;
+                };
+                let name = program_name(&program.value);
+                let operands: Vec<&Word<'_>> = match name.as_str() {
+                    _ if !program.literal => Vec::new(),
+                    "mkdir" | "touch" | "tee" => {
+                        // The words an option takes are no operands.
+                        let takes: &[&str] = match name.as_str() {
+                            "mkdir" => &["-m", "--mode"],
+                            "touch" => &["-d", "-r", "-t", "--date", "--reference"],
+                            _ => &[],
+                        };
+                        let mut operands = Vec::new();
+                        let (mut ended, mut skip) = (false, false);
+                        for word in arguments {
+                            if std::mem::take(&mut skip) {
+                                continue;
+                            }
+                            if !ended && ends_options(word) {
+                                ended = true;
+                            } else if !ended && word.value.starts_with('-') {
+                                skip = takes.contains(&word.value.as_str());
+                            } else {
+                                operands.push(word);
+                            }
+                        }
+                        operands
+                    }
+                    "cp" => copy_destination("cp", arguments)
+                        .and_then(|index| arguments.get(index))
+                        .into_iter()
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                for word in operands {
+                    add(&word.raw, &word.value, word.literal);
+                }
+            }
+            "file_redirect"
+                if matches!(
+                    operator(node, command).as_str(),
+                    ">" | ">>" | "&>" | "&>>" | ">|"
+                ) =>
+            {
+                if let Some(destination) = node.child_by_field_name("destination") {
+                    let (value, complete) = literal(destination, command);
+                    add(&node_text(destination, command), &value, complete);
+                }
+            }
+            _ => {}
+        }
+        let start = stack.len();
+        stack.extend(node.children(&mut node.walk()));
+        stack[start..].reverse();
+    }
+    found
+}
+
+/// What one step of a line is to [`cleans_up`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cleanup {
+    /// A plain `cd` to one folder [`plain_path`] takes.
+    Cd,
+    /// A plain `rm`, `rmdir` or `unlink` of literal paths, maybe followed by
+    /// `|| true` or another [`Self::Inert`] step.
+    Delete,
+    /// A program that changes nothing a delete reaches.
+    Inert,
+    Other,
+}
+
+/// Whether `command` only cleans up: up to its last delete, every step is a
+/// plain `cd` to one folder [`plain_path`] takes, a plain `rm`, `rmdir` or
+/// `unlink` of literal paths, or one of `echo`, `printf` (without `-v`),
+/// `ls`, `pwd`, `true`, `false`, `:`, `test` and `[`, which change nothing a
+/// delete reaches; each in literal words with no assignment or substitution
+/// and redirects that at most silence its output or read a file, and each
+/// running once the one before it ended (`&&`, `;`, a line break; a delete
+/// may be followed by `|| true`). Every path the line deletes is a word of
+/// those deletes: none behind a wrapper, in text run again, or in a step
+/// after the last one. A glob, a variable, a `~`, a step that may move the
+/// shell or make a link before a delete: what it reaches then cannot be told
+/// from its words, so it is no cleanup. Auto lets a cleanup take away paths
+/// the chat itself made without asking (see [`crate::made_paths`]).
+#[must_use]
+pub fn cleans_up(command: &str, workspace: &Path) -> bool {
+    if cfg!(windows) || command.len() > MAX_COMMAND_BYTES {
+        return false;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+        || joined_continuations(command, true).is_some()
+    {
+        return false;
+    }
+    let (reading, whole, tree) = parser_input(command);
+    let Some(tree) = tree.or_else(|| parser.parse(reading.as_ref(), None)) else {
+        return false;
+    };
+    if !whole || tree.root_node().has_error() {
+        return false;
+    }
+    let mut kinds = Vec::new();
+    for statement in statements(tree.root_node()) {
+        for (node, outer) in &statement.steps {
+            let kind = cleanup_step(*node, outer, command);
+            kinds.push((kind, node.byte_range(), statement.background));
+        }
+    }
+    let Some(last) = kinds
+        .iter()
+        .rposition(|(kind, ..)| *kind == Cleanup::Delete)
+    else {
+        return false;
+    };
+    if !kinds[..=last]
+        .iter()
+        .all(|(kind, _, background)| *kind != Cleanup::Other && !background)
+    {
+        return false;
+    }
+    let analysis = analyze(command, workspace);
+    !analysis.unreadable
+        && analysis.deletions.iter().all(|deletion| {
+            deletion.effect == Effect::Deletes
+                && deletion.at.is_some_and(|at| {
+                    kinds
+                        .iter()
+                        .any(|(kind, range, _)| *kind == Cleanup::Delete && range.contains(&at))
+                })
+        })
+}
+
+/// What a step of a line is to [`cleans_up`].
+fn cleanup_step(
+    node: tree_sitter::Node<'_>,
+    outer: &[tree_sitter::Node<'_>],
+    source: &str,
+) -> Cleanup {
+    // `rm -rf x || true`: what follows `||` runs only when the delete failed.
+    if node.kind() == "list" && outer.is_empty() {
+        let parts: Vec<_> = node.named_children(&mut node.walk()).collect();
+        let or = node
+            .children(&mut node.walk())
+            .filter(|child| !child.is_named())
+            .all(|child| child.kind() == "||");
+        return match parts.as_slice() {
+            [delete, after]
+                if or
+                    && cleanup_step(*delete, &[], source) == Cleanup::Delete
+                    && cleanup_step(*after, &[], source) == Cleanup::Inert =>
+            {
+                Cleanup::Delete
+            }
+            _ => Cleanup::Other,
+        };
+    }
+    let (Some(command), redirects) = statement(node, outer) else {
+        return Cleanup::Other;
+    };
+    if heredoc_holds_more(node)
+        || has_substitution(node)
+        || command
+            .named_children(&mut command.walk())
+            .any(|child| child.kind() == "variable_assignment")
+        || !redirects
+            .iter()
+            .all(|redirect| reads_or_silences(*redirect, source))
+    {
+        return Cleanup::Other;
+    }
+    let words = words(command, source);
+    let Some((program, arguments)) = words.split_first() else {
+        return Cleanup::Other;
+    };
+    if !words.iter().all(|word| word.literal) {
+        return Cleanup::Other;
+    }
+    match program.raw.as_str() {
+        "cd" => match arguments {
+            [folder] if plain_path(folder) && !names_no_path("cd", &folder.value) => Cleanup::Cd,
+            _ => Cleanup::Other,
+        },
+        "rm" | "rmdir" | "unlink"
+            if arguments.iter().all(|word| {
+                !word.raw.contains(['*', '?', '[', '{', '~'])
+                    && !word.value.chars().any(char::is_control)
+            }) =>
+        {
+            Cleanup::Delete
+        }
+        "printf" if arguments.iter().any(|word| word.value.starts_with("-v")) => Cleanup::Other,
+        "echo" | "printf" | "ls" | "pwd" | "true" | "false" | ":" | "test" | "[" => Cleanup::Inert,
+        _ => Cleanup::Other,
+    }
+}
+
 /// Whether the literal start of a word nobody can place leads away from
 /// the project: an absolute path, one from home, or one going up.
 fn leads_away(raw: &str) -> bool {
@@ -6281,6 +6541,12 @@ const MAX_LINKS: u8 = 40;
 /// resolve to `/`, outside every project.
 fn resolve(workspace: &Path, argument: impl AsRef<Path>) -> PathBuf {
     resolve_path(&workspace.join(argument), 0)
+}
+
+/// An absolute `path` as [`resolve`] places it: where a delete of it
+/// reaches.
+pub(crate) fn reached(path: &Path) -> PathBuf {
+    resolve_path(path, 0)
 }
 
 fn resolve_path(path: &Path, depth: u8) -> PathBuf {
@@ -9387,6 +9653,100 @@ mod readings {
             );
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_a_line_may_make_outside_the_project_is_each_literal_target() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-creations-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let real = crate::paths::canonicalize(&root).unwrap();
+        let x = real.join("x");
+        let made = |command: &str| creations(command, &workspace, &workspace);
+        assert_eq!(
+            made(&format!(
+                "mkdir -p {x}/a/b && touch {x}/f; echo hi > {x}/out.txt; cp README.md {x}/copy\n\
+                 echo hi | tee -a {x}/t.log >> {x}/more.log",
+                x = x.display()
+            )),
+            ["a/b", "f", "out.txt", "copy", "t.log", "more.log"]
+                .map(|name| x.join(name))
+                .to_vec()
+        );
+        // A relative one leads where it lands; options take their words.
+        assert_eq!(made("touch ../rel"), vec![real.join("rel")]);
+        assert_eq!(
+            made(&format!(
+                "touch -d 2020-01-01 {x}/d; mkdir -m 755 {x}/m",
+                x = x.display()
+            )),
+            vec![x.join("d"), x.join("m")]
+        );
+        // Nothing in the project, nothing that is no literal path, nothing a
+        // wrapper or text run again names, no relative path once the line
+        // may change directory, and no move or link.
+        for command in [
+            "mkdir -p build && touch src/x && echo x > out.txt",
+            "mkdir \"$D\"",
+            "touch ~/x",
+            &format!("touch {}/*", x.display()),
+            &format!("touch {}/{{a,b}}", x.display()),
+            &format!("sudo mkdir {}/s", x.display()),
+            &format!("bash -c 'mkdir {}/s'", x.display()),
+            "cd /tmp && touch y",
+            "echo x > /dev/null 2>&1",
+            &format!("mv a {}/m", x.display()),
+            &format!("ln -s a {}/l", x.display()),
+            &format!("echo x 2>&1 >&2; cat {}/f", x.display()),
+        ] {
+            assert!(made(command).is_empty(), "{command}: {:?}", made(command));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_line_that_only_takes_paths_away_cleans_up() {
+        let workspace = workspace();
+        for command in [
+            "rm -rf /tmp/x",
+            "rm -rf /tmp/x 2>/dev/null",
+            "rm -rf /tmp/x > /dev/null 2>&1",
+            "test -d /tmp/x && rm -rf /tmp/x",
+            "ls /tmp/x; rm -rf /tmp/x\necho done",
+            "cd /tmp && rm -rf x",
+            "rm -rf /tmp/x || true",
+            "rm -f /tmp/a /tmp/b; rmdir /tmp/c; unlink /tmp/d",
+            "echo cleaning; rm -rf /tmp/x; make",
+        ] {
+            assert!(cleans_up(command, &workspace), "{command}");
+        }
+        for command in [
+            "echo nothing to delete",
+            "rm -rf /tmp/x/*",
+            "rm -rf /tmp/{a,b}",
+            "rm -rf \"$D\"",
+            "rm -rf ~/x",
+            "make; rm -rf /tmp/x",
+            "rm -rf /tmp/x &",
+            "rm -rf /tmp/x | cat",
+            "(rm -rf /tmp/x)",
+            "sudo rm -rf /tmp/x",
+            "X=1 rm -rf /tmp/x",
+            "rm -rf /tmp/x > log.txt",
+            "bash -c 'rm -rf /tmp/x'",
+            "rm -rf /tmp/x; sudo rm -rf /tmp/y",
+            "rm -rf /tmp/x; find /tmp/y -delete",
+            "ln -s /etc /tmp/x/l && rm -rf /tmp/x",
+            "printf -v CDPATH / && cd tmp && rm -rf x",
+            "cd \"$D\" && rm -rf x",
+            "echo $HOME && rm -rf /tmp/x",
+            "rm -rf /tmp/x || rm -rf /tmp/y",
+            "\\rm -rf /tmp/x",
+        ] {
+            assert!(!cleans_up(command, &workspace), "{command}");
+        }
     }
 
     #[cfg(unix)]
