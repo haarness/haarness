@@ -63,7 +63,7 @@ pub struct JsonLayers {
     pub instructions: Option<String>,
     /// Configured `instructions` entries (globs, `~/` paths, absolute paths,
     /// URLs), in layer order without duplicates.
-    pub instruction_sources: Vec<String>,
+    pub instruction_sources: Vec<InstructionSource>,
     /// Every local instruction file the assembly considered, so hot reload
     /// can watch files named by `instructions` entries.
     pub instruction_files: Vec<PathBuf>,
@@ -87,6 +87,14 @@ pub struct JsonLayers {
     pub auto_review: haarness_core::AutoReviewSettings,
     /// The project layers are loading.
     pub(crate) project: bool,
+}
+
+/// One configured `instructions` entry and, when a project's file named it
+/// first, that file: such an entry reads only files inside the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstructionSource {
+    pub entry: String,
+    pub project: Option<PathBuf>,
 }
 
 pub struct HookSource {
@@ -406,25 +414,62 @@ pub fn load_layers_with_system(
         }
     }
     let trusted_roots = trusted_instruction_roots(config_dir, home);
+    // A project's own entries name files of the project only: a cloned
+    // repository never puts the person's other files into the prompt.
+    let project_roots = crate::layout::project_roots(workspace);
     let mut urls = Vec::new();
     let mut seen: HashSet<PathBuf> = local_files
         .iter()
         .filter_map(|(file, _)| dunce::canonicalize(file).ok())
         .collect();
-    for entry in &layers.instruction_sources {
+    for InstructionSource { entry, project } in &layers.instruction_sources {
         if entry.starts_with("https://") || entry.starts_with("http://") {
             urls.push(entry.clone());
             continue;
         }
-        for file in instruction_entry_files(entry, home, workspace, trust, &mut layers.warnings) {
+        let fence = project.as_ref().map(|_| project_roots.as_slice());
+        let Some(files) =
+            instruction_entry_files(entry, home, workspace, trust, fence, &mut layers.warnings)
+        else {
+            if let Some(named_by) = project {
+                layers.notices.push(format!(
+                    "{}: ignored instructions {entry:?}: it points outside the project; \
+                     a file of your own belongs in {}",
+                    named_by.display(),
+                    config_dir.join("haarness.json").display()
+                ));
+            }
+            continue;
+        };
+        let mut outside = Vec::new();
+        for file in files {
             let Ok(canonical) = dunce::canonicalize(&file) else {
                 continue;
             };
+            // A link (or a `..` after a wildcard) may lead a match out.
+            if fence.is_some_and(|roots| !roots.iter().any(|root| canonical.starts_with(root))) {
+                outside.push(file);
+                continue;
+            }
             if !seen.insert(canonical.clone()) {
                 continue;
             }
-            let trusted = trusted_roots.iter().any(|root| canonical.starts_with(root));
+            // Only the person's own entries are trusted for where their files
+            // are, never a project's.
+            let trusted =
+                project.is_none() && trusted_roots.iter().any(|root| canonical.starts_with(root));
             local_files.push((file, trusted));
+        }
+        if let (Some(named_by), Some(first)) = (project, outside.first()) {
+            let more = match outside.len() - 1 {
+                0 => String::new(),
+                more => format!(" and {more} more"),
+            };
+            layers.notices.push(format!(
+                "{}: instructions {entry:?}: left out {}{more}: its real path is outside the project",
+                named_by.display(),
+                first.display()
+            ));
         }
     }
     layers.instruction_files = local_files.iter().map(|(file, _)| file.clone()).collect();
@@ -673,13 +718,21 @@ const INSTRUCTION_GLOB_ENTRIES: usize = 1_000_000;
 /// configuration is disabled. A `**` reads each folder once, so a link back
 /// up the tree cannot keep it walking (see [`haarness_server::bounded_glob`]),
 /// and `warnings` says when an entry reached its budget.
+///
+/// With a `fence` (the project's real roots, for an entry a project's file
+/// named) nothing outside it is read: a `~/` entry, and an absolute or
+/// relative one whose fixed start (the folders before its first wildcard)
+/// leads out of the project through `..` or a link, give `None`. A relative
+/// entry is read from each folder where it starts inside; its matches are
+/// still the caller's to check, since a wildcard may match a link.
 fn instruction_entry_files(
     entry: &str,
     home: Option<&Path>,
     workspace: &Path,
     trust: bool,
+    fence: Option<&[PathBuf]>,
     warnings: &mut Vec<String>,
-) -> Vec<PathBuf> {
+) -> Option<Vec<PathBuf>> {
     use haarness_server::bounded_glob::{Cut, Links, Walk};
     let configured = entry;
     let mut files = |pattern: String| {
@@ -696,32 +749,79 @@ fn instruction_entry_files(
         }
         files
     };
+    let starts_inside = |start: PathBuf| fence.is_none_or(|roots| stays_within(&start, roots));
     let entry = match entry.strip_prefix("~/") {
+        Some(_) if fence.is_some() => return None,
         Some(rest) => {
             let Some(home) = home else {
-                return Vec::new();
+                return Some(Vec::new());
             };
             format!("{}/{rest}", glob::Pattern::escape(&home.to_string_lossy()))
         }
         None => entry.to_owned(),
     };
     if Path::new(&entry).is_absolute() {
-        return files(entry);
+        return starts_inside(glob_start(Path::new(&entry))).then(|| files(entry));
     }
     if !trust {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let mut out = Vec::new();
+    let mut inside = false;
     for directory in crate::layout::project_directories(workspace)
         .into_iter()
         .rev()
     {
+        // Judged on the folder as it is: the pattern below escapes it.
+        if !starts_inside(directory.join(glob_start(Path::new(&entry)))) {
+            continue;
+        }
+        inside = true;
         out.extend(files(format!(
             "{}/{entry}",
             glob::Pattern::escape(&directory.to_string_lossy())
         )));
     }
-    out
+    (inside || fence.is_none()).then_some(out)
+}
+
+/// The fixed start of a glob pattern: its folders up to the first one with a
+/// wildcard (`*`, `?` or `[`), where a walk of it begins.
+fn glob_start(pattern: &Path) -> PathBuf {
+    pattern
+        .components()
+        .take_while(|part| !part.as_os_str().to_string_lossy().contains(['*', '?', '[']))
+        .collect()
+}
+
+/// Whether `path` is inside one of `roots` (real paths) once its links and
+/// `..` are followed. A part that does not exist is read as written below the
+/// nearest folder that does, so a path that names nothing yet is judged too.
+fn stays_within(path: &Path, roots: &[PathBuf]) -> bool {
+    use std::path::Component;
+    let mut missing = Vec::new();
+    let mut current = path;
+    let mut real = loop {
+        if let Ok(real) = dunce::canonicalize(current) {
+            break real;
+        }
+        let (Some(parent), Some(last)) = (current.parent(), current.components().next_back())
+        else {
+            return false;
+        };
+        missing.push(last);
+        current = parent;
+    };
+    for part in missing.into_iter().rev() {
+        match part {
+            Component::ParentDir => {
+                real.pop();
+            }
+            Component::Normal(name) => real.push(name),
+            _ => {}
+        }
+    }
+    roots.iter().any(|root| real.starts_with(root))
 }
 
 /// Largest remote instruction body that is inlined.
@@ -1253,9 +1353,12 @@ fn apply_json_layer(layers: &mut JsonLayers, path: &Path, trusted: bool, base: b
             if !layers
                 .instruction_sources
                 .iter()
-                .any(|known| known == entry)
+                .any(|known| known.entry == entry)
             {
-                layers.instruction_sources.push(entry.to_owned());
+                layers.instruction_sources.push(InstructionSource {
+                    entry: entry.to_owned(),
+                    project: layers.project.then(|| path.to_path_buf()),
+                });
             }
         }
     }
@@ -3300,7 +3403,14 @@ mod tests {
             .expect("the system folder's hooks are listed");
         assert!(hook.base && hook.trusted && !hook.plugin);
         assert_eq!(layers.hooks.len(), 1);
-        assert_eq!(layers.instruction_sources, ["/opt/team/rules.md"]);
+        // The system folder's entries are not a project's.
+        assert_eq!(
+            layers.instruction_sources,
+            [InstructionSource {
+                entry: "/opt/team/rules.md".into(),
+                project: None
+            }]
+        );
         let reviewer = layers
             .agents
             .iter()
@@ -3617,61 +3727,81 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        // The project names a store and a key by `instructions`, and its
-        // AGENTS.md is a link to another store.
+        // The project names a store, a key and a private file by
+        // `instructions`, none of them its own, so none is read. Its folders'
+        // AGENTS.md are links to another store, to a key and to a file a read
+        // rule denies, each left out for where it really is.
+        let entries = [
+            "~/.st/data/auth.json".to_owned(),
+            "~/.ssh/id_ed25519".to_owned(),
+            "~/private/notes.md".to_owned(),
+            store.display().to_string(),
+        ];
         fs::write(
             project.join("haarness.json"),
-            serde_json::json!({"instructions": [
-                "~/.st/data/auth.json",
-                "~/.ssh/id_ed25519",
-                "~/private/notes.md",
-                store.display().to_string()
-            ]})
-            .to_string(),
+            serde_json::json!({ "instructions": entries }).to_string(),
         )
         .unwrap();
+        let web = project.join(native("app/web"));
+        fs::create_dir_all(&web).unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&older, project.join("AGENTS.md")).unwrap();
-        let layers = load_layers(&config, Some(&home), &project, true, &[]);
-        // The person is told too.
-        assert!(
-            layers.notices.contains(&format!(
-                "skipped instructions {}: Haarness keeps sign-ins there",
-                store.display()
-            )),
-            "{:?}",
-            layers.notices
-        );
+        {
+            std::os::unix::fs::symlink(&older, project.join("AGENTS.md")).unwrap();
+            std::os::unix::fs::symlink(home.join(".ssh/id_ed25519"), project.join("app/AGENTS.md"))
+                .unwrap();
+            std::os::unix::fs::symlink(home.join("private/notes.md"), web.join("AGENTS.md"))
+                .unwrap();
+        }
+        let layers = load_layers(&config, Some(&home), &web, true, &[]);
+        let ignored: Vec<&String> = layers
+            .notices
+            .iter()
+            .filter(|notice| notice.contains(": ignored instructions "))
+            .collect();
+        assert_eq!(ignored.len(), entries.len(), "{:?}", layers.notices);
+        for entry in &entries {
+            assert!(
+                ignored
+                    .iter()
+                    .any(|notice| notice.contains(&format!("{entry:?}"))),
+                "{entry}: {ignored:?}"
+            );
+        }
         let instructions = layers.instructions.expect("instructions");
         for hidden in ["SIGN_IN_SECRET", "KEY_SECRET", "PRIVATE_NOTES"] {
             assert!(!instructions.contains(hidden), "{instructions}");
         }
         // The person's own file still loads, a read rule about it or not.
         assert!(instructions.contains("GLOBAL_BODY"), "{instructions}");
-        assert!(
-            instructions.contains(&format!(
-                "[Instruction file omitted: {} (Haarness keeps sign-ins there)]",
-                store.display()
-            )),
-            "{instructions}"
-        );
-        // A private key is left out as credentials, rule or no rule; another file by its read rule.
-        assert!(
-            instructions.contains("(it holds credentials)]"),
-            "{instructions}"
-        );
-        assert!(
-            instructions.contains("(a read rule denies it)]"),
-            "{instructions}"
-        );
         #[cfg(unix)]
-        assert!(
-            instructions.contains(&format!(
-                "[Instruction file omitted: {} (Haarness keeps sign-ins there)]",
-                project.join("AGENTS.md").display()
-            )),
-            "{instructions}"
-        );
+        {
+            assert!(
+                instructions.contains(&format!(
+                    "[Instruction file omitted: {} (Haarness keeps sign-ins there)]",
+                    project.join("AGENTS.md").display()
+                )),
+                "{instructions}"
+            );
+            // The person is told too.
+            assert!(
+                layers.notices.contains(&format!(
+                    "skipped instructions {}: Haarness keeps sign-ins there",
+                    project.join("AGENTS.md").display()
+                )),
+                "{:?}",
+                layers.notices
+            );
+            // A private key is left out as credentials, rule or no rule;
+            // another file by its read rule.
+            assert!(
+                instructions.contains("(it holds credentials)]"),
+                "{instructions}"
+            );
+            assert!(
+                instructions.contains("(a read rule denies it)]"),
+                "{instructions}"
+            );
+        }
         // A project's own AGENTS.md loads as before under a read rule that
         // covers it.
         fs::write(own.join("AGENTS.md"), "OWN_PROJECT_BODY").unwrap();
@@ -3817,12 +3947,14 @@ mod tests {
             home.join("shared"),
             project.join(".git"),
             project.join("docs"),
+            project.join("guide"),
             workspace.join("docs"),
             root.join("elsewhere"),
         ] {
             fs::create_dir_all(dir).unwrap();
         }
         fs::write(project.join("docs/style.md"), "ROOT_STYLE").unwrap();
+        fs::write(project.join("guide/abs.md"), "PROJECT_ABSOLUTE").unwrap();
         fs::write(workspace.join("docs/app.md"), "APP_DOCS").unwrap();
         fs::write(home.join("shared/rules.md"), "HOME_RULES").unwrap();
         fs::write(root.join("elsewhere/abs.md"), "ABSOLUTE_RULES").unwrap();
@@ -3831,17 +3963,22 @@ mod tests {
         fs::write(
             config.join("haarness.json"),
             serde_json::json!({
-                "instructions": ["~/shared/rules.md", format!("{base}/remote.md")]
+                "instructions": [
+                    "~/shared/rules.md",
+                    root.join("elsewhere/abs.md").display().to_string(),
+                    format!("{base}/remote.md")
+                ]
             })
             .to_string(),
         )
         .unwrap();
+        // A project names its own files, by an absolute path too.
         fs::write(
             workspace.join("haarness.json"),
             serde_json::json!({
                 "instructions": [
                     "docs/*.md",
-                    root.join("elsewhere/abs.md").display().to_string(),
+                    project.join("guide/abs.md").display().to_string(),
                     "docs/*.md",
                     "http://127.0.0.1:1/unreachable.md",
                     "AGENTS.md"
@@ -3860,6 +3997,7 @@ mod tests {
             "APP_DOCS",
             "ROOT_STYLE",
             "ABSOLUTE_RULES",
+            "PROJECT_ABSOLUTE",
             "REMOTE_RULES",
         ] {
             assert_eq!(
@@ -3875,16 +4013,33 @@ mod tests {
             "{:?}",
             layers.notices
         );
+        let own = |entry: String| InstructionSource {
+            entry,
+            project: None,
+        };
+        let named = |entry: String| InstructionSource {
+            entry,
+            project: Some(workspace.join("haarness.json")),
+        };
         assert_eq!(
             layers.instruction_sources,
             vec![
-                "~/shared/rules.md".to_owned(),
-                format!("{base}/remote.md"),
-                "docs/*.md".to_owned(),
-                root.join("elsewhere/abs.md").display().to_string(),
-                "http://127.0.0.1:1/unreachable.md".to_owned(),
-                "AGENTS.md".to_owned(),
+                own("~/shared/rules.md".to_owned()),
+                own(root.join("elsewhere/abs.md").display().to_string()),
+                own(format!("{base}/remote.md")),
+                named("docs/*.md".to_owned()),
+                named(project.join("guide/abs.md").display().to_string()),
+                named("http://127.0.0.1:1/unreachable.md".to_owned()),
+                named("AGENTS.md".to_owned()),
             ]
+        );
+        assert!(
+            !layers
+                .notices
+                .iter()
+                .any(|notice| notice.contains("ignored instructions")),
+            "{:?}",
+            layers.notices
         );
         assert!(
             layers
@@ -3902,6 +4057,157 @@ mod tests {
         let instructions = global_only.instructions.unwrap();
         assert!(instructions.contains("HOME_RULES"));
         assert!(!instructions.contains("APP_DOCS"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_repositorys_instruction_entries_cannot_reach_beyond_it() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-fence-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let home = root.join("home");
+        let project = root.join("project");
+        for dir in [
+            config.clone(),
+            home.join(".claude"),
+            project.join(".git"),
+            project.join("docs"),
+            root.join("outside"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(home.join("notes.md"), "HOME_NOTES").unwrap();
+        fs::write(home.join(".claude/.credentials.json"), "CLAUDE_TOKENS").unwrap();
+        fs::write(root.join("outside/abs.md"), "OUTSIDE_ABSOLUTE").unwrap();
+        fs::write(root.join("outside/up.md"), "OUTSIDE_UP").unwrap();
+        fs::write(project.join("docs/guide.md"), "PROJECT_GUIDE").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../../outside/up.md", project.join("docs/link.md")).unwrap();
+        let entries = [
+            "~/notes.md".to_owned(),
+            root.join("outside/abs.md").display().to_string(),
+            "../outside/up.md".to_owned(),
+            "~/.claude/.credentials.json".to_owned(),
+        ];
+        let mut named: Vec<String> = entries.to_vec();
+        named.push("docs/*.md".to_owned());
+        fs::write(
+            project.join("haarness.json"),
+            serde_json::json!({ "instructions": named }).to_string(),
+        )
+        .unwrap();
+
+        let layers = load_layers(&config, Some(&home), &project, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        for hidden in [
+            "HOME_NOTES",
+            "CLAUDE_TOKENS",
+            "OUTSIDE_ABSOLUTE",
+            "OUTSIDE_UP",
+        ] {
+            assert!(!instructions.contains(hidden), "{hidden}\n{instructions}");
+        }
+        assert!(instructions.contains("PROJECT_GUIDE"), "{instructions}");
+        // One notice for each entry, naming the file that named it and where
+        // the person's own files go.
+        let ignored: Vec<&String> = layers
+            .notices
+            .iter()
+            .filter(|notice| notice.contains(": ignored instructions "))
+            .collect();
+        assert_eq!(ignored.len(), entries.len(), "{:?}", layers.notices);
+        for entry in &entries {
+            let notice = ignored
+                .iter()
+                .find(|notice| notice.contains(&format!("{entry:?}")))
+                .unwrap_or_else(|| panic!("{entry}: {ignored:?}"));
+            assert!(
+                notice.starts_with(&project.join("haarness.json").display().to_string()),
+                "{notice}"
+            );
+            assert!(
+                notice.ends_with(&config.join("haarness.json").display().to_string()),
+                "{notice}"
+            );
+        }
+        // A match a link leads out of the project is left out, and said once.
+        #[cfg(unix)]
+        assert!(
+            layers.notices.iter().any(|notice| notice.contains(&format!(
+                "instructions \"docs/*.md\": left out {}: its real path is outside the project",
+                project.join("docs/link.md").display()
+            ))),
+            "{:?}",
+            layers.notices
+        );
+        assert!(
+            !layers
+                .instruction_files
+                .iter()
+                .any(|file| !file.starts_with(&project) && !file.starts_with(&config)),
+            "{:?}",
+            layers.instruction_files
+        );
+
+        // The same home file loads when the person's own configuration names it.
+        fs::write(
+            config.join("haarness.json"),
+            serde_json::json!({"instructions": ["~/notes.md"]}).to_string(),
+        )
+        .unwrap();
+        let layers = load_layers(&config, Some(&home), &project, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert_eq!(
+            instructions.matches("HOME_NOTES").count(),
+            1,
+            "{instructions}"
+        );
+        assert!(instructions.contains("PROJECT_GUIDE"), "{instructions}");
+        assert!(!instructions.contains("CLAUDE_TOKENS"), "{instructions}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_a_project_names_is_not_trusted_for_where_it_is() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-untrusted-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let home = root.join("home");
+        // A project kept in a folder whose own files may import from anywhere.
+        let project = home.join(native(".haarness/work"));
+        for dir in [config.clone(), project.join(".git"), root.join("outside")] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let outside = root.join("outside/private.md");
+        fs::write(&outside, "OUTSIDE_PRIVATE").unwrap();
+        fs::write(
+            project.join("rules.md"),
+            format!("RULES_BODY\n@{}\n", outside.display()),
+        )
+        .unwrap();
+        fs::write(
+            project.join("haarness.json"),
+            serde_json::json!({"instructions": ["rules.md"]}).to_string(),
+        )
+        .unwrap();
+        let layers = load_layers(&config, Some(&home), &project, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(instructions.contains("RULES_BODY"), "{instructions}");
+        assert!(!instructions.contains("OUTSIDE_PRIVATE"), "{instructions}");
+
+        // Named by the person, the same file still imports from outside.
+        fs::write(
+            config.join("haarness.json"),
+            serde_json::json!({"instructions": [project.join("rules.md")]}).to_string(),
+        )
+        .unwrap();
+        let layers = load_layers(&config, Some(&home), &project, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(instructions.contains("OUTSIDE_PRIVATE"), "{instructions}");
         fs::remove_dir_all(root).unwrap();
     }
 

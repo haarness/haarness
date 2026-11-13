@@ -83,14 +83,16 @@ The `instructions` key in `haarness.json{,c}` and its legacy filename aliases ap
 {
   "instructions": [
     "docs/*.md",                        // glob, matched in the workspace and each ancestor up to the worktree root
-    "~/shared/rules.md",                // home-relative
-    "/opt/team/standards.md",           // absolute (globs allowed)
+    "~/shared/rules.md",                // home-relative (your own configuration only)
+    "/opt/team/standards.md",           // absolute, globs allowed (in a project's file, only inside the project)
     "https://example.test/rules.md"     // fetched with a 10 s timeout, 200 KiB cap; failures are logged and skipped
   ]
 }
 ```
 
-Files under the global configuration directory or the supported home resource roots may import from outside the workspace; everything else is bounded like project `AGENTS.md`. Relative entries are ignored when project configuration is turned off.
+Files your own configuration names under the global configuration directory or the supported home resource roots may import from outside the workspace; everything else is bounded like project `AGENTS.md`. Relative entries are ignored when project configuration is turned off.
+
+A project's own files (its `haarness.json{,c}` and their aliases, `.haarness/cloud/haarness.json` included) point only at files the project holds, under its worktree root or the workspace, since a cloned repository writes them. Such a file's `~/…` entry, an absolute path outside the project, and an entry whose folders before its first wildcard lead out through `..` or a link are ignored, with one line in the log for each that names the file and where your own files belong: `config: <project>/haarness.json: ignored instructions "~/notes.md": it points outside the project; a file of your own belongs in ~/.config/haarness/haarness.json`. A match of its glob that a link leads out of the project is left out too, in one line for the entry (`… instructions "docs/*.md": left out docs/team.md: its real path is outside the project`). A file a project names is never trusted for where it is, so it imports only from inside the workspace even when the project lives under `~/.haarness`. URLs and the project's other entries load as before, and your own entries, in your global configuration or the system folder, are unchanged: `"~/notes.md"` there still loads in every project.
 
 Globs take `*`, `?`, `[…]` and `**` (a `*` also matches a name that starts with a dot). A `**` follows linked folders, so `~/handbook/**/RULES.md` also reads a `handbook/legal` that links to a folder kept elsewhere, but for each `**` of the entry it reads each real folder once: a link back up the tree (`handbook/team/up -> ..`), or to a folder that `**` already read by another path, is not entered again, so no link can keep a configuration load walking. A linked file matches like any file. A `**` does not go into version control folders (`.git`, `.hg`, `.svn`, `.bzr`, `.jj`, `_darcs`, `CVS`); a pattern that names one (`docs/.git/*.md`) still reads it. As a safety net, one entry reads at most 1,000,000 files and folders; an entry that reaches that uses the files it found until then, and the log says so as a warning (`config: instructions …: stopped after reading 1000000 folder entries; …`).
 
