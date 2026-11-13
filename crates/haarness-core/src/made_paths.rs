@@ -290,9 +290,13 @@ pub fn holds(root: ThreadId, target: &Path) -> bool {
 }
 
 /// Whether everything at and under `path`, links not followed, was born no
-/// earlier than `since`: within `limit` entries, each with a birth time the
-/// system keeps.
+/// earlier than `since` and no later than now, and last changed no earlier
+/// than `since`: within `limit` entries, each with a birth time the system
+/// keeps. A move from another disk is a copy born on arrival, but `mv`,
+/// `cp -p` and `tar -x` keep the time it was last changed. It may look
+/// through a lot of entries: call it off the async workers.
 fn born_since(path: &Path, since: SystemTime, limit: usize) -> bool {
+    let now = SystemTime::now();
     let mut stack = vec![path.to_path_buf()];
     let mut looked = 0;
     while let Some(path) = stack.pop() {
@@ -306,7 +310,11 @@ fn born_since(path: &Path, since: SystemTime, limit: usize) -> bool {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return false,
         };
-        if metadata.created().map_or(true, |born| born < since) {
+        if metadata
+            .created()
+            .map_or(true, |born| born < since || born > now)
+            || metadata.modified().map_or(true, |changed| changed < since)
+        {
             return false;
         }
         if metadata.is_dir() {
@@ -499,6 +507,37 @@ mod tests {
         assert!(!holds(chat, &own.join("theirs/deep/notes.txt")));
         // What the chat made beside it is still its own.
         assert!(holds(chat, &own.join("made.txt")));
+        // A file given an older time (`mv` from another disk, `cp -p`,
+        // `tar -x`) is not the chat's to take away either.
+        let kept = own.join("kept-time.txt");
+        std::fs::write(&kept, "x").unwrap();
+        assert!(holds(chat, &kept));
+        std::fs::File::options()
+            .write(true)
+            .open(&kept)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+            .unwrap();
+        assert!(!holds(chat, &kept));
+        // Nor is one born later than now, as a clock set wrong may make it.
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::macos::fs::FileTimesExt;
+            let later = own.join("later.txt");
+            std::fs::write(&later, "x").unwrap();
+            let future = SystemTime::now() + Duration::from_secs(3600);
+            std::fs::File::options()
+                .write(true)
+                .open(&later)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(future)
+                        .set_created(future),
+                )
+                .unwrap();
+            assert!(!holds(chat, &later));
+        }
         // Past the limit of what is looked at, nothing is.
         let since = SystemTime::UNIX_EPOCH;
         assert!(born_since(&own.join("made.txt"), since, 1));

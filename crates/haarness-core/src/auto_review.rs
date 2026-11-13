@@ -943,10 +943,12 @@ pub(crate) fn unnamed_deletion(
                 return false;
             }
             let path = Path::new(&target.path);
+            // The line's shape first: looking through what the chat made may
+            // take longer.
             let own = target.effect == bash::Effect::Deletes
                 && !kept.holds(path)
-                && crate::made_paths::holds(root, path)
-                && *cleanup.get_or_insert_with(|| bash::cleans_up(command, workspace));
+                && *cleanup.get_or_insert_with(|| bash::cleans_up(command, workspace))
+                && crate::made_paths::holds(root, path);
             !own
         })
 }
@@ -1352,9 +1354,27 @@ impl Reviewer {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let target = (stricter == Decision::Allow)
-            .then(|| unnamed_deletion(request, &self.workspace, &said))
-            .flatten();
+        let target = if stricter == Decision::Allow {
+            // It may look through a folder the chat made: off the async
+            // workers. Should that fail, the deletion is the person's.
+            let (request, workspace) = (request.clone(), self.workspace.clone());
+            let command = request
+                .detail
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let failed = crate::permissions::bash::OutsideDeletion {
+                path: command,
+                placed: false,
+                effect: crate::permissions::bash::Effect::Deletes,
+            };
+            tokio::task::spawn_blocking(move || unnamed_deletion(&request, &workspace, &said))
+                .await
+                .unwrap_or(Some(failed))
+        } else {
+            None
+        };
         let rule = verdict.rule.as_deref().map(|rule| clip(rule, RULE));
         // Haarness's own words when it decided, or the reviewer gave none.
         let (rationale, reason) = match (&target, verdict.rationale.as_deref()) {
