@@ -5412,7 +5412,9 @@ impl AgentRuntime {
                             progress(BtwEvent::Delta { text: delta });
                         }
                     }
+                    // A note before a call is not the side answer.
                     ProviderEvent::ReasoningDelta(_)
+                    | ProviderEvent::Note { .. }
                     | ProviderEvent::ContentStarted
                     | ProviderEvent::Cost { .. } => {}
                     ProviderEvent::Finished { reason } => {
@@ -11805,8 +11807,11 @@ impl RunnerTask {
                     .await?;
                     // A child moved to the background delivers after this.
                     self.release_task_delivery(&call_id);
-                    self.publish_item(ItemData::AssistantMessage { text: output.text })
-                        .await?;
+                    self.publish_item(ItemData::AssistantMessage {
+                        text: output.text,
+                        note: false,
+                    })
+                    .await?;
                     let active = self
                         .active
                         .get(&self.thread.id)
@@ -12629,7 +12634,8 @@ impl RunnerTask {
                         ProviderEvent::TextDelta(delta) | ProviderEvent::ReasoningDelta(delta) => {
                             !delta.is_empty()
                         }
-                        ProviderEvent::ToolCall { .. }
+                        ProviderEvent::Note { .. }
+                        | ProviderEvent::ToolCall { .. }
                         | ProviderEvent::StructuredOutput(_)
                         | ProviderEvent::ContentStarted => true,
                         ProviderEvent::Usage { .. }
@@ -12655,13 +12661,15 @@ impl RunnerTask {
                     // The request to explain a failure is answered once the
                     // reply shows something (words, a tool call or structured
                     // output) or ends. One cut before that, after only usage,
-                    // reasoning or blank text, is sent again still asking.
+                    // reasoning, a note for the call to come or blank text, is
+                    // sent again still asking.
                     let answered = match &event {
                         ProviderEvent::TextDelta(delta) => !delta.trim().is_empty(),
                         ProviderEvent::ToolCall { .. }
                         | ProviderEvent::StructuredOutput(_)
                         | ProviderEvent::Finished { .. } => true,
                         ProviderEvent::ReasoningDelta(_)
+                        | ProviderEvent::Note { .. }
                         | ProviderEvent::ContentStarted
                         | ProviderEvent::Usage { .. }
                         | ProviderEvent::Cost { .. } => false,
@@ -12716,6 +12724,46 @@ impl RunnerTask {
                                 None,
                                 json!({"delta":delta}),
                             );
+                        }
+                        // Reply text for the person, saved as a note: it does
+                        // not make the round one that wrote text, and it is
+                        // never sent back as text (see `provider_messages`).
+                        ProviderEvent::Note {
+                            text: note,
+                            streamed_as_reasoning,
+                        } => {
+                            if streamed_as_reasoning {
+                                // It ran long and went out as reasoning: it
+                                // leaves the thought, with the break before it.
+                                if let Some(rest) = reasoning.strip_suffix(note.as_str()) {
+                                    let kept = rest.trim_end().len();
+                                    reasoning.truncate(kept);
+                                }
+                            } else {
+                                streamed.push_str(&note);
+                            }
+                            let note = note.trim();
+                            if note.is_empty() {
+                                continue;
+                            }
+                            self.flush_reasoning_segment(&mut reasoning, thought_from)
+                                .await?;
+                            self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
+                                .await?;
+                            thought_from = std::time::Instant::now();
+                            self.events.publish_scoped(
+                                "turn.text_delta",
+                                Some(self.thread.id),
+                                Some(self.root_thread_id),
+                                Some(self.turn.id),
+                                None,
+                                json!({"delta":note}),
+                            );
+                            self.publish_item(ItemData::AssistantMessage {
+                                text: note.to_owned(),
+                                note: true,
+                            })
+                            .await?;
                         }
                         ProviderEvent::ToolCall {
                             call_id,
@@ -12927,7 +12975,7 @@ impl RunnerTask {
                                 "provider returned unserializable structured output: {error}"
                             ))
                         })?;
-                        self.publish_item(ItemData::AssistantMessage { text })
+                        self.publish_item(ItemData::AssistantMessage { text, note: false })
                             .await?;
                     }
                 } else {
@@ -13562,8 +13610,11 @@ impl RunnerTask {
             }
             goal_turn_assistant_text.push_str(&segment);
         }
-        self.publish_item(ItemData::AssistantMessage { text: segment })
-            .await?;
+        self.publish_item(ItemData::AssistantMessage {
+            text: segment,
+            note: false,
+        })
+        .await?;
         Ok(())
     }
 
@@ -16575,14 +16626,17 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
     ]
 }
 
-/// The last reply of `turn` that is more than whitespace.
+/// The last reply of `turn` that is more than whitespace. A note before a
+/// call is never the reply.
 fn last_reply(items: &[Item], turn: TurnId) -> Option<&str> {
     items
         .iter()
         .rev()
         .filter(|item| item.turn_id == Some(turn))
         .find_map(|item| match &item.data {
-            ItemData::AssistantMessage { text } if !text.trim().is_empty() => Some(text.as_str()),
+            ItemData::AssistantMessage { text, note: false } if !text.trim().is_empty() => {
+                Some(text.as_str())
+            }
             _ => None,
         })
 }
@@ -17614,8 +17668,12 @@ fn provider_messages_with_origins(
             // A whitespace-only reply segment (often the line breaks a model
             // writes before a tool call) says nothing, and Claude refuses
             // whitespace-only text, which would fail every later request.
-            ItemData::AssistantMessage { text } if text.trim().is_empty() => None,
-            ItemData::AssistantMessage { text } => Some(ProviderMessage::Text {
+            ItemData::AssistantMessage { text, .. } if text.trim().is_empty() => None,
+            // A note came as a thinking block, which goes back unchanged with
+            // the call it preceded (in the call's `provider_metadata`); as
+            // text it would reach the model twice.
+            ItemData::AssistantMessage { note: true, .. } => None,
+            ItemData::AssistantMessage { text, .. } => Some(ProviderMessage::Text {
                 role: "assistant".into(),
                 content: text,
             }),
@@ -22399,6 +22457,7 @@ mod tests {
             sequence: 1,
             data: ItemData::AssistantMessage {
                 text: "Let me look.".into(),
+                note: false,
             },
             created_at: Utc::now(),
         }];
@@ -22414,6 +22473,41 @@ mod tests {
         assert_eq!(
             super::subagent_reply(&items, turn, Some(&round(false))),
             "The subagent's last step wrote no text (finish reason: stop). The last text it wrote, before its final tool calls, follows; it may be its answer or only narration:\n\nLet me look."
+        );
+    }
+
+    /// A note written before a later call is never what the subagent hands
+    /// its parent: its answer is the reply before it.
+    #[test]
+    fn a_subagent_reply_is_never_a_note() {
+        let turn = TurnId::new();
+        let item = |sequence, text: &str, note| Item {
+            id: ItemId::new(),
+            thread_id: ThreadId::new(),
+            turn_id: Some(turn),
+            sequence,
+            data: ItemData::AssistantMessage {
+                text: text.into(),
+                note,
+            },
+            created_at: Utc::now(),
+        };
+        let round = super::LastRound {
+            reason: "stop".into(),
+            output_tokens: Some(12),
+            wrote_text: true,
+        };
+        let items = [
+            item(1, "The date bug is in parse().", false),
+            item(2, "I'll check its tests once more.", true),
+        ];
+        assert_eq!(
+            super::subagent_reply(&items, turn, Some(&round)),
+            "The date bug is in parse()."
+        );
+        assert_eq!(
+            super::subagent_reply(&items[1..], turn, None),
+            super::subagent_reply(&[], turn, None)
         );
     }
 
@@ -23302,6 +23396,7 @@ mod tests {
                 2,
                 ItemData::AssistantMessage {
                     text: "ancient answer".into(),
+                    note: false,
                 },
             ),
             item(
@@ -23359,7 +23454,10 @@ mod tests {
             command_line: None,
             hook: hook.map(str::to_owned),
         };
-        let reply = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let reply = |text: &str| ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        };
         let texts = |items: Vec<Item>| -> Vec<String> {
             provider_messages(items)
                 .into_iter()
@@ -23415,6 +23513,7 @@ mod tests {
                 2,
                 ItemData::AssistantMessage {
                     text: "\n\n".into(),
+                    note: false,
                 },
             ),
             item(
@@ -23440,6 +23539,7 @@ mod tests {
                 5,
                 ItemData::AssistantMessage {
                     text: "Done.".into(),
+                    note: false,
                 },
             ),
             // Saved before turns refused a blank message.
@@ -23683,6 +23783,7 @@ mod tests {
                 2,
                 ItemData::AssistantMessage {
                     text: "ancient answer".into(),
+                    note: false,
                 },
             ),
             item(
@@ -23706,6 +23807,7 @@ mod tests {
                 5,
                 ItemData::AssistantMessage {
                     text: "recent exact answer".into(),
+                    note: false,
                 },
             ),
             item(
@@ -24532,7 +24634,10 @@ mod tests {
     }
 
     fn summary_reply(text: &str) -> ItemData {
-        ItemData::AssistantMessage { text: text.into() }
+        ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        }
     }
 
     fn summary_call(id: &str, name: &str, arguments: serde_json::Value) -> ItemData {
@@ -25357,6 +25462,7 @@ mod tests {
                 6,
                 ItemData::AssistantMessage {
                     text: "renamed".into(),
+                    note: false,
                 },
             ),
             at(running, 7, message("now the docs", false, false)),
@@ -25438,6 +25544,7 @@ mod tests {
                 5,
                 ItemData::AssistantMessage {
                     text: "documented".into(),
+                    note: false,
                 },
             ),
         ];
@@ -25539,6 +25646,7 @@ mod tests {
                 4,
                 ItemData::AssistantMessage {
                     text: "noted".into(),
+                    note: false,
                 },
             ),
         ];
@@ -25973,6 +26081,7 @@ mod tests {
                 3,
                 ItemData::AssistantMessage {
                     text: "stream completed".into(),
+                    note: false,
                 },
             ),
             item(
@@ -25985,6 +26094,7 @@ mod tests {
                 5,
                 ItemData::AssistantMessage {
                     text: "answered steering".into(),
+                    note: false,
                 },
             ),
         ]);
@@ -26047,6 +26157,7 @@ mod tests {
                 5,
                 ItemData::AssistantMessage {
                     text: "handled steering".into(),
+                    note: false,
                 },
             ),
         ]);

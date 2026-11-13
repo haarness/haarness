@@ -205,7 +205,7 @@ fn answers(items: &[Item]) -> Vec<String> {
     items
         .iter()
         .filter_map(|item| match &item.data {
-            ItemData::AssistantMessage { text } => Some(text.clone()),
+            ItemData::AssistantMessage { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect()

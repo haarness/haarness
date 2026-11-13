@@ -70,6 +70,21 @@ test("context estimates use the newest summary and retained tail, respecting und
     undefined,
   );
 });
+test("a note written before a call is not counted: it goes back only inside its thinking block", () => {
+  const result = contextUsage(
+    [
+      item(1, { type: "user_message", text: "a".repeat(400) }),
+      item(2, { type: "assistant_message", text: "b".repeat(400), note: true }),
+      item(3, { type: "assistant_message", text: "c".repeat(40) }),
+    ],
+    thread,
+  );
+  assert.equal(
+    result.breakdown.find((row) => row.label === "Assistant messages")?.tokens,
+    10,
+  );
+  assert.equal(result.messages, 2);
+});
 test("context estimates count the request a summary kept and the tool output it cut", () => {
   const result = contextUsage(
     [

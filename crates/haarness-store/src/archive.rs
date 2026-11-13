@@ -554,6 +554,7 @@ mod tests {
                 Some(turn.id),
                 ItemData::AssistantMessage {
                     text: "root reply secret".into(),
+                    note: false,
                 },
             )
             .await
@@ -721,6 +722,7 @@ mod tests {
                 Some(turn.id),
                 ItemData::AssistantMessage {
                     text: "real answer".into(),
+                    note: false,
                 },
             )
             .await
@@ -759,7 +761,7 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter_map(|item| match item.data {
-                ItemData::UserMessage { text, .. } | ItemData::AssistantMessage { text } => {
+                ItemData::UserMessage { text, .. } | ItemData::AssistantMessage { text, .. } => {
                     Some(text)
                 }
                 _ => None,

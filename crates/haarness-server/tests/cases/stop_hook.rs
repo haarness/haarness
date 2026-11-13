@@ -169,7 +169,7 @@ fn replies(items: &[Item]) -> Vec<&str> {
     items
         .iter()
         .filter_map(|item| match &item.data {
-            ItemData::AssistantMessage { text } => Some(text.as_str()),
+            ItemData::AssistantMessage { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect()

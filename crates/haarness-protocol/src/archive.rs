@@ -383,7 +383,7 @@ fn sanitize_item(item: &mut Item) {
                 *attachment = redact(attachment, "attachment", format!("{}-{index}", item.id));
             }
         }
-        ItemData::AssistantMessage { text } => {
+        ItemData::AssistantMessage { text, .. } => {
             *text = redact(text, "assistant-message", item.id);
         }
         ItemData::Reasoning { text, .. } => *text = redact(text, "reasoning", item.id),

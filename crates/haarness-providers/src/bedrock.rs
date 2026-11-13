@@ -556,10 +556,11 @@ impl ModelProvider for BedrockProvider {
                         .insert(asked.clone(), model_id.clone());
                 }
                 let provider = self.instance.id.clone();
+                let events = ConverseEvents::new(crate::notes::writes_notes(&model_id));
                 return Ok(if whole {
-                    converse_whole(response, cancel, limits, provider)
+                    converse_whole(response, cancel, limits, provider, events)
                 } else {
-                    converse_stream(response, cancel, limits, provider)
+                    converse_stream(response, cancel, limits, provider, events)
                 });
             }
             let status = response.status();
@@ -653,6 +654,7 @@ fn converse_whole(
     cancel: CancellationToken,
     limits: StreamLimits,
     provider_id: String,
+    mut events: ConverseEvents,
 ) -> ProviderStream {
     let trace = crate::RequestTrace::of(&response);
     let failed = trace.clone();
@@ -673,7 +675,6 @@ fn converse_whole(
         let answer: Value = serde_json::from_str(&body).map_err(|error| {
             CoreError::Provider(format!("Bedrock sent an unreadable answer: {error}"))
         })?;
-        let mut events = ConverseEvents::default();
         for (kind, payload) in whole_answer_events(&answer) {
             for event in events.event(kind, &payload) {
                 yield event;
@@ -753,6 +754,7 @@ fn converse_stream(
     cancel: CancellationToken,
     limits: StreamLimits,
     provider_id: String,
+    mut events: ConverseEvents,
 ) -> ProviderStream {
     let limit = limits.idle(crate::sse::is_loopback(response.url()));
     let trace = crate::RequestTrace::of(&response);
@@ -760,15 +762,17 @@ fn converse_stream(
     let stream = try_stream! {
         let mut chunks = response.bytes_stream();
         let mut decoder = aws_event_stream::Decoder::default();
-        let mut events = ConverseEvents::default();
         loop {
+            // `None` when reasoning that waits to be told from a note has
+            // waited long enough.
             let chunk = tokio::select! {
                 () = cancel.cancelled() => Err(CoreError::Cancelled),
+                () = crate::notes::until(events.hold.due()) => Ok(None),
                 chunk = crate::sse::within(limit, chunks.next()) => match chunk {
                     Err(stall) => Err(stall),
-                    Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
+                    Ok(Some(Ok(chunk))) => Ok(Some(Some(chunk))),
                     Ok(Some(Err(error))) => Err(crate::sse::transport_error(error)),
-                    Ok(None) => Ok(None),
+                    Ok(None) => Ok(Some(None)),
                 }
             };
             let chunk = match chunk {
@@ -778,6 +782,10 @@ fn converse_stream(
                     Err(error)?;
                     unreachable!();
                 }
+            };
+            let Some(chunk) = chunk else {
+                if let Some(event) = events.hold.release() { yield event; }
+                continue;
             };
             let Some(chunk) = chunk else { break; };
             decoder.push(&chunk);
@@ -813,9 +821,12 @@ const REASONING_BEFORE_WORDS: &str = "bedrock_reasoning_before_words";
 /// ConverseStream's events turned into Haarness's, holding back what is
 /// only whole at its block's end: a tool call's arguments and a reasoning
 /// block with its signature, which goes back to the model with the call.
+/// The signature also says whether the block is a note for the person.
 #[derive(Default)]
 struct ConverseEvents {
     tool: Option<(String, String, String)>,
+    /// The open reasoning block's text, waiting to be told from a note.
+    hold: crate::notes::NoteHold,
     reasoning: Option<Value>,
     /// The redacted reasoning of the open block, which Bedrock may send in
     /// several pieces (each base64 on the wire).
@@ -831,6 +842,14 @@ struct ConverseEvents {
 }
 
 impl ConverseEvents {
+    /// For a model whose notes come as reasoning blocks when `notes`.
+    fn new(notes: bool) -> Self {
+        Self {
+            hold: crate::notes::NoteHold::new(notes),
+            ..Self::default()
+        }
+    }
+
     fn message(&mut self, message: &aws_event_stream::Message) -> CoreResult<Vec<ProviderEvent>> {
         let payload: Value = serde_json::from_slice(&message.payload).unwrap_or(Value::Null);
         match message.header(":message-type") {
@@ -881,7 +900,7 @@ impl ConverseEvents {
                             .to_owned();
                         whole.push_str(text);
                         block["reasoningText"]["text"] = json!(whole);
-                        events.push(ProviderEvent::ReasoningDelta(text.to_owned()));
+                        events.extend(self.hold.push("", text));
                     }
                     if let Some(signature) = reasoning["signature"].as_str() {
                         block["reasoningText"]["signature"] = json!(signature);
@@ -900,6 +919,13 @@ impl ConverseEvents {
             }
             "contentBlockStop" => {
                 if let Some(block) = self.reasoning.take() {
+                    events.extend(
+                        self.hold.end(
+                            block
+                                .pointer("/reasoningText/signature")
+                                .and_then(Value::as_str),
+                        ),
+                    );
                     self.redacted.clear();
                     if !self.words_since_call {
                         self.reasoning_before_words += 1;
@@ -1882,7 +1908,13 @@ mod tests {
 
     /// Feed `events` to the mapper as one answer, ending with its finish.
     fn mapped(events: &[(&str, Value)]) -> CoreResult<Vec<ProviderEvent>> {
-        let mut mapper = ConverseEvents::default();
+        mapped_by(ConverseEvents::default(), events)
+    }
+
+    fn mapped_by(
+        mut mapper: ConverseEvents,
+        events: &[(&str, Value)],
+    ) -> CoreResult<Vec<ProviderEvent>> {
         let mut decoder = aws_event_stream::Decoder::default();
         decoder.push(&converse_frames(events));
         let mut out = Vec::new();
@@ -2163,6 +2195,84 @@ mod tests {
                 .count,
             None
         );
+    }
+
+    /// Claude 5.5 on Bedrock writes its note for the person as a reasoning
+    /// block of its own, which only the block's signature tells apart.
+    #[test]
+    fn a_note_block_becomes_a_note_and_thinking_stays_reasoning() {
+        let thinking = crate::notes::tests::thinking_signature();
+        let note = crate::notes::tests::note_signature();
+        let answer = |notes| {
+            mapped_by(
+                ConverseEvents::new(notes),
+                &[
+                    ("contentBlockDelta", json!({"contentBlockIndex":0,"delta":{"reasoningContent":{"text":"Checking the failing test."}}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex":0,"delta":{"reasoningContent":{"signature":thinking}}})),
+                    ("contentBlockStop", json!({"contentBlockIndex":0})),
+                    ("contentBlockDelta", json!({"contentBlockIndex":1,"delta":{"reasoningContent":{"text":"I'll run "}}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex":1,"delta":{"reasoningContent":{"text":"the tests now."}}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex":1,"delta":{"reasoningContent":{"signature":note}}})),
+                    ("contentBlockStop", json!({"contentBlockIndex":1})),
+                    ("contentBlockStart", json!({"contentBlockIndex":2,"start":{"toolUse":{"toolUseId":"call-1","name":"bash"}}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex":2,"delta":{"toolUse":{"input":"{\"command\":\"cargo test\"}"}}})),
+                    ("contentBlockStop", json!({"contentBlockIndex":2})),
+                    ("messageStop", json!({"stopReason":"tool_use"})),
+                ],
+            )
+            .unwrap()
+        };
+        let reasoning = |events: &[ProviderEvent]| -> String {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    ProviderEvent::ReasoningDelta(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let notes = |events: &[ProviderEvent]| -> Vec<(String, bool)> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    ProviderEvent::Note {
+                        text,
+                        streamed_as_reasoning,
+                    } => Some((text.clone(), *streamed_as_reasoning)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let metadata = |events: &[ProviderEvent]| {
+            events
+                .iter()
+                .find_map(|event| match event {
+                    ProviderEvent::ToolCall {
+                        provider_metadata, ..
+                    } => Some(provider_metadata.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let waited = answer(true);
+        assert_eq!(reasoning(&waited), "Checking the failing test.");
+        assert_eq!(notes(&waited), [("I'll run the tests now.".into(), false)]);
+        // Both blocks go back with the call as they came.
+        assert_eq!(
+            metadata(&waited),
+            json!({"bedrock_reasoning":[
+                {"reasoningContent":{"reasoningText":{"text":"Checking the failing test.","signature":thinking}}},
+                {"reasoningContent":{"reasoningText":{"text":"I'll run the tests now.","signature":note}}},
+            ]})
+        );
+        // Without waiting, the note streams as reasoning and is moved after.
+        let streamed = answer(false);
+        assert_eq!(
+            reasoning(&streamed),
+            "Checking the failing test.I'll run the tests now."
+        );
+        assert_eq!(notes(&streamed), [("I'll run the tests now.".into(), true)]);
+        assert_eq!(metadata(&streamed), metadata(&waited));
     }
 
     #[test]

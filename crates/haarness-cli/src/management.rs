@@ -1350,6 +1350,8 @@ impl ManagementService {
                     .map_err(core_error)?;
                 let todos = runtime.todos(thread.id).await.map_err(core_error)?;
                 let items = runtime.items(thread.id, None).await.map_err(core_error)?;
+                // The conversation's messages: the notes written before
+                // calls would crowd them out.
                 let recent = items
                     .into_iter()
                     .rev()
@@ -1359,7 +1361,7 @@ impl ManagementService {
                             ItemData::UserMessage {
                                 synthetic: false,
                                 ..
-                            } | ItemData::AssistantMessage { .. }
+                            } | ItemData::AssistantMessage { note: false, .. }
                                 | ItemData::Error { .. }
                         )
                     })
@@ -2359,7 +2361,7 @@ fn item_visible_text(data: &ItemData) -> Option<String> {
         ItemData::UserMessage {
             text, synthetic, ..
         } if !synthetic => Some(text.clone()),
-        ItemData::AssistantMessage { text } | ItemData::Reasoning { text, .. } => {
+        ItemData::AssistantMessage { text, .. } | ItemData::Reasoning { text, .. } => {
             Some(text.clone())
         }
         ItemData::ToolCall {

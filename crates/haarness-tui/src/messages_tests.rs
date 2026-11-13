@@ -13,6 +13,7 @@ fn browser_app(count: u64) -> App {
                         "reply-{i:04}\nsecond line {i}\n{}",
                         "wrapped prose ".repeat(8)
                     ),
+                    note: false,
                 },
             )
         })
@@ -69,7 +70,10 @@ fn messages_search_full_text_unicode_and_hide_internal_records() {
     app.items.push(message_item(
         7,
         &app.thread,
-        ItemData::AssistantMessage { text: "  ".into() },
+        ItemData::AssistantMessage {
+            text: "  ".into(),
+            note: false,
+        },
     ));
     app.open_messages(Some("élève 日本語"));
     assert_eq!(options(&app).len(), 1);
@@ -141,6 +145,7 @@ async fn messages_jump_uses_actual_wrapped_rows_and_survives_live_output() {
             &app.thread,
             ItemData::AssistantMessage {
                 text: "new live response".into(),
+                note: false,
             },
         ));
         let text = app
@@ -194,6 +199,7 @@ fn messages_live_refresh_keeps_selected_identity_and_bounds_large_lists() {
         &app.thread,
         ItemData::AssistantMessage {
             text: "reply newest".into(),
+            note: false,
         },
     ));
     app.refresh_open_messages();
@@ -272,13 +278,17 @@ fn conversation_app() -> App {
             &thread,
             ItemData::AssistantMessage {
                 text: format!("reply-{turn}\n{}", "a long answer line\n".repeat(30)),
+                note: false,
             },
         ));
         if turn == 3 {
             items.push(message_item(
                 base + 2,
                 &thread,
-                ItemData::AssistantMessage { text: " ".into() },
+                ItemData::AssistantMessage {
+                    text: " ".into(),
+                    note: false,
+                },
             ));
             items.push(message_item(
                 base + 3,

@@ -785,6 +785,23 @@ the first reasoning token, and each request after a tool round starts its
 own count. Clients read it as "Thought for 12s"; records made before it was
 measured have none.
 
+An `assistant_message` marked `note: true` is the short line Claude 5.5 and
+Fable 5 write for the person just before a tool call, which those models send
+as a thinking block of its own; Haarness tells it from reasoning by the
+block's signature, and a signature it cannot read counts as reasoning. Clients
+show a note as reply text between the tool rows. It is not the turn's answer:
+the SDKs' `chat()` text, a subagent's or workflow agent's reply, a scheduled
+run's response and `/copy` leave it out. The model gets the note back only
+inside its thinking block, with the call it preceded, never as text. Every
+other message has no `note`, so an older client draws a note as ordinary
+text; `haarness run` prints it as a reply line, and `--format json` adds
+`"note": true` to its `assistant` record. Live, a note arrives as
+`turn.text_delta` followed by its item. For these models a thinking block's
+text reaches `turn.reasoning_delta` up to 3 seconds or 600 characters late,
+so that a note is never streamed as reasoning; a note longer than that has
+already streamed as reasoning, and is taken out of the thought (the
+`reasoning` item that follows leaves it out) when its item is saved.
+
 A `usage` item records one model request: `input_tokens`, `output_tokens`,
 `cache_read_tokens`, `cache_write_tokens`, `cost_usd` (null when unpriced),
 `estimated` when the provider reported no usage and the counts are Haarness's

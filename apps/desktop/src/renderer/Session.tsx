@@ -1674,11 +1674,13 @@ export function Session() {
   /* One footer per assistant turn, under its last text: when the reply
      ended, Copy for all of it and Fork. Earlier text of the turn keeps the
      footer's height with nothing in it, so the footer moving on to newer
-     text never moves the transcript. */
+     text never moves the transcript. A note written before a tool call is
+     no part of the reply: the footer never comes to it, and Copy leaves it
+     out. */
   const turnTexts = createMemo(() => {
     const texts = new Map<string, T.Item[]>();
     for (const item of rows())
-      if (item.data.type === "assistant_message") {
+      if (item.data.type === "assistant_message" && !item.data.note) {
         const key = item.turnId ?? item.id;
         const list = texts.get(key);
         if (list) list.push(item);
@@ -1688,6 +1690,7 @@ export function Session() {
   });
   const reply = (item?: T.Item) => {
     if (item?.data.type !== "assistant_message") return undefined;
+    if (item.data.note) return { last: false, text: item.data.text };
     const texts = turnTexts().get(item.turnId ?? item.id) ?? [item];
     return {
       last: texts.at(-1)?.id === item.id,

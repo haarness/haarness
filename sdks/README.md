@@ -106,7 +106,9 @@ transport options are keyword-only. JSON `null` and omitted fields remain
 separate, including settings-reset requests.
 
 `chat()` starts and waits for a turn, then returns `{turn, items, text}` for that
-turn only. Inspect `turn.status` for completion/failure/interruption. It waits up
+turn only. `text` is the reply: the assistant messages joined, leaving out those
+marked `note` (the short lines a model writes for the person before a tool call,
+which `items` keeps). Inspect `turn.status` for completion/failure/interruption. It waits up
 to five minutes, and the server's wait ends five seconds before the client's
 timeout when you pass a shorter one; a turn still running then raises `409`
 while it keeps going. A pending permission or question must be answered by

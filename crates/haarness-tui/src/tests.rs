@@ -689,6 +689,7 @@ async fn bare_fork_offers_only_assistant_message_boundaries() {
             &thread,
             ItemData::AssistantMessage {
                 text: "first reply".into(),
+                note: false,
             },
         ),
         message_item(
@@ -708,6 +709,7 @@ async fn bare_fork_offers_only_assistant_message_boundaries() {
             &thread,
             ItemData::AssistantMessage {
                 text: "latest reply".into(),
+                note: false,
             },
         ),
     ];
@@ -1035,6 +1037,7 @@ fn a_paused_goal_says_in_full_what_it_waits_for() {
         &thread,
         ItemData::AssistantMessage {
             text: "working on it".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -1962,6 +1965,7 @@ fn transcript_reads_top_down_with_the_composer_pinned_at_the_bottom() {
         &thread,
         ItemData::AssistantMessage {
             text: "short answer".into(),
+            note: false,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -1993,6 +1997,7 @@ fn root_composer_has_a_gutter_after_a_full_transcript_window() {
                 &thread,
                 ItemData::AssistantMessage {
                     text: format!("response {sequence}"),
+                    note: false,
                 },
             )
         })
@@ -2030,6 +2035,7 @@ fn root_composer_gutter_yields_before_clipping_a_compact_composer() {
         &thread,
         ItemData::AssistantMessage {
             text: "newest reply".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -2078,6 +2084,7 @@ fn compact_autocomplete_reserves_the_complete_composer_and_latest_reply() {
         &thread,
         ItemData::AssistantMessage {
             text: "newest reply".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -2136,6 +2143,7 @@ fn scrollback_offset_reveals_earlier_content() {
                 &thread,
                 ItemData::AssistantMessage {
                     text: format!("marker-{sequence}"),
+                    note: false,
                 },
             )
         })
@@ -2194,6 +2202,7 @@ fn live_rows_do_not_move_a_manually_scrolled_view() {
                 &thread,
                 ItemData::AssistantMessage {
                     text: format!("anchor-{sequence}"),
+                    note: false,
                 },
             )
         })
@@ -2242,6 +2251,7 @@ fn active_stream_keeps_the_scroll_recovery_and_interrupt_hints_visible() {
                 &thread,
                 ItemData::AssistantMessage {
                     text: format!("status-anchor-{sequence}"),
+                    note: false,
                 },
             )
         })
@@ -2275,6 +2285,7 @@ fn streaming_markdown_reflow_does_not_move_a_manually_scrolled_view() {
                 &thread,
                 ItemData::AssistantMessage {
                     text: format!("stable-anchor-{sequence}"),
+                    note: false,
                 },
             )
         })
@@ -2589,6 +2600,7 @@ fn a_stop_hooks_message_shows_as_a_quiet_line_with_its_feedback() {
             &thread,
             ItemData::AssistantMessage {
                 text: "Fixed it.".into(),
+                note: false,
             },
         ),
         message_item(
@@ -2604,6 +2616,7 @@ fn a_stop_hooks_message_shows_as_a_quiet_line_with_its_feedback() {
             &thread,
             ItemData::AssistantMessage {
                 text: "The tests pass.".into(),
+                note: false,
             },
         ),
     ];
@@ -3065,6 +3078,7 @@ fn transcript_spacing_separates_semantic_groups_without_splitting_activity_block
             &thread,
             ItemData::AssistantMessage {
                 text: "Summary:\n\n- first point\n- second point".into(),
+                note: false,
             },
         ),
         message_item(
@@ -3157,6 +3171,7 @@ fn short_transcript_window_keeps_single_separators_without_wasting_rows() {
                 &thread,
                 ItemData::AssistantMessage {
                     text: format!("response {sequence}"),
+                    note: false,
                 },
             )
         })
@@ -3503,6 +3518,7 @@ fn reasoning_shares_the_conversation_text_column() {
             &thread,
             ItemData::AssistantMessage {
                 text: "answered ".repeat(40).trim().into(),
+                note: false,
             },
         ),
     ];
@@ -3554,6 +3570,7 @@ fn assistant_replies_carry_the_identity_marker() {
             &thread,
             ItemData::AssistantMessage {
                 text: "crates".into(),
+                note: false,
             },
         ),
         message_item(
@@ -3561,6 +3578,7 @@ fn assistant_replies_carry_the_identity_marker() {
             &thread,
             ItemData::AssistantMessage {
                 text: "one\ntwo continuation".into(),
+                note: false,
             },
         ),
     ];
@@ -3590,6 +3608,7 @@ fn assistant_reply_starting_with_heading_keeps_marker_beside_heading() {
         &thread,
         ItemData::AssistantMessage {
             text: "# Security audit findings\n\nScope reviewed: providers".into(),
+            note: false,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -3780,6 +3799,7 @@ fn assistant_markdown_renders_without_literal_markers() {
         &thread,
         ItemData::AssistantMessage {
             text: "**bold** and `code`\n\n```rust\nfn main() {}\n```".into(),
+            note: false,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -4162,6 +4182,7 @@ fn status_band_spans_the_full_width_on_surface() {
         &thread,
         ItemData::AssistantMessage {
             text: "conversation".into(),
+            note: false,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -4204,6 +4225,7 @@ fn the_panel_heads_the_session_and_the_transcript_does_not_repeat_it() {
         &thread,
         ItemData::AssistantMessage {
             text: "conversation".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
@@ -4271,6 +4293,7 @@ fn masthead_names_the_session_without_repeating_its_id() {
         &thread,
         ItemData::AssistantMessage {
             text: "conversation".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
@@ -4342,6 +4365,7 @@ fn the_top_gutter_survives_a_scrolled_transcript() {
                 &thread,
                 ItemData::AssistantMessage {
                     text: format!("reply-{sequence}"),
+                    note: false,
                 },
             )
         })
@@ -4379,6 +4403,7 @@ fn goal_header_leads_with_the_objective_and_right_aligns_compact_progress() {
         &thread,
         ItemData::AssistantMessage {
             text: "conversation".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -4412,6 +4437,7 @@ fn narrow_frames_keep_the_goal_row_and_a_truncated_session_identity() {
         &thread,
         ItemData::AssistantMessage {
             text: "conversation".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
@@ -4476,6 +4502,7 @@ fn prose_respects_the_content_width_cap_on_wide_terminals() {
         &thread,
         ItemData::AssistantMessage {
             text: "word ".repeat(80),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -7223,6 +7250,64 @@ async fn durable_background_task_state_wins_over_the_launch_acknowledgement() {
     );
 }
 
+/// A note Claude 5.5 wrote before a call is reply text: saved, it takes the
+/// live reply with it, and the live thought too (a long note streamed there
+/// first), and it shows as a reply whatever thinking shows.
+#[tokio::test]
+async fn a_note_is_reply_text_in_every_thinking_mode() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+    let reply = |sequence, text: &str, note| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::AssistantMessage {
+                text: text.into(),
+                note,
+            },
+        )
+    };
+    let created = |item: Item| {
+        fixture_event(
+            "item.created",
+            thread.id,
+            thread.id,
+            serde_json::json!(item),
+        )
+    };
+    app.reasoning_preview = "Checking the failing test.".into();
+    app.preview = "Let me look.".into();
+    app.reduce(created(reply(1, "Let me look.", false)), &client)
+        .await
+        .unwrap();
+    assert!(app.preview.is_empty());
+    assert_eq!(app.reasoning_preview, "Checking the failing test.");
+    app.reasoning_preview = "I'll run the tests now.".into();
+    app.preview = "I'll run the tests now.".into();
+    app.reduce(created(reply(2, "I'll run the tests now.", true)), &client)
+        .await
+        .unwrap();
+    assert!(app.preview.is_empty() && app.reasoning_preview.is_empty());
+    for mode in [
+        crate::state::ThinkingMode::Compact,
+        crate::state::ThinkingMode::Show,
+        crate::state::ThinkingMode::Hide,
+    ] {
+        app.thinking = mode;
+        let rows: Vec<String> = app
+            .lines((80, 20))
+            .into_iter()
+            .map(|line| line_text(&line))
+            .collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("I'll run the tests now.")),
+            "{mode:?}: {rows:#?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn declared_background_mode_survives_live_progress_and_permission_round_trip() {
     let thread = fixture_thread();
@@ -7870,6 +7955,7 @@ fn completed_task_roster_follows_the_assistant_narrative() {
             &thread,
             ItemData::AssistantMessage {
                 text: "Started the safety agents.".into(),
+                note: false,
             },
         ),
     ];
@@ -7912,6 +7998,7 @@ fn same_round_tool_activity_follows_the_assistant_narrative() {
             &thread,
             ItemData::AssistantMessage {
                 text: "I’ll inspect the repository first.".into(),
+                note: false,
             },
         ),
     ];
@@ -8026,6 +8113,7 @@ fn completed_task_roster_stays_before_post_task_work_and_final_answer() {
             &thread,
             ItemData::AssistantMessage {
                 text: "Final security assessment.".into(),
+                note: false,
             },
         ),
     ];
@@ -8088,6 +8176,7 @@ fn successful_task_response_lives_in_its_child_instead_of_cluttering_the_parent(
             &thread,
             ItemData::AssistantMessage {
                 text: "Parent synthesis.".into(),
+                note: false,
             },
         ),
     ];
@@ -10632,6 +10721,7 @@ async fn a_one_cell_drag_over_text_copies_it() {
         &thread,
         ItemData::AssistantMessage {
             text: "A界Z then ok now".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -14040,6 +14130,7 @@ fn todo_tool_activity_is_hidden_before_and_without_a_snapshot() {
             &thread,
             ItemData::AssistantMessage {
                 text: "The todo list is ready.".into(),
+                note: false,
             },
         ));
         assert!(
@@ -14100,6 +14191,7 @@ fn sidebar_is_one_fixed_continuous_background_panel() {
         ItemData::AssistantMessage {
             text: "A deliberately wide transcript row that must never move the sidebar divider"
                 .repeat(3),
+            note: false,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -14482,6 +14574,7 @@ fn selection_extracts_and_paints_the_dragged_rows() {
         &thread,
         ItemData::AssistantMessage {
             text: "alpha beta gamma".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -14518,6 +14611,7 @@ fn selection_uses_display_cells_for_wide_glyphs() {
         &thread,
         ItemData::AssistantMessage {
             text: "A界🙂Z".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -14575,6 +14669,7 @@ fn selection_beside_the_sidebar_copies_only_its_own_pane() {
             &thread,
             ItemData::AssistantMessage {
                 text: "alpha one\nbeta two\ngamma three\ndelta four\nepsilon five".into(),
+                note: false,
             },
         ),
     ];
@@ -14684,6 +14779,7 @@ fn selection_leaves_out_gutters_but_keeps_written_bars() {
             &thread,
             ItemData::AssistantMessage {
                 text: "Reply start\n▎ written bar\n\n> quoted aside\n\n- listed item".into(),
+                note: false,
             },
         ),
     ];
@@ -15083,6 +15179,7 @@ async fn a_small_terminal_still_shows_the_conversation() {
             &thread,
             ItemData::AssistantMessage {
                 text: format!("answer {index}"),
+                note: false,
             },
         ));
     }
@@ -16134,6 +16231,7 @@ fn child_navigation_fixture() -> (App, Thread, Thread, Thread) {
         &first,
         ItemData::AssistantMessage {
             text: "Child result".into(),
+            note: false,
         },
     )];
     let mut app = App::new(
@@ -17998,6 +18096,7 @@ fn a_title_with_escape_sequences_draws_as_its_words() {
         &thread,
         ItemData::AssistantMessage {
             text: "conversation".into(),
+            note: false,
         },
     )];
     let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -22583,6 +22682,7 @@ fn language_changes_refresh_root_and_child_chrome_without_translating_chat() {
                 &thread,
                 ItemData::AssistantMessage {
                     text: "Keep this model response unchanged.".into(),
+                    note: false,
                 },
             )],
             vec![],
@@ -25170,6 +25270,7 @@ fn undo_fixture() -> (App, Thread) {
             &thread,
             ItemData::AssistantMessage {
                 text: "kept reply".into(),
+                note: false,
             },
         ),
         message_item(
@@ -25189,6 +25290,7 @@ fn undo_fixture() -> (App, Thread) {
             &thread,
             ItemData::AssistantMessage {
                 text: "undone reply".into(),
+                note: false,
             },
         ),
     ];
@@ -25572,6 +25674,7 @@ fn page_keys_move_by_the_visible_transcript_less_an_overlap() {
                 &thread,
                 ItemData::AssistantMessage {
                     text: format!("line-{sequence}"),
+                    note: false,
                 },
             )
         })

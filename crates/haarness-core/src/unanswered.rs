@@ -134,7 +134,10 @@ mod tests {
     }
 
     fn text(value: &str) -> ItemData {
-        ItemData::AssistantMessage { text: value.into() }
+        ItemData::AssistantMessage {
+            text: value.into(),
+            note: false,
+        }
     }
 
     #[test]

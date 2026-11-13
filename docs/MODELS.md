@@ -121,6 +121,13 @@ but never a provider's page: confirming a price is a person's job. Fix or add th
 entry in haarness-cloud from the provider's page with today's `checked` date,
 then `--sync` copies the table here.
 
+## Claude's notes before tool calls: 2026-11-13
+
+| Provider | Change |
+| --- | --- |
+| Anthropic, Bedrock, Haarness Cloud, OpenRouter | Claude Opus and Sonnet 5.5 and Fable 5 write the line meant for the person before a tool call ("I'll run the tests now") as a thinking block of its own, which only the block's signature tells from reasoning. Haarness reads each signature as its block ends (a protobuf header whose kind names a note; anything it can't read is reasoning) and stores the line as reply text marked `note`, shown between the tool rows on every surface; the block itself goes back with the call as before, so the next request is byte for byte what it was. These models' thinking text waits up to 3 seconds or 600 characters for its block's end, so a note never shows as thinking first (`crates/haarness-providers/src/notes.rs`). Before, the lines sat inside a closed "Thought" row, or vanished with thinking hidden, and the tool rows followed each other with no words between them. |
+| Haarness Cloud | A Claude thinking block of more than one piece showed twice: the router sends the block's whole text again with its signature, and only a repeat of the last piece was recognised as one. The repeat is kept for the next request and no longer shown. |
+
 ## Local models' failed turns: 2026-11-10
 
 Found by running two-message coding chats on every model Ollama 0.40.6 had on a Mac, on the released 0.1.19, with a

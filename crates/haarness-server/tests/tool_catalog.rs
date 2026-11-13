@@ -382,7 +382,7 @@ async fn deferred_tool_is_loaded_then_executed_on_the_following_provider_round()
             if name == "session_manage")
     }));
     assert!(items.iter().any(|item| {
-        matches!(&item.data, haarness_protocol::ItemData::AssistantMessage { text }
+        matches!(&item.data, haarness_protocol::ItemData::AssistantMessage { text, .. }
             if text.contains("completed end to end"))
     }));
 }

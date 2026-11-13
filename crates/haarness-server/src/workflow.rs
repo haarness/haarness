@@ -1115,7 +1115,8 @@ async fn wait_for_agent(
                         (item.turn_id == Some(turn_id))
                             .then_some(item.data)
                             .and_then(|data| {
-                                if let ItemData::AssistantMessage { text } = data {
+                                // A note before a call is never the answer.
+                                if let ItemData::AssistantMessage { text, note: false } = data {
                                     Some(text)
                                 } else {
                                     None

@@ -611,6 +611,18 @@ pub struct RequestParameters {
 pub enum ProviderEvent {
     TextDelta(String),
     ReasoningDelta(String),
+    /// A note the model wrote for the person just before a tool call, which
+    /// Claude sends as a thinking block of its own (its signature says which
+    /// kind of block it is). It is stored as reply text marked a note; the
+    /// block itself goes back to the model with the call, as any thinking
+    /// does. `text` is the block's text as written.
+    /// `streamed_as_reasoning` is set when the block ran past the time or
+    /// length its text waits to be told apart, so the text already went out
+    /// as `ReasoningDelta`s: the runtime takes it back off the reasoning.
+    Note {
+        text: String,
+        streamed_as_reasoning: bool,
+    },
     ToolCall {
         call_id: String,
         name: String,
@@ -619,9 +631,10 @@ pub enum ProviderEvent {
     },
     StructuredOutput(Value),
     /// The response began content the adapter holds back until it is whole:
-    /// a tool call's arguments, or structured output. Only the request's
-    /// first-token clock reads it; nothing is stored or shown, and it does
-    /// not count as an answer for the retry rules.
+    /// a tool call's arguments, structured output, or the start of a thinking
+    /// block that may turn out to be a note. Only the request's first-token
+    /// clock reads it; nothing is stored or shown, and it does not count as
+    /// an answer for the retry rules.
     ContentStarted,
     /// One request's token counts. `input_tokens` is the whole prompt, cache reads and writes included (`OpenAI`'s
     /// convention; Anthropic and Bedrock adapters add their separate cache counters in), so it measures the context

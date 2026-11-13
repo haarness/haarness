@@ -4946,7 +4946,10 @@ impl RunWork {
         }
         let own = self.owns(item.turn_id) && !answering;
         match &item.data {
-            ItemData::AssistantMessage { text } if own => self.said.push(text.clone()),
+            // What the run said is its answer: a note before a call is not.
+            ItemData::AssistantMessage { text, note: false } if own => {
+                self.said.push(text.clone());
+            }
             ItemData::ToolCall {
                 call_id,
                 name,
@@ -8426,21 +8429,22 @@ async fn print_run_output_client(
             eprintln!("{line}");
             continue;
         }
-        let (kind, text) = match item.data {
-            ItemData::AssistantMessage { text } => ("assistant", text),
-            ItemData::Reasoning { text, .. } if thinking => ("reasoning", text),
+        let (kind, text, note) = match item.data {
+            ItemData::AssistantMessage { text, note } => ("assistant", text, note),
+            ItemData::Reasoning { text, .. } if thinking => ("reasoning", text, false),
             _ => continue,
         };
         if format == RunFormat::Json {
-            println!(
-                "{}",
-                json!({
-                    "type": kind,
-                    "threadID": thread_id,
-                    "turnID": turn_id,
-                    "text": text,
-                })
-            );
+            let mut line = json!({
+                "type": kind,
+                "threadID": thread_id,
+                "turnID": turn_id,
+                "text": text,
+            });
+            if note {
+                line["note"] = json!(true);
+            }
+            println!("{line}");
         } else if kind == "reasoning" {
             print_reasoning(&text);
         } else {
@@ -8558,17 +8562,18 @@ async fn settle_cli_subagents_client(
         }
         let turn_id = item.turn_id;
         match item.data {
-            ItemData::AssistantMessage { text } => {
+            ItemData::AssistantMessage { text, note } => {
                 if format == RunFormat::Json {
-                    println!(
-                        "{}",
-                        json!({
-                            "type":"assistant",
-                            "threadID":thread_id,
-                            "turnID":turn_id,
-                            "text":text,
-                        })
-                    );
+                    let mut line = json!({
+                        "type":"assistant",
+                        "threadID":thread_id,
+                        "turnID":turn_id,
+                        "text":text,
+                    });
+                    if note {
+                        line["note"] = json!(true);
+                    }
+                    println!("{line}");
                 } else {
                     println!("{text}");
                 }
@@ -8849,7 +8854,9 @@ fn output_for_turn(items: Vec<haarness_protocol::Item>, turn_id: TurnId) -> Vec<
         .filter_map(|item| match hook_line(&item.data) {
             Some(line) => Some(TurnOutput::Hook(line)),
             None => match item.data {
-                ItemData::AssistantMessage { text } => Some(TurnOutput::Reply(text)),
+                // A note before a call prints in its place, as the
+                // transcript shows it.
+                ItemData::AssistantMessage { text, .. } => Some(TurnOutput::Reply(text)),
                 _ => None,
             },
         })
@@ -18618,6 +18625,7 @@ request_timeout = 0
                     old_turn,
                     ItemData::AssistantMessage {
                         text: "historical answer".into(),
+                        note: false,
                     },
                 ),
                 item(
@@ -18637,6 +18645,7 @@ request_timeout = 0
                     current_turn,
                     ItemData::AssistantMessage {
                         text: "new answer".into(),
+                        note: false,
                     },
                 ),
             ],
@@ -18658,7 +18667,10 @@ request_timeout = 0
             data,
             created_at: chrono::Utc::now(),
         };
-        let reply = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let reply = |text: &str| ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        };
         let hook = ItemData::UserMessage {
             text: "For the model.\n\n<hook-feedback>\nrun the tests\n  then lint\n</hook-feedback>"
                 .into(),
@@ -21533,7 +21545,10 @@ request_timeout = 0
             child_turn_id: TurnId::new(),
             state: state.into(),
         };
-        let said = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let said = |text: &str| ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        };
         let tool = |call_id: &str, name: &str, arguments: serde_json::Value| ItemData::ToolCall {
             call_id: call_id.into(),
             name: name.into(),
@@ -21794,7 +21809,10 @@ request_timeout = 0
             child_turn_id: TurnId::new(),
             state: "background".into(),
         };
-        let said = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let said = |text: &str| ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        };
         let (own_child, persons_child) = (ThreadId::new(), ThreadId::new());
         let steer = item(message("Also check the docs.", true));
         let items = [
@@ -21896,7 +21914,10 @@ request_timeout = 0
             child_turn_id: TurnId::new(),
             state: "background".into(),
         };
-        let said = |text: &str| ItemData::AssistantMessage { text: text.into() };
+        let said = |text: &str| ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        };
         let (own_child, follow_up) = (ThreadId::new(), ThreadId::new());
         let persons_result = item(
             second,
@@ -22994,7 +23015,7 @@ request_timeout = 0
             .unwrap()
             .into_iter()
             .filter_map(|item| match item.data {
-                ItemData::AssistantMessage { text } => Some(text),
+                ItemData::AssistantMessage { text, .. } => Some(text),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -23053,7 +23074,7 @@ request_timeout = 0
                 .unwrap()
                 .into_iter()
                 .filter_map(|item| match item.data {
-                    ItemData::AssistantMessage { text } => Some(text),
+                    ItemData::AssistantMessage { text, .. } => Some(text),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -23355,7 +23376,7 @@ request_timeout = 0
         );
         assert!(
             of_next.iter().any(
-                |data| matches!(data, ItemData::AssistantMessage { text } if text == "Person done.")
+                |data| matches!(data, ItemData::AssistantMessage { text, .. } if text == "Person done.")
             ),
             "{of_next:?}"
         );

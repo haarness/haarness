@@ -483,7 +483,13 @@ mod tests {
         }
 
         fn assistant(&mut self, turn: TurnId, text: &str) {
-            self.push(Some(turn), ItemData::AssistantMessage { text: text.into() });
+            self.push(
+                Some(turn),
+                ItemData::AssistantMessage {
+                    text: text.into(),
+                    note: false,
+                },
+            );
         }
 
         fn call(&mut self, turn: TurnId, id: &str, name: &str, arguments: Value) {

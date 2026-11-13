@@ -204,7 +204,9 @@ impl Tokenizer {
                             .map(|source| self.media(source))
                             .sum::<u64>()
                 }
-                ItemData::AssistantMessage { text: body } => text(body),
+                // A note goes back only as the thinking block it came in.
+                ItemData::AssistantMessage { note: true, .. } => return 0,
+                ItemData::AssistantMessage { text: body, .. } => text(body),
                 // Reasoning replayed through `provider_metadata` is opaque here;
                 // the anchor's output tokens already include it.
                 ItemData::ToolCall {
@@ -871,6 +873,18 @@ mod tests {
         }
     }
 
+    /// A note goes back to the model only inside its thinking block, which
+    /// the output count already holds: it adds nothing to the context.
+    #[test]
+    fn a_note_adds_nothing_to_the_context() {
+        let reply = |note| ItemData::AssistantMessage {
+            text: "I'll run the tests now.".into(),
+            note,
+        };
+        assert!(Tokenizer::Claude.item(&reply(false)) > 0);
+        assert_eq!(Tokenizer::Claude.item(&reply(true)), 0);
+    }
+
     #[test]
     fn a_cut_tool_output_keeps_its_start_and_end_and_says_where_the_rest_is() {
         let output = (0..400)
@@ -923,6 +937,7 @@ mod tests {
                 3,
                 ItemData::AssistantMessage {
                     text: "middle".into(),
+                    note: false,
                 },
             ),
             item(
@@ -1170,7 +1185,13 @@ mod tests {
         };
         let items = vec![
             item(1, user("hello")),
-            item(2, ItemData::AssistantMessage { text: "hi".into() }),
+            item(
+                2,
+                ItemData::AssistantMessage {
+                    text: "hi".into(),
+                    note: false,
+                },
+            ),
             item(3, usage(10_000, 500, None)),
             item(4, result(&"word ".repeat(400))),
         ];

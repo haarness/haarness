@@ -48,7 +48,7 @@ impl Snapshot {
                     role: "You".into(),
                     text: text.clone(),
                 }),
-                ItemData::AssistantMessage { text } => Some(SharedMessage {
+                ItemData::AssistantMessage { text, .. } => Some(SharedMessage {
                     role: "Assistant".into(),
                     text: text.clone(),
                 }),

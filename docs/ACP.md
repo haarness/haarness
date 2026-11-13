@@ -31,6 +31,9 @@ version 1.
 `initialize` advertises `loadSession`, image, audio and embedded-context prompts, and MCP over HTTP and SSE
 (stdio is always supported).
 
+- **Notes.** The line Claude 5.5 and Fable 5 write for the person before a tool call, which those models
+  send as thinking, reaches the editor as message text (`agent_message_chunk`), live and on
+  `session/load`. A rare long one has already gone out as thought chunks before it ends.
 - **Sessions.** A session id is the Haarness chat id. `cwd` must be absolute and resolve to the
   workspace the bridge was started for; `additionalDirectories` is refused, so an editor cannot point
   a running server at another checkout. `session/load` replays the chat's stored items as updates.
