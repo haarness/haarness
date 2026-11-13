@@ -395,13 +395,41 @@ export function projectChanged(scope: string, now = false) {
   if (now) urgents.set(scope, urgent(scope) + 1);
   else epochs.set(scope, epoch(scope) + 1);
   for (const entry of [...askers.keys()]) if (entry.startsWith(`${scope}\n`)) askAgain(entry, now);
+  told(scope, { now });
 }
 
 /** The file was written: replies showing it, and the next one to draw it, read it again at once. */
 export function projectFileWritten(scope: string, path: string) {
-  const entry = key(scope, path.replace(/\\/g, "/").replace(/^\.\//, ""));
+  const file = path.replace(/\\/g, "/").replace(/^\.\//, "");
+  const entry = key(scope, file);
   touches.set(entry, (touches.get(entry) ?? 0) + 1);
   askAgain(entry, true);
+  told(scope, { now: true, path: file });
+}
+
+/** A change of a project's files: a file written (`path`), or any change, to look at again `now` or after the recheck time. */
+export type ProjectFilesChange = { now: boolean; path?: string };
+const changeListeners = new Set<(scope: string, change: ProjectFilesChange) => void>();
+
+/**
+ * Calls `listener` on each change `projectChanged` and `projectFileWritten`
+ * hear, so what else a reply shows of the project's files (the files its
+ * inline code names, code-links.ts) is looked at again on the same occasions
+ * as its images.
+ */
+export function onProjectChange(listener: (scope: string, change: ProjectFilesChange) => void): () => void {
+  changeListeners.add(listener);
+  return () => changeListeners.delete(listener);
+}
+
+function told(scope: string, change: ProjectFilesChange) {
+  for (const listener of [...changeListeners]) {
+    try {
+      listener(scope, change);
+    } catch {
+      /* One listener's trouble never keeps the others from hearing. */
+    }
+  }
 }
 
 /**
@@ -1000,11 +1028,19 @@ async function decodeImage(data: string): Promise<boolean | "large"> {
   }
 }
 
-/** Reads one image of the project for a view that shows it until `signal` aborts. */
-export function readProjectImage(project: ImageProject, path: string, signal: AbortSignal) {
+/**
+ * Follows what changes `project`'s files: the server's events, and for a
+ * project on this computer the window coming back to the front.
+ */
+export function watchProject(project: ImageProject) {
   watchProjects(project.viewed);
   if (!project.threadId) roots.set(project.connection, project.roots);
   if (!project.remote) localProject(project.scope);
+}
+
+/** Reads one image of the project for a view that shows it until `signal` aborts. */
+export function readProjectImage(project: ImageProject, path: string, signal: AbortSignal) {
+  watchProject(project);
   requestProjectImage(project.scope, path, reader(project.connection, project.threadId), signal, decodeImage);
 }
 

@@ -22,9 +22,19 @@ import {
   readProjectImages,
   relabelProjectImages,
   shownProjectImage,
+  watchProject,
   type ShownImage,
 } from "./project-images";
 import { watchOpenImages } from "./ImageViewer";
+import {
+  codeFileKnown,
+  codeLinkTarget,
+  folderLister,
+  linkCodeSpans,
+  onCodeLinksChanged,
+  pressCodeLink,
+} from "./code-links";
+import { markSelection, selectedByClick, type SelectionMark } from "./selection-click";
 
 /**
  * What is read in the transcript's view: the first text that starts inside
@@ -160,17 +170,8 @@ export function Markdown(props: {
       void window.haarness
         .openLink(connection?.id, thread, target.url)
         .catch(() => app.notify(t("This link could not be opened."), "blocked"));
-    } else if (target.kind === "file") {
-      if (!connection) return app.notify(t("Open a project to open links to its files."), "blocked");
-      app.set("fileRequest", {
-        connection: connection.id,
-        path: target.path,
-        sequence: Date.now(),
-        thread: thread || undefined,
-        link: true,
-        ...(target.line ? { line: target.line } : {}),
-      });
-    } else if (target.kind === "refused")
+    } else if (target.kind === "file") openFile(target.path, target.line);
+    else if (target.kind === "refused")
       app.notify(
         target.reason === "network"
           ? t("Links to network locations do not open.")
@@ -179,6 +180,61 @@ export function Markdown(props: {
             : t("This kind of link does not open in Haarness."),
         "blocked",
       );
+  }
+  /** Opens a file of the project (or of the chat's own folder) in the Files panel, at `line`. */
+  function openFile(path: string, line?: number) {
+    const connection = app.state.connection;
+    if (!connection) return app.notify(t("Open a project to open links to its files."), "blocked");
+    app.set("fileRequest", {
+      connection: connection.id,
+      path,
+      sequence: Date.now(),
+      thread: app.state.selected || undefined,
+      link: true,
+      ...(line ? { line } : {}),
+    });
+  }
+  /**
+   * Inline code that names a file of the project opens it (code-links.ts):
+   * in the conversation, not in a Markdown file's preview or where another
+   * handler takes the links, and only once the text is written, so nothing
+   * changes under the pointer while it streams.
+   */
+  const codeLinks = conversation && !props.onLink;
+  const codeAsked = new Set<string>();
+  let written = false;
+  function linkCode() {
+    if (!codeLinks || disposed || !host) return;
+    const project = imageProject(app.state);
+    if (project) watchProject(project);
+    const list = project && folderLister(project.connection, project.threadId);
+    linkCodeSpans(host, {
+      roots: project?.roots ?? [],
+      known: (path) => (project && list ? codeFileKnown(project.scope, path, list, reading.signal) : false),
+      asked: codeAsked,
+      live: !written,
+    });
+  }
+  if (codeLinks)
+    onCleanup(
+      onCodeLinksChanged((scope) => {
+        if (written && scope === imageProject(app.state)?.scope) linkCode();
+      }),
+    );
+  /** Where the pointer went down on a code link, and the selection then. */
+  let pressed: { code: Element; mark: SelectionMark } | undefined;
+  /** Opens the file a code link names, on a plain click or Enter. */
+  function openCode(event: MouseEvent | KeyboardEvent) {
+    if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return false;
+    const code = (event.target as Element).closest?.("code");
+    const file = codeLinkTarget(code);
+    if (!code || !file || !host.contains(code)) return false;
+    event.preventDefault();
+    // A click that ends a selection made in the code (its path, to copy) only selects.
+    if (event instanceof MouseEvent && selectedByClick(code, event, pressed?.code === code ? pressed.mark : undefined))
+      return true;
+    openFile(file.path, file.line);
+    return true;
   }
   /** Images from another host are remembered for the chat they were loaded in. */
   const scope = () => `${app.state.connection?.id ?? ""}\n${app.state.selected ?? ""}`;
@@ -309,6 +365,8 @@ export function Markdown(props: {
         : undefined,
     }))(update);
     if (conversation) readProjectImages(host, imageProject(app.state), reading.signal, asked, projectLabels());
+    written = !live;
+    linkCode();
     opening?.refresh();
     for (const block of host.querySelectorAll("pre")) {
       const code = block.querySelector("code");
@@ -393,6 +451,7 @@ export function Markdown(props: {
           }).catch(() => {});
           return;
         }
+        if (openCode(event)) return;
         const link = target.closest("a");
         if (link) {
           event.preventDefault();
@@ -401,6 +460,17 @@ export function Markdown(props: {
           if (props.onLink) props.onLink(href);
           else follow(href);
         }
+      }}
+      onPointerDown={(event) => {
+        const code = (event.target as Element).closest?.("code");
+        pressed =
+          code && codeLinkTarget(code)
+            ? { code, mark: markSelection({ clientX: event.clientX, clientY: event.clientY, currentTarget: code }) }
+            : undefined;
+        if (pressed) pressCodeLink(pressed.code);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && !event.repeat && !event.isComposing) openCode(event);
       }}
     />
   );
