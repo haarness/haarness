@@ -199,6 +199,22 @@ test("a delegation a restart cut off reads stopped, not failed", () => {
   assert.notEqual(agentTaskError(other), "");
 });
 
+test("a delegation Stop reached before it began reads stopped, not failed", () => {
+  for (const metadata of [{ notRun: true }, null]) {
+    const result = {
+      type: "tool_result",
+      call_id: "task",
+      name: "task",
+      output: "operation cancelled",
+      is_error: true,
+      metadata,
+    } as const;
+    const [task] = [...agentTasks([item(1, call), item(2, result)]).values()];
+    assert.equal(agentTaskStatus(task), "stopped");
+    assert.equal(agentTaskError(task), "");
+  }
+});
+
 test("a delegation keeps its first result, and a call made again under its key starts over", () => {
   const result = (output: string, metadata: unknown = null) =>
     ({ type: "tool_result", call_id: "task", name: "task", output, is_error: true, metadata }) as ItemData;
