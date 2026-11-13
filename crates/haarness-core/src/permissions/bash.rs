@@ -5309,11 +5309,42 @@ fn read_only_invocation(tokens: &[String]) -> bool {
         return false;
     }
     let args = &tokens[1..];
+    // Whether a short option written alone or clustered with others (`-uo`)
+    // is one of `letters`.
+    let short = |letters: &str| {
+        args.iter().any(|arg| {
+            arg.strip_prefix('-')
+                .filter(|cluster| !cluster.starts_with('-'))
+                .is_some_and(|cluster| cluster.contains(|letter| letters.contains(letter)))
+        })
+    };
+    // Whether a long option is one of `names` or may be read as one, written
+    // shortened as programs that take abbreviations do (`--outp=f`).
+    let long = |names: &[&str]| {
+        args.iter().any(|arg| {
+            let name = arg.split('=').next().unwrap_or_default();
+            name.len() > 2
+                && name.starts_with("--")
+                && names.iter().any(|full| full.starts_with(name))
+        })
+    };
+    // Words that are not options.
+    let operands = || args.iter().filter(|arg| !arg.starts_with('-')).count();
     match program {
-        ":" | "true" | "false" | "pwd" | "printf" | "echo" | "cat" | "head" | "tail" | "wc"
-        | "cut" | "tr" | "uniq" | "grep" | "ls" | "stat" | "file" | "du" | "df" | "basename"
-        | "dirname" | "realpath" | "cmp" | "comm" | "md5" | "md5sum" | "sha1sum" | "sha256sum"
-        | "shasum" | "uname" | "date" | "which" | "type" | "test" | "[" | "jq" | "cd" => true,
+        ":" | "true" | "false" | "pwd" | "echo" | "cat" | "head" | "tail" | "cut" | "tr"
+        | "grep" | "ls" | "stat" | "df" | "basename" | "dirname" | "realpath" | "cmp" | "comm"
+        | "md5" | "md5sum" | "sha1sum" | "sha256sum" | "shasum" | "uname" | "which" | "type"
+        | "test" | "[" | "jq" | "cd" => true,
+        // `printf -v` sets a variable of the shell, which may be `PATH`.
+        "printf" => !short("v"),
+        // `uniq in out` writes `out`.
+        "uniq" => operands() <= 1,
+        // `file -C` writes a compiled magic file.
+        "file" => !short("C") && !long(&["--compile"]),
+        // They read the files to look at from a list in a file.
+        "wc" | "du" => !long(&["--files0-from"]),
+        // Any other word may set the clock.
+        "date" => args.iter().all(|arg| arg.starts_with('+') || arg == "-u"),
         "sleep" => {
             args.len() == 1
                 && !args[0].is_empty()
@@ -5321,17 +5352,17 @@ fn read_only_invocation(tokens: &[String]) -> bool {
                     byte.is_ascii_digit() || matches!(byte, b'.' | b's' | b'm' | b'h' | b'd')
                 })
         }
-        "sort" => !args.iter().any(|arg| {
-            arg == "-o"
-                || (arg.starts_with("-o") && arg.len() > 2)
-                || arg == "--output"
-                || arg.starts_with("--output=")
-                || arg == "--compress-program"
-                || arg.starts_with("--compress-program=")
-        }),
-        "rg" => !args
-            .iter()
-            .any(|arg| arg == "--pre" || arg.starts_with("--pre=")),
+        // `-o` writes, `-T` keeps temporary files in a folder, and
+        // `--compress-program` runs a program; GNU sort takes long options
+        // shortened, so any `--o…`, `--c…` or `--t…` counts.
+        "sort" => {
+            !short("oT")
+                && !args.iter().any(|arg| {
+                    arg.starts_with("--o") || arg.starts_with("--c") || arg.starts_with("--t")
+                })
+        }
+        // `--pre` and `--hostname-bin` run a program.
+        "rg" => !long(&["--pre", "--pre-glob", "--hostname-bin"]),
         "find" => !args.iter().any(|arg| {
             matches!(
                 arg.as_str(),
@@ -5346,11 +5377,7 @@ fn read_only_invocation(tokens: &[String]) -> bool {
                     | "-fls"
             )
         }),
-        "fd" => !args.iter().any(|arg| {
-            matches!(arg.as_str(), "-x" | "--exec" | "-X" | "--exec-batch")
-                || arg.starts_with("--exec=")
-                || arg.starts_with("--exec-batch=")
-        }),
+        "fd" => !short("xX") && !long(&["--exec", "--exec-batch"]),
         "git" => {
             args.first().is_some_and(|subcommand| {
                 matches!(
@@ -5373,12 +5400,14 @@ fn read_only_invocation(tokens: &[String]) -> bool {
                         | "count-objects"
                         | "version"
                 )
-            }) && !args.iter().skip(1).any(|arg| {
-                arg == "--output"
-                    || arg.starts_with("--output=")
-                    || arg == "--ext-diff"
-                    || arg == "--textconv"
-            })
+            }) && !short("O")
+                && !long(&[
+                    "--output",
+                    "--ext-diff",
+                    "--textconv",
+                    "--filters",
+                    "--open-files-in-pager",
+                ])
         }
         _ => false,
     }
@@ -6131,11 +6160,12 @@ fn chain_folders(
 /// failed, so the folder is followed only for steps that read: a read
 /// checked where the `cd` would have gone is at worst one read placed
 /// elsewhere, while a write or a delete stays checked from where the shell
-/// started. The opening `cd`s and `pushd`s, joined by `&&`, are those
-/// [`chain_folders`] follows, into folders that are there now, can be
-/// entered and lie in the project, with redirects that at most silence
-/// them. From the step after them, each step is read from the folder they
-/// reached while it only reads (see [`only_reads`]). The first one that does
+/// started. So the `cd`s it follows must not fail for any reason the line
+/// itself holds (see [`entered`]): plain `cd`s joined by `&&`, as
+/// [`chain_folders`] follows them, into folders that exist now, may be
+/// searched and lie in the project. Not `pushd`, which `sh` may lack (dash
+/// has none). From the step after them, each step is read from the folder
+/// they reached while it only reads (see [`only_reads`]). The first one that does
 /// anything else (writes, deletes, runs any other program, may move the
 /// shell, is another `cd`, a subshell, a group, an `||` list) or is sent to
 /// the background ends it: it and every step after it are read from where
@@ -6187,11 +6217,11 @@ fn reading_folders(
     folders
 }
 
-/// Where a plain `cd` or `pushd` step goes from `from`: one folder
-/// [`plain_path`] takes, with no assignment or substitution, whose
-/// redirects only read a file or silence it (see [`reads_or_silences`]),
-/// into a folder that is there and can be entered. `None` for any other
-/// step.
+/// Where a plain `cd` step goes from `from`, for [`reading_folders`]: one
+/// folder [`plain_path`] takes and written with no `$` (a `$'…'` or `$"…"`
+/// word is no quoting at all to dash), with no assignment or substitution
+/// and no redirect that may fail (see [`cannot_fail`]), whose folder exists
+/// now and may be searched. `None` for any other step.
 fn entered(
     node: tree_sitter::Node<'_>,
     outer: &[tree_sitter::Node<'_>],
@@ -6208,19 +6238,19 @@ fn entered(
             .any(|child| child.kind() == "variable_assignment")
         || !redirects
             .iter()
-            .all(|redirect| reads_or_silences(*redirect, source))
+            .all(|redirect| cannot_fail(*redirect, source))
     {
+        return None;
+    }
+    // The parser may leave the `$` of `$"…"` out of the word.
+    if node_text(command, source).contains('$') {
         return None;
     }
     let words = words(command, source);
     let [program, target] = words.as_slice() else {
         return None;
     };
-    if !program.literal
-        || !matches!(program.value.as_str(), "cd" | "pushd")
-        || !plain_path(target)
-        || names_no_path(&program.value, &target.value)
-    {
+    if program.raw != "cd" || !plain_path(target) || names_no_path(&program.value, &target.value) {
         return None;
     }
     let target =
@@ -6229,7 +6259,7 @@ fn entered(
     (next.as_os_str().len() <= MAX_PLACED_BYTES && enterable(&next)).then_some(next)
 }
 
-/// Whether the shell can enter `folder`: a folder it may search.
+/// Whether `folder` is a folder this process may search, as `cd` needs.
 fn enterable(folder: &Path) -> bool {
     #[cfg(unix)]
     if nix::unistd::access(folder, nix::unistd::AccessFlags::X_OK).is_err() {
@@ -6240,11 +6270,11 @@ fn enterable(folder: &Path) -> bool {
 
 /// Whether a step of a line only reads: a command, or a pipeline of
 /// commands, each of them one of the inspection commands
-/// [`read_only_invocation`] takes, written in literal words with no
+/// [`read_only_invocation`] takes, written in literal words with no `$`,
 /// assignment, substitution or `cd`, and with redirects that only read a
-/// file or silence its output (see [`reads_or_silences`]). A glob may stand
-/// in only for the files of a program with no option that writes or runs
-/// anything, and `uniq` writes its second file.
+/// file or silence its output (see [`reads_or_silences`]). A glob or a
+/// brace list, which may turn into an option, is taken only by the programs
+/// none of whose options writes or runs anything.
 fn only_reads(node: tree_sitter::Node<'_>, outer: &[tree_sitter::Node<'_>], source: &str) -> bool {
     if !outer
         .iter()
@@ -6261,7 +6291,9 @@ fn only_reads(node: tree_sitter::Node<'_>, outer: &[tree_sitter::Node<'_>], sour
         let (Some(command), redirects) = statement(*stage, &[]) else {
             return false;
         };
+        // The parser may leave the `$` of `$"…"` out of a word.
         if has_substitution(*stage)
+            || node_text(*stage, source).contains('$')
             || command
                 .named_children(&mut command.walk())
                 .any(|child| child.kind() == "variable_assignment")
@@ -6280,10 +6312,6 @@ fn only_reads(node: tree_sitter::Node<'_>, outer: &[tree_sitter::Node<'_>], sour
         let globbed = arguments
             .iter()
             .any(|word| word.raw.contains(['*', '?', '[', '{']));
-        let files = arguments
-            .iter()
-            .filter(|word| !word.value.starts_with('-'))
-            .count();
         words.iter().all(|word| word.literal)
             && !matches!(name, "cd" | "pushd")
             && (!globbed
@@ -6291,7 +6319,6 @@ fn only_reads(node: tree_sitter::Node<'_>, outer: &[tree_sitter::Node<'_>], sour
                     name,
                     "cat" | "head" | "tail" | "wc" | "ls" | "grep" | "du" | "stat"
                 ))
-            && (name != "uniq" || files <= 1)
             && read_only_invocation(
                 &words
                     .iter()
@@ -6325,6 +6352,37 @@ fn reads_or_silences(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
                         _ => false,
                     }
             })
+}
+
+/// Whether a redirect on a `cd` can never keep it from running: output sent
+/// to `/dev/null`, copied onto standard output or error, or closed. A file
+/// to read may be missing and another descriptor may not be open, and then
+/// the shell skips the `cd` and runs what follows `;` where it was.
+fn cannot_fail(redirect: tree_sitter::Node<'_>, source: &str) -> bool {
+    redirect.kind() == "file_redirect"
+        && !has_substitution(redirect)
+        && redirect
+            .children_by_field_name("destination", &mut redirect.walk())
+            .count()
+            == 1
+        && redirect
+            .child_by_field_name("destination")
+            .is_some_and(|destination| {
+                let (value, complete) = literal(destination, source);
+                complete
+                    && match operator(redirect, source).as_str() {
+                        ">&" => matches!(value.as_str(), "1" | "2" | "-"),
+                        ">" | ">>" | "&>" | "&>>" | ">|" => value == "/dev/null",
+                        _ => false,
+                    }
+            })
+        // `>&-` closes standard output; the parser reads it as one operator.
+        || redirect.kind() == "file_redirect"
+            && operator(redirect, source) == ">&-"
+            && redirect
+                .children_by_field_name("destination", &mut redirect.walk())
+                .count()
+                == 0
 }
 
 /// `text` kept to [`CLIPPED_PATTERN_BYTES`], with `…` when cut.
@@ -7756,6 +7814,25 @@ mod tests {
             "rg --pre 'touch changed' needle",
             "git diff --output=changed",
             "git diff --ext-diff",
+            // Options written shortened or clustered, and the other ones that
+            // write, keep files or run a program.
+            "sort -uo output input",
+            "sort -ro output input",
+            "sort --outp=output input",
+            "sort --compress-prog=gzip input",
+            "sort -T tmp input",
+            "uniq input output",
+            "file -C -m magic",
+            "wc --files0-from=list",
+            "du --files0-f=list",
+            "printf -v PATH %s ..",
+            "date 010100002000",
+            "rg --pr='touch changed' needle",
+            "rg --hostname-bin=tool needle",
+            "fd -Hx touch",
+            "git grep -Oless needle",
+            "git log --outp=changed",
+            "git cat-file --filters HEAD:x",
             "echo changed > file",
             "./looks-safe status",
             "cargo test",
@@ -8195,7 +8272,10 @@ mod regression {
             "cd sub; git status --short; cat ../README.md",
             "cd sub; ls; cat < ../README.md 2>/dev/null",
             "cd sub && cd deeper; cat ../../README.md",
-            "pushd sub > /dev/null; cat ../README.md",
+            "cd sub > /dev/null; cat ../README.md",
+            "cd sub >/dev/null 2>&1; cat ../README.md",
+            "cd sub 2>&1 >&2; cat ../README.md",
+            "cd sub >&-; cat ../README.md",
             "cd a/l\ncat ../../../README.md",
             "cd sub; cat ../README.md\ncat ../README.md",
         ] {
@@ -8249,6 +8329,37 @@ mod regression {
             "cd \"$D\"; cat ../x",
             "cd -P sub; cat ../x",
             "pushd sub > ../log.txt; cat ../x",
+            // A `cd` that may fail every time: a redirect that may fail
+            // skips it, dash has no `pushd` and takes `$'…'` for `$` and a
+            // quoted word.
+            "cd sub <&9; cat ../x",
+            "cd sub < nosuch.txt; cat ../x",
+            "cd sub 2>&9; cat ../x",
+            "cd sub 9>&8; cat ../x",
+            "pushd sub > /dev/null; cat ../x",
+            "cd $'sub'; cat ../x",
+            "cd $\"sub\"; cat ../x",
+            "cd sub; cat ../x $'y'",
+            "cd sub; cat ../x $\"y\"",
+            // A step one of whose options writes, keeps files or runs a
+            // program, however it is written.
+            "cd sub; sort -uo ../out x; cat ../x",
+            "cd sub; sort -ro../out x; cat ../x",
+            "cd sub; sort --outp=../out x; cat ../x",
+            "cd sub; sort --compress-prog=gzip x; cat ../x",
+            "cd sub; sort -T .. x; cat ../x",
+            "cd sub; echo x | sort -uo ../out; cat ../x",
+            "cd sub; uniq x ../out; cat ../x",
+            "cd sub; file -C -m x; cat ../x",
+            "cd sub; wc --files0-from=list; cat ../x",
+            "cd sub; du --files0-f=list; cat ../x",
+            "cd sub; printf -v PATH %s ..; cat ../x",
+            "cd sub; date 010100002000; cat ../x",
+            "cd sub; rg --pr=tool x; cat ../x",
+            "cd sub; fd -Hx echo; cat ../x",
+            "cd sub; git grep -Oless x; cat ../x",
+            "cd sub; git log --outp=../out; cat ../x",
+            "cd sub; git cat-file --filt HEAD:x; cat ../x",
         ] {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
@@ -8309,6 +8420,40 @@ mod regression {
                 effect: Effect::Deletes,
             }]
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Git Bash reads a line as the shell here does, so a `cd` before `;`
+    /// is followed, and refused, on the same terms; cmd.exe, whose `;` is no
+    /// separator, follows none.
+    #[cfg(unix)]
+    #[test]
+    fn git_bash_follows_a_cd_past_a_semicolon_on_the_same_terms() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-gitbash-cd-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        std::fs::write(workspace.join("README.md"), "# x\n").unwrap();
+        let read = |command: &str, reading: Reading| {
+            analyze_reading(command, &workspace, &workspace, reading).external_dirs
+        };
+        for command in [
+            "cd sub; cat ../README.md",
+            "cd sub\ncat ../README.md",
+            "cd sub <&9; cat ../README.md",
+            "pushd sub > /dev/null; cat ../README.md",
+            "cd sub; sort -uo ../out x; cat ../README.md",
+            "cd sub; rm -rf ../x",
+        ] {
+            assert_eq!(
+                read(command, Reading::GitBash),
+                read(command, Reading::Posix),
+                "{command}"
+            );
+        }
+        assert!(read("cd sub; cat ../README.md", Reading::GitBash).is_empty());
+        assert!(!read("cd sub <&9; cat ../README.md", Reading::GitBash).is_empty());
+        assert!(!read("cd sub; cat ../README.md", Reading::Cmd).is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 

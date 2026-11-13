@@ -9,8 +9,8 @@ r"""Real-binary proof of the October 24 permission-reading fixes, with the echo 
    while a path after a plain `cd` is read from where it went: `cd sub && cat ../README.md` and
    `cd sub && echo x > ../out.txt` run without asking, and so does `cat ../README.md` with `sub` as
    the call's `workdir`; past `;` and a line break the `cd` is followed for reads only, so `cd sub; cat
-   ../README.md` and its two-line form run, while `cd sub; cat ../../x` and `cd sub; echo x > ../x` stop
-   before they run; a `cd` with no folder goes home and asks.
+   ../README.md` and its two-line form run, while `cd sub; cat ../../x`, `cd sub; echo x > ../x`, a `cd`
+   whose redirect may fail and a `pushd` there stop before they run; a `cd` with no folder goes home and asks.
 3. resource_alias: a deny written in `opencode.json` under upstream OpenCode's name for the resource
    read tool refuses `mcp_resource_read`.
 4. backslash: a line that starts with a backslash is a command of its own (an `rm *` deny refuses
@@ -190,6 +190,10 @@ def case_cd_link():
         for line in ['cd sub; cat ../README.md', 'cd sub\ncat ../README.md', 'cd sub && pwd; cat ../README.md']:
             output = bash(env, folder, line, code=0)
             assert '# chained read' in output and 'Stopped' not in output, output
+        # A `cd` its own redirect may stop, and `pushd`, which dash lacks, are not followed.
+        for line in ['cd sub <&9; cat ../README.md', 'pushd sub > /dev/null; cat ../README.md']:
+            output = bash(env, folder, line, code=1)
+            assert 'Stopped:' in output and '# chained read' not in output, output
         output = bash(env, folder, 'cd sub; cat ../../semicolon-read.txt', code=1)
         assert 'Stopped:' in output and str(folder.parent) in output, output
         output = bash(env, folder, 'cd sub; echo semicolon > ../semicolon-out.txt', code=1)
