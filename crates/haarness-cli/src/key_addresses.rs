@@ -16,12 +16,17 @@
 //! global configuration and the projects registered before this Haarness
 //! first ran with these data (see [`record_earlier_keys`]): a project opened
 //! for the first time since then is not among them.
+//!
+//! A provider a project defines with Vertex AI's, Amazon Bedrock's or Azure's
+//! protocol at an address that is not that cloud's own is also never given
+//! this computer's sign-in to the cloud (see
+//! [`haarness_providers::own_cloud_address`]).
 
-use crate::{FileConfig, Paths};
+use crate::{FileConfig, Paths, ProviderSection};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use haarness_providers::{
-    CredentialFence,
+    CompatibleProtocol, CredentialFence,
     auth::{Credential, CredentialStore, key_origin},
 };
 use serde_json::Value;
@@ -42,6 +47,9 @@ pub(crate) struct KeyFence {
     project: BTreeSet<String>,
     /// Providers whose saved credential is not sent, with the notice.
     withheld: BTreeMap<String, String>,
+    /// Providers that may not use this computer's cloud sign-in, with the
+    /// notice when they would have used it.
+    no_ambient: BTreeMap<String, Option<String>>,
 }
 
 impl KeyFence {
@@ -49,6 +57,7 @@ impl KeyFence {
     pub(crate) fn providers(&self) -> CredentialFence {
         CredentialFence {
             project: self.project.iter().cloned().collect(),
+            no_ambient: self.no_ambient.keys().cloned().collect(),
         }
     }
 
@@ -57,9 +66,17 @@ impl KeyFence {
         self.withheld.contains_key(id)
     }
 
+    /// Whether `id` may not use this computer's cloud sign-in.
+    pub(crate) fn without_ambient(&self, id: &str) -> bool {
+        self.no_ambient.contains_key(id)
+    }
+
     /// What the person is told about `id`, when anything.
     pub(crate) fn notice(&self, id: &str) -> Option<&str> {
-        self.withheld.get(id).map(String::as_str)
+        self.withheld
+            .get(id)
+            .map(String::as_str)
+            .or_else(|| self.no_ambient.get(id).and_then(Option::as_deref))
     }
 
     /// Every notice, by provider id, as the log and `haarness providers`
@@ -83,8 +100,11 @@ impl KeyFence {
     /// Every notice, by provider id.
     pub(crate) fn notices(&self) -> impl Iterator<Item = (&str, &str)> {
         self.withheld
-            .iter()
-            .map(|(id, notice)| (id.as_str(), notice.as_str()))
+            .keys()
+            .chain(self.no_ambient.keys())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|id| Some((id.as_str(), self.notice(id)?)))
     }
 }
 
@@ -103,15 +123,47 @@ pub(crate) fn fence(config: &FileConfig, auth: &BTreeMap<String, Value>) -> KeyF
         let credential = auth
             .get(id)
             .and_then(|raw| serde_json::from_value::<Credential>(raw.clone()).ok());
-        if let Some(credential) = credential
-            && !credential.saved_for(url)
-        {
-            fence
-                .withheld
-                .insert(id.clone(), withheld_notice(&address, &credential));
+        // A key of its own, or a saved one (sent or not), is what it uses
+        // instead of a cloud sign-in.
+        let mut keyed = own_key(section);
+        if let Some(credential) = credential {
+            keyed = true;
+            if !credential.saved_for(url) {
+                fence
+                    .withheld
+                    .insert(id.clone(), withheld_notice(&address, &credential));
+            }
+        }
+        let Ok(protocol) = CompatibleProtocol::parse(&section.protocol) else {
+            continue;
+        };
+        let (cloud, owner) = match protocol {
+            CompatibleProtocol::GoogleVertex => ("Google Cloud", "Google's"),
+            CompatibleProtocol::AmazonBedrock => ("AWS", "Amazon Bedrock's"),
+            CompatibleProtocol::AzureOpenAi => ("Azure", "Azure's"),
+            _ => continue,
+        };
+        if !haarness_providers::own_cloud_address(protocol, url) {
+            fence.no_ambient.insert(
+                id.clone(),
+                (!keyed).then(|| {
+                    format!(
+                        "This computer's {cloud} sign-in was not sent to {address}, which is not {owner}. Connect to use a key there."
+                    )
+                }),
+            );
         }
     }
     fence
+}
+
+/// Whether the definition names a key of its own in the environment.
+fn own_key(section: &ProviderSection) -> bool {
+    section
+        .api_key_env
+        .iter()
+        .chain(&section.api_key_envs)
+        .any(|variable| std::env::var_os(variable).is_some_and(|value| !value.is_empty()))
 }
 
 /// Said where the provider is connected, so short enough for two rows of
@@ -654,6 +706,58 @@ mod tests {
         );
         // Recorded once: opening the cloned project changed nothing.
         assert_eq!(origins("router"), Some(vec![router.clone()]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A project's Vertex, Bedrock or Azure provider away from that cloud's
+    /// own addresses is kept from this computer's sign-in to it, and says so
+    /// when it has no key of its own; the person's own definitions are not.
+    #[test]
+    fn a_project_cloud_provider_elsewhere_gets_no_cloud_sign_in() {
+        let (root, paths) = root("key-fence-cloud");
+        let workspace = root.join("cloned");
+        write(
+            &paths.config_dir().join("haarness.json"),
+            r#"{"providers":{"mine":{"protocol":"google-vertex","base_url":"https://vertex-proxy.example.com/v1"}}}"#,
+        );
+        write(
+            &workspace.join("haarness.json"),
+            r#"{"providers":{
+                "team-vertex":{"protocol":"google-vertex","base_url":"https://vertex.evil.example/v1"},
+                "team-bedrock":{"protocol":"amazon-bedrock","base_url":"https://abc123.execute-api.us-east-1.amazonaws.com"},
+                "team-azure":{"protocol":"azure-openai","base_url":"https://team.azure-api.net/openai/v1","api_key_env":"HOME"},
+                "real-vertex":{"protocol":"google-vertex","base_url":"https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google"},
+                "plain":{"base_url":"https://models.example.com/v1"}
+            }}"#,
+        );
+        let config = crate::load_config(&paths, &workspace, true).unwrap();
+        let (_, fence) = current(&paths, &config).unwrap();
+        for id in ["team-vertex", "team-bedrock", "team-azure"] {
+            assert!(fence.without_ambient(id), "{id}");
+        }
+        for id in ["mine", "real-vertex", "plain"] {
+            assert!(!fence.without_ambient(id), "{id}");
+        }
+        let vertex = fence.notice("team-vertex").unwrap();
+        assert!(
+            vertex.starts_with(
+                "This computer's Google Cloud sign-in was not sent to https://vertex.evil.example"
+            ),
+            "{vertex}"
+        );
+        assert!(
+            fence
+                .notice("team-bedrock")
+                .unwrap()
+                .contains("AWS sign-in")
+        );
+        assert!(
+            fence.notice("team-azure").is_none(),
+            "a key of its own: nothing to say"
+        );
+        let applied = fence.providers();
+        assert!(applied.no_ambient.contains("team-vertex"));
+        assert!(applied.project.contains("plain") && !applied.project.contains("mine"));
         fs::remove_dir_all(root).unwrap();
     }
 

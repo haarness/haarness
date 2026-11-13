@@ -154,6 +154,8 @@ pub struct AzureProvider {
     instance: NativeInstance,
     auth_store: Option<Arc<CredentialStore>>,
     models: Vec<ModelInfo>,
+    /// Whether the Azure CLI's sign-in may be asked for a token.
+    ambient: bool,
 }
 
 impl AzureProvider {
@@ -182,7 +184,16 @@ impl AzureProvider {
             instance,
             auth_store,
             models,
+            ambient: true,
         }
+    }
+
+    /// Never ask the Azure CLI for a token: the provider is defined where
+    /// that sign-in does not belong (see [`crate::own_cloud_address`]).
+    #[must_use]
+    pub fn without_ambient_credentials(mut self) -> Self {
+        self.ambient = false;
+        self
     }
 
     async fn credential(&self) -> CoreResult<CloudCredential> {
@@ -191,6 +202,12 @@ impl AzureProvider {
         }
         if let Some(credential) = stored_credential(self.auth_store.as_ref(), &self.instance.id) {
             return Ok(credential);
+        }
+        if !self.ambient {
+            return Err(CoreError::Provider(format!(
+                "{} is not connected: add its API key. This computer's Azure sign-in is used only at Azure's own addresses",
+                self.instance.name
+            )));
         }
         let output = Command::new("az")
             .args([
@@ -633,6 +650,8 @@ pub struct VertexProvider {
     auth_store: Option<Arc<CredentialStore>>,
     models: Vec<ModelInfo>,
     token: Option<SecretString>,
+    /// Whether `gcloud` may be asked for an access token.
+    ambient: bool,
 }
 
 impl VertexProvider {
@@ -678,7 +697,16 @@ impl VertexProvider {
             auth_store,
             models,
             token,
+            ambient: true,
         }
+    }
+
+    /// Never ask `gcloud` for an access token: the provider is defined where
+    /// that sign-in does not belong (see [`crate::own_cloud_address`]).
+    #[must_use]
+    pub fn without_ambient_credentials(mut self) -> Self {
+        self.ambient = false;
+        self
     }
 
     async fn token(&self) -> CoreResult<String> {
@@ -689,6 +717,12 @@ impl VertexProvider {
             stored_credential(self.auth_store.as_ref(), &self.instance.id)
         {
             return Ok(token);
+        }
+        if !self.ambient {
+            return Err(CoreError::Provider(format!(
+                "{} is not connected: add its API key. This computer's Google Cloud sign-in is used only at Google's own addresses",
+                self.instance.name
+            )));
         }
         for args in [
             ["auth", "application-default", "print-access-token"].as_slice(),

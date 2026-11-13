@@ -90,6 +90,8 @@ pub struct BedrockProvider {
     whole_with_tools: RwLock<HashSet<String>>,
     /// Models that refused a forced tool choice.
     unforced: RwLock<HashSet<String>>,
+    /// Whether this computer's AWS sign-in may sign requests.
+    ambient: bool,
 }
 
 /// How a request is signed.
@@ -187,7 +189,24 @@ impl BedrockProvider {
             profiles: RwLock::default(),
             whole_with_tools: RwLock::default(),
             unforced: RwLock::default(),
+            ambient: true,
         }
+    }
+
+    /// Use only the provider's own key: no `AWS_BEARER_TOKEN_BEDROCK` and no
+    /// AWS setup's keys, since the provider is defined where they do not
+    /// belong (see [`crate::own_cloud_address`]).
+    #[must_use]
+    pub fn without_ambient_credentials(mut self) -> Self {
+        self.bearer = self
+            .instance
+            .api_key
+            .clone()
+            .filter(|value| !value.is_empty())
+            .map(SecretString::from);
+        self.sign_in = None;
+        self.ambient = false;
+        self
     }
 
     fn stored_bearer(&self) -> Option<String> {
@@ -223,6 +242,12 @@ impl BedrockProvider {
         }
         if let Some(sign_in) = &self.sign_in {
             return Ok(Signer::SigV4(sign_in.credentials().await?));
+        }
+        if !self.ambient {
+            return Err(CoreError::Provider(format!(
+                "{} is not connected: add its API key. This computer's AWS sign-in is used only at Amazon Bedrock's own addresses",
+                self.instance.name
+            )));
         }
         Err(CoreError::Provider(
             "Amazon Bedrock is not authenticated; set AWS_BEARER_TOKEN_BEDROCK, AWS credentials, or run `haarness auth login amazon-bedrock`".into(),

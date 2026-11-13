@@ -325,6 +325,69 @@ impl ProviderInstance {
 pub struct CredentialFence {
     /// Providers a project defines.
     pub project: std::collections::HashSet<String>,
+    /// Providers that may not use this computer's sign-in to a cloud: the
+    /// `gcloud` access token, the Azure CLI's, or the AWS setup's keys and
+    /// `AWS_BEARER_TOKEN_BEDROCK`.
+    pub no_ambient: std::collections::HashSet<String>,
+}
+
+/// Whether `url` is the cloud's own address for `protocol`, the only kind of
+/// address a provider a project defines may send this computer's sign-in to
+/// that cloud: https to Google's Vertex AI (`*.googleapis.com`,
+/// `*.vertexai.goog`), to Amazon Bedrock itself (`bedrock-runtime.<region>`,
+/// `bedrock.<region>` and their FIPS and VPC endpoints under
+/// `amazonaws.com`), or to Azure's AI services. Other names of those clouds
+/// can lead to servers their customers run (`*.execute-api.amazonaws.com`,
+/// `*.cloudapp.azure.com`). Every other protocol uses no such sign-in.
+#[must_use]
+pub fn own_cloud_address(protocol: CompatibleProtocol, url: &str) -> bool {
+    let Ok(url) = url::Url::parse(url.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str().filter(|_| url.scheme() == "https") else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    match protocol {
+        CompatibleProtocol::GoogleVertex => {
+            host.ends_with(".googleapis.com") || host.ends_with(".vertexai.goog")
+        }
+        CompatibleProtocol::AmazonBedrock => {
+            let Some(name) = host
+                .strip_suffix(".amazonaws.com")
+                .or_else(|| host.strip_suffix(".amazonaws.com.cn"))
+            else {
+                return false;
+            };
+            let labels: Vec<&str> = name.split('.').collect();
+            // `bedrock-runtime.us-east-1`, or a VPC endpoint's
+            // `vpce-….bedrock-runtime.us-east-1.vpce`.
+            let service = match labels.as_slice() {
+                [service, _region] => *service,
+                [endpoint, service, _region, "vpce"] if endpoint.starts_with("vpce-") => *service,
+                _ => return false,
+            };
+            matches!(
+                service,
+                "bedrock" | "bedrock-runtime" | "bedrock-fips" | "bedrock-runtime-fips"
+            )
+        }
+        CompatibleProtocol::AzureOpenAi => [
+            ".openai.azure.com",
+            ".cognitiveservices.azure.com",
+            ".services.ai.azure.com",
+            ".openai.azure.us",
+            ".cognitiveservices.azure.us",
+            ".openai.azure.cn",
+            ".cognitiveservices.azure.cn",
+        ]
+        .iter()
+        .any(|suffix| host.ends_with(suffix)),
+        CompatibleProtocol::OpenAiChatCompletions
+        | CompatibleProtocol::AnthropicMessages
+        | CompatibleProtocol::GeminiGenerateContent
+        | CompatibleProtocol::GithubCopilot => false,
+    }
 }
 
 #[derive(Default)]
@@ -484,6 +547,7 @@ impl NativeProviderRegistry {
             } else {
                 auth_store.clone()
             };
+            let ambient = !fence.no_ambient.contains(instance.id());
             registry.insert(match instance {
                 ProviderInstance::OpenAiChatCompletions(instance) => Arc::new(
                     OpenAiCompatibleProvider::new(instance)
@@ -497,16 +561,31 @@ impl NativeProviderRegistry {
                     Arc::new(GeminiProvider::new(instance).with_auth_store(auth_store))
                 }
                 ProviderInstance::AzureOpenAi(instance) => {
-                    Arc::new(AzureProvider::new(instance, auth_store))
+                    let provider = AzureProvider::new(instance, auth_store);
+                    Arc::new(if ambient {
+                        provider
+                    } else {
+                        provider.without_ambient_credentials()
+                    })
                 }
                 ProviderInstance::GoogleVertex(instance) => {
-                    Arc::new(VertexProvider::new(instance, auth_store))
+                    let provider = VertexProvider::new(instance, auth_store);
+                    Arc::new(if ambient {
+                        provider
+                    } else {
+                        provider.without_ambient_credentials()
+                    })
                 }
                 ProviderInstance::GithubCopilot(instance) => {
                     Arc::new(CopilotProvider::new(instance, auth_store))
                 }
                 ProviderInstance::AmazonBedrock(instance) => {
-                    Arc::new(BedrockProvider::new(instance, auth_store))
+                    let provider = BedrockProvider::new(instance, auth_store);
+                    Arc::new(if ambient {
+                        provider
+                    } else {
+                        provider.without_ambient_credentials()
+                    })
                 }
             });
         }
@@ -1631,6 +1710,7 @@ mod tests {
         });
         let fence = super::CredentialFence {
             project: HashSet::from(["router".to_owned()]),
+            no_ambient: HashSet::new(),
         };
         let registry = super::NativeProviderRegistry::with_providers_and_store(
             vec![instance],
@@ -1674,5 +1754,136 @@ mod tests {
         assert!(provider.info().authenticated);
         ask().await;
         assert_eq!(seen.lock().pop(), Some(Some("Bearer router-key".into())));
+    }
+
+    /// A provider kept from this computer's cloud sign-in says so instead of
+    /// asking `gcloud`, the Azure CLI or the AWS setup for one.
+    #[tokio::test]
+    async fn a_project_provider_never_asks_for_this_computers_cloud_sign_in() {
+        let native = |id: &str| super::NativeInstance {
+            id: id.into(),
+            name: id.into(),
+            base_url: "https://cloud.invalid/v1".into(),
+            api_key: None,
+            models: vec!["m".into()],
+            discover_models: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: ProviderHeaders::default(),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(super::CredentialStore::new(root.path().join("auth.json")));
+        let ids = ["team-vertex", "team-azure", "team-bedrock"];
+        let fence = super::CredentialFence {
+            project: ids.iter().map(|id| (*id).to_owned()).collect(),
+            no_ambient: ids.iter().map(|id| (*id).to_owned()).collect(),
+        };
+        let registry = super::NativeProviderRegistry::with_providers_and_store(
+            vec![
+                super::ProviderInstance::GoogleVertex(native("team-vertex")),
+                super::ProviderInstance::AzureOpenAi(native("team-azure")),
+                super::ProviderInstance::AmazonBedrock(native("team-bedrock")),
+            ],
+            &HashSet::new(),
+            store,
+            &fence,
+        )
+        .await;
+        for (id, cloud) in [
+            ("team-vertex", "Google Cloud"),
+            ("team-azure", "Azure"),
+            ("team-bedrock", "AWS"),
+        ] {
+            let provider = haarness_core::ProviderRegistry::get(&registry, id).unwrap();
+            assert!(!provider.info().authenticated, "{id}");
+            let request = haarness_core::ProviderRequest {
+                model: "m".into(),
+                system: String::new(),
+                messages: vec![haarness_core::ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                tools: Vec::new(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            };
+            let error = match provider
+                .stream(request, tokio_util::sync::CancellationToken::new())
+                .await
+            {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("{id} sent a request"),
+            };
+            assert!(
+                error.contains(&format!("This computer's {cloud} sign-in is used only")),
+                "{id}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clouds_own_addresses_are_told_from_its_customers() {
+        use super::own_cloud_address;
+        let vertex = CompatibleProtocol::GoogleVertex;
+        let bedrock = CompatibleProtocol::AmazonBedrock;
+        let azure = CompatibleProtocol::AzureOpenAi;
+        for (protocol, url) in [
+            (
+                vertex,
+                "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google",
+            ),
+            (vertex, "https://aiplatform.googleapis.com/v1"),
+            (
+                vertex,
+                "https://1234.us-central1-56.prediction.vertexai.goog/v1",
+            ),
+            (bedrock, "https://bedrock-runtime.us-east-1.amazonaws.com"),
+            (
+                bedrock,
+                "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+            ),
+            (
+                bedrock,
+                "https://bedrock-runtime.cn-north-1.amazonaws.com.cn",
+            ),
+            (
+                bedrock,
+                "https://vpce-0abc-xyz.bedrock-runtime.eu-west-1.vpce.amazonaws.com",
+            ),
+            (azure, "https://team.openai.azure.com/openai/v1"),
+            (azure, "https://team.cognitiveservices.azure.com/openai/v1"),
+            (azure, "https://team.services.ai.azure.com/models"),
+        ] {
+            assert!(own_cloud_address(protocol, url), "{url}");
+        }
+        for (protocol, url) in [
+            (vertex, "https://evil.example/v1"),
+            (vertex, "http://us-central1-aiplatform.googleapis.com/v1"),
+            (vertex, "https://googleapis.com.evil.example/v1"),
+            (vertex, "https://evil.example/aiplatform.googleapis.com"),
+            (
+                bedrock,
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+            ),
+            (bedrock, "https://ec2-1-2-3-4.compute-1.amazonaws.com"),
+            (
+                bedrock,
+                "https://vpce-0abc.vpce-svc-123.us-east-1.vpce.amazonaws.com",
+            ),
+            (
+                bedrock,
+                "https://bedrock-runtime.us-east-1.amazonaws.com.evil.example",
+            ),
+            (bedrock, "http://bedrock-runtime.us-east-1.amazonaws.com"),
+            (azure, "https://team.cloudapp.azure.com"),
+            (azure, "https://team.azure-api.net/openai"),
+            (
+                CompatibleProtocol::OpenAiChatCompletions,
+                "https://api.openai.com/v1",
+            ),
+        ] {
+            assert!(!own_cloud_address(protocol, url), "{url}");
+        }
     }
 }

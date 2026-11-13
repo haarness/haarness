@@ -12621,7 +12621,10 @@ fn provider_fingerprints(
             digest.update([u8::from(signed_in.contains(info.id.as_str()))]);
             // A key saved again for this provider's address, or no longer,
             // changes what it may send.
-            digest.update([u8::from(fence.withholds(&info.id))]);
+            digest.update([
+                u8::from(fence.withholds(&info.id)),
+                u8::from(fence.without_ambient(&info.id)),
+            ]);
             (info.id, format!("{:x}", digest.finalize()))
         })
         .collect()
