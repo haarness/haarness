@@ -34,9 +34,11 @@ daemon in a private data folder shows that:
    folder and the chat's id filled in and its command named rather than run, leaves out a
    manual-only and a missing skill, and sends a byte-identical system prompt on the next turn;
 10. with an MCP server of 25 tools and custom agent files, the chat's `task` tool names the
-   custom subagent (not a primary or hidden agent) with the same bytes on both turns, and
-   `load_tool` asked for the server's wildcard and one native tool's exact id loads that tool
-   first and 19 of the server's, and its answer names the matches it left out.
+   custom subagent (not a primary or hidden agent) with the same bytes on every turn; the first
+   turn stores one reminder naming the server and its 25 deferred tools, which later turns (a
+   load among them) replay unchanged without adding another, so turn 2 starts with turn 1's
+   request; and `load_tool` asked for the server's wildcard and one native tool's exact id loads
+   that tool first and 19 of the server's, and its answer names the matches it left out.
 
 With --system-folder the daemon also starts with a system configuration folder
 (HAARNESS_SYSTEM_CONFIG_DIR) whose prompt files add to the main instructions and the
@@ -70,6 +72,8 @@ EVIDENCE.mkdir(parents=True, exist_ok=True)
 MODEL = 'claude-sonnet-4-6'
 # A schema lazy loading defers by default: `load_tool` loads it in section 6.
 LOADED = 'schedule'
+# How the reminder naming where deferred tools come from begins.
+DEFERRED_REMINDER = '<system-reminder>\nMore tools wait to be loaded with load_tool;'
 REQUESTS = []
 SYSTEM_FOLDER = '--system-folder' in sys.argv[1:]
 if SYSTEM_FOLDER:
@@ -671,8 +675,16 @@ for line in sys.stdin:
         offset = len(REQUESTS)
         assert turn(many, 'FIRST many turn')['status'] == 'completed'
         assert turn(many, 'LOAD_MANY please')['status'] == 'completed'
+        assert turn(many, 'THIRD many turn')['status'] == 'completed'
         sent = tool_requests(offset)
-        assert len(sent) == 3, [names(body) for body in sent]
+        assert len(sent) == 4, [names(body) for body in sent]
+        # The model is told once where the deferred tools come from; loads and later turns
+        # tell it nothing new, and the reminder stays where it was stored.
+        told = [[text for text in texts(body) if text.startswith(DEFERRED_REMINDER)] for body in sent]
+        assert all(found == told[0] for found in told) and len(told[0]) == 1, told
+        assert '\n- docs (MCP server): 25 tools\n' in told[0][0], told[0][0]
+        assert 'browser' not in told[0][0], told[0][0]
+        (EVIDENCE / 'deferred-tools-reminder.txt').write_text(told[0][0] + '\n')
         # The chat's task tool names the custom subagent it can start, the same bytes each turn.
         task = next(tool['description'] for tool in sent[0]['tools'] if tool['name'] == 'task')
         assert task.endswith('\n\nCustom subagents you can name in agent:\n- reviewer: Review diffs after code changes'), task[-300:]
@@ -680,6 +692,7 @@ for line in sys.stdin:
         assert json.dumps(sent[1]['tools']) == json.dumps(sent[0]['tools']), 'the tools changed between turns'
         assert json.dumps(clean(sent[1]['system'])) == json.dumps(clean(sent[0]['system'])), 'the system prompt changed'
         assert clean(sent[1]['messages'][:len(sent[0]['messages'])]) == clean(sent[0]['messages']), 'an earlier message changed'
+        assert clean(sent[3]['messages'][:len(sent[2]['messages'])]) == clean(sent[2]['messages']), 'an earlier message changed'
         sent = sent[1:]
         answer = load_answer(sent[1])
         ids = [tool['id'] for tool in answer['loaded']]
@@ -695,6 +708,7 @@ for line in sys.stdin:
         subprocess.run(many_args + ['serve', '--stop'], env=env, capture_output=True, timeout=60)
         connection = first_connection
     checks.append({'many tools': ['task names the custom subagent, not the primary or hidden one',
+                                  'deferred sources told once in turn 1, docs (MCP server): 25 tools; not again after a load',
                                   'turns 1 and 2 send byte-identical tools and system, messages a prefix',
                                   f'{LOADED} named exactly loads ahead of mcp__docs__*',
                                   '20 loaded, the 7 left out named']})

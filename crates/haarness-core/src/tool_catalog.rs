@@ -510,6 +510,11 @@ pub fn lazy_active(
 pub struct ToolSelection {
     pub response: ToolCatalogResponse,
     pub advertised: Vec<ToolDefinition>,
+    /// While lazy loading is active, the tools it leaves for the model to
+    /// load: those deferred now and those the model has loaded since, but
+    /// not a pinned one. What the model is told is deferred (see
+    /// [`deferred_sources`]) follows them, so a load changes nothing there.
+    pub optional: Vec<String>,
 }
 
 /// Build both the public catalog and the exact provider-facing schema list
@@ -566,14 +571,18 @@ where
 
     let mut entries = Vec::with_capacity(definitions.len());
     let mut advertised = Vec::new();
+    let mut optional = Vec::new();
     let mut total = 0_u64;
     let mut visible = 0_u64;
     for tool in definitions {
         let classification = classify_tool(&tool, context_window);
         let enabled = effective_enabled(configured, live, &tool.name);
         let loaded = promoted.contains(&tool.name);
-        let is_advertised = enabled
-            && (!active || classification.essential || pinned(settings, &tool.name) || loaded);
+        let is_pinned = pinned(settings, &tool.name);
+        let is_advertised = enabled && (!active || classification.essential || is_pinned || loaded);
+        if active && enabled && !classification.essential && !is_pinned {
+            optional.push(tool.name.clone());
+        }
         let estimate = estimated_tokens(&tool);
         if enabled {
             total = total.saturating_add(estimate);
@@ -610,7 +619,82 @@ where
             estimated_saved_tokens: total.saturating_sub(visible),
         },
         advertised,
+        optional,
     }
+}
+
+/// The most bytes the list of deferred sources may take (about 500 tokens).
+const DEFERRED_SOURCES_ROOM: usize = 2 * 1024;
+
+/// Where the tools lazy loading leaves for the model to load come from, one
+/// line each: each MCP server (named by `server_of` when it knows the tool's
+/// server) and extension with its count of tools, then each group of
+/// Haarness's own tools, each kind sorted by name. Empty when nothing is
+/// deferred. Names are kept on one line and can't close the reminder the
+/// list is sent in. Past [`DEFERRED_SOURCES_ROOM`], the rest are counted.
+#[must_use]
+pub fn deferred_sources(
+    selection: &ToolSelection,
+    server_of: impl Fn(&str) -> Option<String>,
+) -> String {
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
+    let groups = selection
+        .response
+        .tools
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry.group.as_str()))
+        .collect::<HashMap<_, _>>();
+    // Kind (servers, extensions, groups), name: count.
+    let mut sources = BTreeMap::<(u8, String), usize>::new();
+    for id in &selection.optional {
+        let source = tool_source(id);
+        let key = if let Some(server) = source.strip_prefix("mcp:") {
+            (0, server_of(id).unwrap_or_else(|| server.to_owned()))
+        } else if let Some(extension) = source.strip_prefix("extension:") {
+            (1, extension.to_owned())
+        } else {
+            (
+                2,
+                groups
+                    .get(id.as_str())
+                    .copied()
+                    .unwrap_or("core")
+                    .to_owned(),
+            )
+        };
+        *sources.entry(key).or_default() += 1;
+    }
+    let lines = sources
+        .into_iter()
+        .map(|((kind, name), count)| {
+            let name = name
+                .chars()
+                .filter(|character| !character.is_control() && !matches!(character, '<' | '>'))
+                .take(100)
+                .collect::<String>();
+            let kind = match kind {
+                0 => " (MCP server)",
+                1 => " (extension)",
+                _ => "",
+            };
+            let tools = if count == 1 { "tool" } else { "tools" };
+            format!("- {name}{kind}: {count} {tools}")
+        })
+        .collect::<Vec<_>>();
+    let mut text = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        let rest = lines.len() - index;
+        if text.len() + line.len() + 1 > DEFERRED_SOURCES_ROOM && rest > 1 {
+            let _ = write!(text, "\n- {rest} more sources");
+            break;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(line);
+    }
+    text.trim_start().to_owned()
 }
 
 /// The deferred tools one `load_tool` call matched: those it loads, at most
@@ -1164,6 +1248,102 @@ mod tests {
                 .any(|tool| tool.name == "browser_snapshot")
         );
         assert!(!large.response.lazy_active);
+    }
+
+    /// The model is told where the deferred tools come from: each MCP server
+    /// (by its own name) and extension with its count, then Haarness's own
+    /// groups. A load changes nothing there; a pinned tool is not deferred.
+    #[test]
+    fn the_deferred_sources_name_servers_extensions_and_groups() {
+        let mut definitions = vec![
+            definition("read", "read a file"),
+            definition("memory_read", "read notes"),
+            definition("memory_save", "save notes"),
+            definition("session_manage", "sessions"),
+            definition("ext__lint__run", "lint"),
+            definition("mcp__docs__search", "search"),
+            definition("mcp__docs__read", "read"),
+            definition("mcp__a__b__one", "a tool of the server a__b"),
+            definition("mcp__odd__x", "a server whose name has odd characters"),
+            definition("browser_navigate", "navigate"),
+            definition("browser_wait", "wait"),
+        ];
+        definitions.extend(
+            (0..3).map(|index| definition(&format!("mcp__tracker__t{index}"), "an issue tool")),
+        );
+        let select = |mode, promoted: &[&str]| {
+            select_tools(
+                definitions.clone(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &LazyToolSettings {
+                    mode,
+                    pin: vec!["session_*".into()],
+                    ..LazyToolSettings::default()
+                },
+                &promoted
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<HashSet<_>>(),
+                Some(200_000),
+                false,
+            )
+        };
+        let server_of = |tool: &str| {
+            if tool.starts_with("mcp__a__b__") {
+                Some("a__b".to_owned())
+            } else if tool.starts_with("mcp__odd__") {
+                Some("odd <server>\nname".to_owned())
+            } else {
+                None
+            }
+        };
+        let expected = "- a__b (MCP server): 1 tool\n- docs (MCP server): 2 tools\n- odd servername (MCP server): 1 tool\n- tracker (MCP server): 3 tools\n- lint (extension): 1 tool\n- browser: 1 tool\n- memory: 2 tools";
+        let selection = select(LazyToolMode::Always, &[]);
+        assert_eq!(deferred_sources(&selection, server_of), expected);
+        // The model loaded some: the same words, so nothing is told again.
+        let loaded = select(LazyToolMode::Always, &["memory_read", "mcp__docs__search"]);
+        assert!(names(&loaded.advertised).contains(&"memory_read"));
+        assert_eq!(deferred_sources(&loaded, server_of), expected);
+        // Lazy loading off: nothing is deferred.
+        assert_eq!(
+            deferred_sources(&select(LazyToolMode::Off, &[]), server_of),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_long_list_of_deferred_sources_stays_within_its_room() {
+        let definitions = (0..400)
+            .map(|index| {
+                definition(
+                    &format!("mcp__server_with_a_long_name_{index:03}__tool"),
+                    "a tool",
+                )
+            })
+            .collect::<Vec<_>>();
+        let selection = select_tools(
+            definitions,
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::new(),
+            Some(200_000),
+            false,
+        );
+        let sources = deferred_sources(&selection, |_| None);
+        assert!(
+            sources.len() <= DEFERRED_SOURCES_ROOM + 30,
+            "{}",
+            sources.len()
+        );
+        let last = sources.lines().last().unwrap();
+        let shown = sources.lines().count() - 1;
+        assert_eq!(last, format!("- {} more sources", 400 - shown));
+        assert!(sources.starts_with("- server_with_a_long_name_000 (MCP server): 1 tool\n"));
     }
 
     /// While lazy loading is on, a large window keeps the browser tools that

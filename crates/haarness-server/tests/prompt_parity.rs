@@ -674,3 +674,111 @@ async fn a_cold_side_question_offers_the_task_tool_the_turns_offer() {
     );
     assert_eq!(task(&requests[0]), task(&requests[1]));
 }
+
+/// While lazy loading defers tools, the first turn tells the model where
+/// they come from in a stored reminder; the next turns tell it nothing new,
+/// so the second request starts with the first one's, byte for byte.
+#[tokio::test]
+async fn the_deferred_tools_are_told_once_and_the_next_request_keeps_the_prefix() {
+    let provider = Arc::new(Probe::default());
+    let tools = Arc::new(Registry(
+        [
+            "read",
+            "ext__lint__run",
+            "memory_read",
+            "mcp__docs__search",
+            "mcp__docs__read",
+        ]
+        .into_iter()
+        .map(|name| {
+            Arc::new(HeldTool {
+                entered: CancellationToken::new(),
+                release: CancellationToken::new(),
+                writes: Arc::new(AtomicUsize::new(0)),
+                name,
+            }) as Arc<dyn Tool>
+        })
+        .collect(),
+    ));
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            provider.clone() as Arc<dyn ModelProvider>
+        ])),
+        tools,
+        EventBus::new(64),
+        PathBuf::from("."),
+        String::new(),
+        RuntimeConfig {
+            lazy_tools: LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            ..RuntimeConfig::default()
+        },
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("parity".into()),
+            model: Some("fixture".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // The third asks for memory, whose tools only such a turn is offered:
+    // they come and go, so they are not named and nothing is told again.
+    for text in ["First turn", "Second turn", "Please remember the plan"] {
+        let request = StartTurnRequest {
+            text: text.into(),
+            ..request()
+        };
+        let turn = runtime.start_turn(thread.id, request).await.unwrap();
+        done(&runtime, turn.id).await;
+    }
+    // The chat's own requests: a title request carries no tools.
+    let requests = provider
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| !request.tools.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 3);
+    let told = "<system-reminder>\nMore tools wait to be loaded with load_tool; ask for them by group or server name (this list replaces any earlier one):\n- docs (MCP server): 2 tools\n- lint (extension): 1 tool\n</system-reminder>";
+    let reminders = |request: &ProviderRequest| {
+        request
+            .messages
+            .iter()
+            .filter(|message| matches!(message, ProviderMessage::Text { role, content } if role == "user" && content == told))
+            .count()
+    };
+    assert_eq!(reminders(&requests[0]), 1, "{:?}", requests[0].messages);
+    assert_eq!(reminders(&requests[1]), 1, "{:?}", requests[1].messages);
+    assert_eq!(reminders(&requests[2]), 1, "{:?}", requests[2].messages);
+    let synthetic = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|item| {
+            matches!(
+                &item.data,
+                haarness_protocol::ItemData::UserMessage {
+                    synthetic: true,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(synthetic, 1);
+    assert_eq!(requests[0].system, requests[1].system);
+    assert_eq!(
+        serde_json::to_string(&requests[0].tools).unwrap(),
+        serde_json::to_string(&requests[1].tools).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&requests[1].messages[..requests[0].messages.len()]).unwrap(),
+        serde_json::to_string(&requests[0].messages).unwrap()
+    );
+}
