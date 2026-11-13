@@ -2009,10 +2009,12 @@ export function Session() {
         waitingForSend.delete(pressed);
       }
       // A first message's new chat took the box with the view, this
-      // message in it: it goes there, once all the box held has.
+      // message in it: it goes there, once all the box held has. With
+      // another chat shown by then, it waits in that box: the box shown
+      // holds something Enter was not pressed on.
       const followed = flight && carriedBy.get(flight);
-      if (followed && followed.to === owner()) {
-        if (!went || !(await followed.moved) || owner() !== followed.to || submitting()) return;
+      if (followed) {
+        if (!went || owner() !== followed.to || !(await followed.moved) || owner() !== followed.to || submitting()) return;
         return send(delivery);
       }
       if (!went || owner() !== pressed || submitting()) return;

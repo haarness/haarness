@@ -1028,9 +1028,12 @@ test("a message sent while the chat before it is still being made is never lost:
     await expect(composer()).toHaveValue("");
 
     // What is added meanwhile, a pasted log and a picture, goes with the
-    // box, and with the next message.
+    // box, and with the next message; the first message's own picture goes
+    // with the first only.
     await newChat();
     await holdNext("createThread");
+    await pasteImage(`first-${place}.png`);
+    await expect(page.getByRole("button", { name: `Remove first-${place}.png`, exact: true })).toBeVisible();
     await send(`Why does the build fail, ${place}?`);
     await held("createThread");
     await pasteText(Array.from({ length: 30 }, (_, index) => `BUILD_LOG ${place} line ${index + 1}`).join("\n"));
@@ -1044,11 +1047,14 @@ test("a message sent while the chat before it is still being made is never lost:
     await expect(listed()).toHaveCount(3);
     await expect(context).toHaveCount(0);
     await expect(page.getByRole("button", { name: `Remove log-${place}.png`, exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: `Remove first-${place}.png`, exact: true })).toHaveCount(0);
     const api = place === "project" ? projectClient() : homeClient();
     try {
       const messages = (await Promise.all((await api.listThreads()).map((thread) => api.listItems(thread.id))))
         .flat()
         .flatMap((item) => (item.data.type === "user_message" ? [item.data] : []));
+      const first = messages.find((message) => message.text.includes(`Why does the build fail, ${place}?`));
+      expect(first?.attachments?.length).toBe(1);
       const next = messages.find((message) => message.text.includes(`Here is the log, ${place}`));
       expect(next?.attachments?.length).toBe(1);
       expect(next?.text).toContain(`BUILD_LOG ${place} line 30`);
@@ -1061,6 +1067,7 @@ test("a message sent while the chat before it is still being made is never lost:
     await page.waitForTimeout(300);
     await expect(context).toHaveCount(0);
     await expect(page.getByRole("button", { name: `Remove log-${place}.png`, exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: `Remove first-${place}.png`, exact: true })).toHaveCount(0);
 
     // New chat chosen while the first message's chat is being made: the view
     // stays there, the box keeps what is typed next until it goes, and Enter

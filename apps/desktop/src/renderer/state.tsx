@@ -1317,16 +1317,27 @@ function createApp(saved?: Preferences) {
     await Promise.all([loadAttachmentDraft(from), loadPromptContext(from), loadPromptContext(to)]);
     const files = attachmentDrafts.get(from).filter((item) => !sent.files.includes(item));
     const chips = (contexts()[from] ?? []).filter((item) => !sent.chips.includes(item));
+    // The chat also holds what the sent message took, until it has gone:
+    // the limits are those of the next message, without it.
+    const next = <V,>(items: V[], parked: V[]) => items.filter((item) => !parked.includes(item));
     await carryDraft([
       ...(files.length
         ? [{
-            write: () => setAttachmentDraft(to, (items) => [...items, ...files]),
+            write: () =>
+              setAttachmentDraft(to, (items) => [...items, ...files], (items) => checkAttachments(next(items, sent.files))),
             clear: () => setAttachmentDraft(from, (items) => items.filter((item) => !files.includes(item))),
           }]
         : []),
       ...(chips.length
         ? [{
-            write: () => setPromptContext(to, chips.reduce(addContext, contexts()[to] ?? [])),
+            write: () => {
+              const held = contexts()[to] ?? [];
+              const going = chips.reduce(addContext, next(held, sent.chips));
+              const parked = held.filter(
+                (item) => sent.chips.includes(item) && !going.some((value) => contextKey(value) === contextKey(item)),
+              );
+              return setPromptContext(to, [...parked, ...going]);
+            },
             clear: () => setPromptContext(from, (contexts()[from] ?? []).filter((item) => !chips.includes(item))),
           }]
         : []),
@@ -1853,8 +1864,12 @@ function createApp(saved?: Preferences) {
   );
   const attachmentDraft = (key: string) => { attachmentVersion(); return attachmentDrafts.get(key); };
   const loadAttachmentDraft = (key: string) => attachmentDrafts.load(key);
-  function setAttachmentDraft(key: string, value: Attachment[] | ((items: Attachment[]) => Attachment[])) {
-    const pending = attachmentDrafts.update(key, value);
+  function setAttachmentDraft(
+    key: string,
+    value: Attachment[] | ((items: Attachment[]) => Attachment[]),
+    limit?: (items: Attachment[]) => unknown,
+  ) {
+    const pending = attachmentDrafts.update(key, value, limit);
     void pending.catch((error) => {
       if (!cancelled(error)) set("error", "Could not save attachment draft: " + errorLine(error));
     });
