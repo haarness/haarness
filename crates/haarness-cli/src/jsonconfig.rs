@@ -757,9 +757,11 @@ const INSTRUCTION_GLOB_ENTRIES: usize = 1_000_000;
 /// and `warnings` says when an entry reached its budget.
 ///
 /// With a `fence` (the project's real roots, for an entry a project's file
-/// named) nothing outside it is read: a `~/` entry, and an absolute or
-/// relative one whose fixed start (the folders before its first wildcard)
-/// leads out of the project through `..` or a link, give `None`. A relative entry is read from each folder where it
+/// named) nothing outside it is read: a `~/` entry, one with a `..` part
+/// anywhere, one on another drive or computer (a Windows UNC path), all
+/// judged on the text alone, and an absolute or relative one whose fixed
+/// start (the folders before its first wildcard) a link leads out of the
+/// project, give `None`. A relative entry is read from each folder where it
 /// starts inside; its matches are still the caller's to check, since a
 /// wildcard may match a link.
 fn instruction_entry_files(
@@ -786,6 +788,12 @@ fn instruction_entry_files(
         }
         files
     };
+    if let Some(roots) = fence
+        && (entry.split(['/', '\\']).any(|part| part == "..")
+            || off_the_project_drive(Path::new(entry), roots))
+    {
+        return None;
+    }
     let starts_inside = |start: PathBuf| fence.is_none_or(|roots| stays_within(&start, roots));
     let entry = match entry.strip_prefix("~/") {
         Some(_) if fence.is_some() => return None,
@@ -820,6 +828,30 @@ fn instruction_entry_files(
         )));
     }
     (inside || fence.is_none()).then_some(out)
+}
+
+/// Whether `path` names another computer (a UNC share, a device) or a drive
+/// none of `roots` is on, as Windows writes it, judged on the text alone so
+/// that nothing there is opened. A path with no drive is on none.
+fn off_the_project_drive(path: &Path, roots: &[PathBuf]) -> bool {
+    use std::path::{Component, Prefix};
+    fn drive(path: &Path) -> Option<Prefix<'_>> {
+        match path.components().next() {
+            Some(Component::Prefix(prefix)) => Some(prefix.kind()),
+            _ => None,
+        }
+    }
+    let letter = |prefix: Prefix<'_>| match prefix {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => Some(letter.to_ascii_uppercase()),
+        _ => None,
+    };
+    drive(path).is_some_and(|prefix| {
+        letter(prefix).is_none_or(|disk| {
+            !roots
+                .iter()
+                .any(|root| drive(root).and_then(letter) == Some(disk))
+        })
+    })
 }
 
 /// The fixed start of a glob pattern: its folders up to the first one with a
@@ -4124,6 +4156,8 @@ mod tests {
             "~/notes.md".to_owned(),
             root.join("outside/abs.md").display().to_string(),
             "../outside/up.md".to_owned(),
+            // A `..` after a wildcard is never walked.
+            "*/../../outside/up.md".to_owned(),
             "~/.claude/.credentials.json".to_owned(),
         ];
         let mut named: Vec<String> = entries.to_vec();
@@ -4366,6 +4400,36 @@ mod tests {
                 .contains("MY_CONVENTIONS")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_project_entry_on_another_computer_or_drive_is_judged_by_its_text() {
+        let roots = [PathBuf::from(if cfg!(windows) {
+            r"C:\work\repo"
+        } else {
+            "/work/repo"
+        })];
+        assert!(!off_the_project_drive(Path::new("/elsewhere/x.md"), &roots));
+        assert!(!off_the_project_drive(Path::new("docs/x.md"), &roots));
+        #[cfg(windows)]
+        {
+            for elsewhere in [
+                r"\\host\share\x.md",
+                "//host/share/x.md",
+                r"\\?\UNC\host\share\x.md",
+                r"\\.\pipe\x",
+                r"D:\notes\x.md",
+            ] {
+                assert!(
+                    off_the_project_drive(Path::new(elsewhere), &roots),
+                    "{elsewhere}"
+                );
+            }
+            assert!(!off_the_project_drive(
+                Path::new(r"c:\work\repo\x.md"),
+                &roots
+            ));
+        }
     }
 
     #[test]
