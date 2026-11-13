@@ -253,9 +253,9 @@ export function describeAlwaysRule(
     // An outside folder that holds the project is remembered by the path
     // asked about: the folder alone (`/home/me/`), or a file in it, whose
     // whole name shows while its folder gives way.
-    if (/[/\\]$/.test(pattern)) return words.shortPath(pattern.replace(/[/\\]+$/, "") || "/");
-    if (!/[/\\]\*$/.test(pattern)) return fileInFolder(pattern);
-    return t("Anything in {folder}", { folder: words.shortPath(pattern.replace(/[/\\]\*$/, "")) });
+    if (/[/\\]$/.test(pattern)) return words.shortPath(named(pattern.replace(/[/\\]+$/, "")) || "/");
+    if (!/[/\\]\*$/.test(pattern)) return fileInFolder(named(pattern));
+    return t("Anything in {folder}", { folder: words.shortPath(named(pattern.replace(/[/\\]\*$/, ""))) });
   }
   if (pattern === "*")
     return everyRequest[permission]
@@ -263,12 +263,19 @@ export function describeAlwaysRule(
       : t("Every request of this kind");
   if (permission === "bash" && pattern.endsWith(" *"))
     return t("Commands starting with {command}", { command: pattern.slice(0, -2) });
-  if (permission === "read") return t("Reading {path}", { path: pattern });
+  if (permission === "read") return t("Reading {path}", { path: named(pattern) });
   if (permission === "media_generate" && pattern === "image:*")
     return t("Any image generation");
   if (permission === "media_generate" && pattern === "video:*")
     return t("Any video generation");
-  return pattern;
+  return ["edit", "list"].includes(permission) ? named(pattern) : pattern;
+}
+
+/** A path as a path rule names it, with the `\*` and `\?` that keep a `*` or
+ * `?` in a name from reading as a wildcard turned back into that character.
+ * A backslash before one (`\\?\C:\…` on Windows) is a separator. */
+function named(path: string): string {
+  return path.replace(/(?<!\\)\\([*?])/g, "$1");
 }
 
 /** A file's path in about as many characters as a menu line holds: its

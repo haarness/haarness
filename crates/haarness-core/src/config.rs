@@ -183,13 +183,19 @@ impl RuntimeConfig {
         }
         if matches!(tool, "read" | "list" | "glob" | "grep") {
             for root in &self.read_roots {
-                // Permission patterns use wildcards; ambiguous literal directory
-                // names must retain the ordinary prompt instead of widening access.
-                if root.to_string_lossy().contains(['*', '?']) {
+                let root = root.to_string_lossy();
+                // The rule names the folder itself, a `*` or `?` in its name
+                // included. Where a name cannot be named so (Windows, which
+                // allows neither), such a folder keeps the ordinary prompt
+                // rather than open every folder its name matches.
+                if cfg!(windows) && root.contains(['*', '?']) {
                     continue;
                 }
                 engine.add_rule(crate::PermissionRule {
-                    pattern: format!("external_directory:{}/*", root.display()),
+                    pattern: format!(
+                        "external_directory:{}/*",
+                        crate::permissions::literal_path(&root)
+                    ),
                     decision: crate::PermissionDecision::Allow,
                 });
             }
@@ -266,6 +272,39 @@ impl Default for CompactionSettings {
             reserve_output: None,
             tail_turns: 2,
             preserve_recent_tokens: 24_000,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_root_whose_name_holds_a_star_is_readable_and_its_neighbours_ask() {
+        let root = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\skills\plain")
+        } else {
+            std::path::PathBuf::from("/skills/a*b")
+        };
+        let config = RuntimeConfig {
+            read_roots: vec![root.clone()],
+            ..RuntimeConfig::default()
+        };
+        let engine = config.permission_defaults("build", "read");
+        let operation = |folder: &str| format!("external_directory:{folder}/x");
+        assert_eq!(
+            engine.evaluate(&operation(&root.to_string_lossy())),
+            crate::PermissionDecision::Allow
+        );
+        if !cfg!(windows) {
+            for other in ["/skills/a-other-b", "/skills/a/c/b"] {
+                assert_eq!(
+                    engine.evaluate(&operation(other)),
+                    crate::PermissionDecision::Ask,
+                    "{other}"
+                );
+            }
         }
     }
 }

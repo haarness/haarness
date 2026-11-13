@@ -24,20 +24,26 @@
    to, inside the project or outside it, without asking about the outside folder; glob refuses a
    `..` pattern and leaves out what `**` finds through a link out of the project; an
    `external_directory` deny written through a folder link refuses a read of the folder it leads to.
+9. (November 13) Always for a folder whose name holds a `*` saves it with the `*` escaped: the folder runs
+   again, and a neighbour its name matches (`a*` and `ab`) or an unquoted `a*` glob still asks, headless
+   too; an Always saved before without the escape keeps covering what it matched; a data folder named
+   with a `*` opens its own tool output and not a neighbour's.
 
 Usage: python3 scripts/test-permission-boundaries.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset
 of paths, headless, schedules, session_start, plugin_workflow, config_files, home_variable,
-frontmatter, shell_readings and links). No model is called.
+frontmatter, shell_readings, links and literal_names). No model is called.
 """
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 from e2e_env import ISOLATED
 
@@ -68,9 +74,10 @@ def project(name, config):
     return folder
 
 
-def haarness(folder, *args, check=True, timeout=120):
+def haarness(folder, *args, check=True, timeout=120, environment=None):
     result = subprocess.run([str(BINARY), '--workspace', str(folder), '--trust-project', *args],
-                            env=env, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+                            env=environment or env, capture_output=True, text=True, timeout=timeout,
+                            stdin=subprocess.DEVNULL)
     if check:
         assert result.returncode == 0, f'{args}: {result.stdout}\n{result.stderr}'
     return result
@@ -99,11 +106,14 @@ def connect(folder):
     return json.loads(result.stdout)
 
 
-def api(connection, path):
+def api(connection, path, body=None):
     request = urllib.request.Request(connection['url'] + '/v1' + path,
-                                     headers={'Authorization': 'Bearer ' + connection['token']})
+                                     data=None if body is None else json.dumps(body).encode(),
+                                     headers={'Authorization': 'Bearer ' + connection['token'],
+                                              'Content-Type': 'application/json'})
     with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read())
+        raw = response.read()
+        return json.loads(raw) if raw else None
 
 
 def case_paths():
@@ -434,9 +444,76 @@ def case_links():
     passed('an external_directory deny written through a folder link refuses a read of where it leads')
 
 
+def case_literal_names():
+    """Always for a folder whose name holds a `*` covers that folder, not every folder its name matches."""
+    outside = (root / 'literal-outside').resolve()
+    for folder in ['a*', 'ab', 'old*', 'older']:
+        (outside / folder).mkdir(parents=True, exist_ok=True)
+        (outside / folder / 'f').write_text(f'IN-{folder}\n')
+    literal = project('literal-names', REVIEW)
+    connection = connect(literal)
+    thread = api(connection, '/threads', {'title': 'Literal names', 'provider': 'echo', 'model': 'echo-1'})
+    starred = f"cat '{outside}/a*/f'"
+    turn = api(connection, f'/threads/{thread["id"]}/turns',
+               {'requestId': str(uuid.uuid4()), 'text': '!tool bash ' + json.dumps({'command': starred})})
+    request = until(lambda: api(connection, '/permissions'), 'the read of a* did not ask')[0]
+    assert request['patterns'] == [f'{outside}/a*/*'], request
+    assert request['alwaysPatterns'] == [f'external_directory:{outside}/a\\*/*'], request
+    api(connection, f'/permissions/{request["permissionId"]}', {'decision': 'always_workspace'})
+    until(lambda: api(connection, f'/turns/{turn["id"]}')['status'] not in ('running', 'queued'), 'the turn did not end')
+    # A run nobody can answer: the folder answered runs, its neighbour still stops at the question.
+    assert 'IN-a*' in haarness(literal, 'run', '!tool bash ' + json.dumps({'command': starred})).stdout
+    # An unquoted `a*` is the shell's glob, which reaches `ab` too: it asks about the glob, and an Always
+    # for the folder named `a*` does not answer it.
+    for call, asked in [('!tool bash ' + json.dumps({'command': f'cat {outside}/ab/f'}), f'{outside}/ab/*'),
+                        ('!tool read ' + json.dumps({'path': f'{outside}/ab/f'}), f'{outside}/ab/*'),
+                        ('!tool bash ' + json.dumps({'command': f'cat {outside}/a*/f'}), f'"{outside}/a*/*"')]:
+        result = haarness(literal, 'run', call, check=False)
+        assert result.returncode != 0 and 'Stopped: the agent asked' in result.stderr, result.stdout + result.stderr
+        assert 'IN-ab' not in result.stdout, result.stdout
+        assert asked in result.stderr, result.stderr
+    passed('Always on cat a*/f saves the folder a* alone: a* runs again, while ab and an unquoted a* glob still '
+           'ask, headless too')
+    # What an earlier version saved for such a folder keeps the wildcard it was read with.
+    haarness(literal, 'serve', '--stop')
+    databases = list(data.rglob('haarness.db'))
+    assert databases, 'no database'
+    for database in databases:
+        with sqlite3.connect(database) as db:
+            saved = {row[0] for row in db.execute('SELECT pattern FROM permission_rules WHERE workspace = ?',
+                                                   (str(literal),))}
+            if saved:
+                assert saved == {f'external_directory:{outside}/a\\*/*'}, saved
+                db.execute("INSERT INTO permission_rules(workspace,pattern,decision,created_at) VALUES(?,?,'allow',?)",
+                           (str(literal), f'external_directory:{outside}/old*/*', '2026-11-01T00:00:00Z'))
+    assert 'IN-older' in haarness(literal, 'run', '!tool bash ' + json.dumps({'command': f'cat {outside}/older/f'})).stdout
+    passed('an Always saved before, without the escape, still covers every folder its name matches')
+    # The rule that opens Haarness's own tool output names its data folder alone, `*` included.
+    starred_data = root / 'literal-da*ta'
+    other = root / 'literal-da-other-ta' / 'data' / 'tool-output'
+    other.mkdir(parents=True, exist_ok=True)
+    (other / 'x.txt').write_text('OTHER-OUTPUT\n')
+    own = starred_data / 'data' / 'tool-output'
+    own.mkdir(parents=True, exist_ok=True)
+    (own / 'x.txt').write_text('OWN-OUTPUT\n')
+    data_project = project('literal-data', REVIEW)
+    environment = {**env, 'HAARNESS_DATA_DIR': str(starred_data)}
+    try:
+        output = haarness(data_project, 'run', '!tool read ' + json.dumps({'path': str(own / 'x.txt')}),
+                          environment=environment).stdout
+        assert 'OWN-OUTPUT' in output, output
+        result = haarness(data_project, 'run', '!tool read ' + json.dumps({'path': str(other / 'x.txt')}),
+                          check=False, environment=environment)
+        assert result.returncode != 0 and 'Stopped: the agent asked' in result.stderr, result.stdout + result.stderr
+        assert 'OTHER-OUTPUT' not in result.stdout, result.stdout
+    finally:
+        haarness(data_project, 'serve', '--stop', check=False, environment=environment)
+    passed("a data folder named with a * opens its own tool output and not a neighbour's")
+
+
 CASES = {name: globals()['case_' + name] for name in ['paths', 'headless', 'schedules', 'session_start', 'plugin_workflow',
                                                        'config_files', 'home_variable', 'frontmatter', 'shell_readings',
-                                                       'links']}
+                                                       'links', 'literal_names']}
 selected = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
 try:
     for name in selected:

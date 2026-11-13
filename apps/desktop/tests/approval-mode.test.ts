@@ -240,6 +240,15 @@ test("always rules read as plain words, never as stored permission patterns", ()
     say("external_directory", "external_directory:/srv/a-file-name-longer-than-the-line.json"),
     "…/a-file-name-longer-than-the-line.json",
   );
+  // A `*` or `?` in a name is escaped in the rule; the menu names it as it is.
+  assert.equal(say("external_directory", "external_directory:/Users/me/\\*/*"), "Anything in …/me/*");
+  assert.equal(say("external_directory", "external_directory:/srv/a\\?b/"), "…/srv/a?b");
+  assert.equal(say("external_directory", "external_directory:/srv/x/notes\\?.txt"), "…/x/notes?.txt");
+  assert.equal(say("read", "read:\\*.env"), "Reading *.env");
+  assert.equal(say("edit", "edit:.haarness/workflows/a\\*.ts"), ".haarness/workflows/a*.ts");
+  assert.equal(say("external_directory", "external_directory:\\\\?\\C:\\work\\x/*"), "Anything in …/\\\\?\\C:\\work\\x");
+  // A command rule's backslash is part of the command.
+  assert.equal(say("bash", "bash:ls -d \\*.log"), "ls -d \\*.log");
   assert.equal(say("bash", "bash:git push *"), "Commands starting with git push");
   assert.equal(say("bash", "bash:*"), "Every command");
   assert.equal(say("edit", "edit:*"), "Every file edit");

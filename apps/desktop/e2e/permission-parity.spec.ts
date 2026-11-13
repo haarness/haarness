@@ -152,6 +152,36 @@ test("Always on a shell read of .env shows the command's rule and keeps only tha
   expect(errors).toEqual([]);
 });
 
+test("Always for a folder whose name holds a * names that folder, not every folder it matches",async()=>{
+  await choose(main);await session();
+  for(const [folder,text] of [["notes*","STARRED_PROOF"],["notes-old","OTHER_PROOF"]]){
+    await mkdir(join(root,folder),{recursive:true});await writeFile(join(root,folder,"f.txt"),text);
+  }
+  await send('!tool read {"path":"../notes*/f.txt"}');
+  await expect(page.locator(".approval .prompt-title")).toContainText("Access a folder outside this project");
+  await page.getByRole("button",{name:"Always allow",exact:true}).click();
+  // The menu names the folder as it is; the rule it keeps escapes the `*`.
+  const folder=page.getByRole("menuitem",{name:"Always for this folder",exact:true});
+  await expect(folder).toHaveAttribute("aria-description",/^Anything in .*\/notes\*$/);
+  for(const scheme of ["light","dark"] as const){
+    await app.evaluate(({nativeTheme},value)=>{nativeTheme.themeSource=value;},scheme);
+    await page.emulateMedia({colorScheme:scheme});
+    await expect.poll(()=>page.evaluate(()=>matchMedia("(prefers-color-scheme: dark)").matches)).toBe(scheme==="dark");
+    await page.waitForTimeout(300);await proof(`starred-folder-always-${scheme}`);
+  }
+  await app.evaluate(({nativeTheme})=>{nativeTheme.themeSource="system";});await page.emulateMedia({colorScheme:null});
+  await folder.click();await idle();
+  await expect(page.locator(".transcript")).toContainText("STARRED_PROOF");
+  // The folder reads again without a question; a folder its name matches still asks.
+  await send('!tool read {"path":"../notes*/f.txt"}');await idle();
+  await expect(page.getByRole("button",{name:"Allow once",exact:true})).toHaveCount(0);
+  await send('!tool read {"path":"../notes-old/f.txt"}');
+  await expect(page.getByRole("button",{name:"Allow once",exact:true})).toBeVisible();
+  await page.getByRole("button",{name:"Deny",exact:true}).click();await idle();
+  await expect(page.locator(".transcript")).not.toContainText("OTHER_PROOF");
+  expect(errors).toEqual([]);
+});
+
 test("larger media survives a real drop, draft reload and server submission",async()=>{
   await session();
   const transfer=await page.evaluateHandle(()=>{

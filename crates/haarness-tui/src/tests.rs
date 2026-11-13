@@ -9998,6 +9998,35 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
     assert_eq!(text.matches("Cancel").count(), 1, "{text}");
 }
 
+/// The rule Always keeps for a name holding a `*` or `?` escapes it
+/// (`a\*b`); that is still the path on screen, so no row repeats it.
+#[test]
+fn an_always_rule_that_only_escapes_a_name_is_not_repeated() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let folder = "/Users/sam/drafts*?/*";
+    let mut outside = pending_permission_fixture(&thread, "perm-starred-folder");
+    outside.permission = "external_directory".into();
+    outside.operation = format!("external_directory:{folder}");
+    outside.detail = serde_json::json!({});
+    outside.patterns = vec![folder.into()];
+    outside.always_patterns = vec![r"external_directory:/Users/sam/drafts\*\?/*".into()];
+    let mut read = pending_permission_fixture(&thread, "perm-starred-read");
+    read.permission = "read".into();
+    read.operation = "read:a*.env".into();
+    read.detail = serde_json::json!({"path": "a*.env"});
+    read.patterns = vec!["a*.env".into()];
+    read.always_patterns = vec![r"read:a\*.env".into()];
+    app.permission_focus = true;
+    for (pending, shown) in [(outside, folder), (read, "a*.env")] {
+        app.pending_permissions = vec![pending];
+        let text = frame_text(&app, (120, 40));
+        assert_eq!(text.matches(shown).count(), 1, "{text}");
+        assert!(!text.contains("always allows"), "{text}");
+        assert!(!text.contains(r"\*"), "{text}");
+    }
+}
+
 #[tokio::test]
 async fn arrows_and_enter_answer_the_docked_approval() {
     let thread = fixture_thread();
