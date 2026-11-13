@@ -309,6 +309,15 @@ that is done.";
 /// always blocks cannot hold a turn forever.
 const STOP_HOOK_CONTINUATIONS: u32 = 8;
 
+/// How long a call's tool may go on once its turn is stopped before the
+/// call ends without it. A tool that never looks at the stop (an open of a
+/// pipe nothing writes to, a library call with no way to cancel it) would
+/// otherwise keep the turn, and with it the chat, busy until Haarness
+/// restarts. A second past the time a command's processes get to end once
+/// Stop has signalled them.
+const STOPPED_TOOL_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(crate::background_commands::STOP_SETTLE.as_secs() + 1);
+
 /// How the stored error of a turn that could not start begins; the error
 /// follows.
 const LAUNCH_FAILED: &str = "turn launch failed: ";
@@ -770,6 +779,89 @@ fn tool_output_attachments(metadata: &serde_json::Value) -> Vec<String> {
         .filter(|source| !source.trim().is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Each call of `turn_id` among `items` that no result answers, by id and
+/// tool name: once nothing will run it any more (a shutdown the turn
+/// outlived, a turn that failed or stopped), it is answered so.
+fn open_calls(items: &[Item], turn_id: TurnId) -> Vec<(String, String)> {
+    let turn_items = items
+        .iter()
+        .filter(|item| item.turn_id == Some(turn_id))
+        .collect::<Vec<_>>();
+    crate::pair_tool_calls(turn_items.iter().map(|item| &item.data))
+        .calls
+        .into_iter()
+        .filter_map(|call| match &turn_items[call].data {
+            ItemData::ToolCall { call_id, name, .. } => Some((call_id.clone(), name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The result of call `call_id` that a person's Stop reached, as the tool
+/// loop gives it: cancelled, and marked as not run when it had not `began`.
+fn stopped_call_result(call_id: String, name: String, began: bool) -> ItemData {
+    ItemData::ToolResult {
+        call_id,
+        name,
+        output: user_facing_error(&CoreError::Cancelled),
+        is_error: true,
+        metadata: if began {
+            serde_json::Value::Null
+        } else {
+            crate::not_run_metadata()
+        },
+    }
+}
+
+tokio::task_local! {
+    /// The `abandoned` token (see `RunnerTask::abandoned`) of the run whose
+    /// round spawned a delegation, taken as it did and carried by the task
+    /// that runs the call.
+    static ROUND_ABANDONED: CancellationToken;
+}
+
+/// The calls of a tool round that run in tasks of their own, by their place
+/// in the round: delegations, and reads that run beside each other. When the
+/// round breaks off before it took their results (one could not be stored,
+/// a panic), the reads still running stop: nothing would record what they
+/// found. A delegation's waiting task is left be, since its agent runs on its
+/// own; the turn stops that agent before it answers the call (see
+/// `RunnerTask::end_open_calls`).
+#[derive(Default)]
+struct RoundTasks {
+    handles: HashMap<usize, tokio::task::JoinHandle<CoreResult<ToolOutput>>>,
+    delegations: HashSet<usize>,
+}
+
+impl RoundTasks {
+    fn delegate(&mut self, index: usize, handle: tokio::task::JoinHandle<CoreResult<ToolOutput>>) {
+        self.delegations.insert(index);
+        self.handles.insert(index, handle);
+    }
+
+    fn read(&mut self, index: usize, handle: tokio::task::JoinHandle<CoreResult<ToolOutput>>) {
+        self.handles.insert(index, handle);
+    }
+
+    fn contains_key(&self, index: usize) -> bool {
+        self.handles.contains_key(&index)
+    }
+
+    fn remove(&mut self, index: usize) -> Option<tokio::task::JoinHandle<CoreResult<ToolOutput>>> {
+        self.handles.remove(&index)
+    }
+}
+
+impl Drop for RoundTasks {
+    fn drop(&mut self) {
+        for (index, handle) in &self.handles {
+            if !self.delegations.contains(index) {
+                handle.abort();
+            }
+        }
+    }
 }
 
 fn unconsumed_queued(items: &[Item], turn_id: TurnId) -> Vec<ItemId> {
@@ -8941,6 +9033,7 @@ impl AgentRuntime {
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(Vec::new()),
             instructions_in_context: crate::instructions::InContext::default(),
+            abandoned: Mutex::new(cancel.child_token()),
             cancel,
             workspace,
             runtime_workspace: self.workspace.clone(),
@@ -9271,6 +9364,17 @@ impl AgentRuntime {
     }
 
     async fn interrupt_turns_for_shutdown(&self, reason: &str) -> CoreResult<u64> {
+        let active = self
+            .active
+            .iter()
+            .map(|entry| (entry.key().to_owned(), Arc::clone(entry.value())))
+            .collect::<Vec<_>>();
+        // Each turn knows the shutdown stops it before anything is stopped:
+        // a background agent's turn, which the stops below cancel, then
+        // leaves a call its tool holds to the shutdown, as every turn does.
+        for (_, turn) in &active {
+            *turn.stop_reason.lock() = Some(reason.to_owned());
+        }
         for task in self
             .background_tasks
             .iter()
@@ -9279,16 +9383,10 @@ impl AgentRuntime {
         {
             task.stop_for_shutdown();
         }
-        let active = self
-            .active
-            .iter()
-            .map(|entry| (entry.key().to_owned(), Arc::clone(entry.value())))
-            .collect::<Vec<_>>();
         if active.is_empty() {
             return Ok(0);
         }
         for (_, turn) in &active {
-            *turn.stop_reason.lock() = Some(reason.to_owned());
             turn.cancel.cancel();
             *turn.accepting.lock().await = false;
             turn.changed.notify_waiters();
@@ -9335,20 +9433,13 @@ impl AgentRuntime {
                             }
                         )
                 });
-                let turn_items = items
-                    .into_iter()
-                    .filter(|item| item.turn_id == Some(active_turn.id))
-                    .collect::<Vec<_>>();
                 // The runner noted the calls that began; the others never ran.
                 let started = active_turn.started_calls.lock().clone();
-                let ended = crate::pair_tool_calls(turn_items.iter().map(|item| &item.data))
-                    .calls
+                let ended = open_calls(&items, active_turn.id)
                     .into_iter()
-                    .filter_map(|call| match &turn_items[call].data {
-                        ItemData::ToolCall { call_id, name, .. } => Some(
-                            crate::unfinished_call_result(call_id, name, started.contains(call_id)),
-                        ),
-                        _ => None,
+                    .map(|(call_id, name)| {
+                        let began = started.contains(&call_id);
+                        crate::unfinished_call_result(&call_id, &name, began)
                     })
                     .chain(
                         pending
@@ -9449,6 +9540,11 @@ struct RunnerTask {
     command_started: AtomicBool,
     skill_rules: Mutex<Vec<PermissionRule>>,
     cancel: CancellationToken,
+    /// Cancelled when a run of this turn ends on an error and its open calls
+    /// are answered (see `end_open_calls`): a delegation of that run still
+    /// waiting to start (for a place among the running agents, say) then
+    /// does not. A retry of the turn gets a fresh one. A child of `cancel`.
+    abandoned: Mutex<CancellationToken>,
     /// Where this turn's tools work: the chat's own folder, or the project
     /// folder (`runtime_workspace`).
     workspace: PathBuf,
@@ -10913,6 +11009,10 @@ impl RunnerTask {
             // reservation installed until goal state and the durable turn are
             // terminal. Waiters wake only from `close_acceptance` below.
             self.stop_acceptance().await;
+            let calls_ended = match &result {
+                Err(error) => self.end_open_calls(error).await,
+                Ok(()) => true,
+            };
 
             // Input accepted while a provider/tool round was in flight must
             // not be left as a permanently QUEUED transcript item when that
@@ -10928,7 +11028,19 @@ impl RunnerTask {
                 ) && !is_provider_usage_limit(error_value)
             });
             if retryable && self.has_unconsumed_queued().await {
+                let failed = result.as_ref().err().cloned();
                 result = Arc::clone(&self).run_contained().await;
+                // The calls the retry left open, or the first run's when
+                // they could not be answered before it.
+                match (&result, failed) {
+                    (Err(error), _) => {
+                        self.end_open_calls(error).await;
+                    }
+                    (Ok(()), Some(error)) if !calls_ended => {
+                        self.end_open_calls(&error).await;
+                    }
+                    _ => {}
+                }
             }
 
             // A cancellation, usage limit, or failed retry can still leave an
@@ -11200,6 +11312,16 @@ impl RunnerTask {
             .flatten()
     }
 
+    /// Whether a server shutdown has this turn in hand: it is stopping the
+    /// turn, or has already ended it (the turn is no longer its chat's
+    /// active one while its runner still runs).
+    fn taken_over_by_shutdown(&self) -> bool {
+        self.active
+            .get(&self.thread.id)
+            .filter(|active| active.id == self.turn.id)
+            .is_none_or(|active| active.stop_reason.lock().is_some())
+    }
+
     /// Steering that never reached the model takes its place in the
     /// history, and a notice asks for a person's again. True when the
     /// runtime stopped the turn and the notice of that stop is to ask
@@ -11242,6 +11364,68 @@ impl RunnerTask {
             })
             .await;
         false
+    }
+
+    /// Answers each call of this turn its run left without a result: the run
+    /// ended on `error` after the calls were stored (a write that failed, a
+    /// stop while the model still spoke), and nothing will run them now.
+    /// Without a result a client draws such a call as running for good. A
+    /// person's stop answers them as the tool loop answers the calls Stop
+    /// reaches; anything else as a shutdown answers the calls of a turn it
+    /// outlives. A delegation still at work for one of them is stopped first,
+    /// since nothing waits for its answer any more. False when they could not
+    /// all be answered.
+    async fn end_open_calls(&self, error: &CoreError) -> bool {
+        // A delegation of this run still waiting to start does not start now;
+        // a retry's own get a fresh token.
+        let abandoned = std::mem::replace(&mut *self.abandoned.lock(), self.cancel.child_token());
+        abandoned.cancel();
+        let items = match self.repository.list_items(self.thread.id, None).await {
+            Ok(items) => items,
+            Err(error) => {
+                warn!(thread = %self.thread.id, turn = %self.turn.id, %error, "could not look for the calls a failed turn left open");
+                return false;
+            }
+        };
+        let open = open_calls(&items, self.turn.id);
+        self.stop_unawaited_agents(&open);
+        let stopped =
+            matches!(error, CoreError::Cancelled) && self.runtime_stop_reason(error).is_none();
+        for (call_id, name) in open {
+            let began = self.call_began(&call_id);
+            let result = if stopped {
+                stopped_call_result(call_id, name, began)
+            } else {
+                crate::unfinished_call_result(&call_id, &name, began)
+            };
+            if let Err(error) = self.publish_item(result).await {
+                warn!(thread = %self.thread.id, turn = %self.turn.id, %error, "could not end a call a failed turn left open");
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Stops the agent of each delegation among `calls` that is still at
+    /// work in the foreground: the turn no longer waits for its answer. One
+    /// already in the background keeps going; its result is owed to the chat.
+    fn stop_unawaited_agents(&self, calls: &[(String, String)]) {
+        let agents = self
+            .background_tasks
+            .iter()
+            .filter(|entry| {
+                let task = entry.value();
+                let info = task.info();
+                info.parent_thread_id == self.thread.id
+                    && info.parent_turn_id == self.turn.id
+                    && !task.promoted.load(Ordering::SeqCst)
+                    && calls.iter().any(|(call_id, _)| *call_id == info.call_id)
+            })
+            .map(|entry| Arc::clone(entry.value()))
+            .collect::<Vec<_>>();
+        for agent in agents {
+            agent.cancel_with_parent();
+        }
     }
 
     /// Notes that call `call_id` of this turn has begun, or (`started` false)
@@ -13343,10 +13527,7 @@ impl RunnerTask {
                 // Tasks run concurrently. Consecutive observations run in bounded
                 // groups; mutations remain ordering barriers. Persist results in
                 // provider call order even when observations finish out of order.
-                let mut task_handles: HashMap<
-                    usize,
-                    tokio::task::JoinHandle<CoreResult<ToolOutput>>,
-                > = HashMap::new();
+                let mut task_handles = RoundTasks::default();
                 if calls.iter().any(|(_, name, _)| name == "task") {
                     self.set_status("child_tasks", None);
                 }
@@ -13356,13 +13537,17 @@ impl RunnerTask {
                         let call_id = call_id.clone();
                         let arguments = arguments.clone();
                         let agent = agent.to_owned();
-                        task_handles.insert(
+                        // The run as the round starts it: a retry that
+                        // begins before the call runs has its own.
+                        let abandoned = self.abandoned.lock().clone();
+                        task_handles.delegate(
                             index,
                             tokio::spawn(
-                                async move {
-                                    this.execute_call(&agent, &call_id, "task", arguments).await
-                                }
-                                .in_current_span(),
+                                ROUND_ABANDONED
+                                    .scope(abandoned, async move {
+                                        this.execute_call(&agent, &call_id, "task", arguments).await
+                                    })
+                                    .in_current_span(),
                             ),
                         );
                     }
@@ -13370,7 +13555,7 @@ impl RunnerTask {
                 for (index, (call_id, name, arguments)) in calls.iter().cloned().enumerate() {
                     // After Stop no group starts: its calls go one by one,
                     // each found not to have begun.
-                    if !task_handles.contains_key(&index)
+                    if !task_handles.contains_key(index)
                         && !self.cancel.is_cancelled()
                         && self
                             .tools
@@ -13390,17 +13575,23 @@ impl RunnerTask {
                             {
                                 break;
                             }
+                            // A delegation in the group started above, with
+                            // the round's others: started again, its agent
+                            // would do the work twice.
+                            if task_handles.contains_key(offset) {
+                                continue;
+                            }
                             let this = Arc::clone(&self);
                             let (id, tool, args, agent) =
                                 (id.clone(), tool.clone(), args.clone(), agent.to_owned());
-                            task_handles.insert(offset, tokio::spawn(async move { this.execute_call(&agent, &id, &tool, args).await }.in_current_span()));
+                            task_handles.read(offset, tokio::spawn(async move { this.execute_call(&agent, &id, &tool, args).await }.in_current_span()));
                         }
                     }
                     let fingerprint_arguments = arguments.clone();
                     // Stop came before this call began: it will not run.
                     let stopped_first =
-                        !task_handles.contains_key(&index) && self.cancel.is_cancelled();
-                    let result = if let Some(handle) = task_handles.remove(&index) {
+                        !task_handles.contains_key(index) && self.cancel.is_cancelled();
+                    let result = if let Some(handle) = task_handles.remove(index) {
                         match handle.await {
                             Ok(result) => result,
                             Err(join_error) => {
@@ -14912,26 +15103,26 @@ impl RunnerTask {
                 .map(plain_tool_output)
                 .map_err(|error| CoreError::Storage(error.to_string()))
         } else {
-            tool.expect("non-internal tool resolved above")
-                .execute(
-                    executed,
-                    ToolContext {
-                        execution,
-                        thread_id: self.thread.id,
-                        turn_id: self.turn.id,
-                        workspace: self.workspace.clone(),
-                        authorized_external_paths,
-                        cancel: self.cancel.clone(),
-                        invoker: Some(Arc::new(TurnToolInvoker {
-                            runner: Arc::clone(self),
-                            agent: agent.to_owned(),
-                            parent_call_id: call_id.to_owned(),
-                            sequence: std::sync::atomic::AtomicUsize::new(0),
-                            snippets_ask: false,
-                        })),
-                    },
-                )
-                .await
+            let tool = tool.expect("non-internal tool resolved above");
+            let running = tool.execute(
+                executed,
+                ToolContext {
+                    execution,
+                    thread_id: self.thread.id,
+                    turn_id: self.turn.id,
+                    workspace: self.workspace.clone(),
+                    authorized_external_paths,
+                    cancel: self.cancel.clone(),
+                    invoker: Some(Arc::new(TurnToolInvoker {
+                        runner: Arc::clone(self),
+                        agent: agent.to_owned(),
+                        parent_call_id: call_id.to_owned(),
+                        sequence: std::sync::atomic::AtomicUsize::new(0),
+                        snippets_ask: false,
+                    })),
+                },
+            );
+            self.until_stopped_for_good(name, call_id, running).await
         };
         drop(execution_authority);
         tracing::debug!(
@@ -14980,6 +15171,50 @@ impl RunnerTask {
             append_post_tool_hooks(&mut output.text, decision);
         }
         Ok(output)
+    }
+
+    /// What the tool `running` call `call_id` answers, unless the turn is
+    /// stopped and the tool is still at work [`STOPPED_TOOL_WAIT`] later:
+    /// then the call ends as stopped without it, so Stop always frees the
+    /// chat for its next message. Tools that end their work on a stop
+    /// (commands, MCP calls, computer use) finish well within that. What the
+    /// tool was doing is dropped, and that is the trade-off: a thread it holds
+    /// in a blocking call stays there, so a file operation stuck on a stalled
+    /// disk may still complete after the call reads as stopped, once the
+    /// tool's hold on the file is gone; a patch cut off this way does not say
+    /// which of its files it already wrote, and a `batch` loses the outcomes
+    /// of its steps.
+    async fn until_stopped_for_good(
+        &self,
+        name: &str,
+        call_id: &str,
+        running: impl std::future::Future<Output = CoreResult<ToolOutput>>,
+    ) -> CoreResult<ToolOutput> {
+        let given_up = async {
+            self.cancel.cancelled().await;
+            tokio::time::sleep(STOPPED_TOOL_WAIT).await;
+            // A server shutdown, begun before or after the stop, ends the
+            // calls of a turn that outlives its wait itself, and the server
+            // goes away: nothing more is written here.
+            if self.taken_over_by_shutdown() {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            biased;
+            result = running => result,
+            () = given_up => {
+                warn!(
+                    thread = %self.thread.id,
+                    turn = %self.turn.id,
+                    tool = name,
+                    call_id,
+                    waited_ms = u64::try_from(STOPPED_TOOL_WAIT.as_millis()).unwrap_or(u64::MAX),
+                    "a tool went on after its turn was stopped; its call ends without it"
+                );
+                Err(CoreError::Cancelled)
+            }
+        }
     }
 
     /// A call whose tool ran and failed runs `PostToolUseFailure` hooks, as
@@ -15881,6 +16116,11 @@ impl RunnerTask {
         call_id: &str,
         arguments: &serde_json::Value,
     ) -> CoreResult<String> {
+        // Ends the waits before the agent starts when this run fails first:
+        // the run whose round started this call, taken when it did.
+        let abandoned = ROUND_ABANDONED
+            .try_with(CancellationToken::clone)
+            .unwrap_or_else(|_| self.abandoned.lock().clone());
         if self.depth >= self.config.execution.subagent_depth {
             return Err(CoreError::PermissionDenied(
                 "task depth limit reached; configure execution.subagent_depth to permit deeper delegation".into(),
@@ -16040,8 +16280,9 @@ impl RunnerTask {
         // parallel task calls may all have observed this child while idle.
         let admission_guard = loop {
             let guard = tokio::select! {
+                biased;
+                () = abandoned.cancelled() => return Err(CoreError::Cancelled),
                 guard = admission_lock.lock() => guard,
-                () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
             };
             let existing = self
                 .background_tasks
@@ -16134,8 +16375,9 @@ impl RunnerTask {
             // may have installed a newer run in the meantime.
             drop(guard);
             tokio::select! {
+                biased;
+                () = abandoned.cancelled() => return Err(CoreError::Cancelled),
                 () = existing.wait_delivery() => {},
-                () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
             }
         };
         // Separate pools per depth prevent parents holding every slot while
@@ -16147,9 +16389,15 @@ impl RunnerTask {
             .or_insert_with(|| Arc::new(Semaphore::new(self.config.execution.subagent_concurrency)))
             .clone();
         let permit = tokio::select! {
+            biased;
+            () = abandoned.cancelled() => return Err(CoreError::Cancelled),
             permit = slots.acquire_owned() => permit.map_err(|_| CoreError::Cancelled)?,
-            () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
         };
+        // The run failed while the place was free: nothing of this agent
+        // shows, and it does not start.
+        if abandoned.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
         self.events.publish_scoped(
             "thread.updated",
             Some(child.id),
@@ -16266,6 +16514,7 @@ impl RunnerTask {
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(self.skill_rules.lock().clone()),
             instructions_in_context: crate::instructions::InContext::default(),
+            abandoned: Mutex::new(cancel.child_token()),
             cancel: cancel.clone(),
             // The child's folder is its parent's.
             workspace: self.workspace.clone(),
@@ -16370,6 +16619,11 @@ impl RunnerTask {
             delivery_done: Notify::new(),
         });
         self.background_tasks.insert(child.id, Arc::clone(&task));
+        // The run failed while this agent was being set up, after its stop
+        // of the agents it no longer waits for: this one stops at once too.
+        if abandoned.is_cancelled() {
+            task.cancel_with_parent();
+        }
         drop(admission_guard);
 
         // Child threads are public session IDs and accept queued input through

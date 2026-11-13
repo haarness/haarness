@@ -259,10 +259,7 @@ pub(super) fn open_text(path: &Path) -> CoreResult<(Box<dyn BufRead>, bool)> {
     }
     // A pipe or a device (`/dev/zero`) may never end.
     if !metadata.is_file() {
-        return Err(CoreError::Tool(format!(
-            "{} is not a regular file",
-            path.display()
-        )));
+        return Err(not_regular(path.display()));
     }
     let mut file = File::open(path).map_err(tool)?;
     let mut head = Vec::with_capacity(BINARY_PROBE_BYTES);
@@ -376,6 +373,136 @@ pub(super) fn read_text(
     })
 }
 
+/// The refusal of a pipe, socket or device, which `shown` names.
+pub(super) fn not_regular(shown: impl std::fmt::Display) -> CoreError {
+    CoreError::Tool(format!("{shown} is not a regular file"))
+}
+
+/// What a path held once it was opened that is no file to read or write: a
+/// pipe or a device put in a file's place after [`refuse_special`] looked.
+/// [`super::io_error`] words it as [`not_regular`] does.
+#[derive(Debug)]
+pub(super) struct NotRegular;
+
+impl std::fmt::Display for NotRegular {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("not a regular file")
+    }
+}
+
+impl std::error::Error for NotRegular {}
+
+/// Opens `path` without waiting for a pipe's other end, then refuses what
+/// the open file is if that is neither a regular file nor a folder (a folder
+/// fails as it always did). The file is then read or written as any other:
+/// only its open does not wait.
+fn open_regular(path: &Path, options: &std::fs::OpenOptions) -> io::Result<(File, u64)> {
+    let file = open_without_waiting(path, options)?;
+    let metadata = file.metadata().map_err(unreadable_handle)?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(io::Error::other(NotRegular));
+    }
+    #[cfg(unix)]
+    {
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+        let flags = OFlag::from_bits_truncate(fcntl(&file, FcntlArg::F_GETFL)?);
+        fcntl(&file, FcntlArg::F_SETFL(flags - OFlag::O_NONBLOCK))?;
+    }
+    Ok((file, metadata.len()))
+}
+
+/// The open of [`open_regular`]: on Unix with `O_NONBLOCK`, so a pipe opens
+/// at once. A pipe or socket opened to be written with nothing reading it
+/// fails then (ENXIO) and is refused as no regular file; ENXIO from anything
+/// else (a disk that went away) keeps its own words. An open a lease would
+/// hold (a file another NFS or SMB client has open) is made again the usual
+/// way, waiting as it always did.
+#[cfg(unix)]
+fn open_without_waiting(path: &Path, options: &std::fs::OpenOptions) -> io::Result<File> {
+    use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _};
+    let mut without_waiting = options.clone();
+    without_waiting.custom_flags(nix::libc::O_NONBLOCK);
+    match without_waiting.open(path) {
+        Err(error)
+            if error.raw_os_error() == Some(nix::libc::ENXIO)
+                && std::fs::metadata(path).is_ok_and(|metadata| {
+                    metadata.file_type().is_fifo() || metadata.file_type().is_socket()
+                }) =>
+        {
+            Err(io::Error::other(NotRegular))
+        }
+        Err(error)
+            if error.kind() == io::ErrorKind::WouldBlock
+                && std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) =>
+        {
+            options.open(path)
+        }
+        opened => opened,
+    }
+}
+
+#[cfg(not(unix))]
+fn open_without_waiting(path: &Path, options: &std::fs::OpenOptions) -> io::Result<File> {
+    options.open(path)
+}
+
+/// The failure of an open handle to say what it is: on Windows a device
+/// name (`NUL`, `CON`) or a named pipe, which is no regular file; elsewhere
+/// the error as it came.
+fn unreadable_handle(error: io::Error) -> io::Error {
+    if cfg!(windows) {
+        io::Error::other(NotRegular)
+    } else {
+        error
+    }
+}
+
+/// A file's bytes, as `tokio::fs::read` gives them, but checked on the open
+/// file (see [`open_regular`]).
+pub(super) async fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let (mut file, length) = open_regular(&path, std::fs::OpenOptions::new().read(true))?;
+        let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// Writes `contents` as `tokio::fs::write` does, made or replaced whole, but
+/// checked on the open file (see [`open_regular`]).
+pub(super) async fn write_regular(path: &Path, contents: Vec<u8>) -> io::Result<()> {
+    use std::io::Write as _;
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let (mut file, _) = open_regular(
+            &path,
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true),
+        )?;
+        file.write_all(&contents)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// Refuses a pipe, socket or device at `path` (or a link to one) before
+/// anything opens it, in the words `read` uses: opening a pipe waits for
+/// the other end, so a call would run until Stop could not end it, and a
+/// device (`/dev/zero`) may never end. Nothing there, a folder or a regular
+/// file passes, and is then met as before. `named` is the path as the call
+/// gave it.
+pub(super) async fn refuse_special(path: &Path, named: &str) -> CoreResult<()> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) if !metadata.is_file() && !metadata.is_dir() => Err(not_regular(named)),
+        _ => Ok(()),
+    }
+}
+
 /// A file's text for `edit`, `multiedit` and `apply_patch`, without a byte
 /// order mark, and how the file spells it, so the change is written back
 /// the same way. They change UTF-8 and UTF-16 text (see [`decode`]); a file
@@ -386,7 +513,8 @@ pub(super) async fn read_text_file(
     named: &str,
     tool: &str,
 ) -> CoreResult<(String, Spelling)> {
-    let bytes = tokio::fs::read(path)
+    refuse_special(path, named).await?;
+    let bytes = read_regular(path)
         .await
         .map_err(|error| super::io_error(named, path, &error))?;
     match decode(&bytes) {
@@ -879,6 +1007,32 @@ pub(super) fn any_line_ends(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the open does not wait: the file it gives is read and written as
+    /// any other, so a filesystem that heeds the flag on a regular file never
+    /// answers a read or a write with "try again".
+    #[cfg(unix)]
+    #[test]
+    fn a_checked_file_is_read_and_written_as_usual() {
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+        let root = std::env::temp_dir().join(format!("haarness-opened-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("note.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        for options in [
+            std::fs::OpenOptions::new().read(true).clone(),
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .clone(),
+        ] {
+            let (file, _) = open_regular(&path, &options).unwrap();
+            let flags = OFlag::from_bits_truncate(fcntl(&file, FcntlArg::F_GETFL).unwrap());
+            assert!(!flags.contains(OFlag::O_NONBLOCK), "{options:?}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn an_old_across_mixed_line_ends_is_found_line_by_line() {

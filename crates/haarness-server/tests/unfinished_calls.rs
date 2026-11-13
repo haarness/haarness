@@ -1,19 +1,25 @@
-//! Calls a shutdown cut off end with a result, so the chat goes on.
+//! Calls a shutdown cut off, or a failed turn left, end with a result, and
+//! a tool that never stops does not keep its chat: the chat goes on.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use haarness_core::{
-    AgentRuntime, CoreResult, EventBus, ModelProvider, PermissionDecision, PermissionRule,
-    ProviderEvent, ProviderMessage, ProviderRequest, ProviderStream, RuntimeConfig,
-    StaticProviderRegistry, Tool, ToolContext, ToolDefinition, ToolOutput, ToolRegistry,
+    AgentRuntime, CoreError, CoreResult, EventBus, ModelProvider, PermissionDecision,
+    PermissionRule, ProviderEvent, ProviderMessage, ProviderRequest, ProviderStream, RuntimeConfig,
+    StaticProviderRegistry, ThreadRepository, Tool, ToolContext, ToolDefinition, ToolOutput,
+    ToolRegistry,
 };
 use haarness_protocol::{
-    CreateThreadRequest, ItemData, ModelInfo, ProviderInfo, RequestId, StartTurnRequest, TurnStatus,
+    CreateThreadRequest, Item, ItemData, ItemId, ModelInfo, ProviderInfo, RequestId,
+    StartTurnRequest, Thread, ThreadId, Turn, TurnId, TurnStatus,
 };
 use haarness_store::SqliteStore;
 use serde_json::{Value, json};
@@ -385,7 +391,12 @@ impl ModelProvider for Batch {
                     Ok(ProviderEvent::ToolCall {
                         call_id: format!("call-{index}"),
                         name: (*name).into(),
-                        arguments: json!({}),
+                        // A delegation names its work; other calls take nothing.
+                        arguments: if *name == "task" {
+                            json!({"description": "look around", "prompt": "go"})
+                        } else {
+                            json!({})
+                        },
                         provider_metadata: Value::Null,
                     })
                 })
@@ -413,31 +424,69 @@ impl ModelProvider for Batch {
 /// A runtime with `patient`, `stubborn` (let go at once), and the reads
 /// `glance` (at once) and `wait` (held by `held`).
 fn batch_runtime(provider: Batch, patient: Arc<Patient>, tools: &BatchTools) -> AgentRuntime {
+    batch_runtime_on(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        provider,
+        patient,
+        tools,
+        Vec::new(),
+    )
+}
+
+/// A batch runtime over `store`, with `more` tools besides.
+fn batch_runtime_on(
+    store: Arc<dyn ThreadRepository>,
+    provider: Batch,
+    patient: Arc<Patient>,
+    tools: &BatchTools,
+    more: Vec<Arc<dyn Tool>>,
+) -> AgentRuntime {
+    batch_runtime_with(
+        store,
+        provider,
+        patient,
+        tools,
+        more,
+        RuntimeConfig::default(),
+    )
+}
+
+/// A batch runtime over `store` from `config`, with `more` tools besides.
+fn batch_runtime_with(
+    store: Arc<dyn ThreadRepository>,
+    provider: Batch,
+    patient: Arc<Patient>,
+    tools: &BatchTools,
+    more: Vec<Arc<dyn Tool>>,
+    config: RuntimeConfig,
+) -> AgentRuntime {
     let mut config = RuntimeConfig {
         approval_mode: haarness_protocol::ApprovalMode::Review,
-        ..RuntimeConfig::default()
+        ..config
     };
-    for pattern in ["patient:*", "stubborn:*", "glance:*", "wait:*"] {
-        config.base_rules.push(PermissionRule {
-            pattern: pattern.into(),
-            decision: PermissionDecision::Allow,
-        });
-    }
     let stubborn = Arc::new(Stubborn {
         started: Arc::new(tokio::sync::Semaphore::new(0)),
         release: Arc::new(tokio::sync::Semaphore::new(1)),
     });
+    let mut all = vec![
+        patient as Arc<dyn Tool>,
+        stubborn,
+        tools.glance.clone(),
+        tools.wait.clone(),
+    ];
+    all.extend(more);
+    for tool in &all {
+        config.base_rules.push(PermissionRule {
+            pattern: format!("{}:*", tool.definition().name),
+            decision: PermissionDecision::Allow,
+        });
+    }
     AgentRuntime::with_config(
-        Arc::new(SqliteStore::in_memory().unwrap()),
+        store,
         Arc::new(StaticProviderRegistry::new(vec![
             Arc::new(provider) as Arc<dyn ModelProvider>
         ])),
-        Arc::new(Calls(vec![
-            patient as Arc<dyn Tool>,
-            stubborn,
-            tools.glance.clone(),
-            tools.wait.clone(),
-        ])),
+        Arc::new(Calls(all)),
         EventBus::new(256),
         std::env::temp_dir(),
         String::new(),
@@ -863,4 +912,955 @@ async fn steering_a_turn_the_shutdown_outlived_never_read_is_settled_with_it() {
         .filter(|item| matches!(item.data, ItemData::QueueConsumed { item_id } if item_id == message.id))
         .count();
     assert_eq!(markers, 1, "recovery settles nothing twice");
+}
+
+/// A store that keeps everything as SQLite does, except that the first tool
+/// result it is given cannot be written, as on a disk that is full.
+struct FailsFirstResult {
+    inner: SqliteStore,
+    failed: AtomicBool,
+}
+
+#[async_trait]
+impl ThreadRepository for FailsFirstResult {
+    async fn create_thread(&self, request: CreateThreadRequest) -> CoreResult<Thread> {
+        self.inner.create_thread(request).await
+    }
+    async fn list_threads(&self, include_archived: bool) -> CoreResult<Vec<Thread>> {
+        self.inner.list_threads(include_archived).await
+    }
+    async fn get_thread(&self, id: ThreadId) -> CoreResult<Thread> {
+        self.inner.get_thread(id).await
+    }
+    async fn update_thread(
+        &self,
+        id: ThreadId,
+        request: haarness_protocol::UpdateThreadRequest,
+    ) -> CoreResult<Thread> {
+        self.inner.update_thread(id, request).await
+    }
+    async fn list_items(&self, id: ThreadId, after: Option<u64>) -> CoreResult<Vec<Item>> {
+        self.inner.list_items(id, after).await
+    }
+    async fn start_turn(
+        &self,
+        id: ThreadId,
+        request: StartTurnRequest,
+    ) -> CoreResult<(Turn, Item, bool)> {
+        self.inner.start_turn(id, request).await
+    }
+    async fn get_turn(&self, id: TurnId) -> CoreResult<Turn> {
+        self.inner.get_turn(id).await
+    }
+    async fn append_item(
+        &self,
+        thread: ThreadId,
+        turn: Option<TurnId>,
+        data: ItemData,
+    ) -> CoreResult<Item> {
+        if matches!(data, ItemData::ToolResult { .. }) && !self.failed.swap(true, Ordering::SeqCst)
+        {
+            return Err(CoreError::Storage("database or disk is full".into()));
+        }
+        self.inner.append_item(thread, turn, data).await
+    }
+    async fn set_turn_status(
+        &self,
+        id: TurnId,
+        status: TurnStatus,
+        error: Option<String>,
+    ) -> CoreResult<Turn> {
+        self.inner.set_turn_status(id, status, error).await
+    }
+    async fn compact(
+        &self,
+        id: ThreadId,
+        request: haarness_protocol::CompactRequest,
+        expected_tail: Option<(ItemId, u64)>,
+    ) -> CoreResult<Item> {
+        self.inner.compact(id, request, expected_tail).await
+    }
+    async fn fork_thread(
+        &self,
+        id: ThreadId,
+        title: Option<String>,
+        up_to_sequence: Option<u64>,
+    ) -> CoreResult<Thread> {
+        self.inner.fork_thread(id, title, up_to_sequence).await
+    }
+    async fn set_revert_state(
+        &self,
+        id: ThreadId,
+        state: Option<(u64, String, Option<String>)>,
+    ) -> CoreResult<()> {
+        self.inner.set_revert_state(id, state).await
+    }
+    async fn soft_delete_items_after(&self, id: ThreadId, sequence: u64) -> CoreResult<u64> {
+        self.inner.soft_delete_items_after(id, sequence).await
+    }
+    async fn discard_item(&self, id: ThreadId, item: ItemId) -> CoreResult<()> {
+        self.inner.discard_item(id, item).await
+    }
+    async fn save_permission_rule(
+        &self,
+        workspace: &str,
+        rule: &haarness_core::PermissionRule,
+    ) -> CoreResult<()> {
+        self.inner.save_permission_rule(workspace, rule).await
+    }
+    async fn load_permission_rules(
+        &self,
+        workspace: &str,
+    ) -> CoreResult<Vec<haarness_core::PermissionRule>> {
+        self.inner.load_permission_rules(workspace).await
+    }
+    async fn recover_interrupted(&self) -> CoreResult<u64> {
+        self.inner.recover_interrupted().await
+    }
+    async fn thread_extras(
+        &self,
+        id: ThreadId,
+    ) -> CoreResult<(Option<String>, Option<haarness_protocol::LoopConfig>)> {
+        self.inner.thread_extras(id).await
+    }
+    async fn set_goal(&self, id: ThreadId, goal: Option<String>) -> CoreResult<()> {
+        self.inner.set_goal(id, goal).await
+    }
+    async fn goal_state(&self, id: ThreadId) -> CoreResult<Option<haarness_protocol::GoalState>> {
+        self.inner.goal_state(id).await
+    }
+    async fn save_goal_state(
+        &self,
+        id: ThreadId,
+        state: Option<haarness_protocol::GoalState>,
+    ) -> CoreResult<()> {
+        self.inner.save_goal_state(id, state).await
+    }
+    async fn set_loop(
+        &self,
+        id: ThreadId,
+        config: Option<haarness_protocol::LoopConfig>,
+    ) -> CoreResult<()> {
+        self.inner.set_loop(id, config).await
+    }
+}
+
+/// Each tool result stored in `thread`: its call id, whether it says the
+/// call did not finish, and whether it says the call never ran.
+async fn results(runtime: &AgentRuntime, thread: ThreadId) -> Vec<(String, bool, bool)> {
+    runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            ItemData::ToolResult {
+                call_id, metadata, ..
+            } => Some((
+                call_id,
+                metadata["unfinished"] == true,
+                haarness_core::not_run(&metadata),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Waits until the chat's turn has wound down and takes a message again.
+async fn free(runtime: &AgentRuntime, thread: ThreadId, within: Duration) {
+    tokio::time::timeout(within, async {
+        while runtime.active_turn(thread).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the turn's runner ends and frees the chat");
+}
+
+/// A turn that fails once its calls are stored (the first result could not
+/// be written) answers each of them as a shutdown would, before its notice:
+/// the call that ran did not finish, the one after it never began. Without
+/// a result a client draws a call as running for good. The chat's next
+/// message is answered.
+#[tokio::test]
+async fn a_turn_that_fails_after_its_calls_were_stored_ends_them() {
+    let tools = BatchTools::default();
+    let runtime = batch_runtime_on(
+        Arc::new(FailsFirstResult {
+            inner: SqliteStore::in_memory().unwrap(),
+            failed: AtomicBool::new(false),
+        }),
+        Batch {
+            calls: vec!["stubborn", "glance"],
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
+        Vec::new(),
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Failed);
+    free(&runtime, thread, Duration::from_secs(10)).await;
+    assert_eq!(
+        results(&runtime, thread).await,
+        [
+            ("call-0".to_owned(), true, false),
+            ("call-1".to_owned(), true, true),
+        ],
+        "the call that ran did not finish; the next one never began"
+    );
+    let items = runtime.items(thread, None).await.unwrap();
+    let last_result = items
+        .iter()
+        .rposition(|item| matches!(item.data, ItemData::ToolResult { .. }))
+        .unwrap();
+    let notice = items
+        .iter()
+        .position(|item| matches!(item.data, ItemData::Error { .. }))
+        .expect("the turn's notice");
+    assert!(last_result < notice, "{items:#?}");
+    assert_eq!(
+        tools.glance.ran.available_permits(),
+        0,
+        "the read never ran"
+    );
+
+    let next = runtime
+        .start_turn(thread, turn_request("and now?"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, next.id).await, TurnStatus::Completed);
+}
+
+/// Asks for `stubborn` and, while its response still streams, stops the
+/// turn as Stop does: the call is stored and never runs. Its later requests
+/// answer.
+#[derive(Clone, Default)]
+struct StopsMidAnswer {
+    requests: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl ModelProvider for StopsMidAnswer {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        Provider::default().info()
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let first = !request.tools.is_empty() && {
+            let mut requests = self.requests.lock().unwrap();
+            *requests += 1;
+            *requests == 1
+        };
+        if !first {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderEvent::TextDelta("done".into())),
+                Ok(ProviderEvent::Finished {
+                    reason: "done".into(),
+                }),
+            ])));
+        }
+        let call = ProviderEvent::ToolCall {
+            call_id: "call-0".into(),
+            name: "stubborn".into(),
+            arguments: json!({}),
+            provider_metadata: Value::Null,
+        };
+        Ok(Box::pin(stream::iter(vec![Ok(call)]).chain(
+            stream::poll_fn(move |_| {
+                cancel.cancel();
+                std::task::Poll::Pending
+            }),
+        )))
+    }
+}
+
+/// Stop while the model is still answering, after it made a call, ends that
+/// call as Stop ends a call it reaches before it begins, rather than leaving
+/// it without a result.
+#[tokio::test]
+async fn a_call_made_before_a_stop_mid_answer_is_ended() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let tool = Arc::new(Stubborn {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(1)),
+    });
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
+    config.base_rules.push(PermissionRule {
+        pattern: "stubborn:*".into(),
+        decision: PermissionDecision::Allow,
+    });
+    let runtime = AgentRuntime::with_config(
+        store,
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(StopsMidAnswer::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(Registry(tool.clone())),
+        EventBus::new(256),
+        std::env::temp_dir(),
+        String::new(),
+        config,
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Interrupted);
+    free(&runtime, thread, Duration::from_secs(10)).await;
+    // As the tool loop answers a call Stop reaches before it begins: not as
+    // one a restart cut off.
+    assert_eq!(
+        results(&runtime, thread).await,
+        [("call-0".to_owned(), false, true)]
+    );
+    let items = runtime.items(thread, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(
+            &item.data,
+            ItemData::ToolResult { output, is_error: true, .. } if output == "operation cancelled"
+        )),
+        "{items:#?}"
+    );
+    assert_eq!(tool.started.available_permits(), 0, "the call never ran");
+    let next = runtime
+        .start_turn(thread, turn_request("and now?"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, next.id).await, TurnStatus::Completed);
+}
+
+/// A read that never looks at Stop no longer keeps its chat: once it has
+/// gone on past the time a stopped command gets, its call ends as stopped
+/// (it ran: not marked as never run, nor as cut off by a restart) and the
+/// chat takes its next message.
+#[tokio::test]
+async fn stop_frees_a_chat_whose_tool_never_stops() {
+    let tools = BatchTools::default();
+    let runtime = batch_runtime(
+        Batch {
+            calls: vec!["wait"],
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), tools.held.started.acquire())
+        .await
+        .expect("the read starts")
+        .unwrap()
+        .forget();
+    let stopped = std::time::Instant::now();
+    runtime.interrupt(turn.id).await.unwrap();
+    free(&runtime, thread, Duration::from_secs(20)).await;
+    assert!(
+        stopped.elapsed() >= Duration::from_secs(5),
+        "the tool had a command's time to end first: {:?}",
+        stopped.elapsed()
+    );
+    assert_eq!(
+        results(&runtime, thread).await,
+        [("call-0".to_owned(), false, false)]
+    );
+    let items = runtime.items(thread, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(
+            &item.data,
+            ItemData::ToolResult { call_id, is_error: true, output, .. }
+                if call_id == "call-0" && output != "released"
+        )),
+        "{items:#?}"
+    );
+
+    let next = runtime
+        .start_turn(thread, turn_request("and now?"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, next.id).await, TurnStatus::Completed);
+}
+
+/// Takes its time once its turn is stopped, as a command does while its
+/// processes end, then answers in words of its own.
+struct Tidy {
+    started: Arc<tokio::sync::Semaphore>,
+}
+
+#[async_trait]
+impl Tool for Tidy {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "tidy".into(),
+            description: "Tidy up slowly after Stop".into(),
+            input_schema: json!({"type": "object", "additionalProperties": false}),
+        }
+    }
+
+    fn side_effectful(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, _arguments: Value, context: ToolContext) -> CoreResult<ToolOutput> {
+        self.started.add_permits(1);
+        context.cancel.cancelled().await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        Err(CoreError::Tool("tidied up after the stop".into()))
+    }
+}
+
+/// A tool that ends its work on Stop, taking as long as a stopped command
+/// may, answers its call itself: Stop does not cut it short.
+#[tokio::test]
+async fn a_tool_that_tidies_up_after_stop_answers_its_call_itself() {
+    let tidy = Arc::new(Tidy {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let runtime = batch_runtime_on(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Batch {
+            calls: vec!["tidy"],
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &BatchTools::default(),
+        vec![tidy.clone() as Arc<dyn Tool>],
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), tidy.started.acquire())
+        .await
+        .expect("the tool starts")
+        .unwrap()
+        .forget();
+    runtime.interrupt(turn.id).await.unwrap();
+    free(&runtime, thread, Duration::from_secs(20)).await;
+    let items = runtime.items(thread, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(
+            &item.data,
+            ItemData::ToolResult { call_id, output, .. }
+                if call_id == "call-0" && output.contains("tidied up after the stop")
+        )),
+        "{items:#?}"
+    );
+}
+
+/// A shutdown, not the wait for a stopped tool, ends a turn it outlives:
+/// the turn's runner adds nothing after it, so the chat keeps one result for
+/// the call and one notice, however long the server takes to go.
+#[tokio::test]
+async fn a_shutdown_alone_ends_a_turn_whose_tool_never_stops() {
+    let tool = Arc::new(Stubborn {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let runtime = stubborn_runtime(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        tool.clone(),
+        Provider::default(),
+    );
+    let thread = chat(&runtime).await;
+    runtime
+        .start_turn(thread, turn_request("wait for it"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), tool.started.acquire())
+        .await
+        .expect("the tool starts")
+        .unwrap()
+        .forget();
+    runtime
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    // Past the time a stopped tool is given, with the tool still at work.
+    tokio::time::sleep(Duration::from_millis(7_500)).await;
+    let items = runtime.items(thread, None).await.unwrap();
+    assert_eq!(
+        results(&runtime, thread).await,
+        [("call-1".to_owned(), true, false)],
+        "{items:#?}"
+    );
+    let notices = items
+        .iter()
+        .filter(|item| matches!(item.data, ItemData::Error { .. }))
+        .count();
+    assert_eq!(notices, 1, "{items:#?}");
+}
+
+/// Stop, then a server shutdown within a second: the shutdown alone ends the
+/// turn whose tool never stops, and the wait for the stopped tool, which
+/// began first, adds nothing after it.
+#[tokio::test]
+async fn a_shutdown_soon_after_stop_alone_ends_the_turn() {
+    let tool = Arc::new(Stubborn {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let runtime = stubborn_runtime(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        tool.clone(),
+        Provider::default(),
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("wait for it"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), tool.started.acquire())
+        .await
+        .expect("the tool starts")
+        .unwrap()
+        .forget();
+    let stopped = std::time::Instant::now();
+    runtime.interrupt(turn.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    runtime
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    // Past the time a stopped tool is given, counted from the Stop.
+    tokio::time::sleep(Duration::from_millis(7_500).saturating_sub(stopped.elapsed())).await;
+    let items = runtime.items(thread, None).await.unwrap();
+    assert_eq!(
+        results(&runtime, thread).await,
+        [("call-1".to_owned(), true, false)],
+        "{items:#?}"
+    );
+    let notices = items
+        .iter()
+        .filter(|item| matches!(item.data, ItemData::Error { .. }))
+        .count();
+    assert_eq!(notices, 1, "{items:#?}");
+}
+
+/// A round that breaks off (its first result could not be stored) stops the
+/// read that ran beside it: nothing would record what it found.
+#[tokio::test]
+async fn a_round_that_breaks_off_stops_the_reads_beside_it() {
+    let tools = BatchTools::default();
+    let runtime = batch_runtime_on(
+        Arc::new(FailsFirstResult {
+            inner: SqliteStore::in_memory().unwrap(),
+            failed: AtomicBool::new(false),
+        }),
+        Batch {
+            calls: vec!["glance", "wait"],
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
+        Vec::new(),
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Failed);
+    free(&runtime, thread, Duration::from_secs(10)).await;
+    let ended = results(&runtime, thread).await;
+    assert_eq!(ended.len(), 2, "{ended:?}");
+    assert!(
+        ended.iter().all(|(_, unfinished, _)| *unfinished),
+        "{ended:?}"
+    );
+    // Were the read still waiting, it would take what is let go now.
+    tools.held.release.add_permits(1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        tools.held.release.available_permits(),
+        1,
+        "the read beside the failed one went on"
+    );
+}
+
+/// Waits at its gate until let through, then answers.
+struct Gate {
+    open: Arc<tokio::sync::Semaphore>,
+}
+
+#[async_trait]
+impl Tool for Gate {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "gate".into(),
+            description: "Wait until let through".into(),
+            input_schema: json!({"type": "object", "additionalProperties": false}),
+        }
+    }
+
+    fn side_effectful(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, _arguments: Value, _context: ToolContext) -> CoreResult<ToolOutput> {
+        self.open.acquire().await.unwrap().forget();
+        Ok(ToolOutput {
+            text: "through".into(),
+            metadata: Value::Null,
+        })
+    }
+}
+
+/// The delegation tool as this registry offers it: the runtime runs the
+/// agent itself, and several run side by side, as Haarness offers it.
+struct Delegate;
+
+#[async_trait]
+impl Tool for Delegate {
+    fn parallel_safe(&self, _arguments: &Value) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "task".into(),
+            description: "Hand work to an agent".into(),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    fn side_effectful(&self) -> bool {
+        false
+    }
+
+    async fn execute(&self, _arguments: Value, _context: ToolContext) -> CoreResult<ToolOutput> {
+        unreachable!("the runtime runs a delegation itself")
+    }
+}
+
+/// A turn that fails while an agent it delegated to is at work stops that
+/// agent before it says the call did not finish: nothing waits for its
+/// answer any more.
+#[tokio::test]
+async fn a_failed_turn_stops_the_agent_it_was_waiting_for() {
+    let tools = BatchTools::default();
+    let gate = Arc::new(Gate {
+        open: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let provider = Batch {
+        calls: vec!["gate", "task"],
+        then: vec!["wait"],
+        ..Batch::default()
+    };
+    let runtime = batch_runtime_on(
+        Arc::new(FailsFirstResult {
+            inner: SqliteStore::in_memory().unwrap(),
+            failed: AtomicBool::new(false),
+        }),
+        provider.clone(),
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
+        vec![gate.clone() as Arc<dyn Tool>, Arc::new(Delegate)],
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    // The agent is at work, in a read that never looks at Stop.
+    tokio::time::timeout(Duration::from_secs(10), tools.held.started.acquire())
+        .await
+        .expect("the agent's read starts")
+        .unwrap()
+        .forget();
+    let child = runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|item| match item.data {
+            ItemData::TaskLink {
+                child_thread_id, ..
+            } => Some(child_thread_id),
+            _ => None,
+        })
+        .expect("the delegation's link");
+    let child_turn = runtime
+        .active_turn(child)
+        .await
+        .unwrap()
+        .expect("the agent's turn runs")
+        .id;
+    // The gate's result is the one that cannot be stored.
+    gate.open.add_permits(1);
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Failed);
+    free(&runtime, child, Duration::from_secs(20)).await;
+    assert_eq!(
+        runtime.turn(child_turn).await.unwrap().status,
+        TurnStatus::Interrupted
+    );
+    assert_eq!(
+        results(&runtime, thread).await,
+        [
+            ("call-0".to_owned(), true, false),
+            ("call-1".to_owned(), true, false),
+        ]
+    );
+}
+
+/// A delegation after a read in one round runs beside it, and its agent is
+/// started once, not a second time with the read's group.
+#[tokio::test]
+async fn a_delegation_after_a_read_starts_its_agent_once() {
+    let tools = BatchTools::default();
+    let runtime = batch_runtime_on(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Batch {
+            calls: vec!["glance", "task"],
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
+        vec![Arc::new(Delegate) as Arc<dyn Tool>],
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Completed);
+    free(&runtime, thread, Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let agents = runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|item| matches!(item.data, ItemData::TaskLink { .. }))
+        .count();
+    assert_eq!(
+        agents, 1,
+        "the delegation's agent was started more than once"
+    );
+}
+
+/// A delegation still waiting for a place among the running agents when its
+/// turn fails never starts: its call already says it did not finish.
+#[tokio::test]
+async fn a_delegation_waiting_to_start_when_its_turn_fails_never_starts() {
+    let tools = BatchTools::default();
+    let gate = Arc::new(Gate {
+        open: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let patient = Arc::new(Patient {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let provider = Batch {
+        calls: vec!["gate", "task", "task"],
+        then: vec!["patient"],
+        ..Batch::default()
+    };
+    let mut config = RuntimeConfig::default();
+    // One agent at a time: the second delegation waits for the first.
+    config.execution.subagent_concurrency = 1;
+    let runtime = batch_runtime_with(
+        Arc::new(FailsFirstResult {
+            inner: SqliteStore::in_memory().unwrap(),
+            failed: AtomicBool::new(false),
+        }),
+        provider.clone(),
+        patient.clone(),
+        &tools,
+        vec![gate.clone() as Arc<dyn Tool>, Arc::new(Delegate)],
+        config,
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    // The first agent is at work; the second waits for its place.
+    tokio::time::timeout(Duration::from_secs(10), patient.started.acquire())
+        .await
+        .expect("the first agent works")
+        .unwrap()
+        .forget();
+    let links = |items: &[haarness_protocol::Item]| {
+        items
+            .iter()
+            .filter(|item| matches!(item.data, ItemData::TaskLink { .. }))
+            .count()
+    };
+    assert_eq!(links(&runtime.items(thread, None).await.unwrap()), 1);
+    gate.open.add_permits(1);
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Failed);
+    free(&runtime, thread, Duration::from_secs(10)).await;
+    // The first agent stopped and gave its place up; the second did not take it.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let items = runtime.items(thread, None).await.unwrap();
+    assert_eq!(links(&items), 1, "{items:#?}");
+    assert_eq!(
+        *provider.requests.lock().unwrap(),
+        2,
+        "no second agent asked"
+    );
+    let ended = results(&runtime, thread).await;
+    assert_eq!(ended.len(), 3, "{ended:?}");
+    assert!(
+        ended.iter().all(|(_, unfinished, _)| *unfinished),
+        "{ended:?}"
+    );
+}
+
+/// Hands work to an agent in the background; the agent waits for Stop.
+/// Every other request answers.
+struct DelegatesInBackground;
+
+#[async_trait]
+impl ModelProvider for DelegatesInBackground {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        Provider::default().info()
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let answered = matches!(
+            request.messages.last(),
+            Some(ProviderMessage::ToolResult { .. })
+        );
+        let agent = request.messages.iter().any(|message| {
+            matches!(message, ProviderMessage::Text { role, content }
+                if role == "user" && content.contains("work alone"))
+        });
+        let event = if request.tools.is_empty() || answered {
+            ProviderEvent::TextDelta("done".into())
+        } else if agent {
+            ProviderEvent::ToolCall {
+                call_id: "inner".into(),
+                name: "patient".into(),
+                arguments: json!({}),
+                provider_metadata: Value::Null,
+            }
+        } else {
+            ProviderEvent::ToolCall {
+                call_id: "call-0".into(),
+                name: "task".into(),
+                arguments: json!({"description": "alone", "prompt": "work alone", "background": true}),
+                provider_metadata: Value::Null,
+            }
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(event),
+            Ok(ProviderEvent::Finished {
+                reason: "done".into(),
+            }),
+        ])))
+    }
+}
+
+/// An agent at work in the background when the server shuts down ends with
+/// the shutdown's notice, not the words of a person's Stop.
+#[tokio::test]
+async fn a_background_agent_a_shutdown_stops_says_the_shutdown_stopped_it() {
+    let patient = Arc::new(Patient {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
+    for pattern in ["patient:*", "task:*"] {
+        config.base_rules.push(PermissionRule {
+            pattern: pattern.into(),
+            decision: PermissionDecision::Allow,
+        });
+    }
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(DelegatesInBackground) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(Calls(vec![
+            patient.clone() as Arc<dyn Tool>,
+            Arc::new(Delegate),
+        ])),
+        EventBus::new(256),
+        std::env::temp_dir(),
+        String::new(),
+        config,
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Completed);
+    tokio::time::timeout(Duration::from_secs(10), patient.started.acquire())
+        .await
+        .expect("the agent works in the background")
+        .unwrap()
+        .forget();
+    let child = runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|item| match item.data {
+            ItemData::TaskLink {
+                child_thread_id, ..
+            } => Some(child_thread_id),
+            _ => None,
+        })
+        .expect("the delegation's link");
+
+    runtime
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    free(&runtime, child, Duration::from_secs(10)).await;
+    let notices = runtime
+        .items(child, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            ItemData::Error { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].starts_with("Haarness stopped."), "{notices:?}");
 }
