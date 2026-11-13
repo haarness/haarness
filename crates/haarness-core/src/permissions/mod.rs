@@ -1113,16 +1113,16 @@ fn rule_names(
     real_folders: &std::collections::BTreeMap<String, String>,
 ) -> bool {
     // A digest of one command is compared by equality alone, never matched.
-    if is_exact_rule(&rule.pattern) || names_star_file(&rule.pattern, operation) {
+    if is_exact_rule(&rule.pattern) {
         return false;
     }
-    if rule_covers(&rule.pattern, operation) || separators_cover(rule, &rule.pattern, operation) {
+    if reads_over(rule, &rule.pattern, operation) {
         return true;
     }
     if operation.starts_with(EXTERNAL_DIRECTORY)
-        && real_folders.get(&rule.pattern).is_some_and(|real| {
-            path_rule_matches(real, operation) || separators_cover(rule, real, operation)
-        })
+        && real_folders
+            .get(&rule.pattern)
+            .is_some_and(|real| reads_over(rule, real, operation))
     {
         return true;
     }
@@ -1137,25 +1137,24 @@ fn rule_names(
     }
     let absolute = Path::new(target).is_absolute();
     spellings.iter().any(|(spelled, spelled_absolute)| {
-        *spelled_absolute == absolute
-            && (path_rule_matches(&rule.pattern, spelled)
-                || separators_cover(rule, &rule.pattern, spelled))
+        *spelled_absolute == absolute && reads_over(rule, &rule.pattern, spelled)
     })
 }
 
-/// Whether a deny or ask about file paths that writes `\*` or `\?` covers
-/// `value` when each backslash in `pattern` is read as `/`, as before path
-/// rules named a literal `*` or `?`: a rule written with Windows separators
-/// (`secrets\*`, `**\*.pem`) keeps refusing or asking for what it did. An
-/// allow, saved answers included, names the literal character only, so
-/// reading it as a name never widens one nor lifts a deny.
-fn separators_cover(rule: &PermissionRule, pattern: &str, value: &str) -> bool {
-    rule.decision != PermissionDecision::Allow
-        && holds_literal_wildcard(pattern)
-        && value
-            .split_once(':')
-            .is_some_and(|(permission, _)| is_path_permission(permission))
-        && wildcard_match(pattern, value)
+/// Whether `pattern` (`rule`'s own, or where its folder link leads) covers
+/// `value`: see [`rule_covers`]. A deny or ask about file paths also covers
+/// what it covered when every backslash in it read as `/` and a folder
+/// ask's `/*` as a name like any other, so a rule written with Windows
+/// separators (`secrets\*`, `**\*.pem`) keeps refusing or asking for what
+/// it did. An allow, saved answers included, reads only the new way, so the
+/// new reading never widens one nor lifts a deny.
+fn reads_over(rule: &PermissionRule, pattern: &str, value: &str) -> bool {
+    rule_covers(pattern, value)
+        || (rule.decision != PermissionDecision::Allow
+            && value
+                .split_once(':')
+                .is_some_and(|(permission, _)| is_path_permission(permission))
+            && wildcard_match(pattern, value))
 }
 
 const EXTERNAL_DIRECTORY: &str = "external_directory:";
@@ -1777,27 +1776,24 @@ pub fn wildcard_match(pattern: &str, value: &str) -> bool {
 /// `list`, `external_directory`), as [`wildcard_match`] does for any other.
 #[must_use]
 pub fn rule_covers(pattern: &str, operation: &str) -> bool {
-    if names_star_file(pattern, operation) {
-        return false;
-    }
     let path = operation
         .split_once(':')
         .is_some_and(|(permission, _)| is_path_permission(permission));
-    if path {
-        path_rule_matches(pattern, operation)
-    } else {
-        wildcard_match(pattern, operation)
+    if !path {
+        return wildcard_match(pattern, operation);
     }
-}
-
-/// Whether `pattern` names a file called `*` in a folder (`…/\*`) while
-/// `operation` asks about all that folder holds, as an outside-folder ask
-/// does with a trailing `/*`: such a rule never answers it.
-fn names_star_file(pattern: &str, operation: &str) -> bool {
-    !cfg!(windows)
-        && operation.starts_with(EXTERNAL_DIRECTORY)
-        && operation.ends_with("/*")
-        && pattern.ends_with("/\\*")
+    // An outside-folder ask about all a folder holds ends in `/*`: any name
+    // there, which only a rule's `*` covers, not `?` nor a file called `*`.
+    match operation.strip_suffix('*') {
+        Some(folder)
+            if !cfg!(windows)
+                && operation.starts_with(EXTERNAL_DIRECTORY)
+                && folder.ends_with('/') =>
+        {
+            path_rule_matches(pattern, &format!("{folder}{}", bash::ANY_NAME))
+        }
+        _ => path_rule_matches(pattern, operation),
+    }
 }
 
 /// Whether rules for `permission` name file paths: `read`, `list`,
@@ -2475,13 +2471,36 @@ mod tests {
         // Any other backslash is still `/`.
         assert!(path_rule_matches(r"\m\k\*v/*", "/m/k*v/x"));
         assert!(!path_rule_matches(r"\m\k\*v/*", "/m/kzv/x"));
-        // A rule for a file called `*` is not all its folder holds.
-        let file = engine(&[r"external_directory:/srv/q/\*", r"read:/srv/q/\*"]);
-        assert_eq!(
-            file.evaluate("external_directory:/srv/q/*"),
-            PermissionDecision::Ask
-        );
+        // A folder ask's `/*` is any name there: only a rule's `*` answers
+        // it, not a file called `*` nor `?`.
+        let file = engine(&[
+            r"external_directory:/srv/q/\*",
+            r"external_directory:/srv/q/*\*",
+            r"external_directory:/srv/q/*?",
+            r"read:/srv/q/\*",
+        ]);
+        for asked in ["/srv/q/*", "/srv/q/ab/*"] {
+            assert_eq!(
+                file.evaluate(&format!("external_directory:{asked}")),
+                PermissionDecision::Ask,
+                "{asked}"
+            );
+        }
         assert_eq!(file.evaluate("read:/srv/q/*"), PermissionDecision::Allow);
+        assert_eq!(
+            engine(&["external_directory:/srv/q/*"]).evaluate("external_directory:/srv/q/ab/*"),
+            PermissionDecision::Allow
+        );
+        // A deny of that shape refuses what it did.
+        let mut denies = PermissionEngine::new(vec![rule("*", PermissionDecision::Allow)]);
+        denies.add_rule(rule(
+            "external_directory:/srv/q/?",
+            PermissionDecision::Deny,
+        ));
+        assert_eq!(
+            denies.evaluate("external_directory:/srv/q/*"),
+            PermissionDecision::Deny
+        );
     }
 
     #[test]
