@@ -109,7 +109,7 @@ A chat can also be created with a folder of its own: `directory`, as `<date>/<na
 
 - `POST /v1/threads/{id}/background[?childThreadId=...]` to promote running foreground subagents
 - `GET /v1/threads/{id}/commands`, `GET /v1/threads/{id}/commands/{command}`, `GET …/commands/{command}/output`, `POST …/commands/{command}/stop`, `POST /v1/threads/{id}/commands/background[?commandId=...]` and `GET /v1/commands/active` for the agents' shell commands (`background-commands.v1`; see [agent commands in the background](#agent-commands-in-the-background))
-- `POST /v1/threads/{id}/interrupt` to stop every active turn, child task, and workflow in that root conversation. Add `?resume=true` for an interactive Stop: steering the agent has not answered yet is answered by a continuation turn (see [Steer and Queue](INPUT-QUEUE.md)). The agents' shell commands in the background keep running while the chat replies, and on a `resume=true` stop; without `resume`, and with no turn running in the chat, they are stopped too. A tool that does not stop when asked is waited for 6 seconds (a second more than a command's processes get to end); then its call ends as stopped without it, a warning in the log names the tool, and the chat takes its next message
+- `POST /v1/threads/{id}/interrupt` to stop every active turn, child task, and workflow in that root conversation. Add `?resume=true` for an interactive Stop: steering the agent has not answered yet is answered by a continuation turn (see [Steer and Queue](INPUT-QUEUE.md)). The agents' shell commands in the background keep running while the chat replies, and on a `resume=true` stop; without `resume`, and with no turn running in the chat, they are stopped too. A tool that does not stop when asked is waited for 6 seconds (a second more than a command's processes get to end); then its call ends as stopped without it, a warning in the log names the tool, and the chat takes its next message. What the tool was doing is let go, not undone: a write stuck on a stalled disk may still land after its call reads as stopped, and a patch or `batch` cut off this way does not list what it had already done. A server shutdown that comes before then settles the turn itself, as below
 - `POST /v1/threads/{id}/goal` for tagged goal lifecycle actions
 - `GET /v1/turns/active`, `GET /v1/turns/{id}`, `POST /interrupt` (`?resume=true` as above), `GET /wait?timeout_ms=N` (default 30 s, at most 300 s; a turn still running then answers `409`)
 - `GET /v1/permissions`, `/v1/questions`; `POST /v1/permissions/{id}`, `/v1/questions/{id}`.
@@ -666,8 +666,10 @@ left without a result gets an error `tool_result` first, saying it did not
 finish, with `metadata: {"unfinished": true}`; a turn that outlives a graceful
 shutdown's wait gets the same results before the shutdown marks it interrupted.
 So does a turn that ends on an error once its calls are stored (a database
-write that failed, Stop while the model was still answering), before its
-notice: no call is left drawn as running.
+write that failed), before its notice, after stopping a delegated agent still
+at work for one of them; Stop while the model was still answering ends a call
+it made as Stop ends one it reaches before it begins (`operation cancelled`,
+`notRun`). No call is left drawn as running.
 Desktop and the TUI show such a call as one that did not finish, in a few words
 of their own, rather than its result's text, which is written for the model;
 the phone apps and Cloud web still show that text as a failed call. A request
