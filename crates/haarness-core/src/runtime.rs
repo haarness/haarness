@@ -13519,6 +13519,12 @@ impl RunnerTask {
                             {
                                 break;
                             }
+                            // A delegation in the group started above, with
+                            // the round's others: started again, its agent
+                            // would do the work twice.
+                            if task_handles.contains_key(offset) {
+                                continue;
+                            }
                             let this = Arc::clone(&self);
                             let (id, tool, args, agent) =
                                 (id.clone(), tool.clone(), args.clone(), agent.to_owned());

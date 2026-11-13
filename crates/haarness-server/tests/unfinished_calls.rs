@@ -1515,11 +1515,15 @@ impl Tool for Gate {
 }
 
 /// The delegation tool as this registry offers it: the runtime runs the
-/// agent itself.
+/// agent itself, and several run side by side, as Haarness offers it.
 struct Delegate;
 
 #[async_trait]
 impl Tool for Delegate {
+    fn parallel_safe(&self, _arguments: &Value) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "task".into(),
@@ -1606,5 +1610,43 @@ async fn a_failed_turn_stops_the_agent_it_was_waiting_for() {
             ("call-0".to_owned(), true, false),
             ("call-1".to_owned(), true, false),
         ]
+    );
+}
+
+/// A delegation after a read in one round runs beside it, and its agent is
+/// started once, not a second time with the read's group.
+#[tokio::test]
+async fn a_delegation_after_a_read_starts_its_agent_once() {
+    let tools = BatchTools::default();
+    let runtime = batch_runtime_on(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Batch {
+            calls: vec!["glance", "task"],
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
+        vec![Arc::new(Delegate) as Arc<dyn Tool>],
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Completed);
+    free(&runtime, thread, Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let agents = runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|item| matches!(item.data, ItemData::TaskLink { .. }))
+        .count();
+    assert_eq!(
+        agents, 1,
+        "the delegation's agent was started more than once"
     );
 }
