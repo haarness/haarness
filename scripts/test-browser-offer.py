@@ -12,9 +12,9 @@ over the server's own WebSocket routes:
 - a Chrome profile connected: sent again, to another chat too; gone with it;
 - Desktop's new-chat browser attached: a chat whose first turn starts before its own
   browser is attached is sent them already;
-- with lazy loading on (this model's window is above 64K), a request carries only the six
-  browser tools that open, read and work a page, beside `load_tool`; a deferred browser tool
-  the model calls by name still reaches the browser, and goes with the next request.
+- with lazy loading on (this model's window is above 64K), a request carries only the
+  eleven browser tools that find, open, read and work a page, beside `load_tool`; a deferred
+  browser tool the model calls by name still reaches the browser, and goes with the next request.
 
 Needs the `websockets` package (run it with a venv that has it).
 """
@@ -42,7 +42,8 @@ BINARY = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).r
 REQUESTS = []
 SCRIPT = []
 # The browser tools a request carries while lazy loading defers the others.
-AT_HAND = sorted(['browser_tabs_open', 'browser_navigate', 'browser_snapshot', 'browser_click', 'browser_fill',
+AT_HAND = sorted(['browser_tabs_open', 'browser_tabs_list', 'browser_tabs_focus', 'browser_navigate', 'browser_frames',
+                  'browser_snapshot', 'browser_click', 'browser_fill', 'browser_press', 'browser_dialog',
                   'browser_screenshot'])
 
 
@@ -181,21 +182,25 @@ async def scenario(url, token):
     requests = await turn(chat, 'with Desktop')
     assert browser(requests) == [True], browser(requests)
     with_browser = requests[0]['bytes']
-    # Lazy loading on: six browser tools at hand, the rest behind load_tool.
+    # Lazy loading on: eleven browser tools at hand, the rest behind load_tool.
     assert browser_tools(requests[0]) == AT_HAND, browser_tools(requests[0])
     assert 'load_tool' in requests[0]['tools'], requests[0]['tools']
     # A deferred browser tool called by name still runs in the browser, and stays.
+    tab = 'tab_' + str(uuid.uuid4())
+    await desktop.send(json.dumps({'type': 'state', 'state': {
+        'tabs': [{'id': tab, 'generation': 1, 'url': 'https://example.test/'}], 'focusedTabID': tab}}))
+    await asyncio.sleep(0.3)
     seen = []
     answering = asyncio.create_task(answer_commands(desktop, seen))
-    SCRIPT[:] = [{'call': 'browser_tabs_list', 'arguments': {}}, 'listed']
-    requests = await turn(chat, 'list the tabs')
+    SCRIPT[:] = [{'call': 'browser_back', 'arguments': {'tabID': tab}}, 'went back']
+    requests = await turn(chat, 'go back')
     answering.cancel()
-    assert 'browser_tabs_list' not in requests[0]['tools'], requests[0]['tools']
+    assert 'browser_back' not in requests[0]['tools'], requests[0]['tools']
     answer = next(message for message in reversed(requests[1]['messages']) if message['role'] == 'tool')
-    assert '"tabs"' in answer['content'] and 'not advertised' not in answer['content'], answer
+    assert not answer['content'].startswith('tool error') and 'not advertised' not in answer['content'], answer
     assert [(command['action']['type'], bool(command.get('inspect'))) for command in seen] == \
-        [('tabs.list', True), ('tabs.list', False)], seen
-    assert 'browser_tabs_list' in requests[1]['tools'], requests[1]['tools']
+        [('back', True), ('back', False)], seen
+    assert 'browser_back' in requests[1]['tools'], requests[1]['tools']
 
     # Desktop closed the chat: the next turn sends none.
     await desktop.close()

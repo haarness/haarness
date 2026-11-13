@@ -79,8 +79,8 @@ pub use stream_limits::{
     stream_stall_silence,
 };
 pub use tool_catalog::{
-    LOAD_TOOL_NAME, LazyToolSettings, SKILL_LIST_BUDGET, code_can_call, load_tool_definition,
-    select_tools, skill_list, some_names,
+    DeferredMatches, LOAD_TOOL_NAME, LazyToolSettings, SKILL_LIST_BUDGET, code_can_call,
+    find_deferred_tools, load_tool_definition, select_tools, skill_list, some_names,
 };
 pub use tool_validation::{shell_call_from_words, tool_call_arguments, with_field_aliases};
 pub use turn_context::{

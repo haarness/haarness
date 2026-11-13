@@ -166,8 +166,14 @@ fn classify(name: &str) -> Classification {
         ("media", "Media", false)
     } else if name.starts_with("browser_") {
         // Offered only while a browser can serve the chat. The few that
-        // open, read and work a page stay; the rest wait to be loaded.
-        ("browser", "Browser", BROWSER_RESIDENT.contains(&name))
+        // open, read and work a page stay; the rest wait to be loaded, those
+        // for looking into a page and moving files in a group of their own,
+        // so the model asking for the browser's tools gets the everyday ones.
+        if is_browser_devtool(name) {
+            ("devtools", "Browser developer tools", false)
+        } else {
+            ("browser", "Browser", BROWSER_RESIDENT.contains(&name))
+        }
     } else if name.starts_with("ext__")
         || name.starts_with("mcp__")
         || matches!(
@@ -201,17 +207,39 @@ fn classify(name: &str) -> Classification {
 }
 
 /// The browser tools a chat keeps while lazy loading is on, above
-/// [`SMALL_WINDOW`]: enough to open a page, read it, click, type and see
-/// it, about 1.5K tokens. The browser's other 38 tools (some 7K tokens of
-/// tabs, frames, files, network, profiling and more) wait to be loaded.
-const BROWSER_RESIDENT: [&str; 6] = [
+/// [`SMALL_WINDOW`]: enough to find and open a tab, read a page, click,
+/// type, press keys, answer a dialog and see it, about 2.2K tokens, and
+/// every browser tool their descriptions and errors send the model to. The
+/// browser's other 33 tools (some 6.3K tokens) wait to be loaded: 13 in the
+/// `browser` group, 20 in `devtools`, each group one load.
+const BROWSER_RESIDENT: [&str; 11] = [
     "browser_tabs_open",
+    "browser_tabs_list",
+    "browser_tabs_focus",
     "browser_navigate",
+    "browser_frames",
     "browser_snapshot",
     "browser_click",
     "browser_fill",
+    "browser_press",
+    "browser_dialog",
     "browser_screenshot",
 ];
+
+/// Whether `name` is a browser tool for looking into a page or moving
+/// files rather than working it: scripts, console, network, traces,
+/// profiles, audits, uploads and downloads (group `devtools`).
+fn is_browser_devtool(name: &str) -> bool {
+    name == "browser_evaluate"
+        || name == "browser_console"
+        || name == "browser_lighthouse"
+        || ["network_", "trace_", "cpu_", "heap_", "files_"]
+            .iter()
+            .any(|family| {
+                name.strip_prefix("browser_")
+                    .is_some_and(|rest| rest.starts_with(family))
+            })
+}
 
 /// The window at or under which a chat leaves all the browser's tools out
 /// until the model loads them, as it does other optional groups. Chrome's
@@ -248,14 +276,13 @@ fn tight(context_window: Option<u64>) -> bool {
 /// one.
 fn classify_in(name: &str, context_window: Option<u64>) -> Classification {
     let window = context_window.filter(|window| *window > 0);
+    let classification = classify(name);
     if name.starts_with("browser_") && window.is_some_and(|window| window <= SMALL_WINDOW) {
         return Classification {
-            group: "browser",
-            title: "Browser",
             essential: false,
+            ..classification
         };
     }
-    let classification = classify(name);
     // Computer use's tools are offered only while it is on; then they are
     // the point.
     if tight(context_window) && !TIGHT_RESIDENT.contains(&name) && !name.starts_with("mac_") {
@@ -841,12 +868,25 @@ fn deferred_entries<'a>(
         .collect()
 }
 
-/// The deferred tools one (lowercased) query matches, exact ids first.
+/// The deferred tools one (lowercased) query matches, exact ids first. A
+/// query that names a group holding deferred tools (`browser`, `devtools`,
+/// `cloud`, as the model is told them) finds that group's, and not every
+/// tool that mentions the word: asked for the browser, the model gets its
+/// everyday tools, not the profilers whose ids hold the word too.
 fn query_matches(
     deferred: &[&ToolCatalogEntry],
     by_id: &HashMap<&str, &ToolDefinition>,
     query: &str,
 ) -> Vec<String> {
+    let mut group = deferred
+        .iter()
+        .filter(|entry| entry.group.eq_ignore_ascii_case(query))
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    if !group.is_empty() {
+        group.sort();
+        return group;
+    }
     let mut candidates = deferred
         .iter()
         .filter(|entry| {
@@ -1363,6 +1403,7 @@ mod tests {
             )
         }));
         definitions.push(definition("read", "read a file"));
+        definitions.push(definition("browser_console", "read the browser console"));
         let select = |window| {
             select_tools(
                 definitions.clone(),
@@ -1376,19 +1417,12 @@ mod tests {
         };
         let large = select(200_000);
         assert!(large.response.lazy_active);
-        assert_eq!(
-            names(&large.advertised),
-            [
-                "browser_click",
-                "browser_fill",
-                "browser_navigate",
-                "browser_screenshot",
-                "browser_snapshot",
-                "browser_tabs_open",
-                "read",
-                LOAD_TOOL_NAME
-            ]
-        );
+        let mut resident = BROWSER_RESIDENT.to_vec();
+        resident.sort_unstable();
+        resident.extend(["read", LOAD_TOOL_NAME]);
+        assert_eq!(names(&large.advertised), resident);
+        // Asked for the browser group, the loader loads its tools, never
+        // those of the developer tools' group, whose ids hold the word too.
         let matches = find_deferred_tools(&definitions, &large.response, &["browser".into()]);
         assert_eq!(matches.found.len(), MAX_LOAD_MATCHES);
         assert_eq!(matches.left_out.len(), 10);
@@ -1398,6 +1432,10 @@ mod tests {
                 .iter()
                 .chain(&matches.left_out)
                 .all(|id| id.starts_with("browser_more_"))
+        );
+        assert_eq!(
+            search_deferred_tools(&definitions, &large.response, &["devtools".into()]),
+            ["browser_console"]
         );
         // A window of 64K or less: every browser tool waits, as before.
         assert_eq!(

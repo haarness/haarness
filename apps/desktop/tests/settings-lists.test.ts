@@ -94,10 +94,16 @@ test("tools group by source, and built-in tools by the catalog's groups with fam
   assert.ok(OPEN_GROUP_LIMIT >= 1);
 });
 
-test("the browser's own catalog group reads as the family Core held, right after Core", () => {
-  // Servers that keep a few browser tools at hand and defer the rest list them all in a browser group.
+test("the browser's own catalog groups read as the one family Core held, right after Core", () => {
+  // Servers that keep a few browser tools at hand and defer the rest list them in a browser group,
+  // its developer tools in one of their own.
   const browser = ["back", "click", "cpu_analyze", "fill", "tabs_open"].map((name) =>
-    tool("browser_" + name, "native", "", ["browser", "Browser"]),
+    tool(
+      "browser_" + name,
+      "native",
+      "",
+      name === "cpu_analyze" ? ["devtools", "Browser developer tools"] : ["browser", "Browser"],
+    ),
   );
   const parts = (tools: ToolCatalogEntry[]) =>
     toolGroups(tools)[0].groups!.map((part) => [part.key, part.name, part.prefix, part.tools.map((item) => item.id)]);

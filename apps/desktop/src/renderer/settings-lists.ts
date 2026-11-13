@@ -59,12 +59,12 @@ const PART_TITLES: Record<string, string> = { extensions: "Manage extensions" };
 /** Tools of one catalog group sharing a name prefix this often are their own part. */
 const FAMILY_SIZE = 5;
 /**
- * Catalog groups that list one family of tools Core once held: the browser's,
- * which servers put in a group of their own so some can wait to be loaded.
- * They read as a family split out of Core does: right after it, titled by
- * their prefix.
+ * Catalog groups that list one family of tools Core once held, by the family's
+ * prefix: the browser's, which servers put in groups of their own (its
+ * developer tools apart) so some can wait to be loaded. They read as one
+ * family split out of Core does: right after it, titled by their prefix.
  */
-const CORE_FAMILIES = ["browser"];
+const CORE_FAMILIES: Record<string, string> = { browser: "browser", devtools: "browser" };
 
 function sourceOf(tool: ToolCatalogEntry): { kind: ToolGroupKind; name: string } {
   const [kind, ...rest] = tool.source.split(":");
@@ -93,7 +93,7 @@ function builtinParts(tools: ToolCatalogEntry[]): ToolGroup[] {
   }
   const parts: ToolGroup[] = [];
   const order = [...buckets.keys()]
-    .filter((key) => !CORE_FAMILIES.includes(key))
+    .filter((key) => !(key in CORE_FAMILIES))
     .sort((a, b) =>
       a === "core" ? -1 : b === "core" ? 1 : buckets.get(a)!.title.localeCompare(buckets.get(b)!.title),
     );
@@ -104,7 +104,10 @@ function builtinParts(tools: ToolCatalogEntry[]): ToolGroup[] {
     prefix,
     tools: members.sort(byTitle(prefix)),
   });
-  const coreFamilies = CORE_FAMILIES.filter((key) => buckets.has(key)).map((key) => family(key, buckets.get(key)!.tools));
+  const familyTools = new Map<string, ToolCatalogEntry[]>();
+  for (const [key, prefix] of Object.entries(CORE_FAMILIES))
+    if (buckets.has(key)) familyTools.set(prefix, [...(familyTools.get(prefix) ?? []), ...buckets.get(key)!.tools]);
+  const coreFamilies = [...familyTools].map(([prefix, members]) => family(prefix, members));
   for (const key of order) {
     const bucket = buckets.get(key)!;
     const families = new Map<string, ToolCatalogEntry[]>();
