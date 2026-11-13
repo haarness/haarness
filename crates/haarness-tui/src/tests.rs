@@ -9915,14 +9915,14 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
 fn an_always_rule_that_only_escapes_a_name_is_not_repeated() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
-    let folder = "/Users/sam/odd*?/*";
-    let mut outside = pending_permission_fixture(&thread, "perm-odd-folder");
+    let folder = "/Users/sam/drafts*?/*";
+    let mut outside = pending_permission_fixture(&thread, "perm-starred-folder");
     outside.permission = "external_directory".into();
     outside.operation = format!("external_directory:{folder}");
     outside.detail = serde_json::json!({});
     outside.patterns = vec![folder.into()];
-    outside.always_patterns = vec![r"external_directory:/Users/sam/odd\*\?/*".into()];
-    let mut read = pending_permission_fixture(&thread, "perm-odd-read");
+    outside.always_patterns = vec![r"external_directory:/Users/sam/drafts\*\?/*".into()];
+    let mut read = pending_permission_fixture(&thread, "perm-starred-read");
     read.permission = "read".into();
     read.operation = "read:a*.env".into();
     read.detail = serde_json::json!({"path": "a*.env"});

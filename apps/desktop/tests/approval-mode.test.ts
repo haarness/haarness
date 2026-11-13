@@ -248,7 +248,7 @@ test("always rules read as plain words, never as stored permission patterns", ()
   assert.equal(say("edit", "edit:.haarness/workflows/a\\*.ts"), ".haarness/workflows/a*.ts");
   assert.equal(say("external_directory", "external_directory:\\\\?\\C:\\work\\x/*"), "Anything in …/\\\\?\\C:\\work\\x");
   // A command rule's backslash is part of the command.
-  assert.equal(say("bash", "bash:find . -name \\*.ts"), "find . -name \\*.ts");
+  assert.equal(say("bash", "bash:ls -d \\*.log"), "ls -d \\*.log");
   assert.equal(say("bash", "bash:git push *"), "Commands starting with git push");
   assert.equal(say("bash", "bash:*"), "Every command");
   assert.equal(say("edit", "edit:*"), "Every file edit");
