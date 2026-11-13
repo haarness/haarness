@@ -11,11 +11,14 @@ a loop too. The script proves that:
    the linked folder's and the linked file included, nothing from the version control folder;
 2. the log has no warning about a glob that stopped early;
 3. the terminal UI opens on the same configuration and answers a message (echo provider, tmux);
-4. the project's own file points only at files the project holds: its `~/` entry, an absolute path outside it
-   and a `../` entry never reach the prompt, each with one line in the log, while its absolute path inside
-   the project loads, and an `AGENTS.md` over 40 KiB is left out with a line naming it;
-5. the folders' `AGENTS.md` that the scripted `read` calls find attach as before, except one a link leads out
-   of the project and one over 40 KiB, which the log names once each.
+4. the project's own file points only at files the project holds: its `~/` entry, an absolute path outside it,
+   a `../` entry and a `..` after a wildcard never reach the prompt, each with one warning in the log, while
+   its absolute path inside the project loads, and an `AGENTS.md` over 40 KiB is left out with a warning;
+5. the person's own relative entry meets the project's link to a history file: left out, with a line in the
+   prompt and a warning;
+6. the folders' `AGENTS.md` that the scripted `read` calls find attach as before, a link to a personal note
+   included, except a link out of the project to a file that is not a Markdown note and one over 40 KiB,
+   which the log warns about once each.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-instruction-globs.py
 """
@@ -133,7 +136,7 @@ try:
     os.symlink("../elsewhere/legal", handbook / "legal")
     (handbook / "linked").mkdir()
     os.symlink("../../elsewhere/RULES.md", handbook / "linked/RULES.md")
-    write(data / "config/haarness.json", json.dumps({"instructions": ["~/handbook/**/RULES.md"]}))
+    write(data / "config/haarness.json", json.dumps({"instructions": ["~/handbook/**/RULES.md", "CONVENTIONS.md"]}))
     project.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(project)], check=True)
     write(project / ".haarness/config.toml", f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\n[lsp]\nenabled=false\n')
@@ -143,21 +146,27 @@ try:
     write(root / "outside/abs.md", "MARK_OUTSIDE_ABSOLUTE\n")
     write(root / "outside/up.md", "MARK_OUTSIDE_UP\n")
     write(project / "guide/inside.md", "MARK_PROJECT_ABSOLUTE\n")
-    outside_entries = ["~/private-notes.md", str(root / "outside/abs.md"), "../outside/up.md"]
+    outside_entries = ["~/private-notes.md", str(root / "outside/abs.md"), "../outside/up.md",
+                       "*/../../outside/up.md"]
+    # Whoever names it, a file the project links out of itself loads only as a personal note would.
+    write(root / "outside/history", "MARK_HISTORY\n")
+    os.symlink("../outside/history", project / "CONVENTIONS.md")
     write(project / "haarness.json", json.dumps({"instructions": [
         "docs/**/*.md", *outside_entries, str(project / "guide/inside.md")]}))
     write(project / "docs/guide.md", "MARK_PROJECT_DOC\n")
     os.symlink("..", project / "docs/loop")
     # Too large for the prompt: left out whole, and named in the log.
     write(project / "AGENTS.md", "MARK_ROOT_LARGE " * 2700)
-    # Folders the scripted turn reads in: a plain AGENTS.md, one that is a link out of the project and
-    # one too large.
-    write(root / "outside/nested.md", "MARK_NESTED_OUTSIDE\n")
+    # Folders the scripted turn reads in: a plain AGENTS.md, a link to a personal note, a link out of the
+    # project to a file that is no note, and one too large.
+    write(root / "outside/note.md", "MARK_NESTED_NOTE\n")
+    write(root / "outside/nested-history", "MARK_NESTED_OUTSIDE\n")
     write(project / "kept/AGENTS.md", "MARK_NESTED_KEPT\n")
-    (project / "linked").mkdir()
-    os.symlink("../../outside/nested.md", project / "linked/AGENTS.md")
+    for folder, target in [("note", "note.md"), ("linked", "nested-history")]:
+        (project / folder).mkdir()
+        os.symlink(f"../../outside/{target}", project / folder / "AGENTS.md")
     write(project / "large/AGENTS.md", "MARK_NESTED_LARGE " * 2500)
-    for folder in ["kept", "linked", "large"]:
+    for folder in ["kept", "note", "linked", "large"]:
         write(project / folder / "code.rs", f"fn {folder}() {{}} // CODE_{folder.upper()}\n")
         READS.append(f"{folder}/code.rs")
 
@@ -183,28 +192,41 @@ try:
     assert prompt.count("MARK_PROJECT_ABSOLUTE") == 1, prompt[-3000:]
     for entry in outside_entries:
         line = f"{project / 'haarness.json'}: ignored instructions {json.dumps(entry)}: it points outside the project"
-        assert logs.count(line) == 1, (entry, [row for row in logs.splitlines() if "ignored instructions" in row])
+        rows = [row for row in logs.splitlines() if line in row]
+        assert len(rows) == 1 and " WARN " in rows[0], (entry, [row for row in logs.splitlines() if "ignored instructions" in row])
     assert str(data / "config/haarness.json") in logs, "the notice says where the person's own files go"
-    check("a project's `~/`, outside absolute and `../` entries reach no request, each with one log line, "
-          "while its own absolute path and the person's handbook load")
+    check("a project's `~/`, outside absolute, `../` and wildcard-then-`..` entries reach no request, each with "
+          "one warning, while its own absolute path and the person's handbook load")
 
     assert "MARK_ROOT_LARGE" not in json.dumps(REQUESTS)
-    assert f"skipped instructions {project / 'AGENTS.md'}: it is larger than 40 KiB" in logs, logs[-3000:]
-    check("an AGENTS.md over 40 KiB is left out of the prompt and named in the log")
+    rows = [row for row in logs.splitlines()
+            if f"skipped instructions {project / 'AGENTS.md'}: it is larger than 40 KiB" in row]
+    assert len(rows) == 1 and " WARN " in rows[0], logs[-3000:]
+    check("an AGENTS.md over 40 KiB is left out of the prompt with a warning")
+
+    linked_out = "a link leads it out of the project to a file that is not a plain Markdown note"
+    assert "MARK_HISTORY" not in json.dumps(REQUESTS)
+    assert f"[Instruction file omitted: {project / 'CONVENTIONS.md'} ({linked_out})]" in prompt, prompt[-3000:]
+    rows = [row for row in logs.splitlines() if f"skipped instructions {project / 'CONVENTIONS.md'}: {linked_out}" in row]
+    assert len(rows) == 1 and " WARN " in rows[0], rows
+    check("the person's relative entry meets the project's link to a history file: left out, said in the "
+          "prompt and warned about")
 
     results = next(body for body in REQUESTS if "tool_result" in json.dumps(body.get("messages", [])[-1:]))
     sent = json.dumps(results["messages"])
-    for folder in ["KEPT", "LINKED", "LARGE"]:
+    for folder in ["KEPT", "NOTE", "LINKED", "LARGE"]:
         assert f"CODE_{folder}" in sent, (folder, sent[:3000])
-    assert sent.count("MARK_NESTED_KEPT") == 1, sent[:3000]
+    for mark in ["MARK_NESTED_KEPT", "MARK_NESTED_NOTE"]:
+        assert sent.count(mark) == 1, (mark, sent[:3000])
     for mark in ["MARK_NESTED_OUTSIDE", "MARK_NESTED_LARGE"]:
         assert mark not in json.dumps(REQUESTS), mark
     left_out = [line for line in logs.splitlines() if "read did not attach an instruction file" in line]
-    for name, reason in [("linked", "a link leads it outside the project"), ("large", "it is larger than 40 KiB")]:
+    for name, reason in [("linked", linked_out), ("large", "it is larger than 40 KiB")]:
         rows = [line for line in left_out if str(project / name / "AGENTS.md") in line]
-        assert len(rows) == 1 and reason in rows[0], (name, left_out)
-    check("reads attach a folder's AGENTS.md as before, but not one a link leads out of the project or one "
-          "over 40 KiB, each named once in the log")
+        assert len(rows) == 1 and reason in rows[0] and " WARN " in rows[0], (name, left_out)
+    assert len(left_out) == 2, left_out
+    check("reads attach a folder's AGENTS.md as before, a link to a personal note included, but not a link out "
+          "to a file that is no note or one over 40 KiB, each warned about once")
 
     # The person's glob loads for any project: a plain one, on the echo provider.
     plain = root / "plain"
