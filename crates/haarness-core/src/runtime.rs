@@ -13730,12 +13730,11 @@ impl RunnerTask {
             offer.context_window,
             deferring,
         );
-        // Those offered only on a turn whose words ask for them (memory,
-        // sessions, the managers) come and go turn by turn: named, they
-        // would have the list told again as often.
+        // Those offered only on a turn whose words ask for them come and go
+        // turn by turn: named, they would have the list told again as often.
         selection
             .optional
-            .retain(|name| !is_intent_gated_tool(name));
+            .retain(|name| !offered_by_the_prompt(name));
         Ok(crate::tool_catalog::deferred_sources(&selection, |tool| {
             self.tools.tool_server(tool)
         }))
@@ -16836,6 +16835,13 @@ fn detects_workflow_keyword(text: &str) -> bool {
             !previous.is_some_and(identifier) && !next.is_some_and(identifier)
         })
     })
+}
+
+/// Whether a turn is offered `name` only when its prompt's words (or
+/// Ultracode, or a turn's own tool settings) ask for it: `workflow`, and the
+/// administration, memory and session tools [`is_intent_gated_tool`] names.
+fn offered_by_the_prompt(name: &str) -> bool {
+    name == "workflow" || is_intent_gated_tool(name)
 }
 
 fn is_intent_gated_tool(name: &str) -> bool {

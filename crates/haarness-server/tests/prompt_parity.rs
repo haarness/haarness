@@ -686,6 +686,7 @@ async fn the_deferred_tools_are_told_once_and_the_next_request_keeps_the_prefix(
             "read",
             "ext__lint__run",
             "memory_read",
+            "workflow",
             "mcp__docs__search",
             "mcp__docs__read",
         ]
@@ -725,9 +726,15 @@ async fn the_deferred_tools_are_told_once_and_the_next_request_keeps_the_prefix(
         })
         .await
         .unwrap();
-    // The third asks for memory, whose tools only such a turn is offered:
-    // they come and go, so they are not named and nothing is told again.
-    for text in ["First turn", "Second turn", "Please remember the plan"] {
+    // The third asks for memory and the fourth for a workflow, whose tools
+    // only such a turn is offered: they come and go, so they are not named
+    // and nothing is told again.
+    for text in [
+        "First turn",
+        "Second turn",
+        "Please remember the plan",
+        "Run the release workflow",
+    ] {
         let request = StartTurnRequest {
             text: text.into(),
             ..request()
@@ -744,7 +751,7 @@ async fn the_deferred_tools_are_told_once_and_the_next_request_keeps_the_prefix(
         .filter(|request| !request.tools.is_empty())
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     let told = "<system-reminder>\nMore tools wait to be loaded with load_tool; ask for them by group or server name (this list replaces any earlier one):\n- docs (MCP server): 2 tools\n- lint (extension): 1 tool\n</system-reminder>";
     let reminders = |request: &ProviderRequest| {
         request
@@ -756,6 +763,7 @@ async fn the_deferred_tools_are_told_once_and_the_next_request_keeps_the_prefix(
     assert_eq!(reminders(&requests[0]), 1, "{:?}", requests[0].messages);
     assert_eq!(reminders(&requests[1]), 1, "{:?}", requests[1].messages);
     assert_eq!(reminders(&requests[2]), 1, "{:?}", requests[2].messages);
+    assert_eq!(reminders(&requests[3]), 1, "{:?}", requests[3].messages);
     let synthetic = runtime
         .items(thread.id, None)
         .await
