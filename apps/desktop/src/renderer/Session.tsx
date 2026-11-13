@@ -35,6 +35,7 @@ import {
   plainMessage,
   promptWithContext,
   sentParts,
+  type PromptContext,
 } from "./prompt-context";
 import { UserMessageBody } from "./UserMessage";
 import { ThoughtRow, ThoughtTicker } from "./ThoughtRow";
@@ -564,12 +565,26 @@ export function Session() {
   let composer!: HTMLTextAreaElement;
   let conversation!: HTMLElement;
 
-  /** The new chat a first message is making, which the message box's text
-   * moves to with the view: the box it moves from and where it lands, by
-   * owner, draft key and stored draft. */
+  /** The new chat a first message is making, which the message box moves
+   * to with the view: the box it moves from and where it lands, by owner,
+   * draft key and stored draft; the send making it, and what that send
+   * took from the box. */
   let carriedTo:
-    | { from: string; fromKey: string; fromStored: string; to: string; toKey: string; toStored: string }
+    | {
+        from: string;
+        fromKey: string;
+        fromStored: string;
+        to: string;
+        toKey: string;
+        toStored: string;
+        flight: Promise<boolean>;
+        sent: { files: Attachment[]; chips: PromptContext[] };
+      }
     | undefined;
+  /** Where the box went when a send moved the view to the chat it made
+   * (that chat's owner), by send, and whether all it held got there: an
+   * Enter waiting in the box follows it. */
+  const carriedBy = new WeakMap<Promise<boolean>, { to: string; moved: Promise<boolean> }>();
   /** The chat the message box was drawn for last. */
   let shownOwner = "";
   /** Text on its way, by stored draft: it stays stored there (ahead of what
@@ -1807,16 +1822,34 @@ export function Session() {
             change(draft());
             set("drafts", carry.fromKey, "");
             void app.run(() => window.haarness.storage(carry.fromStored, ""));
-          } else setDraft(state.drafts[draftKey()] ?? "");
+            // So do the attachments and chips added meanwhile.
+            const moved = app
+              .run(async () => {
+                await app.carryNewChatParts(carry.fromKey, carry.toKey, carry.sent);
+                return true;
+              })
+              .then((done) => done === true);
+            // Followed only when the message moved the view, not the person.
+            if (app.openingCreatedChat() === id) carriedBy.set(carry.flight, { to: carry.to, moved });
+          } else {
+            // The box showed another page then: the new chat has the
+            // page's text as state.tsx gave it, which leaves the page.
+            setDraft(state.drafts[draftKey()] ?? "");
+            if (draft().trim() && state.drafts[carry.fromKey] === draft()) {
+              set("drafts", carry.fromKey, "");
+              void app.run(() => window.haarness.storage(carry.fromStored, ""));
+            }
+          }
         } else setDraft(state.drafts[draftKey()] ?? "");
         shownOwner = owner();
         fileDrop.reset();
         const key = draftKey();
         const current = owner();
         const locationId = project()?.id;
+        const stored = "draft:" + draftScope() + ":" + id;
         if (locationId)
           void window.haarness
-            .storage("draft:" + draftScope() + ":" + id)
+            .storage(stored)
             .then(
               async (value) =>
                 value ??
@@ -1825,9 +1858,12 @@ export function Session() {
                   : await window.haarness.storage("draft:" + locationId + ":")),
             )
             .then((value) => {
+              // A message on its way from this box is stored there until it
+              // has gone: the box it emptied stays empty.
               if (
                 owner() === current &&
                 !draft() &&
+                !unsent.has(stored) &&
                 typeof value === "string"
               ) {
                 set("drafts", key, value);
@@ -1968,11 +2004,21 @@ export function Session() {
       const pressed = owner();
       if (waitingForSend.has(pressed)) return;
       waitingForSend.add(pressed);
+      const flight = inFlight.get(pressed);
       let went = false;
       try {
-        went = (await inFlight.get(pressed)) ?? false;
+        went = (await flight) ?? false;
       } finally {
         waitingForSend.delete(pressed);
+      }
+      // A first message's new chat took the box with the view, this
+      // message in it: it goes there, once all the box held has. With
+      // another chat shown by then, it waits in that box: the box shown
+      // holds something Enter was not pressed on.
+      const followed = flight && carriedBy.get(flight);
+      if (followed) {
+        if (!went || owner() !== followed.to || !(await followed.moved) || owner() !== followed.to || submitting()) return;
+        return send(delivery);
       }
       if (!went || owner() !== pressed || submitting()) return;
       return send(delivery);
@@ -2131,6 +2177,9 @@ export function Session() {
     const keyboard = document.activeElement === composer;
     // Kept as it was until it has gone (see `change`).
     unsent.set(storedKey, text);
+    // Out of the box at once, unless an input method is composing there:
+    // then only once it ends, and the chat moving first leaves it behind.
+    const taken = !composingText;
     setSubmissions((items) => [...items, origin]);
     let landed!: (went: boolean) => void;
     const flight = new Promise<boolean>((done) => (landed = done));
@@ -2193,6 +2242,8 @@ export function Session() {
               to: createdOwner,
               toKey: sessionKey(connection!, id),
               toStored: "draft:" + connection + ":" + id,
+              flight,
+              sent: { files: originalAttachments, chips: context },
             };
           // Commit the destination before removing the persisted starter
           // attachments. A failed disk write must leave the original recoverable.
@@ -2200,7 +2251,7 @@ export function Session() {
             await app.setAttachmentDraft(sessionKey(connection!, id), originalAttachments);
             await clearSentAttachments(contextKey);
           });
-          if (state.drafts["new:" + originProject] === text)
+          if (!taken && state.drafts["new:" + originProject] === text)
             set("drafts", "new:" + originProject, "");
           void app.run(async () => {
             await app.clearPromptContext(contextKey, context);
@@ -2214,6 +2265,7 @@ export function Session() {
         },
         context,
         delivery,
+        taken,
       );
       sent = true;
       // Gone: what the box holds now is what its draft keeps.
@@ -2247,12 +2299,13 @@ export function Session() {
         (!document.activeElement || document.activeElement === document.body)
       )
         composer.focus({ preventScroll: true });
-      // What was typed while that chat was being made went to it with the
-      // view (state.tsx), so the new-chat draft starts empty again.
-      if (!selected && shown) {
-        set("drafts", "new:" + originProject, "");
+      // The new-chat page keeps what it holds now, stored without the
+      // message that went: what was typed while its chat was being made
+      // left the page with the view, and what was typed there after New
+      // chat is the next message (a second Enter sends it).
+      if (!selected) {
         if (draftSave?.key === storedKey) draftSave = undefined;
-        await window.haarness.storage(storedKey, "");
+        await window.haarness.storage(storedKey, state.drafts["new:" + originProject] ?? "");
       }
       // app.send already clears the shared text draft. Attachments have
       // their own lifecycle, and files added during the request must survive.
@@ -2263,8 +2316,6 @@ export function Session() {
         "draft:" + connection + ":" + threadId,
         state.drafts[sessionKey(connection!, threadId)] ?? "",
       );
-      if (!selected && !state.drafts["new:" + originProject])
-        await window.haarness.storage("draft:" + originProject + ":", "");
     } finally {
       setSubmissions((items) =>
         items.filter((item) => item !== origin && item !== createdOwner),

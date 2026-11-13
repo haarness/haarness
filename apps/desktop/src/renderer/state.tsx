@@ -1316,6 +1316,47 @@ function createApp(saved?: Preferences) {
     ]);
     return result;
   }
+  /**
+   * What the new-chat page `from` holds besides the message just sent from
+   * it (attachments and context chips added while that message's chat was
+   * being made) goes to that chat, `to`, with the message box, as its text
+   * does. Written there before it leaves the page, so a write that fails
+   * leaves it where it was.
+   */
+  async function carryNewChatParts(
+    from: string,
+    to: string,
+    sent: { files: Attachment[]; chips: PromptContext[] },
+  ) {
+    await Promise.all([loadAttachmentDraft(from), loadPromptContext(from), loadPromptContext(to)]);
+    const files = attachmentDrafts.get(from).filter((item) => !sent.files.includes(item));
+    const chips = (contexts()[from] ?? []).filter((item) => !sent.chips.includes(item));
+    // The chat also holds what the sent message took, until it has gone:
+    // the limits are those of the next message, without it.
+    const next = <V,>(items: V[], parked: V[]) => items.filter((item) => !parked.includes(item));
+    await carryDraft([
+      ...(files.length
+        ? [{
+            write: () =>
+              setAttachmentDraft(to, (items) => [...items, ...files], (items) => checkAttachments(next(items, sent.files))),
+            clear: () => setAttachmentDraft(from, (items) => items.filter((item) => !files.includes(item))),
+          }]
+        : []),
+      ...(chips.length
+        ? [{
+            write: () => {
+              const held = contexts()[to] ?? [];
+              const going = chips.reduce(addContext, next(held, sent.chips));
+              const parked = held.filter(
+                (item) => sent.chips.includes(item) && !going.some((value) => contextKey(value) === contextKey(item)),
+              );
+              return setPromptContext(to, [...parked, ...going]);
+            },
+            clear: () => setPromptContext(from, (contexts()[from] ?? []).filter((item) => !chips.includes(item))),
+          }]
+        : []),
+    ]);
+  }
   /** The message box shows: a project or This computer is open, or This
    * computer's new chat is opening. */
   const composerShown = () => !!state.connection || homeOpening();
@@ -1837,8 +1878,12 @@ function createApp(saved?: Preferences) {
   );
   const attachmentDraft = (key: string) => { attachmentVersion(); return attachmentDrafts.get(key); };
   const loadAttachmentDraft = (key: string) => attachmentDrafts.load(key);
-  function setAttachmentDraft(key: string, value: Attachment[] | ((items: Attachment[]) => Attachment[])) {
-    const pending = attachmentDrafts.update(key, value);
+  function setAttachmentDraft(
+    key: string,
+    value: Attachment[] | ((items: Attachment[]) => Attachment[]),
+    limit?: (items: Attachment[]) => unknown,
+  ) {
+    const pending = attachmentDrafts.update(key, value, limit);
     void pending.catch((error) => {
       if (!cancelled(error)) set("error", "Could not save attachment draft: " + errorLine(error));
     });
@@ -2282,6 +2327,9 @@ function createApp(saved?: Preferences) {
     if (request !== notificationNavigation) return;
     await chooseProjectSession(view.id, target.thread);
   }
+  /** The chat a first message has just made, while the view moves to it. */
+  let openingCreated = "";
+  const openingCreatedChat = () => openingCreated;
   async function create(
     options: {
       provider?: string;
@@ -2342,10 +2390,16 @@ function createApp(saved?: Preferences) {
           try { await window.haarness.browserAdopt(connection, thread.id); }
           catch (error) { if (!cancelled(error)) set("error", "Your browser remains on the new-chat screen: " + errorLine(error)); }
         }
-        if (generation === current && selection === currentSelection)
-          await choose(thread.id, panel, {
+        if (generation === current && selection === currentSelection) {
+          // Choosing a chat shows it at once, so the message box sees this
+          // move as the message's own, not one the person made.
+          openingCreated = thread.id;
+          const opened = choose(thread.id, panel, {
             fresh: freshChat(created, Date.now(), hydration),
           });
+          openingCreated = "";
+          await opened;
+        }
       }
     }
     return thread;
@@ -2358,6 +2412,9 @@ function createApp(saved?: Preferences) {
     onCreated?: (id: string) => void,
     context: PromptContext[] = [],
     delivery?: T.InputDelivery,
+    /** The sender has taken the text out of its box already: a draft that
+     * reads the same is the next message, typed again, and stays. */
+    taken = false,
   ) {
     const target = project()?.id;
     const draftProject = newDraftScope();
@@ -2511,9 +2568,9 @@ function createApp(saved?: Preferences) {
       if (note) set("commandNotes", noteKey, note);
     } else await targetApi(pending.method, thread.id, input);
     await window.haarness.storage(key, null);
-    if (state.drafts[sessionKey(connection, thread.id)] === text)
+    if (!taken && state.drafts[sessionKey(connection, thread.id)] === text)
       set("drafts", sessionKey(connection, thread.id), "");
-    if (!targetThread && state.drafts["new:" + draftProject] === text)
+    if (!taken && !targetThread && state.drafts["new:" + draftProject] === text)
       set("drafts", "new:" + draftProject, "");
     if (state.connection?.id === connection) await refresh();
     return thread.id;
@@ -2837,6 +2894,8 @@ function createApp(saved?: Preferences) {
     homeOpening,
     homeOpened,
     moveNewChat,
+    carryNewChatParts,
+    openingCreatedChat,
     homeFailed,
     retryOpening,
     chatHomeLocation,

@@ -25,9 +25,12 @@ export function createAttachmentDrafts(
   return {
     get: (key: string) => drafts.get(key) ?? [],
     load: (key: string) => enqueue(key, () => hydrate(key)),
-    update: (key: string, value: Update) => enqueue(key, async () => {
+    /** `limit` checks the new value (by default against the limits of one
+     * message) and throws to refuse it. */
+    update: (key: string, value: Update, limit: (items: Attachment[]) => unknown = checkAttachments) => enqueue(key, async () => {
       await hydrate(key);
-      const items = checkAttachments(typeof value === "function" ? value(drafts.get(key)!) : value);
+      const items = typeof value === "function" ? value(drafts.get(key)!) : value;
+      limit(items);
       drafts.set(key, items);
       changed();
       await storage(key, items);
