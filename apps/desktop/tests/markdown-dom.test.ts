@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
-import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "../src/renderer/link-target";
+import { cssReferencesOutside, loadsNetworkPath, parsedAddress, sanitizedLink } from "../src/renderer/link-target";
 import { REPLY_ID, replyAttribute, replyIds } from "../src/renderer/remote-images";
 
 // Markdown sanitizing needs a DOM, which these tests do not have, so this
@@ -75,6 +75,19 @@ test("an address a reply loads by itself never names a network path, however it 
     assert.ok(attributes.includes(`"${name}"`), name);
   assert.match(markdown, /if \(loadsNetworkPath\(data\.attrValue\)\) data\.keepAttr = false;/);
   assert.match(markdown, /const value = parsedAddress\(data\.attrValue\);/);
+});
+
+// `[README.md:3](README.md:3)` is a link to a file at the project's top, but
+// `readme.md:` reads as a scheme: the sanitizer made it a placeholder, so the
+// link said it does not open. Its address now stays as written.
+test("a reply's link to a top-level file with its line keeps its address as written", async () => {
+  const markdown = await readFile(new URL("../src/renderer/markdown-dom.ts", import.meta.url), "utf8");
+  assert.match(markdown, /const rule = sanitizedLink\(value\);\n\s*if \(rule === "keep"\) data\.forceKeepAttr = true;/);
+  assert.match(markdown, /else if \(rule === "placeholder"\) \{\n[^}]*setAttribute\("href", "unsupported:"\)/);
+  for (const href of ["README.md:3", " main.rs:42 ", "a.ts:12-20", "a.ts:12:4"])
+    assert.equal(sanitizedLink(parsedAddress(href)), "keep", href);
+  for (const href of ["tel:123", "vscode://file/a.ts", "x-acme.settings:privacy"])
+    assert.equal(sanitizedLink(parsedAddress(href)), "placeholder", href);
 });
 
 // SVG presentation attributes are CSS, and their `url()` loads what it names:

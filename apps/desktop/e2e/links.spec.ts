@@ -33,6 +33,7 @@ test.beforeAll(async () => {
     join(workspace, "src/a.ts"),
     Array.from({ length: 200 }, (_, index) => `export const line${index + 1} = ${index + 1};`).join("\n") + "\n",
   );
+  await writeFile(join(workspace, "README.md"), "# Link fixture\n\nThe third line.\n");
   await writeFile(join(workspace, "run.command"), "#!/bin/sh\necho linked script ran\n", { mode: 0o755 });
   await writeFile(
     join(workspace, "diagram.svg"),
@@ -121,6 +122,7 @@ test("file links in a reply open project files in the Files panel; others say wh
   await page.locator(".sessions").getByRole("button", { name: "Link fixture", exact: true }).click();
   const links = [
     "[source](src/a.ts:150)",
+    "[readme](README.md:3)",
     "[script](run.command)",
     "[diagram](diagram.svg)",
     "[guide](docs/guide.md)",
@@ -148,6 +150,11 @@ test("file links in a reply open project files in the Files panel; others say wh
   await expect(page.locator(".file-preview .cm-activeLine")).toBeInViewport();
   await link("absolute").click();
   await expect(page.locator(".file-preview .cm-activeLine")).toHaveText("export const line7 = 7;");
+  // A file at the project's top with its line, whose name reads like a scheme.
+  await expect(link("readme")).toHaveAttribute("href", "README.md:3");
+  await link("readme").click();
+  await expect(activeTab).toContainText("README.md");
+  await expect(page.locator(".file-preview .cm-activeLine")).toHaveText("The third line.");
 
   // A script opens as text, and an SVG only in the sandboxed preview.
   await link("script").click();

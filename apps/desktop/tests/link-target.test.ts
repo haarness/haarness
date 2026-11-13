@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { linkTarget, type LinkTarget } from "../src/renderer/link-target";
+import { linkTarget, sanitizedLink, topFileLine, type LinkTarget } from "../src/renderer/link-target";
 
 const project = { root: "/Users/me/work/app" };
 const file = (path: string, line?: number): LinkTarget => ({
@@ -35,6 +35,49 @@ test("links to project files open in the Files panel, at their line", () => {
     ["/Users/me/work/app", file("")],
   ] as const)
     assert.deepEqual(linkTarget(href, project), target, href);
+});
+
+// A file at the project's top with a line reads, to the URL parser, as a
+// scheme (`readme.md:`), so it used to be refused as an unsupported link.
+test("a file at the project's top opens at its line, though its name looks like a scheme", () => {
+  for (const [href, target] of [
+    ["README.md:3", file("README.md", 3)],
+    ["main.rs:42", file("main.rs", 42)],
+    ["a.ts:12-20", file("a.ts", 12)],
+    ["a.ts:12:4", file("a.ts", 12)],
+    ["index.test.tsx:9", file("index.test.tsx", 9)],
+    ["Cargo.toml:1", file("Cargo.toml", 1)],
+    [" README.md:3\n", file("README.md", 3)],
+    ["README.md#L3", file("README.md", 3)],
+    ["README.md", file("README.md")],
+  ] as const)
+    assert.deepEqual(linkTarget(href, project), target, href);
+  for (const href of [
+    "tel:123",
+    "sms:5551234",
+    "x-acme.settings:privacy.camera",
+    "x-acme.settings:privacy.camera:3",
+    "vscode://file/a.ts:3",
+    "vscode:a.ts:3",
+    "README.md:3:4:5",
+    "README.md:3x",
+    "README.md:",
+    "Makefile:3",
+    "javascript:alert(1)",
+  ])
+    assert.deepEqual(linkTarget(href, project), refused("unsupported"), href);
+});
+
+test("the reply's sanitizer keeps such a link as written, and still turns other schemes into a placeholder", () => {
+  for (const href of ["README.md:3", "main.rs:42-50", "a.ts:12:4", "file:///Users/me/work/app/a.ts", "C:\\app\\a.ts", "smb://host/share"])
+    assert.equal(sanitizedLink(href), "keep", href);
+  for (const href of ["tel:123", "vscode://file/a.ts", "x-acme.settings:privacy", "javascript:alert(1)", "Makefile:3"])
+    assert.equal(sanitizedLink(href), "placeholder", href);
+  // The default rules decide the rest: web and mail links, and paths.
+  for (const href of ["https://example.test", "mailto:me@example.test", "src/a.ts:12", "README.md", "#top", ".env:3"])
+    assert.equal(sanitizedLink(href), undefined, href);
+  assert.equal(topFileLine("README.md:3"), true);
+  assert.equal(topFileLine("src/README.md:3"), false);
 });
 
 test("a file that could run or pick its own app still only opens in the Files panel", () => {
