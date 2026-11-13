@@ -431,6 +431,17 @@ pub fn load_layers_with_system(
     // A project's own entries name files of the project only: a cloned
     // repository never puts the person's other files into the prompt.
     let project_roots = crate::layout::project_roots(workspace);
+    // The same roots as written, for paths judged on their text.
+    let named_roots: Vec<PathBuf> = project_roots
+        .iter()
+        .cloned()
+        .chain(
+            crate::layout::project_directories(workspace)
+                .first()
+                .map(|root| fold(root)),
+        )
+        .chain(std::iter::once(fold(workspace)))
+        .collect();
     let mut urls = Vec::new();
     let mut seen: HashSet<PathBuf> = local_files
         .iter()
@@ -441,22 +452,42 @@ pub fn load_layers_with_system(
             urls.push(entry.clone());
             continue;
         }
-        let fence = project.as_ref().map(|_| project_roots.as_slice());
-        let Some(files) =
-            instruction_entry_files(entry, home, workspace, trust, fence, &mut layers.warnings)
-        else {
-            if let Some(named_by) = project {
-                layers.warnings.push(format!(
-                    "{}: ignored instructions {entry:?}: it points outside the project; \
-                     a file of your own belongs in {}",
-                    named_by.display(),
-                    config_dir.join("haarness.json").display()
-                ));
+        let fence = project
+            .as_ref()
+            .map(|_| (project_roots.as_slice(), named_roots.as_slice()));
+        let files =
+            instruction_entry_files(entry, home, workspace, trust, fence, &mut layers.warnings);
+        let files = match files {
+            Ok(files) => files,
+            Err(ignored) => {
+                if let Some(named_by) = project {
+                    let own = config_dir.join("haarness.json");
+                    let why = match ignored {
+                        Ignored::Outside => format!(
+                            "it points outside the project; a file of your own belongs in {}",
+                            own.display()
+                        ),
+                        Ignored::DotsLeave => format!(
+                            "its `..` leaves the repository, which is not followed; a file of \
+                             your own belongs in {}",
+                            own.display()
+                        ),
+                        Ignored::DotsAfterWildcard => "a `..` after a wildcard is not followed; \
+                                                       write the path from the repository root"
+                            .to_owned(),
+                    };
+                    layers.warnings.push(format!(
+                        "{}: ignored instructions {entry:?}: {why}",
+                        named_by.display()
+                    ));
+                }
+                continue;
             }
-            continue;
         };
         // A relative entry's matches lie in the project, whoever named it, so
-        // the project decides where a link among them leads.
+        // the project decides where a link among them leads; but one of the
+        // person's own whose `..` walks out of the project names their own
+        // file, as its text says.
         let relative = !entry.starts_with("~/") && !Path::new(entry).is_absolute();
         let mut outside = Vec::new();
         for file in files {
@@ -467,14 +498,19 @@ pub fn load_layers_with_system(
                 continue;
             }
             // A link may lead a match of a project's entry out of it.
-            if fence.is_some_and(|roots| !roots.iter().any(|root| canonical.starts_with(root))) {
+            if fence.is_some_and(|(roots, _)| !roots.iter().any(|root| canonical.starts_with(root)))
+            {
                 outside.push(file);
                 continue;
             }
             seen.insert(canonical.clone());
             // Only the person's own entries are trusted for where their files
             // are, never a project's.
-            let project = project.is_some() || relative;
+            let project = project.is_some()
+                || (relative && {
+                    let folded = fold(&file);
+                    named_roots.iter().any(|root| folded.starts_with(root))
+                });
             let trusted = !project && trusted_roots.iter().any(|root| canonical.starts_with(root));
             local_files.push(Candidate {
                 file,
@@ -760,22 +796,24 @@ const INSTRUCTION_GLOB_ENTRIES: usize = 1_000_000;
 /// up the tree cannot keep it walking (see [`haarness_server::bounded_glob`]),
 /// and `warnings` says when an entry reached its budget.
 ///
-/// With a `fence` (the project's real roots, for an entry a project's file
-/// named) nothing outside it is read: a `~/` entry, one with a `..` part
-/// anywhere, one on another drive or computer (a Windows UNC path), all
-/// judged on the text alone, and an absolute or relative one whose fixed
-/// start (the folders before its first wildcard) a link leads out of the
-/// project, give `None`. A relative entry is read from each folder where it
-/// starts inside; its matches are still the caller's to check, since a
-/// wildcard may match a link.
+/// With a `fence` (the project's real roots and the same roots as written,
+/// for an entry a project's file named) nothing outside it is read, and the
+/// entry is [`Ignored`]: a `~/` entry, one with a `..` after its first
+/// wildcard, one on another drive or computer (a Windows UNC path), all
+/// judged on the text alone; one whose `..` before its first wildcard leaves
+/// the repository on the text, its start then walked as folded so no link
+/// can turn it; and one whose fixed start (the folders before its first
+/// wildcard) a link leads out of the project. A relative entry is read from
+/// each folder where it starts inside; its matches are still the caller's
+/// to check, since a wildcard may match a link.
 fn instruction_entry_files(
     entry: &str,
     home: Option<&Path>,
     workspace: &Path,
     trust: bool,
-    fence: Option<&[PathBuf]>,
+    fence: Option<(&[PathBuf], &[PathBuf])>,
     warnings: &mut Vec<String>,
-) -> Option<Vec<PathBuf>> {
+) -> Result<Vec<PathBuf>, Ignored> {
     use haarness_server::bounded_glob::{Cut, Links, Walk};
     let configured = entry;
     let mut files = |pattern: String| {
@@ -792,46 +830,131 @@ fn instruction_entry_files(
         }
         files
     };
-    if let Some(roots) = fence
-        && (entry.split(['/', '\\']).any(|part| part == "..")
-            || off_the_project_drive(Path::new(entry), roots))
-    {
-        return None;
+    // Judged on the text first, so nothing outside is opened to find out.
+    let parts: Vec<&str> = entry.split(['/', '\\']).collect();
+    let wildcard = parts
+        .iter()
+        .position(|part| part.contains(['*', '?', '[']))
+        .unwrap_or(parts.len());
+    let dots = parts[..wildcard].contains(&"..");
+    if let Some((roots, _)) = fence {
+        if parts[wildcard..].contains(&"..") {
+            return Err(Ignored::DotsAfterWildcard);
+        }
+        if entry.starts_with("~/") || off_the_project_drive(Path::new(entry), roots) {
+            return Err(Ignored::Outside);
+        }
     }
-    let starts_inside = |start: PathBuf| fence.is_none_or(|roots| stays_within(&start, roots));
+    // A project's `..` is followed on the text, and only within the
+    // repository: `../shared/team.md` from `app`, but no further.
+    let start = |folder: Option<&Path>| -> Result<(PathBuf, String), Ignored> {
+        let fixed = parts[..wildcard].join("/");
+        let written = folder.map_or_else(|| PathBuf::from(&fixed), |folder| folder.join(&fixed));
+        let Some((roots, named)) = fence else {
+            return Ok((written, String::new()));
+        };
+        let (start, rest) = if dots {
+            (fold(&written), parts[wildcard..].join("/"))
+        } else {
+            (glob_start(&written), String::new())
+        };
+        if dots && !named.iter().any(|root| start.starts_with(root)) {
+            return Err(Ignored::DotsLeave);
+        }
+        if !stays_within(&start, roots) {
+            return Err(Ignored::Outside);
+        }
+        Ok((start, rest))
+    };
+    // The pattern a fenced `..` entry walks: its folded start, escaped, and
+    // the rest as written.
+    let folded = |start: &Path, rest: &str| {
+        let start = glob::Pattern::escape(&start.to_string_lossy());
+        if rest.is_empty() {
+            start
+        } else {
+            format!("{start}/{rest}")
+        }
+    };
     let entry = match entry.strip_prefix("~/") {
-        Some(_) if fence.is_some() => return None,
         Some(rest) => {
             let Some(home) = home else {
-                return Some(Vec::new());
+                return Ok(Vec::new());
             };
             format!("{}/{rest}", glob::Pattern::escape(&home.to_string_lossy()))
         }
         None => entry.to_owned(),
     };
     if Path::new(&entry).is_absolute() {
-        return starts_inside(glob_start(Path::new(&entry))).then(|| files(entry));
+        let (start, rest) = start(None)?;
+        return Ok(files(if fence.is_some() && dots {
+            folded(&start, &rest)
+        } else {
+            entry
+        }));
     }
     if !trust {
-        return Some(Vec::new());
+        return Ok(Vec::new());
     }
     let mut out = Vec::new();
-    let mut inside = false;
+    let mut verdict = Err(Ignored::Outside);
     for directory in crate::layout::project_directories(workspace)
         .into_iter()
         .rev()
     {
         // Judged on the folder as it is: the pattern below escapes it.
-        if !starts_inside(directory.join(glob_start(Path::new(&entry)))) {
-            continue;
-        }
-        inside = true;
-        out.extend(files(format!(
-            "{}/{entry}",
-            glob::Pattern::escape(&directory.to_string_lossy())
-        )));
+        let (start, rest) = match start(Some(&directory)) {
+            Ok(start) => start,
+            Err(ignored) => {
+                if verdict.is_err() {
+                    verdict = Err(ignored);
+                }
+                continue;
+            }
+        };
+        verdict = Ok(());
+        out.extend(files(if fence.is_some() && dots {
+            folded(&start, &rest)
+        } else {
+            format!(
+                "{}/{entry}",
+                glob::Pattern::escape(&directory.to_string_lossy())
+            )
+        }));
     }
-    (inside || fence.is_none()).then_some(out)
+    if fence.is_none() {
+        return Ok(out);
+    }
+    verdict.map(|()| out)
+}
+
+/// Why a project's `instructions` entry is ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ignored {
+    /// It names a place outside the project: a `~/` path, an absolute path
+    /// or a link that leads out, another computer or drive.
+    Outside,
+    /// Its `..` leaves the repository.
+    DotsLeave,
+    /// It has a `..` after a wildcard.
+    DotsAfterWildcard,
+}
+
+/// `path` with its `.` and `..` parts taken away on the text alone: a `..`
+/// drops the name before it, whatever links there are.
+fn fold(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut folded = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                folded.pop();
+            }
+            part => folded.push(part),
+        }
+    }
+    folded
 }
 
 /// Whether `path` names another computer (a UNC share, a device) or a drive
@@ -4200,10 +4323,22 @@ mod tests {
                 notice.starts_with(&project.join("haarness.json").display().to_string()),
                 "{notice}"
             );
-            assert!(
-                notice.ends_with(&config.join("haarness.json").display().to_string()),
-                "{notice}"
-            );
+            // Each says why, and where a file of the person's own belongs.
+            let why = if entry.starts_with('*') {
+                "a `..` after a wildcard is not followed; write the path from the repository root"
+                    .to_owned()
+            } else {
+                format!(
+                    "{}; a file of your own belongs in {}",
+                    if entry.starts_with("..") {
+                        "its `..` leaves the repository, which is not followed"
+                    } else {
+                        "it points outside the project"
+                    },
+                    config.join("haarness.json").display()
+                )
+            };
+            assert!(notice.ends_with(&why), "{notice}");
         }
         // A match a link leads out of the project is left out, and said once.
         #[cfg(unix)]
@@ -4434,6 +4569,146 @@ mod tests {
                 &roots
             ));
         }
+    }
+
+    #[test]
+    fn the_persons_own_entries_with_dots_load_as_they_name_them() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-person-dots-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let project = root.join("project");
+        for dir in [
+            config.clone(),
+            project.join(".git"),
+            root.join(".team"),
+            root.join("shared"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        for (file, body) in [
+            ("team-rules.txt", "TEAM_TEXT"),
+            (".team/rules.md", "HIDDEN_TEAM"),
+            ("shared/RULES", "SHARED_RULES"),
+            ("shared/ok.md", "SHARED_OK"),
+            ("shared/style.mdc", "SHARED_STYLE"),
+        ] {
+            fs::write(root.join(native(file)), body).unwrap();
+        }
+        // Files beside every project, which the person's own entries name
+        // through `..`: no link, so they are the person's.
+        fs::write(
+            config.join("haarness.json"),
+            serde_json::json!({"instructions": [
+                "../team-rules.txt",
+                "../.team/rules.md",
+                "../shared/RULES",
+                "../shared/ok.md",
+                "../shared/*.mdc"
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let layers = load_layers(&config, None, &project, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        for body in [
+            "TEAM_TEXT",
+            "HIDDEN_TEAM",
+            "SHARED_RULES",
+            "SHARED_OK",
+            "SHARED_STYLE",
+        ] {
+            assert_eq!(
+                instructions.matches(body).count(),
+                1,
+                "{body}\n{instructions}"
+            );
+        }
+        assert!(
+            !instructions.contains("[Instruction file omitted"),
+            "{instructions}"
+        );
+        assert!(layers.warnings.is_empty(), "{:?}", layers.warnings);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_projects_dots_reach_only_within_the_repository() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-project-dots-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let repository = root.join("mono");
+        let workspace = repository.join("app");
+        for dir in [
+            config.clone(),
+            repository.join(".git"),
+            repository.join("shared"),
+            workspace.join("docs/a"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(repository.join("shared/team.md"), "TEAM_RULES").unwrap();
+        fs::write(repository.join("shared/style.md"), "TEAM_STYLE").unwrap();
+        fs::write(root.join("outside.md"), "OUTSIDE_RULES").unwrap();
+        fs::write(workspace.join("docs/x.md"), "DOCS_X").unwrap();
+        let entries = [
+            "../shared/team.md",
+            "../shared/*.md",
+            "../../outside.md",
+            "docs/*/../x.md",
+        ];
+        fs::write(
+            workspace.join("haarness.json"),
+            serde_json::json!({ "instructions": entries }).to_string(),
+        )
+        .unwrap();
+        let layers = load_layers(&config, None, &workspace, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        // Inside the repository the `..` is followed, once per file.
+        assert_eq!(
+            instructions.matches("TEAM_RULES").count(),
+            1,
+            "{instructions}"
+        );
+        assert_eq!(
+            instructions.matches("TEAM_STYLE").count(),
+            1,
+            "{instructions}"
+        );
+        for hidden in ["OUTSIDE_RULES", "DOCS_X"] {
+            assert!(!instructions.contains(hidden), "{hidden}\n{instructions}");
+        }
+        let named_by = workspace.join("haarness.json");
+        for (entry, why) in [
+            (
+                "../../outside.md",
+                format!(
+                    "its `..` leaves the repository, which is not followed; a file of your own \
+                     belongs in {}",
+                    config.join("haarness.json").display()
+                ),
+            ),
+            (
+                "docs/*/../x.md",
+                "a `..` after a wildcard is not followed; write the path from the repository root"
+                    .to_owned(),
+            ),
+        ] {
+            let warning = format!(
+                "{}: ignored instructions {entry:?}: {why}",
+                named_by.display()
+            );
+            assert!(
+                layers.warnings.contains(&warning),
+                "{warning}\n{:?}",
+                layers.warnings
+            );
+        }
+        assert_eq!(layers.warnings.len(), 2, "{:?}", layers.warnings);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
