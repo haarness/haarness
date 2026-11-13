@@ -1831,9 +1831,10 @@ export function Session() {
         const key = draftKey();
         const current = owner();
         const locationId = project()?.id;
+        const stored = "draft:" + draftScope() + ":" + id;
         if (locationId)
           void window.haarness
-            .storage("draft:" + draftScope() + ":" + id)
+            .storage(stored)
             .then(
               async (value) =>
                 value ??
@@ -1842,9 +1843,12 @@ export function Session() {
                   : await window.haarness.storage("draft:" + locationId + ":")),
             )
             .then((value) => {
+              // A message on its way from this box is stored there until it
+              // has gone: the box it emptied stays empty.
               if (
                 owner() === current &&
                 !draft() &&
+                !unsent.has(stored) &&
                 typeof value === "string"
               ) {
                 set("drafts", key, value);

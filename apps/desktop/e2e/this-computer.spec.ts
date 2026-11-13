@@ -154,6 +154,20 @@ async function send(text: string) {
   await composer().press("Enter");
 }
 
+/** Notes every text the message box shows from now on, once each in turn:
+ * text that flashes away and back is noted twice. */
+const watchBox = () =>
+  page.evaluate(() => {
+    const seen: string[] = ((window as any).boxSeen = []);
+    const look = () => {
+      const value = document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.value ?? "";
+      if (seen[seen.length - 1] !== value) seen.push(value);
+      if ((window as any).boxSeen === seen) requestAnimationFrame(look);
+    };
+    look();
+  });
+const boxSeen = () => page.evaluate(() => (window as any).boxSeen as string[]);
+
 async function settled(thread: string) {
   await expect.poll(async () => (await client!.activeTurns()).some((turn) => turn.threadId === thread), { timeout: 60000 }).toBe(false);
 }
@@ -601,12 +615,17 @@ test("opening This computer from a project chat shows its new chat at once, and 
   await expect(page.locator(".titlebar-caption")).toHaveText("This computer");
   await expect(page.locator(".transcript")).not.toContainText("A project chat first");
   await expect(composer()).toBeEnabled();
-  await send("Sent while it opens");
+  await composer().fill("Sent while it opens");
+  await watchBox();
+  await composer().press("Enter");
   await expect(page.getByRole("button", { name: /Send message/ })).toHaveAttribute("aria-busy", "true");
   await rm(flags.slow);
   await expect(rows()).toHaveCount(1, { timeout: 60000 });
   await expect(page.locator(".transcript")).toContainText("Echo: Sent while it opens", { timeout: 60000 });
   expect(await loadingMarkSeen()).toBe(false);
+  // The box held the message until it went, then emptied, once: the
+  // message never came back into it.
+  expect(await boxSeen()).toEqual(["Sent while it opens", ""]);
   await expect(page.locator(".project-list")).toContainText("Echo: A project chat first");
 });
 
@@ -887,6 +906,18 @@ test("with the terminal open, opening another chat by pointer or keyboard leaves
   for (const pty of await client!.listPtys()) await client!.deletePty(pty.id);
 });
 
+test("a first launch's message sent while This computer opens leaves the message box once, and never comes back into it", async () => {
+  await launch();
+  await expect(composer()).toBeEnabled();
+  await composer().fill("Sent at the first launch");
+  await watchBox();
+  await composer().press("Enter");
+  await expect(page.locator(".transcript")).toContainText("Echo: Sent at the first launch", { timeout: 60000 });
+  await expect(rows()).toHaveCount(1);
+  await page.waitForTimeout(500);
+  expect(await boxSeen()).toEqual(["Sent at the first launch", ""]);
+});
+
 test("a message sent while the chat before it is still being made is never lost: it follows that chat, or starts its own after New chat, in a project and on This computer", async () => {
   await writeFile(
     join(temporary, "desktop", "desktop.json"),
@@ -919,19 +950,6 @@ test("a message sent while the chat before it is still being made is never lost:
     });
   const held = () => expect.poll(() => app!.evaluate(() => typeof (globalThis as any).releaseChat), { timeout: 60000 }).toBe("function");
   const release = () => app!.evaluate(() => { (globalThis as any).releaseChat(); delete (globalThis as any).releaseChat; });
-  // Every text the message box shows, from now on, once each in turn: what
-  // flashes away and back shows up twice.
-  const watchBox = () =>
-    page.evaluate(() => {
-      const seen: string[] = ((window as any).boxSeen = []);
-      const look = () => {
-        const value = document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.value ?? "";
-        if (seen[seen.length - 1] !== value) seen.push(value);
-        if ((window as any).boxSeen === seen) requestAnimationFrame(look);
-      };
-      look();
-    });
-  const boxSeen = () => page.evaluate(() => (window as any).boxSeen as string[]);
   const userMessages = () => page.locator(".message.user").allInnerTexts();
 
   for (const place of ["project", "This computer"] as const) {
