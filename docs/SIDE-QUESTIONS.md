@@ -140,5 +140,6 @@ changed tool catalog, or incompatible history makes the side question reconstruc
 the current project instructions, agent prompt, and eligible schemas. The memory
 index, a changed date and earlier turns' hook context are stored in the chat's
 history, so the reconstructed question reads them from there; a chat with no
-turn yet gets the current memory index and date with the question. Hooks are not
+turn yet gets the current memory index and date with the question; it is not
+told which tools are deferred, as a side question loads none. Hooks are not
 replayed.
