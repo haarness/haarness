@@ -5338,9 +5338,9 @@ impl AgentRuntime {
                     .iter()
                     .filter(|tool| !engine.disables_tool(&tool.name) && !is_goal_tool(&tool.name))
                     .cloned()
-                    // As the chat's own turns send it.
+                    // As a turn started in the chat sends it.
                     .map(|tool| {
-                        if tool.name == "task" && thread.parent_id.is_none() {
+                        if tool.name == "task" {
                             task_with_subagents(tool, &agents)
                         } else {
                             tool

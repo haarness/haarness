@@ -130,7 +130,17 @@ pub fn subagent_list(agents: &[crate::CustomAgent]) -> String {
     let lines = listed
         .iter()
         .map(|agent| {
-            let description = agent.description.split_whitespace().collect::<Vec<_>>();
+            // One line, and no control character a project's file may hold.
+            let description = agent
+                .description
+                .split_whitespace()
+                .map(|word| {
+                    word.chars()
+                        .filter(|character| !character.is_control())
+                        .collect::<String>()
+                })
+                .filter(|word| !word.is_empty())
+                .collect::<Vec<_>>();
             if description.is_empty() {
                 format!("\n- {}", agent.id)
             } else {
@@ -307,7 +317,7 @@ mod tests {
         let agents = [
             agent(
                 "lines",
-                "First line\nsecond line\r\n\n  third\tline  ",
+                "First line\nsecond line\r\n\n  third\tline \u{1b}[31m\u{7}\u{0} ",
                 None,
                 false,
             ),
@@ -320,7 +330,7 @@ mod tests {
             lines,
             [
                 "Custom subagents you can name in agent:",
-                "- lines: First line second line third line",
+                "- lines: First line second line third line [31m",
                 &format!(
                     "- long: {}",
                     crate::tool_catalog::shortened(long.trim_end())

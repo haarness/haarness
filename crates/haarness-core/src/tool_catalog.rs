@@ -965,8 +965,14 @@ pub fn load_tool_result(
     }
     if !left_out.is_empty() {
         let names = left_out.iter().map(String::as_str).collect::<Vec<_>>();
+        // A chat that holds the most loaded tools it can loads no more.
+        let next = if full.is_empty() {
+            " Load the ones you need by exact id."
+        } else {
+            ""
+        };
         message.push(format!(
-            "Also matched, past the {MAX_LOAD_MATCHES} tools one call loads, so not loaded: {}. Load the ones you need by exact id.",
+            "Also matched, past the {MAX_LOAD_MATCHES} tools one call loads, so not loaded: {}.{next}",
             some_names(&names, LEFT_OUT_ROOM)
         ));
     }
@@ -2420,6 +2426,21 @@ mod tests {
             message.contains(
                 "past the 20 tools one call loads, so not loaded: mcp__docs__t21, mcp__docs__t22, mcp__docs__t23, mcp__docs__t24, mcp__docs__t25."
             ) && message.ends_with("Load the ones you need by exact id."),
+            "{message}"
+        );
+        // A chat at the loaded-tool limit is not told to load more.
+        let full = load_tool_result(
+            &[],
+            &[],
+            &matches.found,
+            &matches.left_out,
+            &selection.response,
+        );
+        let message = full["message"].as_str().unwrap();
+        assert!(
+            message.contains("Use the tools you have.")
+                && message.contains("so not loaded: mcp__docs__t21")
+                && !message.contains("Load the ones you need"),
             "{message}"
         );
         // Under the limit, nothing more is said.

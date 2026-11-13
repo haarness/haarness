@@ -636,7 +636,7 @@ async fn a_cold_side_question_offers_the_task_tool_the_turns_offer() {
             ..RuntimeConfig::default()
         },
     );
-    let thread = runtime
+    let chat = runtime
         .create_thread(CreateThreadRequest {
             provider: Some("parity".into()),
             model: Some("fixture".into()),
@@ -644,20 +644,17 @@ async fn a_cold_side_question_offers_the_task_tool_the_turns_offer() {
         })
         .await
         .unwrap();
-    runtime
-        .btw(
-            thread.id,
-            BtwRequest {
-                request_id: RequestId::new(),
-                question: "Who can I delegate to?".into(),
-                history: Vec::new(),
-            },
-        )
+    // A chat with a parent (a workflow agent's, or a child a person messages)
+    // whose turns start as a chat's do.
+    let child = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("parity".into()),
+            model: Some("fixture".into()),
+            parent_id: Some(chat.id),
+            ..Default::default()
+        })
         .await
         .unwrap();
-    let turn = runtime.start_turn(thread.id, request()).await.unwrap();
-    done(&runtime, turn.id).await;
-    let requests = provider.requests.lock().unwrap().clone();
     let task = |request: &ProviderRequest| {
         request
             .tools
@@ -666,13 +663,37 @@ async fn a_cold_side_question_offers_the_task_tool_the_turns_offer() {
             .map(|tool| tool.description.clone())
             .unwrap()
     };
-    assert!(side(&requests[0]) && !side(&requests[1]));
-    assert!(
-        task(&requests[1]).ends_with("\n- reviewer: Review diffs after code changes"),
-        "{}",
-        task(&requests[1])
-    );
-    assert_eq!(task(&requests[0]), task(&requests[1]));
+    for thread in [chat.id, child.id] {
+        provider.requests.lock().unwrap().clear();
+        runtime
+            .btw(
+                thread,
+                BtwRequest {
+                    request_id: RequestId::new(),
+                    question: "Who can I delegate to?".into(),
+                    history: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let turn = runtime.start_turn(thread, request()).await.unwrap();
+        done(&runtime, turn.id).await;
+        let requests = provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| !request.tools.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(side(&requests[0]) && !side(&requests[1]));
+        assert!(
+            task(&requests[1]).ends_with("\n- reviewer: Review diffs after code changes"),
+            "{}",
+            task(&requests[1])
+        );
+        assert_eq!(task(&requests[0]), task(&requests[1]));
+    }
 }
 
 /// While lazy loading defers tools, the first turn tells the model where
