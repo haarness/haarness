@@ -887,7 +887,7 @@ test("with the terminal open, opening another chat by pointer or keyboard leaves
   for (const pty of await client!.listPtys()) await client!.deletePty(pty.id);
 });
 
-test("inline code in a chat of This computer links the files of the chat's own folder, and nothing outside it", async () => {
+test("inline code in a chat of This computer links the files of the chat's own folder, and nothing outside it, as its turns end", async () => {
   await launch();
   await expect(composer()).toBeEnabled();
   await send("Plan the trip");
@@ -898,6 +898,8 @@ test("inline code in a chat of This computer links the files of the chat's own f
     .poll(async () => (folder = ((await client!.listThreads()) as (Thread & { directory?: string })[])[0]?.directory ?? ""))
     .not.toBe("");
   const one = (await client.listThreads())[0]!;
+  // The window's own first turn has ended.
+  await expect(page.locator(".transcript .markdown").filter({ hasText: "Echo: Plan the trip" })).toHaveCount(1);
   await settled(one.id);
   await writeFile(join(folder, "plan.md"), "# Plan\nsecond line\n");
   // Another chat's file, and a link in this chat's folder that leads to it.
@@ -906,18 +908,20 @@ test("inline code in a chat of This computer links the files of the chat's own f
   await symlink(join(folder, "..", "other", "notes.md"), join(folder, "sneaky.md"));
   const turn = await client.startTurn(one.id, {
     requestId: crypto.randomUUID(),
-    text: "Read `plan.md:2`, not `../other/notes.md` or `sneaky.md`.",
+    text: "Read `plan.md:2` and `budget.csv`, not `../other/notes.md` or `sneaky.md`.",
   });
   await client.waitTurn(turn.id);
-  // Opened again, the chat draws the reply of the turn started from outside the window.
-  await page.reload();
-  await ready();
-  await rows().first().click();
   const reply = page.locator(".transcript .markdown").filter({ hasText: "Echo: Read" });
   const plan = reply.getByRole("link", { name: "plan.md:2", exact: true });
   await expect(plan).toBeVisible();
-  for (const plain of ["../other/notes.md", "sneaky.md"])
+  for (const plain of ["budget.csv", "../other/notes.md", "sneaky.md"])
     await expect(reply.locator("code", { hasText: plain }), plain).not.toHaveAttribute("role", "link");
+  // A file made in the chat's folder links in the reply on screen once the chat's next turn ends.
+  await writeFile(join(folder, "budget.csv"), "day,cost\n");
+  const next = await client.startTurn(one.id, { requestId: crypto.randomUUID(), text: "Done?" });
+  await client.waitTurn(next.id);
+  await expect(page.locator(".transcript .markdown").filter({ hasText: "Echo: Done?" })).toHaveCount(1);
+  await expect(reply.getByRole("link", { name: "budget.csv", exact: true })).toBeVisible();
   await plan.click();
   await expect(page.locator(".file-tabs .active")).toContainText("plan.md");
   await expect(page.locator(".file-preview .cm-activeLine")).toHaveText("second line");

@@ -9,6 +9,7 @@ import {
   imageHeader,
   imageType,
   applyProjectEvent,
+  eventScope,
   inViewedTree,
   localProject,
   onProjectImageSettled,
@@ -1160,4 +1161,25 @@ test("a remembered note shows on the placeholder at once", () => {
   assert.deepEqual(image.replacement!.children.map((child) => child.textContent), ["Big", "Too big to display"]);
   // Still with its path, so a later change reads it again.
   assert.equal(image.replacement!.dataset.projectPath, "big.png");
+});
+
+// A chat of This computer has a folder of its own, and only a file write
+// names it: its turn's end and its tools' results name only the chat. They
+// went to the connection's scope, so what its replies show of its folder
+// (images, files named in inline code) was not looked at again after them.
+test("an event of a chat of This computer concerns its own folder; anywhere else, the connection's project", () => {
+  const folderOf = (thread?: string | null) => (thread === "trip" ? "/chats/day/trip" : undefined);
+  const trip = { scope: "home\n/chats/day/trip", folder: "/chats/day/trip" };
+  assert.deepEqual(eventScope("home", { threadId: "trip" }, folderOf), trip);
+  // A subagent's event names the chat it works for.
+  assert.deepEqual(eventScope("home", { threadId: "helper", rootThreadId: "trip" }, folderOf), trip);
+  // A write names its folder itself.
+  assert.deepEqual(eventScope("home", { threadId: "other", payload: { directory: "/chats/day/x" } }, folderOf), {
+    scope: "home\n/chats/day/x",
+    folder: "/chats/day/x",
+  });
+  // A chat whose folder is not known, an event of no chat, and a project's events.
+  assert.deepEqual(eventScope("home", { threadId: "unknown" }, folderOf), { scope: "home" });
+  assert.deepEqual(eventScope("home", {}, folderOf), { scope: "home" });
+  assert.deepEqual(eventScope("project", { threadId: "trip" }), { scope: "project" });
 });

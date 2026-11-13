@@ -938,6 +938,8 @@ export interface ImageProject {
   /** A remote host's project, whose files the window coming to the front does not change. */
   remote: boolean;
   viewed: (thread?: string | null, root?: string | null) => ReturnType<typeof inViewedTree>;
+  /** In This computer, the folder a chat (or the chat a subagent works for) works in. */
+  folderOf?: (thread?: string | null) => string | undefined;
 }
 
 /** The project of the window's open chat, read from the app's state when an event arrives. */
@@ -961,6 +963,7 @@ export function imageProject(state: {
       threadId: state.selected,
       remote: false,
       viewed,
+      folderOf: (thread) => chatFolderOf(state.threads, thread),
     };
   }
   return { connection: connection.id, scope: connection.id, roots: projectRoots(connection), remote: connection.remote, viewed };
@@ -981,19 +984,40 @@ export function chatFolderOf(
   return undefined;
 }
 
+/**
+ * What a server event of `connection` concerns: in This computer, a chat's
+ * own folder, which a write names (`directory`) and any other event names by
+ * its chat, or the chat its subagent works for (`folderOf`, the chats'
+ * folders); anywhere else, or for a chat whose folder is not known, the
+ * connection's project.
+ */
+export function eventScope(
+  connection: string,
+  event: { payload?: unknown; threadId?: string | null; rootThreadId?: string | null },
+  folderOf?: ImageProject["folderOf"],
+): { scope: string; folder?: string } {
+  const named = (event.payload as { directory?: unknown } | undefined)?.directory;
+  const folder =
+    typeof named === "string" && named ? named : folderOf?.(event.rootThreadId ?? event.threadId) || undefined;
+  return folder ? { scope: connection + "\n" + folder, folder } : { scope: connection };
+}
+
 let watching = false;
 /** Each project's folders, which a tool's absolute path is read against. */
 const roots = new Map<string, string[]>();
+/** For each connection of This computer, the folders its chats work in. */
+const chatFolders = new Map<string, NonNullable<ImageProject["folderOf"]>>();
 /** Images read from a project are read again once its files may have changed (see `projectEvent`). */
 function watchProjects(viewed: ImageProject["viewed"]) {
   if (watching) return;
   watching = true;
   window.haarness.onEvent((event) => {
     if (event.kind !== "server" || !event.connection) return;
-    // A write in a chat's own folder (This computer) names its file from there.
-    const folder = (event.data as { payload?: { directory?: unknown } }).payload?.directory;
-    const scope = typeof folder === "string" && folder ? event.connection + "\n" + folder : event.connection;
-    applyProjectEvent(scope, event.data as Parameters<typeof projectEvent>[0], viewed, roots.get(event.connection));
+    // In This computer, a chat's event concerns its own folder, where its
+    // tools write and whose files its replies name.
+    const data = event.data as Parameters<typeof projectEvent>[0];
+    const { scope, folder } = eventScope(event.connection, data, chatFolders.get(event.connection));
+    applyProjectEvent(scope, data, viewed, folder ? [windowsPath(folder)] : roots.get(event.connection));
   });
   window.addEventListener("focus", windowFocused);
 }
@@ -1034,6 +1058,7 @@ async function decodeImage(data: string): Promise<boolean | "large"> {
  */
 export function watchProject(project: ImageProject) {
   watchProjects(project.viewed);
+  if (project.folderOf) chatFolders.set(project.connection, project.folderOf);
   if (!project.threadId) roots.set(project.connection, project.roots);
   if (!project.remote) localProject(project.scope);
 }
