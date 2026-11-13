@@ -84,6 +84,8 @@ the TUI draws on the terminal, or the editor it handed the terminal to does, not
 - Real terminals: `scripts/test-tmux.sh` and the `scripts/test-*-tmux.*` scripts start an isolated
   server and drive the TUI in tmux, reading the screen. `scripts/e2e_tmux.py` makes a tmux pane run
   with the script's environment instead of the tmux server's. `scripts/test-tui-cursor.py` runs in CI.
+  `scripts/test-tui-open-file-tmux.py` clicks paths in an answer, with stand-in editors that log
+  their arguments.
 - Useful environment: `HAARNESS_DATA_DIR` or `HAARNESS_HOME` for an isolated install,
   `HAARNESS_TEST_PROVIDER=1` for the deterministic `echo` provider, `HAARNESS_SCHEDULE_SKIP_INSTALL=1`
   so no schedule reaches the operating system, and `HAARNESS_E2E_KEEP=1` to keep a passing Python
