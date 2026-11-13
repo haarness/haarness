@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import shlex
 import subprocess
 import tempfile
 import time
@@ -11,6 +10,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 import e2e_env  # noqa: F401 (usage statistics stay off for every Haarness this script starts)
+from e2e_tmux import drop_socket, pane_command, socket_path
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", ROOT / "target/debug/haarness")).resolve()
@@ -41,9 +41,17 @@ with tempfile.TemporaryDirectory(prefix="haarness-messages-") as directory:
         run("git", *args, cwd=project, stderr=subprocess.DEVNULL)
     env = dict(os.environ, HAARNESS_HOME=str(root / "home"), HAARNESS_DATA_DIR=str(root / "data"), HAARNESS_TEST_PROVIDER="1")
     session = f"haarness-messages-{os.getpid()}"
-    sessions = [session]
     clipboard = subprocess.check_output(["pbpaste"]) if os.uname().sysname == "Darwin" else None
     checks = []
+    # A tmux server of the script's own: what the TUI copies goes to its paste buffer, never to the
+    # person's own tmux nor, through that, to their terminal's clipboard.
+    socket = socket_path(root)
+
+    def tmux(*args):
+        return run("tmux", "-S", socket, "-f", "/dev/null", *args)
+
+    def paste_buffer():
+        return subprocess.run(["tmux", "-S", str(socket), "show-buffer"], capture_output=True, text=True).stdout
     try:
         connection = json.loads(run(BINARY, "--workspace", project, "--trust-project", "desktop", input='{"action":"connect"}', env=env))
 
@@ -56,13 +64,13 @@ with tempfile.TemporaryDirectory(prefix="haarness-messages-") as directory:
                 return json.loads(raw) if raw else None
 
         def pane():
-            return run("tmux", "capture-pane", "-p", "-t", session)
+            return tmux("capture-pane", "-p", "-t", session)
 
         def keys(*values):
-            run("tmux", "send-keys", "-t", session, *values)
+            tmux("send-keys", "-t", session, *values)
 
         def text(value):
-            run("tmux", "send-keys", "-l", "-t", session, value)
+            tmux("send-keys", "-l", "-t", session, value)
 
         def command(value):
             keys("C-c")
@@ -96,9 +104,8 @@ with tempfile.TemporaryDirectory(prefix="haarness-messages-") as directory:
             api(f"/threads/{thread}/turns", {"requestId": str(uuid.uuid4()), "text": value, "provider": "echo", "model": "echo-1"})
             until(lambda: not api("/turns/active"), "echo turn did not finish")
 
-        launch_env = [f"{name}={env[name]}" for name in ["HAARNESS_HOME", "HAARNESS_DATA_DIR", "HAARNESS_TEST_PROVIDER"]]
-        launch = shlex.join(["env", *launch_env, str(BINARY), "--workspace", str(project), "--trust-project"])
-        run("tmux", "new-session", "-d", "-x", "112", "-y", "34", "-s", session, launch)
+        launch = pane_command(env, [BINARY, "--workspace", project, "--trust-project"])
+        tmux("new-session", "-d", "-x", "112", "-y", "34", "-s", session, launch)
         until(lambda: "/ commands" in pane(), "local TUI did not open")
         open_browser()
         until(lambda: "Nothing to choose from" in pane(), "empty browser did not show its empty state")
@@ -121,6 +128,7 @@ with tempfile.TemporaryDirectory(prefix="haarness-messages-") as directory:
         screen("search")
         action(2)
         until(lambda: "Message copied" in pane(), "copy action did not finish")
+        until(lambda: paste_buffer() == reply["data"]["text"], "the copy did not reach tmux's paste buffer whole")
         if clipboard is not None:
             until(lambda: subprocess.check_output(["pbpaste"]).decode() == reply["data"]["text"], "clipboard omitted or altered message text")
         assert "PROTECTED UNSENT DRAFT" in pane()
@@ -188,7 +196,7 @@ with tempfile.TemporaryDirectory(prefix="haarness-messages-") as directory:
         start_turn(source, "PROMPT live NEEDLE-05")
         until(lambda: re.search(r"\bof 4\b", pane()), "open browser did not refresh through live events")
         screen("live-browser")
-        run("tmux", "resize-window", "-t", session, "-x", "48", "-y", "18")
+        tmux("resize-window", "-t", session, "-x", "48", "-y", "18")
         until(lambda: "Messages" in pane(), "narrow browser lost its dialog")
         keys("End", "Enter")
         until(lambda: "Jump to message" in pane(), "narrow browser selection failed")
@@ -199,11 +207,10 @@ with tempfile.TemporaryDirectory(prefix="haarness-messages-") as directory:
 
         # A separate client workspace attaches to the same server and source.
         session = f"haarness-messages-attach-{os.getpid()}"
-        sessions.append(session)
         client_workspace = root / "client"
         client_workspace.mkdir()
-        attach = shlex.join(["env", *launch_env, f'HAARNESS_SERVER_TOKEN={connection["token"]}', str(BINARY), "--workspace", str(client_workspace), "--session", source, "attach", connection["url"]])
-        run("tmux", "new-session", "-d", "-x", "100", "-y", "30", "-s", session, attach)
+        attach = pane_command({**env, "HAARNESS_SERVER_TOKEN": connection["token"]}, [BINARY, "--workspace", client_workspace, "--session", source, "attach", connection["url"]])
+        tmux("new-session", "-d", "-x", "100", "-y", "30", "-s", session, attach)
         until(lambda: "NEW LIVE OUTPUT" in pane() or "PROMPT live" in pane(), "attached TUI did not load source history")
         open_browser("needle-00")
         until(lambda: re.search(r"\bof 2\b", pane()), "attached browser did not search server history")
@@ -221,8 +228,8 @@ with tempfile.TemporaryDirectory(prefix="haarness-messages-") as directory:
             pass
         raise
     finally:
-        for target in sessions:
-            subprocess.run(["tmux", "kill-session", "-t", target], capture_output=True)
+        subprocess.run(["tmux", "-S", str(socket), "kill-server"], capture_output=True)
+        drop_socket(socket, root)
         subprocess.run([str(BINARY), "--workspace", str(project), "serve", "--stop"], env=env, capture_output=True, timeout=30)
         if clipboard is not None:
             subprocess.run(["pbcopy"], input=clipboard, check=True)
