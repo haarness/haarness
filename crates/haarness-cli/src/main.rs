@@ -12052,6 +12052,14 @@ fn doctor(paths: &Paths, workspace: &Path, project_config: bool) -> Result<()> {
         &[],
     );
     println!("{}", auto_review_line(&layers));
+    // What a load of this configuration leaves out or cannot read, which
+    // the log also records: a project's instruction entry outside it, say.
+    for warning in &layers.warnings {
+        println!("config warning: {warning}");
+    }
+    for error in &layers.errors {
+        println!("config error: {error}");
+    }
     Ok(())
 }
 
