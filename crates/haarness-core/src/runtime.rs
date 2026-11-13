@@ -763,6 +763,31 @@ fn tool_output_attachments(metadata: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+/// The results that end each call of `turn_id` among `items` that no result
+/// answers, once nothing will run it any more (a shutdown the turn outlived,
+/// a turn that failed): each says the call did not finish, and one that had
+/// not `began` is marked as not run too.
+fn unfinished_results(
+    items: &[Item],
+    turn_id: TurnId,
+    began: impl Fn(&str) -> bool,
+) -> Vec<ItemData> {
+    let turn_items = items
+        .iter()
+        .filter(|item| item.turn_id == Some(turn_id))
+        .collect::<Vec<_>>();
+    crate::pair_tool_calls(turn_items.iter().map(|item| &item.data))
+        .calls
+        .into_iter()
+        .filter_map(|call| match &turn_items[call].data {
+            ItemData::ToolCall { call_id, name, .. } => {
+                Some(crate::unfinished_call_result(call_id, name, began(call_id)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn unconsumed_queued(items: &[Item], turn_id: TurnId) -> Vec<ItemId> {
     let consumed: HashSet<ItemId> = items
         .iter()
@@ -9300,26 +9325,16 @@ impl AgentRuntime {
                             }
                         )
                 });
-                let turn_items = items
-                    .into_iter()
-                    .filter(|item| item.turn_id == Some(active_turn.id))
-                    .collect::<Vec<_>>();
                 // The runner noted the calls that began; the others never ran.
                 let started = active_turn.started_calls.lock().clone();
-                let ended = crate::pair_tool_calls(turn_items.iter().map(|item| &item.data))
-                    .calls
-                    .into_iter()
-                    .filter_map(|call| match &turn_items[call].data {
-                        ItemData::ToolCall { call_id, name, .. } => Some(
-                            crate::unfinished_call_result(call_id, name, started.contains(call_id)),
-                        ),
-                        _ => None,
-                    })
-                    .chain(
-                        pending
-                            .into_iter()
-                            .map(|item_id| ItemData::QueueConsumed { item_id }),
-                    );
+                let ended =
+                    unfinished_results(&items, active_turn.id, |call_id| started.contains(call_id))
+                        .into_iter()
+                        .chain(
+                            pending
+                                .into_iter()
+                                .map(|item_id| ItemData::QueueConsumed { item_id }),
+                        );
                 for data in ended {
                     if let Ok(item) = self
                         .repository
@@ -10878,6 +10893,7 @@ impl RunnerTask {
             // reservation installed until goal state and the durable turn are
             // terminal. Waiters wake only from `close_acceptance` below.
             self.stop_acceptance().await;
+            self.end_open_calls().await;
 
             // Input accepted while a provider/tool round was in flight must
             // not be left as a permanently QUEUED transcript item when that
@@ -10894,6 +10910,9 @@ impl RunnerTask {
             });
             if retryable && self.has_unconsumed_queued().await {
                 result = Arc::clone(&self).run_contained().await;
+                if result.is_err() {
+                    self.end_open_calls().await;
+                }
             }
 
             // A cancellation, usage limit, or failed retry can still leave an
@@ -11207,6 +11226,27 @@ impl RunnerTask {
             })
             .await;
         false
+    }
+
+    /// Answers each call of this turn its run left without a result, as a
+    /// shutdown the turn outlives does: the run ended on an error after the
+    /// calls were stored (a write that failed, a stop while the model still
+    /// spoke), and nothing will run them now. Without a result a client
+    /// draws such a call as running for good.
+    async fn end_open_calls(&self) {
+        let items = match self.repository.list_items(self.thread.id, None).await {
+            Ok(items) => items,
+            Err(error) => {
+                warn!(thread = %self.thread.id, turn = %self.turn.id, %error, "could not look for the calls a failed turn left open");
+                return;
+            }
+        };
+        for data in unfinished_results(&items, self.turn.id, |call_id| self.call_began(call_id)) {
+            if let Err(error) = self.publish_item(data).await {
+                warn!(thread = %self.thread.id, turn = %self.turn.id, %error, "could not end a call a failed turn left open");
+                return;
+            }
+        }
     }
 
     /// Notes that call `call_id` of this turn has begun, or (`started` false)

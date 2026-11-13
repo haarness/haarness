@@ -1,19 +1,25 @@
-//! Calls a shutdown cut off end with a result, so the chat goes on.
+//! Calls a shutdown cut off, or a failed turn left, end with a result, so
+//! the chat goes on.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use haarness_core::{
-    AgentRuntime, CoreResult, EventBus, ModelProvider, PermissionDecision, PermissionRule,
-    ProviderEvent, ProviderMessage, ProviderRequest, ProviderStream, RuntimeConfig,
-    StaticProviderRegistry, Tool, ToolContext, ToolDefinition, ToolOutput, ToolRegistry,
+    AgentRuntime, CoreError, CoreResult, EventBus, ModelProvider, PermissionDecision,
+    PermissionRule, ProviderEvent, ProviderMessage, ProviderRequest, ProviderStream, RuntimeConfig,
+    StaticProviderRegistry, ThreadRepository, Tool, ToolContext, ToolDefinition, ToolOutput,
+    ToolRegistry,
 };
 use haarness_protocol::{
-    CreateThreadRequest, ItemData, ModelInfo, ProviderInfo, RequestId, StartTurnRequest, TurnStatus,
+    CreateThreadRequest, Item, ItemData, ItemId, ModelInfo, ProviderInfo, RequestId,
+    StartTurnRequest, Thread, ThreadId, Turn, TurnId, TurnStatus,
 };
 use haarness_store::SqliteStore;
 use serde_json::{Value, json};
@@ -413,31 +419,50 @@ impl ModelProvider for Batch {
 /// A runtime with `patient`, `stubborn` (let go at once), and the reads
 /// `glance` (at once) and `wait` (held by `held`).
 fn batch_runtime(provider: Batch, patient: Arc<Patient>, tools: &BatchTools) -> AgentRuntime {
+    batch_runtime_on(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        provider,
+        patient,
+        tools,
+        Vec::new(),
+    )
+}
+
+/// A batch runtime over `store`, with `more` tools besides.
+fn batch_runtime_on(
+    store: Arc<dyn ThreadRepository>,
+    provider: Batch,
+    patient: Arc<Patient>,
+    tools: &BatchTools,
+    more: Vec<Arc<dyn Tool>>,
+) -> AgentRuntime {
     let mut config = RuntimeConfig {
         approval_mode: haarness_protocol::ApprovalMode::Review,
         ..RuntimeConfig::default()
     };
-    for pattern in ["patient:*", "stubborn:*", "glance:*", "wait:*"] {
-        config.base_rules.push(PermissionRule {
-            pattern: pattern.into(),
-            decision: PermissionDecision::Allow,
-        });
-    }
     let stubborn = Arc::new(Stubborn {
         started: Arc::new(tokio::sync::Semaphore::new(0)),
         release: Arc::new(tokio::sync::Semaphore::new(1)),
     });
+    let mut all = vec![
+        patient as Arc<dyn Tool>,
+        stubborn,
+        tools.glance.clone(),
+        tools.wait.clone(),
+    ];
+    all.extend(more);
+    for tool in &all {
+        config.base_rules.push(PermissionRule {
+            pattern: format!("{}:*", tool.definition().name),
+            decision: PermissionDecision::Allow,
+        });
+    }
     AgentRuntime::with_config(
-        Arc::new(SqliteStore::in_memory().unwrap()),
+        store,
         Arc::new(StaticProviderRegistry::new(vec![
             Arc::new(provider) as Arc<dyn ModelProvider>
         ])),
-        Arc::new(Calls(vec![
-            patient as Arc<dyn Tool>,
-            stubborn,
-            tools.glance.clone(),
-            tools.wait.clone(),
-        ])),
+        Arc::new(Calls(all)),
         EventBus::new(256),
         std::env::temp_dir(),
         String::new(),
@@ -863,4 +888,326 @@ async fn steering_a_turn_the_shutdown_outlived_never_read_is_settled_with_it() {
         .filter(|item| matches!(item.data, ItemData::QueueConsumed { item_id } if item_id == message.id))
         .count();
     assert_eq!(markers, 1, "recovery settles nothing twice");
+}
+
+/// A store that keeps everything as SQLite does, except that the first tool
+/// result it is given cannot be written, as on a disk that is full.
+struct FailsFirstResult {
+    inner: SqliteStore,
+    failed: AtomicBool,
+}
+
+#[async_trait]
+impl ThreadRepository for FailsFirstResult {
+    async fn create_thread(&self, request: CreateThreadRequest) -> CoreResult<Thread> {
+        self.inner.create_thread(request).await
+    }
+    async fn list_threads(&self, include_archived: bool) -> CoreResult<Vec<Thread>> {
+        self.inner.list_threads(include_archived).await
+    }
+    async fn get_thread(&self, id: ThreadId) -> CoreResult<Thread> {
+        self.inner.get_thread(id).await
+    }
+    async fn update_thread(
+        &self,
+        id: ThreadId,
+        request: haarness_protocol::UpdateThreadRequest,
+    ) -> CoreResult<Thread> {
+        self.inner.update_thread(id, request).await
+    }
+    async fn list_items(&self, id: ThreadId, after: Option<u64>) -> CoreResult<Vec<Item>> {
+        self.inner.list_items(id, after).await
+    }
+    async fn start_turn(
+        &self,
+        id: ThreadId,
+        request: StartTurnRequest,
+    ) -> CoreResult<(Turn, Item, bool)> {
+        self.inner.start_turn(id, request).await
+    }
+    async fn get_turn(&self, id: TurnId) -> CoreResult<Turn> {
+        self.inner.get_turn(id).await
+    }
+    async fn append_item(
+        &self,
+        thread: ThreadId,
+        turn: Option<TurnId>,
+        data: ItemData,
+    ) -> CoreResult<Item> {
+        if matches!(data, ItemData::ToolResult { .. }) && !self.failed.swap(true, Ordering::SeqCst)
+        {
+            return Err(CoreError::Storage("database or disk is full".into()));
+        }
+        self.inner.append_item(thread, turn, data).await
+    }
+    async fn set_turn_status(
+        &self,
+        id: TurnId,
+        status: TurnStatus,
+        error: Option<String>,
+    ) -> CoreResult<Turn> {
+        self.inner.set_turn_status(id, status, error).await
+    }
+    async fn compact(
+        &self,
+        id: ThreadId,
+        request: haarness_protocol::CompactRequest,
+        expected_tail: Option<(ItemId, u64)>,
+    ) -> CoreResult<Item> {
+        self.inner.compact(id, request, expected_tail).await
+    }
+    async fn fork_thread(
+        &self,
+        id: ThreadId,
+        title: Option<String>,
+        up_to_sequence: Option<u64>,
+    ) -> CoreResult<Thread> {
+        self.inner.fork_thread(id, title, up_to_sequence).await
+    }
+    async fn set_revert_state(
+        &self,
+        id: ThreadId,
+        state: Option<(u64, String, Option<String>)>,
+    ) -> CoreResult<()> {
+        self.inner.set_revert_state(id, state).await
+    }
+    async fn soft_delete_items_after(&self, id: ThreadId, sequence: u64) -> CoreResult<u64> {
+        self.inner.soft_delete_items_after(id, sequence).await
+    }
+    async fn discard_item(&self, id: ThreadId, item: ItemId) -> CoreResult<()> {
+        self.inner.discard_item(id, item).await
+    }
+    async fn save_permission_rule(
+        &self,
+        workspace: &str,
+        rule: &haarness_core::PermissionRule,
+    ) -> CoreResult<()> {
+        self.inner.save_permission_rule(workspace, rule).await
+    }
+    async fn load_permission_rules(
+        &self,
+        workspace: &str,
+    ) -> CoreResult<Vec<haarness_core::PermissionRule>> {
+        self.inner.load_permission_rules(workspace).await
+    }
+    async fn recover_interrupted(&self) -> CoreResult<u64> {
+        self.inner.recover_interrupted().await
+    }
+    async fn thread_extras(
+        &self,
+        id: ThreadId,
+    ) -> CoreResult<(Option<String>, Option<haarness_protocol::LoopConfig>)> {
+        self.inner.thread_extras(id).await
+    }
+    async fn set_goal(&self, id: ThreadId, goal: Option<String>) -> CoreResult<()> {
+        self.inner.set_goal(id, goal).await
+    }
+    async fn goal_state(&self, id: ThreadId) -> CoreResult<Option<haarness_protocol::GoalState>> {
+        self.inner.goal_state(id).await
+    }
+    async fn save_goal_state(
+        &self,
+        id: ThreadId,
+        state: Option<haarness_protocol::GoalState>,
+    ) -> CoreResult<()> {
+        self.inner.save_goal_state(id, state).await
+    }
+    async fn set_loop(
+        &self,
+        id: ThreadId,
+        config: Option<haarness_protocol::LoopConfig>,
+    ) -> CoreResult<()> {
+        self.inner.set_loop(id, config).await
+    }
+}
+
+/// Each tool result stored in `thread`: its call id, whether it says the
+/// call did not finish, and whether it says the call never ran.
+async fn results(runtime: &AgentRuntime, thread: ThreadId) -> Vec<(String, bool, bool)> {
+    runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            ItemData::ToolResult {
+                call_id, metadata, ..
+            } => Some((
+                call_id,
+                metadata["unfinished"] == true,
+                haarness_core::not_run(&metadata),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Waits until the chat's turn has wound down and takes a message again.
+async fn free(runtime: &AgentRuntime, thread: ThreadId, within: Duration) {
+    tokio::time::timeout(within, async {
+        while runtime.active_turn(thread).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the turn's runner ends and frees the chat");
+}
+
+/// A turn that fails once its calls are stored (the first result could not
+/// be written) answers each of them as a shutdown would, before its notice:
+/// the call that ran did not finish, the one after it never began. Without
+/// a result a client draws a call as running for good. The chat's next
+/// message is answered.
+#[tokio::test]
+async fn a_turn_that_fails_after_its_calls_were_stored_ends_them() {
+    let tools = BatchTools::default();
+    let runtime = batch_runtime_on(
+        Arc::new(FailsFirstResult {
+            inner: SqliteStore::in_memory().unwrap(),
+            failed: AtomicBool::new(false),
+        }),
+        Batch {
+            calls: vec!["stubborn", "glance"],
+            ..Batch::default()
+        },
+        Arc::new(Patient {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+        }),
+        &tools,
+        Vec::new(),
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Failed);
+    free(&runtime, thread, Duration::from_secs(10)).await;
+    assert_eq!(
+        results(&runtime, thread).await,
+        [
+            ("call-0".to_owned(), true, false),
+            ("call-1".to_owned(), true, true),
+        ],
+        "the call that ran did not finish; the next one never began"
+    );
+    let items = runtime.items(thread, None).await.unwrap();
+    let last_result = items
+        .iter()
+        .rposition(|item| matches!(item.data, ItemData::ToolResult { .. }))
+        .unwrap();
+    let notice = items
+        .iter()
+        .position(|item| matches!(item.data, ItemData::Error { .. }))
+        .expect("the turn's notice");
+    assert!(last_result < notice, "{items:#?}");
+    assert_eq!(
+        tools.glance.ran.available_permits(),
+        0,
+        "the read never ran"
+    );
+
+    let next = runtime
+        .start_turn(thread, turn_request("and now?"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, next.id).await, TurnStatus::Completed);
+}
+
+/// Asks for `stubborn` and, while its response still streams, stops the
+/// turn as Stop does: the call is stored and never runs. Its later requests
+/// answer.
+#[derive(Clone, Default)]
+struct StopsMidAnswer {
+    requests: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl ModelProvider for StopsMidAnswer {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        Provider::default().info()
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let first = !request.tools.is_empty() && {
+            let mut requests = self.requests.lock().unwrap();
+            *requests += 1;
+            *requests == 1
+        };
+        if !first {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderEvent::TextDelta("done".into())),
+                Ok(ProviderEvent::Finished {
+                    reason: "done".into(),
+                }),
+            ])));
+        }
+        let call = ProviderEvent::ToolCall {
+            call_id: "call-0".into(),
+            name: "stubborn".into(),
+            arguments: json!({}),
+            provider_metadata: Value::Null,
+        };
+        Ok(Box::pin(stream::iter(vec![Ok(call)]).chain(
+            stream::poll_fn(move |_| {
+                cancel.cancel();
+                std::task::Poll::Pending
+            }),
+        )))
+    }
+}
+
+/// Stop while the model is still answering, after it made a call, ends that
+/// call as one that never ran, rather than leaving it without a result.
+#[tokio::test]
+async fn a_call_made_before_a_stop_mid_answer_is_ended() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let tool = Arc::new(Stubborn {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(1)),
+    });
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
+    config.base_rules.push(PermissionRule {
+        pattern: "stubborn:*".into(),
+        decision: PermissionDecision::Allow,
+    });
+    let runtime = AgentRuntime::with_config(
+        store,
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(StopsMidAnswer::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(Registry(tool.clone())),
+        EventBus::new(256),
+        std::env::temp_dir(),
+        String::new(),
+        config,
+    );
+    let thread = chat(&runtime).await;
+    let turn = runtime
+        .start_turn(thread, turn_request("go"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, turn.id).await, TurnStatus::Interrupted);
+    free(&runtime, thread, Duration::from_secs(10)).await;
+    assert_eq!(
+        results(&runtime, thread).await,
+        [("call-0".to_owned(), true, true)]
+    );
+    assert_eq!(tool.started.available_permits(), 0, "the call never ran");
+    let next = runtime
+        .start_turn(thread, turn_request("and now?"))
+        .await
+        .unwrap();
+    assert_eq!(settled(&runtime, next.id).await, TurnStatus::Completed);
 }

@@ -665,6 +665,9 @@ gives what it copied without its marker one at the end of the copy. Each call su
 left without a result gets an error `tool_result` first, saying it did not
 finish, with `metadata: {"unfinished": true}`; a turn that outlives a graceful
 shutdown's wait gets the same results before the shutdown marks it interrupted.
+So does a turn that ends on an error once its calls are stored (a database
+write that failed, Stop while the model was still answering), before its
+notice: no call is left drawn as running.
 Desktop and the TUI show such a call as one that did not finish, in a few words
 of their own, rather than its result's text, which is written for the model;
 the phone apps and Cloud web still show that text as a failed call. A request
