@@ -906,12 +906,56 @@ test("with the terminal open, opening another chat by pointer or keyboard leaves
   for (const pty of await client!.listPtys()) await client!.deletePty(pty.id);
 });
 
+/** The next call of `method` Desktop makes is held: the server has answered
+ * it (or, with `failure`, it fails so), and Desktop hears so only once
+ * `release` is called. A second hold is set once the call held before has
+ * come: one set while that call is still awaited would be undone by it. */
+const holdNext = (method: string, failure?: string) =>
+  app!.evaluate(({ ipcMain }, [method, failure]) => {
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: any[]) => unknown> })._invokeHandlers;
+    const original = handlers.get("haarness:api")!;
+    ipcMain.removeHandler("haarness:api");
+    ipcMain.handle("haarness:api", async (event, raw) => {
+      if (raw.method !== method) return original(event, raw);
+      ipcMain.removeHandler("haarness:api");
+      ipcMain.handle("haarness:api", original);
+      const response = failure ? { ok: false, error: failure } : await original(event, raw);
+      await new Promise<void>((resolve) => ((globalThis as any)["release " + method] = resolve));
+      return response;
+    });
+  }, [method, failure] as const);
+const held = (method: string) =>
+  expect.poll(() => app!.evaluate((_, method) => typeof (globalThis as any)["release " + method], method), { timeout: 60000 }).toBe("function");
+const release = (method: string) =>
+  app!.evaluate((_, method) => {
+    (globalThis as any)["release " + method]();
+    delete (globalThis as any)["release " + method];
+  }, method);
+const userMessages = () => page.locator(".message.user").allInnerTexts();
+
+/** Text pasted into the message box, as Cmd+V gives it. */
+async function pasteText(text: string) {
+  await composer().focus();
+  await page.evaluate((text) => {
+    const transfer = new DataTransfer();
+    transfer.setData("text/plain", text);
+    const target = document.activeElement ?? document.body;
+    const event = new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true });
+    if (target.dispatchEvent(event)) document.execCommand("insertText", false, text);
+  }, text);
+}
+
 test("a first launch's message sent while This computer opens leaves the message box once, and never comes back into it", async () => {
+  // This computer is slow to open: the message waits for it.
+  const flags = await wrappedBinary();
+  await writeFile(flags.slow, "");
   await launch();
   await expect(composer()).toBeEnabled();
   await composer().fill("Sent at the first launch");
   await watchBox();
   await composer().press("Enter");
+  await expect(page.getByRole("button", { name: /Send message/ })).toHaveAttribute("aria-busy", "true");
+  await rm(flags.slow);
   await expect(page.locator(".transcript")).toContainText("Echo: Sent at the first launch", { timeout: 60000 });
   await expect(rows()).toHaveCount(1);
   await page.waitForTimeout(500);
@@ -932,25 +976,7 @@ test("a message sent while the chat before it is still being made is never lost:
   await ready();
   const transcript = page.locator(".transcript");
   const projectRows = () => page.locator(".project-list .session-row > button[aria-current]");
-  // The next chat Desktop makes is held where it is slowest to arrive: the
-  // server has made it, and Desktop hears so only once it is released.
-  const holdNextChat = () =>
-    app!.evaluate(({ ipcMain }) => {
-      const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: any[]) => unknown> })._invokeHandlers;
-      const original = handlers.get("haarness:api")!;
-      ipcMain.removeHandler("haarness:api");
-      ipcMain.handle("haarness:api", async (event, raw) => {
-        if (raw.method !== "createThread") return original(event, raw);
-        ipcMain.removeHandler("haarness:api");
-        ipcMain.handle("haarness:api", original);
-        const response = await original(event, raw);
-        await new Promise<void>((resolve) => ((globalThis as any).releaseChat = resolve));
-        return response;
-      });
-    });
-  const held = () => expect.poll(() => app!.evaluate(() => typeof (globalThis as any).releaseChat), { timeout: 60000 }).toBe("function");
-  const release = () => app!.evaluate(() => { (globalThis as any).releaseChat(); delete (globalThis as any).releaseChat; });
-  const userMessages = () => page.locator(".message.user").allInnerTexts();
+  const context = page.getByLabel("Attached context", { exact: true });
 
   for (const place of ["project", "This computer"] as const) {
     const listed = place === "project" ? projectRows : rows;
@@ -966,16 +992,16 @@ test("a message sent while the chat before it is still being made is never lost:
     // Enter again while the first message's chat is being made: the view
     // moves to that chat with the message box, and the next message goes
     // there after the first.
-    await holdNextChat();
+    await holdNext("createThread");
     await send(`First words in the ${place}`);
-    await held();
+    await held("createThread");
     await expect(composer()).toHaveValue("");
     await composer().fill(`More words while it is made, ${place}`);
     await watchBox();
     await composer().press("Enter");
     await page.waitForTimeout(300);
     await expect(composer()).toHaveValue(`More words while it is made, ${place}`);
-    await release();
+    await release("createThread");
     // It reaches the turn still running, as a message sent then does, or
     // starts the next one: either way the reply takes it up.
     await expect(page.locator(".message.assistant").last()).toContainText(`More words while it is made, ${place}`, { timeout: 60000 });
@@ -989,21 +1015,67 @@ test("a message sent while the chat before it is still being made is never lost:
     );
     expect(await boxSeen()).toEqual([`More words while it is made, ${place}`, ""]);
 
+    // The same words again go too.
+    await newChat();
+    await holdNext("createThread");
+    await send(`test ${place}`);
+    await held("createThread");
+    await composer().fill(`test ${place}`);
+    await composer().press("Enter");
+    await release("createThread");
+    await expect.poll(async () => (await userMessages()).filter((text) => text.includes(`test ${place}`)).length, { timeout: 60000 }).toBe(2);
+    await expect(listed()).toHaveCount(2);
+    await expect(composer()).toHaveValue("");
+
+    // What is added meanwhile, a pasted log and a picture, goes with the
+    // box, and with the next message.
+    await newChat();
+    await holdNext("createThread");
+    await send(`Why does the build fail, ${place}?`);
+    await held("createThread");
+    await pasteText(Array.from({ length: 30 }, (_, index) => `BUILD_LOG ${place} line ${index + 1}`).join("\n"));
+    await expect(context.locator(".prompt-context-item")).toHaveCount(1);
+    await pasteImage(`log-${place}.png`);
+    await expect(page.getByRole("button", { name: `Remove log-${place}.png`, exact: true })).toBeVisible();
+    await composer().fill(`Here is the log, ${place}`);
+    await composer().press("Enter");
+    await release("createThread");
+    await expect(page.locator(".message.assistant").last()).toContainText(`Here is the log, ${place}`, { timeout: 60000 });
+    await expect(listed()).toHaveCount(3);
+    await expect(context).toHaveCount(0);
+    await expect(page.getByRole("button", { name: `Remove log-${place}.png`, exact: true })).toHaveCount(0);
+    const api = place === "project" ? projectClient() : homeClient();
+    try {
+      const messages = (await Promise.all((await api.listThreads()).map((thread) => api.listItems(thread.id))))
+        .flat()
+        .flatMap((item) => (item.data.type === "user_message" ? [item.data] : []));
+      const next = messages.find((message) => message.text.includes(`Here is the log, ${place}`));
+      expect(next?.attachments?.length).toBe(1);
+      expect(next?.text).toContain(`BUILD_LOG ${place} line 30`);
+    } finally {
+      api.close();
+    }
+    // Nothing of it stayed on the new-chat page.
+    await newChat();
+    await expect(page.locator(".conversation-empty h2")).toBeVisible();
+    await page.waitForTimeout(300);
+    await expect(context).toHaveCount(0);
+    await expect(page.getByRole("button", { name: `Remove log-${place}.png`, exact: true })).toHaveCount(0);
+
     // New chat chosen while the first message's chat is being made: the view
     // stays there, the box keeps what is typed next until it goes, and Enter
     // starts a chat of its own once the first has gone.
-    await newChat();
-    await holdNextChat();
+    await holdNext("createThread");
     await send(`A chat of its own in the ${place}`);
-    await held();
+    await held("createThread");
     await newChat();
     await composer().fill(`And another chat after it, ${place}`);
     await watchBox();
     await composer().press("Enter");
     await page.waitForTimeout(300);
     await expect(composer()).toHaveValue(`And another chat after it, ${place}`);
-    await release();
-    await expect(listed()).toHaveCount(3, { timeout: 60000 });
+    await release("createThread");
+    await expect(listed()).toHaveCount(5, { timeout: 60000 });
     await expect(transcript).toContainText(`Echo: And another chat after it, ${place}`, { timeout: 60000 });
     await expect(transcript).not.toContainText(`A chat of its own in the ${place}`);
     await expect(composer()).toHaveValue("");
@@ -1011,6 +1083,19 @@ test("a message sent while the chat before it is still being made is never lost:
     await listed().filter({ hasText: `A chat of its own in the ${place}` }).click();
     await expect(transcript).toContainText(`Echo: A chat of its own in the ${place}`, { timeout: 60000 });
     await expect(transcript).not.toContainText(`And another chat after it, ${place}`);
+
+    // The same words again after New chat make a chat of their own too.
+    await newChat();
+    await holdNext("createThread");
+    await send(`twice ${place}`);
+    await held("createThread");
+    await newChat();
+    await composer().fill(`twice ${place}`);
+    await composer().press("Enter");
+    await release("createThread");
+    await expect(listed().filter({ hasText: `twice ${place}` })).toHaveCount(2, { timeout: 60000 });
+    await expect(transcript).toContainText(`Echo: twice ${place}`, { timeout: 60000 });
+    await expect(composer()).toHaveValue("");
   }
   // Nothing that went is kept as a draft: after a reload the new-chat page
   // is empty.
@@ -1020,4 +1105,48 @@ test("a message sent while the chat before it is still being made is never lost:
   await expect(page.locator(".conversation-empty h2")).toHaveText("What should we work on?");
   await page.waitForTimeout(1000);
   await expect(composer()).toHaveValue("");
+});
+
+test("a message waiting for the chat before it stays in the box when that chat cannot be made, or when the person opens that chat", async () => {
+  await launch();
+  await ready();
+  const transcript = page.locator(".transcript");
+  // The chat cannot be made: the first message comes back into the box,
+  // ahead of the next one, and neither goes.
+  await holdNext("createThread", "The chat could not be made (test)");
+  await send("first");
+  await held("createThread");
+  await composer().fill("next");
+  await composer().press("Enter");
+  await release("createThread");
+  await expect(page.getByText("The chat could not be made (test)", { exact: false })).toBeVisible();
+  await expect(composer()).toHaveValue("first\n\nnext");
+  await page.waitForTimeout(500);
+  await expect(composer()).toHaveValue("first\n\nnext");
+  await expect(rows()).toHaveCount(0);
+  const dismiss = page.getByRole("button", { name: "Dismiss error", exact: true });
+  if (await dismiss.count()) await dismiss.click();
+  await composer().fill("");
+
+  // New chat, a next message and Enter there, then the first message's chat
+  // opened by the person while it is being made: the message box goes there
+  // as it is, and the next message waits in it, unsent, for the person.
+  await holdNext("createThread");
+  await send("Made while I look");
+  await held("createThread");
+  await holdNext("startTurn");
+  await section().getByRole("button", { name: "New chat in This computer", exact: true }).click();
+  await composer().fill("Meant for a chat of its own");
+  await composer().press("Enter");
+  await release("createThread");
+  await held("startTurn");
+  await expect(rows()).toHaveCount(1);
+  await rows().first().click();
+  await expect(rows().first()).toHaveAttribute("aria-current", "true");
+  await release("startTurn");
+  await expect(transcript).toContainText("Echo: Made while I look", { timeout: 60000 });
+  await page.waitForTimeout(1000);
+  expect((await userMessages()).filter((text) => text.includes("Meant for a chat of its own"))).toHaveLength(0);
+  await expect(composer()).toHaveValue("Meant for a chat of its own");
+  await expect(rows()).toHaveCount(1);
 });

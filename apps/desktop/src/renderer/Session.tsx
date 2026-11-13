@@ -35,6 +35,7 @@ import {
   plainMessage,
   promptWithContext,
   sentParts,
+  type PromptContext,
 } from "./prompt-context";
 import { UserMessageBody } from "./UserMessage";
 import { ThoughtRow, ThoughtTicker } from "./ThoughtRow";
@@ -564,9 +565,10 @@ export function Session() {
   let composer!: HTMLTextAreaElement;
   let conversation!: HTMLElement;
 
-  /** The new chat a first message is making, which the message box's text
-   * moves to with the view: the box it moves from and where it lands, by
-   * owner, draft key and stored draft, and the send making it. */
+  /** The new chat a first message is making, which the message box moves
+   * to with the view: the box it moves from and where it lands, by owner,
+   * draft key and stored draft; the send making it, and what that send
+   * took from the box. */
   let carriedTo:
     | {
         from: string;
@@ -576,11 +578,13 @@ export function Session() {
         toKey: string;
         toStored: string;
         flight: Promise<boolean>;
+        sent: { files: Attachment[]; chips: PromptContext[] };
       }
     | undefined;
-  /** Where the box went with the view while a send made its new chat (that
-   * chat's owner), by send: an Enter waiting there follows it. */
-  const carriedBy = new WeakMap<Promise<boolean>, string>();
+  /** Where the box went when a send moved the view to the chat it made
+   * (that chat's owner), by send, and whether all it held got there: an
+   * Enter waiting in the box follows it. */
+  const carriedBy = new WeakMap<Promise<boolean>, { to: string; moved: Promise<boolean> }>();
   /** The chat the message box was drawn for last. */
   let shownOwner = "";
   /** Text on its way, by stored draft: it stays stored there (ahead of what
@@ -1815,7 +1819,15 @@ export function Session() {
             change(draft());
             set("drafts", carry.fromKey, "");
             void app.run(() => window.haarness.storage(carry.fromStored, ""));
-            carriedBy.set(carry.flight, carry.to);
+            // So do the attachments and chips added meanwhile.
+            const moved = app
+              .run(async () => {
+                await app.carryNewChatParts(carry.fromKey, carry.toKey, carry.sent);
+                return true;
+              })
+              .then((done) => done === true);
+            // Followed only when the message moved the view, not the person.
+            if (app.openingCreatedChat() === id) carriedBy.set(carry.flight, { to: carry.to, moved });
           } else {
             // The box showed another page then: the new chat has the
             // page's text as state.tsx gave it, which leaves the page.
@@ -1997,9 +2009,13 @@ export function Session() {
         waitingForSend.delete(pressed);
       }
       // A first message's new chat took the box with the view, this
-      // message in it: it goes there.
-      const here = flight && carriedBy.get(flight) === owner() ? owner() : pressed;
-      if (!went || owner() !== here || submitting()) return;
+      // message in it: it goes there, once all the box held has.
+      const followed = flight && carriedBy.get(flight);
+      if (followed && followed.to === owner()) {
+        if (!went || !(await followed.moved) || owner() !== followed.to || submitting()) return;
+        return send(delivery);
+      }
+      if (!went || owner() !== pressed || submitting()) return;
       return send(delivery);
     }
     if (queue.editing()) {
@@ -2156,6 +2172,9 @@ export function Session() {
     const keyboard = document.activeElement === composer;
     // Kept as it was until it has gone (see `change`).
     unsent.set(storedKey, text);
+    // Out of the box at once, unless an input method is composing there:
+    // then only once it ends, and the chat moving first leaves it behind.
+    const taken = !composingText;
     setSubmissions((items) => [...items, origin]);
     let landed!: (went: boolean) => void;
     const flight = new Promise<boolean>((done) => (landed = done));
@@ -2219,6 +2238,7 @@ export function Session() {
               toKey: sessionKey(connection!, id),
               toStored: "draft:" + connection + ":" + id,
               flight,
+              sent: { files: originalAttachments, chips: context },
             };
           // Commit the destination before removing the persisted starter
           // attachments. A failed disk write must leave the original recoverable.
@@ -2226,7 +2246,7 @@ export function Session() {
             await app.setAttachmentDraft(sessionKey(connection!, id), originalAttachments);
             await clearSentAttachments(contextKey);
           });
-          if (state.drafts["new:" + originProject] === text)
+          if (!taken && state.drafts["new:" + originProject] === text)
             set("drafts", "new:" + originProject, "");
           void app.run(async () => {
             await app.clearPromptContext(contextKey, context);
@@ -2240,6 +2260,7 @@ export function Session() {
         },
         context,
         delivery,
+        taken,
       );
       sent = true;
       // Gone: what the box holds now is what its draft keeps.
