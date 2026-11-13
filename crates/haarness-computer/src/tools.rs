@@ -1364,8 +1364,9 @@ impl MacTool {
         let settings = self.computer.settings();
         input["ring"] = json!(settings.ring);
         input["bar"] = self.computer.bar_words();
-        // Long actions, such as typing a long text, refresh the screen lease while they run.
-        let renew = {
+        // Long actions, such as typing a long text, refresh the screen lease while they run. The refresh ends with the
+        // action, also when the call is let go before it returns (Stop gives a call that does not end a few seconds).
+        let renew = tokio_util::task::AbortOnDropHandle::new({
             let computer = self.computer.clone();
             let thread = conversation(context).to_string();
             tokio::spawn(async move {
@@ -1377,9 +1378,9 @@ impl MacTool {
                     computer.touch();
                 }
             })
-        };
+        });
         let result = self.helper(op, input, timeout, &context.cancel).await;
-        renew.abort();
+        drop(renew);
         // Escape stays armed from the action's end, however long it took.
         self.computer.touch();
         match result {
@@ -1903,6 +1904,67 @@ mod tests {
         };
         assert_eq!(field.describe(), "text field \"Search\"");
         assert_eq!(Target::default().describe(), "the marked spot");
+    }
+
+    /// An action let go while it waits for the helper (Stop gives up on a
+    /// call that does not end) stops refreshing the screen lease: another
+    /// chat may take the screen once it is released.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_action_let_go_stops_refreshing_the_screen_lease() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        // A helper that never answers its greeting.
+        let helper = root.path().join("silent-helper");
+        std::fs::write(&helper, "#!/bin/sh\nexec sleep 3\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let computer = Computer::new(crate::Config {
+            config_dir: root.path().join("config"),
+            data_dir: root.path().join("data"),
+            cache_dir: root.path().join("cache"),
+            helper: Some(helper),
+            console: Some(true),
+        });
+        computer
+            .manage(&json!({"action": "accept", "version": crate::terms::VERSION}))
+            .await
+            .unwrap();
+        assert!(computer.settings().on());
+        let chat = ThreadId::new();
+        let context = ToolContext {
+            execution: haarness_core::ExecutionSettings::default(),
+            thread_id: chat,
+            turn_id: haarness_protocol::TurnId::new(),
+            workspace: root.path().to_path_buf(),
+            authorized_external_paths: Vec::new(),
+            cancel: CancellationToken::new(),
+            invoker: None,
+        };
+        let tool = MacTool {
+            kind: Kind::Click,
+            computer: computer.clone(),
+        };
+        let action = tokio::spawn(async move {
+            tool.act(&context, "click", json!({}), Duration::from_secs(15))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while computer.lease().current().is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the action takes the screen");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        action.abort();
+        let _ = action.await;
+        assert!(computer.lease().release(&chat.to_string()));
+        // Past the next refresh the action would have made.
+        tokio::time::sleep(crate::lease::IDLE / 3 + Duration::from_secs(1)).await;
+        assert!(
+            computer.lease().current().is_none(),
+            "the screen lease was taken again"
+        );
     }
 
     #[test]
