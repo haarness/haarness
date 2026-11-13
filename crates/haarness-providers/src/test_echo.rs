@@ -17,6 +17,10 @@ use tokio_util::sync::CancellationToken;
 ///   round emits `Tool <name> => <output>` from the tool result.
 /// - `!preface <name> <json-args>` — like `!tool`, but emits assistant prose
 ///   before the call so persistence/rendering order can be tested.
+/// - `!note <name> <json-args>` — calls the tool twice, each call after a
+///   note for the person (as Claude 5.5 writes them): the first after some
+///   reasoning, sent whole; the second first streamed as reasoning, as a
+///   long note is, then moved. The third round reports the last result.
 /// - `!multi <json-array>` — emits several tool calls in one round, e.g.
 ///   `[{"name":"task","arguments":{...}}, ...]`; the follow-up round emits
 ///   `All tools finished`.
@@ -279,6 +283,47 @@ impl ModelProvider for EchoProvider {
                 )));
                 events.push(Ok(ProviderEvent::ToolCall {
                     call_id: "echo-call-1".into(),
+                    name,
+                    arguments,
+                    provider_metadata: serde_json::Value::Null,
+                }));
+            }
+        } else if let Some(script) = directive.strip_prefix("!note ") {
+            let results = last_user_index.map_or(0, |user| {
+                request.messages[user..]
+                    .iter()
+                    .filter(|message| matches!(message, ProviderMessage::ToolResult { .. }))
+                    .count()
+            });
+            let (name, arguments) = parse_tool_script(script);
+            match (results, last_tool_result) {
+                (0, _) => {
+                    events.push(Ok(ProviderEvent::ReasoningDelta(
+                        "Planning the check.".into(),
+                    )));
+                    events.push(Ok(ProviderEvent::Note {
+                        text: "First I'll run it once.".into(),
+                        streamed_as_reasoning: false,
+                    }));
+                }
+                (1, _) => {
+                    let note = "Once more, to be sure.";
+                    events.push(Ok(ProviderEvent::ReasoningDelta(note.into())));
+                    events.push(Ok(ProviderEvent::Note {
+                        text: note.into(),
+                        streamed_as_reasoning: true,
+                    }));
+                }
+                (_, Some((_, name, output))) => {
+                    events.push(Ok(ProviderEvent::TextDelta(format!(
+                        "Tool {name} => {output}"
+                    ))));
+                }
+                (_, None) => {}
+            }
+            if results < 2 {
+                events.push(Ok(ProviderEvent::ToolCall {
+                    call_id: format!("echo-call-{}", results + 1),
                     name,
                     arguments,
                     provider_metadata: serde_json::Value::Null,

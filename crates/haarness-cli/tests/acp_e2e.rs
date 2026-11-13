@@ -1082,6 +1082,72 @@ async fn an_image_sent_only_by_its_address_reaches_the_model_as_a_link() {
     daemon_guard.stop().await;
 }
 
+/// The note a model writes for the person before a tool call reaches the
+/// editor as message text, live and when the session is loaded again; the
+/// thinking before it stays a thought. A note long enough to have streamed as
+/// thinking first went out as thought chunks too, live only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_note_before_a_call_is_message_text_live_and_on_load() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, _, session) =
+        acp_session(&directory).await;
+    std::fs::write(workspace.join("notes.txt"), "apples\npears\n").expect("write a file to read");
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+               "params":{"sessionId":session, "prompt":[
+                   {"type":"text", "text":"!note read {\"path\":\"notes.txt\"}"}]}}),
+    )
+    .await;
+    let mut live = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 3, &mut live).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response:?}");
+    let texts = |messages: &[Value], kind: &str| -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|message| update_text(message, kind))
+            .map(str::to_owned)
+            .collect()
+    };
+    let said = texts(&live, "agent_message_chunk");
+    assert!(
+        said.iter().any(|text| text == "First I'll run it once.")
+            && said.iter().any(|text| text == "Once more, to be sure."),
+        "{said:?}"
+    );
+    assert_eq!(
+        texts(&live, "agent_thought_chunk"),
+        ["Planning the check.", "Once more, to be sure."]
+    );
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":4, "method":"session/load",
+               "params":{"sessionId":session, "cwd":workspace, "mcpServers":[]}}),
+    )
+    .await;
+    let mut replayed = Vec::new();
+    receive_response(&mut lines, &mut stdin, 4, &mut replayed).await;
+    let said = texts(&replayed, "agent_message_chunk");
+    assert!(
+        said.iter().any(|text| text == "First I'll run it once.")
+            && said.iter().any(|text| text == "Once more, to be sure."),
+        "{said:?}"
+    );
+    assert_eq!(
+        texts(&replayed, "agent_thought_chunk"),
+        ["Planning the check."]
+    );
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}
+
 /// A prompt a `UserPromptSubmit` hook blocks is refused with the hook's
 /// reason as an invalid request, not an internal error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
