@@ -31,9 +31,9 @@ const NOTE_KIND: &[u8] = b"narration";
 /// A signature is base64 over a protobuf message. Its field 2 holds a message
 /// whose field 1 is a header in the clear, and the header's field 8 names
 /// the block's kind: `narration` for a note, `thinking` for reasoning. The
-/// rest is sealed. Anything that does not read that way (another format, a
-/// cut signature, an empty one) is reasoning, so a change of format only
-/// shows notes as thoughts again.
+/// rest is sealed. A signature laid out any other way (cut short, empty, a
+/// layout Anthropic moves to later) is taken for reasoning: such a note is
+/// drawn the way every note was before this reader.
 pub(crate) fn is_note(signature: &str) -> bool {
     signature_kind(signature).as_deref() == Some(NOTE_KIND)
 }
@@ -182,6 +182,18 @@ impl NoteHold {
         &self.text
     }
 
+    /// The open block ended before any signature came for it, closed by
+    /// words, a call or the end of the answer: the stream carries no
+    /// signatures (a gateway that drops them), so from now on nothing of it
+    /// waits for a note that cannot be told. What waited goes out as
+    /// reasoning.
+    pub(crate) fn end_unsigned(&mut self) -> Option<ProviderEvent> {
+        if !self.text.is_empty() {
+            self.wait = Duration::ZERO;
+        }
+        self.end(None)
+    }
+
     /// The open block ended with `signature` (none when it came without
     /// one): it is a note, or what still waited of it goes out as reasoning.
     pub(crate) fn end(&mut self, signature: Option<&str>) -> Option<ProviderEvent> {
@@ -323,6 +335,8 @@ pub(crate) mod tests {
             "claude-fable-5-1",
             "claude-mythos-5",
             "claude-opus-6",
+            "claude-opus-5-5@20260901",
+            "claude-sonnet-5-5[1m]",
         ] {
             assert!(writes_notes(model), "{model}");
         }
@@ -446,6 +460,21 @@ pub(crate) mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_block_without_a_signature_stops_the_waiting() {
+        let mut hold = NoteHold::new(true);
+        // Nothing open: the stream may still send signatures.
+        assert!(hold.end_unsigned().is_none());
+        assert!(matches!(
+            hold.push("", "Reading.").as_slice(),
+            [ProviderEvent::ContentStarted]
+        ));
+        assert_eq!(reasoning(hold.end_unsigned()).as_deref(), Some("Reading."));
+        // The rest of the stream streams as it comes.
+        assert_eq!(reasoning(hold.push("", "More.")).as_deref(), Some("More."));
+        assert!(hold.due().is_none());
     }
 
     #[test]

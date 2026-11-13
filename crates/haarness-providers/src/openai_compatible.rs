@@ -2962,6 +2962,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         break;
                     }
                     Err(error) => {
+                        // Reasoning that waited was thought before the break.
+                        if let Some(event) = hold.release() { yield event; }
                         // Usage that already arrived was billed; keep it.
                         if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
                             yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens }; if let Some(usd) = charged.take() { yield ProviderEvent::Cost { usd }; }
@@ -3005,6 +3007,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     };
                     let error = CoreError::Provider(message);
                     trace.failed(&error);
+                    if let Some(event) = hold.release() { yield event; }
                     Err(error)?;
                 }
                 // A reply sent whole carries `message` where a stream's
@@ -3017,14 +3020,6 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     }
                     _ => &event["choices"][0]["delta"],
                 };
-                if let Some(text)=delta["content"].as_str().filter(|text| !text.is_empty()){
-                    // Words end the thinking block before them.
-                    if let Some(event) = hold.end(None) { yield event; }
-                    if native_json {
-                        if json_output.is_empty() { yield ProviderEvent::ContentStarted; }
-                        json_output.push_str(text);
-                    } else { yield ProviderEvent::TextDelta(text.into()); }
-                }
                 if let Some(parts) = delta["content"].as_array() {
                     for part in parts {
                         push_mistral_part(&mut mistral_content, part);
@@ -3066,9 +3061,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     for detail in details.as_array().into_iter().flatten() {
                         // A Haarness router sends a Claude block's whole text
                         // again with its signature: kept for replay only.
+                        let signed = block_signature(detail).is_some();
                         if direct_reasoning.is_none()
                             && !repeated
-                            && let Some(text) = visible_reasoning(detail).filter(|text| *text != hold.text())
+                            && let Some(text) = visible_reasoning(detail).filter(|text| !signed || *text != hold.text())
                         {
                             let lead = if emitted_reasoning
                                 .as_ref()
@@ -3090,8 +3086,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         }
                     }
                 }
+                // Words come after the reasoning of the same chunk, which a
+                // gateway may pack with them, and end the block before them.
+                if let Some(text)=delta["content"].as_str().filter(|text| !text.is_empty()){
+                    if let Some(event) = hold.end_unsigned() { yield event; }
+                    if native_json {
+                        if json_output.is_empty() { yield ProviderEvent::ContentStarted; }
+                        json_output.push_str(text);
+                    } else { yield ProviderEvent::TextDelta(text.into()); }
+                }
                 if let Some(deltas)=delta["tool_calls"].as_array(){
-                    if !deltas.is_empty() && let Some(event) = hold.end(None) { yield event; }
+                    if !deltas.is_empty() && let Some(event) = hold.end_unsigned() { yield event; }
                     for tool in deltas {
                         let index = streamed_call_slot(&calls, tool);
                         // A call's arguments are held until the stream ends;
@@ -3112,7 +3117,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 if let Some(reason)=event["choices"][0]["finish_reason"].as_str().filter(|reason| !reason.is_empty()){finish_reason = Some(reason.to_owned()); trace.mark_finished();}
                 if response_id.is_none() { response_id = event["id"].as_str().map(str::to_owned); }
             }
-            if let Some(event) = hold.end(None) { yield event; }
+            if let Some(event) = hold.end_unsigned() { yield event; }
             let mut provider_metadata = json!({});
             if !reasoning_details.is_empty() {
                 provider_metadata["reasoning_details"] = json!(reasoning_details);
@@ -8366,5 +8371,150 @@ mod tests {
         assert_eq!(details[1]["text"], "I'll run the tests now.");
         assert_eq!(details[1]["signature"], json!(note));
         assert_eq!(details[0]["signature"], json!(thinking));
+    }
+
+    /// The events a stream of `chunks` (each a whole chunk, a `data:` line)
+    /// gives for `model`, errors kept.
+    async fn chunk_events(
+        model: &str,
+        chunks: Vec<Value>,
+    ) -> Vec<haarness_core::CoreResult<ProviderEvent>> {
+        let body: String = chunks
+            .iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .chain(["data: [DONE]\n\n".to_owned()])
+            .collect();
+        let (provider, _) = openrouter_fixture(post(move || {
+            let body = body.clone();
+            async move { ([(CONTENT_TYPE, "text/event-stream")], body) }
+        }))
+        .await;
+        let mut request = short_request();
+        request.model = model.into();
+        provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect()
+            .await
+    }
+
+    fn delta(delta: Value) -> Value {
+        json!({"choices":[{"index":0,"delta":delta}]})
+    }
+
+    /// Claude 5.5 reached through a gateway that drops signatures (GitHub
+    /// Copilot's `reasoning_text`): only its first thinking waits; once a
+    /// block ends with no signature, the rest streams as it comes.
+    #[tokio::test]
+    async fn a_stream_without_signatures_stops_waiting_after_its_first_block() {
+        let events: Vec<ProviderEvent> = chunk_events(
+            "claude-opus-5.5",
+            vec![
+                delta(json!({"reasoning_text":"Checking."})),
+                delta(json!({"content":"Let me look."})),
+                delta(json!({"reasoning_text":"Now the tests."})),
+                delta(json!({"content":" Done."})),
+                json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+            ],
+        )
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|event| !matches!(event, ProviderEvent::Finished { .. }))
+        .collect();
+        let shown: Vec<String> = events.iter().map(|event| format!("{event:?}")).collect();
+        assert_eq!(
+            shown,
+            [
+                "ContentStarted",
+                r#"ReasoningDelta("Checking.")"#,
+                r#"TextDelta("Let me look.")"#,
+                r#"ReasoningDelta("Now the tests.")"#,
+                r#"TextDelta(" Done.")"#,
+            ]
+        );
+    }
+
+    /// Unsigned details that happen to equal the thought so far are shown:
+    /// only a signed detail repeats a block's whole text.
+    #[tokio::test]
+    async fn unsigned_details_are_never_taken_for_a_repeat() {
+        let piece = |text: &str| {
+            delta(json!({"reasoning_details":[{"type":"reasoning.text","text":text,"index":0}]}))
+        };
+        let events = chunk_events(
+            "google/gemini-3.5-flash-lite",
+            vec![
+                piece("\n"),
+                piece("\n"),
+                piece("Plan."),
+                json!({"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}),
+            ],
+        )
+        .await;
+        let reasoning: String = events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ProviderEvent::ReasoningDelta(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, "\n\nPlan.");
+    }
+
+    /// A gateway may pack a note's signed detail and the first words of the
+    /// reply into one chunk: the note still comes whole, once, before them.
+    #[tokio::test]
+    async fn a_signed_detail_packed_with_words_ends_its_block_first() {
+        let note = crate::notes::tests::note_signature();
+        let events: Vec<ProviderEvent> = chunk_events(
+            "anthropic/claude-sonnet-5.5",
+            vec![
+                delta(json!({"reasoning":"I'll run ","reasoning_content":"I'll run "})),
+                delta(json!({"reasoning":"the tests now.","reasoning_content":"the tests now."})),
+                delta(json!({
+                    "reasoning_details":[{"type":"reasoning.text","format":"anthropic-claude-v1","index":0,"text":"I'll run the tests now.","signature":note}],
+                    "content":"Running them."
+                })),
+                json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+            ],
+        )
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+        assert_eq!(
+            reasoning_and_notes(&events),
+            (
+                String::new(),
+                vec![("I'll run the tests now.".to_owned(), false)]
+            )
+        );
+        let at = |wanted: fn(&ProviderEvent) -> bool| events.iter().position(wanted).unwrap();
+        assert!(
+            at(|event| matches!(event, ProviderEvent::Note { .. }))
+                < at(|event| matches!(event, ProviderEvent::TextDelta(_)))
+        );
+    }
+
+    /// Thinking that waited is shown before an error the stream reports
+    /// ends it, as it was before the wait.
+    #[tokio::test]
+    async fn waiting_thinking_goes_out_before_an_error() {
+        let events = chunk_events(
+            "anthropic/claude-opus-5.5",
+            vec![
+                delta(json!({"reasoning":"Weighing two fixes.","reasoning_content":"Weighing two fixes."})),
+                json!({"error":{"message":"Overloaded","code":529}}),
+            ],
+        )
+        .await;
+        let reasoning = events
+            .iter()
+            .position(|event| matches!(event, Ok(ProviderEvent::ReasoningDelta(text)) if text == "Weighing two fixes."))
+            .expect("the thought before the error");
+        let error = events.iter().position(Result::is_err).expect("the error");
+        assert!(reasoning < error, "{events:?}");
     }
 }

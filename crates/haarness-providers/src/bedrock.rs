@@ -779,6 +779,8 @@ fn converse_stream(
                 Ok(chunk) => chunk,
                 Err(error) => {
                     drop(chunks);
+                    // Reasoning that waited was thought before the break.
+                    if let Some(event) = events.hold.release() { yield event; }
                     Err(error)?;
                     unreachable!();
                 }
@@ -790,14 +792,26 @@ fn converse_stream(
             let Some(chunk) = chunk else { break; };
             decoder.push(&chunk);
             while let Some(message) = decoder.next() {
-                let message = message.map_err(|error| {
-                    CoreError::Provider(format!("Bedrock sent an unreadable answer: {error}"))
-                })?;
-                for event in events.message(&message)? {
-                    yield event;
+                let answered = message
+                    .map_err(|error| {
+                        CoreError::Provider(format!("Bedrock sent an unreadable answer: {error}"))
+                    })
+                    .and_then(|message| events.message(&message));
+                match answered {
+                    Ok(answered) => {
+                        for event in answered {
+                            yield event;
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(event) = events.hold.release() { yield event; }
+                        Err(error)?;
+                    }
                 }
             }
         }
+        // An answer that ended in the middle of a block.
+        if let Some(event) = events.hold.release() { yield event; }
         if !decoder.is_empty() {
             Err(CoreError::Provider(
                 "Bedrock connection closed before message completed".into(),
@@ -2195,6 +2209,63 @@ mod tests {
                 .count,
             None
         );
+    }
+
+    /// Reasoning that waits to be told from a note is shown before the
+    /// answer breaks off, whether Bedrock raises an exception or the
+    /// connection ends in the middle of the block.
+    #[tokio::test]
+    async fn waiting_reasoning_goes_out_before_a_break() {
+        async fn answer(State(frames): State<Vec<u8>>) -> Vec<u8> {
+            frames
+        }
+        let thought = (
+            "contentBlockDelta",
+            json!({"contentBlockIndex":0,"delta":{"reasoningContent":{"text":"Weighing two fixes."}}}),
+        );
+        let exception = aws_event_stream::encode(
+            &[
+                (":message-type", "exception"),
+                (":exception-type", "throttlingException"),
+                (":content-type", "application/json"),
+            ],
+            br#"{"message":"Too many requests"}"#,
+        );
+        for frames in [
+            [converse_frames(std::slice::from_ref(&thought)), exception].concat(),
+            converse_frames(std::slice::from_ref(&thought)),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    Router::new().route("/", post(answer)).with_state(frames),
+                )
+                .await
+                .unwrap()
+            });
+            let response = reqwest::Client::new()
+                .post(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            let events: Vec<_> = converse_stream(
+                response,
+                CancellationToken::new(),
+                StreamLimits::default(),
+                "amazon-bedrock".into(),
+                ConverseEvents::new(true),
+            )
+            .collect()
+            .await;
+            let thought = events
+                .iter()
+                .position(|event| matches!(event, Ok(ProviderEvent::ReasoningDelta(text)) if text == "Weighing two fixes."))
+                .expect("the thought before the break");
+            let error = events.iter().position(Result::is_err).expect("the break");
+            assert!(thought < error, "{events:?}");
+        }
     }
 
     /// Claude 5.5 on Bedrock writes its note for the person as a reasoning

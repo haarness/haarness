@@ -786,16 +786,20 @@ own count. Clients read it as "Thought for 12s"; records made before it was
 measured have none.
 
 An `assistant_message` marked `note: true` is the short line Claude 5.5 and
-Fable 5 write for the person just before a tool call, which those models send
-as a thinking block of its own; Haarness tells it from reasoning by the
-block's signature, and a signature it cannot read counts as reasoning. Clients
+later, Fable and Mythos 5 write for the person just before a tool call, which
+those models send as a thinking block of its own; Haarness tells it from
+reasoning by the block's signature, and treats the block as reasoning when
+that signature does not read as one it knows. Clients
 show a note as reply text between the tool rows. It is not the turn's answer:
 the SDKs' `chat()` text, a subagent's or workflow agent's reply, a scheduled
 run's response and `/copy` leave it out. The model gets the note back only
 inside its thinking block, with the call it preceded, never as text. Every
 other message has no `note`, so an older client draws a note as ordinary
 text; `haarness run` prints it as a reply line, and `--format json` adds
-`"note": true` to its `assistant` record. Live, a note arrives as
+`"note": true` to its `assistant` record. A server from before notes (0.1.22
+and earlier) that runs a later turn of such a chat sends each note to the
+model as words as well as inside its thinking block: nothing fails, the model
+only reads the line twice. Live, a note arrives as
 `turn.text_delta` followed by its item. For these models a thinking block's
 text reaches `turn.reasoning_delta` up to 3 seconds or 600 characters late,
 so that a note is never streamed as reasoning; a note longer than that has

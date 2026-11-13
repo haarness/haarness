@@ -603,7 +603,15 @@ impl ModelProvider for AnthropicProvider {
                     continue;
                 };
                 let Some(event) = event else { break };
-                let event = event?;
+                let event = match event {
+                    Ok(event) => event,
+                    // What waited was thought before the answer broke off:
+                    // it goes out first, as a cut answer's thinking always did.
+                    Err(error) => {
+                        if let Some(event) = hold.release() { yield event; }
+                        Err::<Value, _>(error)?
+                    }
+                };
                 match event["type"].as_str().unwrap_or_default() {
                     "message_start" => {
                         message_id = event.pointer("/message/id").and_then(Value::as_str).map(str::to_owned);
@@ -726,11 +734,14 @@ impl ModelProvider for AnthropicProvider {
                     "error" => {
                         let error = CoreError::Provider(event.to_string());
                         trace.failed(&error);
+                        if let Some(event) = hold.release() { yield event; }
                         Err(error)?;
                     }
                     _ => {}
                 }
             }
+            // An answer that ended in the middle of a block.
+            if let Some(event) = hold.release() { yield event; }
         }))
     }
 }
@@ -741,8 +752,10 @@ pub(crate) const NEWEST_CLAUDE: (u32, u32) = (5, 5);
 
 /// A Claude release read from its id under any vendor spelling:
 /// `claude-opus-5-5`, `anthropic/claude-sonnet-5.5`,
-/// `us.anthropic.claude-fable-5-1-v1:0` and the older `claude-3-5-sonnet`.
-/// A dated snapshot (`-20250514`) is not a minor version.
+/// `us.anthropic.claude-fable-5-1-v1:0`, Vertex AI's
+/// `claude-opus-5-5@20260901`, `claude-sonnet-5-5[1m]` and the older
+/// `claude-3-5-sonnet`. A dated snapshot (`-20250514`, `@20260901`) is not a
+/// minor version, nor is a bracketed context mark.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ClaudeRelease {
     pub family: String,
@@ -750,6 +763,7 @@ pub(crate) struct ClaudeRelease {
 }
 
 pub(crate) fn claude_release(id: &str) -> Option<ClaudeRelease> {
+    let id = id.split('[').next().unwrap_or(id);
     let lower = id.to_ascii_lowercase().replace('.', "-");
     let (_, rest) = lower.split_once("claude-")?;
     let number = |part: &str| {
@@ -757,7 +771,7 @@ pub(crate) fn claude_release(id: &str) -> Option<ClaudeRelease> {
             .then(|| part.parse::<u32>().ok())
             .flatten()
     };
-    let parts: Vec<&str> = rest.split(['-', ':']).collect();
+    let parts: Vec<&str> = rest.split(['-', ':', '@']).collect();
     let (family, numbers) = match parts.first().copied().and_then(number) {
         // The older spelling puts the version first: `claude-3-5-sonnet`.
         Some(_) => {
@@ -1750,6 +1764,18 @@ pub(crate) mod tests {
             claude_release("claude-3-5-sonnet-20241022"),
             release("sonnet", (3, 5))
         );
+        assert_eq!(
+            claude_release("claude-opus-5-5@20260901"),
+            release("opus", (5, 5))
+        );
+        assert_eq!(
+            claude_release("claude-sonnet-5-5[1m]"),
+            release("sonnet", (5, 5))
+        );
+        assert_eq!(
+            claude_release("claude-opus-4-1@20250805"),
+            release("opus", (4, 1))
+        );
         assert_eq!(claude_release("claude-test"), None);
         assert_eq!(claude_release("MiniMax-M3"), None);
         // Listed releases keep their answers; a newer one takes the newest.
@@ -1781,6 +1807,8 @@ pub(crate) mod tests {
             "claude-sonnet-5-5",
             "claude-haiku-5-5",
             "claude-sonnet-6",
+            "claude-opus-5-5@20260901",
+            "claude-sonnet-5-5[1m]",
         ] {
             assert!(binds_thinking(id), "{id}");
         }
@@ -2713,5 +2741,59 @@ pub(crate) mod tests {
             metadata["anthropic_thinking"][0]["signature"],
             json!(recorded_signature())
         );
+    }
+
+    /// Thinking that waits to be told from a note is shown before an error
+    /// that ends the answer, as it was before the wait.
+    #[tokio::test]
+    async fn waiting_thinking_goes_out_before_an_error() {
+        async fn failing() -> ([(axum::http::HeaderName, &'static str); 1], String) {
+            let events = [
+                r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":12,"output_tokens":1}}}"#,
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Weighing two fixes."}}"#,
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            ];
+            let body = events.iter().fold(String::new(), |mut body, event| {
+                use std::fmt::Write as _;
+                let _ = write!(body, "data: {event}\n\n");
+                body
+            });
+            ([(CONTENT_TYPE, "text/event-stream")], body)
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/messages", post(failing)))
+                .await
+                .unwrap()
+        });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        let events: Vec<_> = provider
+            .stream(
+                ProviderRequest {
+                    model: "claude-opus-5-5".into(),
+                    system: "test".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "the tests fail".into(),
+                    }],
+                    tools: Vec::new(),
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        let thought = events
+            .iter()
+            .position(|event| matches!(event, Ok(ProviderEvent::ReasoningDelta(text)) if text == "Weighing two fixes."))
+            .expect("the thought before the error");
+        let error = events.iter().position(Result::is_err).expect("the error");
+        assert!(thought < error, "{events:?}");
     }
 }
