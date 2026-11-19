@@ -24360,6 +24360,62 @@ async fn review_opens_loading_and_is_collected_by_a_later_frame() {
     server.await.unwrap();
 }
 
+/// An untracked file too large for the server to count says so where its
+/// counts would be, and why it has no lines, instead of claiming none.
+#[tokio::test]
+async fn review_names_a_file_too_large_to_count() {
+    let body = serde_json::json!([
+        {
+            "file": "dump.log",
+            "status": "added",
+            "additions": 0,
+            "deletions": 0,
+            "truncated": true,
+            "truncation": "file_too_large",
+            "uncounted": true
+        },
+        {
+            "file": "notes.md",
+            "status": "added",
+            "additions": 1,
+            "deletions": 0,
+            "patch": "@@ -0,0 +1 @@\n+# Notes\n"
+        }
+    ])
+    .to_string();
+    let (client, server) = workspace_http_client(vec![body], false).await;
+    let mut app = selector_fixture();
+    app.open_diff_viewer(crate::diffview::DiffSource::WorkingTree, &client);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while viewer_of(&app).loading {
+            app.sync_diff_layout(120);
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("review delivered");
+    let rows: Vec<String> = app.lines((120, 30)).iter().map(line_text).collect();
+    let header = |name: &str| {
+        rows.iter()
+            .find(|row| row.contains(name) && row.contains("added"))
+            .unwrap_or_else(|| panic!("{name} header in {rows:#?}"))
+    };
+    let dump = header("dump.log");
+    assert!(dump.contains("too large to count  added"), "{dump:?}");
+    assert!(!dump.contains("+0"), "{dump:?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Too large to read here; its lines are not counted")),
+        "{rows:#?}"
+    );
+    let notes = header("notes.md");
+    assert!(notes.contains("+1 −0  added"), "{notes:?}");
+    // The totals leave it out, and say so.
+    assert!(rows[0].contains("+1 −0"), "{:?}", rows[0]);
+    assert!(rows[0].contains("1 not counted"), "{:?}", rows[0]);
+    server.await.unwrap();
+}
+
 /// A review that cannot be fetched has to say something the reader can act
 /// on, not reqwest's bare transport text.
 #[tokio::test]

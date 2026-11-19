@@ -1805,7 +1805,7 @@
         "type": "object"
       },
       "FileDiff": {
-        "description": "Bounded file-change payload shared by Git review and snapshot/turn diffs.\nGit responses normally carry `patch`; snapshot responses normally carry\n`before` and `after`. A missing body with `truncated=true` remains an\nhonest metadata-only change instead of returning an unbounded payload.",
+        "description": "Bounded file-change payload shared by Git review and snapshot/turn diffs.\nGit responses normally carry `patch`; snapshot responses normally carry\n`before` and `after`. A tool's change carries `before` and `after` too,\nor, for a file over its body limit, a bounded `patch` of the change\nalone (hunks without file headers). A missing body with `truncated=true`\nremains an honest metadata-only change instead of returning an unbounded\npayload.",
         "properties": {
           "additions": {
             "format": "int64",
@@ -5508,12 +5508,16 @@
                     "$ref": "#/components/schemas/DiffTruncation"
                   }
                 ]
+              },
+              "uncounted": {
+                "description": "An untracked text file too large to read for its line counts: its\n`additions` are zero rather than counted, and it has no body. Absent\nfor every file whose counts are real.",
+                "type": "boolean"
               }
             },
             "type": "object"
           }
         ],
-        "description": "One entry of a Git review: a [`FileDiff`] plus the bounds the review had\nto apply to produce it.\n\nIt flattens, so the wire shape is a strict superset of `FileDiff` and the\nendpoint keeps returning the same array of the same objects; both added\nfields are optional and defaulted, so an older client \u2014 or the generated\nTypeScript SDK before it is regenerated \u2014 decodes these responses\nunchanged and simply does not see them."
+        "description": "One entry of a Git review: a [`FileDiff`] plus the bounds the review had\nto apply to produce it.\n\nIt flattens, so the wire shape is a strict superset of `FileDiff` and the\nendpoint keeps returning the same array of the same objects; the added\nfields are optional and defaulted, so an older client \u2014 or the generated\nTypeScript SDK before it is regenerated \u2014 decodes these responses\nunchanged and simply does not see them."
       },
       "ReviewFinding": {
         "properties": {

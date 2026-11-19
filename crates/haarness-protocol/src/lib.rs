@@ -634,8 +634,11 @@ pub enum FileDiffStatus {
 
 /// Bounded file-change payload shared by Git review and snapshot/turn diffs.
 /// Git responses normally carry `patch`; snapshot responses normally carry
-/// `before` and `after`. A missing body with `truncated=true` remains an
-/// honest metadata-only change instead of returning an unbounded payload.
+/// `before` and `after`. A tool's change carries `before` and `after` too,
+/// or, for a file over its body limit, a bounded `patch` of the change
+/// alone (hunks without file headers). A missing body with `truncated=true`
+/// remains an honest metadata-only change instead of returning an unbounded
+/// payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiff {
@@ -673,7 +676,7 @@ pub enum DiffTruncation {
 /// to apply to produce it.
 ///
 /// It flattens, so the wire shape is a strict superset of `FileDiff` and the
-/// endpoint keeps returning the same array of the same objects; both added
+/// endpoint keeps returning the same array of the same objects; the added
 /// fields are optional and defaulted, so an older client — or the generated
 /// TypeScript SDK before it is regenerated — decodes these responses
 /// unchanged and simply does not see them.
@@ -691,6 +694,11 @@ pub struct ReviewFile {
     /// review listed everything that changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted_files: Option<u64>,
+    /// An untracked text file too large to read for its line counts: its
+    /// `additions` are zero rather than counted, and it has no body. Absent
+    /// for every file whose counts are real.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub uncounted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

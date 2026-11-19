@@ -11,7 +11,8 @@ use std::borrow::Cow;
 use haarness_opentui::{Line, Span, attr};
 use haarness_protocol::{FileDiff, FileDiffStatus, Item, ItemData, ItemId};
 
-use crate::diff::{render_added, render_diff};
+use crate::diff::{render_added, render_added_rows, render_diff, render_patch};
+use crate::diffview::{RowKind, rows_from_patch};
 use crate::markdown::render_markdown;
 use crate::state::{App, ChildTask, unfinished};
 use crate::theme::Theme;
@@ -740,6 +741,25 @@ fn render_file_diffs(metadata: &serde_json::Value, width: usize, theme: &Theme) 
                 (FileDiffStatus::Modified, Some(before), Some(after)) => {
                     render_diff(before, after, width, theme, "    ")
                 }
+                // A large file's change, kept as a diff instead of its texts.
+                (status, None, None) => diff.patch.as_deref().map_or_else(Vec::new, |patch| {
+                    if status == FileDiffStatus::Added {
+                        let rows = rows_from_patch(patch);
+                        let added = rows.iter().filter(|row| row.kind == RowKind::Added);
+                        let total = usize::try_from(diff.additions).unwrap_or(usize::MAX);
+                        render_added_rows(
+                            added.map(|row| row.text.as_str()),
+                            total,
+                            width,
+                            theme,
+                            "    ",
+                            TOOL_BLOCK_ROWS,
+                        )
+                    } else {
+                        let removed = (status == FileDiffStatus::Deleted).then_some(diff.deletions);
+                        render_patch(patch, width, theme, "    ", removed)
+                    }
+                }),
                 _ => Vec::new(),
             }
         };
@@ -1067,6 +1087,199 @@ mod workflow_tests {
             )
             .is_empty()
         );
+    }
+
+    fn rows_of(metadata: &serde_json::Value) -> Vec<String> {
+        super::render_file_diffs(metadata, 80, &Theme::default())
+            .iter()
+            .map(|row| row.text().trim_end().to_owned())
+            .collect()
+    }
+
+    /// A change to a large file comes as a diff of the change: its real
+    /// lines, numbered as the file is, with two lines of context.
+    #[test]
+    fn a_large_file_change_draws_from_its_stored_diff() {
+        use std::fmt::Write as _;
+        let line = |number: usize| format!("line {number:05} of a large file, as written");
+        let mut patch = String::from("@@ -872,7 +872,7 @@\n");
+        for number in 872..=878 {
+            if number == 875 {
+                let _ = write!(patch, "-{}\n+line 00875 (changed)\n", line(number));
+            } else {
+                let _ = writeln!(patch, " {}", line(number));
+            }
+        }
+        let entry = serde_json::json!({"diffs": [{
+            "file": "large.txt", "status": "modified", "additions": 1, "deletions": 1,
+            "patch": patch,
+        }]});
+        assert_eq!(
+            rows_of(&entry),
+            [
+                "    M large.txt".to_owned(),
+                format!("    873   {}", line(873)),
+                format!("    874   {}", line(874)),
+                format!("    875 - {}", line(875)),
+                "    875 + line 00875 (changed)".to_owned(),
+                format!("    876   {}", line(876)),
+                format!("    877   {}", line(877)),
+            ]
+        );
+
+        // Cut short: what it holds, then that it is not all.
+        let entry = serde_json::json!({"diffs": [{
+            "file": "large.txt", "status": "modified", "additions": 9, "deletions": 9,
+            "patch": "@@ -3,1 +3,1 @@\n-old\n+new\n", "truncated": true,
+        }]});
+        assert_eq!(
+            rows_of(&entry),
+            [
+                "    M large.txt",
+                "     3 - old",
+                "     3 + new",
+                "      diff content truncated"
+            ]
+        );
+
+        // A new large file shows its first lines, and how many more it has.
+        let mut patch = String::from("@@ -0,0 +1,1000 @@\n");
+        for number in 1..=1_000 {
+            let _ = writeln!(patch, "+{}", line(number));
+        }
+        let entry = serde_json::json!({"diffs": [{
+            "file": "copy.txt", "status": "added", "additions": 1000, "deletions": 0,
+            "patch": patch,
+        }]});
+        let rows = rows_of(&entry);
+        assert_eq!(rows[0], "    A copy.txt");
+        assert_eq!(rows[1], format!("    + {}", line(1)));
+        assert_eq!(rows.len(), 2 + super::TOOL_BLOCK_ROWS);
+        assert_eq!(rows.last().unwrap(), "      … +988 more lines");
+
+        // A large file removed whole: the lines left out are counted from
+        // the whole file, not from what its stored diff kept.
+        let mut patch = String::from("@@ -1,1500 +0,0 @@\n");
+        for number in 1..=1_500 {
+            let _ = writeln!(patch, "-{}", line(number));
+        }
+        let entry = serde_json::json!({"diffs": [{
+            "file": "old.txt", "status": "deleted", "additions": 0, "deletions": 100_000,
+            "patch": patch, "truncated": true,
+        }]});
+        let rows = rows_of(&entry);
+        assert_eq!(rows[0], "    D old.txt");
+        assert_eq!(rows[1], format!("       1 - {}", line(1)));
+        assert_eq!(rows[rows.len() - 2], "      … +99800 more lines");
+        assert_eq!(rows.last().unwrap(), "      diff content truncated");
+
+        // A CRLF file's line ends stay out of sight.
+        let entry = serde_json::json!({"diffs": [{
+            "file": "large.txt", "status": "modified", "additions": 1, "deletions": 1,
+            "patch": "@@ -9,2 +9,2 @@\n same\r\n-old\r\n+new\r\n",
+        }]});
+        assert_eq!(
+            rows_of(&entry),
+            [
+                "    M large.txt",
+                "     9   same",
+                "    10 - old",
+                "    10 + new"
+            ]
+        );
+    }
+
+    /// The same change draws the same from a pair of texts and from a stored
+    /// diff with Git's three lines of context: a run of unchanged lines
+    /// longer than four between two changes becomes a gap in both, and a
+    /// carriage return alone stays inside its line in both.
+    #[test]
+    fn a_stored_diff_draws_as_its_texts_would() {
+        let before = (1..=40)
+            .fold(String::new(), |text, number| {
+                text + &format!("row {number}\n")
+            })
+            .replacen("row 2\n", "progress 10%\rprogress 20%\n", 1);
+        let mut after = before.clone();
+        for (old, new) in [
+            ("row 3\n", "row three\n"),
+            ("row 7\n", "row seven\n"),
+            ("row 13\n", "row thirteen\nan added row\n"),
+            ("row 20\n", ""),
+            ("row 31\n", "row thirty-one\n"),
+        ] {
+            after = after.replacen(old, new, 1);
+        }
+        let (old, new) = (
+            crate::diff::text_lines(&before),
+            crate::diff::text_lines(&after),
+        );
+        let patch = similar::TextDiff::configure()
+            .newline_terminated(true)
+            .diff_slices(&old, &new)
+            .unified_diff()
+            .context_radius(3)
+            .to_string();
+        let theme = Theme::default();
+        let text = |lines: Vec<haarness_opentui::Line>| {
+            lines
+                .iter()
+                .map(haarness_opentui::Line::text)
+                .collect::<Vec<_>>()
+        };
+        let drawn = text(crate::diff::render_patch(&patch, 80, &theme, "    ", None));
+        assert_eq!(
+            drawn,
+            text(crate::diff::render_diff(
+                &before, &after, 80, &theme, "    "
+            ))
+        );
+        assert_eq!(
+            drawn.iter().filter(|row| row.contains('⋮')).count(),
+            3,
+            "{drawn:#?}"
+        );
+        // Numbered as the file is: row 31 is line 31.
+        assert!(
+            drawn.iter().any(|row| row.trim_end() == "    31 - row 31"),
+            "{drawn:#?}"
+        );
+        assert!(
+            drawn
+                .iter()
+                .any(|row| row.contains(" 2   progress 10%\\u{D}progress 20%")),
+            "{drawn:#?}"
+        );
+    }
+
+    /// Chats stored before large files kept a diff hold the first 32 KiB of
+    /// each text; they load and draw as they always did.
+    #[test]
+    fn an_older_cut_change_draws_as_before() {
+        let text = (1..=1_000).fold(String::new(), |text, number| {
+            text + &format!("line {number:05} of a large file, as written\n")
+        });
+        let cut = &text[..32 * 1_024];
+        let entry = serde_json::json!({"diffs": [{
+            "file": "large.txt", "status": "modified", "additions": 1, "deletions": 1,
+            "before": cut, "after": cut, "truncated": true,
+        }]});
+        assert_eq!(
+            rows_of(&entry),
+            ["    M large.txt", "      diff content unavailable"]
+        );
+        let grown = cut.replacen("line 00025 of", "line 00025 now of", 1);
+        let entry = serde_json::json!({"diffs": [{
+            "file": "large.txt", "status": "modified", "additions": 1, "deletions": 1,
+            "before": cut, "after": &grown[..32 * 1_024], "truncated": true,
+        }]});
+        let rows = rows_of(&entry);
+        assert!(
+            rows.iter()
+                .any(|row| row.ends_with(" 25 + line 00025 now of a large file, as written")),
+            "{rows:#?}"
+        );
+        assert_eq!(rows.last().unwrap(), "      diff content truncated");
     }
 }
 

@@ -1940,6 +1940,8 @@
   "1 file left as it was": "1 arquivo ficou como estava",
   "{count} files left as they were": "{count} arquivos ficaram como estavam",
   "too large for Undo": "grande demais para Desfazer",
+  "too large to count": "grande demais para contar",
+  "{count} not counted": "{count} sem contagem",
   "ignored": "ignorado",
   "outside the folder": "fora da pasta",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} tem mais de 2 MiB e Desfazer não tem uma cópia dele. Envie uma mensagem para manter a conversa como está agora.",

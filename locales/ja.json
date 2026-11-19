@@ -1940,6 +1940,8 @@
   "1 file left as it was": "1 件のファイルはそのままです",
   "{count} files left as they were": "{count} 件のファイルはそのままです",
   "too large for Undo": "大きすぎて元に戻せません",
+  "too large to count": "大きすぎて数えられません",
+  "{count} not counted": "{count} 件は未集計",
   "ignored": "無視対象",
   "outside the folder": "フォルダー外",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} は 2 MiB を超えていて、元に戻すためのコピーがありません。チャットを今の状態のまま残すには、メッセージを送信してください。",

@@ -235,7 +235,11 @@ fn row_language(file: &FileDiff, rows: &[DiffRow]) -> String {
 
 /// Rows from a pre/post image pair. `context` of `None` keeps the whole file.
 pub fn rows_from_texts(before: &str, after: &str, context: Option<u32>) -> Vec<DiffRow> {
-    let diff = TextDiff::from_lines(before, after);
+    let (old, new) = (
+        crate::diff::text_lines(before),
+        crate::diff::text_lines(after),
+    );
+    let diff = TextDiff::configure().diff_slices(&old, &new);
     let mut rows = Vec::new();
     let Some(context) = context else {
         for change in diff.iter_all_changes() {
@@ -290,10 +294,11 @@ pub fn line_stat(file: &FileDiff) -> (u64, u64) {
     if file.binary || file.truncated || (file.before.is_none() && file.after.is_none()) {
         return (file.additions, file.deletions);
     }
-    let diff = TextDiff::from_lines(
-        file.before.as_deref().unwrap_or_default(),
-        file.after.as_deref().unwrap_or_default(),
+    let (old, new) = (
+        crate::diff::text_lines(file.before.as_deref().unwrap_or_default()),
+        crate::diff::text_lines(file.after.as_deref().unwrap_or_default()),
     );
+    let diff = TextDiff::configure().diff_slices(&old, &new);
     diff.ops()
         .iter()
         .fold((0, 0), |(additions, deletions), op| match op.tag() {
@@ -827,6 +832,8 @@ pub struct DiffViewer {
     /// Changed paths the server bounded out of this review. `None` means it
     /// returned everything that changed.
     pub omitted_files: Option<u64>,
+    /// Untracked files too large for the server to count: no counts, no body.
+    pub uncounted: BTreeSet<String>,
     /// Columns the patch pane had in the last frame. Split needs room, so the
     /// resolved layout is a function of this as well as the reader's choice.
     pub pane_width: std::cell::Cell<usize>,
@@ -862,6 +869,7 @@ impl DiffViewer {
             tree_scroll: 0,
             loading: false,
             omitted_files: None,
+            uncounted: BTreeSet::new(),
             pane_width: std::cell::Cell::new(0),
             opened_with: DiffPreferences::default(),
         };
@@ -897,7 +905,13 @@ impl DiffViewer {
         self.rows = self
             .files
             .iter()
-            .map(|file| file_rows(file, context))
+            .map(|file| {
+                let mut rows = file_rows(file, context);
+                if self.uncounted.contains(&file.file) {
+                    rows.note = Some("Too large to read here; its lines are not counted".into());
+                }
+                rows
+            })
             .collect();
         self.tree = FileTree::build(&self.files);
         self.expanded = self.tree.all_directories();

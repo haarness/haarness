@@ -66,6 +66,11 @@ const BINARY_SNIFF_BYTES: usize = 8000;
 /// `16 * MAX_PATCH_BYTES` while saturating an SSD.
 const UNTRACKED_CONCURRENCY: usize = 16;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
+/// The most of one untracked text file read to count its lines. A larger one
+/// is listed as too large to count: no review shows more than
+/// [`MAX_TOTAL_PATCH_BYTES`] of a file, and a multi-gigabyte log or dump
+/// left in the tree would otherwise be read in full on every listing.
+const MAX_COUNTED_BYTES: usize = MAX_TOTAL_PATCH_BYTES;
 
 const DEFAULT_CONTEXT_LINES: u32 = i32::MAX as u32;
 const MAX_METADATA_BYTES: usize = 10_000_000;
@@ -127,6 +132,7 @@ struct DiffEntry {
     binary: bool,
     truncated: bool,
     truncation: Option<DiffTruncation>,
+    uncounted: bool,
 }
 
 impl Default for DiffEntry {
@@ -139,6 +145,7 @@ impl Default for DiffEntry {
             binary: false,
             truncated: false,
             truncation: None,
+            uncounted: false,
         }
     }
 }
@@ -337,6 +344,10 @@ pub async fn diff_selected(
         };
         if scan.binary {
             entry.truncation = Some(DiffTruncation::Binary);
+        } else if scan.uncounted {
+            entry.truncated = true;
+            entry.truncation = Some(DiffTruncation::FileTooLarge);
+            entry.uncounted = true;
         } else if !summary {
             match untracked_patch(&file, &scan) {
                 Some(body) => {
@@ -371,6 +382,7 @@ pub async fn diff_selected(
             },
             truncation: entry.truncation,
             omitted_files,
+            uncounted: entry.uncounted,
         })
         .collect())
 }
@@ -609,6 +621,9 @@ struct FileScan {
     body: Option<String>,
     /// Content was read but deliberately not kept, because it did not fit.
     over_budget: bool,
+    /// Text over [`MAX_COUNTED_BYTES`]: read no further than that, so its
+    /// lines are not counted and it has no body.
+    uncounted: bool,
     /// The Git file mode the synthesized header reports.
     mode: &'static str,
 }
@@ -620,6 +635,7 @@ const SYMLINK_MODE: &str = "120000";
 
 /// Read one untracked file once: line count, binary verdict, and — when it
 /// fits `budget` — its content. `budget` of `None` is a metadata-only scan.
+/// Text past [`MAX_COUNTED_BYTES`] is not read: the file is uncounted.
 async fn scan_untracked(
     workspace: &Path,
     file: &str,
@@ -647,6 +663,7 @@ async fn scan_untracked(
             binary: false,
             body: fits.then_some(text),
             over_budget: budget.is_some() && !fits,
+            uncounted: false,
             mode: SYMLINK_MODE,
         }));
     }
@@ -655,6 +672,9 @@ async fn scan_untracked(
         return Ok(None);
     }
     let mode = file_mode(&metadata);
+    // Its size as listed, sparse or not: a file over the cap is read only as
+    // far as telling text from binary.
+    let oversized = metadata.len() > MAX_COUNTED_BYTES as u64;
 
     let Ok(mut handle) = tokio::fs::File::open(&path).await else {
         return Ok(None);
@@ -685,17 +705,29 @@ async fn scan_untracked(
                     binary: true,
                     body: None,
                     over_budget: false,
+                    uncounted: false,
                     mode,
                 }));
             }
+        }
+        // A file that grows past the cap while it is read stops there too.
+        if (oversized && sniffed >= BINARY_SNIFF_BYTES) || read_total + read > MAX_COUNTED_BYTES {
+            return Ok(Some(FileScan {
+                lines: 0,
+                binary: false,
+                body: None,
+                over_budget: false,
+                uncounted: true,
+                mode,
+            }));
         }
         lines += chunk
             .iter()
             .fold(0_u64, |count, byte| count + u64::from(*byte == b'\n'));
         last = chunk[read - 1];
         read_total += read;
-        // Past the budget the content is dropped, but the read continues: the
-        // line counts stay honest even for a file too big to show.
+        // Past the budget the content is dropped, but the read continues up
+        // to the cap: the line counts stay honest for a file too big to show.
         if captured.is_some() && read_total > budget.unwrap_or(0) {
             captured = None;
         } else if let Some(body) = &mut captured {
@@ -708,6 +740,7 @@ async fn scan_untracked(
     Ok(Some(FileScan {
         lines,
         binary: false,
+        uncounted: false,
         over_budget: captured.is_none() && budget.is_some() && read_total > 0,
         body: captured.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
         mode,
@@ -1479,6 +1512,78 @@ mod tests {
         assert!(huge.diff.patch.is_none());
         assert!(huge.diff.truncated);
         assert_eq!(huge.truncation, Some(DiffTruncation::FileTooLarge));
+        assert!(!huge.uncounted);
+    }
+
+    /// An untracked text file over the read cap is listed as too large to
+    /// count, from the start of it alone; one at the cap is still counted,
+    /// and a binary one is still binary.
+    #[tokio::test]
+    async fn untracked_text_past_the_cap_is_not_read() {
+        let repo = TestRepo::new();
+        repo.write("base.txt", "base\n");
+        repo.commit_all("baseline");
+        let lines = "a line of text\n".repeat(MAX_COUNTED_BYTES / 15);
+        repo.write("at-cap.log", &lines);
+        let mut over = lines.clone();
+        over.push_str("one more\n");
+        repo.write("over-cap.log", over);
+        let mut blob = vec![0_u8; 16];
+        blob.extend_from_slice(lines.as_bytes());
+        blob.extend_from_slice(b"past the cap\n");
+        repo.write("blob.bin", blob);
+        // Text, then a hole three gigabytes long: no disk is spent on it,
+        // and reading it all would take a long time.
+        #[cfg(unix)]
+        {
+            let sparse = std::fs::File::create(repo.path.join("sparse.log")).unwrap();
+            std::io::Write::write_all(&mut &sparse, "text first\n".repeat(1_000).as_bytes())
+                .unwrap();
+            sparse.set_len(3 << 30).unwrap();
+        }
+
+        for summary in [true, false] {
+            let diffs = by_file(
+                diff_selected(&repo.path, DiffMode::WorkingTree, 3, summary, None, true)
+                    .await
+                    .unwrap(),
+            );
+            let counted = &diffs["at-cap.log"];
+            assert_eq!(counted.diff.additions, (MAX_COUNTED_BYTES / 15) as u64);
+            assert!(!counted.uncounted);
+            let mut uncounted = vec!["over-cap.log"];
+            if cfg!(unix) {
+                uncounted.push("sparse.log");
+            }
+            for name in uncounted {
+                let file = &diffs[name];
+                assert!(file.uncounted, "{name}");
+                assert_eq!(file.diff.status, FileDiffStatus::Added);
+                assert_eq!((file.diff.additions, file.diff.deletions), (0, 0), "{name}");
+                assert!(file.diff.truncated && file.diff.patch.is_none() && !file.diff.binary);
+                assert_eq!(file.truncation, Some(DiffTruncation::FileTooLarge));
+            }
+            let blob = &diffs["blob.bin"];
+            assert!(blob.diff.binary && !blob.uncounted);
+            assert_eq!(blob.truncation, Some(DiffTruncation::Binary));
+        }
+        // Opened on its own, it is still too large to count or show.
+        let alone = diff_selected(
+            &repo.path,
+            DiffMode::WorkingTree,
+            3,
+            false,
+            Some("over-cap.log"),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(alone[0].uncounted && alone[0].diff.patch.is_none());
+        // The field is left out wherever it does not apply.
+        assert_eq!(serde_json::to_value(&alone[0]).unwrap()["uncounted"], true);
+        let counted = by_file(working_tree_diff(&repo.path).await.unwrap());
+        let json = serde_json::to_value(&counted["at-cap.log"]).unwrap();
+        assert!(json.get("uncounted").is_none(), "{json}");
     }
 
     #[tokio::test]

@@ -1940,6 +1940,8 @@
   "1 file left as it was": "1 Datei blieb, wie sie war",
   "{count} files left as they were": "{count} Dateien blieben, wie sie waren",
   "too large for Undo": "zu groß für Rückgängig",
+  "too large to count": "zu groß zum Zählen",
+  "{count} not counted": "{count} nicht gezählt",
   "ignored": "ignoriert",
   "outside the folder": "außerhalb des Ordners",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} ist größer als 2 MiB, und Rückgängig hat keine Kopie davon. Sende eine Nachricht, damit der Chat so bleibt, wie er jetzt ist.",
