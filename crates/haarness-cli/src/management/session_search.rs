@@ -80,16 +80,27 @@ type Place = (DateTime<Utc>, Uuid);
 /// Where `thread` comes in a run of searches that began at `since`: by when
 /// it was last active, most recent first, then by id; or, when it has been
 /// active since the run began, after every other chat, since it may have
-/// moved past the point where the run goes on. `None` for the calling chat
-/// then: each search of it makes it active again, and the run's first
-/// search read it first, as the most recently active.
+/// moved past the point where the run goes on.
+///
+/// The calling chat comes first in the run's first search (`since` is
+/// `None`), even when another chat saved something between its call and the
+/// search, and is left out of the later ones (`None`): each search of it
+/// makes it active again, and the first one read it, or stopped inside it
+/// and said how to go on there.
 fn place(thread: &Thread, since: Option<DateTime<Utc>>, calling: ThreadId) -> Option<Place> {
+    if thread.id == calling {
+        return since.is_none().then_some((first_place(), thread.id.0));
+    }
     match since {
-        Some(since) if thread.updated_at > since => {
-            (thread.id != calling).then_some((DateTime::UNIX_EPOCH, thread.id.0))
-        }
+        Some(since) if thread.updated_at > since => Some((DateTime::UNIX_EPOCH, thread.id.0)),
         _ => Some((thread.updated_at, thread.id.0)),
     }
+}
+
+/// A time later than any chat's, which a cursor still writes and reads back
+/// in RFC 3339 (9999-12-31T23:59:59Z).
+fn first_place() -> DateTime<Utc> {
+    DateTime::from_timestamp(253_402_300_799, 0).unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
 /// Searches the visible text of the chats `input` asks for (`query`,
@@ -262,7 +273,8 @@ pub(super) async fn search(
             let _ = write!(
                 note,
                 " For {}, search again with \"before\": \"{cursor}\"; chats active since the \
-                 first of these searches began come last then, so a chat may come twice.",
+                 first of these searches began come last then, even past a time it was given, \
+                 so a chat may come twice.",
                 if cut.is_some() {
                     "the chats after it"
                 } else {
@@ -600,6 +612,10 @@ mod tests {
         assert_eq!(titles(&result), ["third"]);
         assert_eq!(result["searched"], json!({"chats": 1, "of": 4}));
         assert!(result.get("restOfChat").is_none(), "{result}");
+        let third_time = result["chats"][0]["thread"]["updatedAt"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let next = result["next"]["before"].as_str().unwrap().to_owned();
         assert!(next.contains(&format!(" {third} ")), "{next}");
         let stopped = result["stopped"].as_str().unwrap();
@@ -608,7 +624,8 @@ mod tests {
             format!(
                 "Stopped at the limit of 2 matches, with 1 of 4 chats searched. For the chats \
                  not searched yet, search again with \"before\": \"{next}\"; chats active since the \
-                 first of these searches began come last then, so a chat may come twice."
+                 first of these searches began come last then, even past a time it was given, \
+                 so a chat may come twice."
             )
         );
         // Going on from there finds the older ones, and nothing twice.
@@ -619,9 +636,8 @@ mod tests {
         assert_eq!(result["searched"], json!({"chats": 3, "of": 3}));
         assert!(result.get("stopped").is_none(), "{result}");
         // A bare time still reads as the chats last active before it.
-        let time = next.split(' ').next().unwrap();
         let result = chats
-            .search(query(json!({"before": time})), third, SEARCH_TIME)
+            .search(query(json!({"before": third_time})), third, SEARCH_TIME)
             .await;
         assert_eq!(titles(&result), ["second", "first"], "{result}");
 
@@ -689,6 +705,9 @@ mod tests {
         let older = chats.chat("older", vec![said("canary release")]).await;
         chats.chat("middle", vec![said("canary release")]).await;
         let here = chats.chat("here", vec![said("canary release")]).await;
+        // Another chat saved something between the calling chat's call and
+        // the search: the calling chat is still read first.
+        chats.chat("busy", vec![said("canary release")]).await;
         let input = |before: Option<&str>| {
             let mut input = json!({"action": "search", "query": "canary release", "limit": 1});
             if let Some(before) = before {
@@ -698,13 +717,16 @@ mod tests {
         };
         let first = chats.search(input(None), here, SEARCH_TIME).await;
         assert_eq!(titles(&first), ["here"]);
-        // Before the next call the oldest chat gets a message: it is now
-        // the most recently active, past the point the search gave.
-        chats
-            .store
-            .append_item(older, None, said("lunch"))
-            .await
-            .unwrap();
+        // Before the next call the calling chat saves the search's result,
+        // and the oldest chat gets a message: it is now the most recently
+        // active, past the point the search gave.
+        for chat in [here, older] {
+            chats
+                .store
+                .append_item(chat, None, said("lunch"))
+                .await
+                .unwrap();
+        }
         let mut seen = Vec::new();
         let mut before = first["next"]["before"].as_str().map(str::to_owned);
         for _ in 0..10 {
@@ -713,9 +735,9 @@ mod tests {
             seen.extend(titles(&result).into_iter().map(str::to_owned));
             before = result["next"]["before"].as_str().map(str::to_owned);
         }
-        // Both are reached, once each, the one active since last, and the
-        // calling chat is not read again for its own activity.
-        assert_eq!(seen, ["middle", "older"]);
+        // Each is reached once, the one active since last, and the calling
+        // chat is not read again for its own activity.
+        assert_eq!(seen, ["busy", "middle", "older"]);
     }
 
     #[tokio::test]
