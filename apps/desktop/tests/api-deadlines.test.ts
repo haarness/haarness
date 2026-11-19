@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Haarness } from "@haarness/sdk";
-import { cutOnTheWay, withDeadline } from "../src/main/api-deadlines";
+import { alreadyCompacting, cutOnTheWay, withDeadline } from "../src/main/api-deadlines";
 
 test("a compaction waits as long as the phones and the web do, other calls keep the client's deadline", () => {
   assert.deepEqual(withDeadline("compact", ["chat", {}]), ["chat", {}, { timeoutMs: 310_000 }]);
@@ -47,22 +47,45 @@ test("a compaction a relay or proxy cut on its way is told from one the server r
     });
   const failure = (client: Haarness) => client.compact("chat", {}).then(() => undefined, (error: unknown) => error);
   // A computer on the release that finishes cut summaries, reached through Cloud.
-  const relayed = { relayed: true, url: "https://haarness.ai/api/v1/remote-hosts/h/runtime", version: "0.1.24" };
+  const relayed = { relayed: true, version: "0.1.24", outForMs: 0 };
   const json = (status: number, body: object) => answering(status, JSON.stringify(body));
-  // Cloudflare's limit, as it answers it, and a gateway's.
+  // Cloudflare's limit, as it answers it, and other proxies' answers with nothing to read.
   assert.equal(cutOnTheWay(await failure(answering(524, "<html>A timeout occurred</html>", "text/html")), relayed), true);
   assert.equal(cutOnTheWay(await failure(answering(504, "Gateway Timeout", "text/plain")), relayed), true);
-  // Cloud lost the computer's connection while the request was out.
+  assert.equal(cutOnTheWay(await failure(answering(500, "<html>oops</html>", "text/html")), relayed), true);
+  assert.equal(cutOnTheWay(await failure(answering(503, "", "text/plain")), relayed), true);
+  // A sentence is someone's answer, not a cut.
   assert.equal(
-    cutOnTheWay(await failure(json(409, { code: "remote_offline", message: "This computer is offline or its connection changed" })), relayed),
-    true,
+    cutOnTheWay(await failure(answering(502, "The upstream server sent an invalid response.", "text/plain")), relayed),
+    false,
   );
+  // Cloud lost the computer's connection, as Cloud says it: a cut once the call
+  // had been out a while; said at once, the computer was not there to take it.
+  const lost = await failure(
+    json(409, { error: { code: "conflict", message: "Remote host is offline or its connection changed. Try again." } }),
+  );
+  assert.equal(cutOnTheWay(lost, { ...relayed, outForMs: 6_000 }), true);
+  assert.equal(cutOnTheWay(lost, relayed), false);
   // Another compaction under way: waited for whatever the release.
   const underWay = await failure(json(409, { code: "conflict", message: "conflict: this chat is already being compacted" }));
+  assert.equal(alreadyCompacting(underWay), true);
   assert.equal(cutOnTheWay(underWay, relayed), true);
-  assert.equal(cutOnTheWay(underWay, { relayed: false, url: "http://127.0.0.1:4096", version: "0.1.0" }), true);
+  assert.equal(cutOnTheWay(underWay, { relayed: false, version: "0.1.0", outForMs: 0 }), true);
   // The computer's runtime failed the request, or the model the summary.
-  assert.equal(cutOnTheWay(await failure(json(502, { code: "bad_gateway", message: "Your computer couldn't answer." })), relayed), false);
+  assert.equal(
+    cutOnTheWay(
+      await failure(
+        json(502, {
+          error: {
+            code: "bad_gateway",
+            message: "Your computer couldn't answer. Check that Haarness is open and up to date on it, then try again.",
+          },
+        }),
+      ),
+      relayed,
+    ),
+    false,
+  );
   assert.equal(cutOnTheWay(await failure(json(502, { code: "provider_error", message: "provider error: overloaded" })), relayed), false);
   assert.equal(cutOnTheWay(await failure(json(503, { code: "provider_unavailable", message: "Ollama isn't running" })), relayed), false);
   // An older computer's summary died with its request.
@@ -72,7 +95,7 @@ test("a compaction a relay or proxy cut on its way is told from one the server r
   );
 });
 
-test("a dropped connection is a cut only on the way to another computer, never a failure to connect", async () => {
+test("a dropped connection is a cut only through Cloud's relay, never a failure to connect", async () => {
   const dropping = (code: string) =>
     new Haarness({
       baseUrl: "http://127.0.0.1:1",
@@ -83,12 +106,10 @@ test("a dropped connection is a cut only on the way to another computer, never a
   const failure = (client: Haarness) => client.compact("chat", {}).then(() => undefined, (error: unknown) => error);
   const reset = await failure(dropping("ECONNRESET"));
   const refused = await failure(dropping("ECONNREFUSED"));
-  // This computer's own server that dropped the request is gone, its summary too.
-  assert.equal(cutOnTheWay(reset, { relayed: false, url: "http://127.0.0.1:4096", version: "0.1.24" }), false);
-  assert.equal(cutOnTheWay(reset, { relayed: false, url: "http://localhost:4096", version: "0.1.24" }), false);
-  // Through Cloud's relay, or to a server on another computer, the answer was lost on the way.
-  assert.equal(cutOnTheWay(reset, { relayed: true, url: "http://127.0.0.1:19080/api", version: "0.1.24" }), true);
-  assert.equal(cutOnTheWay(reset, { relayed: false, url: "https://build-box.example.test:4096", version: "0.1.24" }), true);
+  // A server reached directly that dropped the request is gone, its summary too.
+  assert.equal(cutOnTheWay(reset, { relayed: false, version: "0.1.24", outForMs: 0 }), false);
+  // Through Cloud's relay, the answer was lost on the way.
+  assert.equal(cutOnTheWay(reset, { relayed: true, version: "0.1.24", outForMs: 0 }), true);
   // A request that never got there.
-  assert.equal(cutOnTheWay(refused, { relayed: true, url: "https://haarness.ai/api", version: "0.1.24" }), false);
+  assert.equal(cutOnTheWay(refused, { relayed: true, version: "0.1.24", outForMs: 0 }), false);
 });

@@ -81,4 +81,6 @@ test("the server's words about a compaction are said in the reader's language", 
     errorText(new Error("conflict: thread changed while the compaction summary was generated; retry compaction")).message,
     CHAT_CHANGED,
   );
+  assert.equal(errorText(new Error("The summary didn't come back in time")).message, "The summary didn't come back in time");
+  assert.equal(errorText(new Error("The summary didn't come back in time")).known, true);
 });
