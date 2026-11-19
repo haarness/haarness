@@ -498,7 +498,7 @@ mod tests {
         let key = KeyEvent::new(code, KeyModifiers::NONE);
         tokio::time::timeout(
             Duration::from_secs(1),
-            handle(app, client, vec![Event::Key(key)]),
+            Box::pin(handle(app, client, vec![Event::Key(key)])),
         )
         .await
         .expect("a key waited on the file search");
