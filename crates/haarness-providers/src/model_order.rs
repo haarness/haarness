@@ -66,6 +66,12 @@ fn key(id: &str) -> ModelOrder<'_> {
         "claude" if model.contains("-sonnet") => 1,
         "claude" if model.contains("-fable") => 2,
         "claude" if model.contains("-haiku") => 3,
+        // Gemini 4 is named by element: Carbon is the most capable, Neon
+        // replaces Argon, Hydrogen is the fast one.
+        "gemini" if model.contains("-carbon") => 0,
+        "gemini" if model.contains("-neon") => 1,
+        "gemini" if model.contains("-argon") => 2,
+        "gemini" if model.contains("-hydrogen") => 3,
         _ if model.contains("-pro") => 0,
         _ if model.contains("-mini") || model.contains("-flash") && !model.contains("-lite") => 2,
         _ if model.contains("-nano") || model.contains("-lite") => 3,
@@ -89,6 +95,10 @@ mod tests {
     #[test]
     fn routed_catalog_groups_generations_and_variants_instead_of_reverse_alphabetical_ids() {
         let expected = [
+            "openai/gpt-6.2-astra",
+            "openai/gpt-6.2-sol",
+            "openai/gpt-6.1-sol",
+            "openai/gpt-6.1-terra",
             "openai/gpt-6-astra",
             "openai/gpt-6-sol",
             "openai/gpt-6-luna",
@@ -105,7 +115,10 @@ mod tests {
             "anthropic/claude-sonnet-5",
             "anthropic/claude-opus-4.6",
             "anthropic/claude-sonnet-4.6",
+            "google/gemini-4-carbon",
+            "google/gemini-4-neon",
             "google/gemini-4-argon",
+            "google/gemini-4-hydrogen",
             "google/gemini-3.8-flash",
             "google/gemini-3.5-flash",
             "google/gemini-3.5-flash-lite",

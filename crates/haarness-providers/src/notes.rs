@@ -358,6 +358,8 @@ pub(crate) mod tests {
             "anthropic/claude-sonnet-5.5",
             "us.anthropic.claude-opus-5-5-v1:0",
             "claude-fable-5-1",
+            "claude-fable-5-2",
+            "anthropic/claude-mythos-5.2",
             "claude-mythos-5",
             "claude-opus-6",
             "claude-opus-5-5@20260901",

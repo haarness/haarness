@@ -56,6 +56,9 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
     (
         "openai",
         &[
+            entry("gpt-6.2-astra", 1_050_000, 128_000, None),
+            entry("gpt-6.2-sol", 1_050_000, 128_000, None),
+            entry("gpt-6.1-terra", 1_050_000, 128_000, None),
             entry("gpt-6.1-sol", 1_050_000, 128_000, None),
             entry("gpt-6-sol", 1_050_000, 128_000, None),
             entry("gpt-6-luna", 1_050_000, 128_000, None),
@@ -186,6 +189,8 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
             entry("claude-opus-5-5", 1_000_000, 128_000, None),
             entry("claude-sonnet-5-5", 1_000_000, 128_000, None),
             entry("claude-haiku-5-5", 1_000_000, 128_000, None),
+            entry("claude-fable-5-2", 1_000_000, 128_000, None),
+            entry("claude-mythos-5-2", 1_000_000, 128_000, None),
             entry("claude-fable-5-1", 1_000_000, 128_000, None),
             entry("claude-mythos-5-1", 1_000_000, 128_000, None),
             entry("claude-opus-4-8", 1_000_000, 128_000, None),
@@ -229,6 +234,10 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
     (
         "gemini",
         &[
+            // Listed by the Models API on 2026-11-19.
+            entry("gemini-4-neon", 1_048_576, 65_536, None),
+            entry("gemini-4-hydrogen", 1_048_576, 65_536, None),
+            entry("gemini-4-carbon", 1_048_576, 32_768, None),
             // Probed 2026-10-15: the Models API lists 32,768 output tokens.
             entry("gemini-4-argon", 1_048_576, 32_768, None),
             entry("gemini-3.8-flash", 1_048_576, 65_536, None),

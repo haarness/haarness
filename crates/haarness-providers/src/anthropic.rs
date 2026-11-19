@@ -1000,6 +1000,7 @@ pub(crate) fn preferred_models() -> Vec<ModelInfo> {
         model("claude-opus-5-5"),
         model("claude-sonnet-5-5"),
         model("claude-haiku-5-5"),
+        model("claude-fable-5-2"),
         model("claude-fable-5-1"),
         model("claude-fable-5"),
         model("claude-opus-5"),
@@ -1796,6 +1797,8 @@ pub(crate) mod tests {
             "claude-opus-4-8",
             "claude-opus-6",
             "claude-nova-7",
+            "claude-fable-5-2",
+            "claude-mythos-5-2",
             // Vertex AI's dated ids and a context mark name the same release.
             "claude-opus-5@20260301",
             "claude-sonnet-5@20260301",
@@ -1816,6 +1819,10 @@ pub(crate) mod tests {
             assert!(!adaptive_thinking(id), "{id}");
         }
         for id in [
+            "claude-fable-5-2",
+            "claude-mythos-5-2",
+            "global.anthropic.claude-fable-5-2",
+            "claude-fable-5-2@20261101",
             "claude-fable-5-1",
             "claude-mythos-5-1",
             "claude-opus-5-5",
