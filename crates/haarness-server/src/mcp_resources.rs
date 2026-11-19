@@ -13,7 +13,6 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt as _;
 
 pub(crate) const LIST: &str = "mcp_resource_list";
 pub(crate) const READ: &str = "mcp_resource_read";
@@ -420,7 +419,7 @@ pub(crate) async fn read_mentions(
         blocks.push(match read {
             Ok((body, media)) => {
                 attachments.extend(media);
-                let body = cut(body, MENTION_BYTES.min(room), &directory).await?;
+                let body = cut(body, MENTION_BYTES.min(room), &directory).await;
                 room = room.saturating_sub(body.len());
                 mention_block(mention, &body, false)
             }
@@ -446,17 +445,18 @@ pub(crate) async fn read_mentions(
 /// A mentioned resource's text within `room` bytes (and 2,000 lines): the
 /// first whole lines that fit, and the start of a long line that does not,
 /// then a note that says how much is left out and where the whole text was
-/// saved for the model to read. JSON on one line is laid out a value a line
+/// saved for the model to read (or why it could not be). JSON on one line
+/// is laid out a value a line
 /// first (see [`crate::tools::indented_json`]), and comes whole when it
 /// then fits.
-async fn cut(text: String, room: usize, directory: &Path) -> CoreResult<String> {
+async fn cut(text: String, room: usize, directory: &Path) -> String {
     let fits = |text: &str| text.len() <= room && text.lines().count() <= MENTION_LINES;
     if fits(&text) {
-        return Ok(text);
+        return text;
     }
     // Saved, and shown, as an MCP tool's text is, so the file reads by line.
     let text = match crate::tools::indented_json(&text) {
-        Some(laid_out) if fits(&laid_out) => return Ok(laid_out),
+        Some(laid_out) if fits(&laid_out) => return laid_out,
         Some(laid_out) => laid_out,
         None => text,
     };
@@ -479,18 +479,20 @@ async fn cut(text: String, room: usize, directory: &Path) -> CoreResult<String> 
         }
         kept += line.len();
     }
-    let error = |error: std::io::Error| CoreError::Tool(error.to_string());
-    let (path, mut file) = crate::data_folder::new_private_file(directory, "resource")
-        .await
-        .map_err(error)?;
-    file.write_all(text.as_bytes()).await.map_err(error)?;
-    file.flush().await.map_err(error)?;
-    Ok(format!(
-        "{}\n[Only the first {kept} of {} bytes are here: a message holds up to 50 KiB of one resource and 128 KiB of all it mentions. The whole resource is saved at {}; read it there with offset/limit.]",
+    // A save that fails (a full disk) costs the message only the file: the
+    // part that fits still comes, and the note says why the rest is missing.
+    let whole = match crate::tools::save_whole(text.as_bytes(), directory, "resource").await {
+        Ok(path) => format!(
+            "The whole resource is saved at {}; read it there with offset/limit.",
+            path.display()
+        ),
+        Err(why) => format!("{why}, so only this part can be read."),
+    };
+    format!(
+        "{}\n[Only the first {kept} of {} bytes are here: a message holds up to 50 KiB of one resource and 128 KiB of all it mentions. {whole}]",
         text[..kept].trim_end(),
         text.len(),
-        path.display()
-    ))
+    )
 }
 
 /// A read's attachments, each checked as a message's own attachments are,
@@ -827,9 +829,7 @@ mod tests {
     async fn a_long_mention_is_saved_for_its_owner_alone() {
         use std::os::unix::fs::PermissionsExt as _;
         let saved = std::env::temp_dir().join(format!("haarness-mention-{}", uuid::Uuid::now_v7()));
-        let body = cut("line\n".repeat(30_000), MENTION_BYTES, &saved)
-            .await
-            .unwrap();
+        let body = cut("line\n".repeat(30_000), MENTION_BYTES, &saved).await;
         let path = body
             .split("The whole resource is saved at ")
             .nth(1)
@@ -843,6 +843,35 @@ mod tests {
             "line\n".repeat(30_000)
         );
         std::fs::remove_dir_all(saved).unwrap();
+    }
+
+    /// A save that fails (a full disk) failed the whole message; the part
+    /// that fits comes now, with why the rest is missing. A read through the
+    /// tool keeps its preview the same way.
+    #[tokio::test]
+    async fn a_long_mention_whose_whole_cannot_be_saved_still_comes_in_part() {
+        let root = std::env::temp_dir().join(format!("haarness-mention-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file"), "").unwrap();
+        let folder = root.join("file/tool-output");
+        let body = cut("line\n".repeat(30_000), MENTION_BYTES, &folder).await;
+        assert!(body.starts_with("line\nline\n"), "{body:.40}");
+        let note = format!(
+            "128 KiB of all it mentions. Saving all of it in {} failed (",
+            folder.display()
+        );
+        assert!(body.contains(&note), "{}", &body[body.len() - 300..]);
+        assert!(body.ends_with("), so only this part can be read.]"));
+        let read = resource_output(
+            &json!({"contents": [{"uri": "docs://long", "text": "line\n".repeat(30_000)}]}),
+            &folder,
+            &mut 0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(read.metadata, json!({"truncated": true}));
+        assert!(read.text.contains("so only the part above can be read."));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -1159,7 +1188,7 @@ mod tests {
         assert!(spaced.len() > MENTION_BYTES, "{}", spaced.len());
         let directory =
             std::env::temp_dir().join(format!("haarness-mention-{}", uuid::Uuid::now_v7()));
-        let body = cut(spaced, MENTION_BYTES, &directory).await.unwrap();
+        let body = cut(spaced, MENTION_BYTES, &directory).await;
         assert!(
             !body.contains("[Only the first "),
             "{}",

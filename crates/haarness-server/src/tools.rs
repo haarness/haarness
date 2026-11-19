@@ -668,7 +668,7 @@ impl Tool for ExecuteTool {
                 } else if within_tool_output_limits(&compact) {
                     output(compact)
                 } else {
-                    cut_laid_out(&laid_out, &tool_output_dir(), false).await?.0
+                    cut_laid_out(&laid_out, &tool_output_dir(), false).await.0
                 }
             }
         };
@@ -1849,7 +1849,15 @@ async fn fetch_page(
     }
     let kind = crate::webfetch::kind(content_type.as_deref(), &body);
     let crate::webfetch::Kind::Text { html, .. } = kind else {
-        return fetched_file(&page, kind, content_type.as_deref(), body, media_max_bytes).await;
+        return fetched_file(
+            &page,
+            kind,
+            content_type.as_deref(),
+            body,
+            media_max_bytes,
+            &tool_output_dir(),
+        )
+        .await;
     };
     // A challenge some services answer with 200 instead of the page.
     if let Some(service) = crate::webfetch::bot_check(status.as_u16(), &headers, &body) {
@@ -1933,15 +1941,16 @@ async fn read_head(mut response: reqwest::Response, limit: usize) -> Vec<u8> {
     body
 }
 
-/// A fetched file that is not text: a PDF or an image is saved and attached
-/// for the model, as `read` attaches one; any other file is saved, and the
-/// model is told where.
+/// A fetched file that is not text: a PDF or an image is saved (in
+/// `directory`) and attached for the model, as `read` attaches one; any
+/// other file is saved, and the model is told where.
 async fn fetched_file(
     page: &url::Url,
     kind: crate::webfetch::Kind,
     content_type: Option<&str>,
     body: Vec<u8>,
     media_max_bytes: u64,
+    directory: &Path,
 ) -> CoreResult<ToolOutput> {
     use crate::webfetch::Kind;
     let size = body.len() as u64;
@@ -1950,12 +1959,29 @@ async fn fetched_file(
         Kind::Image(extension) => extension,
         Kind::Other | Kind::Text { .. } => "bin",
     };
+    // A file that is not text reaches the model only through the saved
+    // copy: a save that fails says so, rather than in the system's bare
+    // words.
+    let unsaved = |error: std::io::Error| {
+        CoreError::Tool(format!(
+            "{page} was fetched ({}), but saving it in {} failed ({error}), so it cannot be read.",
+            crate::webfetch::size(size),
+            directory.display()
+        ))
+    };
     let (path, mut file) =
-        crate::data_folder::new_private_file_with(&tool_output_dir(), "fetched", extension)
+        crate::data_folder::new_private_file_with(directory, "fetched", extension)
             .await
-            .map_err(tool_error)?;
-    file.write_all(&body).await.map_err(tool_error)?;
-    file.flush().await.map_err(tool_error)?;
+            .map_err(unsaved)?;
+    let written = async {
+        file.write_all(&body).await?;
+        file.flush().await
+    };
+    if let Err(error) = written.await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(unsaved(error));
+    }
     drop(file);
     let saved = path.display().to_string();
     let title = page
@@ -3193,7 +3219,7 @@ struct WholeOutput {
     /// The [`ScriptCall`] it is kept for.
     call: u64,
     /// The file the cut text names, or `None` for JSON that fit once laid
-    /// out, which is not cut.
+    /// out, which is not cut, and for a cut whose whole could not be saved.
     file: Option<PathBuf>,
     /// The cut text the call gave, by its length and hash: what a script is
     /// handed must start with it (hooks may add to its end), so a server
@@ -3201,7 +3227,8 @@ struct WholeOutput {
     /// that is not cut names no file, so it must be all that is handed.
     cut: (usize, [u8; 32]),
     /// The server's text when the file holds another form of it (JSON
-    /// laid out a value a line), else `None`: the file is the text.
+    /// laid out a value a line) or there is no file, else `None`: the file
+    /// is the text.
     text: Option<String>,
     metadata: Value,
 }
@@ -3227,7 +3254,8 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
     let script = SCRIPT_CALL.try_with(|call| *call).ok();
     let whole = script.map(|_| text.clone());
     let (capped, saved) = cut_mcp_text(text, directory, false).await?;
-    let Some((file, reformatted)) = saved else {
+    // Not cut: as it came, or its JSON laid out.
+    let Value::Object(cut) = capped.metadata else {
         if let (Some(call), Some(whole)) = (script, whole)
             && capped.text != whole
         {
@@ -3243,9 +3271,6 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
             text: capped.text,
             metadata,
         });
-    };
-    let Value::Object(cut) = capped.metadata else {
-        unreachable!("a cut output says where it was saved");
     };
     let mut merged = match metadata.clone() {
         Value::Null => serde_json::Map::new(),
@@ -3264,11 +3289,17 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
     };
     merged.extend(cut);
     if let (Some(call), Some(whole)) = (script, whole) {
+        // With no file saved (a full disk), the script gets the whole from
+        // memory.
+        let (file, text) = match saved {
+            Some((file, reformatted)) => (Some(file), reformatted.then_some(whole)),
+            None => (None, Some(whole)),
+        };
         keep_whole_output(WholeOutput {
             call,
-            file: Some(file),
+            file,
             cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
-            text: reformatted.then_some(whole),
+            text,
             metadata,
         });
     }
@@ -3316,17 +3347,19 @@ pub(crate) async fn take_whole_mcp_output(
         *outputs = others;
         own
     };
-    let named = if output.metadata.get("truncated") == Some(&Value::Bool(true)) {
-        Some(Path::new(output.metadata.get("outputPath")?.as_str()?))
-    } else {
-        None
+    // A cut names the file that holds the whole, unless none could be saved.
+    let truncated = output.metadata.get("truncated") == Some(&Value::Bool(true));
+    let named = match output.metadata.get("outputPath") {
+        Some(path) if truncated => Some(Path::new(path.as_str()?)),
+        _ => None,
     };
     let kept = own.into_iter().rev().find(|kept| {
         let (length, hash) = kept.cut;
         let text = output.text.as_bytes();
-        let start = match kept.file {
-            Some(_) => text.get(..length),
-            None => (text.len() == length).then_some(text),
+        let start = if truncated {
+            text.get(..length)
+        } else {
+            (text.len() == length).then_some(text)
         };
         kept.file.as_deref() == named && start.is_some_and(|start| cut_fingerprint(start) == hash)
     })?;
@@ -6292,33 +6325,78 @@ pub(crate) async fn truncate_output_at(text: String, directory: &Path) -> CoreRe
         return Ok(output(text));
     }
     let preview = output_preview(&text);
-    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
-        .await
-        .map_err(tool_error)?;
-    file.write_all(text.as_bytes()).await.map_err(tool_error)?;
-    file.flush().await.map_err(tool_error)?;
+    let saved = save_whole(text.as_bytes(), directory, "tool").await;
     let removed = text.len().saturating_sub(preview.len());
-    let notice = cut_notice(&path, removed, false);
+    let notice = cut_notice(&saved, removed, false);
     Ok(ToolOutput {
         text: format!("{preview}\n\n{notice}"),
-        metadata: json!({"truncated": true, "outputPath": path}),
+        metadata: cut_metadata(&saved),
     })
 }
 
-/// What follows the start of a cut output: where the whole of it is, how to
-/// read it, and how much is left out.
-fn cut_notice(path: &Path, removed: usize, failed: bool) -> String {
+/// Saves the whole of a cut text in a new file of `directory`, for the cut
+/// to name. A save that fails (a full disk, a folder that cannot be
+/// written) costs only the file: it is logged, what it left is removed, and
+/// the system's words for it come back for the note, since the cut text is
+/// still worth having.
+pub(crate) async fn save_whole(
+    bytes: &[u8],
+    directory: &Path,
+    prefix: &str,
+) -> Result<PathBuf, String> {
+    let (path, mut file) = crate::data_folder::new_private_file(directory, prefix)
+        .await
+        .map_err(|error| unsaved(directory, &error))?;
+    let written = async {
+        file.write_all(bytes).await?;
+        file.flush().await
+    };
+    if let Err(error) = written.await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(unsaved(directory, &error));
+    }
+    Ok(path)
+}
+
+/// Why a save in `directory` failed, as a cut's note says it, logged.
+fn unsaved(directory: &Path, error: &std::io::Error) -> String {
+    tracing::warn!(
+        %error,
+        folder = %directory.display(),
+        "the whole of a cut tool output could not be saved; the cut is returned without it"
+    );
+    format!(
+        "Saving all of it in {} failed ({error})",
+        directory.display()
+    )
+}
+
+/// A cut output's metadata: cut, and where the whole is when it was saved.
+fn cut_metadata(saved: &Result<PathBuf, String>) -> Value {
+    match saved {
+        Ok(path) => json!({"truncated": true, "outputPath": path}),
+        Err(_) => json!({"truncated": true}),
+    }
+}
+
+/// What follows the start of a cut output: where the whole of it is and
+/// how to read it, or why it could not be saved, and how much is left out.
+fn cut_notice(saved: &Result<PathBuf, String>, removed: usize, failed: bool) -> String {
     let lead = if failed {
         "The tool call failed and its output was truncated."
     } else {
         "The tool call succeeded but its output was truncated."
     };
-    format!(
-        "{lead} Full output saved to: {}\n\
-         Use grep on that path or read it with offset/limit.\n\n\
-         ...{removed} bytes truncated...",
-        path.display()
-    )
+    let whole = match saved {
+        Ok(path) => format!(
+            "Full output saved to: {}\n\
+             Use grep on that path or read it with offset/limit.",
+            path.display()
+        ),
+        Err(why) => format!("{why}, so only the part above can be read."),
+    };
+    format!("{lead} {whole}\n\n...{removed} bytes truncated...")
 }
 
 /// An MCP server's text as it is cut for the model (a tool's result or
@@ -6329,9 +6407,9 @@ fn cut_notice(path: &Path, removed: usize, failed: bool) -> String {
 /// the file can be read by line, and a line longer than what is left of the
 /// 50 KiB is cut inside it rather than left out. JSON that fits once
 /// indented (written with wider indents than two spaces, say) is not cut.
-/// Gives the output (the text, or its JSON indented) and, when it was cut,
-/// the file holding the whole and whether it holds it indented rather than
-/// as it came.
+/// Gives the output (the text, or its JSON indented; cut, its metadata says
+/// so) and, when it was cut and the whole could be saved, the file holding
+/// the whole and whether it holds it indented rather than as it came.
 pub(crate) async fn cut_mcp_text(
     text: String,
     directory: &Path,
@@ -6346,34 +6424,29 @@ pub(crate) async fn cut_mcp_text(
     if reformatted && within_tool_output_limits(&readable) {
         return Ok((output(readable), None));
     }
-    let (cut, path) = cut_laid_out(&readable, directory, failed).await?;
-    Ok((cut, Some((path, reformatted))))
+    let (cut, path) = cut_laid_out(&readable, directory, failed).await;
+    Ok((cut, path.map(|path| (path, reformatted))))
 }
 
 /// `readable`, text past the limits as [`cut_mcp_text`] lays it out, cut:
-/// its start, then where the whole was saved in `directory`.
+/// its start, then where the whole was saved in `directory` (the file too),
+/// or why it could not be.
 async fn cut_laid_out(
     readable: &str,
     directory: &Path,
     failed: bool,
-) -> CoreResult<(ToolOutput, PathBuf)> {
+) -> (ToolOutput, Option<PathBuf>) {
     let preview = filled_preview(readable);
-    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
-        .await
-        .map_err(tool_error)?;
-    file.write_all(readable.as_bytes())
-        .await
-        .map_err(tool_error)?;
-    file.flush().await.map_err(tool_error)?;
+    let saved = save_whole(readable.as_bytes(), directory, "tool").await;
     let removed = readable.len().saturating_sub(preview.len());
-    let notice = cut_notice(&path, removed, failed);
-    Ok((
+    let notice = cut_notice(&saved, removed, failed);
+    (
         ToolOutput {
             text: format!("{preview}\n\n{notice}"),
-            metadata: json!({"truncated": true, "outputPath": path}),
+            metadata: cut_metadata(&saved),
         },
-        path,
-    ))
+        saved.ok(),
+    )
 }
 
 /// A line longer than this is taken for data written on one line (JSON,
@@ -10260,6 +10333,111 @@ export default workflow({
             "head preview kept the tail"
         );
         tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    /// A folder for saved output that cannot be made (it would be under a
+    /// file), as a full disk or a folder that cannot be written refuses a
+    /// save, in a folder of the test's own.
+    fn unwritable_folder() -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("haarness-unsaved-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file"), "").unwrap();
+        let folder = root.join("file/tool-output");
+        (root, folder)
+    }
+
+    /// A save that failed lost the whole result: the model got "Not a
+    /// directory" or "No space left on device" instead of the preview.
+    #[tokio::test]
+    async fn a_cut_output_whose_whole_cannot_be_saved_still_shows_its_start() {
+        let (root, folder) = unwritable_folder();
+        let body = (0..3_000)
+            .map(|line| format!("line {line}: {}", "x".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_output_at(body.clone(), &folder).await.unwrap();
+        assert_eq!(result.metadata, json!({"truncated": true}));
+        assert!(result.text.starts_with("line 0: "), "{:.80}", result.text);
+        assert!(!result.text.contains("line 2999:"));
+        let note = format!(
+            "The tool call succeeded but its output was truncated. Saving all of it in {} failed (",
+            folder.display()
+        );
+        assert!(
+            result.text.contains(&note),
+            "{}",
+            &result.text[result.text.len() - 300..]
+        );
+        assert!(
+            result
+                .text
+                .contains("), so only the part above can be read.\n\n..."),
+            "{}",
+            &result.text[result.text.len() - 300..]
+        );
+        // An MCP tool's text (and a failure's) is cut the same way.
+        for failed in [false, true] {
+            let (cut, saved) = cut_mcp_text(body.clone(), &folder, failed).await.unwrap();
+            assert!(saved.is_none());
+            assert_eq!(cut.metadata, json!({"truncated": true}));
+            assert!(cut.text.starts_with("line 0: ") && cut.text.len() < 52 * 1024);
+            assert!(cut.text.contains("so only the part above can be read."));
+            assert_eq!(
+                cut.text
+                    .contains("The tool call failed and its output was truncated."),
+                failed
+            );
+        }
+        // So is a fetched page, which a save that fails no longer loses;
+        // a fetched file, which has no preview, says why it cannot be read.
+        let page = url::Url::parse("https://example.com/report.pdf").unwrap();
+        let fetched = fetched_file(
+            &page,
+            crate::webfetch::Kind::Pdf,
+            Some("application/pdf"),
+            b"%PDF-1.7\n".to_vec(),
+            u64::MAX,
+            &folder,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            fetched.contains(&format!(
+                "https://example.com/report.pdf was fetched (9 bytes), but saving it in {} failed (",
+                folder.display()
+            )) && fetched.ends_with("), so it cannot be read."),
+            "{fetched}"
+        );
+        assert!(root.join("file").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A script's MCP call gets the whole text from memory when no file
+    /// could hold it, as the model gets the cut.
+    #[tokio::test]
+    async fn a_script_gets_the_whole_mcp_text_its_save_could_not_keep() {
+        let (root, folder) = unwritable_folder();
+        let script = ScriptCall::new();
+        let text = "row\n".repeat(20_000);
+        let output = script
+            .run(capped_mcp_output(
+                ToolOutput {
+                    text: text.clone(),
+                    metadata: json!({"rows": 20_000}),
+                },
+                &folder,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(output.metadata, json!({"rows": 20_000, "truncated": true}));
+        assert!(output.text.contains("so only the part above can be read."));
+        let (whole, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
+        assert_eq!(
+            (whole, metadata, file),
+            (text, json!({"rows": 20_000}), None)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
