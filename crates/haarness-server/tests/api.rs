@@ -15935,6 +15935,11 @@ mod background_commands;
 #[path = "cases/agent_files.rs"]
 mod agent_files;
 
+// POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
+#[cfg(unix)]
+#[path = "cases/chat_temp.rs"]
+mod chat_temp;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =

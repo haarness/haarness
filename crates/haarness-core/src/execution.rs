@@ -63,6 +63,12 @@ pub struct ExecutionSettings {
     /// chat that started it all. `None` outside a turn. Set per call by the runtime, never configured.
     #[serde(skip)]
     pub root_thread: Option<haarness_protocol::ThreadId>,
+    /// The calling chat's own temp folder ([`crate::chat_temp`]): its shell
+    /// commands get it as `TMPDIR`, `TMP` and `TEMP`, and its file tools reach
+    /// it as they reach the project. `None` when it has none (yet). Set per
+    /// call by the runtime, never configured.
+    #[serde(skip)]
+    pub temp_folder: Option<std::path::PathBuf>,
 }
 
 impl Default for ExecutionSettings {
@@ -87,6 +93,7 @@ impl Default for ExecutionSettings {
             chat_home: None,
             shell_call: None,
             root_thread: None,
+            temp_folder: None,
         }
     }
 }

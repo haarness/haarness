@@ -237,6 +237,12 @@ pub(crate) fn custom_system_prompt_with_context(
     )
 }
 
+/// The prompt's one line about the chat's own temp folder
+/// ([`crate::chat_temp`]). It names no path, which differs from chat to chat
+/// (its commands get it in `TMPDIR`), so every chat of a project shares one
+/// cached prompt prefix.
+const CHAT_TEMP_LINE: &str = "Scratch files belong in this chat's private temporary folder, which shell commands find in TMPDIR (also TMP and TEMP) and subagents share: unlike /tmp, using it asks for no approval. A file tool reaches it by its full path, which `echo $TMPDIR` prints.";
+
 fn runtime_context_prompt(context: &SystemPromptContext<'_>) -> String {
     let mut prompt = format!(
         "You are powered by the model named {}. The exact model ID is {}/{}.\n\
@@ -248,7 +254,8 @@ fn runtime_context_prompt(context: &SystemPromptContext<'_>) -> String {
            Architecture: {}\n\
            Today's date: {}\n\
          </env>\n\n\
-         Use native tool calls only; never print invented tool-call markup. Treat the working directory as the default scope, preserve unrelated user changes, and verify material changes in proportion to risk. When tools are unavailable or a check cannot be run, say so plainly instead of claiming success.",
+         Use native tool calls only; never print invented tool-call markup. Treat the working directory as the default scope, preserve unrelated user changes, and verify material changes in proportion to risk. When tools are unavailable or a check cannot be run, say so plainly instead of claiming success.\n\n\
+         {CHAT_TEMP_LINE}",
         context.model,
         context.provider,
         context.model,
@@ -388,6 +395,9 @@ mod tests {
         assert!(prompt.contains("Is directory a git repo: yes"));
         assert!(prompt.contains("Today's date: 2026-08-26"));
         assert!(prompt.contains("Use native tool calls only"));
+        // The chat's own temp folder is named by its variable, never its path.
+        assert!(prompt.contains(CHAT_TEMP_LINE));
+        assert!(!prompt.contains("haarness-"));
     }
 
     #[test]

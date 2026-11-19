@@ -5211,12 +5211,52 @@ impl AgentRuntime {
                     haarness_protocol::ShellCommandEndedBy::ChatStopped,
                 );
             }
+            // Its own temp folder goes with it, in the background: one taken
+            // back out of the archive gets a new one, empty. What is left (a
+            // command still writing there) goes at the next start.
+            if root == id {
+                tokio::task::spawn_blocking(move || crate::chat_temp::remove(id));
+            }
             if let Some(hooks) = &self.components().hooks {
                 let call = self.hook_call(&thread, None).await;
                 hooks.session_end(&call, "archived").await;
             }
         }
         Ok(thread)
+    }
+    /// Takes away the own temp folders ([`crate::chat_temp`]) of the chats
+    /// this server holds archived, and those of chats it does not hold in
+    /// which nothing changed for [`crate::chat_temp::IDLE_LIMIT`]: another
+    /// server's, or one whose data folder is gone. A folder of a chat it holds
+    /// and keeps stays, however old. How many went.
+    pub async fn sweep_chat_temp_folders(&self) -> usize {
+        let Ok(recorded) = tokio::task::spawn_blocking(crate::chat_temp::recorded).await else {
+            return 0;
+        };
+        let mut archived = Vec::new();
+        let mut unknown = Vec::new();
+        for folder in recorded {
+            match self.repository.get_thread(folder.chat()).await {
+                Ok(thread) if thread.archived => archived.push(folder.chat()),
+                Err(CoreError::NotFound(_)) => unknown.push(folder),
+                // A chat it keeps, or one not known to be gone.
+                Ok(_) | Err(_) => {}
+            }
+        }
+        tokio::task::spawn_blocking(move || {
+            let now = std::time::SystemTime::now();
+            let idle = unknown
+                .into_iter()
+                .filter(|folder| folder.untouched(now) >= crate::chat_temp::IDLE_LIMIT)
+                .map(|folder| folder.chat());
+            archived
+                .into_iter()
+                .chain(idle)
+                .filter(|chat| crate::chat_temp::remove(*chat))
+                .count()
+        })
+        .await
+        .unwrap_or(0)
     }
     pub async fn items(
         &self,
@@ -7291,7 +7331,8 @@ impl AgentRuntime {
         if let Some(store) = &self.repository_approvals {
             *self.repository_rules.lock() = store.load()?;
         }
-        let plans = ask_plans(name, &arguments, &workspace);
+        let temp_folder = chat_temp_folder(root, name);
+        let plans = chat_ask_plans(name, &arguments, &workspace, temp_folder.as_deref());
         let authorized_external_paths = plans
             .iter()
             .flat_map(|plan| plan.external_paths.iter().cloned())
@@ -7789,6 +7830,7 @@ impl AgentRuntime {
         }
         let mut execution = components.config.execution.clone();
         execution.person_shell = !agent_work;
+        execution.temp_folder = temp_folder;
         execution.chat_home = self.chat_home.then(|| self.workspace.clone());
         if name == "bash"
             && allowed.is_ok()
@@ -14876,7 +14918,8 @@ impl RunnerTask {
         if let Some(store) = &self.repository_approvals {
             *self.repository_rules.lock() = store.load()?;
         }
-        let plans = ask_plans(name, &arguments, &self.workspace);
+        let temp_folder = chat_temp_folder(self.root_thread_id, name);
+        let plans = chat_ask_plans(name, &arguments, &self.workspace, temp_folder.as_deref());
         let authorized_external_paths = plans
             .iter()
             .flat_map(|plan| plan.external_paths.iter().cloned())
@@ -15068,6 +15111,7 @@ impl RunnerTask {
         let mut execution = self.config.execution.clone();
         execution.chat_home = self.chat_home.then(|| self.runtime_workspace.clone());
         execution.root_thread = Some(self.root_thread_id);
+        execution.temp_folder = temp_folder;
         if name == "bash"
             && let Some(hooks) = &self.hooks
         {
@@ -20175,6 +20219,31 @@ async fn recover_read_path(
     Ok(())
 }
 
+/// The own temp folder ([`crate::chat_temp`]) of the conversation whose root
+/// chat is `root`, for a call of tool `name`: made for a shell command,
+/// which gets it as `TMPDIR`, and looked up for any other tool, which may
+/// name a path in it once a command made it.
+fn chat_temp_folder(root: ThreadId, name: &str) -> Option<PathBuf> {
+    if name == "bash" {
+        crate::chat_temp::folder(root)
+    } else {
+        crate::chat_temp::existing(root)
+    }
+}
+
+/// [`ask_plans`] for a call of a chat whose own temp folder is `temp`: a
+/// path in it is no folder outside the project, for the shell and the file
+/// tools alike, and `$TMPDIR`, `$TMP` and `$TEMP` name it (see
+/// `bash::with_chat_temp`).
+fn chat_ask_plans(
+    name: &str,
+    arguments: &serde_json::Value,
+    workspace: &Path,
+    temp: Option<&Path>,
+) -> Vec<AskPlan> {
+    crate::permissions::bash::with_chat_temp(temp, || ask_plans(name, arguments, workspace))
+}
+
 /// The permission groups for one tool call. Bash commands are shell-parsed:
 /// each command in a chain becomes its own pattern with an arity-generalized
 /// "always" rule, and touching paths outside the workspace raises a separate
@@ -22769,7 +22838,9 @@ fn external_path_request(
         crate::permissions::resolve_permission_path(workspace, value)
     };
     let root = crate::paths::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    if path.starts_with(root) {
+    // The chat's own temp folder is no folder outside either (see
+    // `chat_ask_plans`).
+    if path.starts_with(root) || crate::permissions::bash::in_chat_temp(&path) {
         return None;
     }
     let directory = match kind {
@@ -27694,6 +27765,105 @@ mod tests {
         if real != std::path::Path::new("/tmp") {
             assert_eq!(plans[1].patterns[1..], [real.display().to_string()]);
         }
+    }
+
+    /// A chat's own temp folder is no folder outside the project for its
+    /// shell and file tools, by where a path really leads; a way out of it,
+    /// another chat's folder and every other folder outside still ask, and
+    /// without a folder `$TMPDIR` is the server's, as before.
+    // POSIX shell text: Windows runs commands in cmd.exe.
+    #[cfg(unix)]
+    #[test]
+    fn a_chat_s_own_temp_folder_is_no_folder_outside_the_project() {
+        let root = std::env::temp_dir().join(format!("haarness-own-temp-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let root = crate::paths::canonicalize(&root).unwrap();
+        let temp = root.join("chats/1a2b3c4d");
+        let other = root.join("chats/5e6f7a8b");
+        std::fs::create_dir_all(temp.join("build")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink(&other, temp.join("link")).unwrap();
+        let outside = |name: &str, arguments: serde_json::Value, temp: Option<&std::path::Path>| {
+            super::chat_ask_plans(name, &arguments, &workspace, temp)
+                .iter()
+                .any(|plan| plan.permission == "external_directory")
+        };
+        let shell = |command: &str| json!({ "command": command });
+        let shown = temp.display();
+        for command in [
+            "echo hi > \"$TMPDIR/out.txt\"".to_owned(),
+            "cat $TMPDIR/out.txt".into(),
+            "cat ${TMPDIR}/out.txt | head -1".into(),
+            "rm -rf \"$TMPDIR/build\"".into(),
+            "mkdir -p $TMP/a/b && touch $TEMP/a/b/c".into(),
+            "cp README.md \"$TMPDIR/\"".into(),
+            "rm -f $TMPDIR/*.log".into(),
+            "cd $TMPDIR && ls".into(),
+            "python3 -m pytest > \"$TMPDIR/log.txt\" 2>&1".into(),
+            format!("cd {shown} && rm -rf build && echo x > again.txt"),
+            format!("cat {shown}/out.txt"),
+        ] {
+            assert!(
+                !outside("bash", shell(&command), Some(&temp)),
+                "{command} asks"
+            );
+        }
+        assert!(!outside(
+            "bash",
+            json!({ "command": "ls", "workdir": temp.display().to_string() }),
+            Some(&temp)
+        ));
+        for command in [
+            "cat \"$TMPDIR/../5e6f7a8b/x\"".to_owned(),
+            "cat $TMPDIR/link/x".into(),
+            "echo x > $TMPDIR/../x".into(),
+            format!("cat {}/x", other.display()),
+            "echo x > /etc/haarness-test-x".into(),
+        ] {
+            assert!(
+                outside("bash", shell(&command), Some(&temp)),
+                "{command} does not ask"
+            );
+        }
+        // Without the chat's folder, as before: a path spelled out there asks.
+        assert!(outside("bash", shell(&format!("echo x > {shown}/x")), None));
+        // The file tools.
+        let file = temp.join("notes.md").display().to_string();
+        for (tool, arguments) in [
+            ("read", json!({ "path": file })),
+            ("write", json!({ "path": file, "content": "x" })),
+            ("edit", json!({ "path": file, "old": "x", "new": "y" })),
+            ("list", json!({ "path": temp.display().to_string() })),
+            (
+                "glob",
+                json!({ "pattern": "*", "path": temp.display().to_string() }),
+            ),
+            (
+                "grep",
+                json!({ "pattern": "x", "path": temp.display().to_string() }),
+            ),
+        ] {
+            assert!(!outside(tool, arguments.clone(), Some(&temp)), "{tool}");
+            assert!(outside(tool, arguments, None), "{tool}");
+        }
+        for (tool, arguments) in [
+            (
+                "read",
+                json!({ "path": temp.join("link/x").display().to_string() }),
+            ),
+            (
+                "write",
+                json!({ "path": other.join("x").display().to_string(), "content": "x" }),
+            ),
+            (
+                "list",
+                json!({ "path": root.join("chats").display().to_string() }),
+            ),
+        ] {
+            assert!(outside(tool, arguments, Some(&temp)), "{tool}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

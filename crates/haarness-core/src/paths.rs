@@ -66,6 +66,27 @@ fn plain_name(name: &str) -> bool {
     !device
 }
 
+/// Makes `folder` (in a folder that is there) for this user alone, 0700, or
+/// finds it there as such: a folder, not a link, that this user owns and no
+/// one else can open. A shared temp folder lets anyone make a name in it
+/// first, so a folder that fails any of that is not this user's to use.
+#[cfg(unix)]
+#[must_use]
+pub fn own_private_folder(folder: &Path) -> bool {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+    let user = nix::unistd::geteuid().as_raw();
+    match std::fs::DirBuilder::new().mode(0o700).create(folder) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            std::fs::symlink_metadata(folder).is_ok_and(|metadata| {
+                let open_to_others = metadata.mode() & 0o077 != 0;
+                metadata.is_dir() && metadata.uid() == user && !open_to_others
+            })
+        }
+        Err(_) => false,
+    }
+}
+
 /// A path as a model on Windows writes it, in the spelling Windows reads: a
 /// Git Bash, Cygwin or WSL drive path (`/c/Users/…`, `/cygdrive/c/…`,
 /// `/mnt/c/…`, `/C:/…`) as the drive path it names (`C:/Users/…`), and a path

@@ -5907,8 +5907,9 @@ fn fallback(command: &str) -> BashAnalysis {
     }
 }
 
-/// The paths outside `workspace` that `command` deletes when it runs from
-/// `workdir` (the project when `None`), placed where they really lead. A path
+/// The paths outside `workspace` (and outside the chat's own temp folder,
+/// while [`with_chat_temp`] names it) that `command` deletes when it runs
+/// from `workdir` (the project when `None`), placed where they really lead. A path
 /// with a variable or a substitution cannot be placed, and neither can a
 /// relative one in a line that changes directory: both count as outside, and
 /// are given as written.
@@ -5989,7 +5990,10 @@ pub fn outside_deletions(
                     None => resolve(&from, Path::new(&deletion.value)),
                 };
                 let only_a_file = matches!(deletion.effect, Effect::Replaces | Effect::Empties);
-                if resolved.starts_with(&project) || (only_a_file && !resolved.is_file()) {
+                if resolved.starts_with(&project)
+                    || in_chat_temp(&resolved)
+                    || (only_a_file && !resolved.is_file())
+                {
                     continue;
                 }
                 OutsideDeletion {
@@ -7185,7 +7189,7 @@ fn external_dir(
         None => resolve(from, Path::new(target)),
     };
     let workspace = resolve(workspace, Path::new(""));
-    if resolved.starts_with(&workspace) {
+    if resolved.starts_with(&workspace) || in_chat_temp(&resolved) {
         return None;
     }
     if !complete || resolved.is_dir() {
@@ -7260,7 +7264,7 @@ fn cd_dir(
         None => lexical(from, Path::new(target)),
     };
     let resolved = resolve(from, named);
-    if resolved.starts_with(resolve(workspace, Path::new(""))) {
+    if resolved.starts_with(resolve(workspace, Path::new(""))) || in_chat_temp(&resolved) {
         return None;
     }
     if !complete || resolved.is_dir() {
@@ -7374,13 +7378,57 @@ const FOLDER_VARIABLES: [&str; 6] = [
     "XDG_STATE_HOME",
 ];
 
+thread_local! {
+    /// The calling chat's own temp folder while a line of it is read (see
+    /// [`with_chat_temp`]).
+    static CHAT_TEMP: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `read` with the readings of this thread taking `folder`, the
+/// calling chat's own temp folder ([`crate::chat_temp`]), as what `$TMPDIR`,
+/// `$TMP` and `$TEMP` name (its commands get it in those variables) and as
+/// no folder outside the project: a path that leads into it, links
+/// followed, asks nothing, while one that leads out of it (`..`, a link in
+/// it, another chat's folder) asks as before. Without a folder they read
+/// `$TMPDIR` from the server's environment, as always.
+pub(crate) fn with_chat_temp<T>(folder: Option<&Path>, read: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            CHAT_TEMP.with(|current| *current.borrow_mut() = previous);
+        }
+    }
+    let previous = CHAT_TEMP.with(|current| current.replace(folder.map(Path::to_path_buf)));
+    let _restore = Restore(previous);
+    read()
+}
+
+/// Whether `resolved` (links followed) is in the chat's own temp folder of
+/// the reading under way (see [`with_chat_temp`]).
+pub(crate) fn in_chat_temp(resolved: &Path) -> bool {
+    CHAT_TEMP.with(|folder| {
+        folder
+            .borrow()
+            .as_deref()
+            .is_some_and(|folder| resolved.starts_with(folder))
+    })
+}
+
 /// The folder `$NAME` or `${NAME}` stands for, when it is one of
-/// [`FOLDER_VARIABLES`] and set to an absolute path.
+/// [`FOLDER_VARIABLES`] and set to an absolute path, or one of the chat's
+/// temp folder variables while a line of it is read.
 fn folder_variable(text: &str) -> Option<String> {
     let name = text
         .strip_prefix("${")
         .and_then(|rest| rest.strip_suffix('}'))
         .or_else(|| text.strip_prefix('$'))?;
+    if crate::chat_temp::VARIABLES.contains(&name)
+        && let Some(folder) = CHAT_TEMP.with(|folder| folder.borrow().clone())
+    {
+        return Some(folder.to_string_lossy().into_owned());
+    }
     if !FOLDER_VARIABLES.contains(&name) {
         return None;
     }

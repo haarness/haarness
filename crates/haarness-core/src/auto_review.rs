@@ -932,7 +932,12 @@ pub(crate) fn unnamed_deletion(
     let kept = Kept::new(home.as_deref(), workspace);
     let root = request.root_thread_id;
     let mut cleanup = None;
-    bash::outside_deletions(command, workspace, workdir.as_deref())
+    // The chat's own temp folder is no folder outside the project.
+    let temp = crate::chat_temp::existing(root);
+    let deletions = bash::with_chat_temp(temp.as_deref(), || {
+        bash::outside_deletions(command, workspace, workdir.as_deref())
+    });
+    deletions
         .into_iter()
         // A path nobody can place is never one the person named.
         .find(|target| {
@@ -2064,6 +2069,51 @@ mod tests {
         let workspace = Path::new("/project");
         assert!(context("(empty)", None, "{}", workspace, true).contains(COMPUTER_WORDS));
         assert!(!context("(empty)", None, "{}", workspace, false).contains("`computer`"));
+    }
+
+    /// What a command deletes in its chat's own temp folder is no deletion
+    /// outside the project; in another chat's it is.
+    // POSIX shell text: Windows runs commands in cmd.exe.
+    #[cfg(unix)]
+    #[test]
+    fn a_deletion_in_the_chat_s_own_temp_folder_is_not_outside_the_project() {
+        let root = std::env::temp_dir().join(format!("haarness-unnamed-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (chat, other) = (ThreadId::new(), ThreadId::new());
+        let folder = crate::chat_temp::folder(chat).unwrap();
+        let others = crate::chat_temp::folder(other).unwrap();
+        std::fs::create_dir(folder.join("build")).unwrap();
+        std::fs::create_dir(others.join("build")).unwrap();
+        let request = |command: &str| ReviewRequest {
+            permission: "external_directory".into(),
+            patterns: Vec::new(),
+            detail: json!({ "command": format!("{command} && cat /etc/hosts") }),
+            tool: Some(("bash".into(), "c1".into())),
+            thread_id: ThreadId::new(),
+            root_thread_id: chat,
+            turn_id: None,
+        };
+        for command in [
+            "rm -rf \"$TMPDIR/build\"".to_owned(),
+            format!("rm -rf {}/build", folder.display()),
+        ] {
+            assert_eq!(
+                unnamed_deletion(&request(&command), &workspace, "Run the tests"),
+                None,
+                "{command}"
+            );
+        }
+        let found = unnamed_deletion(
+            &request(&format!("rm -rf {}/build", others.display())),
+            &workspace,
+            "Run the tests",
+        )
+        .unwrap();
+        assert_eq!(Path::new(&found.path), others.join("build"));
+        crate::chat_temp::remove(chat);
+        crate::chat_temp::remove(other);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

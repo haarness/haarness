@@ -884,7 +884,10 @@ impl Tool for LspTool {
         let file = haarness_core::resolve_permission_path(&context.workspace, requested);
         let root = haarness_core::paths::canonicalize(&context.workspace)
             .unwrap_or_else(|_| context.workspace.clone());
-        if !file.starts_with(root) && !context.authorized_external_paths.contains(&file) {
+        if !file.starts_with(root)
+            && !in_temp_folder(&file, &context)
+            && !context.authorized_external_paths.contains(&file)
+        {
             return Err(CoreError::Invalid(
                 "LSP path is outside the workspace and was not authorized".into(),
             ));
@@ -4317,7 +4320,7 @@ impl Tool for BuiltinTool {
                         },
                         &context.cancel,
                         &tool_output_dir(),
-                        &context.execution.shell_env,
+                        &shell_environment(&context),
                         agent,
                     )
                     .await
@@ -4328,7 +4331,7 @@ impl Tool for BuiltinTool {
                         given.unwrap_or(context.execution.shell_timeout_ms),
                         &context.cancel,
                         &tool_output_dir(),
-                        &context.execution.shell_env,
+                        &shell_environment(&context),
                         agent,
                     )
                     .await
@@ -5096,13 +5099,54 @@ fn ensure_within(path: PathBuf, context: &ToolContext) -> CoreResult<PathBuf> {
     let is_tool_output = haarness_core::paths::canonicalize(&output_root)
         .is_ok_and(|output_root| path.starts_with(output_root));
     let is_authorized_external = context.authorized_external_paths.contains(&path);
-    if !path.starts_with(&root) && !is_tool_output && !is_authorized_external {
+    if !path.starts_with(&root)
+        && !is_tool_output
+        && !is_authorized_external
+        && !in_temp_folder(&path, context)
+    {
         return Err(CoreError::PermissionDenied(format!(
             "external directory: {}",
             path.display()
         )));
     }
     Ok(path)
+}
+
+/// Whether `path`, resolved as the system resolves it, is in the calling
+/// chat's own temp folder (see `haarness_core::chat_temp`), which its tools
+/// reach as they reach the project.
+fn in_temp_folder(path: &Path, context: &ToolContext) -> bool {
+    context
+        .execution
+        .temp_folder
+        .as_deref()
+        .is_some_and(|folder| path.starts_with(folder))
+}
+
+/// The variables a shell command of the chat gets: the `shell.env` hooks',
+/// with the chat's own temp folder as `TMPDIR`, `TMP` and `TEMP` over
+/// theirs, since its permission was checked with the folder there (on
+/// Windows a name is the same in any case).
+fn shell_environment(
+    context: &ToolContext,
+) -> std::borrow::Cow<'_, std::collections::BTreeMap<String, String>> {
+    let Some(folder) = &context.execution.temp_folder else {
+        return std::borrow::Cow::Borrowed(&context.execution.shell_env);
+    };
+    let mut env = context.execution.shell_env.clone();
+    env.retain(|name, _| {
+        !haarness_core::chat_temp::VARIABLES.iter().any(|own| {
+            if cfg!(windows) {
+                own.eq_ignore_ascii_case(name)
+            } else {
+                own == name
+            }
+        })
+    });
+    for name in haarness_core::chat_temp::VARIABLES {
+        env.insert(name.to_owned(), folder.to_string_lossy().into_owned());
+    }
+    std::borrow::Cow::Owned(env)
 }
 
 /// `list`: the entries of one folder, sorted. Each entry's type comes from

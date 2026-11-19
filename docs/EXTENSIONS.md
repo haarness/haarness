@@ -242,6 +242,9 @@ Where each hook fires:
   `HAARNESS` and `HAARNESS_SESSION_ID` win over an extension's values, and an
   `AI_AGENT` it sets is kept (see
   [Permissions and execution](PERMISSIONS-AND-EXECUTION.md#configure-execution-budgets)).
+  So does the chat's own temp folder as `TMPDIR`, `TMP` and `TEMP`, which the
+  command was checked with (see
+  [A chat's own temp folder](PERMISSIONS-AND-EXECUTION.md#a-chats-own-temp-folder)).
 - `tool.definition` runs once per tool when the registry is composed (startup
   and hot reload), for native, MCP and extension tools known at that time; an
   error there keeps that configuration from loading. A tool listed later, such

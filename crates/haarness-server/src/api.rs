@@ -149,6 +149,11 @@ pub async fn serve_with_host(
 /// per process, by the first server it starts.
 static SWEPT_COMMAND_FILES: std::sync::Once = std::sync::Once::new();
 
+/// So are the temp folders of archived and long-unused chats. Not in a test
+/// binary: its many servers, each with a store of its own, share one folder
+/// of chats' folders, and each test sweeps what it means to.
+static SWEPT_CHAT_TEMP_FOLDERS: std::sync::Once = std::sync::Once::new();
+
 // Retain the same async startup API as serve for existing callers.
 #[allow(clippy::unused_async)]
 pub async fn serve_with_access(
@@ -182,6 +187,21 @@ pub async fn serve_with_access(
                 tracing::info!(
                     removed,
                     "removed output files of commands a gone process left"
+                );
+            }
+        });
+    });
+    SWEPT_CHAT_TEMP_FOLDERS.call_once(|| {
+        if haarness_protocol::test_binary() {
+            return;
+        }
+        let runtime = Arc::clone(&state.runtime);
+        tokio::spawn(async move {
+            let removed = runtime.sweep_chat_temp_folders().await;
+            if removed > 0 {
+                tracing::info!(
+                    removed,
+                    "removed the temp folders of archived or long-unused chats"
                 );
             }
         });
