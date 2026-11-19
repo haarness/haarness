@@ -3006,6 +3006,8 @@
   "The attachments come to {size}, over the {limit} limit for media in one message": "Ekler toplam {size}; bu, tek bir mesajdaki medya için {limit} sınırını aşıyor",
   "its images and PDFs would take the message over the 20 MiB limit for media": "görselleri ve PDF'leri mesajı 20 MiB medya sınırının üzerine çıkarır",
   "{name} is {size}, over the {limit} limit for media in one message": "{name} {size}; bu, tek bir mesajdaki medya için {limit} sınırını aşıyor",
+  "The attachments come to {size}, over the {limit} limit for media sent to another computer": "Ekler toplam {size}; bu, başka bir bilgisayara gönderilen medya için {limit} sınırını aşıyor",
+  "{name} is {size}, over the {limit} limit for media sent to another computer": "{name} {size}; bu, başka bir bilgisayara gönderilen medya için {limit} sınırını aşıyor",
   "Marketplaces": "Pazar yerleri",
   "Update automatically": "Otomatik güncelle",
   "Update {name} automatically": "{name} otomatik güncellensin",

@@ -3006,6 +3006,8 @@
   "The attachments come to {size}, over the {limit} limit for media in one message": "Vedhæftningerne fylder {size}, over grænsen på {limit} for medier i én besked",
   "its images and PDFs would take the message over the 20 MiB limit for media": "dens billeder og PDF'er ville bringe beskeden over grænsen på 20 MiB for medier",
   "{name} is {size}, over the {limit} limit for media in one message": "{name} fylder {size}, over grænsen på {limit} for medier i én besked",
+  "The attachments come to {size}, over the {limit} limit for media sent to another computer": "Vedhæftningerne fylder {size}, over grænsen på {limit} for medier sendt til en anden computer",
+  "{name} is {size}, over the {limit} limit for media sent to another computer": "{name} fylder {size}, over grænsen på {limit} for medier sendt til en anden computer",
   "Marketplaces": "Marketplaces",
   "Update automatically": "Opdater automatisk",
   "Update {name} automatically": "Opdater {name} automatisk",

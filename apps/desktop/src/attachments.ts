@@ -43,18 +43,16 @@ export function imageType(bytes: Uint8Array): string | undefined {
   return undefined;
 }
 
+/** The bytes attachments carry: each data URL's payload, decoded. */
+export function attachmentBytes(values: Attachment[]) {
+  return values.reduce((total, value) => {
+    const encoded = value.data.split(",")[1] ?? "";
+    return total + Math.floor(encoded.length / 4) * 3 - (encoded.match(/=+$/)?.[0].length ?? 0);
+  }, 0);
+}
+
 export function checkAttachments(values: Attachment[]) {
-  if (
-    values.length > 20 ||
-    values.reduce(
-      (total, value) => {
-        const encoded = value.data.split(",")[1] ?? "";
-        return total + Math.floor(encoded.length / 4) * 3 - (encoded.match(/=+$/)?.[0].length ?? 0);
-      },
-      0,
-    ) >
-      20 * 1024 * 1024
-  )
+  if (values.length > 20 || attachmentBytes(values) > 20 * 1024 * 1024)
     throw new Error("Attachments must total at most 20 MiB and 20 files.");
   return values;
 }

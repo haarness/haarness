@@ -1686,7 +1686,7 @@ pub(crate) fn apply_mention(app: &mut App, client: &ApiClient) -> bool {
             .map(|workspace| std::path::Path::new(workspace).join(&path))
     };
     if let Some(absolute) = absolute
-        && !client.uploads_attachments()
+        && client.uploads() == crate::media::Uploads::No
         && crate::media::mime_for_path(&absolute).is_some()
     {
         app.composer.replace_range(start, end, "");

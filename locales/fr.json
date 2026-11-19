@@ -3006,6 +3006,8 @@
   "The attachments come to {size}, over the {limit} limit for media in one message": "Les pièces jointes totalisent {size}, au-delà de la limite de {limit} de médias par message",
   "its images and PDFs would take the message over the 20 MiB limit for media": "ses images et PDF feraient dépasser au message la limite de 20 MiB de médias",
   "{name} is {size}, over the {limit} limit for media in one message": "{name} fait {size}, au-delà de la limite de {limit} de médias par message",
+  "The attachments come to {size}, over the {limit} limit for media sent to another computer": "Les pièces jointes totalisent {size}, au-delà de la limite de {limit} de médias envoyés à un autre ordinateur",
+  "{name} is {size}, over the {limit} limit for media sent to another computer": "{name} fait {size}, au-delà de la limite de {limit} de médias envoyés à un autre ordinateur",
   "Marketplaces": "Places de marché",
   "Update automatically": "Mettre à jour automatiquement",
   "Update {name} automatically": "Mettre à jour {name} automatiquement",

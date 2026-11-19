@@ -2975,7 +2975,7 @@ impl App {
     /// A bracketed paste or terminal file drop into the prompt: dropped
     /// media becomes attachments, anything else is text. `uploads` says the
     /// client sends files to the server whole (an attached server).
-    pub fn paste_into_prompt(&mut self, text: &str, uploads: bool) {
+    pub fn paste_into_prompt(&mut self, text: &str, uploads: crate::media::Uploads) {
         // A shell command reads only the prompt's text, so in shell mode a
         // dropped file stays its path.
         let paths = if self.shell_mode {

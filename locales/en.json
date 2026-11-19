@@ -3006,6 +3006,8 @@
   "The attachments come to {size}, over the {limit} limit for media in one message": "The attachments come to {size}, over the {limit} limit for media in one message",
   "its images and PDFs would take the message over the 20 MiB limit for media": "its images and PDFs would take the message over the 20 MiB limit for media",
   "{name} is {size}, over the {limit} limit for media in one message": "{name} is {size}, over the {limit} limit for media in one message",
+  "The attachments come to {size}, over the {limit} limit for media sent to another computer": "The attachments come to {size}, over the {limit} limit for media sent to another computer",
+  "{name} is {size}, over the {limit} limit for media sent to another computer": "{name} is {size}, over the {limit} limit for media sent to another computer",
   "Marketplaces": "Marketplaces",
   "Update automatically": "Update automatically",
   "Update {name} automatically": "Update {name} automatically",

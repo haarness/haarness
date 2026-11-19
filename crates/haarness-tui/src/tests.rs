@@ -8669,7 +8669,7 @@ async fn a_typed_answer_that_did_not_land_comes_back_to_the_prompt() {
         let mut app = asked_free_text(&thread, &["q-typed"]).await;
         let (client, _) = answering_server(thread.id, reply).await;
         type_text(&mut app, "the release branch ", &client).await;
-        app.paste_into_prompt(&paste, false);
+        app.paste_into_prompt(&paste, crate::media::Uploads::No);
         let typed = app.composer.text().to_owned();
         assert!(typed.contains("[#1 pasted 12 lines]"), "{typed}");
         let sent = crate::input::handle_key(
@@ -27599,14 +27599,14 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
 
     app.shell_mode = true;
     app.composer.set_text("open ".into());
-    app.paste_into_prompt(&dropped, false);
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
     assert!(app.attachments.is_empty());
     assert_eq!(app.composer.text(), format!("open {dropped}"));
 
     // Out of shell mode the same drop is an attachment.
     app.shell_mode = false;
     app.composer.clear();
-    app.paste_into_prompt(&dropped, false);
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
     assert_eq!(
         app.attachments,
         vec![dunce::canonicalize(&image).unwrap().display().to_string()]
@@ -27618,7 +27618,7 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
     let readme = root.join("README.md");
     std::fs::write(&readme, "# Notes\n").unwrap();
     app.notice.clear();
-    app.paste_into_prompt(&readme.display().to_string(), false);
+    app.paste_into_prompt(&readme.display().to_string(), crate::media::Uploads::No);
     assert_eq!(app.composer.text(), readme.display().to_string());
     assert!(app.notice.is_empty(), "{}", app.notice);
     assert_eq!(app.attachments.len(), 1);

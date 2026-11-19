@@ -3006,6 +3006,8 @@
   "The attachments come to {size}, over the {limit} limit for media in one message": "附件共 {size}，超過了單則訊息 {limit} 的媒體上限",
   "its images and PDFs would take the message over the 20 MiB limit for media": "其中的圖片和 PDF 會使訊息超出 20 MiB 的媒體上限",
   "{name} is {size}, over the {limit} limit for media in one message": "{name} 大小為 {size}，超過了單則訊息 {limit} 的媒體上限",
+  "The attachments come to {size}, over the {limit} limit for media sent to another computer": "附件共 {size}，超過了傳送到另一台電腦的 {limit} 媒體上限",
+  "{name} is {size}, over the {limit} limit for media sent to another computer": "{name} 大小為 {size}，超過了傳送到另一台電腦的 {limit} 媒體上限",
   "Marketplaces": "市集",
   "Update automatically": "自動更新",
   "Update {name} automatically": "自動更新 {name}",

@@ -3006,6 +3006,8 @@
   "The attachments come to {size}, over the {limit} limit for media in one message": "添付ファイルは合計 {size} で、1 件のメッセージのメディア上限 {limit} を超えています",
   "its images and PDFs would take the message over the 20 MiB limit for media": "このリソースの画像と PDF を含めると、メッセージがメディア上限の 20 MiB を超えます",
   "{name} is {size}, over the {limit} limit for media in one message": "{name} は {size} で、1 件のメッセージのメディア上限 {limit} を超えています",
+  "The attachments come to {size}, over the {limit} limit for media sent to another computer": "添付ファイルは合計 {size} で、別のコンピューターに送るメディアの上限 {limit} を超えています",
+  "{name} is {size}, over the {limit} limit for media sent to another computer": "{name} は {size} で、別のコンピューターに送るメディアの上限 {limit} を超えています",
   "Marketplaces": "マーケットプレイス",
   "Update automatically": "自動で更新",
   "Update {name} automatically": "{name} を自動で更新",

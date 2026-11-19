@@ -3006,6 +3006,8 @@
   "The attachments come to {size}, over the {limit} limit for media in one message": "ไฟล์แนบรวมกันมีขนาด {size} เกินขีดจำกัดสื่อ {limit} ต่อหนึ่งข้อความ",
   "its images and PDFs would take the message over the 20 MiB limit for media": "รูปภาพและ PDF ของรายการนี้จะทำให้ข้อความเกินขีดจำกัดสื่อ 20 MiB",
   "{name} is {size}, over the {limit} limit for media in one message": "{name} มีขนาด {size} เกินขีดจำกัดสื่อ {limit} ต่อหนึ่งข้อความ",
+  "The attachments come to {size}, over the {limit} limit for media sent to another computer": "ไฟล์แนบรวมกันมีขนาด {size} เกินขีดจำกัดสื่อ {limit} ที่ส่งไปยังคอมพิวเตอร์เครื่องอื่นได้",
+  "{name} is {size}, over the {limit} limit for media sent to another computer": "{name} มีขนาด {size} เกินขีดจำกัดสื่อ {limit} ที่ส่งไปยังคอมพิวเตอร์เครื่องอื่นได้",
   "Marketplaces": "มาร์เก็ตเพลส",
   "Update automatically": "อัปเดตโดยอัตโนมัติ",
   "Update {name} automatically": "อัปเดต {name} โดยอัตโนมัติ",

@@ -3006,6 +3006,8 @@
   "The attachments come to {size}, over the {limit} limit for media in one message": "Prilozi zajedno imaju {size}, više od ograničenja od {limit} za medije u jednoj poruci",
   "its images and PDFs would take the message over the 20 MiB limit for media": "njegove slike i PDF datoteke bi poruku odvele preko ograničenja od 20 MiB za medije",
   "{name} is {size}, over the {limit} limit for media in one message": "{name} ima {size}, više od ograničenja od {limit} za medije u jednoj poruci",
+  "The attachments come to {size}, over the {limit} limit for media sent to another computer": "Prilozi zajedno imaju {size}, više od ograničenja od {limit} za medije poslane na drugi računar",
+  "{name} is {size}, over the {limit} limit for media sent to another computer": "{name} ima {size}, više od ograničenja od {limit} za medije poslane na drugi računar",
   "Marketplaces": "Marketplacei",
   "Update automatically": "Automatski ažuriraj",
   "Update {name} automatically": "Automatski ažuriraj {name}",

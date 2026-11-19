@@ -3006,6 +3006,8 @@
   "The attachments come to {size}, over the {limit} limit for media in one message": "Załączniki zajmują {size}, więcej niż limit {limit} multimediów w jednej wiadomości",
   "its images and PDFs would take the message over the 20 MiB limit for media": "jego obrazy i pliki PDF przekroczyłyby limit 20 MiB multimediów w wiadomości",
   "{name} is {size}, over the {limit} limit for media in one message": "{name} zajmuje {size}, więcej niż limit {limit} multimediów w jednej wiadomości",
+  "The attachments come to {size}, over the {limit} limit for media sent to another computer": "Załączniki zajmują {size}, więcej niż limit {limit} multimediów wysyłanych na inny komputer",
+  "{name} is {size}, over the {limit} limit for media sent to another computer": "{name} zajmuje {size}, więcej niż limit {limit} multimediów wysyłanych na inny komputer",
   "Marketplaces": "Marketplace’y",
   "Update automatically": "Aktualizuj automatycznie",
   "Update {name} automatically": "Aktualizuj {name} automatycznie",

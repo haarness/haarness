@@ -1,6 +1,30 @@
 import { attachmentMimeTypes, checkAttachments, imageType, type Attachment } from "../attachments";
-import { t } from "./i18n";
-export { checkAttachments, type Attachment } from "../attachments";
+import { isolatedValues } from "./error-text";
+import { formatNumber, t } from "./i18n";
+export { attachmentBytes, checkAttachments, type Attachment } from "../attachments";
+
+/**
+ * The most a message to another of your computers carries in files.
+ * Haarness Cloud relays at most 16 MiB in one request, and a file travels
+ * inline in base64, a third larger: 11 MiB of files leave room for the
+ * message's own text. The phone apps hold to the same.
+ */
+export const relayAttachmentLimit = 11 * 1024 * 1024;
+
+/** Bytes as a size in MiB, rounded up to a tenth, in the interface language. */
+const mebibytes = (bytes: number) => formatNumber(Math.ceil((bytes * 10) / (1024 * 1024)) / 10) + " MiB";
+
+/**
+ * Why files that come to `total` bytes cannot go to another of your
+ * computers in one message, in the reader's language; nothing when they fit.
+ */
+export function relayRefusal(total: number) {
+  if (total <= relayAttachmentLimit) return undefined;
+  return t(
+    "The attachments come to {size}, over the {limit} limit for media sent to another computer",
+    isolatedValues({ size: mebibytes(total), limit: mebibytes(relayAttachmentLimit) }),
+  );
+}
 
 /**
  * Whether a dropped or pasted file goes to the draft as an attachment, by
