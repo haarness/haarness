@@ -134,8 +134,9 @@ export function TerminalPanel() {
   }
   async function create() {
     if (starting() || creating() || unfoldered()) return;
-    // The person asked for it: it takes the keyboard once it connects.
-    terminalKeyboard.claim();
+    // The person asked for it: it takes the keyboard once it connects, and
+    // the terminal shown until then does not, should it connect meanwhile.
+    terminalKeyboard.starting();
     const connection = app.state.connection!.id;
     const shown = folder();
     setCreating(true);
@@ -143,12 +144,14 @@ export function TerminalPanel() {
       const item = await window.haarness.api<PtyInfo>(connection, "createPty", [
         { cols: 100, rows: 20, ...(shown ? { directory: shown } : {}) },
       ]);
+      terminalKeyboard.started(item.id);
       shownOutput.started(connection + ":" + item.id);
       if (disposed || connection !== app.state.connection?.id) return;
       await refresh();
       if (!disposed && connection === app.state.connection?.id)
         setSelected(item.id);
     } finally {
+      terminalKeyboard.started();
       setCreating(false);
     }
   }
@@ -654,7 +657,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
         // those, wrapping and clearing in the wrong places here.
         await sizes.now({ cols: terminal.cols, rows: terminal.rows });
         if (disposed) return true;
-        if (!connected && terminalKeyboard.take()) terminal.focus();
+        if (!connected && terminalKeyboard.take(props.id)) terminal.focus();
         connected = true;
         live = true;
         watch.connected();
