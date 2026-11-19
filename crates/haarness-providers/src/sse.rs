@@ -118,10 +118,11 @@ fn framed_stream(
         } else {
             let status = response.status();
             let headers = response.headers().clone();
+            let answered = response.url().clone();
             let body = within(limit, response.text())
                 .await?
                 .unwrap_or_default();
-            Err(status_error(status, &headers, &body))?;
+            Err(status_error(status, &headers, &answered, &body))?;
             unreachable!();
         };
         let mut chunks = response.bytes_stream();
@@ -256,12 +257,18 @@ fn whole_reply(body: &str) -> CoreResult<Value> {
 }
 
 /// The error for a refused streamed request: `HTTP <status>` with the
-/// provider's own words, and the wait a rate limit names.
+/// provider's own words, and the wait a rate limit names. A redirect the
+/// client did not follow says where it led instead (see [`redirected_to`]),
+/// `answered` being the address that sent it.
 pub(crate) fn status_error(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
+    answered: &reqwest::Url,
     body: &str,
 ) -> CoreError {
+    if let Some(target) = redirected_to(status, headers, answered) {
+        return CoreError::Provider(format!("HTTP {status}: {}", unfollowed_redirect(&target)));
+    }
     let advised = advised_retry(status, headers);
     let detail = provider_error_detail(body);
     let mut message = detail.map_or_else(
@@ -274,6 +281,67 @@ pub(crate) fn status_error(
         message.push_str(&advised);
     }
     CoreError::Provider(message)
+}
+
+/// Where a redirect that came back as the answer led: its `Location`, read
+/// against `answered`, as scheme, host, port and path. A user name,
+/// password, query or fragment there can carry a credential, so they are
+/// left out. `None` when the answer is no such redirect, or leads somewhere
+/// other than an http or https address.
+pub(crate) fn redirected_to(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    answered: &reqwest::Url,
+) -> Option<String> {
+    if !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
+    let location = headers.get(reqwest::header::LOCATION)?.to_str().ok()?;
+    let mut target = answered.join(location.trim()).ok()?;
+    if !matches!(target.scheme(), "http" | "https") {
+        return None;
+    }
+    let _ = target.set_username("");
+    let _ = target.set_password(None);
+    target.set_query(None);
+    target.set_fragment(None);
+    Some(target.into())
+}
+
+/// What a person reads of a provider's redirect to `target` that its client
+/// did not follow (a provider a project defines is redirected only below its
+/// own address, Haarness Cloud's router not at all): whether that address is
+/// the provider's is the person's call.
+pub(crate) fn unfollowed_redirect(target: &str) -> String {
+    format!(
+        "the provider redirected this request to {target}. Haarness doesn't follow a provider's redirect away from its address, so nothing was sent there. If you trust that address, change the provider's base_url to point there."
+    )
+}
+
+/// Whether `response`, to a request for `provider`'s model list, is a
+/// redirect its client did not follow (see [`redirected_to`]). Its body is
+/// no list, so the configured models stay. The daemon log says where it led
+/// once for each provider and address while this process runs: the list is
+/// asked for again and again.
+pub(crate) fn unfollowed_listing(provider: &str, response: &reqwest::Response) -> bool {
+    static LOGGED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let Some(target) = redirected_to(response.status(), response.headers(), response.url()) else {
+        return false;
+    };
+    let first = LOGGED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(format!("{provider}\n{}", response.url()));
+    if first {
+        tracing::warn!(
+            provider,
+            status = response.status().as_u16(),
+            to = %target,
+            "the provider redirected its model list away from its address, which Haarness doesn't follow; if you trust that address, point the provider's base_url there"
+        );
+    }
+    true
 }
 
 /// The wait a rate-limited response names in `Retry-After`, spelled the way
@@ -770,6 +838,7 @@ mod tests {
         let error = super::status_error(
             reqwest::StatusCode::TOO_MANY_REQUESTS,
             &reqwest::header::HeaderMap::new(),
+            &reqwest::Url::parse("https://generativelanguage.googleapis.com/v1beta").unwrap(),
             limited,
         );
         assert_eq!(
@@ -841,6 +910,85 @@ mod tests {
         assert_eq!(
             super::upstream_error(&json!({"message":"Rate limited","code":429})),
             None
+        );
+    }
+
+    /// A redirect that came back as the answer names where it led, without
+    /// the credentials a `Location` may carry, and leaves its body out.
+    #[test]
+    fn an_unfollowed_redirect_names_where_it_led_and_nothing_secret() {
+        use reqwest::{StatusCode, header::HeaderMap};
+        let answered =
+            reqwest::Url::parse("http://me:pw@gw.example:8080/v1/chat/completions?key=k").unwrap();
+        let error = |status: StatusCode, location: Option<&str>, body: &str| {
+            let mut headers = HeaderMap::new();
+            if let Some(location) = location {
+                headers.insert(reqwest::header::LOCATION, location.parse().unwrap());
+            }
+            super::status_error(status, &headers, &answered, body).to_string()
+        };
+        let said = error(
+            StatusCode::TEMPORARY_REDIRECT,
+            Some("https://u:p@other.example/v1?k=s#part"),
+            "Redirecting to https://other.example/v1?k=s",
+        );
+        assert_eq!(
+            said,
+            "provider error: HTTP 307 Temporary Redirect: the provider redirected this request to https://other.example/v1. Haarness doesn't follow a provider's redirect away from its address, so nothing was sent there. If you trust that address, change the provider's base_url to point there."
+        );
+        for secret in ["u:p", "k=s", "part", "Redirecting"] {
+            assert!(!said.contains(secret), "{secret}: {said}");
+        }
+        // A `Location` relative to the address that answered.
+        for (status, location, target) in [
+            (
+                StatusCode::MOVED_PERMANENTLY,
+                "/v2/chat",
+                "http://gw.example:8080/v2/chat",
+            ),
+            (
+                StatusCode::FOUND,
+                "../../v3/x?y=1",
+                "http://gw.example:8080/v3/x",
+            ),
+            (
+                StatusCode::SEE_OTHER,
+                "//other.example:9/p",
+                "http://other.example:9/p",
+            ),
+            (
+                StatusCode::PERMANENT_REDIRECT,
+                " https://other.example ",
+                "https://other.example/",
+            ),
+        ] {
+            let said = error(status, Some(location), "");
+            assert!(
+                said.contains(&format!("redirected this request to {target}. ")),
+                "{location}: {said}"
+            );
+            assert!(!said.contains("me:pw") && !said.contains("key=k"), "{said}");
+        }
+        // No address to name: the status line, as before.
+        assert_eq!(
+            error(StatusCode::TEMPORARY_REDIRECT, None, ""),
+            "provider error: HTTP 307 Temporary Redirect"
+        );
+        assert_eq!(
+            error(StatusCode::FOUND, Some("ftp://other.example/x"), ""),
+            "provider error: HTTP 302 Found"
+        );
+        assert_eq!(
+            error(StatusCode::NOT_MODIFIED, Some("https://other.example"), ""),
+            "provider error: HTTP 304 Not Modified"
+        );
+        assert_eq!(
+            error(
+                StatusCode::NOT_FOUND,
+                Some("https://other.example"),
+                "no route"
+            ),
+            "provider error: HTTP 404 Not Found: no route"
         );
     }
 }

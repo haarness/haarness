@@ -347,6 +347,7 @@ impl OpenAiCompatibleProvider {
             .send()
             .await
             .ok()
+            .filter(|response| !crate::sse::unfollowed_listing(&self.id, response))
             .and_then(|response| response.error_for_status().ok());
         if let Some(response) = discovered
             && let Ok(body) = response.json::<Value>().await
@@ -2842,7 +2843,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let answer = if !response.status().is_success() && !self.server_output_limit {
             let status = response.status();
             let headers_seen = response.headers().clone();
-            let idle = limits.idle(crate::sse::is_loopback(response.url()));
+            let answered = response.url().clone();
+            let idle = limits.idle(crate::sse::is_loopback(&answered));
             let text = crate::sse::within(idle, response.text())
                 .await?
                 .unwrap_or_default();
@@ -2871,11 +2873,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 } else {
                     let status = response.status();
                     let headers_seen = response.headers().clone();
+                    let answered = response.url().clone();
                     trace.refused(status);
                     let text = crate::sse::within(idle, response.text())
                         .await?
                         .unwrap_or_default();
-                    Err(crate::sse::status_error(status, &headers_seen, &text))
+                    Err(crate::sse::status_error(
+                        status,
+                        &headers_seen,
+                        &answered,
+                        &text,
+                    ))
                 }
             // Some servers (older gateways and local runtimes) refuse the
             // usage option instead of ignoring it: ask once more without it.
@@ -2904,7 +2912,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 )))
             } else {
                 trace.refused(status);
-                Err(crate::sse::status_error(status, &headers_seen, &text))
+                Err(crate::sse::status_error(
+                    status,
+                    &headers_seen,
+                    &answered,
+                    &text,
+                ))
             }
         } else {
             Ok(response)

@@ -2070,6 +2070,24 @@ mod tests {
         }
     }
 
+    /// The error a chat on `provider` ends with, if any.
+    async fn first_error(provider: &std::sync::Arc<dyn ModelProvider>) -> Option<String> {
+        use futures::StreamExt as _;
+        let stream = match provider
+            .stream(chat(), tokio_util::sync::CancellationToken::new())
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => return Some(error.to_string()),
+        };
+        stream
+            .filter_map(|item| std::future::ready(item.err()))
+            .boxed()
+            .next()
+            .await
+            .map(|error| error.to_string())
+    }
+
     async fn send(provider: &std::sync::Arc<dyn ModelProvider>) -> Result<(), String> {
         use futures::StreamExt as _;
         let stream = provider
@@ -2085,7 +2103,8 @@ mod tests {
     /// `Authorization` on the way to another server, so `x-api-key`,
     /// `x-goog-api-key` and `api-key` would go along, and on the same server
     /// another path can be another account's. A redirect below the saved
-    /// address is still followed.
+    /// address is still followed. One that is not fails the chat naming
+    /// where it led, and a model list the daemon log names once.
     #[tokio::test]
     async fn a_project_provider_follows_no_redirect_off_its_server() {
         use axum::{
@@ -2099,6 +2118,7 @@ mod tests {
         let record = elsewhere.clone();
         let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let other_address = format!("http://{}", other.local_addr().unwrap());
+        let hop = format!("{other_address}/hop/");
         tokio::spawn(async move {
             let app = Router::new().fallback(any(move |uri: Uri, headers: HeaderMap| {
                 let record = record.clone();
@@ -2184,6 +2204,19 @@ mod tests {
                 "team-leave",
                 format!("{address}/leave"),
             )),
+            super::ProviderInstance::OpenAiChatCompletions(CompatibleInstance {
+                id: "team-listed".into(),
+                name: "team-listed".into(),
+                base_url: format!("{address}/hop/listed/v1"),
+                api_key: None,
+                models: vec!["m".into()],
+                discover_models: true,
+                server_output_limit: false,
+                replay_observed_reasoning: false,
+                model_defaults: CompatibleModelDefaults::default(),
+                assume_authenticated: false,
+                headers: ProviderHeaders::default(),
+            }),
         ];
         for instance in &instances {
             store
@@ -2201,6 +2234,7 @@ mod tests {
                 .collect(),
             ..super::CredentialFence::default()
         };
+        let (logged, _guard) = crate::log_capture::Logged::start();
         let registry = super::NativeProviderRegistry::with_providers_and_store(
             instances,
             &HashSet::new(),
@@ -2208,17 +2242,51 @@ mod tests {
             &fence,
         )
         .await;
-        for id in [
-            "team-anthropic",
-            "team-gemini",
-            "team-azure",
-            "team-gateway",
-            "team-leave",
+        let leave = format!("{address}/v1/");
+        for (id, led) in [
+            ("team-anthropic", Some(&hop)),
+            ("team-gemini", Some(&hop)),
+            ("team-azure", Some(&hop)),
+            ("team-gateway", None),
+            ("team-leave", Some(&leave)),
+            ("team-listed", Some(&hop)),
         ] {
             let provider = haarness_core::ProviderRegistry::get(&registry, id).unwrap();
             assert!(provider.info().authenticated, "{id}");
             provider.refresh_models(true).await;
-            let _ = send(&provider).await;
+            provider.refresh_models(true).await;
+            let refusal = first_error(&provider).await;
+            let Some(led) = led else {
+                assert_eq!(refusal, None, "{id}");
+                continue;
+            };
+            let refusal = refusal.unwrap_or_default();
+            assert!(
+                refusal.contains(&format!("redirected this request to {led}"))
+                    && refusal.contains("Haarness doesn't follow a provider's redirect")
+                    && !refusal.contains('?'),
+                "{id}: {refusal}"
+            );
+        }
+        // A model list redirected away is named once for each provider, and
+        // the provider keeps its configured models.
+        let listed = logged.lines("the provider redirected its model list away from its address, which Haarness doesn't follow; if you trust that address, point the provider's base_url there");
+        for id in ["team-anthropic", "team-listed"] {
+            let lines: Vec<_> = listed
+                .iter()
+                .filter(|line| line.contains(&format!(" provider={id} ")))
+                .collect();
+            assert_eq!(lines.len(), 1, "{id}: {}", logged.all());
+            assert!(
+                lines[0].contains(&format!(" to={hop}")) && !lines[0].contains('?'),
+                "{}",
+                lines[0]
+            );
+            let provider = haarness_core::ProviderRegistry::get(&registry, id).unwrap();
+            assert!(
+                provider.info().models.iter().any(|model| model.id == "m"),
+                "{id}"
+            );
         }
         assert!(elsewhere.lock().is_empty(), "{:?}", elsewhere.lock());
         let arrived = here.lock();

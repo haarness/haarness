@@ -168,6 +168,7 @@ impl AnthropicProvider {
                 .send()
                 .await
                 .ok()
+                .filter(|response| !crate::sse::unfollowed_listing(&self.id, response))
                 .and_then(|response| response.error_for_status().ok())?;
             let Ok(body) = response.json::<Value>().await else {
                 return None;
