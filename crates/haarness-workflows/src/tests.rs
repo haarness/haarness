@@ -1931,6 +1931,46 @@ fn native_arguments_apply_declared_defaults_and_coerce_haarness_types() {
 }
 
 #[test]
+fn native_arguments_sent_as_the_json_text_of_an_object_read_as_that_object() {
+    let catalog = haarness_workflow_catalog::WorkflowCatalog::new(Vec::new());
+    let definition = catalog
+        .inspect_source(
+            r#"export default workflow({
+                name: "audit",
+                arguments: {
+                    target: { type: "string" },
+                    rounds: { type: "number", default: 1 }
+                },
+                run() {}
+            })"#,
+            "audit.ts",
+        )
+        .unwrap();
+    let args = crate::coordinator::workflow_args(
+        &definition,
+        Some(json!("\n  {\"target\":\"src\",\"rounds\":\"4\"}\n")),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(args, json!({"target":"src","rounds":4.0}));
+    // Text that is no object's JSON is refused as any other value is.
+    for text in [
+        "src",
+        "[\"src\"]",
+        "\"src\"",
+        "4",
+        "true",
+        "null",
+        "{\"target\":",
+    ] {
+        let error = crate::coordinator::workflow_args(&definition, Some(json!(text)))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("JSON object"), "{text}: {error}");
+    }
+}
+
+#[test]
 fn child_frames_require_the_known_version_and_known_fields() {
     let ready: ChildFrame =
         serde_json::from_str(r#"{"version":1,"type":"ready"}"#).expect("ready frame");

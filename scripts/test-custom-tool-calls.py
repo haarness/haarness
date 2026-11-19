@@ -15,6 +15,12 @@ template does. Each case is one `haarness run`. Checked:
 - A command that runs out of a timeout that reads as seconds (1200) is told the unit and the timeout to send.
 - A server whose chat template takes one tool call per assistant message (Llama 3's: "This model only supports single
   tool-calls at once!") gets them one by one once the model made two calls at once, and the turn goes on.
+- One item written bare where a list is wanted (`load_tool {"queries": "schedule"}`) is that list: the tool loads
+  and runs.
+- A workflow started with its arguments written as the JSON text of an object (`"args": "{\"target\": \"src\"}"`)
+  gets that object.
+- `session_manage search` finds a phrase from an earlier chat as a short excerpt, says it searched every chat, and
+  leaves out its own call.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-custom-tool-calls.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -23,6 +29,8 @@ import http.server
 import json
 import os
 import pathlib
+import re
+import shutil
 import socketserver
 import subprocess
 import tempfile
@@ -57,8 +65,20 @@ CASES = {
     'deferred': [[('schedule', {'action': 'list'})]],
     'timeout': [[('bash', {'command': 'sleep 5', 'timeout': 1200})]],
     'parallel': [[('read', {'path': 'README.md'}), ('read', {'path': 'src/notes.txt'})]],
+    'oneitem': [[('load_tool', {'queries': 'schedule'})], [('schedule', {'action': 'list'})]],
+    # The second round waits for the run the first started, by the id its result gave.
+    'workflow': lambda results: [
+        [('workflow', {'action': 'start', 'name': 'echo-args', 'args': '{"target": "src", "rounds": "3"}'})],
+        [('workflow', {'action': 'wait', 'runID': run_id(results[0]) if results else '', 'timeout': 60000})],
+    ],
+    'session': [[('session_manage', {'action': 'search', 'query': 'case:names'})]],
 }
 requests = []
+
+
+def run_id(result):
+    found = re.search(r'"runID":\s*"([0-9a-f-]{36})"', result)
+    return found.group(1) if found else ''
 
 
 class Gateway(http.server.BaseHTTPRequestHandler):
@@ -96,6 +116,8 @@ class Gateway(http.server.BaseHTTPRequestHandler):
             # Split, each call is its own message: the one round of two calls is done when both results are back.
             rounds_done = 1 if requests[-1]['results'] else 0
         script = CASES[case]
+        if callable(script):
+            script = script(requests[-1]['results'])
         if rounds_done < len(script):
             calls = [{'index': index, 'id': f'{case}-{rounds_done}-{index}', 'type': 'function',
                       'function': {'name': name, 'arguments': json.dumps(arguments)}}
@@ -120,7 +142,19 @@ threading.Thread(target=gateway.serve_forever, daemon=True).start()
 env = clean_env()
 env.update(HAARNESS_DATA_DIR=str(root / 'state'), HAARNESS_HOME=str(root / 'home'), HAARNESS_NO_CONNECT_PROMPT='1')
 env.pop('HAARNESS_TEST_PROVIDER', None)
-(workspace / '.haarness').mkdir()
+# A native workflow runs on Bun; keep the one this machine has on PATH.
+bun = shutil.which('bun') or str(pathlib.Path.home() / '.bun/bin/bun')
+env['PATH'] = f'{pathlib.Path(bun).parent}:{env.get("PATH", "/usr/bin:/bin")}'
+(workspace / '.haarness/workflows').mkdir(parents=True)
+(workspace / '.haarness/workflows/echo-args.ts').write_text(
+    'import { workflow } from "@haarness-ai/plugin"\n\n'
+    'export default workflow({\n'
+    '  name: "echo-args",\n'
+    '  arguments: { target: { type: "string" }, rounds: { type: "number", default: 1 } },\n'
+    '  async run(args) {\n'
+    '    return { target: args.target, rounds: args.rounds }\n'
+    '  },\n'
+    '})\n')
 (workspace / '.haarness/config.toml').write_text(
     '[providers.lmstudio]\nenabled = false\n[providers.ollama]\nenabled = false\n'
     '[lazy_tools]\nmode = "always"\n'
@@ -193,9 +227,42 @@ def check_parallel():
     return "a chat template that takes one call a message gets the calls one by one, and the turn goes on"
 
 
+def check_oneitem():
+    rounds, results = run('oneitem')
+    assert '"id": "schedule"' in results[0], results
+    assert 'available on the next model round' in results[0], results
+    assert results[1] == '[]', results
+    assert 'schedule' in rounds[-1]['tools'], rounds[-1]['tools']
+    return 'one item written bare where a list is wanted is that list: load_tool loads the tool, and it runs'
+
+
+def check_workflow():
+    _, results = run('workflow')
+    assert run_id(results[0]), results
+    waited = json.loads(results[1])
+    # The run hands back the arguments it got.
+    assert waited['status'] == 'completed', results[1]
+    assert waited['result'] == {'target': 'src', 'rounds': 3}, results[1]
+    return "a workflow's arguments written as the JSON text of an object are that object"
+
+
+def check_session():
+    _, results = run('session')
+    found = json.loads(results[0])
+    assert isinstance(found, dict), results
+    assert found['searched']['chats'] == found['searched']['of'] > 1 and 'stopped' not in found, results
+    hits = [hit for chat in found['chats'] for hit in chat['matches']]
+    assert any(hit['kind'] == 'user_message' and 'Please do case:names.' in hit['excerpt'] for hit in hits), results
+    # Its own call holds the query and is left out; nothing is a whole item.
+    assert not any(hit.get('tool') == 'session_manage' for hit in hits), results
+    assert all(len(hit['excerpt']) <= 302 and 'item' not in hit for hit in hits), results
+    return 'a session search finds an earlier chat\'s words as an excerpt, over every chat, without its own call'
+
+
 failed = []
 try:
-    for check in (check_names, check_shapes, check_repeated, check_deferred, check_timeout, check_parallel):
+    for check in (check_names, check_shapes, check_repeated, check_deferred, check_timeout, check_parallel,
+                  check_oneitem, check_workflow, check_session):
         try:
             print(f'PASS {check()}', flush=True)
         except AssertionError as error:

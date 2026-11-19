@@ -1705,6 +1705,13 @@ pub(crate) fn workflow_args(
         return Ok(input);
     }
     let input = input.unwrap_or_else(|| json!({}));
+    // The `workflow` tool's `args` takes any value, so a model's
+    // `"args": "{\"target\":\"src\"}"` arrives as the object's JSON text.
+    let input = input
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text.trim()).ok())
+        .filter(Value::is_object)
+        .unwrap_or(input);
     let args = input
         .as_object()
         .ok_or_else(|| CoreError::Invalid("workflow arguments must be a JSON object".into()))?;
