@@ -46,20 +46,49 @@ test("a compaction a relay or proxy cut on its way is told from one the server r
       fetch: (async () => new Response(body, { status, headers: { "Content-Type": type } })) as typeof fetch,
     });
   const failure = (client: Haarness) => client.compact("chat", {}).then(() => undefined, (error: unknown) => error);
-  // Cloudflare's limit, as it answers it.
-  assert.equal(cutOnTheWay(await failure(answering(524, "<html>A timeout occurred</html>", "text/html"))), true);
-  assert.equal(cutOnTheWay(await failure(answering(504, "Gateway Timeout", "text/plain"))), true);
-  assert.equal(cutOnTheWay(await failure(answering(502, JSON.stringify({ code: "bad_gateway", message: "Your computer couldn't answer." })))), true);
-  // The server's own answers: the summary failed, or none was made.
-  assert.equal(cutOnTheWay(await failure(answering(502, JSON.stringify({ code: "provider_error", message: "provider error: overloaded" })))), false);
-  assert.equal(cutOnTheWay(await failure(answering(409, JSON.stringify({ code: "conflict", message: "conflict: this chat is already being compacted" })))), false);
-  assert.equal(cutOnTheWay(await failure(answering(503, JSON.stringify({ code: "provider_unavailable", message: "Ollama isn't running" })))), false);
-  // A connection that dropped.
-  const dropped = new Haarness({
-    baseUrl: "http://127.0.0.1:1",
-    fetch: (async () => {
-      throw new TypeError("fetch failed");
-    }) as typeof fetch,
-  });
-  assert.equal(cutOnTheWay(await failure(dropped)), true);
+  // A computer on the release that finishes cut summaries, reached through Cloud.
+  const relayed = { relayed: true, url: "https://haarness.ai/api/v1/remote-hosts/h/runtime", version: "0.1.24" };
+  const json = (status: number, body: object) => answering(status, JSON.stringify(body));
+  // Cloudflare's limit, as it answers it, and a gateway's.
+  assert.equal(cutOnTheWay(await failure(answering(524, "<html>A timeout occurred</html>", "text/html")), relayed), true);
+  assert.equal(cutOnTheWay(await failure(answering(504, "Gateway Timeout", "text/plain")), relayed), true);
+  // Cloud lost the computer's connection while the request was out.
+  assert.equal(
+    cutOnTheWay(await failure(json(409, { code: "remote_offline", message: "This computer is offline or its connection changed" })), relayed),
+    true,
+  );
+  // Another compaction under way: waited for whatever the release.
+  const underWay = await failure(json(409, { code: "conflict", message: "conflict: this chat is already being compacted" }));
+  assert.equal(cutOnTheWay(underWay, relayed), true);
+  assert.equal(cutOnTheWay(underWay, { relayed: false, url: "http://127.0.0.1:4096", version: "0.1.0" }), true);
+  // The computer's runtime failed the request, or the model the summary.
+  assert.equal(cutOnTheWay(await failure(json(502, { code: "bad_gateway", message: "Your computer couldn't answer." })), relayed), false);
+  assert.equal(cutOnTheWay(await failure(json(502, { code: "provider_error", message: "provider error: overloaded" })), relayed), false);
+  assert.equal(cutOnTheWay(await failure(json(503, { code: "provider_unavailable", message: "Ollama isn't running" })), relayed), false);
+  // An older computer's summary died with its request.
+  assert.equal(
+    cutOnTheWay(await failure(answering(524, "<html>A timeout occurred</html>", "text/html")), { ...relayed, version: "0.1.23" }),
+    false,
+  );
+});
+
+test("a dropped connection is a cut only on the way to another computer, never a failure to connect", async () => {
+  const dropping = (code: string) =>
+    new Haarness({
+      baseUrl: "http://127.0.0.1:1",
+      fetch: (async () => {
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error(code), { code }) });
+      }) as typeof fetch,
+    });
+  const failure = (client: Haarness) => client.compact("chat", {}).then(() => undefined, (error: unknown) => error);
+  const reset = await failure(dropping("ECONNRESET"));
+  const refused = await failure(dropping("ECONNREFUSED"));
+  // This computer's own server that dropped the request is gone, its summary too.
+  assert.equal(cutOnTheWay(reset, { relayed: false, url: "http://127.0.0.1:4096", version: "0.1.24" }), false);
+  assert.equal(cutOnTheWay(reset, { relayed: false, url: "http://localhost:4096", version: "0.1.24" }), false);
+  // Through Cloud's relay, or to a server on another computer, the answer was lost on the way.
+  assert.equal(cutOnTheWay(reset, { relayed: true, url: "http://127.0.0.1:19080/api", version: "0.1.24" }), true);
+  assert.equal(cutOnTheWay(reset, { relayed: false, url: "https://build-box.example.test:4096", version: "0.1.24" }), true);
+  // A request that never got there.
+  assert.equal(cutOnTheWay(refused, { relayed: true, url: "https://haarness.ai/api", version: "0.1.24" }), false);
 });

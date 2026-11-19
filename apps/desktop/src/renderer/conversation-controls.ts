@@ -1,10 +1,10 @@
-import { createSignal } from "solid-js";
+import { createEffect, createSignal } from "solid-js";
 import { formatNumber, t } from "./i18n";
 import type { Item, Thread } from "@haarness/sdk";
 import { useApp } from "./state";
 import { lastUserMessage, unrestoredFiles } from "./conversation-history";
 import { shortcutLabel, type SearchEntry } from "./search";
-import { isCompactionCut, watchCompaction } from "./compaction-wait";
+import { CHAT_CHANGED, isCompactionCut, watchCompaction } from "./compaction-wait";
 import { COMPACTION_WAIT_MS, type CompactionCut } from "../shared";
 
 export const historyCommands = [
@@ -27,6 +27,16 @@ export function createConversationControls(props: {
   const owner = () => app.state.connection?.id + ":" + app.state.selected;
   const [pending, setPending] = createSignal<string[]>([]);
   const busy = () => pending().includes(owner());
+  // A compaction that failed after its chat was left: said in that chat,
+  // once it is open again, not in whichever chat is open now.
+  const [late, setLate] = createSignal<Record<string, string>>({});
+  createEffect(() => {
+    const key = owner();
+    const said = late()[key];
+    if (said === undefined) return;
+    setLate(({ [key]: _, ...rest }) => rest);
+    app.showError(new Error(said));
+  });
   const disabled = (action: string) =>
     !app.state.ready ||
     !thread() ||
@@ -51,7 +61,10 @@ export function createConversationControls(props: {
     const key = owner();
     const before = [...app.state.items];
     const started = Date.now();
-    const compaction = action === "compact" ? watchCompaction(connection, id) : undefined;
+    const compaction =
+      action === "compact"
+        ? watchCompaction(connection, id, app.state.connection?.info.serverInstanceId)
+        : undefined;
     setPending((values) => [...values, key]);
     try {
       const value = await window.haarness.api<Thread | Item | CompactionCut>(
@@ -63,10 +76,17 @@ export function createConversationControls(props: {
             : "compact",
         action === "redo" ? [id] : [id, {}],
       );
-      // Cut on its way through a relay: the server goes on, and the chat
-      // stays compacting until the summary lands.
+      // Cut on its way through a relay (or another compaction is under
+      // way): the server goes on, and the chat stays compacting until the
+      // summary lands.
       if (compaction && isCompactionCut(value))
-        await compaction.until(started + COMPACTION_WAIT_MS, value.compactionCut);
+        try {
+          await compaction.until(started + COMPACTION_WAIT_MS, value.compactionCut, t(CHAT_CHANGED));
+        } catch (error) {
+          if (owner() === key) throw error;
+          setLate((values) => ({ ...values, [key]: (error as Error).message }));
+          return;
+        }
       if (owner() !== key) return;
       await app.refresh();
       if (owner() !== key) return;

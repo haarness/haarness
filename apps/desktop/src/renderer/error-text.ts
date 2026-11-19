@@ -48,6 +48,8 @@ const sentences = {
   tooLarge: "This is too large to send.",
   signInRefused: "The server refused the token or password. Check it, then try again.",
   refused: "That didn't go through. Try again.",
+  compacting: "This chat is already being compacted",
+  changedWhileCompacting: "The chat changed while it was being summarised",
 } as const;
 /** Refusals a server names by their `reason`, said with the file they are
  * about: no retry can do them, and the words say what to do instead. */
@@ -227,6 +229,9 @@ export function errorText(error: unknown, options: { relay?: boolean } = {}): Er
     if (path) return { message: key, values: { path }, known: true };
   }
   const status = typeof raw === "number" ? raw : statusLine(text)?.status;
+  if (/already being compacted/i.test(text)) return known(sentences.compacting);
+  if (/thread changed (?:while|before) (?:the )?compaction/i.test(text))
+    return known(sentences.changedWhileCompacting);
   if (code === "bad_gateway" || code === "project_server_unavailable" || computerFailed.test(text))
     return known(copy.computer);
   if (

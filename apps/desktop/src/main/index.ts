@@ -1366,8 +1366,13 @@ function installHandlers() {
       (error: unknown) => {
         // The server goes on with a compaction whose request a relay or proxy
         // cut: the window waits for it to land, with what to say if it never does.
-        if (input.method !== "compact" || !cutOnTheWay(error)) throw error;
-        const relay = !!connections.get(input.connection)?.view.remoteHost;
+        const item = connections.get(input.connection);
+        const relay = !!item?.view.remoteHost;
+        if (
+          input.method !== "compact" ||
+          !cutOnTheWay(error, { relayed: relay, url: item?.url, version: item?.view.info.version })
+        )
+          throw error;
         return { compactionCut: failureMessage(error, { relay }) } satisfies CompactionCut;
       },
     );
