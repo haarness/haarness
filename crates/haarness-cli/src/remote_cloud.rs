@@ -639,7 +639,9 @@ impl std::fmt::Display for Interrupted {
 impl std::error::Error for Interrupted {}
 /// How long the relay may stay silent before the connection counts as
 /// stalled. The connector pings five times in that period, and Cloud answers
-/// each ping.
+/// each ping. Any byte from the relay breaks the silence: a large request
+/// still arriving on a slow link (its body travels whole in one frame) holds
+/// back the answers to those pings, yet the relay is far from silent.
 const RELAY_SILENCE: Duration = Duration::from_secs(25);
 /// How long one frame may take to leave; a stalled network fills the socket's
 /// buffer and the send then waits for as long as TCP keeps retrying.
@@ -700,7 +702,7 @@ async fn relay_link(
 ) -> Result<Link> {
     let attempt = tokio::time::timeout(
         Duration::from_secs(10),
-        haarness_account::websocket::connect(
+        haarness_account::websocket::connect_heard(
             handshake,
             Some(
                 tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
@@ -709,8 +711,8 @@ async fn relay_link(
             ),
         ),
     );
-    let socket = match attempt.await {
-        Ok(Ok((socket, _))) => socket,
+    let (socket, heard) = match attempt.await {
+        Ok(Ok((socket, _, heard))) => (socket, heard),
         Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
             if response.status() == reqwest::StatusCode::UNAUTHORIZED =>
         {
@@ -758,6 +760,7 @@ async fn relay_link(
     let (served, mut requests) = tokio::sync::watch::channel(false);
     let session = connected(
         socket,
+        heard,
         target.clone(),
         http.clone(),
         served,
@@ -855,9 +858,8 @@ fn record_exit(file: &Path, error: &anyhow::Error) {
     }
 }
 async fn connected(
-    mut socket: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    mut socket: haarness_account::websocket::HeardSocket,
+    heard: haarness_account::websocket::LastHeard,
     target: Target,
     http: reqwest::Client,
     served: tokio::sync::watch::Sender<bool>,
@@ -948,12 +950,11 @@ async fn connected(
     // The request each job serves, so one that panics is still logged and released.
     let mut requests: HashMap<tokio::task::Id, (Uuid, String)> = HashMap::new();
     let mut tick = tokio::time::interval(silence / 5);
-    let mut last_message = tokio::time::Instant::now();
     loop {
         tokio::select! {
             ()=runtime_lost.cancelled()=>return Err(Interrupted("Local runtime changed").into()),
             _=tick.tick()=>{
-                if last_message.elapsed()>=silence {
+                if heard.at().elapsed()>=silence {
                     return Err(Interrupted("Relay heartbeat timed out").into());
                 }
                 send_frame(&mut socket,Message::Ping(vec![1].into())).await?;
@@ -971,7 +972,6 @@ async fn connected(
             frame=socket.next()=>{
                 match frame.context("Relay closed")?? {
                     Message::Text(value)=>{
-                        last_message=tokio::time::Instant::now();
                         match serde_json::from_str::<Frame>(&value)? {
                             frame@Frame::Open{id,..}=>{
                                 ensure!(!active.contains_key(&id),"Duplicate relay request");
@@ -999,7 +999,7 @@ async fn connected(
                             _=>anyhow::bail!("Unexpected relay frame"),
                         }
                     },
-                    Message::Ping(_)|Message::Pong(_)=>last_message=tokio::time::Instant::now(),
+                    Message::Ping(_)|Message::Pong(_)=>{},
                     _=>break,
                 }
             }
@@ -1011,9 +1011,7 @@ async fn connected(
 }
 /// Send one frame to the relay, as a stall once it takes longer than `RELAY_SEND`.
 async fn send_frame(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    socket: &mut haarness_account::websocket::HeardSocket,
     message: Message,
 ) -> Result<()> {
     match tokio::time::timeout(RELAY_SEND, socket.send(message)).await {
@@ -4188,6 +4186,9 @@ mod tests {
         Mute(Duration),
         /// Route one request here and wait for its answer.
         Serve,
+        /// Route one large request here, its frame written a piece at a time
+        /// over this long as on a slow link, and wait for its answer.
+        Trickle(Duration),
         /// Announce another protocol version.
         Version(u64),
         /// Announce these features, keep the socket and pass on every frame
@@ -4218,13 +4219,33 @@ mod tests {
                 }
                 match step {
                     Relay::Hold(time) | Relay::Mute(time) => tokio::time::sleep(time).await,
-                    Relay::Serve => {
+                    Relay::Serve | Relay::Trickle(_) => {
+                        let path = if matches!(step, Relay::Trickle(_)) {
+                            "/v1/host/workspaces/w1/v1/threads"
+                        } else {
+                            "/v1/info"
+                        };
                         let open = json!({"type":"open","id":Uuid::now_v7(),"method":"GET",
-                            "path":"/v1/info","headers":[],"body":"","websocket":false,"thread":null});
-                        socket
-                            .send(Message::Text(open.to_string().into()))
-                            .await
-                            .unwrap();
+                            "path":path,"headers":[],"body":"","websocket":false,"thread":null});
+                        if let Relay::Trickle(time) = step {
+                            use tokio::io::AsyncWriteExt as _;
+                            // A text frame as the relay sends it, padded to
+                            // half a megabyte, in 20 pieces.
+                            let mut text = open.to_string().into_bytes();
+                            text.resize(512 * 1024, b' ');
+                            let mut frame = vec![0x81, 127];
+                            frame.extend((text.len() as u64).to_be_bytes());
+                            frame.extend(text);
+                            for piece in frame.chunks(frame.len().div_ceil(20)) {
+                                socket.get_mut().write_all(piece).await.unwrap();
+                                tokio::time::sleep(time / 20).await;
+                            }
+                        } else {
+                            socket
+                                .send(Message::Text(open.to_string().into()))
+                                .await
+                                .unwrap();
+                        }
                         while let Some(Ok(message)) = socket.next().await {
                             if let Message::Text(text) = message
                                 && serde_json::from_str::<Value>(&text).unwrap()["type"] == "end"
@@ -4592,6 +4613,62 @@ mod tests {
         assert!(
             said.iter().any(|line| line
                 == "Remote connection ended: Relay did not say it was ready in time; reconnecting"),
+            "{said:?}"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+    #[tokio::test]
+    async fn a_large_request_arriving_slowly_is_served_and_never_taken_for_silence() {
+        use axum::{Json, Router, routing::get};
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = asked.clone();
+        let runtime = Router::new()
+            .route(
+                "/v1/info",
+                get(|| async { Json(json!({"capabilities":["remote-chat-scope.v1"]})) }),
+            )
+            .route(
+                "/v1/host/workspaces/w1/v1/threads",
+                get(move || {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { Json(json!([])) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = Target {
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            token: "fixture".into(),
+            project: "project".into(),
+            thread: None,
+        };
+        tokio::spawn(async move { axum::serve(listener, runtime).await.unwrap() });
+        // The request takes six times the relay's allowed silence to arrive,
+        // with no whole frame (no answer to a ping) meanwhile.
+        let silence = Duration::from_millis(300);
+        let (relay, _) = fake_relay(vec![Relay::Trickle(silence * 6)]).await;
+        let root = std::env::temp_dir().join(format!("haarness-remote-trickle-{}", Uuid::now_v7()));
+        let attention = attention(&Paths::new(Some(&root)).unwrap());
+        let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let heard = said.clone();
+        let mut outage = Outage::new(move |line| heard.lock().unwrap().push(line.to_owned()));
+        let started = std::time::Instant::now();
+        let link = relay_link(
+            relay.as_str().into_client_request().unwrap(),
+            &target,
+            &reqwest::Client::new(),
+            Duration::from_secs(60),
+            silence,
+            &attention,
+            &mut outage,
+        )
+        .await
+        .unwrap();
+        assert_eq!(link, Link::Ended { proven: true });
+        assert!(started.elapsed() >= silence * 6);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let said = said.lock().unwrap().clone();
+        assert!(
+            !said.iter().any(|line| line.contains("heartbeat")),
             "{said:?}"
         );
         std::fs::remove_dir_all(root).ok();
