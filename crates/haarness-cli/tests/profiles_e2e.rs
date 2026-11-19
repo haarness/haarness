@@ -361,6 +361,98 @@ fn real_cli_save_inspect_dry_run_restore_conflict_force_and_runtime_agent_discov
     }
 }
 
+/// A skill linked into place is saved as its files while the link stays in
+/// the saved folders; one linked in from elsewhere is left out, and the save
+/// names it instead of failing.
+#[cfg(unix)]
+#[test]
+fn real_cli_saves_linked_skills_and_names_the_links_it_left_out() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    fixture.put(
+        "source",
+        "workspace/.haarness/skills/fmt/SKILL.md",
+        "---\nname: fmt\ndescription: Format fixture skill\n---\nFormat the code.\n",
+    );
+    fs::create_dir_all(fixture.root.join("source/workspace/.agents/skills")).unwrap();
+    symlink(
+        "../../.haarness/skills/fmt",
+        fixture.root.join("source/workspace/.agents/skills/fmt"),
+    )
+    .unwrap();
+    fixture.put(
+        "dotfiles",
+        "skills/lint/SKILL.md",
+        "---\nname: lint\ndescription: Dotfiles fixture skill\n---\nLint the code.\n",
+    );
+    fs::create_dir_all(fixture.root.join("source/config/skills")).unwrap();
+    let linked = fixture.root.join("source/config/skills/lint");
+    symlink(fixture.root.join("dotfiles/skills/lint"), &linked).unwrap();
+    let archive = fixture.archive();
+    let file = archive.to_str().unwrap();
+    let saved = fixture.ok(
+        "source",
+        &["profile", "save", "Linked", "--output", file, "--json"],
+    );
+    assert_eq!(saved["leftOut"], serde_json::json!([linked]));
+    let paths: Vec<_> = saved["manifest"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["path"].as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "project/.agents/skills/fmt/SKILL.md",
+            "project/.haarness/skills/fmt/SKILL.md",
+        ]
+    );
+    let again = fixture.root.join("again.zip");
+    let summary = fixture.output(
+        "source",
+        &[
+            "profile",
+            "save",
+            "Linked",
+            "--output",
+            again.to_str().unwrap(),
+        ],
+    );
+    assert!(summary.status.success());
+    let summary = String::from_utf8_lossy(&summary.stdout);
+    assert!(
+        summary.contains(&format!(
+            "Skipped 1 link that leads outside the saved folders: {}\n",
+            linked.display()
+        )),
+        "{summary}"
+    );
+    let dry = fixture.ok(
+        "target",
+        &["profile", "restore", file, "--dry-run", "--json"],
+    );
+    assert_eq!(
+        dry["targets"],
+        serde_json::json!([
+            fixture
+                .root
+                .join("target/workspace/.agents/skills/fmt/SKILL.md"),
+            fixture
+                .root
+                .join("target/workspace/.haarness/skills/fmt/SKILL.md"),
+        ])
+    );
+    fixture.ok("target", &["profile", "restore", file, "--json"]);
+    let restored = fixture.root.join("target/workspace/.agents/skills/fmt");
+    assert!(!fs::symlink_metadata(&restored).unwrap().is_symlink());
+    assert!(
+        fs::symlink_metadata(restored.join("SKILL.md"))
+            .unwrap()
+            .is_file()
+    );
+}
+
 #[tokio::test]
 async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persistence() {
     let mut fixture = Fixture::new();

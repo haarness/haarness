@@ -66,6 +66,21 @@ folder is left out too, notably [prompt files](PROMPT-FILES.md) (`prompts/`),
 the terminal UI's own state and history (`tui-state.toml` and the others) and
 the switches Settings keeps in `capabilities.json`.
 
+A symbolic link is followed only while it stays inside the folder being saved,
+and is then saved as the files it leads to, under the link's own name. In the
+project that is anywhere in the project: a skill shared by `.agents` and
+`.haarness`, or an `AGENTS.md` that points at another instructions file. In the
+configuration and data folders it is a part a profile saves from them, and in
+an installed plugin it is the plugin's own folder. A saved folder that is itself
+a link follows the same rule. Any other link is left out and the save carries
+on: a skill linked in from a dotfiles repository, or a link to `.env`, a key, a
+credential store or the chat database. `profile save` names what it left out on
+one line, and `--json` lists those paths under `leftOut`. Links that lead
+nowhere, or back into a folder that holds them, are passed over, and a save
+stops with an error rather than follow more than 1,000 links. Archives never
+hold links: a restore writes regular files and still refuses a link on any path
+it writes to.
+
 **Configuration and scripts can contain inline secrets.** Archives retain
 their contents, including literal environment/header values, and are neither
 encrypted nor automatically sanitized. Inspect included files before sharing.

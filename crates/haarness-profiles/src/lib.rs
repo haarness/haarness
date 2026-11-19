@@ -103,6 +103,13 @@ pub struct Archive {
     files: BTreeMap<String, Vec<u8>>,
 }
 
+/// A saved profile archive, and the symbolic links it was saved without
+/// because they lead outside the folders it saves.
+pub struct Saved {
+    pub bytes: Vec<u8>,
+    pub left_out: Vec<PathBuf>,
+}
+
 #[derive(Deserialize)]
 struct Installed {
     path: PathBuf,
@@ -337,25 +344,39 @@ impl Archive {
         Ok(Self { manifest, files })
     }
 
-    pub fn capture(roots: &Roots, name: &str, scope: Scope) -> Result<Vec<u8>> {
+    pub fn capture(roots: &Roots, name: &str, scope: Scope) -> Result<Saved> {
         validate_name(name)?;
         let mut files = BTreeMap::new();
+        let mut links = Links::default();
         if scope != Scope::Local {
-            collect(&roots.config, "global/config", scope, &mut files)?;
+            let config = Place::new(&roots.config, "global/config", false);
+            collect(
+                &roots.config,
+                "global/config",
+                &config,
+                scope,
+                &mut files,
+                &mut links,
+            )?;
             // The walk above never enters `plugins/`, whose only portable part
             // is `plugins/local/` (global plugins and marketplace MCP bundles).
             collect(
                 &roots.config.join("plugins/local"),
                 "global/config/plugins/local",
+                &config,
                 scope,
                 &mut files,
+                &mut links,
             )?;
+            let data = Place::new(&roots.data, "global/data", false);
             for name in ["skills", "plugins/local"] {
                 collect(
                     &roots.data.join(name),
                     &format!("global/data/{name}"),
+                    &data,
                     scope,
                     &mut files,
+                    &mut links,
                 )?;
             }
             // Bundle installed content instead of copying machine-specific registry paths.
@@ -370,7 +391,10 @@ impl Archive {
                         "global/config/plugins/local/profile-{}",
                         &hash(name.as_bytes())[..16]
                     );
-                    collect(&plugin.path, &prefix, scope, &mut files)?;
+                    // The registry names the plugin's folder, wherever it
+                    // is, so that folder is the one its links stay inside.
+                    let place = Place::new(&plugin.path, &prefix, true);
+                    collect(&plugin.path, &prefix, &place, scope, &mut files, &mut links)?;
                     if !plugin.enabled {
                         files.insert(format!("{prefix}/.haarness-disabled"), (Vec::new(), false));
                     }
@@ -378,12 +402,15 @@ impl Archive {
             }
         }
         if scope != Scope::Global {
+            let project = Place::new(&roots.project, "project", true);
             for name in CONFIG_FILES.iter().chain(PROJECT_DIRS.iter()) {
                 collect(
                     &roots.project.join(name),
                     &format!("project/{name}"),
+                    &project,
                     scope,
                     &mut files,
+                    &mut links,
                 )?;
             }
         }
@@ -440,7 +467,10 @@ impl Archive {
         }
         let bytes = zip.finish()?.into_inner();
         Self::decode(&bytes)?;
-        Ok(bytes)
+        let mut left_out = links.left_out;
+        left_out.sort();
+        left_out.dedup();
+        Ok(Saved { bytes, left_out })
     }
 
     /// Validate every target before making changes; stage all replacements and roll back failures.
@@ -647,16 +677,114 @@ fn target(roots: &Roots, path: &str) -> Result<PathBuf> {
 
 type Captured = BTreeMap<String, (Vec<u8>, bool)>;
 
-fn collect(root: &Path, prefix: &str, scope: Scope, files: &mut Captured) -> Result<()> {
+/// How many symbolic links one save follows at most, so links that fan out
+/// into one another cannot keep a save walking the same folders.
+const MAX_LINKS: usize = 1000;
+
+/// A folder a profile saves from. A symbolic link met while saving it is
+/// saved as what it leads to only when that stays inside this folder.
+struct Place<'a> {
+    /// The folder's real path, every link on the way to it resolved.
+    real: PathBuf,
+    /// The archive path its contents are saved under.
+    prefix: &'a str,
+    /// Whether a link may lead anywhere inside it (the project, a plugin's
+    /// folder), or only to the parts a profile saves from it (the
+    /// configuration and data folders, which also hold sign-ins, history and
+    /// other state of this computer).
+    whole: bool,
+}
+
+/// What a save does with a symbolic link.
+enum Link {
+    /// Save what it leads to, as regular files under the link's own path.
+    Follow,
+    /// Pass over it without a word: it leads nowhere, or back into a folder
+    /// that holds it, whose files are saved where they are.
+    Skip,
+    /// Leave it out and say so: it leads outside the saved folders.
+    Outside,
+}
+
+#[derive(Default)]
+struct Links {
+    left_out: Vec<PathBuf>,
+    followed: usize,
+}
+
+impl<'a> Place<'a> {
+    fn new(folder: &Path, prefix: &'a str, whole: bool) -> Self {
+        Self {
+            real: dunce::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf()),
+            prefix,
+            whole,
+        }
+    }
+
+    /// The verdict for `path`, a link or a saved folder that is, or sits
+    /// under, a link.
+    fn judge(&self, path: &Path, scope: Scope) -> Link {
+        let Ok(target) = dunce::canonicalize(path) else {
+            return Link::Skip;
+        };
+        let Some(relative) = target
+            .strip_prefix(&self.real)
+            .ok()
+            .and_then(Path::to_str)
+            .map(|relative| relative.replace('\\', "/"))
+        else {
+            return Link::Outside;
+        };
+        if path
+            .parent()
+            .and_then(|parent| dunce::canonicalize(parent).ok())
+            .is_some_and(|parent| parent.starts_with(&target))
+        {
+            return Link::Skip;
+        }
+        if relative.is_empty() {
+            return Link::Follow;
+        }
+        // A link to a file a profile never carries (`.env`, keys, credential
+        // stores, dependencies) cannot bring it in under another name.
+        if excluded(&relative) {
+            return Link::Outside;
+        }
+        let saved = format!("{}/{relative}", self.prefix);
+        if self.whole || allowed(&saved, scope) || allowed(&format!("{saved}/_"), scope) {
+            Link::Follow
+        } else {
+            Link::Outside
+        }
+    }
+}
+
+fn collect(
+    root: &Path,
+    prefix: &str,
+    place: &Place,
+    scope: Scope,
+    files: &mut Captured,
+    links: &mut Links,
+) -> Result<()> {
     match fs::symlink_metadata(root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
         Ok(_) => {}
     }
-    check_path(root)?;
+    // A saved folder that is itself a link, or sits under one, follows the
+    // same rule as a link inside it.
+    match place.judge(root, scope) {
+        Link::Follow => {}
+        Link::Skip => return Ok(()),
+        Link::Outside => {
+            links.left_out.push(root.to_path_buf());
+            return Ok(());
+        }
+    }
     let mut used: usize = files.values().map(|(bytes, _)| bytes.len()).sum();
-    for entry in walkdir::WalkDir::new(root)
-        .follow_links(false)
+    let mut walk = walkdir::WalkDir::new(root)
+        .follow_links(true)
         .into_iter()
         .filter_entry(|entry| {
             if entry.depth() == 0 {
@@ -668,9 +796,22 @@ fn collect(root: &Path, prefix: &str, scope: Scope, files: &mut Captured) -> Res
             let relative = entry.path().strip_prefix(root).unwrap_or(Path::new(""));
             let path = format!("{prefix}/{}", relative.to_string_lossy().replace('\\', "/"));
             allowed(&path, scope) || allowed(&format!("{path}/_"), scope)
-        })
-    {
-        let entry = entry?;
+        });
+    while let Some(entry) = walk.next() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            // A link that leads nowhere, or back to a folder this walk is
+            // inside, has nothing more to save.
+            Err(error)
+                if error.loop_ancestor().is_some()
+                    || error.path().is_some_and(|path| {
+                        path.is_symlink() && dunce::canonicalize(path).is_err()
+                    }) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         let relative = entry.path().strip_prefix(root)?;
         let suffix = relative
             .to_str()
@@ -684,11 +825,23 @@ fn collect(root: &Path, prefix: &str, scope: Scope, files: &mut Captured) -> Res
         if !allowed(&path, scope) && !allowed(&format!("{path}/_"), scope) {
             continue;
         }
-        ensure!(
-            !entry.file_type().is_symlink(),
-            "profile source symlink refused: {}",
-            entry.path().display()
-        );
+        if entry.depth() > 0 && entry.path_is_symlink() {
+            let verdict = place.judge(entry.path(), scope);
+            if !matches!(verdict, Link::Follow) {
+                if matches!(verdict, Link::Outside) {
+                    links.left_out.push(entry.path().to_path_buf());
+                }
+                if entry.file_type().is_dir() {
+                    walk.skip_current_dir();
+                }
+                continue;
+            }
+            links.followed += 1;
+            ensure!(
+                links.followed <= MAX_LINKS,
+                "profile has more than {MAX_LINKS} symbolic links to follow"
+            );
+        }
         if entry.file_type().is_dir() {
             continue;
         }

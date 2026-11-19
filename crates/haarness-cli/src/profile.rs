@@ -157,7 +157,8 @@ pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> 
             if *push {
                 let _ = remote(args)?;
             }
-            let bytes = Archive::capture(&roots, name, (*scope).into())?;
+            let saved = Archive::capture(&roots, name, (*scope).into())?;
+            let bytes = saved.bytes;
             let fallback = format!("{}.profile.zip", slug(name));
             let output = destination(output.as_deref().unwrap_or(Path::new(&fallback)))?;
             haarness_profiles::write(&output, &bytes, *force)?;
@@ -170,7 +171,7 @@ pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> 
             } else {
                 None
             };
-            json!({"output":output, "manifest":manifest, "pushed":pushed})
+            json!({"output":output, "manifest":manifest, "pushed":pushed, "leftOut":saved.left_out})
         }
         Command::Inspect { file } => {
             serde_json::to_value(Archive::decode(&haarness_profiles::read(file)?)?.manifest)?
@@ -258,6 +259,15 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                 files(manifest.entries.len()),
                 result["output"].as_str().unwrap_or_default()
             )?;
+            let left_out: Vec<&str> = result["leftOut"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            if let Some(line) = skipped_links(&left_out) {
+                writeln!(text, "{line}")?;
+            }
             if let Ok(record) =
                 serde_json::from_value::<haarness_profiles::Record>(result["pushed"].clone())
             {
@@ -373,6 +383,26 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
         Command::Delete { id } => writeln!(text, "Deleted {id}")?,
     }
     Ok(text)
+}
+
+/// The line naming the links a save left out because they lead outside the
+/// saved folders: the first three by path, then how many more.
+fn skipped_links(paths: &[&str]) -> Option<String> {
+    let (named, rest) = paths.split_at(paths.len().min(3));
+    let list = if rest.is_empty() {
+        named.join(", ")
+    } else {
+        format!("{} and {} more", named.join(", "), rest.len())
+    };
+    match paths.len() {
+        0 => None,
+        1 => Some(format!(
+            "Skipped 1 link that leads outside the saved folders: {list}"
+        )),
+        count => Some(format!(
+            "Skipped {count} links that lead outside the saved folders: {list}"
+        )),
+    }
 }
 
 fn files(count: usize) -> String {
@@ -538,4 +568,28 @@ async fn download(args: &ProfileArgs, id: Uuid) -> Result<Vec<u8>> {
     .await?;
     Archive::decode(&bytes)?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skipped_links;
+
+    #[test]
+    fn a_save_names_the_links_it_left_out_in_one_line() {
+        assert_eq!(skipped_links(&[]), None);
+        assert_eq!(
+            skipped_links(&["/home/sam/.config/haarness/skills/fmt"]).as_deref(),
+            Some(
+                "Skipped 1 link that leads outside the saved folders: /home/sam/.config/haarness/skills/fmt"
+            )
+        );
+        assert_eq!(
+            skipped_links(&["/a", "/b"]).as_deref(),
+            Some("Skipped 2 links that lead outside the saved folders: /a, /b")
+        );
+        assert_eq!(
+            skipped_links(&["/a", "/b", "/c", "/d", "/e"]).as_deref(),
+            Some("Skipped 5 links that lead outside the saved folders: /a, /b, /c and 2 more")
+        );
+    }
 }

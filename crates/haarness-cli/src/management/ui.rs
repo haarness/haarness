@@ -2219,11 +2219,14 @@ impl ManagementService {
                     "both" => haarness_profiles::Scope::Both,
                     _ => bail!("Choose profile scope"),
                 };
-                catalog.put(&haarness_profiles::Archive::capture(
-                    &self.profile_roots(),
-                    required_string(input, "name")?,
-                    scope,
-                )?)?;
+                catalog.put(
+                    &haarness_profiles::Archive::capture(
+                        &self.profile_roots(),
+                        required_string(input, "name")?,
+                        scope,
+                    )?
+                    .bytes,
+                )?;
             }
             "restore" => {
                 let archive = haarness_profiles::Archive::decode(
