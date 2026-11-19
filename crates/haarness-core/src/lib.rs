@@ -10,6 +10,7 @@ mod background_commands;
 pub mod chat_folders;
 mod config;
 pub mod definitions;
+mod envelope;
 mod events;
 mod execution;
 mod goal;
