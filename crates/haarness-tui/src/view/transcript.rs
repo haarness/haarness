@@ -756,7 +756,8 @@ fn render_file_diffs(metadata: &serde_json::Value, width: usize, theme: &Theme) 
                             TOOL_BLOCK_ROWS,
                         )
                     } else {
-                        render_patch(patch, width, theme, "    ")
+                        let removed = (status == FileDiffStatus::Deleted).then_some(diff.deletions);
+                        render_patch(patch, width, theme, "    ", removed)
                     }
                 }),
                 _ => Vec::new(),
@@ -1155,6 +1156,37 @@ mod workflow_tests {
         assert_eq!(rows[1], format!("    + {}", line(1)));
         assert_eq!(rows.len(), 2 + super::TOOL_BLOCK_ROWS);
         assert_eq!(rows.last().unwrap(), "      … +988 more lines");
+
+        // A large file removed whole: the lines left out are counted from
+        // the whole file, not from what its stored diff kept.
+        let mut patch = String::from("@@ -1,1500 +0,0 @@\n");
+        for number in 1..=1_500 {
+            let _ = writeln!(patch, "-{}", line(number));
+        }
+        let entry = serde_json::json!({"diffs": [{
+            "file": "old.txt", "status": "deleted", "additions": 0, "deletions": 100_000,
+            "patch": patch, "truncated": true,
+        }]});
+        let rows = rows_of(&entry);
+        assert_eq!(rows[0], "    D old.txt");
+        assert_eq!(rows[1], format!("       1 - {}", line(1)));
+        assert_eq!(rows[rows.len() - 2], "      … +99800 more lines");
+        assert_eq!(rows.last().unwrap(), "      diff content truncated");
+
+        // A CRLF file's line ends stay out of sight.
+        let entry = serde_json::json!({"diffs": [{
+            "file": "large.txt", "status": "modified", "additions": 1, "deletions": 1,
+            "patch": "@@ -9,2 +9,2 @@\n same\r\n-old\r\n+new\r\n",
+        }]});
+        assert_eq!(
+            rows_of(&entry),
+            [
+                "    M large.txt",
+                "     9   same",
+                "    10 - old",
+                "    10 + new"
+            ]
+        );
     }
 
     /// The same change draws the same from a pair of texts and from a stored
@@ -1186,7 +1218,7 @@ mod workflow_tests {
                 .map(haarness_opentui::Line::text)
                 .collect::<Vec<_>>()
         };
-        let drawn = text(crate::diff::render_patch(&patch, 80, &theme, "    "));
+        let drawn = text(crate::diff::render_patch(&patch, 80, &theme, "    ", None));
         assert_eq!(
             drawn,
             text(crate::diff::render_diff(

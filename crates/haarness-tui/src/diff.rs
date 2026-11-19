@@ -83,7 +83,15 @@ pub fn render_diff(old: &str, new: &str, width: usize, theme: &Theme, indent: &s
 /// A stored unified diff drawn as [`render_diff`] draws a pair of texts: two
 /// lines of context around each change, numbered as the file is. A tool's
 /// change to a large file is kept as such a diff instead of its texts.
-pub fn render_patch(patch: &str, width: usize, theme: &Theme, indent: &str) -> Vec<Line> {
+/// `removed`, for a file removed whole, is how many lines it had, which the
+/// rows left out say rather than what the stored diff kept.
+pub fn render_patch(
+    patch: &str,
+    width: usize,
+    theme: &Theme,
+    indent: &str,
+    removed: Option<u64>,
+) -> Vec<Line> {
     let rows = near_changes(rows_from_patch(patch));
     let digits = rows
         .iter()
@@ -98,6 +106,7 @@ pub fn render_patch(patch: &str, width: usize, theme: &Theme, indent: &str) -> V
         .max(10);
     let mut lines = Vec::new();
     let mut truncated = 0_usize;
+    let mut shown = 0_u64;
     for row in &rows {
         if row.kind == RowKind::Gap {
             if lines.len() < MAX_ROWS {
@@ -118,6 +127,7 @@ pub fn render_patch(patch: &str, width: usize, theme: &Theme, indent: &str) -> V
         }
         .map_or_else(|| " ".repeat(digits), |number| format!("{number:>digits$}"));
         let gutter = Span::new(format!("{indent}{number} "), theme.muted);
+        shown += 1;
         lines.push(match row.kind {
             RowKind::Added => inline_row(gutter, '+', emphasized(row), inner, theme, true),
             RowKind::Removed => inline_row(gutter, '-', emphasized(row), inner, theme, false),
@@ -127,6 +137,9 @@ pub fn render_patch(patch: &str, width: usize, theme: &Theme, indent: &str) -> V
                 Line::new(spans)
             }
         });
+    }
+    if let Some(removed) = removed {
+        truncated = usize::try_from(removed.saturating_sub(shown)).unwrap_or(usize::MAX);
     }
     if truncated > 0 {
         lines.push(Line::plain(
