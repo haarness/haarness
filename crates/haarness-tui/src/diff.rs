@@ -11,8 +11,16 @@ use crate::theme::Theme;
 const MAX_ROWS: usize = 200;
 const CONTEXT: usize = 2;
 
+/// A text's lines with their line ends. Only a line feed ends a line, as Git,
+/// editors and the server's stored diffs count them: a carriage return alone
+/// stays inside its line, so the numbers are the file's.
+pub fn text_lines(text: &str) -> Vec<&str> {
+    text.split_inclusive('\n').collect()
+}
+
 pub fn render_diff(old: &str, new: &str, width: usize, theme: &Theme, indent: &str) -> Vec<Line> {
-    let diff = TextDiff::from_lines(old, new);
+    let (old_lines, new_lines) = (text_lines(old), text_lines(new));
+    let diff = TextDiff::configure().diff_slices(&old_lines, &new_lines);
     let digits = old
         .lines()
         .count()
@@ -398,8 +406,8 @@ mod tests {
     }
 
     /// A CRLF file's line ends stay out of sight on every row; a carriage
-    /// return that ends no line is still a code (the diff breaks the line
-    /// there, a new file's lines do not).
+    /// return that ends no line is still a code, inside its line, which keeps
+    /// the file's number.
     #[test]
     fn a_crlf_file_diffs_without_its_line_ends() {
         let theme = Theme::editorial_dark();
@@ -409,7 +417,7 @@ mod tests {
         assert!(text.contains("beta") && text.contains("BETA"), "{text}");
         assert!(text.contains("日本語 wide"), "{text}");
         assert_eq!(text.matches("\\u{D}").count(), 1, "{text}");
-        assert!(text.contains("gam\\u{D}"), "{text}");
+        assert!(text.contains(" 4 + gam\\u{D}ma"), "{text}");
         let added = text_of(&render_added(new, 80, &theme, "", 10)).join("\n");
         assert_eq!(added.matches("\\u{D}").count(), 1, "{added}");
         assert!(added.contains("gam\\u{D}ma"), "{added}");

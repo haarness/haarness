@@ -235,7 +235,11 @@ fn row_language(file: &FileDiff, rows: &[DiffRow]) -> String {
 
 /// Rows from a pre/post image pair. `context` of `None` keeps the whole file.
 pub fn rows_from_texts(before: &str, after: &str, context: Option<u32>) -> Vec<DiffRow> {
-    let diff = TextDiff::from_lines(before, after);
+    let (old, new) = (
+        crate::diff::text_lines(before),
+        crate::diff::text_lines(after),
+    );
+    let diff = TextDiff::configure().diff_slices(&old, &new);
     let mut rows = Vec::new();
     let Some(context) = context else {
         for change in diff.iter_all_changes() {
@@ -290,10 +294,11 @@ pub fn line_stat(file: &FileDiff) -> (u64, u64) {
     if file.binary || file.truncated || (file.before.is_none() && file.after.is_none()) {
         return (file.additions, file.deletions);
     }
-    let diff = TextDiff::from_lines(
-        file.before.as_deref().unwrap_or_default(),
-        file.after.as_deref().unwrap_or_default(),
+    let (old, new) = (
+        crate::diff::text_lines(file.before.as_deref().unwrap_or_default()),
+        crate::diff::text_lines(file.after.as_deref().unwrap_or_default()),
     );
+    let diff = TextDiff::configure().diff_slices(&old, &new);
     diff.ops()
         .iter()
         .fold((0, 0), |(additions, deletions), op| match op.tag() {

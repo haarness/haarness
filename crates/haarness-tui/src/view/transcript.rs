@@ -1191,12 +1191,15 @@ mod workflow_tests {
 
     /// The same change draws the same from a pair of texts and from a stored
     /// diff with Git's three lines of context: a run of unchanged lines
-    /// longer than four between two changes becomes a gap in both.
+    /// longer than four between two changes becomes a gap in both, and a
+    /// carriage return alone stays inside its line in both.
     #[test]
     fn a_stored_diff_draws_as_its_texts_would() {
-        let before = (1..=40).fold(String::new(), |text, number| {
-            text + &format!("row {number}\n")
-        });
+        let before = (1..=40)
+            .fold(String::new(), |text, number| {
+                text + &format!("row {number}\n")
+            })
+            .replacen("row 2\n", "progress 10%\rprogress 20%\n", 1);
         let mut after = before.clone();
         for (old, new) in [
             ("row 3\n", "row three\n"),
@@ -1207,7 +1210,13 @@ mod workflow_tests {
         ] {
             after = after.replacen(old, new, 1);
         }
-        let patch = similar::TextDiff::from_lines(&before, &after)
+        let (old, new) = (
+            crate::diff::text_lines(&before),
+            crate::diff::text_lines(&after),
+        );
+        let patch = similar::TextDiff::configure()
+            .newline_terminated(true)
+            .diff_slices(&old, &new)
             .unified_diff()
             .context_radius(3)
             .to_string();
@@ -1228,6 +1237,17 @@ mod workflow_tests {
         assert_eq!(
             drawn.iter().filter(|row| row.contains('⋮')).count(),
             3,
+            "{drawn:#?}"
+        );
+        // Numbered as the file is: row 31 is line 31.
+        assert!(
+            drawn.iter().any(|row| row.trim_end() == "    31 - row 31"),
+            "{drawn:#?}"
+        );
+        assert!(
+            drawn
+                .iter()
+                .any(|row| row.contains(" 2   progress 10%\\u{D}progress 20%")),
             "{drawn:#?}"
         );
     }
