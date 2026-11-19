@@ -4757,7 +4757,8 @@ fn program_name(value: &str) -> String {
 /// word: `-e` a script and `-f` a script file (so `-es/f/g/` is a script
 /// and `-ne's/a/b/p'` holds one), `-i` and `-I` a backup suffix (`-ie` is
 /// `-i` with the suffix `e`; the next word only as BSD's `sed -i ''` and
-/// `sed -i .bak` give it), and GNU's `-l` a line length (a number; BSD's
+/// `sed -i .bak` give it, empty or a name with a leading `.` and no `/`),
+/// and GNU's `-l` a line length (a number; BSD's
 /// `-l` takes none). A long option may be shortened as getopt allows
 /// (`--expr=…`, `--fi prog`, `--in-place`'s `--in`). Without `-e` or `-f`
 /// the first operand is the script.
@@ -4812,10 +4813,13 @@ fn sed_in_place<'s, 't>(arguments: &'s [Word<'t>]) -> Option<Vec<&'s Word<'t>>> 
                 }
                 'i' | 'I' => {
                     in_place = true;
+                    // GNU sed takes options anywhere (`sed -e … -i file`):
+                    // a path after `-i` is a file, not BSD's suffix.
                     let next = arguments.get(index);
                     if rest.is_empty()
                         && next.is_some_and(|next| {
-                            next.value.is_empty() || next.value.starts_with('.')
+                            next.value.is_empty()
+                                || (next.value.starts_with('.') && !next.value.contains('/'))
                         })
                     {
                         index += 1;
@@ -11256,6 +11260,17 @@ mod readings {
         for options in ["-es/a/i/", "-n -e's/i/b/p'", "-e 'i\\'", "--expr=i"] {
             let command = format!("sed {options} {file_path}");
             assert!(found(&command).is_empty(), "{command}");
+        }
+        // GNU sed takes `-i` anywhere: a path after it is a file, and only
+        // an empty word or a `.bak`-like name is BSD's suffix.
+        for command in [
+            "sed 's/a/b/' -i ../outside/cache/data.bin",
+            "sed -e 's/a/b/' -i ../outside/cache/data.bin",
+            "sed -i -e 's/a/b/' -i ../outside/cache/data.bin",
+            "sed -i .orig -e 's/a/b/' ../outside/cache/data.bin",
+            "sed -i '' 's/a/b/' ../outside/cache/data.bin",
+        ] {
+            assert_eq!(found(command), vec![placed(&file_text)], "{command}");
         }
         for command in [
             format!("cp new.bin {out}/cache/"),
