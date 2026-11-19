@@ -200,7 +200,8 @@ pub struct TempFolder<'a> {
 /// the environment is set and may set them again, so they are set again on
 /// the script's first line, as the bundled rg's folder is put back on
 /// `PATH`, from an argument a profile does not change, after a look that it
-/// is still the one argument left and a folder. Should that fail (a profile
+/// is still the one argument left, the very folder written into the line,
+/// and a folder. Should that fail (a profile
 /// that keeps one of them read-only, or that changed the arguments), a
 /// script whose permission was checked with the folder there does not run,
 /// and says how to put it right; any other runs with what the profile set.
@@ -238,27 +239,31 @@ fn shell_from(
 const TEMP_VARIABLES: [&str; 3] = ["TMPDIR", "TMP", "TEMP"];
 
 /// The script's line that sets the temp folder variables again from the
-/// next argument (see [`shell_command_in`]), when it is the one argument
-/// left and a folder; `command` keeps a read-only one from ending the shell.
-/// Then the arguments are cleared, however many a profile left.
-const TEMP_LINE: &str = "[ \"$#\" -eq 1 ] && [ -d \"$1\" ] && \
-     command export TMPDIR=\"$1\" TMP=\"$1\" TEMP=\"$1\" 2>/dev/null; shift $#; ";
-
-/// [`TEMP_LINE`] for a script whose permission was checked with the folder
-/// there: when it cannot be set, the script does not run, and says why.
-const REQUIRED_TEMP_LINE: &str = "{ [ \"$#\" -eq 1 ] && [ -d \"$1\" ] && \
-     command export TMPDIR=\"$1\" TMP=\"$1\" TEMP=\"$1\" 2>/dev/null; } || { \
-     printf '%s\\n' 'This command reads TMPDIR, TMP or TEMP as the temp folder of this chat, but the login profile keeps one of them read-only or changed the arguments of the shell, so the folder could not be set and the command did not run. Remove readonly for TMPDIR, TMP and TEMP from the profile.' >&2; \
-     exit 126; }; shift; ";
-
-/// The line [`shell_with_binary`] puts first for `temp`.
-fn temp_line(temp: Option<TempFolder<'_>>) -> &'static str {
-    match temp {
-        Some(TempFolder { required: true, .. }) => REQUIRED_TEMP_LINE,
-        Some(_) => TEMP_LINE,
-        None => "",
+/// next argument (see [`shell_command_in`]), `spelled` as the shell gets it:
+/// only when it is the one argument left, the very folder written into the
+/// line (so a profile that put other arguments in its place sets nothing)
+/// and a folder; `command` keeps a read-only one from ending the shell. When
+/// `required` and that fails, the script does not run, and says why; else
+/// it goes on with what the profile set, the arguments cleared.
+fn temp_line(temp: Option<TempFolder<'_>>, spelled: &str) -> String {
+    let Some(temp) = temp else {
+        return String::new();
+    };
+    let literal = format!("'{}'", spelled.replace('\'', r"'\''"));
+    let set = format!(
+        "[ \"$#\" -eq 1 ] && [ \"$1\" = {literal} ] && [ -d \"$1\" ] && \
+         command export TMPDIR=\"$1\" TMP=\"$1\" TEMP=\"$1\" 2>/dev/null"
+    );
+    if temp.required {
+        format!("{{ {set}; }} || {{ printf '%s\\n' '{REQUIRED_MESSAGE}' >&2; exit 126; }}; shift; ")
+    } else {
+        format!("{set}; shift $#; ")
     }
 }
+
+/// What a script whose permission read the variables as the folder says
+/// when they cannot be set (see [`temp_line`]).
+const REQUIRED_MESSAGE: &str = "This command reads TMPDIR, TMP or TEMP as the temp folder of this chat, but the login profile keeps one of them read-only or changed the arguments of the shell, so the folder could not be set and the command did not run. Remove readonly for TMPDIR, TMP and TEMP from the profile.";
 
 /// `argument` as the MSYS and Cygwin runtime reads a Windows command line
 /// back into one word: always in double quotes (an unquoted word holding
@@ -297,7 +302,8 @@ fn shell_with_binary(
             // (`C:/Users/…`), which Git's tools and Windows programs both
             // read, and `echo $TMPDIR` shows a path the file tools take
             // (Git's runtime would have made it `/tmp/…`).
-            let line = temp_line(temp);
+            let forward = temp.map(|temp| temp.path.to_string_lossy().replace('\\', "/"));
+            let line = temp_line(temp, forward.as_deref().unwrap_or_default());
             let mut command = Command::new(bash);
             command
                 .raw_arg("-lc")
@@ -307,9 +313,8 @@ fn shell_with_binary(
                 .env("CHERE_INVOKING", "1")
                 .env("MSYS2_PATH_TYPE", "inherit")
                 .env_remove("CDPATH");
-            if let Some(temp) = temp {
-                let forward = temp.path.to_string_lossy().replace('\\', "/");
-                command.raw_arg("sh").raw_arg(msys_quoted(&forward));
+            if let Some(forward) = &forward {
+                command.raw_arg("sh").raw_arg(msys_quoted(forward));
             }
             command
         } else {
@@ -336,7 +341,8 @@ fn shell_with_binary(
             ""
         };
         // Then the chat's own temp folder, over what a profile set.
-        let line = temp_line(temp);
+        let spelled = temp.map(|temp| temp.path.to_string_lossy().into_owned());
+        let line = temp_line(temp, spelled.as_deref().unwrap_or_default());
         command
             .args([
                 "-lc",
@@ -626,7 +632,12 @@ mod tests {
         // A profile that empties the arguments the line reads: the command
         // runs with the folder, or does not run at all (dash stops at the
         // first `shift` with none left, as it did before chats had folders).
-        for emptying in ["set --\n", "set -- '' ''\n", "shift\n"] {
+        for emptying in [
+            "set --\n",
+            "set -- '' ''\n",
+            "shift\n",
+            "set -- x \"$HOME\"\n",
+        ] {
             profile(emptying);
             for required in [true, false] {
                 let output = run(Some(temp.path()), required);
@@ -640,6 +651,21 @@ mod tests {
                 assert!(with_folder || stopped, "{emptying}: {output:?}");
             }
         }
+    }
+
+    /// The folder is written into the line as a quoted word, whatever it
+    /// holds.
+    #[test]
+    fn the_temp_line_quotes_the_folder_it_compares_with() {
+        let path = Path::new("/tmp/it's $HOME");
+        for required in [true, false] {
+            let line = temp_line(Some(TempFolder { path, required }), "/tmp/it's $HOME");
+            assert!(
+                line.contains(r#"[ "$1" = '/tmp/it'\''s $HOME' ]"#),
+                "{line}"
+            );
+        }
+        assert_eq!(temp_line(None, ""), "");
     }
 
     #[cfg(unix)]
