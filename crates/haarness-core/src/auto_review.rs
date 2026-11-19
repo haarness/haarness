@@ -463,6 +463,18 @@ struct Entry {
     text: String,
 }
 
+/// `items` without a turn the provider's safety check stopped, which is left
+/// out here as it is of the chat's own requests: sent to the reviewer, it
+/// would only be stopped again (see [`haarness_protocol::tokens::left_out`]).
+fn kept(items: &[Item]) -> Vec<Item> {
+    let left_out = haarness_protocol::tokens::left_out(items);
+    items
+        .iter()
+        .filter(|item| !left_out.contains(&item.id))
+        .cloned()
+        .collect()
+}
+
 /// Whether a stored message that is not synthetic is the person's: not a
 /// reminder Haarness adds, and not another chat's agent speaking.
 fn person_wrote(text: &str) -> bool {
@@ -1254,10 +1266,10 @@ impl Reviewer {
         };
         let skip = request.tool.as_ref().map(|(_, call_id)| call_id.as_str());
         let transcript = render(
-            &entries(top, false, if child { None } else { skip }),
+            &entries(&kept(top), false, if child { None } else { skip }),
             if child { BUDGET / 2 } else { BUDGET },
         );
-        let task = child.then(|| render(&entries(&own, true, skip), BUDGET / 2));
+        let task = child.then(|| render(&entries(&kept(&own), true, skip), BUDGET / 2));
         let prompt = context(
             &transcript,
             task.as_deref(),
@@ -1663,6 +1675,40 @@ mod tests {
         assert!(salvage("no verdict here").is_none());
         assert!(salvage("{\"note\": \"nothing\"}").is_none());
         assert!(salvage("} {").is_none());
+    }
+
+    /// The reviewer reads the chat as its requests do: a turn the safety
+    /// check stopped is not in it.
+    #[test]
+    fn a_turn_the_safety_check_stopped_never_reaches_the_reviewer() {
+        let stopped = Some(haarness_protocol::TurnId::new());
+        let in_stopped = |sequence, data| Item {
+            turn_id: stopped,
+            ..item(sequence, data)
+        };
+        let items = vec![
+            item(1, user("Please clean the build folder")),
+            in_stopped(2, user("STOPPED REQUEST")),
+            in_stopped(
+                3,
+                ItemData::Error {
+                    message: "Stopped by the provider's safety check (refusal).".into(),
+                    retryable: false,
+                    turn_left_out: true,
+                },
+            ),
+            item(4, user("Clean it another way")),
+        ];
+        let read = entries(&kept(&items), false, None)
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!read.contains("STOPPED REQUEST"), "{read}");
+        assert!(
+            read.contains("Clean it another way") && read.contains("build folder"),
+            "{read}"
+        );
     }
 
     #[test]
