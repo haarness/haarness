@@ -38,10 +38,6 @@ pub(super) fn resolve(program: &str, config: &McpConfigureRequest) -> Option<(Pa
             setting("XDG_CONFIG_HOME").as_deref(),
         )
     });
-    // The tool folders Desktop named come after the system's: they hold the
-    // version managers' folders in the order `node_managers` has them.
-    let mut system = system_directories();
-    system.extend(haarness_ripgrep::tool_folders());
     fallback_path(
         program,
         &cwd,
@@ -49,7 +45,8 @@ pub(super) fn resolve(program: &str, config: &McpConfigureRequest) -> Option<(Pa
         home.as_deref(),
         extra.as_deref(),
         nvm.as_deref().map(Path::as_os_str),
-        &system,
+        &system_directories(),
+        &haarness_ripgrep::tool_folders(),
     )
 }
 
@@ -82,6 +79,9 @@ fn system_directories() -> Vec<PathBuf> {
     directories
 }
 
+/// `tools` are the tool folders Desktop named (`HAARNESS_TOOL_PATH`), which
+/// come after every folder above.
+#[allow(clippy::too_many_arguments)]
 fn fallback_path(
     program: &str,
     cwd: &Path,
@@ -90,6 +90,7 @@ fn fallback_path(
     extra: Option<&OsStr>,
     nvm: Option<&OsStr>,
     system: &[PathBuf],
+    tools: &[PathBuf],
 ) -> Option<(PathBuf, OsString)> {
     let original = std::env::split_paths(inherited)
         .map(|path| cwd.join(path))
@@ -124,6 +125,7 @@ fn fallback_path(
             .unwrap_or_else(|| home.join(".nvm"));
         directories.extend(node_managers(home, &nvm));
     }
+    directories.extend(tools.iter().cloned());
     // Only folders that are there reach the launcher's PATH.
     directories.retain(|path| path.is_dir());
     let executable = locate(program, &directories)?;
@@ -294,6 +296,7 @@ mod tests {
             None,
             None,
             &[],
+            &[],
         )
         .unwrap();
         assert_eq!(path, directory.join(name));
@@ -313,6 +316,7 @@ mod tests {
                 Some(root.as_os_str()),
                 None,
                 None,
+                &[],
                 &[]
             )
             .is_none()
@@ -325,6 +329,7 @@ mod tests {
                 None,
                 Some(OsStr::new("relative/fallback")),
                 None,
+                &[],
                 &[]
             )
             .is_none()
@@ -385,6 +390,7 @@ mod tests {
                 None,
                 nvm.map(Path::as_os_str),
                 system,
+                &[],
             )
         }
     }
@@ -436,6 +442,39 @@ mod tests {
                 "{folder}: {env:?}"
             );
         }
+    }
+
+    /// Desktop's tool folders come after the version managers' own: nvm's
+    /// default npx still wins over a nodenv shim Desktop named, and a
+    /// launcher only Desktop's folders hold is found.
+    #[test]
+    fn desktop_s_tool_folders_come_after_the_version_managers() {
+        let home = Home::new();
+        let nodenv = home.launcher(".nodenv/shims", "haarness-fixture-npx");
+        let nvm = home.launcher(".nvm/versions/node/v20.18.1/bin", "haarness-fixture-npx");
+        let go = home.launcher("go/bin", "haarness-fixture-server");
+        let tools = [
+            nodenv.parent().unwrap().to_path_buf(),
+            go.parent().unwrap().to_path_buf(),
+        ];
+        let find = |program: &str| {
+            fallback_path(
+                program,
+                &home.0,
+                OsStr::new("/usr/bin:/bin"),
+                Some(home.0.as_os_str()),
+                None,
+                None,
+                &[],
+                &tools,
+            )
+        };
+        let (path, env) = find("haarness-fixture-npx").unwrap();
+        assert_eq!(path, nvm);
+        let env = std::env::split_paths(&env).collect::<Vec<_>>();
+        assert_eq!(&env[env.len() - 2..], &tools);
+        assert_eq!(find("haarness-fixture-server").unwrap().0, go);
+        assert!(home.find("haarness-fixture-server", None).is_none());
     }
 
     #[test]

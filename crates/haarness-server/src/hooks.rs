@@ -525,11 +525,46 @@ fn enterable(folder: &Path) -> bool {
 /// The process for `entry`, started in `folders.cwd` and told
 /// `folders.project` as its project folder.
 fn hook_command(entry: &HookEntry, folders: Folders<'_>) -> tokio::process::Command {
-    let (program, arguments) = hook_invocation(entry, folders.project);
+    hook_command_with(entry, folders, &haarness_ripgrep::tool_folders())
+}
+
+/// [`hook_command`], with `tools` the tool folders Desktop named
+/// (`HAARNESS_TOOL_PATH`), which a hook also finds its programs in, as an
+/// agent's command does: a shell hook gets them at the end of `PATH` after
+/// its login profile ran, and a program run without a shell after the
+/// server's own `PATH`. Windows names none.
+fn hook_command_with(
+    entry: &HookEntry,
+    folders: Folders<'_>,
+    tools: &[PathBuf],
+) -> tokio::process::Command {
+    let (program, mut arguments) = hook_invocation(entry, folders.project);
+    let tools: &[PathBuf] = if cfg!(windows) { &[] } else { tools };
+    let shell_form = entry.args.is_empty()
+        && shell_kind(&program) == Some(ShellKind::Posix)
+        && matches!(arguments.as_slice(), [flag, _] if flag == "-lc");
+    if shell_form && !tools.is_empty() {
+        let script = format!("{}\n{}", haarness_ripgrep::FOLDERS_LAST, arguments[1]);
+        arguments.truncate(1);
+        arguments.push(script);
+        arguments.push(program.clone());
+        arguments.extend(
+            tools
+                .iter()
+                .filter_map(|tool| tool.to_str().map(str::to_owned)),
+        );
+    }
     let mut command = tokio::process::Command::new(program);
     command.args(arguments);
     for name in haarness_core::private_env_names() {
         command.env_remove(name);
+    }
+    if !entry.args.is_empty()
+        && !tools.is_empty()
+        && let Some(path) =
+            haarness_ripgrep::with_folders(std::env::var_os("PATH").as_deref(), tools)
+    {
+        command.env("PATH", path);
     }
     command
         .current_dir(folders.cwd)
@@ -2089,6 +2124,89 @@ mod tests {
             .1,
             [r"C:\src\a$(calc)"]
         );
+    }
+
+    /// A hook finds its programs in the tool folders Desktop named, as an
+    /// agent's command does: a shell hook after its login profile ran (so a
+    /// profile that puts `~/.cargo/bin` first while it is missing still does),
+    /// and a program run without a shell after the server's own PATH.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hooks_find_programs_in_the_tool_folders_after_the_profile() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("haarness-hook-tools-{}", uuid::Uuid::now_v7()));
+        let home = root.join("home");
+        let system = root.join("system");
+        let cargo = home.join(".cargo/bin");
+        let local = home.join(".local/bin");
+        let probe = |folder: &Path, name: &str, says: &str| {
+            std::fs::create_dir_all(folder).unwrap();
+            std::fs::write(folder.join(name), format!("#!/bin/sh\necho {says}\n")).unwrap();
+            std::fs::set_permissions(folder.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        };
+        probe(&system, "haarness-probe-shadowed", "system");
+        probe(&cargo, "haarness-probe-shadowed", "cargo");
+        probe(&local, "haarness-probe-local", "local");
+        std::fs::write(
+            home.join(".cargo/setup.sh"),
+            "case \":$PATH:\" in\n  *\":$HOME/.cargo/bin:\"*) ;;\n  *) PATH=\"$HOME/.cargo/bin:$PATH\"; export PATH ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::write(home.join(".profile"), ". \"$HOME/.cargo/setup.sh\"\n").unwrap();
+        let entry = |command: &str, args: &[&str]| HookEntry {
+            event: "Stop".into(),
+            matcher: None,
+            command: command.into(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            shell: None,
+            timeout: Duration::from_secs(5),
+            plugin_root: None,
+            asynchronous: false,
+        };
+        let folders = Folders {
+            cwd: &root,
+            project: &root,
+            chat_folder_gone: false,
+        };
+        let tools = [cargo.clone(), local.clone()];
+        let shell = entry(
+            "haarness-probe-shadowed; haarness-probe-local; printf 'args:%s\\n' \"$#\"",
+            &[],
+        );
+        let run = |mut command: tokio::process::Command| async move {
+            let output = command
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        let mut command = hook_command_with(&shell, folders, &tools);
+        command
+            .env("HOME", &home)
+            .env("PATH", format!("{}:/usr/bin:/bin", system.display()));
+        assert_eq!(run(command).await, "cargo\nlocal\nargs:0\n");
+        // Without tool folders the hook runs as it always did.
+        let mut command = hook_command_with(&shell, folders, &[]);
+        command
+            .env("HOME", &home)
+            .env("PATH", format!("{}:/usr/bin:/bin", system.display()));
+        assert_eq!(run(command).await, "cargo\nargs:0\n");
+        // A program run without a shell is looked for after the server's PATH.
+        let command = hook_command_with(&entry("haarness-probe-local", &["x"]), folders, &tools);
+        let path = command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| value)
+            .map(std::env::split_paths)
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(path.last(), Some(&local));
+        assert_eq!(run(command).await, "local\n");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

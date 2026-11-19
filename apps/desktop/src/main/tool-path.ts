@@ -2,7 +2,9 @@ import { opendirSync, readFileSync, statSync } from "node:fs";
 import { posix, win32 } from "node:path";
 
 /** What PATH needs to know of a folder; nothing when it is not there. */
-export type FolderCheck = (path: string) => { directory: boolean; mode: number; uid: number } | undefined;
+export type FolderCheck = (
+  path: string,
+) => { directory: boolean; mode: number; uid: number; gid: number } | undefined;
 
 /** The little reading nvm's folder needs. */
 export interface Files {
@@ -15,7 +17,7 @@ export interface Files {
 function inspect(path: string) {
   try {
     const stat = statSync(path);
-    return { directory: stat.isDirectory(), mode: stat.mode, uid: stat.uid };
+    return { directory: stat.isDirectory(), mode: stat.mode, uid: stat.uid, gid: stat.gid };
   } catch {
     return undefined;
   }
@@ -127,9 +129,9 @@ function nvmFolders(path: typeof posix, root: string, files: Files) {
  * profile that puts `~/.cargo/bin` first only while it is missing (rustup's
  * and uv's setup files do) must still find it missing. Each one is there,
  * not on `PATH` already, and nobody else may write in it: one under the home
- * folder belongs to the person (or the system) and is writable by them alone,
- * and Homebrew's, which its installer leaves writable by its group, is not
- * writable by everyone. Nothing is run to find them. Windows apps get the
+ * folder belongs to the person (or the system) and is writable by them alone
+ * (on Linux, also by the group of their own), and Homebrew's, which its
+ * installer leaves writable by its group, is not writable by everyone. Nothing is run to find them. Windows apps get the
  * person's PATH from the registry, so there only Bun's folder follows it, as
  * before, and no tool folders are named.
  */
@@ -141,8 +143,9 @@ export function toolEnvironment(options: {
   accountHome: string;
   /** Folders ahead of everything (a packaged app's own programs). */
   bundled?: string[];
-  /** The person's user id; Desktop's own by default. */
+  /** The person's user and group ids; Desktop's own by default. */
   uid?: number;
+  gid?: number;
   folder?: FolderCheck;
   files?: Files;
 }): { PATH: string; HAARNESS_TOOL_PATH?: string } {
@@ -175,9 +178,19 @@ export function toolEnvironment(options: {
   if (windows) return { PATH };
 
   const me = options.uid ?? process.getuid?.() ?? -1;
+  // Linux gives each person a group of their own (its id their user id),
+  // and installers run with umask 002 make folders that group may write in.
+  // A Mac's group is `staff`, which every user shares.
+  const myGroup = options.gid ?? process.getgid?.() ?? -1;
+  const ownGroup = options.platform === "linux" && myGroup === me ? myGroup : undefined;
   const theirs = (candidate: string) => {
     const found = folder(candidate);
-    return !!found?.directory && (found.uid === me || found.uid === 0) && (found.mode & 0o022) === 0;
+    return (
+      !!found?.directory &&
+      (found.uid === me || found.uid === 0) &&
+      (found.mode & 0o002) === 0 &&
+      ((found.mode & 0o020) === 0 || found.gid === ownGroup)
+    );
   };
   const shared = (candidate: string) => {
     const found = folder(candidate);

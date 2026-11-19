@@ -197,6 +197,15 @@ fn folders_from(value: Option<&OsStr>) -> Vec<PathBuf> {
         .collect()
 }
 
+/// POSIX shell text that adds each of its arguments (folders) to the end of
+/// `PATH` unless it is there already, then leaves the script no arguments:
+/// for a login shell's script, so it runs after the profile did. The folders
+/// are arguments, never shell text, so no name in one is ever run.
+pub const FOLDERS_LAST: &str = "for __haarness_folder do case \":$PATH:\" in \
+     *\":$__haarness_folder:\"*) ;; \
+     *) PATH=\"${PATH:+$PATH:}$__haarness_folder\" ;; esac; done; \
+     unset __haarness_folder; export PATH; set --; ";
+
 /// `path` with each tool folder it lacks added at its end, so a program it
 /// already finds is still the one found; for the server's own lookups
 /// (language servers, formatters, MCP launchers). `path` as it is when there
@@ -317,14 +326,7 @@ fn shell_with_binary(
         // Then each tool folder the profiles did not put on PATH goes last:
         // one a profile put first (rustup's and uv's setup files do so only
         // while it is missing) stays first, and nothing found before moves.
-        let tools_last = if tools.is_empty() {
-            ""
-        } else {
-            "for __haarness_folder do case \":$PATH:\" in \
-             *\":$__haarness_folder:\"*) ;; \
-             *) PATH=\"${PATH:+$PATH:}$__haarness_folder\" ;; esac; done; \
-             unset __haarness_folder; export PATH; set --; "
-        };
+        let tools_last = if tools.is_empty() { "" } else { FOLDERS_LAST };
         command
             .args([
                 "-lc",

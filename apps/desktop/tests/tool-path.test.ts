@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { knownHomeFolders, toolEnvironment, type Files, type FolderCheck } from "../src/main/tool-path";
 
 const ME = 501;
-type Folder = { mode?: number; uid?: number; file?: boolean };
+type Folder = { mode?: number; uid?: number; gid?: number; file?: boolean };
 /** A file system where only `folders` are there (as folders of ME, 0755,
  * unless they say otherwise), noting every path looked at. */
 function only(folders: string[] | Record<string, Folder>): FolderCheck & { asked: string[] } {
@@ -18,7 +18,7 @@ function only(folders: string[] | Record<string, Folder>): FolderCheck & { asked
   const check = (path: string) => {
     asked.push(path);
     const folder = known[path];
-    return folder && { directory: !folder.file, mode: folder.mode ?? 0o755, uid: folder.uid ?? ME };
+    return folder && { directory: !folder.file, mode: folder.mode ?? 0o755, uid: folder.uid ?? ME, gid: folder.gid ?? 20 };
   };
   return Object.assign(check, { asked });
 }
@@ -128,6 +128,39 @@ test("a folder under the home is the person's or the system's and only they may 
     }),
   );
   assert.deepEqual(tools, ["/Users/me/.local/bin", "/Users/me/.cargo/bin", "/opt/homebrew/sbin"]);
+});
+
+test("on Linux a folder the person's own group may write in counts; a shared group's never, nor on a Mac", () => {
+  const folders = {
+    "/home/me/.local/bin": { mode: 0o775, gid: ME },
+    "/home/me/.cargo/bin": { mode: 0o775, gid: 100 },
+    "/home/me/go/bin": { mode: 0o777, gid: ME },
+  };
+  const linux = (gid: number) =>
+    toolEnvironment({
+      platform: "linux",
+      env: { PATH: "/usr/bin:/bin", HOME: "/home/me" },
+      accountHome: "/home/me",
+      uid: ME,
+      gid,
+      folder: only(folders),
+      files: nothing,
+    }).HAARNESS_TOOL_PATH;
+  // Its group: the person's own, as a per-user group is.
+  assert.equal(linux(ME), "/home/me/.local/bin");
+  // A primary group others share (`users`) is not the person's own.
+  assert.equal(linux(100), undefined);
+  // A Mac's `staff` is shared by every user.
+  const mac = toolEnvironment({
+    platform: "darwin",
+    env: { PATH: dock, HOME: "/Users/me" },
+    accountHome: "/Users/me",
+    uid: ME,
+    gid: ME,
+    folder: only({ "/Users/me/.local/bin": { mode: 0o775, gid: ME } }),
+    files: nothing,
+  });
+  assert.equal(mac.HAARNESS_TOOL_PATH, undefined);
 });
 
 test("the home the agent's shell sees decides, and a relative one names nothing from a home folder", () => {
