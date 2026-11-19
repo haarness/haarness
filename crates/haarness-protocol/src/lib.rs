@@ -634,8 +634,11 @@ pub enum FileDiffStatus {
 
 /// Bounded file-change payload shared by Git review and snapshot/turn diffs.
 /// Git responses normally carry `patch`; snapshot responses normally carry
-/// `before` and `after`. A missing body with `truncated=true` remains an
-/// honest metadata-only change instead of returning an unbounded payload.
+/// `before` and `after`. A tool's change carries `before` and `after` too,
+/// or, for a file over its body limit, a bounded `patch` of the change
+/// alone (hunks without file headers). A missing body with `truncated=true`
+/// remains an honest metadata-only change instead of returning an unbounded
+/// payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiff {

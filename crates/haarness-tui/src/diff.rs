@@ -5,6 +5,7 @@
 use haarness_opentui::{Line, Span, attr};
 use similar::{ChangeTag, TextDiff};
 
+use crate::diffview::{DiffRow, RowKind, rows_from_patch};
 use crate::theme::Theme;
 
 const MAX_ROWS: usize = 200;
@@ -48,8 +49,12 @@ pub fn render_diff(old: &str, new: &str, width: usize, theme: &Theme, indent: &s
                 );
                 let gutter = Span::new(format!("{indent}{number} "), theme.muted);
                 let row = match change.tag() {
-                    ChangeTag::Insert => inline_row(gutter, '+', &change, inner, theme, true),
-                    ChangeTag::Delete => inline_row(gutter, '-', &change, inner, theme, false),
+                    ChangeTag::Insert => {
+                        inline_row(gutter, '+', segments(&change), inner, theme, true)
+                    }
+                    ChangeTag::Delete => {
+                        inline_row(gutter, '-', segments(&change), inner, theme, false)
+                    }
                     ChangeTag::Equal => {
                         let text: String = change
                             .iter_strings_lossy()
@@ -75,12 +80,141 @@ pub fn render_diff(old: &str, new: &str, width: usize, theme: &Theme, indent: &s
     lines
 }
 
+/// A stored unified diff drawn as [`render_diff`] draws a pair of texts: two
+/// lines of context around each change, numbered as the file is. A tool's
+/// change to a large file is kept as such a diff instead of its texts.
+pub fn render_patch(patch: &str, width: usize, theme: &Theme, indent: &str) -> Vec<Line> {
+    let rows = near_changes(rows_from_patch(patch));
+    let digits = rows
+        .iter()
+        .filter_map(|row| row.old.max(row.new))
+        .max()
+        .unwrap_or(0)
+        .to_string()
+        .len()
+        .max(2);
+    let inner = width
+        .saturating_sub(indent.chars().count() + digits + 1)
+        .max(10);
+    let mut lines = Vec::new();
+    let mut truncated = 0_usize;
+    for row in &rows {
+        if row.kind == RowKind::Gap {
+            if lines.len() < MAX_ROWS {
+                lines.push(Line::plain(
+                    format!("{indent}{}  ⋮", " ".repeat(digits + 1)),
+                    theme.muted,
+                ));
+            }
+            continue;
+        }
+        if lines.len() >= MAX_ROWS {
+            truncated += 1;
+            continue;
+        }
+        let number = match row.kind {
+            RowKind::Removed => row.old,
+            _ => row.new,
+        }
+        .map_or_else(|| " ".repeat(digits), |number| format!("{number:>digits$}"));
+        let gutter = Span::new(format!("{indent}{number} "), theme.muted);
+        lines.push(match row.kind {
+            RowKind::Added => inline_row(gutter, '+', emphasized(row), inner, theme, true),
+            RowKind::Removed => inline_row(gutter, '-', emphasized(row), inner, theme, false),
+            _ => {
+                let mut spans = vec![gutter, Span::new("  ", theme.muted)];
+                spans.extend(code(line_body(&row.text), inner, 0, &Span::new("", theme.muted)).0);
+                Line::new(spans)
+            }
+        });
+    }
+    if truncated > 0 {
+        lines.push(Line::plain(
+            format!("{indent}  … +{truncated} more lines"),
+            theme.muted,
+        ));
+    }
+    lines
+}
+
+/// A stored diff's rows with at most [`CONTEXT`] unchanged lines on either
+/// side of a change, as [`render_diff`] groups a pair of texts: a longer
+/// unchanged run between two changes becomes a gap.
+fn near_changes(rows: Vec<DiffRow>) -> Vec<DiffRow> {
+    // Rows from the last change before each row, then from the next one
+    // after it; a gap ends a hunk, and with it the run.
+    let mut near = vec![false; rows.len()];
+    let measure = |distance: &mut Option<usize>, row: &DiffRow| {
+        *distance = match row.kind {
+            RowKind::Gap => None,
+            kind if kind.is_change() => Some(0),
+            _ => distance.map(|distance| distance + 1),
+        };
+        distance.is_some_and(|distance| distance <= CONTEXT)
+    };
+    let mut distance = None;
+    for (index, row) in rows.iter().enumerate() {
+        near[index] |= measure(&mut distance, row);
+    }
+    let mut distance = None;
+    for (index, row) in rows.iter().enumerate().rev() {
+        near[index] |= measure(&mut distance, row);
+    }
+    let mut kept: Vec<DiffRow> = Vec::with_capacity(rows.len());
+    let mut skipped = false;
+    for (row, near) in rows.into_iter().zip(near) {
+        if !near || row.kind == RowKind::Gap {
+            skipped = true;
+            continue;
+        }
+        if skipped && !kept.is_empty() {
+            kept.push(DiffRow {
+                kind: RowKind::Gap,
+                old: None,
+                new: None,
+                text: String::new(),
+                emphasis: Vec::new(),
+            });
+        }
+        skipped = false;
+        kept.push(row);
+    }
+    kept
+}
+
+/// A patch row's text in runs, each marked when it is one of the words that
+/// differ from the line it pairs with.
+fn emphasized(row: &DiffRow) -> Vec<(bool, String)> {
+    let mut ranges = row.emphasis.iter().peekable();
+    let mut segments: Vec<(bool, String)> = Vec::new();
+    for (index, character) in row.text.chars().enumerate() {
+        while ranges.next_if(|&&(_, end)| index >= end).is_some() {}
+        let marked = ranges.peek().is_some_and(|&&(start, _)| index >= start);
+        match segments.last_mut() {
+            Some((last, text)) if *last == marked => text.push(character),
+            _ => segments.push((marked, character.to_string())),
+        }
+    }
+    segments
+}
+
+/// A changed line's runs of text, each marked when it is one of the words
+/// that actually differ, without its line end.
+fn segments(change: &similar::InlineChange<'_, str>) -> Vec<(bool, String)> {
+    let mut segments: Vec<(bool, String)> = change
+        .iter_strings_lossy()
+        .map(|(emphasized, value)| (emphasized, value.into_owned()))
+        .collect();
+    trim_line_end(&mut segments);
+    segments
+}
+
 /// A changed line with its intra-line emphasized runs (the words that
 /// actually differ) rendered inverse.
 fn inline_row(
     gutter: Span,
     marker: char,
-    change: &similar::InlineChange<'_, str>,
+    segments: Vec<(bool, String)>,
     inner: usize,
     theme: &Theme,
     added: bool,
@@ -92,11 +226,6 @@ fn inline_row(
     };
     let mut spans = vec![gutter, Span::new(format!("{marker} "), fg).on(bg)];
     let mut used = 2usize;
-    let mut segments: Vec<(bool, String)> = change
-        .iter_strings_lossy()
-        .map(|(emphasized, value)| (emphasized, value.into_owned()))
-        .collect();
-    trim_line_end(&mut segments);
     for (emphasized, value) in &segments {
         let (emphasized, value) = (*emphasized, value.as_str());
         if value.is_empty() {
@@ -130,13 +259,31 @@ pub fn render_added(
     indent: &str,
     cap: usize,
 ) -> Vec<Line> {
+    render_added_rows(
+        content.lines(),
+        content.lines().count(),
+        width,
+        theme,
+        indent,
+        cap,
+    )
+}
+
+/// [`render_added`] for the first `rows` of a new file `total` lines long.
+pub fn render_added_rows<'a>(
+    rows: impl IntoIterator<Item = &'a str>,
+    total: usize,
+    width: usize,
+    theme: &Theme,
+    indent: &str,
+    cap: usize,
+) -> Vec<Line> {
     let inner = width.saturating_sub(indent.chars().count()).max(10);
-    let mut lines: Vec<Line> = content
-        .lines()
+    let mut lines: Vec<Line> = rows
+        .into_iter()
         .take(cap)
         .map(|row| styled_row(indent, '+', row, inner, theme, true))
         .collect();
-    let total = content.lines().count();
     if total > cap {
         lines.push(Line::plain(
             format!("{indent}  … +{} more lines", total - cap),

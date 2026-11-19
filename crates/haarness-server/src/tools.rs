@@ -6097,6 +6097,11 @@ fn output(text: String) -> ToolOutput {
 /// in snapshots; this payload exists only to render an immediate review.
 const TOOL_DIFF_MAX_FILES: usize = 64;
 const TOOL_DIFF_BODY_MAX_BYTES: usize = 32 * 1_024;
+/// A file with a body over that limit keeps a unified diff of its change
+/// instead, in the room its two bodies would have had.
+const TOOL_DIFF_PATCH_MAX_BYTES: usize = 2 * TOOL_DIFF_BODY_MAX_BYTES;
+/// Unchanged lines kept on each side of a change in that diff, as Git keeps.
+const TOOL_DIFF_PATCH_CONTEXT: usize = 3;
 const TOOL_DIFF_LINE_BUDGET: Duration = Duration::from_millis(500);
 
 enum ExistingDiffBody {
@@ -6176,7 +6181,9 @@ fn opaque_file_diff(
     after: Option<&str>,
     binary: bool,
 ) -> FileDiff {
-    let mut diff = text_file_diff(file, status, before, after);
+    // With one side unknown there is no change to diff, so the side that is
+    // known stays as its (possibly cut) text.
+    let mut diff = body_file_diff(file, status, before, after);
     diff.binary = binary;
     // A body is necessarily missing when the old bytes cannot be represented
     // as UTF-8 or could not be read. Keep that limitation explicit on the wire.
@@ -6184,7 +6191,45 @@ fn opaque_file_diff(
     diff
 }
 
+/// A text file's change: its bodies when they fit the limit, otherwise a
+/// bounded unified diff of the change itself. A cut body would show only the
+/// start of a large file, where an edit further down looks like no change,
+/// and a cut in the middle of the file like one.
 fn text_file_diff(
+    file: &str,
+    status: FileDiffStatus,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> FileDiff {
+    if [before, after]
+        .into_iter()
+        .flatten()
+        .all(|body| body.len() <= TOOL_DIFF_BODY_MAX_BYTES)
+    {
+        return body_file_diff(file, status, before, after);
+    }
+    let (before, after) = (before.unwrap_or_default(), after.unwrap_or_default());
+    let diff = line_diff(before, after);
+    let (additions, deletions) = match status {
+        FileDiffStatus::Added => (line_count(after), 0),
+        FileDiffStatus::Deleted => (0, line_count(before)),
+        FileDiffStatus::Modified => changed_lines(&diff),
+    };
+    let (patch, truncated) = bounded_patch(&diff);
+    FileDiff {
+        file: file.to_owned(),
+        status,
+        additions,
+        deletions,
+        patch,
+        before: None,
+        after: None,
+        binary: false,
+        truncated,
+    }
+}
+
+fn body_file_diff(
     file: &str,
     status: FileDiffStatus,
     before: Option<&str>,
@@ -6223,6 +6268,179 @@ fn bounded_diff_body(body: &str) -> (String, bool) {
     (body[..end].to_owned(), true)
 }
 
+/// What Git writes after a last line that has no line end.
+const NO_LINE_END: &str = "\\ No newline at end of file\n";
+
+/// `diff` as the hunks of a unified diff, numbered as the files are, with no
+/// file headers (the entry names its file), in at most
+/// [`TOOL_DIFF_PATCH_MAX_BYTES`]. Hunks are kept whole while they fit; of a
+/// first hunk too long on its own, the lines from its first change that fit.
+/// No line is copied before it is known to fit, so a huge rewrite costs no
+/// more than the bound. Says whether any of the change was left out.
+fn bounded_patch(diff: &similar::TextDiff<'_, '_, '_, str>) -> (Option<String>, bool) {
+    let mut patch = String::new();
+    for group in diff.grouped_ops(TOOL_DIFF_PATCH_CONTEXT) {
+        let room = TOOL_DIFF_PATCH_MAX_BYTES - patch.len();
+        if let Some(hunk) = PatchHunk::whole(diff, &group, room) {
+            patch.push_str(&hunk);
+            continue;
+        }
+        if patch.is_empty() {
+            patch = PatchHunk::cut(diff, &group, room);
+        }
+        return (Some(patch), true);
+    }
+    (Some(patch).filter(|patch| !patch.is_empty()), false)
+}
+
+/// One hunk of a [`bounded_patch`] as it is written.
+struct PatchHunk {
+    old_start: usize,
+    new_start: usize,
+    old_lines: usize,
+    new_lines: usize,
+    body: String,
+    /// Bytes the body may take: the room left less the longest header the
+    /// hunk could have.
+    limit: usize,
+}
+
+impl PatchHunk {
+    fn new(ops: &[similar::DiffOp], room: usize) -> Self {
+        let (old_start, new_start) = ops
+            .first()
+            .map_or((0, 0), |op| (op.old_range().start, op.new_range().start));
+        let (old_end, new_end) = ops
+            .last()
+            .map_or((0, 0), |op| (op.old_range().end, op.new_range().end));
+        let longest = Self::header(
+            old_start,
+            old_end - old_start,
+            new_start,
+            new_end - new_start,
+        );
+        Self {
+            old_start,
+            new_start,
+            old_lines: 0,
+            new_lines: 0,
+            body: String::new(),
+            limit: room.saturating_sub(longest.len()),
+        }
+    }
+
+    /// The hunk with all its lines, or `None` when they do not fit `room`.
+    fn whole(
+        diff: &similar::TextDiff<'_, '_, '_, str>,
+        ops: &[similar::DiffOp],
+        room: usize,
+    ) -> Option<String> {
+        let mut hunk = Self::new(ops, room);
+        for op in ops {
+            for change in diff.iter_changes(op) {
+                if !hunk.push(change.tag(), change.value()) {
+                    return None;
+                }
+            }
+        }
+        Some(hunk.finish())
+    }
+
+    /// The start of a hunk too long for `room`: from its first change, so the
+    /// lines kept always show one, as many lines as fit, and of a first line
+    /// too long on its own, its start.
+    fn cut(
+        diff: &similar::TextDiff<'_, '_, '_, str>,
+        ops: &[similar::DiffOp],
+        room: usize,
+    ) -> String {
+        let ops = match ops.first() {
+            Some(op) if op.tag() == similar::DiffTag::Equal => &ops[1..],
+            _ => ops,
+        };
+        let mut hunk = Self::new(ops, room);
+        'lines: for op in ops {
+            for change in diff.iter_changes(op) {
+                if hunk.push(change.tag(), change.value()) {
+                    continue;
+                }
+                if hunk.body.is_empty() {
+                    let value = change.value();
+                    let mut end = hunk.limit.saturating_sub(2).min(value.len());
+                    while !value.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    hunk.write(change.tag(), &value[..end]);
+                    hunk.body.push('\n');
+                }
+                break 'lines;
+            }
+        }
+        hunk.finish()
+    }
+
+    /// Adds one line when it fits, and says whether it did.
+    fn push(&mut self, tag: similar::ChangeTag, value: &str) -> bool {
+        // A line ends in a line feed, or in a carriage return alone, which
+        // the line diff also ends a line at; either way the patch line ends
+        // in a line feed.
+        let ended = value.ends_with(['\n', '\r']);
+        let size = 1
+            + value.len()
+            + usize::from(!value.ends_with('\n'))
+            + if ended { 0 } else { NO_LINE_END.len() };
+        if self.body.len() + size > self.limit {
+            return false;
+        }
+        self.write(tag, value);
+        if !value.ends_with('\n') {
+            self.body.push('\n');
+        }
+        if !ended {
+            self.body.push_str(NO_LINE_END);
+        }
+        true
+    }
+
+    fn write(&mut self, tag: similar::ChangeTag, text: &str) {
+        let sign = match tag {
+            similar::ChangeTag::Equal => ' ',
+            similar::ChangeTag::Delete => '-',
+            similar::ChangeTag::Insert => '+',
+        };
+        self.body.push(sign);
+        self.body.push_str(text);
+        if tag != similar::ChangeTag::Insert {
+            self.old_lines += 1;
+        }
+        if tag != similar::ChangeTag::Delete {
+            self.new_lines += 1;
+        }
+    }
+
+    fn finish(self) -> String {
+        let mut hunk = Self::header(
+            self.old_start,
+            self.old_lines,
+            self.new_start,
+            self.new_lines,
+        );
+        hunk.push_str(&self.body);
+        hunk
+    }
+
+    /// `@@ -1,3 +1,4 @@`: one-based first lines, where an empty side names
+    /// the line before it.
+    fn header(old_start: usize, old_lines: usize, new_start: usize, new_lines: usize) -> String {
+        let first = |start: usize, lines: usize| if lines == 0 { start } else { start + 1 };
+        format!(
+            "@@ -{},{old_lines} +{},{new_lines} @@\n",
+            first(old_start, old_lines),
+            first(new_start, new_lines)
+        )
+    }
+}
+
 /// Lines added and removed by a line diff, the same count `git diff` and the
 /// Review panel give. Unchanged lines inside an edited region are not
 /// changes: a replacement that keeps four of its lines adds and removes the
@@ -6239,22 +6457,29 @@ fn line_changes(status: FileDiffStatus, before: Option<&str>, after: Option<&str
             if before == after {
                 return (0, 0);
             }
-            // Lines keep their terminators here, so a changed final newline
-            // still counts as the one-line mutation it is.
-            let diff = similar::TextDiff::configure()
-                .timeout(TOOL_DIFF_LINE_BUDGET)
-                .diff_lines(before, after);
-            diff.ops()
-                .iter()
-                .fold((0, 0), |(additions, deletions), op| match op.tag() {
-                    similar::DiffTag::Equal => (additions, deletions),
-                    _ => (
-                        additions + u64::try_from(op.new_range().len()).unwrap_or(u64::MAX),
-                        deletions + u64::try_from(op.old_range().len()).unwrap_or(u64::MAX),
-                    ),
-                })
+            changed_lines(&line_diff(before, after))
         }
     }
+}
+
+/// Lines keep their terminators here, so a changed final newline still
+/// counts as the one-line mutation it is.
+fn line_diff<'a>(before: &'a str, after: &'a str) -> similar::TextDiff<'a, 'a, 'a, str> {
+    similar::TextDiff::configure()
+        .timeout(TOOL_DIFF_LINE_BUDGET)
+        .diff_lines(before, after)
+}
+
+fn changed_lines(diff: &similar::TextDiff<'_, '_, '_, str>) -> (u64, u64) {
+    diff.ops()
+        .iter()
+        .fold((0, 0), |(additions, deletions), op| match op.tag() {
+            similar::DiffTag::Equal => (additions, deletions),
+            _ => (
+                additions + u64::try_from(op.new_range().len()).unwrap_or(u64::MAX),
+                deletions + u64::try_from(op.old_range().len()).unwrap_or(u64::MAX),
+            ),
+        })
 }
 
 fn line_count(body: &str) -> u64 {
@@ -9458,7 +9683,9 @@ export default workflow({
 
     #[test]
     fn mutation_diff_metadata_is_bounded_and_snapshot_scoped() {
-        let oversized = "é".repeat(TOOL_DIFF_BODY_MAX_BYTES);
+        // One line longer than the whole diff may be: its start, cut
+        // between characters.
+        let oversized = "é".repeat(TOOL_DIFF_PATCH_MAX_BYTES);
         let diff = text_file_diff(
             "large.txt",
             FileDiffStatus::Modified,
@@ -9466,14 +9693,29 @@ export default workflow({
             Some(&oversized.replace('é', "x")),
         );
         assert!(diff.truncated);
-        assert!(diff.before.as_ref().unwrap().len() <= TOOL_DIFF_BODY_MAX_BYTES);
-        assert!(diff.after.as_ref().unwrap().len() <= TOOL_DIFF_BODY_MAX_BYTES);
+        assert_eq!((diff.before.as_ref(), diff.after.as_ref()), (None, None));
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        let patch = diff.patch.unwrap();
+        assert!(patch.len() <= TOOL_DIFF_PATCH_MAX_BYTES, "{}", patch.len());
         assert!(
-            diff.before
-                .as_ref()
-                .unwrap()
-                .is_char_boundary(diff.before.as_ref().unwrap().len())
+            patch.starts_with("@@ -1,1 +0,0 @@\n-éé"),
+            "{}",
+            &patch[..40]
         );
+        assert!(patch.ends_with("é\n"));
+        assert_well_formed(&patch);
+        // A side that cannot be read has no change to diff: the other stays
+        // as its cut text.
+        let opaque = opaque_file_diff(
+            "large.txt",
+            FileDiffStatus::Modified,
+            None,
+            Some(&oversized),
+            true,
+        );
+        assert!(opaque.truncated && opaque.patch.is_none());
+        let after = opaque.after.unwrap();
+        assert!(after.len() <= TOOL_DIFF_BODY_MAX_BYTES && oversized.starts_with(&after));
 
         let workspace = PathBuf::from("/tmp/haarness-side-effect-classification");
         let registry = NativeToolRegistry::new(workspace);
@@ -9492,6 +9734,273 @@ export default workflow({
             !registry.get("task").unwrap().side_effectful(),
             "child turns own their workspace mutation snapshots"
         );
+    }
+
+    /// Every hunk of a stored diff holds exactly the lines its header counts,
+    /// so a reader that trusts the counts reads it right.
+    fn assert_well_formed(patch: &str) {
+        let mut hunks = 0;
+        let mut expected = (0, 0);
+        let mut seen = (0, 0);
+        for line in patch.lines() {
+            if let Some(header) = line.strip_prefix("@@ -") {
+                assert_eq!(seen, expected, "{patch}");
+                let (old, new) = header.trim_end_matches(" @@").split_once(" +").unwrap();
+                let count =
+                    |range: &str| range.split_once(',').unwrap().1.parse::<usize>().unwrap();
+                expected = (count(old), count(new));
+                seen = (0, 0);
+                hunks += 1;
+                continue;
+            }
+            match line.chars().next() {
+                Some(' ') => seen = (seen.0 + 1, seen.1 + 1),
+                Some('-') => seen.0 += 1,
+                Some('+') => seen.1 += 1,
+                Some('\\') => {}
+                other => panic!("{other:?} in {patch}"),
+            }
+        }
+        assert_eq!(seen, expected, "{patch}");
+        assert!(hunks > 0, "{patch}");
+    }
+
+    /// A file of `bytes / 40` numbered lines, a little under `bytes` long.
+    fn numbered_lines(bytes: usize) -> String {
+        (1..=bytes / 40).fold(String::new(), |text, number| {
+            text + &format!("line {number:05} of a large file, as written\n")
+        })
+    }
+
+    #[tokio::test]
+    async fn an_edit_far_into_a_large_file_stores_its_real_change() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-large-diff-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&root).unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let context = tool_context(&workspace);
+        let text = numbered_lines(40_000);
+        // Line 875 starts past the 32 KiB a body keeps.
+        assert!(text.find("line 00875").unwrap() > TOOL_DIFF_BODY_MAX_BYTES);
+        std::fs::write(workspace.join("large.txt"), &text).unwrap();
+        let edited = registry
+            .get("edit")
+            .unwrap()
+            .execute(
+                json!({"path":"large.txt","old":"line 00875 of","new":"line 00875 (changed) of"}),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> =
+            serde_json::from_value(edited.metadata["diffs"].clone()).unwrap();
+        let [diff] = diffs.as_slice() else {
+            panic!("{diffs:?}")
+        };
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        assert_eq!((diff.before.as_ref(), diff.after.as_ref()), (None, None));
+        assert!(!diff.truncated);
+        assert_eq!(
+            diff.patch.as_deref(),
+            Some(
+                "@@ -872,7 +872,7 @@\n \
+                 line 00872 of a large file, as written\n \
+                 line 00873 of a large file, as written\n \
+                 line 00874 of a large file, as written\n\
+                 -line 00875 of a large file, as written\n\
+                 +line 00875 (changed) of a large file, as written\n \
+                 line 00876 of a large file, as written\n \
+                 line 00877 of a large file, as written\n \
+                 line 00878 of a large file, as written\n"
+            )
+        );
+
+        // An edit near the start that makes the file longer: one hunk, and
+        // nothing that looks like a change where a body would have been cut.
+        let grown = registry
+            .get("edit")
+            .unwrap()
+            .execute(
+                json!({"path":"large.txt","old":"line 00025 of a large file","new":"line 00025 of a large file, now with a good deal more text on it"}),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> = serde_json::from_value(grown.metadata["diffs"].clone()).unwrap();
+        let patch = diffs[0].patch.as_deref().unwrap();
+        assert_eq!(patch.matches("@@ -").count(), 1, "{patch}");
+        assert!(patch.starts_with("@@ -22,7 +22,7 @@\n"), "{patch}");
+        assert_eq!(
+            patch
+                .lines()
+                .filter(|line| line.starts_with(['-', '+']))
+                .collect::<Vec<_>>(),
+            [
+                "-line 00025 of a large file, as written",
+                "+line 00025 of a large file, now with a good deal more text on it, as written"
+            ]
+        );
+
+        // A patch to the same file, a new large file and its removal store
+        // the same form.
+        let patched = registry
+            .get("apply_patch")
+            .unwrap()
+            .execute(
+                json!({"input":"*** Begin Patch\n*** Update File: large.txt\n@@\n-line 00990 of a large file, as written\n+line 00990 was patched\n*** End Patch\n"}),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> =
+            serde_json::from_value(patched.metadata["diffs"].clone()).unwrap();
+        let patch = diffs[0].patch.as_deref().unwrap();
+        assert!(patch.starts_with("@@ -987,7 +987,7 @@\n"), "{patch}");
+        assert!(patch.contains("\n+line 00990 was patched\n"), "{patch}");
+        assert!(diffs[0].before.is_none() && !diffs[0].truncated);
+
+        let written = registry
+            .get("write")
+            .unwrap()
+            .execute(json!({"path":"copy.txt","content":text}), context.clone())
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> =
+            serde_json::from_value(written.metadata["diffs"].clone()).unwrap();
+        assert_eq!(diffs[0].status, FileDiffStatus::Added);
+        assert_eq!((diffs[0].additions, diffs[0].deletions), (1_000, 0));
+        let patch = diffs[0].patch.as_deref().unwrap();
+        assert!(
+            patch.starts_with("@@ -0,0 +1,1000 @@\n+line 00001 "),
+            "{patch}"
+        );
+        assert!(diffs[0].after.is_none() && !diffs[0].truncated);
+        assert_well_formed(patch);
+
+        let removed = registry
+            .get("apply_patch")
+            .unwrap()
+            .execute(
+                json!({"input":"*** Begin Patch\n*** Delete File: copy.txt\n*** End Patch\n"}),
+                context,
+            )
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> =
+            serde_json::from_value(removed.metadata["diffs"].clone()).unwrap();
+        assert_eq!(diffs[0].status, FileDiffStatus::Deleted);
+        assert!(
+            diffs[0]
+                .patch
+                .as_deref()
+                .unwrap()
+                .starts_with("@@ -1,1000 +0,0 @@\n-line 00001 ")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_huge_change_stores_a_bounded_diff_of_whole_hunks() {
+        // Every tenth line changes: far more hunks than fit.
+        let before = numbered_lines(200 << 10);
+        let after: String = before
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                if index % 10 == 5 {
+                    format!("{line} (changed)\n")
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect();
+        let diff = text_file_diff(
+            "huge.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&after),
+        );
+        assert_eq!(
+            (diff.additions, diff.deletions),
+            (
+                before.lines().count() as u64 / 10,
+                before.lines().count() as u64 / 10
+            )
+        );
+        assert!(diff.truncated);
+        let patch = diff.patch.unwrap();
+        assert!(patch.len() <= TOOL_DIFF_PATCH_MAX_BYTES, "{}", patch.len());
+        assert!(
+            patch.len() > TOOL_DIFF_PATCH_MAX_BYTES - 1_024,
+            "{}",
+            patch.len()
+        );
+        assert_well_formed(&patch);
+        // Whole hunks only: the last one ends in its trailing context.
+        assert!(
+            patch.ends_with("9 of a large file, as written\n"),
+            "{patch}"
+        );
+
+        // A rewrite of every line is one hunk too long for the bound: its
+        // first lines, from the first change.
+        let before = numbered_lines(100 << 10);
+        let rewritten = before.replace("as written", "as rewritten");
+        let diff = text_file_diff(
+            "huge.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&rewritten),
+        );
+        assert!(diff.truncated);
+        let patch = diff.patch.unwrap();
+        assert!(patch.len() <= TOOL_DIFF_PATCH_MAX_BYTES, "{}", patch.len());
+        assert!(patch.starts_with("@@ -1,"), "{}", &patch[..80]);
+        assert!(patch.contains("\n-line 00001 of a large file, as written\n"));
+        assert_well_formed(&patch);
+
+        // A last line without its line end says so, as Git does.
+        let diff = text_file_diff(
+            "huge.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&format!("{before}tail")),
+        );
+        assert!(
+            diff.patch
+                .as_deref()
+                .unwrap()
+                .ends_with("+tail\n\\ No newline at end of file\n")
+        );
+        assert!(!diff.truncated);
+        // A large file written over with the same text has no change.
+        let same = text_file_diff(
+            "huge.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&before),
+        );
+        assert_eq!(
+            (same.patch, same.truncated, same.additions),
+            (None, false, 0)
+        );
+        // One changed line of an 8 MB file is one small hunk.
+        let big = numbered_lines(8 << 20);
+        let changed = big.replacen("line 100000 of", "line 100000 (changed) of", 1);
+        let diff = text_file_diff(
+            "big.txt",
+            FileDiffStatus::Modified,
+            Some(&big),
+            Some(&changed),
+        );
+        assert_eq!(
+            (diff.additions, diff.deletions, diff.truncated),
+            (1, 1, false)
+        );
+        let patch = diff.patch.unwrap();
+        assert!(patch.starts_with("@@ -99997,7 +99997,7 @@\n"), "{patch}");
+        assert_eq!(patch.lines().count(), 9, "{patch}");
     }
 
     #[tokio::test]

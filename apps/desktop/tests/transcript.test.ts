@@ -499,6 +499,45 @@ test("a Codex patch envelope reads as the files it edits, and the result's diffs
   // A failed call changed nothing, so its arguments are all there is to show.
   assert.deepEqual(toolChanges("apply_patch", { input }, { ...result, is_error: true }), files);
   assert.deepEqual(patchFiles("@@ -1 +1 @@\n-a\n+b\n"), []);
+  // A large file's change is reported as a diff of the change, with no texts:
+  // its preview is the changed lines themselves.
+  const large = {
+    ...result,
+    metadata: {
+      diffs: [
+        {
+          file: "src/math.ts",
+          status: "modified",
+          additions: 1,
+          deletions: 1,
+          patch: "@@ -873,5 +873,5 @@\n a\n b\n-old\n+new\n c\n d\n@@ -990,2 +990,2 @@\n x\n-y\n\\ No newline at end of file\n+z\n\\ No newline at end of file\n",
+        },
+      ],
+    },
+  };
+  const [change] = toolChanges("apply_patch", { input }, large);
+  assert.deepEqual(change, {
+    path: "src/math.ts",
+    patch: large.metadata.diffs[0].patch,
+    before: undefined,
+    after: undefined,
+    additions: 1,
+    deletions: 1,
+  });
+  assert.deepEqual(
+    changeRows(change).map((row) => [row.kind, row.text, row.old ?? row.line]),
+    [
+      ["context", "a", 873],
+      ["context", "b", 874],
+      ["remove", "old", 875],
+      ["add", "new", 875],
+      ["context", "c", 876],
+      ["context", "d", 877],
+      ["context", "x", 990],
+      ["remove", "y", 991],
+      ["add", "z", 991],
+    ],
+  );
 });
 
 test("routine edit confirmations are dropped under a diff, diagnostics are not", () => {

@@ -1571,7 +1571,7 @@
         "type": "object"
       },
       "FileDiff": {
-        "description": "Bounded file-change payload shared by Git review and snapshot/turn diffs.\nGit responses normally carry `patch`; snapshot responses normally carry\n`before` and `after`. A missing body with `truncated=true` remains an\nhonest metadata-only change instead of returning an unbounded payload.",
+        "description": "Bounded file-change payload shared by Git review and snapshot/turn diffs.\nGit responses normally carry `patch`; snapshot responses normally carry\n`before` and `after`. A tool's change carries `before` and `after` too,\nor, for a file over its body limit, a bounded `patch` of the change\nalone (hunks without file headers). A missing body with `truncated=true`\nremains an honest metadata-only change instead of returning an unbounded\npayload.",
         "properties": {
           "additions": {
             "format": "int64",
