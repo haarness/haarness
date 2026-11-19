@@ -2767,6 +2767,22 @@ function createApp(saved?: Preferences) {
     if (envelope.eventId <= lastCursor) return;
     lastCursor = envelope.eventId;
     for (const journal of journals) journal.push(item as T.EventEnvelope);
+    // A message sent after an undo replaces the undone turns, which the
+    // server then drops: the open chat drops them too, at once, and reads
+    // its history again, or they would show once the undo is over.
+    const undone =
+      envelope.type === "thread.updated" &&
+      envelope.threadId === state.selected &&
+      !(envelope.payload as Partial<T.Thread>).revert
+        ? state.threads.find((thread) => thread.id === envelope.threadId)?.revert
+        : undefined;
+    const replaced = !!undone;
+    if (undone)
+      set("items", (items) =>
+        items.filter(
+          (entry) => entry.sequence <= undone.sequence || (!!envelope.turnId && entry.turnId === envelope.turnId),
+        ),
+      );
     reduceEvent(state, set, item as T.EventEnvelope);
     // Goals pause, block and finish on their own; the TUI shows the message
     // in its status line, and Desktop beside the goal's chat composer.
@@ -2811,9 +2827,10 @@ function createApp(saved?: Preferences) {
     if (item.type === "assets.updated" || item.type === "configuration.reloaded")
       void catalogs().catch(showError);
     if (
-      ["thread.reverted", "thread.unreverted", "thread.compacted"].includes(
-        item.type,
-      ) &&
+      (replaced ||
+        ["thread.reverted", "thread.unreverted", "thread.compacted"].includes(
+          item.type,
+        )) &&
       "threadId" in item &&
       item.threadId === state.selected
     ) {
