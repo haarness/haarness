@@ -641,8 +641,8 @@ The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.
 From the moment it begins, the server starts no turn: a message sent then, or
 one that was waiting while a turn's input closed, is refused with `503`
-`server_stopping` (`retryable: true`, `details.reason` `server_stopping`) and
-can be sent again under its `requestId` once the server is back. A message for
+`server_stopping` (`retryable: true`, `details.reason` `server_stopping`,
+"Haarness is shutting down. Send it again in a moment.") and can be sent again under its `requestId` once the server is back. A message for
 the queue stays queued, and a background command's or subagent's result that
 arrives then is kept as one its chat refused (see above), "(Haarness is shutting
 down)" in its notice.

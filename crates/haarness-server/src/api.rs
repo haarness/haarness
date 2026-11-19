@@ -3853,7 +3853,7 @@ mod failure_tests {
         let error = CoreError::Refused(Box::new(haarness_core::Refusal {
             reason: haarness_protocol::RefusalReason::ServerStopping,
             path: None,
-            message: haarness_core::SERVER_STOPPING.into(),
+            message: haarness_core::SERVER_STOPPING_RETRY.into(),
         }));
         assert_eq!(
             super::failure_parts(&error),
@@ -3864,7 +3864,10 @@ mod failure_tests {
             )
         );
         let body = message(ApiFailure::from(error)).await;
-        assert_eq!(body["message"], "Haarness is shutting down");
+        assert_eq!(
+            body["message"],
+            "Haarness is shutting down. Send it again in a moment."
+        );
         assert_eq!(body["details"]["reason"], "server_stopping");
     }
 }

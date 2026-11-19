@@ -288,7 +288,7 @@ try:
     assert answer.status == 503, (answer.status, said)
     assert said.get("code") == "server_stopping" and said.get("retryable") is True, said
     assert said.get("details", {}).get("reason") == "server_stopping", said
-    assert said.get("message") == "Haarness is shutting down", said
+    assert said.get("message") == "Haarness is shutting down. Send it again in a moment.", said
     until(lambda: not daemon_pids(), "the stopped daemon is still listed", timeout=60)
     connect()
     texts = [item["data"]["text"] for item in api(f"/threads/{closing}/items")

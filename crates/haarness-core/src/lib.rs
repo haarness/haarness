@@ -125,9 +125,12 @@ pub const UNREAD_WHILE_WORKING: &str =
 pub const CHAT_BUSY: &str = "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.";
 
 /// Why a server that has begun to shut down refuses a new turn (with
-/// [`haarness_protocol::RefusalReason::ServerStopping`]): read by people as
-/// a send's error, and in the notice of a background result it keeps.
+/// [`haarness_protocol::RefusalReason::ServerStopping`]), as the notice of a
+/// background result it keeps names it.
 pub const SERVER_STOPPING: &str = "Haarness is shutting down";
+
+/// What a request the shutdown refused answers: why, and what to do.
+pub const SERVER_STOPPING_RETRY: &str = "Haarness is shutting down. Send it again in a moment.";
 
 /// Why the server refuses to let a chat's agents do more without asking when
 /// the change comes from a program that runs for an agent (an agent's

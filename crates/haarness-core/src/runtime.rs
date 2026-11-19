@@ -737,7 +737,7 @@ fn server_stopping() -> CoreError {
     CoreError::Refused(Box::new(crate::Refusal {
         reason: haarness_protocol::RefusalReason::ServerStopping,
         path: None,
-        message: crate::SERVER_STOPPING.into(),
+        message: crate::SERVER_STOPPING_RETRY.into(),
     }))
 }
 
@@ -2274,6 +2274,8 @@ pub fn prompt_blocked(turn_error: &str) -> Option<&str> {
 #[must_use]
 pub fn refusal_reason(error: &CoreError) -> String {
     match error {
+        // A notice names the reason; what to do is its own.
+        error if is_server_stopping(error) => crate::SERVER_STOPPING.into(),
         CoreError::Invalid(reason)
         | CoreError::Conflict(reason)
         | CoreError::NotFound(reason)
