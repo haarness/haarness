@@ -3906,15 +3906,41 @@ impl Tool for BuiltinTool {
                     )));
                 }
                 let pattern = string(&args, "pattern")?;
+                // `src/**/*.{ts,tsx}` is a walk for each alternative: the glob
+                // crate has no braces, and read as written it finds nothing.
+                let alternatives = crate::bounded_glob::alternatives(pattern).map_err(|error| {
+                    CoreError::Invalid(format!("glob pattern `{pattern}` is not valid: {error}"))
+                })?;
                 // A `..` would leave the folder the outside-folder check
                 // judged; the folder is given as `path` instead.
-                if climbs(pattern) {
+                if alternatives.iter().any(|alternative| climbs(alternative)) {
                     return Err(CoreError::Invalid(
                         "a glob pattern cannot contain `..`; pass the folder to search as path"
                             .into(),
                     ));
                 }
-                let pattern = root.join(pattern).to_string_lossy().into_owned();
+                // Checked before the folder is joined to it, so a mistake is
+                // named where the model wrote it.
+                for alternative in &alternatives {
+                    if let Err(error) = glob::Pattern::new(alternative) {
+                        return Err(invalid_glob(pattern, alternative, &error));
+                    }
+                }
+                // The folder matches itself alone, `[slug]` and all.
+                let base = crate::bounded_glob::literal(&root);
+                let patterns: Vec<String> = alternatives
+                    .iter()
+                    .map(|alternative| {
+                        let path = Path::new(alternative);
+                        if path.has_root() || path.is_absolute() {
+                            root.join(path)
+                        } else {
+                            Path::new(&base).join(path)
+                        }
+                        .to_string_lossy()
+                        .into_owned()
+                    })
+                    .collect();
                 let workspace = haarness_core::paths::canonicalize(&context.workspace)
                     .unwrap_or_else(|_| context.workspace.clone());
                 // A file a `read` rule denies is left out like a secret one.
@@ -3931,7 +3957,7 @@ impl Tool for BuiltinTool {
                 // at and at one of folder entries read.
                 let walk = tokio::task::spawn_blocking(move || {
                     glob_walk(
-                        &pattern,
+                        &patterns,
                         &GlobScope {
                             root,
                             workspace,
@@ -5417,10 +5443,13 @@ struct GlobScope {
     named: PathBuf,
 }
 
-/// Walk `pattern` (already joined to the scope's root) within `limits`.
-/// Runs synchronously; the caller keeps it off the async workers.
+/// Walk `patterns` (the alternatives of one pattern, each already joined to
+/// the scope's root) one after another within `limits`, which they share.
+/// A path two of them match is listed once, and the paths of several come
+/// in the order one walk lists them. Runs synchronously; the caller keeps
+/// it off the async workers.
 fn glob_walk(
-    pattern: &str,
+    patterns: &[String],
     scope: &GlobScope,
     secrets: &SecretFilter,
     cancel: &tokio_util::sync::CancellationToken,
@@ -5428,70 +5457,107 @@ fn glob_walk(
 ) -> CoreResult<GlobFound> {
     let mut folders = HashMap::<PathBuf, bool>::new();
     let mut found = GlobFound::default();
-    let stop = cancel.clone();
-    let mut walk = crate::bounded_glob::Walk::new(pattern)
-        .map_err(tool_error)?
-        .linked_entries(limits.entries)
-        .stop_when(move || stop.is_cancelled());
-    for (looked, path) in walk.by_ref().enumerate() {
-        if cancel.is_cancelled() {
-            return Err(CoreError::Cancelled);
+    // Each path listed, with what the output says of it.
+    let mut listed = Vec::<(PathBuf, String)>::new();
+    let mut seen = (patterns.len() > 1).then(std::collections::HashSet::<PathBuf>::new);
+    let mut looked = 0;
+    let mut linked_read = 0;
+    for pattern in patterns {
+        let stop = cancel.clone();
+        let mut walk = crate::bounded_glob::Walk::new(pattern)
+            .map_err(tool_error)?
+            .linked_entries(limits.entries.saturating_sub(linked_read))
+            .stop_when(move || stop.is_cancelled());
+        for path in walk.by_ref() {
+            if cancel.is_cancelled() {
+                return Err(CoreError::Cancelled);
+            }
+            if listed.len() == 10_000 {
+                found.partial = true;
+                break;
+            }
+            if looked == limits.matches {
+                found.partial = true;
+                found.stopped = true;
+                break;
+            }
+            if let Some(seen) = seen.as_mut()
+                && !seen.insert(path.clone())
+            {
+                continue;
+            }
+            looked += 1;
+            // A part starting with `.`, such as `.*`, also matches `.` and `..`.
+            if !path.strip_prefix(&scope.root).is_ok_and(|relative| {
+                !relative
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir)
+            }) {
+                continue;
+            }
+            // `**` follows linked folders (never one back up the tree): a match
+            // in a folder a link takes out of the project and the searched folder
+            // is left out, as a list of that folder would ask first.
+            let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
+            let inside = *folders.entry(parent).or_insert_with_key(|parent| {
+                haarness_core::paths::canonicalize(parent).is_ok_and(|real| {
+                    real.starts_with(&scope.root) || real.starts_with(&scope.workspace)
+                })
+            });
+            if !inside {
+                found.skipped.outside += 1;
+                continue;
+            }
+            // `*` matches dotfiles and `**` follows linked folders, so each file
+            // is checked by where it really leads as well.
+            if !path.is_dir()
+                && let Some(hidden) = secrets.hides(&path)
+            {
+                found.skipped.count(hidden);
+                continue;
+            }
+            // Relative with `/`, as grep and the file listing write it (Windows
+            // writes `\\`); a path outside the folder as the system does.
+            let value = match path.strip_prefix(&scope.named) {
+                Ok(relative) if cfg!(windows) => relative.to_string_lossy().replace('\\', "/"),
+                Ok(relative) => relative.display().to_string(),
+                Err(_) => path.display().to_string(),
+            };
+            listed.push((path, value));
         }
-        if found.values.len() == 10_000 {
-            found.partial = true;
+        linked_read += walk.entries_read();
+        match walk.cut() {
+            Some(crate::bounded_glob::Cut::Stopped) => return Err(CoreError::Cancelled),
+            Some(crate::bounded_glob::Cut::Large) => {
+                found.partial = true;
+                found.large = true;
+            }
+            None => {}
+        }
+        if found.partial {
             break;
         }
-        if looked == limits.matches {
-            found.partial = true;
-            found.stopped = true;
-            break;
-        }
-        // A part starting with `.`, such as `.*`, also matches `.` and `..`.
-        if !path.strip_prefix(&scope.root).is_ok_and(|relative| {
-            !relative
-                .components()
-                .any(|part| part == std::path::Component::ParentDir)
-        }) {
-            continue;
-        }
-        // `**` follows linked folders (never one back up the tree): a match
-        // in a folder a link takes out of the project and the searched folder
-        // is left out, as a list of that folder would ask first.
-        let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
-        let inside = *folders.entry(parent).or_insert_with_key(|parent| {
-            haarness_core::paths::canonicalize(parent).is_ok_and(|real| {
-                real.starts_with(&scope.root) || real.starts_with(&scope.workspace)
-            })
-        });
-        if !inside {
-            found.skipped.outside += 1;
-            continue;
-        }
-        // `*` matches dotfiles and `**` follows linked folders, so each file
-        // is checked by where it really leads as well.
-        if !path.is_dir()
-            && let Some(hidden) = secrets.hides(&path)
-        {
-            found.skipped.count(hidden);
-            continue;
-        }
-        // Relative with `/`, as grep and the file listing write it (Windows
-        // writes `\\`); a path outside the folder as the system does.
-        found.values.push(match path.strip_prefix(&scope.named) {
-            Ok(relative) if cfg!(windows) => relative.to_string_lossy().replace('\\', "/"),
-            Ok(relative) => relative.display().to_string(),
-            Err(_) => path.display().to_string(),
-        });
     }
-    match walk.cut() {
-        Some(crate::bounded_glob::Cut::Stopped) => return Err(CoreError::Cancelled),
-        Some(crate::bounded_glob::Cut::Large) => {
-            found.partial = true;
-            found.large = true;
-        }
-        None => {}
+    if seen.is_some() {
+        listed.sort_by(|(first, _), (second, _)| first.cmp(second));
     }
+    found.values = listed.into_iter().map(|(_, value)| value).collect();
     Ok(found)
+}
+
+/// A pattern the glob crate cannot read, named as the model wrote it: the
+/// alternative of its braces at fault too, when it has several.
+fn invalid_glob(pattern: &str, alternative: &str, error: &glob::PatternError) -> CoreError {
+    let within = if alternative == pattern {
+        String::new()
+    } else {
+        format!(" (its alternative `{alternative}`)")
+    };
+    CoreError::Invalid(format!(
+        "glob pattern `{pattern}` is not valid{within}: {} at character {}",
+        error.msg,
+        error.pos + 1
+    ))
 }
 
 /// Ends a glob's output saying it stopped at its budget, so an empty or short
@@ -10286,10 +10352,24 @@ export default workflow({
         let cancel = CancellationToken::new();
         // Every folder reached without a link is read whatever the budget, as on a
         // repository far larger than it; only the linked folder is cut.
-        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(0)).unwrap();
+        let found = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits_entries(0),
+        )
+        .unwrap();
         assert!(found.large && found.partial && !found.stopped);
         assert_eq!(found.values, ["a.txt", "b/c.txt", "d/e.txt"]);
-        let all = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(100)).unwrap();
+        let all = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits_entries(100),
+        )
+        .unwrap();
         assert!(!all.large && !all.partial);
         assert_eq!(
             all.values,
@@ -10334,16 +10414,36 @@ export default workflow({
         let pattern = workspace.join("**/*").to_string_lossy().into_owned();
         let cancel = CancellationToken::new();
         // Matches left out count against the budget too.
-        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits(10)).unwrap();
+        let found = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits(10),
+        )
+        .unwrap();
         assert!(found.stopped && found.partial);
         assert!(found.skipped.outside >= 7, "{}", found.skipped.outside);
         assert!(found.values.len() + found.skipped.outside <= 10);
-        let everything = glob_walk(&pattern, &scope, &secrets, &cancel, limits(1_000)).unwrap();
+        let everything = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits(1_000),
+        )
+        .unwrap();
         assert!(!everything.stopped && !everything.partial);
         assert_eq!(everything.skipped.outside, 30);
         cancel.cancel();
         assert!(matches!(
-            glob_walk(&pattern, &scope, &secrets, &cancel, limits(1_000)),
+            glob_walk(
+                std::slice::from_ref(&pattern),
+                &scope,
+                &secrets,
+                &cancel,
+                limits(1_000)
+            ),
             Err(CoreError::Cancelled)
         ));
         let stopped = with_stop(output(String::new()), 10);
@@ -11472,6 +11572,109 @@ export default workflow({
             .await
             .unwrap();
         assert_eq!(none.text, "No files found");
+    }
+
+    /// `src/**/*.{ts,tsx}`, as models write it, answered "No files found":
+    /// the glob crate has no braces. Each alternative is walked now.
+    #[tokio::test]
+    async fn a_glob_with_brace_alternatives_finds_each_of_them() {
+        let (root, _) = read_fixture("README.md", b"# app\n");
+        for file in [
+            "src/b.tsx",
+            "src/a.ts",
+            "src/lib/c.ts",
+            "src/lib/d.js",
+            "test/e.ts",
+            "a{b",
+            "{x}",
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        let glob = |pattern: &str| {
+            let root = root.clone();
+            let args = json!({"pattern": pattern});
+            async move { edit_in(&root, "glob", args).await }
+        };
+        // In the order one walk would list them, each once.
+        let found = glob("src/**/*.{ts,tsx}").await.unwrap();
+        assert_eq!(found.text, "src/a.ts\nsrc/b.tsx\nsrc/lib/c.ts");
+        let found = glob("{src,test}/**/*.{ts,t{s,s}x}").await.unwrap();
+        assert_eq!(found.text, "src/a.ts\nsrc/b.tsx\nsrc/lib/c.ts\ntest/e.ts");
+        // Braces with no comma, or left open, are the name as written.
+        assert_eq!(glob("a{b").await.unwrap().text, "a{b");
+        assert_eq!(glob("{x}").await.unwrap().text, "{x}");
+        // An alternative may not climb out of the folder either.
+        let climbs = glob("{..,src}/*.ts").await.unwrap_err().to_string();
+        assert!(climbs.contains("cannot contain `..`"), "{climbs}");
+        let many = glob("{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}").await.unwrap_err();
+        assert_eq!(
+            many.to_string(),
+            CoreError::Invalid(
+                "glob pattern `{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}` is not valid: its {a,b} alternatives stand for more than 32 patterns".into()
+            )
+            .to_string()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A malformed pattern says so, named as the model wrote it, never as
+    /// the folder joined to it nor as files that are not there.
+    #[tokio::test]
+    async fn a_malformed_glob_is_named_as_written() {
+        let (root, _) = read_fixture("visible.ts", b"x\n");
+        let refused = |pattern: &str| {
+            let root = root.clone();
+            let args = json!({"pattern": pattern});
+            async move { edit_in(&root, "glob", args).await.unwrap_err().to_string() }
+        };
+        let unclosed = refused("src/[").await;
+        assert!(
+            unclosed.ends_with(
+                "glob pattern `src/[` is not valid: invalid range pattern at character 5"
+            ),
+            "{unclosed}"
+        );
+        let stars = refused("*.{ts,a***}").await;
+        assert!(
+            stars.contains("glob pattern `*.{ts,a***}` is not valid (its alternative `*.a***`): "),
+            "{stars}"
+        );
+        // A true miss still reads as one.
+        let miss = edit_in(&root, "glob", json!({"pattern": "*.txt"}))
+            .await
+            .unwrap();
+        assert!(miss.text.starts_with("No files found"), "{}", miss.text);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A folder named as a route segment (`app/[slug]`) was read as a
+    /// pattern, a class of one letter, so a glob in it found nothing.
+    #[tokio::test]
+    async fn a_glob_in_a_folder_whose_name_looks_like_a_pattern_finds_its_files() {
+        let (root, _) = read_fixture("README.md", b"# app\n");
+        let folder = root.join("app/[slug]");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("page.tsx"), "x").unwrap();
+        let found = edit_in(
+            &root,
+            "glob",
+            json!({"path": "app/[slug]", "pattern": "*.tsx"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.text, "app/[slug]/page.tsx");
+        // An absolute pattern inside the folder reads as before.
+        let absolute = edit_in(
+            &root,
+            "glob",
+            json!({"pattern": root.join("README.*").to_string_lossy()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(absolute.text, "README.md");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Told to "set replaceAll", Qwen2.5 Coder set it on the other edit and
