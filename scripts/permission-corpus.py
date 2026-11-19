@@ -146,6 +146,11 @@ CORPUS = [
     'unset TMPDIR; echo x > "$TMPDIR/p7.txt"', 'env -u TMPDIR sh -c \'echo x > "$TMPDIR/p8.txt"\'',
     'env -i sh -c \'echo x > "$TMPDIR/p9.txt"\'', 'sudo sh -c \'echo x > "$TMPDIR/p10.txt"\'',
     '. ./settings.sh; echo x > "$TMPDIR/p11.txt"', 'echo x > "${TMPDIR:=$HOME}/p12.txt"',
+    'bash -lc \'rm -rf "$TMPDIR"/*\'', 'sh -l -c \'echo x > "$TMPDIR/n2.txt"\'',
+    'bash --login -c \'echo x > "$TMPDIR/n3.txt"\'', 'zsh -c \'echo x > "$TMPDIR/n4.txt"\'',
+    'bash -ic \'echo x > "$TMPDIR/n5.txt"\' 2>/dev/null', 'exec -l bash -c \'echo x > "$TMPDIR/c3.txt"\'',
+    'if . ./env.sh; then echo x > "$TMPDIR/c1.txt"; fi', 'command . ./env.sh; echo x > "$TMPDIR/c2.txt"',
+    'bash -c \'echo x > "$TMPDIR/ok.txt"\'',
     # Files
     'rm -rf node_modules && npm install', 'rm -rf ~/Library/Caches/foo', 'cat ~/.zshrc', 'cat ../outside/secret',
     'cp .env.example .env', 'mv build dist', 'chmod +x run.sh && ./run.sh', 'bash run.sh', 'sudo rm -rf /tmp/x',

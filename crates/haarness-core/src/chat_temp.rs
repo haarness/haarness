@@ -709,9 +709,10 @@ mod tests {
         age(&folder.join("sub"), old);
         assert!(!unused(), "a new file in reach");
         assert!(recorded().unused_within(IDLE_LIMIT, SystemTime::now(), 1));
-        // A command of the chat starts.
+        // A command of the chat starts: kept, however large.
         assert_eq!(folder_in(&chats, root), Some(folder));
         assert!(!unused());
+        assert!(!recorded().unused_within(IDLE_LIMIT, SystemTime::now(), 1));
     }
 
     /// The folder's path leaves room for the sockets programs make in

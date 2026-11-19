@@ -69,6 +69,12 @@ pub struct ExecutionSettings {
     /// call by the runtime, never configured.
     #[serde(skip)]
     pub temp_folder: Option<std::path::PathBuf>,
+    /// The call's permission read `$TMPDIR`, `$TMP` or `$TEMP` as
+    /// [`Self::temp_folder`]: its command does not run unless it gets the
+    /// folder there, whatever a login profile does. Set per call by the
+    /// runtime, never configured.
+    #[serde(skip)]
+    pub temp_folder_named: bool,
 }
 
 impl Default for ExecutionSettings {
@@ -94,6 +100,7 @@ impl Default for ExecutionSettings {
             shell_call: None,
             root_thread: None,
             temp_folder: None,
+            temp_folder_named: false,
         }
     }
 }

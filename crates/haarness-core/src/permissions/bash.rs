@@ -390,7 +390,18 @@ pub(crate) fn analyze_reading(
     workdir: &Path,
     reading: Reading,
 ) -> BashAnalysis {
-    let _names = LineNames::of(command);
+    let names = LineNames::set(|| names_chat_temp(command));
+    let analysis = read_line(command, workspace, workdir, reading);
+    // A line that runs a shell or text which may set `TMPDIR` again reads
+    // it as without the chat's folder.
+    if names.read_again() {
+        return read_line(command, workspace, workdir, reading);
+    }
+    analysis
+}
+
+/// [`analyze_reading`] in one go.
+fn read_line(command: &str, workspace: &Path, workdir: &Path, reading: Reading) -> BashAnalysis {
     if command.len() > MAX_COMMAND_BYTES {
         let mut analysis = fallback(&clipped(command));
         analysis.unreadable = true;
@@ -2219,8 +2230,12 @@ impl Reader<'_> {
         let input = || stdin.map_or(Input::Unknown, |stdin| stdin_script(stdin, source));
         let name = program_name(&program.value);
         match name.as_str() {
-            "eval" => self.nested(&joined(arguments), depth),
+            "eval" => {
+                note_temp_reset();
+                self.nested(&joined(arguments), depth);
+            }
             "source" | "." => {
+                note_temp_reset();
                 let text = match arguments.first() {
                     Some(first) if first.node.kind() == "process_substitution" => {
                         substituted(first.node, source).map_or(Input::Unknown, Input::Text)
@@ -2345,6 +2360,11 @@ impl Reader<'_> {
             }
             "exec" => {
                 let options = Options::read(arguments, "a", "", &[]);
+                // `-l` makes what it runs a login shell, `-c` empties its
+                // environment.
+                if options.flags.contains(['l', 'c']) {
+                    note_temp_reset();
+                }
                 self.invocation(options.rest, stdin, source, depth);
             }
             "nice" => {
@@ -2442,6 +2462,9 @@ impl Reader<'_> {
                 }
             }
             name if SHELLS.contains(&name) => {
+                if reads_startup_files(name, arguments) {
+                    note_temp_reset();
+                }
                 self.script(shell_script(arguments, input, source), depth);
             }
             _ => {}
@@ -7382,13 +7405,26 @@ const FOLDER_VARIABLES: [&str; 6] = [
 ];
 
 /// The calling chat's own temp folder while a line of it is read (see
-/// [`with_chat_temp`]), and the folders in it the reading reached.
+/// [`with_chat_temp`]), and what the reading did with it.
 struct ChatTemp {
     folder: PathBuf,
-    reached: Vec<PathBuf>,
+    used: TempUse,
     /// Whether `$TMPDIR`, `$TMP` and `$TEMP` name it in the line under way
     /// (see [`names_chat_temp`]).
     names: bool,
+    /// Whether the line under way runs a shell or text that may set them
+    /// again (see [`note_temp_reset`]).
+    resets: bool,
+}
+
+/// What reading a call did with the chat's own temp folder.
+#[derive(Debug, Default)]
+pub(crate) struct TempUse {
+    /// The folders in it the call's paths reach (see [`reached_chat_temp`]).
+    pub(crate) reached: Vec<PathBuf>,
+    /// Whether it read `$TMPDIR`, `$TMP` or `$TEMP` as the folder, so the
+    /// command must get the folder there to be what was checked.
+    pub(crate) named: bool,
 }
 
 thread_local! {
@@ -7404,15 +7440,14 @@ thread_local! {
 /// link in it, another chat's folder) is, as before. Without a folder they
 /// read `$TMPDIR` from the server's environment, as always.
 pub(crate) fn with_chat_temp<T>(folder: Option<&Path>, read: impl FnOnce() -> T) -> T {
-    with_chat_temp_reached(folder, read).0
+    with_chat_temp_use(folder, read).0
 }
 
-/// [`with_chat_temp`], and the folders in the chat's own temp folder that
-/// the reading found its paths in (see [`reached_chat_temp`]).
-pub(crate) fn with_chat_temp_reached<T>(
+/// [`with_chat_temp`], and what the reading did with the folder.
+pub(crate) fn with_chat_temp_use<T>(
     folder: Option<&Path>,
     read: impl FnOnce() -> T,
-) -> (T, Vec<PathBuf>) {
+) -> (T, TempUse) {
     struct Restore(Option<ChatTemp>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -7422,21 +7457,79 @@ pub(crate) fn with_chat_temp_reached<T>(
     }
     let own = folder.map(|folder| ChatTemp {
         folder: folder.to_path_buf(),
-        reached: Vec::new(),
+        used: TempUse::default(),
         names: true,
+        resets: false,
     });
     let previous = CHAT_TEMP.with(|current| current.replace(own));
     let restore = Restore(previous);
     let value = read();
-    let reached = CHAT_TEMP.with(|current| {
+    let used = CHAT_TEMP.with(|current| {
         current
             .borrow_mut()
             .as_mut()
-            .map(|own| std::mem::take(&mut own.reached))
+            .map(|own| std::mem::take(&mut own.used))
             .unwrap_or_default()
     });
     drop(restore);
-    (value, reached)
+    (value, used)
+}
+
+/// Says that the line under way runs something that may set `TMPDIR`,
+/// `TMP` or `TEMP` again after the command's first line set them: text the
+/// line does not show (`source`, `.`, `eval`), or a shell that reads startup
+/// files (see [`reads_startup_files`]). The line is then read again without
+/// the chat's folder (see [`analyze_reading`]).
+fn note_temp_reset() {
+    CHAT_TEMP.with(|own| {
+        if let Some(own) = own.borrow_mut().as_mut() {
+            own.resets = true;
+        }
+    });
+}
+
+/// Whether `shell` (one of [`SHELLS`]), given `arguments`, reads startup
+/// files that may set `TMPDIR` again: zsh and fish always do; bash and the
+/// others when told to be a login or interactive shell (`-l` or `-i` in any
+/// cluster, `--login`, `--interactive`, `--rcfile`, `--init-file`), and bash
+/// also when the server's `BASH_ENV` names a file. Options are read up to the
+/// first word that is none; one only known when it runs counts.
+fn reads_startup_files(shell: &str, arguments: &[Word<'_>]) -> bool {
+    if matches!(shell, "zsh" | "fish") {
+        return true;
+    }
+    if shell == "bash" && std::env::var_os("BASH_ENV").is_some_and(|file| !file.is_empty()) {
+        return true;
+    }
+    let mut words = arguments.iter();
+    while let Some(word) = words.next() {
+        if !word.literal {
+            return true;
+        }
+        let value = word.value.as_str();
+        if value == "--" || !(value.starts_with('-') || value.starts_with('+')) || value.len() < 2 {
+            return false;
+        }
+        if let Some(long) = value.strip_prefix("--") {
+            let name = long.split_once('=').map_or(long, |(name, _)| name);
+            if matches!(name, "login" | "interactive" | "rcfile" | "init-file") {
+                return true;
+            }
+            continue;
+        }
+        let letters = &value[1..];
+        if letters.contains(['l', 'i']) {
+            return true;
+        }
+        // `-c` takes the script, and `-o` and `-O` an option's name.
+        if letters.contains(['c', 'o', 'O']) {
+            words.next();
+            if letters.contains('c') {
+                return false;
+            }
+        }
+    }
+    false
 }
 
 /// Whether `$TMPDIR`, `$TMP` and `$TEMP` in `command` surely hold the chat's
@@ -7445,11 +7538,11 @@ pub(crate) fn with_chat_temp_reached<T>(
 /// or reads a value into one (`TMPDIR=~`, `export`, `unset`, `read`, `for
 /// TMPDIR in`, `printf -v`, `env TMPDIR=`, `${TMPDIR:=…}`), and runs nothing
 /// that hands its commands another environment (`env -i`, `env -u`, `exec
-/// -c`, `sudo`, `doas`, `su`, `pkexec`, `runuser`) or text the line does not
-/// show (`source`, `.`, `eval`). Otherwise the whole line reads them as
-/// before: `$TMPDIR` as the server's own, the others as unknown. It reads
-/// the text, so a word in a string or a comment counts too; that only ever
-/// asks more.
+/// -c`, `sudo`, `doas`, `su`, `pkexec`, `runuser`). Otherwise the whole line
+/// reads them as before: `$TMPDIR` as the server's own, the others as
+/// unknown. It reads the text, so a word in a string or a comment counts
+/// too; that only ever asks more. What the line runs that may set them again
+/// is found as it is read (see [`note_temp_reset`]).
 fn names_chat_temp(command: &str) -> bool {
     use std::sync::LazyLock;
     static PLAIN: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -7459,8 +7552,7 @@ fn names_chat_temp(command: &str) -> bool {
         LazyLock::new(|| regex::Regex::new(r"\b(?:TMPDIR|TMP|TEMP)\b").expect("valid"));
     static ELSEWHERE: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(concat!(
-            r"(?:^|[\s;&|(){}!`])(?:sudo|doas|su|pkexec|runuser|source|eval)(?:\s|$)",
-            r"|(?:^|[;&|(){}!\n]|\b(?:then|do|else)\b)\s*\.\s",
+            r"(?:^|[\s;&|(){}!`])(?:sudo|doas|su|pkexec|runuser)(?:\s|$)",
             r"|\benv\b[^;&|\n]*?\s(?:-[A-Za-z]*[iu]|-(?:\s|$)|--(?:ignore-environment|unset))",
             r"|\bexec\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c",
         ))
@@ -7470,25 +7562,48 @@ fn names_chat_temp(command: &str) -> bool {
 }
 
 /// For as long as a line is read, whether its `$TMPDIR`, `$TMP` and `$TEMP`
-/// name the chat's own temp folder (see [`names_chat_temp`]).
-struct LineNames(Option<bool>);
+/// name the chat's own temp folder (see [`names_chat_temp`]), with what was
+/// noted before it.
+struct LineNames(Option<(bool, bool, bool)>);
 
 impl LineNames {
-    fn of(command: &str) -> Self {
+    fn set(names: impl FnOnce() -> bool) -> Self {
         Self(CHAT_TEMP.with(|own| {
-            own.borrow_mut()
-                .as_mut()
-                .map(|own| std::mem::replace(&mut own.names, names_chat_temp(command)))
+            own.borrow_mut().as_mut().map(|own| {
+                let previous = (own.names, own.resets, own.used.named);
+                own.names = names();
+                own.resets = false;
+                previous
+            })
         }))
+    }
+
+    /// Whether the line just read named the folder although it runs
+    /// something that may set the variables again: then what it noted of
+    /// the names goes, and the line is to be read again without them.
+    fn read_again(&self) -> bool {
+        let Some((_, _, named_before)) = self.0 else {
+            return false;
+        };
+        CHAT_TEMP.with(|own| {
+            let mut own = own.borrow_mut();
+            let Some(own) = own.as_mut().filter(|own| own.names && own.resets) else {
+                return false;
+            };
+            own.names = false;
+            own.used.named = named_before;
+            true
+        })
     }
 }
 
 impl Drop for LineNames {
     fn drop(&mut self) {
-        if let Some(previous) = self.0 {
+        if let Some((names, resets, _)) = self.0 {
             CHAT_TEMP.with(|own| {
                 if let Some(own) = own.borrow_mut().as_mut() {
-                    own.names = previous;
+                    own.names = names;
+                    own.resets = resets;
                 }
             });
         }
@@ -7514,8 +7629,8 @@ pub(crate) fn reached_chat_temp(resolved: &Path, folder: &Path) -> bool {
         let Some(own) = own.as_mut().filter(|own| resolved.starts_with(&own.folder)) else {
             return false;
         };
-        if !own.reached.iter().any(|known| known == folder) {
-            own.reached.push(folder.to_path_buf());
+        if !own.used.reached.iter().any(|known| known == folder) {
+            own.used.reached.push(folder.to_path_buf());
         }
         true
     })
@@ -7531,10 +7646,13 @@ fn folder_variable(text: &str) -> Option<String> {
         .or_else(|| text.strip_prefix('$'))?;
     if crate::chat_temp::VARIABLES.contains(&name)
         && let Some(folder) = CHAT_TEMP.with(|own| {
-            own.borrow()
-                .as_ref()
+            own.borrow_mut()
+                .as_mut()
                 .filter(|own| own.names)
-                .map(|own| own.folder.clone())
+                .map(|own| {
+                    own.used.named = true;
+                    own.folder.clone()
+                })
         })
     {
         return Some(folder.to_string_lossy().into_owned());
@@ -8627,10 +8745,6 @@ mod tests {
             "sudo sh -c 'echo $TMPDIR'",
             "doas sh -c 'echo $TMPDIR'",
             "su -c 'echo $TMPDIR'",
-            ". ./env.sh; echo $TMPDIR",
-            "true && . env.sh",
-            "source env.sh",
-            "eval \"$x\"; echo $TMPDIR",
             "exec -c sh -c 'echo $TMPDIR'",
         ] {
             assert!(!names_chat_temp(setting), "{setting}");

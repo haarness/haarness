@@ -7321,7 +7321,8 @@ impl AgentRuntime {
             *self.repository_rules.lock() = store.load()?;
         }
         let temp_folder = chat_temp_folder(root, name);
-        let plans = chat_ask_plans(name, &arguments, &workspace, temp_folder.as_deref());
+        let (plans, temp_folder_named) =
+            chat_ask_plans_named(name, &arguments, &workspace, temp_folder.as_deref());
         let authorized_external_paths = plans
             .iter()
             .flat_map(|plan| plan.external_paths.iter().cloned())
@@ -7820,6 +7821,7 @@ impl AgentRuntime {
         let mut execution = components.config.execution.clone();
         execution.person_shell = !agent_work;
         execution.temp_folder = temp_folder;
+        execution.temp_folder_named = temp_folder_named;
         execution.chat_home = self.chat_home.then(|| self.workspace.clone());
         if name == "bash"
             && allowed.is_ok()
@@ -14908,7 +14910,8 @@ impl RunnerTask {
             *self.repository_rules.lock() = store.load()?;
         }
         let temp_folder = chat_temp_folder(self.root_thread_id, name);
-        let plans = chat_ask_plans(name, &arguments, &self.workspace, temp_folder.as_deref());
+        let (plans, temp_folder_named) =
+            chat_ask_plans_named(name, &arguments, &self.workspace, temp_folder.as_deref());
         let authorized_external_paths = plans
             .iter()
             .flat_map(|plan| plan.external_paths.iter().cloned())
@@ -15101,6 +15104,7 @@ impl RunnerTask {
         execution.chat_home = self.chat_home.then(|| self.runtime_workspace.clone());
         execution.root_thread = Some(self.root_thread_id);
         execution.temp_folder = temp_folder;
+        execution.temp_folder_named = temp_folder_named;
         if name == "bash"
             && let Some(hooks) = &self.hooks
         {
@@ -20249,17 +20253,30 @@ fn chat_temp_folder(root: ThreadId, name: &str) -> Option<PathBuf> {
 /// (see `bash::with_chat_temp`), and the folders in it the call reaches are
 /// asked about in a group of their own that no ask holds up, so a rule that
 /// refuses them (`"external_directory": {"/tmp/*": "deny"}`) still does.
+#[cfg(test)]
 fn chat_ask_plans(
     name: &str,
     arguments: &serde_json::Value,
     workspace: &Path,
     temp: Option<&Path>,
 ) -> Vec<AskPlan> {
-    let (mut plans, reached) = crate::permissions::bash::with_chat_temp_reached(temp, || {
+    chat_ask_plans_named(name, arguments, workspace, temp).0
+}
+
+/// [`chat_ask_plans`], and whether the call was read with `$TMPDIR`, `$TMP`
+/// or `$TEMP` as the chat's folder, so its command must get the folder there
+/// whatever a login profile says (see `ExecutionSettings::temp_folder_named`).
+fn chat_ask_plans_named(
+    name: &str,
+    arguments: &serde_json::Value,
+    workspace: &Path,
+    temp: Option<&Path>,
+) -> (Vec<AskPlan>, bool) {
+    let (mut plans, used) = crate::permissions::bash::with_chat_temp_use(temp, || {
         ask_plans(name, arguments, workspace)
     });
     let mut patterns: Vec<String> = Vec::new();
-    for folder in reached {
+    for folder in used.reached {
         let pattern = format!(
             "{}/*",
             folder.to_string_lossy().trim_end_matches(['/', '\\'])
@@ -20280,7 +20297,7 @@ fn chat_ask_plans(
             own_temp: true,
         });
     }
-    plans
+    (plans, used.named)
 }
 
 /// The permission groups for one tool call. Bash commands are shell-parsed:
@@ -27936,11 +27953,58 @@ mod tests {
             "source settings.sh && echo x > $TMPDIR/p15.txt",
             "eval \"$SET\"; echo x > $TMPDIR/p16.txt",
             "exec -c sh -c 'echo x > \"$TMPDIR/p17.txt\"'",
+            // A shell that reads startup files, which may set them again.
+            "bash -lc 'echo x > \"$TMPDIR/n1.txt\"'",
+            "bash -lc 'rm -rf \"$TMPDIR\"/*'",
+            "sh -l -c 'echo x > \"$TMPDIR/n2.txt\"'",
+            "bash --login -c 'echo x > \"$TMPDIR/n3.txt\"'",
+            "zsh -c 'echo x > \"$TMPDIR/n4.txt\"'",
+            "fish -c 'echo x > $TMPDIR/n5.txt'",
+            "bash -ic 'echo x > \"$TMPDIR/n6.txt\"' 2>/dev/null",
+            "bash --rcfile ./rc -c 'echo x > \"$TMPDIR/n7.txt\"'",
+            "exec -l bash -c 'echo x > \"$TMPDIR/n8.txt\"'",
+            "timeout 5 bash -lc 'echo x > \"$TMPDIR/n9.txt\"'",
+            "bash -l <<'EOF'\necho x > \"$TMPDIR/n10.txt\"\nEOF",
+            // Text the line does not show, wherever it runs.
+            "if . ./env.sh; then echo x > \"$TMPDIR/c1.txt\"; fi",
+            "command . ./env.sh; echo x > \"$TMPDIR/c2.txt\"",
+            "builtin source env.sh; echo x > $TMPDIR/c3.txt",
+            "time . ./env.sh; echo x > $TMPDIR/c4.txt",
+            "while . ./env.sh; do echo x > \"$TMPDIR/c5.txt\"; break; done",
+            "true || . ./env.sh; echo x > \"$TMPDIR/c6.txt\"",
         ] {
             assert!(
                 outside("bash", shell(command), Some(&temp)),
                 "{command} does not ask"
             );
+        }
+        // A shell that reads none keeps the folder.
+        if std::env::var_os("BASH_ENV").is_none() {
+            for command in [
+                "bash -c 'echo x > \"$TMPDIR/ok1.txt\"'",
+                "sh -c 'echo x > \"$TMPDIR/ok2.txt\"'",
+                "bash -e -o pipefail -c 'echo x > \"$TMPDIR/ok3.txt\"'",
+            ] {
+                assert!(
+                    !outside("bash", shell(command), Some(&temp)),
+                    "{command} asks"
+                );
+            }
+        }
+        // Whether the command must get the folder in the variables: only
+        // when its check read them as the folder.
+        let named = |command: &str| {
+            super::chat_ask_plans_named("bash", &shell(command), &workspace, Some(&temp)).1
+        };
+        assert!(named("echo x > \"$TMPDIR/a\""));
+        assert!(named("bash -c 'cat $TMPDIR/a'"));
+        for command in [
+            "echo hello",
+            "git status --short",
+            "TMPDIR=~; echo x > $TMPDIR/a",
+            "bash -lc 'echo x > \"$TMPDIR/a\"'",
+        ] {
+            assert!(!named(command), "{command}");
         }
         for command in [
             "export TMP=~; rm -f $TMP/secret.txt",
