@@ -316,23 +316,53 @@ export function themeColors(id: ThemeId, appearance: Appearance): Colors {
   };
 }
 
+/** Selected text: the primary colour at 30%, as `::selection` mixes it in
+ * base.css. The terminal takes it as a colour of its own, since xterm reads
+ * no CSS mixes, and draws the text on it in the text colour: a program's
+ * own colours (red, green, muted) are too faint on it to read. */
+export const SELECTION_SHARE = 0.3;
+function selectionColor(colors: Colors) {
+  const alpha = Math.round(SELECTION_SHARE * 255).toString(16).padStart(2, "0");
+  return colors.primary.slice(0, 7) + alpha;
+}
+
+/** Halfway between two `#rrggbb` colours. */
+function halfway(a: string, b: string) {
+  return (
+    "#" +
+    [1, 3, 5]
+      .map((offset) =>
+        Math.round((parseInt(a.slice(offset, offset + 2), 16) + parseInt(b.slice(offset, offset + 2), 16)) / 2)
+          .toString(16)
+          .padStart(2, "0"),
+      )
+      .join("")
+  );
+}
+
 /**
  * The terminal's colours, from the palette's roles. Programs take ANSI black
  * to be dark and white to be light whatever the background: a program that
  * knows it runs on a light terminal writes black text (`ESC [30m`), and
  * black on white (`ESC [30;47m`) marks a status line or a badge. So black is
  * the page in dark and the text in light, and white the other way round.
+ * Cyan is a teal halfway between the palette's green and blue, never the
+ * text colour, so cyan output (a diff's hunk lines, `ls` links) stands out.
  */
 export function terminalTheme(id: ThemeId, appearance: Appearance) {
   const colors = themeColors(id, appearance);
   const dark = appearance === "dark";
   const black = dark ? colors.page : colors.text;
   const white = dark ? colors.text : colors.raised;
+  const cyan = halfway(colors.green, colors["syntax-property"]);
   return {
     background: colors.page,
     foreground: colors.text,
     cursor: colors.primary,
-    selectionBackground: colors.selected,
+    // The character under the block cursor.
+    cursorAccent: colors.page,
+    selectionBackground: selectionColor(colors),
+    selectionForeground: colors.text,
     black,
     brightBlack: colors.muted,
     red: colors.danger,
@@ -340,14 +370,14 @@ export function terminalTheme(id: ThemeId, appearance: Appearance) {
     yellow: colors["syntax-number"],
     blue: colors["syntax-property"],
     magenta: colors["syntax-keyword"],
-    cyan: colors.primary,
+    cyan,
     white,
     brightRed: colors.danger,
     brightGreen: colors.green,
     brightYellow: colors["syntax-number"],
     brightBlue: colors["syntax-property"],
     brightMagenta: colors["syntax-keyword"],
-    brightCyan: colors.primary,
+    brightCyan: cyan,
     brightWhite: dark ? colors.text : colors.page,
   };
 }

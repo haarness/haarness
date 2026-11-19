@@ -68,15 +68,30 @@ export function contextMenuItems(
  * The terminal's right-click menu, which the terminal asks main for (see
  * Terminal.tsx) in place of the page's: Copy while text is selected there,
  * which copies that text, and Paste, which the terminal's own field takes and
- * sends to the shell as it does Command/Ctrl+V.
+ * sends to the shell as it does Command/Ctrl+V. Then Clear, which clears the
+ * screen and scrollback but keeps the prompt line, when the terminal asks for
+ * it (not while a full-screen program has the alternate screen); on macOS it
+ * names its key, ⌘K, which main hears itself (`registerAccelerator: false`).
  */
 export function terminalMenuItems(
   selection: string,
-  actions: Pick<ContextMenuActions, "t" | "copy">,
+  actions: Pick<ContextMenuActions, "t" | "copy"> & { clear?: () => void; platform?: string },
 ): MenuItemConstructorOptions[] {
   return [
     ...(selection ? [{ label: actions.t("Copy"), click: () => actions.copy(selection) }] : []),
     { label: actions.t("Paste"), role: "paste" },
+    ...(actions.clear
+      ? [
+          { type: "separator" as const },
+          {
+            label: actions.t("Clear"),
+            click: actions.clear,
+            ...(actions.platform === "darwin"
+              ? { accelerator: "Command+K", registerAccelerator: false }
+              : {}),
+          },
+        ]
+      : []),
   ];
 }
 

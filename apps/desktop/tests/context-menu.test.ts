@@ -181,15 +181,31 @@ test("on macOS the native helper is asked for spellings, with the word after --,
   assert.equal(calls.length, 5);
 });
 
-test("the terminal's menu offers Copy for its selection, then Paste", () => {
+test("the terminal's menu offers Copy for its selection, then Paste, then Clear", () => {
   const done: string[] = [];
   const actions = { t: (key: string) => translate("en", key), copy: (text: string) => done.push(text) };
-  const lines = (items: MenuItemConstructorOptions[]) => items.map((item) => (item.role ? `${item.label} (${item.role})` : item.label));
+  const lines = (items: MenuItemConstructorOptions[]) =>
+    items.map((item) =>
+      item.type === "separator"
+        ? "—"
+        : [item.label, item.role && `(${item.role})`, item.accelerator && `[${item.accelerator}]`].filter(Boolean).join(" "),
+    );
   assert.deepEqual(lines(terminalMenuItems("", actions)), ["Paste (paste)"]);
   const items = terminalMenuItems("npm test\n  src/app.ts", actions);
   assert.deepEqual(lines(items), ["Copy", "Paste (paste)"]);
   (items[0].click as () => void)();
   assert.deepEqual(done, ["npm test\n  src/app.ts"]);
+  // Clear, set apart; on macOS it names ⌘K, which main hears itself, so the
+  // menu never takes the key as its own.
+  const clear = () => done.push("cleared");
+  const mac = terminalMenuItems("", { ...actions, clear, platform: "darwin" });
+  assert.deepEqual(lines(mac), ["Paste (paste)", "—", "Clear [Command+K]"]);
+  assert.equal(mac[2].registerAccelerator, false);
+  (mac[2].click as () => void)();
+  assert.deepEqual(done.at(-1), "cleared");
+  // Elsewhere Ctrl+K is the shell's, and Clear has no key.
+  assert.deepEqual(lines(terminalMenuItems("ls", { ...actions, clear, platform: "linux" })), ["Copy", "Paste (paste)", "—", "Clear"]);
+  assert.equal(translate("de", "Clear"), "Löschen");
 });
 
 // Built by `npm run build` (scripts/build-voice.mjs) on a Mac.
