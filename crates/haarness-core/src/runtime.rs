@@ -21236,6 +21236,7 @@ mod shell_reading_tests {
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
         std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(project.join("src/Prod.ENV"), "TOKEN=x").unwrap();
         std::os::unix::fs::symlink(".env", project.join("notes.txt")).unwrap();
         // Haarness's defaults: shell commands run, `.env` reads ask.
         let defaults = engine(&[]);
@@ -21285,6 +21286,13 @@ mod shell_reading_tests {
             "cat .e*",
             "head -1 .?nv",
             "cat *",
+            // A secret's name in any case: `.ENV` is `.env` on a disk that
+            // ignores case, and `Prod.ENV` is named as one anywhere.
+            "cat .ENV",
+            "grep TOKEN .Env",
+            "cat src/Prod.ENV",
+            "cd src && cat Prod.ENV",
+            "cat src/P*",
         ] {
             assert_eq!(verdict(&defaults, command), Ask, "{command}");
         }
@@ -21313,6 +21321,8 @@ mod shell_reading_tests {
             "du -sh .*",
             "echo .*",
             "printf '%s\\n' .env*",
+            "cat .ENV.EXAMPLE",
+            "ls -la src/Prod.ENV",
         ] {
             assert_eq!(verdict(&defaults, command), Allow, "{command}");
         }

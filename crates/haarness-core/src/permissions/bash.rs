@@ -2862,7 +2862,7 @@ impl Reader<'_> {
         let globbed = complete && unquoted_glob(raw);
         let named = complete
             && reads
-            && value.contains(".env")
+            && holds_env(value)
             && crate::permissions::is_secret_path(Path::new(value));
         let linked = complete && reads && !named && !globbed && is_link(self.from(), raw, value);
         let credential = complete && crate::permissions::may_name_credential_store(value);
@@ -2977,7 +2977,7 @@ impl Reader<'_> {
         }
         for (candidate, link) in found {
             // Its name says it is a secret, or it may be a link to one.
-            let named = candidate.to_string_lossy().contains(".env")
+            let named = holds_env(&candidate.to_string_lossy())
                 && crate::permissions::is_secret_path(&candidate);
             if !named && link == Some(false) {
                 continue;
@@ -3711,11 +3711,21 @@ fn later_stages(node: tree_sitter::Node<'_>) -> Option<std::ops::Range<usize>> {
     None
 }
 
-/// Whether a glob's last part may match a secret's name: its literal end
-/// does not rule one out (`.e*`, `*`, `*.env*`, `*nv`), as `*.rs` does.
+/// Whether a glob's last part may match a secret's name, in any case: its
+/// literal end does not rule one out (`.e*`, `.E*`, `*`, `*.env*`, `*nv`),
+/// as `*.rs` does.
 pub(crate) fn may_match_secret(part: &str) -> bool {
-    let end = part.rsplit(['*', '?', ']']).next().unwrap_or(part);
+    let part = part.to_ascii_lowercase();
+    let end = part.rsplit(['*', '?', ']']).next().unwrap_or(&part);
     end.is_empty() || part.contains("env") || ".env".ends_with(end)
+}
+
+/// Whether `text` holds `.env` in any case, as every secret's name does
+/// (see [`crate::permissions::is_secret_path`]): the cheap test first.
+fn holds_env(text: &str) -> bool {
+    text.as_bytes()
+        .windows(4)
+        .any(|window| window.eq_ignore_ascii_case(b".env"))
 }
 
 /// Whether a word as written holds a glob the shell expands: `*`, `?` or

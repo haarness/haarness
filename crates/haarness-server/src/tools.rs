@@ -9788,6 +9788,56 @@ export default workflow({
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
+    /// A secret's name counts in any case: `.ENV` is `.env` on a disk that
+    /// ignores case, and `PROD.ENV` is named as a secret anywhere.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_tools_skip_secret_names_in_any_case() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-secret-case-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("app")).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&workspace).unwrap();
+        for file in ["PROD.ENV", "app/Local.Env.Local", "C.ENV.EXAMPLE", "d.txt"] {
+            std::fs::write(workspace.join(file), format!("needle {file}\n")).unwrap();
+        }
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |tool: &'static str, args: Value| {
+            let registry = &registry;
+            let context = ToolContext {
+                execution: haarness_core::ExecutionSettings::default(),
+                thread_id: ThreadId::new(),
+                turn_id: TurnId::new(),
+                workspace: workspace.clone(),
+                authorized_external_paths: Vec::new(),
+                cancel: CancellationToken::new(),
+                invoker: None,
+            };
+            async move {
+                registry
+                    .get(tool)
+                    .unwrap()
+                    .execute(args, context)
+                    .await
+                    .unwrap()
+            }
+        };
+        let grep = run("grep", json!({"pattern":"needle"})).await;
+        for kept in ["needle C.ENV.EXAMPLE", "needle d.txt"] {
+            assert!(grep.text.contains(kept), "{kept}: {}", grep.text);
+        }
+        for secret in ["needle PROD.ENV", "needle app/Local.Env.Local"] {
+            assert!(!grep.text.contains(secret), "{secret}: {}", grep.text);
+        }
+        assert_eq!(grep.metadata["skipped"], 2);
+        let glob = run("glob", json!({"pattern":"**/*"})).await;
+        assert!(glob.text.contains("C.ENV.EXAMPLE"), "{}", glob.text);
+        assert!(!glob.text.contains("PROD.ENV"), "{}", glob.text);
+        assert!(!glob.text.contains("Local.Env.Local"), "{}", glob.text);
+        let named = run("grep", json!({"pattern":"needle","path":"PROD.ENV"})).await;
+        assert_eq!(named.metadata["skipped"], 1, "{}", named.text);
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
     /// An agent turn whose rules deny reading `private/*`.
     #[cfg(unix)]
     struct DenyPrivate(PathBuf);

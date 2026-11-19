@@ -305,6 +305,35 @@ async fn parity_secret_reads_follow_the_file_really_opened_and_spare_node_module
         assert!(result.is_error);
         assert!(!result.output.text.contains("secret"));
     }
+    // A secret's name in any case asks too, about the file as it is named.
+    std::fs::write(fixture.0.join("Prod.ENV"), "secret").unwrap();
+    let r = runtime.clone();
+    let id = thread.id;
+    let call = tokio::spawn(async move {
+        r.run_direct_tool(
+            id,
+            "read",
+            json!({"path":"Prod.ENV"}),
+            CancellationToken::new(),
+        )
+        .await
+    });
+    let approval = pending(&runtime).await;
+    assert_eq!(approval.permission, "read");
+    assert_eq!(approval.patterns, vec!["Prod.ENV"]);
+    runtime
+        .reply_permission(
+            &approval.permission_id,
+            PermissionReply {
+                decision: Reply::Reject,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    let result = call.await.unwrap().unwrap();
+    assert!(result.is_error);
+    assert!(!result.output.text.contains("secret"));
     // Search tools never ask; they leave the secret out and say so.
     let result = runtime
         .run_direct_tool(

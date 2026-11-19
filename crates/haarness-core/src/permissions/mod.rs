@@ -483,7 +483,8 @@ const PATH_PERMISSIONS: [&str; 3] = ["read", "edit", "list"];
 /// names them) holds no secret. Packages ship `.env` files, often as test
 /// fixtures, so a file inside a `node_modules` folder is read without
 /// asking; `*` crosses `/`, so the two allows cover such a folder at any
-/// depth, in relative and absolute paths alike.
+/// depth, in relative and absolute paths alike. They name a path whatever
+/// its case (see [`is_secret_rule`]).
 const SECRET_READ_RULES: [(&str, PermissionDecision); 8] = [
     ("*.env", PermissionDecision::Ask),
     ("*.env.*", PermissionDecision::Ask),
@@ -534,11 +535,13 @@ fn is_exact_rule(pattern: &str) -> bool {
 /// and `..` are resolved lexically. Search tools leave such a secret-named
 /// file out and only say how many they left out; an explicit read of one
 /// still asks. Configured rules play no part, so every search hides the same
-/// files.
+/// files. Case plays none either, on every system: on a disk that ignores
+/// it (macOS's and Windows' by default) `.ENV` is the file `.env`, and
+/// `Prod.Env.Local` is named as a secret anywhere.
 #[must_use]
 pub fn is_secret_path(path: &Path) -> bool {
     let path = normalize_absolute(path);
-    let path = path.to_string_lossy();
+    let path = path.to_string_lossy().to_ascii_lowercase();
     SECRET_READ_RULES
         .iter()
         .rfind(|(pattern, _)| wildcard_match(pattern, &path))
@@ -1107,8 +1110,49 @@ fn tool_denial<'a>(
 /// Whether `rule` covers `operation`, as written or, for a path rule, by the
 /// file's other spelling: a relative rule meets the project-relative path and
 /// an absolute rule the absolute one. A rule starting with `*` (the built-in
-/// secret rules) or `~` matches as written, so it means what it always did.
+/// secret rules) or `~` matches as written, so it means what it always did;
+/// a secret rule also names the path in any case ([`is_secret_rule`]).
 fn rule_names(
+    rule: &PermissionRule,
+    operation: &str,
+    spellings: &[(String, bool)],
+    real_folders: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    if names_as_written(rule, operation, spellings, real_folders) {
+        return true;
+    }
+    if !operation.starts_with("read:")
+        || !is_secret_rule(rule)
+        || !operation.bytes().any(|byte| byte.is_ascii_uppercase())
+    {
+        return false;
+    }
+    let spellings: Vec<(String, bool)> = spellings
+        .iter()
+        .map(|(spelled, absolute)| (spelled.to_ascii_lowercase(), *absolute))
+        .collect();
+    names_as_written(
+        rule,
+        &operation.to_ascii_lowercase(),
+        &spellings,
+        real_folders,
+    )
+}
+
+/// Whether `rule` is one of the built-in `read` rules for secrets
+/// ([`SECRET_READ_RULES`]), Haarness's or the same pattern configured: it
+/// names a path in any case, as [`is_secret_path`] reads one, so `.ENV`
+/// asks as `.env` does and a configured `"*.env": "deny"` refuses it too.
+fn is_secret_rule(rule: &PermissionRule) -> bool {
+    rule.pattern.strip_prefix("read:").is_some_and(|pattern| {
+        SECRET_READ_RULES
+            .iter()
+            .any(|(secret, _)| *secret == pattern)
+    })
+}
+
+/// [`rule_names`] with the operation as written.
+fn names_as_written(
     rule: &PermissionRule,
     operation: &str,
     spellings: &[(String, bool)],
@@ -2032,6 +2076,40 @@ mod tests {
             configured.evaluate("read:node_modules/bottleneck/.env"),
             PermissionDecision::Deny
         );
+        // A secret's name in any case asks (on a disk that ignores case,
+        // `.ENV` is `.env`), and a configured rule of the same pattern
+        // covers it too; a template stays readable in any case. An answer
+        // for the file as it is spelled still opens it.
+        for path in [".ENV", "/project/app/Prod.Env.Local", "src/.Env"] {
+            assert_eq!(
+                engine.evaluate(&format!("read:{path}")),
+                PermissionDecision::Ask,
+                "{path}"
+            );
+            assert_eq!(
+                configured.evaluate(&format!("read:{path}")),
+                if path.ends_with("Local") {
+                    PermissionDecision::Ask
+                } else {
+                    PermissionDecision::Deny
+                },
+                "{path}"
+            );
+        }
+        assert_eq!(
+            engine.evaluate("read:/project/.ENV.EXAMPLE"),
+            PermissionDecision::Allow
+        );
+        let mut answered = PermissionEngine::build_defaults();
+        answered.approve_always("read:/project/app/Prod.Env.Local");
+        assert_eq!(
+            answered.evaluate("read:/project/app/Prod.Env.Local"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            answered.evaluate("read:/project/app/prod.env.local"),
+            PermissionDecision::Ask
+        );
         assert_eq!(
             engine.evaluate("external_directory:/tmp/*"),
             PermissionDecision::Ask
@@ -2068,12 +2146,39 @@ mod tests {
             "node_modules/pkg/.env",
             "/project/a/node_modules/pkg/.env.local",
             "mynode_modules/.env",
+            // Whatever the case of the name.
+            ".ENV",
+            ".Env",
+            "app/Prod.Env.Local",
+            ".ENV.LOCAL",
+            "/Project/App/.env.PRODUCTION",
+            "C.ENV.EXAMPLE",
+            ".env.Sample",
+            "Node_Modules/pkg/E.ENV",
+            "D.TXT",
         ] {
             assert_eq!(
                 is_secret_path(Path::new(path)),
                 engine.evaluate(&format!("read:{path}")) == PermissionDecision::Ask,
                 "{path}"
             );
+        }
+        for path in [
+            ".ENV",
+            ".Env",
+            "app/Prod.Env.Local",
+            ".ENV.LOCAL",
+            "x.env.PRODUCTION",
+        ] {
+            assert!(is_secret_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            ".ENV.EXAMPLE",
+            "C.Env.Template",
+            "Node_Modules/pkg/E.ENV",
+            "D.TXT",
+        ] {
+            assert!(!is_secret_path(Path::new(path)), "{path}");
         }
         // `..` is resolved first, so a path that only passes through
         // node_modules is judged by the file it reaches.
