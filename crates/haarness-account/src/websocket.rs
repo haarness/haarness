@@ -6,17 +6,28 @@
 //! security product the system trusts) let every HTTPS request through and
 //! refused remote control with "UnknownIssuer".
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    pin::Pin,
+    sync::{Arc, Mutex, OnceLock},
+    task::{Context, Poll},
+};
 
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::TcpStream,
+    time::Instant,
+};
 use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream,
     tungstenite::{
-        self, client::IntoClientRequest, handshake::client::Response, protocol::WebSocketConfig,
+        self, client::IntoClientRequest, error::UrlError, handshake::client::Response,
+        protocol::WebSocketConfig,
     },
 };
 
 pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// A [`Socket`] that notes when it last heard from the server ([`Heard`]).
+pub type HeardSocket = WebSocketStream<MaybeTlsStream<Heard<TcpStream>>>;
 
 /// Open a WebSocket. A `wss` server's certificate is checked by the
 /// operating system's verifier, as reqwest checks HTTPS; `ws` stays plain.
@@ -28,6 +39,120 @@ where
     R: IntoClientRequest + Unpin,
 {
     connect_with(request, config, platform()?).await
+}
+
+/// Open a WebSocket as [`connect`] does, on a connection that notes when it
+/// last read anything from the server: a socket yields a message only once
+/// the whole of it has arrived, so a large one on a slow link looks like a
+/// silent server to anyone who only counts messages.
+pub async fn connect_heard<R>(
+    request: R,
+    config: Option<WebSocketConfig>,
+) -> Result<(HeardSocket, Response, LastHeard), tungstenite::Error>
+where
+    R: IntoClientRequest + Unpin,
+{
+    let request = request.into_client_request()?;
+    let uri = request.uri();
+    // An IPv6 address comes in brackets, which the connect does not take.
+    let host = uri
+        .host()
+        .ok_or(tungstenite::Error::Url(UrlError::NoHostName))?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_owned();
+    let port = uri
+        .port_u16()
+        .or_else(|| match uri.scheme_str() {
+            Some("wss") => Some(443),
+            Some("ws") => Some(80),
+            _ => None,
+        })
+        .ok_or(tungstenite::Error::Url(UrlError::UnsupportedUrlScheme))?;
+    let tls = platform()?;
+    let tcp = TcpStream::connect((host.as_str(), port)).await?;
+    let heard = LastHeard::now();
+    let stream = Heard {
+        inner: tcp,
+        heard: heard.clone(),
+    };
+    let (socket, response) = tokio_tungstenite::client_async_tls_with_config(
+        request,
+        stream,
+        config,
+        Some(Connector::Rustls(tls)),
+    )
+    .await?;
+    Ok((socket, response, heard))
+}
+
+/// When a [`Heard`] connection last read a byte.
+#[derive(Clone, Debug)]
+pub struct LastHeard(Arc<Mutex<Instant>>);
+impl LastHeard {
+    fn now() -> Self {
+        Self(Arc::new(Mutex::new(Instant::now())))
+    }
+    /// The last time anything arrived, or when the connection opened.
+    #[must_use]
+    pub fn at(&self) -> Instant {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn mark(&self) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+    }
+}
+
+/// A connection that notes in [`LastHeard`] each time it reads something.
+#[derive(Debug)]
+pub struct Heard<S> {
+    inner: S,
+    heard: LastHeard,
+}
+impl<S: AsyncRead + Unpin> AsyncRead for Heard<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let read = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if matches!(read, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            self.heard.mark();
+        }
+        read
+    }
+}
+impl<S: AsyncWrite + Unpin> AsyncWrite for Heard<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 async fn connect_with<R>(
@@ -240,5 +365,39 @@ mod tests {
             Message::Text("hello".into())
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_heard_connection_notes_a_message_still_arriving() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let payload = vec![b'x'; 64 * 1024];
+        let sent = payload.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // One text message, written a piece at a time on a slow link.
+            let mut frame = vec![0x81, 127];
+            frame.extend((sent.len() as u64).to_be_bytes());
+            frame.extend(&sent);
+            for piece in frame.chunks(8 * 1024) {
+                socket.get_mut().write_all(piece).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            socket
+        });
+        let (mut socket, _, heard) = connect_heard(url.as_str(), None).await.unwrap();
+        let opened = heard.at();
+        // Nothing whole has arrived yet, but the connection has heard it.
+        let early =
+            tokio::time::timeout(std::time::Duration::from_millis(450), socket.next()).await;
+        assert!(early.is_err(), "{early:?}");
+        assert!(heard.at() >= opened + std::time::Duration::from_millis(200));
+        assert_eq!(
+            socket.next().await.unwrap().unwrap(),
+            Message::Text(String::from_utf8(payload).unwrap().into())
+        );
+        drop(server.await.unwrap());
     }
 }

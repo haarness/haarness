@@ -491,18 +491,25 @@ impl ApiClient {
     }
 
     /// Whether this client sends the files it attaches itself, read from
-    /// this computer, as data URLs; otherwise the server reads an attached
-    /// path from its own disk.
+    /// this computer, as data URLs, and to a server reached directly or to
+    /// another computer through Haarness Cloud's relay; otherwise the server
+    /// reads an attached path from its own disk.
     #[must_use]
-    pub fn uploads_attachments(&self) -> bool {
-        self.upload_attachments
+    pub fn uploads(&self) -> crate::media::Uploads {
+        if !self.upload_attachments {
+            crate::media::Uploads::No
+        } else if relayed(&self.endpoint().base) {
+            crate::media::Uploads::Relayed
+        } else {
+            crate::media::Uploads::Direct
+        }
     }
 
     async fn attachments(&self, sources: Vec<String>) -> Result<Vec<String>> {
-        if !self.upload_attachments {
-            return Ok(sources);
+        match self.uploads() {
+            crate::media::Uploads::No => Ok(sources),
+            uploads => crate::media::inline_sources(sources, uploads).await,
         }
-        crate::media::inline_sources(sources).await
     }
 
     fn endpoint(&self) -> ApiEndpoint {
@@ -2483,8 +2490,7 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
     let said = field("message")
         .or_else(|| field("error"))
         .or(plain.as_deref());
-    let relayed = path.contains("/remote-hosts/") || path.contains("/remote-sessions/");
-    let message = match refusal_words(status, code.as_deref(), said, relayed) {
+    let message = match refusal_words(status, code.as_deref(), said, relayed(&path)) {
         Some(words) => {
             let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
             let detail = compact.chars().take(512).collect::<String>();
@@ -2510,6 +2516,12 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
         path: detail("path"),
     }
     .into())
+}
+
+/// Whether a request to `url` (or a path) goes through Haarness Cloud's
+/// relay to another of your computers.
+fn relayed(url: &str) -> bool {
+    url.contains("/remote-hosts/") || url.contains("/remote-sessions/")
 }
 
 /// Failures in plain words: the same words Desktop and the phones use.
@@ -2742,6 +2754,23 @@ mod tests {
         ApiClient, ApiEndpoint, EndpointCredentials, EndpointResolver, REVIEW_TIMEOUT, ServerAuth,
         SubscriptionEvent, compatible_server_info, parse_sse_frame, review_error,
     };
+
+    #[test]
+    fn a_client_says_how_the_files_it_attaches_reach_the_server() {
+        use crate::media::Uploads;
+        let local = ApiClient::new("http://127.0.0.1:1", "token").unwrap();
+        assert_eq!(local.uploads(), Uploads::No);
+        assert_eq!(local.with_attachment_uploads().uploads(), Uploads::Direct);
+        for relayed in [
+            "https://haarness.ai/api/v1/remote-hosts/h1/runtime/v1/host/workspaces/w1",
+            "https://haarness.ai/api/v1/remote-sessions/s1/runtime",
+        ] {
+            let client = ApiClient::new(relayed, "token")
+                .unwrap()
+                .with_attachment_uploads();
+            assert_eq!(client.uploads(), Uploads::Relayed, "{relayed}");
+        }
+    }
 
     /// A review that runs out of time has to name the thing the reader can
     /// change, not the transport that gave up.

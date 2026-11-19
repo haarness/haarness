@@ -8669,7 +8669,7 @@ async fn a_typed_answer_that_did_not_land_comes_back_to_the_prompt() {
         let mut app = asked_free_text(&thread, &["q-typed"]).await;
         let (client, _) = answering_server(thread.id, reply).await;
         type_text(&mut app, "the release branch ", &client).await;
-        app.paste_into_prompt(&paste, false);
+        app.paste_into_prompt(&paste, crate::media::Uploads::No);
         let typed = app.composer.text().to_owned();
         assert!(typed.contains("[#1 pasted 12 lines]"), "{typed}");
         let sent = crate::input::handle_key(
@@ -27655,14 +27655,14 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
 
     app.shell_mode = true;
     app.composer.set_text("open ".into());
-    app.paste_into_prompt(&dropped, false);
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
     assert!(app.attachments.is_empty());
     assert_eq!(app.composer.text(), format!("open {dropped}"));
 
     // Out of shell mode the same drop is an attachment.
     app.shell_mode = false;
     app.composer.clear();
-    app.paste_into_prompt(&dropped, false);
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
     assert_eq!(
         app.attachments,
         vec![dunce::canonicalize(&image).unwrap().display().to_string()]
@@ -27674,7 +27674,7 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
     let readme = root.join("README.md");
     std::fs::write(&readme, "# Notes\n").unwrap();
     app.notice.clear();
-    app.paste_into_prompt(&readme.display().to_string(), false);
+    app.paste_into_prompt(&readme.display().to_string(), crate::media::Uploads::No);
     assert_eq!(app.composer.text(), readme.display().to_string());
     assert!(app.notice.is_empty(), "{}", app.notice);
     assert_eq!(app.attachments.len(), 1);
@@ -27720,7 +27720,7 @@ fn a_drop_of_media_and_other_files_attaches_the_media_and_types_the_rest() {
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
 
     app.composer.set_text_split("compare ", "with the notes");
-    app.paste_into_prompt(&dropped, false);
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
     assert_eq!(
         app.attachments,
         vec![dunce::canonicalize(&image).unwrap().display().to_string()]
@@ -27740,7 +27740,7 @@ fn a_drop_of_media_and_other_files_attaches_the_media_and_types_the_rest() {
     app.notice.clear();
     app.composer.set_text("ls -l ".into());
     let short = format!("{} {} ", as_dropped(&image), as_dropped(&others[0]));
-    app.paste_into_prompt(&short, false);
+    app.paste_into_prompt(&short, crate::media::Uploads::No);
     assert!(app.attachments.is_empty());
     assert_eq!(app.composer.text(), format!("ls -l {short}"));
     assert!(app.notice.is_empty(), "{}", app.notice);
@@ -27778,14 +27778,17 @@ fn a_mixed_drop_over_a_limit_is_reported_and_kept_as_text() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
 
-    app.paste_into_prompt(&dropped, false);
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
     assert!(app.attachments.is_empty());
     assert_eq!(app.composer.expanded_text(), dropped);
     assert_eq!(app.notice, "Attach at most 8 files at once");
 
     // Media alone over the limit are refused whole, as before.
     app.composer.clear();
-    app.paste_into_prompt(&dropped[..dropped.rfind(' ').unwrap()], false);
+    app.paste_into_prompt(
+        &dropped[..dropped.rfind(' ').unwrap()],
+        crate::media::Uploads::No,
+    );
     assert!(app.composer.is_empty());
     assert_eq!(app.notice, "Attach at most 8 files at once");
 
@@ -27814,22 +27817,22 @@ fn dropping_an_attached_file_again_says_it_is_attached_already() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
 
-    app.paste_into_prompt(&as_dropped(&first), false);
+    app.paste_into_prompt(&as_dropped(&first), crate::media::Uploads::No);
     assert_eq!(app.notice, "Attached 1 file · backspace removes");
-    app.paste_into_prompt(&as_dropped(&first), false);
+    app.paste_into_prompt(&as_dropped(&first), crate::media::Uploads::No);
     assert_eq!(app.notice, "Already attached");
     assert_eq!(app.attachments.len(), 1);
     // The other files of such a drop still go in as text.
     app.paste_into_prompt(
         &format!("{} {}", as_dropped(&first), as_dropped(&readme)),
-        false,
+        crate::media::Uploads::No,
     );
     assert_eq!(app.notice, "Already attached");
     assert_eq!(app.composer.text(), as_dropped(&readme));
     // Only what is new is counted.
     app.paste_into_prompt(
         &format!("{} {}", as_dropped(&first), as_dropped(&second)),
-        false,
+        crate::media::Uploads::No,
     );
     assert_eq!(app.notice, "Attached 1 file · backspace removes");
     assert_eq!(app.attachments.len(), 2);
@@ -27838,10 +27841,10 @@ fn dropping_an_attached_file_again_says_it_is_attached_already() {
     app.attachments.clear();
     app.paste_into_prompt(
         &format!("{} {}", as_dropped(&first), as_dropped(&second)),
-        false,
+        crate::media::Uploads::No,
     );
     assert_eq!(app.notice, "2 Dateien angehängt · backspace entfernt");
-    app.paste_into_prompt(&as_dropped(&second), false);
+    app.paste_into_prompt(&as_dropped(&second), crate::media::Uploads::No);
     assert_eq!(app.notice, "Bereits angehängt");
 
     let _ = std::fs::remove_dir_all(root);

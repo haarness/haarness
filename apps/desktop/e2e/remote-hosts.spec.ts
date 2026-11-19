@@ -466,6 +466,78 @@ async function chat(page: Page, text: string) {
   await expect(page.locator(".transcript")).toContainText("Echo: " + text, { timeout: 30000 });
 }
 
+/** Drops a PDF of `mib` MiB, made in the page, on the chat. */
+async function dropPdf(page: Page, name: string, mib: number) {
+  await page.evaluate(({ name, mib }) => {
+    const transfer = new DataTransfer();
+    const bytes = new Uint8Array(Math.round(mib * 1024 * 1024));
+    bytes.set(new TextEncoder().encode("%PDF-1.4\n"));
+    transfer.items.add(new File([bytes], name, { type: "application/pdf" }));
+    const target = document.querySelector(".conversation") ?? document.querySelector(".conversation-empty");
+    target!.dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
+  }, { name, mib });
+}
+
+test("files for another computer stop at what the relay carries, said as they are attached; this computer takes more", async () => {
+  test.setTimeout(240000);
+  const { folders, env, cloud, stop } = await fixture();
+  let app: ElectronApplication | undefined;
+  // Sizes come set apart (FSI … PDI) for right-to-left sentences.
+  const refused = (size: string) =>
+    new RegExp(`The attachments come to \u2068?${size}\u2069?, over the \u2068?11 MiB\u2069? limit for media sent to another computer`);
+  const limit = refused("12 MiB");
+  try {
+    let page: Page;
+    ({ app, page } = await launch(env, folders.local));
+    await page.getByRole("button", { name: "Open another project", exact: true }).click();
+    await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+    const chips = page.locator(".composer-attachments > span");
+    // A project on this computer takes 12 MiB as before.
+    await dropPdf(page, "here.pdf", 12);
+    await expect(page.getByRole("button", { name: "Remove here.pdf", exact: true })).toBeVisible({ timeout: 20000 });
+    await page.getByRole("button", { name: "Remove here.pdf", exact: true }).click();
+    await expect(chips).toHaveCount(0);
+
+    // On Studio, through Cloud: refused as it is dropped, quietly, and the
+    // draft keeps what it held.
+    await openStudio(page, /studio-project/);
+    await dropPdf(page, "scan.pdf", 12);
+    const notice = page.locator(".toast").filter({ hasText: limit });
+    await expect(notice).toBeVisible();
+    await expect(notice).toHaveAttribute("data-tone", "blocked");
+    await expect(page.getByRole("button", { name: "Dismiss error", exact: true })).toHaveCount(0);
+    await expect(chips).toHaveCount(0);
+    await shoot(page, "attach-limit");
+    // What fits goes; more beside it is refused for the total.
+    await dropPdf(page, "notes.pdf", 1);
+    await expect(page.getByRole("button", { name: "Remove notes.pdf", exact: true })).toBeVisible({ timeout: 20000 });
+    await dropPdf(page, "more.pdf", 10.5);
+    await expect(page.locator(".toast").filter({ hasText: refused("11.5 MiB") })).toBeVisible();
+    await expect(chips).toHaveCount(1);
+    // The message goes with what fits.
+    const turns = () => cloud.seen.filter((item) => item.method === "POST" && /\/runtime\/.*\/v1\/threads\/[^/]+\/turns$/.test(item.path)).length;
+    const before = turns();
+    await chat(page, "with notes");
+    expect(turns()).toBe(before + 1);
+    await expect(chips).toHaveCount(0);
+    // In the chat it made, too.
+    await dropPdf(page, "scan.pdf", 12);
+    await expect(page.locator(".toast").filter({ hasText: limit })).toBeVisible();
+    await expect(chips).toHaveCount(0);
+    if (shots) {
+      await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+      await expect(page.locator(".titlebar .host-badge")).toHaveText("على Studio");
+      await dropPdf(page, "scan.pdf", 12);
+      await expect(page.locator(".toast").filter({ hasText: "للوسائط المرسلة إلى حاسوب آخر" })).toBeVisible();
+      await shoot(page, "attach-limit-ar", "light");
+      await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+    }
+  } finally {
+    if (app) await close(app);
+    await stop();
+  }
+});
+
 test("a project server that starts again while its stream follows on is read again, not waited for", async () => {
   test.setTimeout(180000);
   const { folders, env, studioEnv, cloud, stop } = await fixture();

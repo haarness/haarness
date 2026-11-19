@@ -3012,6 +3012,8 @@
   "The attachments come to {size}, over the {limit} limit for media in one message": "Вложения занимают {size} — больше лимита {limit} на медиафайлы в одном сообщении",
   "its images and PDFs would take the message over the 20 MiB limit for media": "его изображения и PDF превысили бы лимит сообщения на медиафайлы в 20 MiB",
   "{name} is {size}, over the {limit} limit for media in one message": "{name} занимает {size} — больше лимита {limit} на медиафайлы в одном сообщении",
+  "The attachments come to {size}, over the {limit} limit for media sent to another computer": "Вложения занимают {size} — больше лимита {limit} на медиафайлы, отправляемые на другой компьютер",
+  "{name} is {size}, over the {limit} limit for media sent to another computer": "{name} занимает {size} — больше лимита {limit} на медиафайлы, отправляемые на другой компьютер",
   "Marketplaces": "Маркетплейсы",
   "Update automatically": "Обновлять автоматически",
   "Update {name} automatically": "Обновлять {name} автоматически",

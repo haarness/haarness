@@ -987,7 +987,10 @@ audio and video together (text files do not count), the most providers take
 inline. Since a stored message is sent again with every later request of its
 chat, turn and queued-input requests refuse more with `400` naming the size and
 the limit ("scan.pdf is 21 MiB, over the 20 MiB limit for media in one
-message"). That includes a message queued to run later (`delivery: "queue"`)
+message"). A server reached through Haarness Cloud's relay is sent less: Cloud
+carries at most 16 MiB in a request (`413` beyond it) and the media go in base64,
+so Desktop and a terminal UI attached through Cloud hold a message's media to
+11 MiB, as the phone apps do, and say so as a file is attached. That includes a message queued to run later (`delivery: "queue"`)
 and the attachments a queue edit adds to one: they are checked when they
 arrive, so a message that could never start never waits at the head of the
 queue. When its turn comes it is not refused for them again: a file that

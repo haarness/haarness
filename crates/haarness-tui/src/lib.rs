@@ -1023,7 +1023,7 @@ async fn run_with_client(
                         if app.permission_focus {
                             app.release_permission_focus(true);
                         }
-                        app.paste_into_prompt(&text, client.uploads_attachments());
+                        app.paste_into_prompt(&text, client.uploads());
                     }
                     TerminalEvent::Mouse(mouse) => {
                         if let Some(terminal) = &mut app.terminal {

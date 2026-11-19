@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { droppedPath, pathText } from "../src/renderer/file-drop";
-import { attachable } from "../src/renderer/media";
+import { attachable, attachmentBytes, checkAttachments, relayAttachmentLimit, relayRefusal } from "../src/renderer/media";
+import { applyLanguage } from "../src/renderer/i18n";
 
 test("a dropped file that is not media is referred to by its path at the caret", () => {
   const workspace = "/Users/me/project";
@@ -39,4 +40,41 @@ test("images, PDFs and other media attach; source code, text and folders do not"
   assert.equal(await attachable(new File(["x"], "a.ts", { type: "video/mp2t" })), false);
   assert.equal(await attachable(new File(["# x"], "a.md", { type: "text/markdown" })), false);
   assert.equal(await attachable(new File([], "folder", { type: "" })), false);
+});
+
+test("files for another computer stop at what the relay carries; a server here takes more", async () => {
+  const pdf = (mib: number) => ({
+    name: "scan.pdf",
+    data: "data:application/pdf;base64," + Buffer.alloc(mib * 1024 * 1024, 1).toString("base64"),
+  });
+  const twelve = [pdf(12)];
+  // This computer's server takes a 12 MiB draft as it is.
+  assert.deepEqual(checkAttachments(twelve), twelve);
+  // Another computer does not, and says what it takes.
+  assert.equal(attachmentBytes(twelve), 12 * 1024 * 1024);
+  // Each size is set apart, so a right-to-left sentence keeps it in one piece.
+  const apart = (size: string) => "\u2068" + size + "\u2069";
+  assert.equal(
+    relayRefusal(attachmentBytes(twelve)),
+    `The attachments come to ${apart("12 MiB")}, over the ${apart("11 MiB")} limit for media sent to another computer`,
+  );
+  assert.equal(relayRefusal(relayAttachmentLimit), undefined);
+  assert.equal(
+    relayRefusal(relayAttachmentLimit + 1),
+    `The attachments come to ${apart("11.1 MiB")}, over the ${apart("11 MiB")} limit for media sent to another computer`,
+  );
+  // In the reader's language, with its own decimal mark.
+  const global = globalThis as { document?: unknown };
+  const saved = global.document;
+  global.document = { documentElement: {} };
+  try {
+    applyLanguage("de");
+    assert.equal(
+      relayRefusal(12.35 * 1024 * 1024),
+      `Die Anhänge umfassen ${apart("12,4 MiB")} und überschreiten damit das Limit von ${apart("11 MiB")} für Medien an einen anderen Computer`,
+    );
+  } finally {
+    applyLanguage("en");
+    global.document = saved;
+  }
 });
