@@ -4077,7 +4077,8 @@ fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
 /// The `GIT_WORK_TREE` values `command` (a command node) sets, by where each
 /// starts: an assignment before its program (`GIT_WORK_TREE=x git …`, also
 /// before a wrapper), and a word `env` or `sudo` sets (`env GIT_WORK_TREE=x
-/// git …`). An empty one sets none.
+/// git …`), or `arch` in its `-e=` (`arch -e=GIT_WORK_TREE=x git …`). An
+/// empty one sets none.
 fn work_tree_settings(command: tree_sitter::Node<'_>, source: &str) -> Vec<(usize, Path_)> {
     const NAME: &str = "GIT_WORK_TREE";
     let mut found = Vec::new();
@@ -4101,6 +4102,8 @@ fn work_tree_settings(command: tree_sitter::Node<'_>, source: &str) -> Vec<(usiz
             let (value, literal) = unquote(child, source);
             // Read as an option's value: `~` there is a name.
             value
+                .strip_prefix("-e=")
+                .unwrap_or(&value)
                 .strip_prefix(NAME)
                 .and_then(|rest| rest.strip_prefix('='))
                 .map(|tree| Path_ {
@@ -4121,8 +4124,9 @@ fn work_tree_settings(command: tree_sitter::Node<'_>, source: &str) -> Vec<(usiz
 /// Whether `node` (with its `parent`) sets `GIT_WORK_TREE` to a value: an
 /// assignment (before a command, on its own, or made by `export`, `declare`,
 /// `local` or `readonly`), `export GIT_WORK_TREE` of a value set elsewhere, a
-/// word a command such as `env` or `sudo` is given (`GIT_WORK_TREE=x`) or
-/// `export` is, quoted or not (`export "GIT_WORK_TREE=x"`), or
+/// word a command such as `env` or `sudo` is given (`GIT_WORK_TREE=x`, or
+/// `arch`'s `-e=GIT_WORK_TREE=x`) or `export` is, quoted or not (`export
+/// "GIT_WORK_TREE=x"`), or
 /// `${GIT_WORK_TREE:=x}`. An empty value sets none (git refuses it), and
 /// reading it (`"$GIT_WORK_TREE"`) or `unset` sets nothing.
 fn sets_work_tree(
@@ -4154,10 +4158,19 @@ fn sets_work_tree(
             && parent.is_some_and(|parent| {
                 matches!(parent.kind(), "command" | "declaration_command")
             })
-            && text(node).trim_start_matches(['"', '\'']).starts_with(NAME) =>
+            && {
+                let quoted = ['"', '\''];
+                let text = text(node).trim_start_matches(quoted);
+                text.strip_prefix("-e=")
+                    .unwrap_or(text)
+                    .trim_start_matches(quoted)
+                    .starts_with(NAME)
+            } =>
         {
             let (value, literal) = unquote(node, source);
             value
+                .strip_prefix("-e=")
+                .unwrap_or(&value)
                 .strip_prefix(NAME)
                 .and_then(|rest| rest.strip_prefix('='))
                 .is_some_and(|rest| !(literal && rest.is_empty()))
@@ -4838,19 +4851,20 @@ fn sed_in_place<'s, 't>(arguments: &'s [Word<'t>]) -> Option<Vec<&'s Word<'t>>> 
 /// The command macOS `arch` runs: the words after its own options, which
 /// it reads one word at a time rather than as getopt does. `-arch`, `-d`
 /// and `-e` take the next word (an architecture, a variable to unset, one
-/// to set); `-c` clears the environment and any other names an
-/// architecture (`-arm64`, `-x86_64`, `-32`). `-h` prints its usage and
-/// runs nothing, as `arch` alone does (it prints the machine's
-/// architecture).
+/// to set) unless it is written in theirs (`-e=A=1`); `-c` clears the
+/// environment and any other names an architecture (`-arm64`, `-x86_64`,
+/// `-32`). A word with an expansion is one too (`-$(uname -m)`): `arch`
+/// refuses an option it does not know, so the program is never one. `-h`
+/// prints its usage and runs nothing, as `arch` alone does (it prints the
+/// machine's architecture).
 fn arch_command<'s, 't>(arguments: &'s [Word<'t>]) -> &'s [Word<'t>] {
     let mut index = 0;
     while let Some(word) = arguments.get(index) {
-        if !word.literal || !word.value.starts_with('-') {
+        if !word.value.starts_with('-') {
             break;
         }
         index += 1;
         match word.value.as_str() {
-            "--" => break,
             "-h" => return &[],
             "-arch" | "-d" | "-e" => index += 1,
             _ => {}
@@ -9842,7 +9856,7 @@ mod readings {
             "arch -x86_64 rm x",
             "arch -arch arm64 rm x",
             "arch -c -d HOME -e A=1 -arm64e rm x",
-            "/usr/bin/arch -32 -- rm x",
+            "/usr/bin/arch -32 rm x",
             "arch rm x",
             "busybox rm x",
             "/bin/rm x",
@@ -11017,6 +11031,8 @@ mod readings {
             "GIT_WORK_TREE=../outside/cache git clean -fdx",
             "env GIT_WORK_TREE=../outside/cache git clean -fdx",
             "sudo GIT_WORK_TREE=../outside/cache git clean -fdx",
+            "arch -arm64 -e GIT_WORK_TREE=../outside/cache git clean -fdx",
+            "arch -arm64 -e=GIT_WORK_TREE=../outside/cache git clean -fdx",
             "cd sub && git --work-tree=../../outside/cache clean -fdx",
             "bash -c 'GIT_WORK_TREE=../outside/cache git clean -fdx'",
         ] {
@@ -11360,8 +11376,17 @@ mod readings {
             format!("arch -arm64 rm -rf {out}/cache"),
             format!("arch -c -e A=1 -arch arm64 sh -c 'rm -rf {out}/cache'"),
             format!("arch -d HOME -x86_64 rm -rf {out}/cache"),
+            format!("arch -$(uname -m) rm -rf {out}/cache"),
         ] {
             assert_eq!(found(&command), vec![placed(&cache)], "{command}");
+        }
+        // An `arch` option with an expansion is still an option: what
+        // follows is its program, not operands of one nobody can name.
+        for command in [
+            "arch -$(uname -m) cp build/app ~/haarness-nosuch/app",
+            "arch \"-$ARCH\" cp build/app ~/haarness-nosuch/app",
+        ] {
+            assert!(found(command).is_empty(), "{command}");
         }
         std::fs::remove_dir_all(root).unwrap();
     }
