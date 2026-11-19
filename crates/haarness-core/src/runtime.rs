@@ -19200,6 +19200,9 @@ struct AskPlan {
     /// for it (see `permissions::bash::BashAnalysis::globbed`): a rule
     /// answers for it only when it covers every name the glob may pick.
     globbed: HashMap<String, String>,
+    /// Folders in the calling chat's own temp folder (see `chat_ask_plans`):
+    /// a rule that refuses them still does, but nothing asks about them.
+    own_temp: bool,
 }
 
 /// What a bash group read from inside its written commands (see
@@ -19466,6 +19469,25 @@ impl AskPlan {
     /// a here-document's operator on its line) is judged as a written
     /// command: an allow for the command it was read from does not cover it.
     fn evaluate(&self, engine: &PermissionEngine, pattern: &str) -> crate::permissions::Evaluation {
+        let evaluation = self.evaluate_rules(engine, pattern);
+        // The chat's own temp folder: what a rule refuses stays refused, and
+        // nothing asks.
+        if self.own_temp && evaluation.decision == PermissionDecision::Ask {
+            return crate::permissions::Evaluation {
+                decision: PermissionDecision::Allow,
+                protected: false,
+                ..evaluation
+            };
+        }
+        evaluation
+    }
+
+    /// [`Self::evaluate`] by the rules alone.
+    fn evaluate_rules(
+        &self,
+        engine: &PermissionEngine,
+        pattern: &str,
+    ) -> crate::permissions::Evaluation {
         let operation = self.operation(pattern);
         let Some(shell) = &self.shell else {
             let evaluation = engine.evaluate_detailed(&operation);
@@ -19692,6 +19714,7 @@ impl AskPlan {
             resolved,
             shell: self.shell,
             globbed: self.globbed,
+            own_temp: self.own_temp,
         }
     }
 }
@@ -20127,6 +20150,7 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
         resolved: Vec::new(),
         shell: None,
         globbed: HashMap::new(),
+        own_temp: false,
     };
     for plan in plans {
         combined
@@ -20220,17 +20244,43 @@ fn chat_temp_folder(root: ThreadId, name: &str) -> Option<PathBuf> {
     }
 }
 
-/// [`ask_plans`] for a call of a chat whose own temp folder is `temp`: a
-/// path in it is no folder outside the project, for the shell and the file
-/// tools alike, and `$TMPDIR`, `$TMP` and `$TEMP` name it (see
-/// `bash::with_chat_temp`).
+/// [`ask_plans`] for a call of a chat whose own temp folder is `temp`, for
+/// the shell and the file tools alike: `$TMPDIR`, `$TMP` and `$TEMP` name it
+/// (see `bash::with_chat_temp`), and the folders in it the call reaches are
+/// asked about in a group of their own that no ask holds up, so a rule that
+/// refuses them (`"external_directory": {"/tmp/*": "deny"}`) still does.
 fn chat_ask_plans(
     name: &str,
     arguments: &serde_json::Value,
     workspace: &Path,
     temp: Option<&Path>,
 ) -> Vec<AskPlan> {
-    crate::permissions::bash::with_chat_temp(temp, || ask_plans(name, arguments, workspace))
+    let (mut plans, reached) = crate::permissions::bash::with_chat_temp_reached(temp, || {
+        ask_plans(name, arguments, workspace)
+    });
+    let mut patterns: Vec<String> = Vec::new();
+    for folder in reached {
+        let pattern = format!(
+            "{}/*",
+            folder.to_string_lossy().trim_end_matches(['/', '\\'])
+        );
+        if !patterns.contains(&pattern) {
+            patterns.push(pattern);
+        }
+    }
+    if !patterns.is_empty() {
+        plans.push(AskPlan {
+            permission: "external_directory".into(),
+            always: patterns.clone(),
+            patterns,
+            external_paths: Vec::new(),
+            resolved: Vec::new(),
+            shell: None,
+            globbed: HashMap::new(),
+            own_temp: true,
+        });
+    }
+    plans
 }
 
 /// The permission groups for one tool call. Bash commands are shell-parsed:
@@ -20263,6 +20313,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
     }
     if matches!(
@@ -20288,6 +20339,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
     }
     if name.starts_with("mac_") {
@@ -20312,6 +20364,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
     }
     if name.starts_with("browser_") {
@@ -20342,6 +20395,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
         let remember = arguments["__browser"]["remember"]
             .as_array()
@@ -20359,6 +20413,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 resolved: Vec::new(),
                 shell: None,
                 globbed: HashMap::new(),
+                own_temp: false,
             });
         }
         if matches!(name, "browser_files_upload" | "browser_files_drop") {
@@ -20407,6 +20462,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
     }
     if matches!(name, "image_generate" | "video_generate") {
@@ -20423,6 +20479,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
     }
     if name == "workflow" {
@@ -20441,6 +20498,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
         if arguments.get("action").and_then(serde_json::Value::as_str) == Some("create") {
             // The new file also meets the rules for where a linked
@@ -20460,6 +20518,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 resolved,
                 shell: None,
                 globbed: HashMap::new(),
+                own_temp: false,
             });
         }
         return plans;
@@ -20559,6 +20618,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 resolved: Vec::new(),
                 shell: None,
                 globbed,
+                own_temp: false,
             });
         }
         if !analysis.patterns.is_empty() {
@@ -20571,6 +20631,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 resolved: Vec::new(),
                 shell: Some(shell),
                 globbed: HashMap::new(),
+                own_temp: false,
             });
         }
         return plans;
@@ -20620,6 +20681,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved,
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         });
     }
     if name == "apply_patch" {
@@ -20657,6 +20719,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                     resolved,
                     shell: None,
                     globbed: HashMap::new(),
+                    own_temp: false,
                 });
                 return plans;
             }
@@ -20669,6 +20732,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         });
         return plans;
     }
@@ -20730,6 +20794,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         resolved,
         shell: None,
         globbed: HashMap::new(),
+        own_temp: false,
     });
     plans
 }
@@ -22827,15 +22892,17 @@ fn external_path_request(
         crate::permissions::resolve_permission_path(workspace, value)
     };
     let root = crate::paths::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    // The chat's own temp folder is no folder outside either (see
-    // `chat_ask_plans`).
-    if path.starts_with(root) || crate::permissions::bash::in_chat_temp(&path) {
+    if path.starts_with(root) {
         return None;
     }
     let directory = match kind {
         ExternalPathKind::Directory => path.as_path(),
         ExternalPathKind::File | ExternalPathKind::Entry => path.parent().unwrap_or(path.as_path()),
     };
+    // The chat's own temp folder is asked about apart (see `chat_ask_plans`).
+    if crate::permissions::bash::reached_chat_temp(&path, directory) {
+        return None;
+    }
     let pattern = format!(
         "{}/*",
         directory.to_string_lossy().trim_end_matches(['/', '\\'])
@@ -27756,14 +27823,15 @@ mod tests {
         }
     }
 
-    /// A chat's own temp folder is no folder outside the project for its
-    /// shell and file tools, by where a path really leads; a way out of it,
-    /// another chat's folder and every other folder outside still ask, and
-    /// without a folder `$TMPDIR` is the server's, as before.
+    /// A chat's own temp folder asks nothing of its shell and file tools, by
+    /// where a path really leads, while a rule that refuses it still does; a
+    /// way out of it, another chat's folder and every other folder outside
+    /// still ask, and without a folder `$TMPDIR` is the server's, as before.
     // POSIX shell text: Windows runs commands in cmd.exe.
     #[cfg(unix)]
     #[test]
     fn a_chat_s_own_temp_folder_is_no_folder_outside_the_project() {
+        use crate::{PermissionDecision, PermissionEngine, PermissionRule};
         let root = std::env::temp_dir().join(format!("haarness-own-temp-{}", uuid::Uuid::now_v7()));
         let workspace = root.join("project");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -27773,10 +27841,40 @@ mod tests {
         std::fs::create_dir_all(temp.join("build")).unwrap();
         std::fs::create_dir_all(&other).unwrap();
         std::os::unix::fs::symlink(&other, temp.join("link")).unwrap();
-        let outside = |name: &str, arguments: serde_json::Value, temp: Option<&std::path::Path>| {
-            super::chat_ask_plans(name, &arguments, &workspace, temp)
+        // Whether the call asks under Haarness's defaults, and whether a
+        // person's deny of the folder that holds the chats' folders refuses it.
+        let mut defaults = PermissionEngine::build_defaults();
+        defaults.set_workspace(&workspace);
+        let mut refusing = PermissionEngine::build_defaults();
+        refusing.set_workspace(&workspace);
+        refusing.add_rule(PermissionRule {
+            pattern: format!("external_directory:{}/*", root.join("chats").display()),
+            decision: PermissionDecision::Deny,
+        });
+        let decided = |engine: &PermissionEngine,
+                       name: &str,
+                       arguments: &serde_json::Value,
+                       temp: Option<&std::path::Path>,
+                       decision: PermissionDecision| {
+            super::chat_ask_plans(name, arguments, &workspace, temp)
                 .iter()
-                .any(|plan| plan.permission == "external_directory")
+                .any(|plan| {
+                    plan.patterns
+                        .iter()
+                        .any(|pattern| plan.evaluate(engine, pattern).decision == decision)
+                })
+        };
+        let outside = |name: &str, arguments: serde_json::Value, temp: Option<&std::path::Path>| {
+            decided(&defaults, name, &arguments, temp, PermissionDecision::Ask)
+        };
+        let refused = |name: &str, arguments: serde_json::Value| {
+            decided(
+                &refusing,
+                name,
+                &arguments,
+                Some(&temp),
+                PermissionDecision::Deny,
+            )
         };
         let shell = |command: &str| json!({ "command": command });
         let shown = temp.display();
@@ -27797,6 +27895,7 @@ mod tests {
                 !outside("bash", shell(&command), Some(&temp)),
                 "{command} asks"
             );
+            assert!(refused("bash", shell(&command)), "{command} is not refused");
         }
         assert!(!outside(
             "bash",
@@ -27834,6 +27933,7 @@ mod tests {
             ),
         ] {
             assert!(!outside(tool, arguments.clone(), Some(&temp)), "{tool}");
+            assert!(refused(tool, arguments.clone()), "{tool} is not refused");
             assert!(outside(tool, arguments, None), "{tool}");
         }
         for (tool, arguments) in [

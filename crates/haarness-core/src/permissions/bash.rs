@@ -7189,14 +7189,15 @@ fn external_dir(
         None => resolve(from, Path::new(target)),
     };
     let workspace = resolve(workspace, Path::new(""));
-    if resolved.starts_with(&workspace) || in_chat_temp(&resolved) {
+    if resolved.starts_with(&workspace) {
         return None;
     }
-    if !complete || resolved.is_dir() {
-        Some(resolved)
+    let folder = if !complete || resolved.is_dir() {
+        resolved.clone()
     } else {
-        Some(resolved.parent().unwrap_or(&resolved).to_path_buf())
-    }
+        resolved.parent().unwrap_or(&resolved).to_path_buf()
+    };
+    (!reached_chat_temp(&resolved, &folder)).then_some(folder)
 }
 
 /// What separates a path's folders: `/`, and on Windows `\` too.
@@ -7264,14 +7265,15 @@ fn cd_dir(
         None => lexical(from, Path::new(target)),
     };
     let resolved = resolve(from, named);
-    if resolved.starts_with(resolve(workspace, Path::new(""))) || in_chat_temp(&resolved) {
+    if resolved.starts_with(resolve(workspace, Path::new(""))) {
         return None;
     }
-    if !complete || resolved.is_dir() {
-        Some(resolved)
+    let folder = if !complete || resolved.is_dir() {
+        resolved.clone()
     } else {
-        Some(resolved.parent().unwrap_or(&resolved).to_path_buf())
-    }
+        resolved.parent().unwrap_or(&resolved).to_path_buf()
+    };
+    (!reached_chat_temp(&resolved, &folder)).then_some(folder)
 }
 
 /// The folder an unquoted leading `~` expands to: `~` and `~/…` are the
@@ -7378,10 +7380,15 @@ const FOLDER_VARIABLES: [&str; 6] = [
     "XDG_STATE_HOME",
 ];
 
+/// The calling chat's own temp folder while a line of it is read (see
+/// [`with_chat_temp`]), and the folders in it the reading reached.
+struct ChatTemp {
+    folder: PathBuf,
+    reached: Vec<PathBuf>,
+}
+
 thread_local! {
-    /// The calling chat's own temp folder while a line of it is read (see
-    /// [`with_chat_temp`]).
-    static CHAT_TEMP: std::cell::RefCell<Option<PathBuf>> =
+    static CHAT_TEMP: std::cell::RefCell<Option<ChatTemp>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -7389,30 +7396,67 @@ thread_local! {
 /// calling chat's own temp folder ([`crate::chat_temp`]), as what `$TMPDIR`,
 /// `$TMP` and `$TEMP` name (its commands get it in those variables) and as
 /// no folder outside the project: a path that leads into it, links
-/// followed, asks nothing, while one that leads out of it (`..`, a link in
-/// it, another chat's folder) asks as before. Without a folder they read
-/// `$TMPDIR` from the server's environment, as always.
+/// followed, is no outside folder, while one that leads out of it (`..`, a
+/// link in it, another chat's folder) is, as before. Without a folder they
+/// read `$TMPDIR` from the server's environment, as always.
 pub(crate) fn with_chat_temp<T>(folder: Option<&Path>, read: impl FnOnce() -> T) -> T {
-    struct Restore(Option<PathBuf>);
+    with_chat_temp_reached(folder, read).0
+}
+
+/// [`with_chat_temp`], and the folders in the chat's own temp folder that
+/// the reading found its paths in (see [`reached_chat_temp`]).
+pub(crate) fn with_chat_temp_reached<T>(
+    folder: Option<&Path>,
+    read: impl FnOnce() -> T,
+) -> (T, Vec<PathBuf>) {
+    struct Restore(Option<ChatTemp>);
     impl Drop for Restore {
         fn drop(&mut self) {
             let previous = self.0.take();
             CHAT_TEMP.with(|current| *current.borrow_mut() = previous);
         }
     }
-    let previous = CHAT_TEMP.with(|current| current.replace(folder.map(Path::to_path_buf)));
-    let _restore = Restore(previous);
-    read()
+    let own = folder.map(|folder| ChatTemp {
+        folder: folder.to_path_buf(),
+        reached: Vec::new(),
+    });
+    let previous = CHAT_TEMP.with(|current| current.replace(own));
+    let restore = Restore(previous);
+    let value = read();
+    let reached = CHAT_TEMP.with(|current| {
+        current
+            .borrow_mut()
+            .as_mut()
+            .map(|own| std::mem::take(&mut own.reached))
+            .unwrap_or_default()
+    });
+    drop(restore);
+    (value, reached)
 }
 
 /// Whether `resolved` (links followed) is in the chat's own temp folder of
 /// the reading under way (see [`with_chat_temp`]).
 pub(crate) fn in_chat_temp(resolved: &Path) -> bool {
-    CHAT_TEMP.with(|folder| {
-        folder
-            .borrow()
-            .as_deref()
-            .is_some_and(|folder| resolved.starts_with(folder))
+    CHAT_TEMP.with(|own| {
+        own.borrow()
+            .as_ref()
+            .is_some_and(|own| resolved.starts_with(&own.folder))
+    })
+}
+
+/// [`in_chat_temp`] for a path a call reaches, which notes `folder`, the
+/// folder it would be asked about by, for the call's group of the chat's own
+/// folders (see `chat_ask_plans`), where a rule that refuses it still does.
+pub(crate) fn reached_chat_temp(resolved: &Path, folder: &Path) -> bool {
+    CHAT_TEMP.with(|own| {
+        let mut own = own.borrow_mut();
+        let Some(own) = own.as_mut().filter(|own| resolved.starts_with(&own.folder)) else {
+            return false;
+        };
+        if !own.reached.iter().any(|known| known == folder) {
+            own.reached.push(folder.to_path_buf());
+        }
+        true
     })
 }
 
@@ -7425,7 +7469,8 @@ fn folder_variable(text: &str) -> Option<String> {
         .and_then(|rest| rest.strip_suffix('}'))
         .or_else(|| text.strip_prefix('$'))?;
     if crate::chat_temp::VARIABLES.contains(&name)
-        && let Some(folder) = CHAT_TEMP.with(|folder| folder.borrow().clone())
+        && let Some(folder) =
+            CHAT_TEMP.with(|own| own.borrow().as_ref().map(|own| own.folder.clone()))
     {
         return Some(folder.to_string_lossy().into_owned());
     }

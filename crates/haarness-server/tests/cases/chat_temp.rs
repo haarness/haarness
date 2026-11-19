@@ -3,9 +3,9 @@
 //! folder outside the project, in Review and in Auto (where the reviewer is
 //! not asked). Another chat's folder still asks. Its child agents, its
 //! background commands, a person's `!` command and a workflow's share it,
-//! a `shell.env` hook does not move it, and the prompt names no path.
-//! Archiving keeps it; the cleanup at start takes away what archived and
-//! unknown chats left once nothing used it for a week.
+//! a `shell.env` hook does not move it, a person's deny still refuses it, and
+//! the prompt names no path. Archiving keeps it; the cleanup at start takes
+//! away what archived and unknown chats left once nothing used it for a week.
 use super::*;
 use haarness_core::{HookCall, HookDecision, HookPort};
 use haarness_protocol::{
@@ -80,6 +80,15 @@ impl HookPort for Elsewhere {
 
 /// A runtime under Haarness's default rules, in Review.
 fn runtime(workspace: &Path, hooks: Option<Arc<dyn HookPort>>) -> (AgentRuntime, Capturing) {
+    runtime_with(workspace, hooks, RuntimeConfig::default())
+}
+
+/// [`runtime`] with `config`'s rules.
+fn runtime_with(
+    workspace: &Path,
+    hooks: Option<Arc<dyn HookPort>>,
+    config: RuntimeConfig,
+) -> (AgentRuntime, Capturing) {
     let provider = Capturing::default();
     let runtime = AgentRuntime::with_config(
         Arc::new(SqliteStore::in_memory().unwrap()),
@@ -92,7 +101,7 @@ fn runtime(workspace: &Path, hooks: Option<Arc<dyn HookPort>>) -> (AgentRuntime,
         String::new(),
         RuntimeConfig {
             approval_mode: ApprovalMode::Review,
-            ..RuntimeConfig::default()
+            ..config
         },
     );
     let runtime = match hooks {
@@ -502,6 +511,50 @@ async fn child_agents_background_commands_a_person_and_a_workflow_share_the_chat
         .await
         .unwrap();
     assert_eq!(result.output.metadata["stdout"], format!("{shown}{shown}"));
+    haarness_core::chat_temp::remove(thread);
+}
+
+#[tokio::test]
+async fn a_person_s_deny_still_refuses_the_chat_s_own_temp_folder() {
+    let fixture = Fixture::new();
+    // The folder that holds every chat's folder, here.
+    let probe = ThreadId::new();
+    let chats = haarness_core::chat_temp::folder(probe)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    haarness_core::chat_temp::remove(probe);
+    let mut config = RuntimeConfig::default();
+    config.base_rules.push(haarness_core::PermissionRule {
+        pattern: format!("external_directory:{}/*", chats.display()),
+        decision: haarness_core::PermissionDecision::Deny,
+    });
+    let (runtime, _) = runtime_with(&fixture.project(), None, config);
+    let thread = new_chat(&runtime).await;
+    runs_unasked(&runtime, thread, &bash(r#"echo x > "$TMPDIR/x.txt""#)).await;
+    let folder = haarness_core::chat_temp::existing(thread).unwrap();
+    runs_unasked(
+        &runtime,
+        thread,
+        &call(
+            "write",
+            json!({ "path": folder.join("y.txt"), "content": "y" }),
+        ),
+    )
+    .await;
+    let refused = results(&runtime, thread).await;
+    assert_eq!(refused.len(), 2, "{refused:?}");
+    for (_, output, is_error) in refused {
+        assert!(
+            is_error && output.contains("is denied by permission rule 'external_directory:"),
+            "{output}"
+        );
+    }
+    assert!(!folder.join("x.txt").exists() && !folder.join("y.txt").exists());
+    // The project is the project, as before.
+    runs_unasked(&runtime, thread, &bash("echo z > z.txt")).await;
+    assert!(fixture.project().join("z.txt").is_file());
     haarness_core::chat_temp::remove(thread);
 }
 

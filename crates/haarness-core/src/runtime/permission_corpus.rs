@@ -74,10 +74,15 @@ fn remembered() -> Vec<PermissionRule> {
 /// What a `bash` call of `command` would do before running: refused by a
 /// rule, asked about (with the patterns and the Always it would offer), or
 /// allowed.
-fn decide(engine: &PermissionEngine, command: &str, workspace: &Path) -> serde_json::Value {
+fn decide(
+    engine: &PermissionEngine,
+    command: &str,
+    workspace: &Path,
+    temp: Option<&Path>,
+) -> serde_json::Value {
     let mut asked = Vec::new();
     let mut always = Vec::new();
-    for plan in ask_plans("bash", &json!({ "command": command }), workspace) {
+    for plan in chat_ask_plans("bash", &json!({ "command": command }), workspace, temp) {
         let mut asks = false;
         for pattern in &plan.patterns {
             let evaluation = plan.evaluate(engine, pattern);
@@ -212,10 +217,7 @@ fn permission_corpus() {
                 } else {
                     name.to_owned()
                 };
-                decisions.insert(
-                    key,
-                    bash::with_chat_temp(temp.as_deref(), || decide(&engine, line, &project)),
-                );
+                decisions.insert(key, decide(&engine, line, &project, temp.as_deref()));
             }
         }
         decisions.insert("auto".into(), auto(line, &project));
