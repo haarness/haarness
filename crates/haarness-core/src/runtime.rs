@@ -739,6 +739,20 @@ fn failure_message(error: &mut CoreError) -> Option<&mut String> {
     }
 }
 
+/// The refusal of a turn once the server has begun to shut down.
+fn server_stopping() -> CoreError {
+    CoreError::Refused(Box::new(crate::Refusal {
+        reason: haarness_protocol::RefusalReason::ServerStopping,
+        path: None,
+        message: crate::SERVER_STOPPING_RETRY.into(),
+    }))
+}
+
+fn is_server_stopping(error: &CoreError) -> bool {
+    matches!(error, CoreError::Refused(refusal)
+        if refusal.reason == haarness_protocol::RefusalReason::ServerStopping)
+}
+
 /// A chat's provider this server doesn't have now. A model runtime on the
 /// computer is listed only while it answers, so its chats find it gone once
 /// it stops; another provider was disconnected since the chat began.
@@ -2144,13 +2158,34 @@ fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
 
 /// The words a turn on `model` of the provider `info` describes (when it is
 /// known) fails with: what its transcript shows and its stored error holds.
-/// With `advice` they also say what to do (see `describe_failure`).
+/// With `advice` they also say what to do (see `describe_failure`); for a
+/// stop by the provider's safety check, that the turn is left out of what
+/// the model sees from now on (see [`leaves_turn_out`]).
 fn turn_failure_words(
     error: &CoreError,
     info: Option<&haarness_protocol::ProviderInfo>,
     model: &str,
     advice: bool,
 ) -> String {
+    if advice && let CoreError::ProviderBlocked(reason) = error {
+        return format!(
+            "{error} {}",
+            if recitation(reason) {
+                RECITATION_ADVICE
+            } else {
+                LEFT_OUT_ADVICE
+            }
+        );
+    }
+    if advice
+        && let CoreError::Provider(raw) = error
+        && content_check_refusal(raw)
+    {
+        return format!(
+            "{} refused this chat: its safety check flagged it as possibly against its usage policy. {LEFT_OUT_ADVICE_EARLIER}",
+            info.map_or("The provider", |info| info.name.as_str())
+        );
+    }
     if let Some(info) = info
         && let Some(words) = describe_local_model_failure(error, info, model, advice)
             .or_else(|| describe_model_refusal(error, info, model, advice))
@@ -2158,6 +2193,66 @@ fn turn_failure_words(
         return words;
     }
     describe_failure(error, info.map(|info| info.name.as_str()), advice)
+}
+
+/// What a person reads after a safety stop's words: the turn it ended is
+/// left out of later requests (see [`leaves_turn_out`]).
+const LEFT_OUT_ADVICE: &str =
+    "The model won't see this request again, so you can edit and resend it or pick another model.";
+
+/// The same for a check that reads the whole request, so something earlier
+/// in the chat may have set it off.
+const LEFT_OUT_ADVICE_EARLIER: &str = "The model won't see this request again, so you can edit and resend it, or start a new chat if something earlier set it off.";
+
+/// What a person reads after a stop of the reply for repeating published
+/// text (Gemini's `RECITATION`), which says nothing against the request.
+const RECITATION_ADVICE: &str = "The reply followed existing published text too closely for the provider: ask for it another way, or pick another model.";
+
+/// What a person reads when the safety check stopped the summary of an
+/// automatic compaction: the earlier conversation set it off, so leaving
+/// out this turn would not help.
+const SUMMARY_STOP_ADVICE: &str = "That is the summary Haarness writes when a chat grows past what the model takes in, so something earlier in this chat set it off: start a new chat, or pick another model.";
+
+/// A stop of the reply for repeating published text rather than for what
+/// was asked.
+fn recitation(reason: &str) -> bool {
+    reason.eq_ignore_ascii_case("recitation")
+}
+
+/// Whether the provider's safety check refused what `error` ended a turn
+/// with, so the turn is left out of every later request (as
+/// `ItemData::Error::turn_left_out` records): a reworded message, or the same
+/// one on another model, then goes without what tripped it. A stop of the
+/// response (Anthropic's `refusal`, a content filter or guardrail, Gemini's
+/// safety finish), or a check of the whole request before any answer. Not
+/// a reply stopped for repeating published text, which the request did not
+/// cause.
+fn leaves_turn_out(error: &CoreError) -> bool {
+    match error {
+        CoreError::ProviderBlocked(reason) => !recitation(reason),
+        CoreError::Provider(raw) => content_check_refusal(raw),
+        _ => false,
+    }
+}
+
+/// A provider's content check that refused the request as a whole.
+/// OpenAI's flags the chat's earlier messages too ("Invalid prompt: your
+/// prompt was flagged as potentially violating our usage policy. Please try
+/// again with a different prompt"), so a new message in the same chat can be
+/// refused again for an old one. Alibaba's for Qwen (DashScope, or a gateway
+/// such as a router passing its words on, in its stream too) is the same
+/// kind: `data_inspection_failed`, "Input data may contain inappropriate
+/// content".
+fn content_check_refusal(raw: &str) -> bool {
+    provider_error_fields(raw).is_some_and(|(_, code, _)| {
+        matches!(
+            code.as_deref(),
+            Some("invalid_prompt" | "data_inspection_failed" | "DataInspectionFailed")
+        )
+    }) || raw.contains("[invalid_prompt]")
+        || raw.contains("data_inspection_failed")
+        || raw.contains("DataInspectionFailed")
+        || raw.contains("data may contain inappropriate content")
 }
 
 /// Keep transport envelopes in logs while giving the transcript a concise,
@@ -2186,6 +2281,8 @@ pub fn prompt_blocked(turn_error: &str) -> Option<&str> {
 #[must_use]
 pub fn refusal_reason(error: &CoreError) -> String {
     match error {
+        // A notice names the reason; what to do is its own.
+        error if is_server_stopping(error) => crate::SERVER_STOPPING.into(),
         CoreError::Invalid(reason)
         | CoreError::Conflict(reason)
         | CoreError::NotFound(reason)
@@ -2873,24 +2970,7 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             provider.unwrap_or("The provider")
         );
     }
-    // OpenAI's safety check flags the whole request, the chat's earlier
-    // messages too ("Invalid prompt: your prompt was flagged as potentially
-    // violating our usage policy. Please try again with a different
-    // prompt"): a new message in the same chat can be refused again for an
-    // old one.
-    // Alibaba's content check for Qwen (DashScope, or a gateway passing its
-    // words on) is the same kind of refusal: `data_inspection_failed`, "Input
-    // data may contain inappropriate content".
-    if provider_error_fields(raw).is_some_and(|(_, code, _)| {
-        matches!(
-            code.as_deref(),
-            Some("invalid_prompt" | "data_inspection_failed" | "DataInspectionFailed")
-        )
-    }) || raw.contains("[invalid_prompt]")
-        || raw.contains("data_inspection_failed")
-        || raw.contains("DataInspectionFailed")
-        || raw.contains("data may contain inappropriate content")
-    {
+    if content_check_refusal(raw) {
         return format!(
             "{} refused this chat: its safety check flagged it as possibly against its usage policy. Rephrase your last message, or start a new chat if something earlier in this one set it off.",
             provider.unwrap_or("The provider")
@@ -3456,6 +3536,9 @@ pub struct AgentRuntime {
     /// Concurrent child agents' first requests for one prompt prefix: the
     /// first goes alone so the others can read the cache it writes.
     prefix_warmup: crate::prefix_warmup::PrefixWarmup,
+    /// Why the server is shutting down, once it has begun to: from then on
+    /// no turn starts (see [`AgentRuntime::interrupt_active_turns`]).
+    stopping: Arc<Mutex<Option<String>>>,
     run_stances: Arc<RunStances>,
 }
 
@@ -3600,6 +3683,7 @@ impl AgentRuntime {
             run_ended: Arc::new(DashMap::new()),
             approval_modes,
             prefix_warmup: crate::prefix_warmup::PrefixWarmup::default(),
+            stopping: Arc::new(Mutex::new(None)),
             run_stances: Arc::new(RunStances::default()),
         }
     }
@@ -4679,6 +4763,9 @@ impl AgentRuntime {
                     self.publish_input_queue(id).await?;
                     Ok(Some(turn))
                 }
+                // The server is shutting down: the message stays queued for
+                // the next start, where Send runs it.
+                Err(error) if is_server_stopping(&error) => Ok(None),
                 // Another turn was running: the message waits in the queue,
                 // and that turn's end runs it. It reads the queue only once it
                 // has left `active`, so this holds though it has ended since.
@@ -5998,6 +6085,7 @@ impl AgentRuntime {
                             ItemData::Error {
                                 message: notice,
                                 retryable: false,
+                                turn_left_out: false,
                             },
                         ],
                     )
@@ -8834,6 +8922,12 @@ impl AgentRuntime {
             }
             return Err(CoreError::Conflict(crate::CHAT_BUSY.into()));
         }
+        // A shutdown under way starts nothing: what waited at a turn's gate
+        // as it closed, a background result that arrived then, a queued
+        // message a turn's end would run. Nothing here is stored yet.
+        if self.stopping.lock().is_some() {
+            return Err(server_stopping());
+        }
         let thread = self
             .with_chat_folder(self.repository.get_thread(thread_id).await?)
             .await?;
@@ -8940,6 +9034,12 @@ impl AgentRuntime {
             started_calls: Mutex::new(HashSet::new()),
         });
         self.active.insert(thread_id, active.clone());
+        // A shutdown that began after the check above may not have found
+        // this turn among the active ones: it stops as they do.
+        if let Some(reason) = self.stopping.lock().clone() {
+            *active.stop_reason.lock() = Some(reason);
+            cancel.cancel();
+        }
 
         let setup = async {
             // A runtime circuit breaker parks an otherwise-active pursuit
@@ -9013,6 +9113,7 @@ impl AgentRuntime {
                     ItemData::Error {
                         message: message.clone(),
                         retryable: true,
+                        turn_left_out: false,
                     },
                 )
                 .await
@@ -9151,7 +9252,9 @@ impl AgentRuntime {
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
             reviews_running: std::sync::atomic::AtomicUsize::new(0),
+            summary_stopped: AtomicBool::new(false),
             prefix_warmup: self.prefix_warmup.clone(),
+            stopping: self.stopping.clone(),
             run_stances: self.run_stances.clone(),
             unattended,
         });
@@ -9416,6 +9519,9 @@ impl AgentRuntime {
     /// cancellation cleanup, after which any straggler is made durably
     /// interrupted so a restart can never display a phantom running turn.
     pub async fn interrupt_active_turns(&self, reason: &str) -> CoreResult<u64> {
+        // First no turn starts any more: one would run tools while the server
+        // goes away, and be found interrupted at the next start.
+        *self.stopping.lock() = Some(reason.to_owned());
         // Commands stop beside the turns, and the server waits for them
         // too (as long as for the turns) so their ends are recorded first.
         let commands = self.stop_commands_for_shutdown().await;
@@ -9534,6 +9640,7 @@ impl AgentRuntime {
                     ItemData::Error {
                         message: message.clone(),
                         retryable: true,
+                        turn_left_out: false,
                     },
                 )
                 .await
@@ -9698,7 +9805,12 @@ struct RunnerTask {
     /// Auto's reviews deciding this turn's requests now: the turn reads
     /// `reviewing` from the first until the last ends.
     reviews_running: std::sync::atomic::AtomicUsize,
+    /// The provider's safety check stopped the summary of an automatic
+    /// compaction this turn asked for: the earlier conversation set it off,
+    /// not this turn (see [`RunnerTask::visible_error`]).
+    summary_stopped: AtomicBool,
     prefix_warmup: crate::prefix_warmup::PrefixWarmup,
+    stopping: Arc<Mutex<Option<String>>>,
     run_stances: Arc<RunStances>,
     /// A turn nobody can answer: a schedule's run and the subagents and
     /// results it starts. A `--yolo` client (the terminal UI, `haarness
@@ -11046,6 +11158,21 @@ impl RunnerTask {
             .providers
             .get(&self.turn.provider)
             .map(|provider| provider.info());
+        if leaves_turn_out(error) && self.summary_stopped.load(Ordering::SeqCst) {
+            let stop = match error {
+                CoreError::ProviderBlocked(_) => error.to_string(),
+                _ => format!(
+                    "{} refused the summary of this chat: its safety check flagged it as possibly against its usage policy.",
+                    info.as_ref()
+                        .map_or("The provider", |info| info.name.as_str())
+                ),
+            };
+            return if self.depth == 0 {
+                format!("{stop} {SUMMARY_STOP_ADVICE}")
+            } else {
+                stop
+            };
+        }
         // A child agent's failure is read by the model that started it.
         turn_failure_words(error, info.as_ref(), &self.turn.model, self.depth == 0)
     }
@@ -11246,12 +11373,22 @@ impl RunnerTask {
                 TurnStatus::Failed
             };
             let message = visible_error;
+            // A safety stop leaves its turn out of later requests from here on,
+            // a subagent's too, so resuming it does not send the same again;
+            // not one of the summary the earlier conversation set off.
+            let turn_left_out = stop_reason.is_none()
+                && leaves_turn_out(error_value)
+                && !self.summary_stopped.load(Ordering::SeqCst);
+            if turn_left_out {
+                self.leave_note_of_changes().await;
+            }
             // Terminal failures are transcript items too: publish the durable
             // item before turn.finished so attached clients see the error live.
             let _ = self
                 .publish_item(ItemData::Error {
                     message: message.clone(),
                     retryable: stop_reason.is_some(),
+                    turn_left_out,
                 })
                 .await;
             self.set_status("done", None);
@@ -11364,6 +11501,69 @@ impl RunnerTask {
         Ok(())
     }
 
+    /// For a turn about to be left out of later requests: when it changed
+    /// files or ran commands, a hidden note in its place says so (see
+    /// [`left_out_note`]). The files are those its checkpoint shows changed,
+    /// and those its file tools name (a folder without checkpoints).
+    async fn leave_note_of_changes(&self) {
+        let Ok(items) = self.repository.list_items(self.thread.id, None).await else {
+            return;
+        };
+        let turn = items
+            .iter()
+            .filter(|item| item.turn_id == Some(self.turn.id))
+            .collect::<Vec<_>>();
+        let mut files = Vec::new();
+        if let Some(snapshots) = &self.snapshots {
+            for item in &turn {
+                if let ItemData::Snapshot {
+                    snapshot_id,
+                    base_snapshot_id: Some(base),
+                    ..
+                } = &item.data
+                {
+                    match snapshots.diff_snapshots(base, snapshot_id).await {
+                        Ok(diffs) => files.extend(diffs.into_iter().map(|diff| diff.file)),
+                        Err(error) => {
+                            warn!(thread = %self.thread.id, turn = %self.turn.id, %error, "cannot read what a stopped turn changed");
+                        }
+                    }
+                }
+            }
+        }
+        for path in undo_files::written_paths(turn.iter().copied()) {
+            let path = Path::new(&path)
+                .strip_prefix(&self.workspace)
+                .map_or(path.clone(), |relative| {
+                    relative.to_string_lossy().into_owned()
+                });
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+        let ran = left_out_note::ran(&turn, |name| {
+            self.tools
+                .get(name)
+                .is_some_and(|tool| tool.side_effectful())
+        });
+        let Some(text) = left_out_note::note(&files, ran) else {
+            return;
+        };
+        if let Err(error) = self
+            .publish_item(ItemData::UserMessage {
+                text,
+                attachments: Vec::new(),
+                queued: false,
+                synthetic: true,
+                command_line: None,
+                hook: None,
+            })
+            .await
+        {
+            warn!(thread = %self.thread.id, turn = %self.turn.id, %error, "cannot leave the note of a stopped turn's changes");
+        }
+    }
+
     async fn has_unconsumed_queued(&self) -> bool {
         self.repository
             .list_items(self.thread.id, None)
@@ -11459,6 +11659,7 @@ impl RunnerTask {
                     self.visible_error(error_value)
                 ),
                 retryable: true,
+                turn_left_out: false,
             })
             .await;
         false
@@ -11838,7 +12039,12 @@ impl RunnerTask {
             self.cancel.clone(),
             Some(scaled(input_limit, overflow_share(compactions))),
         )
-        .await?;
+        .await
+        .inspect_err(|error| {
+            if leaves_turn_out(error) {
+                self.summary_stopped.store(true, Ordering::SeqCst);
+            }
+        })?;
         let active = self
             .active
             .get(&self.thread.id)
@@ -16727,7 +16933,9 @@ impl RunnerTask {
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
             reviews_running: std::sync::atomic::AtomicUsize::new(0),
+            summary_stopped: AtomicBool::new(false),
             prefix_warmup: self.prefix_warmup.clone(),
+            stopping: self.stopping.clone(),
             run_stances: self.run_stances.clone(),
             unattended: self.unattended,
         });
@@ -16815,7 +17023,22 @@ impl RunnerTask {
                                 .as_deref()
                                 .ok()
                                 .and_then(|items| last_reply(items, child_turn));
-                            Err(CoreError::Tool(subagent_blocked(&reason, partial)))
+                            // Its stop says whether the turn was left out.
+                            let left_out = items.as_deref().ok().is_none_or(|items| {
+                                items.iter().rev().any(|item| {
+                                    item.turn_id == Some(child_turn)
+                                        && matches!(
+                                            item.data,
+                                            ItemData::Error {
+                                                turn_left_out: true,
+                                                ..
+                                            }
+                                        )
+                                })
+                            });
+                            Err(CoreError::Tool(subagent_blocked(
+                                &reason, partial, left_out,
+                            )))
                         }
                         error => Err(error),
                     }
@@ -17055,6 +17278,7 @@ impl RunnerTask {
             run_ended: self.run_ended.clone(),
             approval_modes: self.approval_modes.clone(),
             prefix_warmup: self.prefix_warmup.clone(),
+            stopping: self.stopping.clone(),
             run_stances: self.run_stances.clone(),
         }
     }
@@ -17118,7 +17342,11 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
                 .as_deref()
                 .and_then(CoreError::provider_blocked_reason)
             {
-                Some(reason) => subagent_blocked(reason, task.reply.as_deref()),
+                // Nothing here says whether a summary was stopped: only a
+                // recited reply is known to keep its turn.
+                Some(reason) => {
+                    subagent_blocked(reason, task.reply.as_deref(), !recitation(reason))
+                }
                 None => task
                     .error
                     .clone()
@@ -17164,6 +17392,7 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
         ItemData::Error {
             message: notice,
             retryable: false,
+            turn_left_out: false,
         },
     ]
 }
@@ -17242,12 +17471,25 @@ fn finish_note(last: Option<&LastRound>) -> String {
 }
 
 /// What a parent reads when the provider's safety check stopped its
-/// subagent. The child's history still holds what was blocked, so resuming
-/// it or resending the task would most likely be blocked again.
-fn subagent_blocked(reason: &str, partial: Option<&str>) -> String {
-    let mut text = format!(
-        "The provider's safety check stopped this subagent ({reason}). Its history still holds what the blocked request sent, so resuming it or sending the same task again is likely to be blocked too: do not retry it as is. Start a new subagent with the task rephrased or split, do the work directly, or tell the user."
-    );
+/// subagent. A stopped turn is left out of the child's history, task and
+/// all, so a resumed child needs the whole task again; the same task worded
+/// the same way would most likely be stopped again. A recited reply keeps its
+/// turn; a stopped summary of the child's history (`left_out` false
+/// otherwise) means its history itself sets the check off.
+fn subagent_blocked(reason: &str, partial: Option<&str>, left_out: bool) -> String {
+    let mut text = if left_out {
+        format!(
+            "The provider's safety check stopped this subagent ({reason}). That turn is now left out of the subagent's history, so a resumed subagent no longer has what it was asked there: send the whole task again. The same task sent unchanged is likely to be stopped too: do not retry it as is. Resume it or start a new subagent with the whole task rephrased or split, do the work directly, or tell the user."
+        )
+    } else if recitation(reason) {
+        format!(
+            "The provider's safety check stopped this subagent's reply ({reason}) for following published text too closely. Its history still holds the task: resume it asking for the work another way, do the work directly, or tell the user."
+        )
+    } else {
+        format!(
+            "The provider's safety check stopped this subagent ({reason}) while its long history was being summarized, so something earlier in that history set it off and resuming it would be stopped again. Start a new subagent with the whole task, do the work directly, or tell the user."
+        )
+    };
     if let Some(partial) = partial {
         text.push_str("\n\nPartial reply before the stop:\n");
         text.push_str(partial);
@@ -21247,6 +21489,7 @@ fn rule_spelling(path: &Path) -> String {
 
 mod commands;
 mod failure_kinds;
+mod left_out_note;
 mod retained;
 mod undo_files;
 
@@ -23675,6 +23918,7 @@ mod tests {
         ));
         assert!(
             blocked.contains("The provider's safety check stopped this subagent (refusal).")
+                && blocked.contains("left out of the subagent's history")
                 && blocked.contains("do not retry it as is")
                 && blocked.contains("Partial reply before the stop:\npartial words")
                 && blocked.contains(
@@ -23683,6 +23927,17 @@ mod tests {
             "{blocked}"
         );
         assert!(!blocked.contains("Send a follow-up message"), "{blocked}");
+        // A child an older build stopped is told of as one stopped now.
+        let older = envelope(&task(
+            "failed",
+            None,
+            Some("The provider's safety check stopped this response (refusal). Send a follow-up message to try again; if it stops again, rephrase the request or choose another model.".into()),
+        ));
+        assert!(
+            older.contains("The provider's safety check stopped this subagent (refusal).")
+                && !older.contains("Send a follow-up message"),
+            "{older}"
+        );
         let failed = envelope(&task(
             "failed",
             None,
@@ -23773,6 +24028,49 @@ mod tests {
         assert!(
             envelope.contains("<summary>Read <T>: completed</summary>"),
             "{envelope}"
+        );
+    }
+
+    /// A stopped subagent's parent is told what its stop left: a turn left
+    /// out needs the whole task again; a recited reply keeps the task; a
+    /// stopped summary of its history means a new subagent.
+    #[test]
+    fn a_stopped_subagent_is_described_by_what_its_stop_left() {
+        let left_out = super::subagent_blocked("refusal", None, true);
+        assert!(
+            left_out.contains("left out of the subagent's history")
+                && left_out.contains("send the whole task again"),
+            "{left_out}"
+        );
+        let recited = super::subagent_blocked("RECITATION", Some("partial"), false);
+        assert!(
+            recited.contains("Its history still holds the task")
+                && !recited.contains("left out")
+                && recited.ends_with("Partial reply before the stop:\npartial"),
+            "{recited}"
+        );
+        let summary = super::subagent_blocked("refusal", None, false);
+        assert!(
+            summary.contains("while its long history was being summarized")
+                && summary.contains("Start a new subagent with the whole task")
+                && !summary.contains("left out"),
+            "{summary}"
+        );
+        // After a restart only a recited reply is known to keep its turn.
+        assert!(
+            super::stranded_report(&crate::StrandedTask {
+                parent_thread_id: ThreadId::new(),
+                parent_turn_id: None,
+                call_id: "call".into(),
+                child_thread_id: ThreadId::new(),
+                child_turn_id: TurnId::new(),
+                state: "failed".into(),
+                description: "Audit".into(),
+                reply: None,
+                error: Some(CoreError::ProviderBlocked("RECITATION".into()).to_string()),
+            })
+            .iter()
+            .any(|data| matches!(data, ItemData::UserMessage { text, .. } if text.contains("Its history still holds the task")))
         );
     }
 
@@ -24718,6 +25016,20 @@ mod tests {
         }
     }
 
+    /// A start the shutdown refuses names it in a few words, which also
+    /// read well inside the notice of a background result kept for the next
+    /// message ("… could not start a turn in this chat (Haarness is shutting
+    /// down); …").
+    #[test]
+    fn a_start_refused_for_the_shutdown_says_so_plainly() {
+        let refused = super::server_stopping();
+        assert!(super::is_server_stopping(&refused));
+        assert_eq!(super::refusal_reason(&refused), "Haarness is shutting down");
+        assert!(!super::is_server_stopping(&CoreError::Conflict(
+            crate::CHAT_BUSY.into()
+        )));
+    }
+
     /// The deferred tools a turn names go to the model before the message
     /// that opened the turn, which stays the last of it; anywhere else they
     /// stay where they were stored.
@@ -24942,10 +25254,213 @@ mod tests {
             ItemData::Error {
                 message: "operation cancelled".into(),
                 retryable: false,
+                turn_left_out: false,
             },
         ));
         stopped.push(at(5, second, user("something else", None)));
         assert_eq!(texts(stopped), ["fix it", "Fixed.", "something else"]);
+    }
+
+    /// A turn the provider's safety check stopped is left out of what later
+    /// requests send, its call and the call's result with it, so a reworded
+    /// message goes without what set the check off. A compaction made in
+    /// that turn stays and stands for the history before it; a stop an older
+    /// build stored stays in the request.
+    #[test]
+    fn a_turn_the_safety_check_stopped_is_left_out_of_later_requests() {
+        let (first, stopped, next) = (
+            Some(TurnId::new()),
+            Some(TurnId::new()),
+            Some(TurnId::new()),
+        );
+        let at = |sequence: u64, turn: Option<TurnId>, data: ItemData| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let user = |text: &str| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+            command_line: None,
+            hook: None,
+        };
+        let reply = |text: &str| ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        };
+        let stop = |turn_left_out| ItemData::Error {
+            message: super::turn_failure_words(
+                &CoreError::ProviderBlocked("refusal".into()),
+                None,
+                "model",
+                true,
+            ),
+            retryable: false,
+            turn_left_out,
+        };
+        let sent = |items: Vec<Item>| -> Vec<String> {
+            provider_messages(items)
+                .into_iter()
+                .map(|message| match message {
+                    ProviderMessage::Text { content, .. } => content,
+                    ProviderMessage::ToolCall { call_id, .. } => format!("call {call_id}"),
+                    ProviderMessage::ToolResult { call_id, .. } => format!("result {call_id}"),
+                    media @ ProviderMessage::Media { .. } => panic!("{media:?}"),
+                })
+                .collect()
+        };
+        let mut items = vec![
+            at(1, first, user("first question")),
+            at(2, first, reply("first answer")),
+            at(3, stopped, user("the stopped request")),
+            at(
+                4,
+                stopped,
+                ItemData::ToolCall {
+                    call_id: "c1".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "notes.txt"}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            at(
+                5,
+                stopped,
+                ItemData::ToolResult {
+                    call_id: "c1".into(),
+                    name: "read".into(),
+                    output: "notes".into(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            at(6, stopped, reply("partial answer")),
+            at(7, stopped, stop(true)),
+            at(8, next, user("reworded")),
+        ];
+        assert_eq!(
+            sent(items.clone()),
+            ["first question", "first answer", "reworded"]
+        );
+        // As an older build stored it, the stop leaves its turn in.
+        items[6].data = stop(false);
+        assert_eq!(
+            sent(items.clone()),
+            [
+                "first question",
+                "first answer",
+                "the stopped request",
+                "call c1",
+                "result c1",
+                "partial answer",
+                "reworded"
+            ]
+        );
+
+        // A compaction made while the stopped turn ran stays.
+        let compacted = vec![
+            at(1, first, user("first question")),
+            at(2, first, reply("first answer")),
+            at(3, stopped, user("the stopped request")),
+            at(
+                4,
+                stopped,
+                ItemData::Compaction {
+                    summary: "SUMMARY OF EVERYTHING".into(),
+                    files_touched: Vec::new(),
+                    outstanding: Vec::new(),
+                    todo_checkpoint: None,
+                    tail_start_sequence: Some(2),
+                    kept_sequences: vec![3],
+                    tool_output_chars: None,
+                },
+            ),
+            at(5, stopped, reply("partial answer")),
+            at(6, stopped, stop(true)),
+            at(7, next, user("reworded")),
+        ];
+        let after = sent(compacted);
+        assert_eq!(after.len(), 3, "{after:?}");
+        assert!(after[0].contains("SUMMARY OF EVERYTHING"), "{after:?}");
+        assert_eq!(after[1..], ["first answer", "reworded"]);
+    }
+
+    /// A safety stop's error says the request stays out of the chat from now
+    /// on, in words of its own; a stopped subagent's says it as plainly to
+    /// the model that started it, and the reason reads back from either, and
+    /// from the words older builds stored.
+    #[test]
+    fn a_safety_stop_says_its_request_is_left_out() {
+        let blocked = CoreError::ProviderBlocked("refusal".into());
+        let person = super::turn_failure_words(&blocked, None, "model", true);
+        assert_eq!(
+            person,
+            "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit and resend it or pick another model."
+        );
+        assert!(super::leaves_turn_out(&blocked));
+        // A subagent's own chat keeps it short: its parent reads more.
+        assert_eq!(
+            super::turn_failure_words(&blocked, None, "model", false),
+            "Stopped by the provider's safety check (refusal)."
+        );
+        // A check of the whole request is left out the same way.
+        let flagged = CoreError::Provider(
+            "HTTP 400 Bad Request: [invalid_prompt] Invalid prompt: your prompt was flagged as potentially violating our usage policy.".into(),
+        );
+        assert!(super::leaves_turn_out(&flagged));
+        let info = haarness_protocol::ProviderInfo {
+            id: "openai".into(),
+            name: "OpenAI".into(),
+            authenticated: true,
+            models: Vec::new(),
+        };
+        let words = super::turn_failure_words(&flagged, Some(&info), "gpt-5", true);
+        assert_eq!(
+            words,
+            "OpenAI refused this chat: its safety check flagged it as possibly against its usage policy. The model won't see this request again, so you can edit and resend it, or start a new chat if something earlier set it off."
+        );
+        // Its usage reports count it as they did.
+        assert_eq!(
+            super::failure_kinds::FailureKind::of(&words),
+            super::failure_kinds::FailureKind::of(&super::describe_failure(
+                &flagged,
+                Some("OpenAI"),
+                true
+            ))
+        );
+        // A reply stopped for repeating published text keeps its turn, and
+        // says what to do instead.
+        let recited = CoreError::ProviderBlocked("RECITATION".into());
+        assert!(!super::leaves_turn_out(&recited));
+        assert_eq!(
+            super::turn_failure_words(&recited, None, "model", true),
+            "Stopped by the provider's safety check (RECITATION). The reply followed existing published text too closely for the provider: ask for it another way, or pick another model."
+        );
+        // Other failures keep their turn.
+        for other in [
+            CoreError::Provider("HTTP 500 Internal Server Error".into()),
+            CoreError::ProviderIncomplete("length".into()),
+            CoreError::Cancelled,
+        ] {
+            assert!(!super::leaves_turn_out(&other), "{other:?}");
+        }
+        for stored in [
+            person.as_str(),
+            "Stopped by the provider's safety check (refusal).",
+            "The provider's safety check stopped this response (refusal). Send a follow-up message to try again; if it stops again, rephrase the request or choose another model.",
+        ] {
+            assert_eq!(
+                CoreError::provider_blocked_reason(stored),
+                Some("refusal"),
+                "{stored}"
+            );
+            assert_eq!(
+                super::failure_kinds::FailureKind::of(stored),
+                super::failure_kinds::FailureKind::Blocked,
+                "{stored}"
+            );
+        }
     }
 
     #[test]
@@ -25084,6 +25599,7 @@ mod tests {
                 ItemData::Error {
                     message: "restarted".into(),
                     retryable: true,
+                    turn_left_out: false,
                 },
             ),
             in_turn(6, next, person("and now?", false)),
@@ -27017,6 +27533,7 @@ mod tests {
                 ItemData::Error {
                     message: "Haarness restarted".into(),
                     retryable: true,
+                    turn_left_out: false,
                 },
             ),
             at(next, 4, message("now the docs", false, false)),

@@ -3408,6 +3408,10 @@
               "retryable": {
                 "type": "boolean"
               },
+              "turn_left_out": {
+                "description": "The provider's safety check stopped this turn, so every item of\nit is left out of later requests: the person's message, what the\nmodel wrote and the tools it ran, though the chat still shows them\n(a compaction made during the turn stays). A reworded message is\nthen not stopped again for the same history. Set only when the\nstop is stored: older stops are still sent.",
+                "type": "boolean"
+              },
               "type": {
                 "enum": [
                   "error"
@@ -5280,9 +5284,10 @@
         "type": "object"
       },
       "RefusalReason": {
-        "description": "Why a request was refused for good (see [`ApiErrorDetails::reason`]).",
+        "description": "Why a request was refused (see [`ApiErrorDetails::reason`]).",
         "enum": [
           "no_undo_copy",
+          "server_stopping",
           "other"
         ],
         "type": "string"

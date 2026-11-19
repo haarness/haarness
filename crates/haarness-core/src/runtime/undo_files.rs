@@ -206,6 +206,20 @@ type StartedCall<'a> = (&'a str, &'a Value, DateTime<Utc>);
 /// What the file-tool calls among `items` that succeeded changed, in the
 /// order they ran, and the child agents' chats they started. Only names are
 /// read; no call's content is copied.
+/// The paths the file tools of `items` wrote or removed, as their calls
+/// name them, each once, in order.
+pub(super) fn written_paths<'a>(items: impl Iterator<Item = &'a Item>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    file_changes(items)
+        .0
+        .into_iter()
+        .map(|change| match change {
+            Change::Written { path, .. } | Change::Removed { path } => path,
+        })
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
 fn file_changes<'a>(items: impl Iterator<Item = &'a Item>) -> (Vec<Change>, Vec<ChildRun>) {
     let mut started: HashMap<CallKey<'_>, StartedCall<'_>> = HashMap::new();
     let mut changes = Vec::new();

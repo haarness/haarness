@@ -12024,6 +12024,108 @@ async fn approval_hints_use_plain_words_and_the_toast_yields_to_the_card() {
     assert!(!app.notice.contains("session"), "{}", app.notice);
 }
 
+/// The safety stop that ended the latest turn points to `/undo`, which puts
+/// the message back in the prompt; an older stop, a later turn, a running
+/// turn or an undo already made leave the error alone.
+#[test]
+fn a_safety_stop_that_ended_the_latest_turn_points_to_undo() {
+    let thread = fixture_thread();
+    let words = "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit and resend it or pick another model.";
+    let stop = |turn_left_out| {
+        message_item(
+            3,
+            &thread,
+            ItemData::Error {
+                message: words.into(),
+                retryable: false,
+                turn_left_out,
+            },
+        )
+    };
+    let asked = message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: "the request".into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+            command_line: None,
+            hook: None,
+        },
+    );
+    let partial = message_item(
+        2,
+        &thread,
+        ItemData::AssistantMessage {
+            text: "partial".into(),
+            note: false,
+        },
+    );
+    let render = |app: &App| -> String {
+        crate::view::transcript::transcript_lines(app, 100)
+            .lines
+            .iter()
+            .map(|line| line_text(line) + "\n")
+            .collect()
+    };
+    let hint = "/undo to edit and resend";
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        vec![asked.clone(), partial.clone(), stop(true)],
+        vec![],
+        vec![],
+    );
+    let text = render(&app);
+    assert!(text.contains(&format!("    {hint}\n")), "{text}");
+    assert!(
+        text.find("× Stopped by").unwrap() < text.find(hint).unwrap(),
+        "{text}"
+    );
+    app.language = crate::locale::Language::Japanese;
+    assert!(render(&app).contains("/undo で編集して再送信"));
+    app.language = crate::locale::Language::English;
+    // While a turn runs, /undo would stop it first.
+    app.active_turn = Some(haarness_protocol::TurnId::new());
+    assert!(!render(&app).contains(hint));
+    app.active_turn = None;
+    // A fork has a parent and /undo of its own; a subagent's chat has not.
+    app.thread.parent_id = Some(haarness_protocol::ThreadId::new());
+    assert!(render(&app).contains(hint));
+    app.thread.is_subagent = true;
+    assert!(!render(&app).contains(hint));
+    app.thread.is_subagent = false;
+    app.thread.parent_id = None;
+    // Once another turn began, /undo takes that one back.
+    app.items.push(message_item(
+        4,
+        &thread,
+        ItemData::UserMessage {
+            text: "reworded".into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+            command_line: None,
+            hook: None,
+        },
+    ));
+    assert!(!render(&app).contains(hint));
+    // A stop an older server stored is still sent: nothing to point to.
+    let older = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        vec![asked, partial, stop(false)],
+        vec![],
+        vec![],
+    );
+    let text = render(&older);
+    assert!(
+        text.contains("× Stopped by") && !text.contains(hint),
+        "{text}"
+    );
+}
+
 #[test]
 fn a_rejected_tool_and_a_stopped_turn_read_as_choices_not_failures() {
     let thread = fixture_thread();
@@ -12076,6 +12178,7 @@ fn a_rejected_tool_and_a_stopped_turn_read_as_choices_not_failures() {
         ItemData::Error {
             message: "operation cancelled".into(),
             retryable: false,
+            turn_left_out: false,
         },
     );
     let app = App::new(
@@ -13419,6 +13522,7 @@ fn provider_failure_text_wraps_instead_of_leaking_past_the_chat_pane() {
         ItemData::Error {
             message: "Provider rejected the request (cyber_policy): Rephrase the request or use an account authorized for this security work.".into(),
             retryable: false,
+            turn_left_out: false,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -25479,6 +25583,36 @@ async fn an_undo_whose_history_cannot_be_read_keeps_the_undone_prompt() {
     server.await.unwrap();
     assert_eq!(app.composer.text(), "write the file");
     assert!(app.refresh_needed);
+}
+
+/// Where Undo has no checkpoints, `/undo` after a safety stop still puts its
+/// message back in the prompt; any other refusal says why, as before.
+#[tokio::test]
+async fn undo_without_checkpoints_still_brings_back_a_stopped_request() {
+    let (mut app, thread) = undo_fixture();
+    app.items.push(message_item(
+        5,
+        &thread,
+        ItemData::Error {
+            message: "Stopped by the provider's safety check (refusal).".into(),
+            retryable: false,
+            turn_left_out: true,
+        },
+    ));
+    let refused = r#"{"code":"invalid_request","message":"invalid request: snapshots are disabled","retryable":false}"#;
+    let (client, server) = workspace_http_status_client(vec![(400, refused.into())], false).await;
+    app.execute_command("/undo", &client).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(app.composer.text(), "write the file");
+    assert!(!app.notice.contains("Undo failed"), "{}", app.notice);
+
+    // Without a stop to bring back, the refusal is said.
+    let (mut app, _) = undo_fixture();
+    let (client, server) = workspace_http_status_client(vec![(400, refused.into())], false).await;
+    app.execute_command("/undo", &client).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(app.composer.text(), "");
+    assert!(app.notice.starts_with("Undo failed"), "{}", app.notice);
 }
 
 #[tokio::test]

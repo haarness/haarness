@@ -24,7 +24,13 @@ Before this change none of the chats heard anything: the subagent stayed
   `serve --stop`. Its chat gets an `interrupted` checkpoint, a
   hidden `<command … state="interrupted">` message and a notice, once; no turn
   starts by itself, and the next daemon stops what the crash left running.
+- stopping: a message whose request is still arriving when SIGTERM comes
+  waits for the chat's closing turn (its command ignores the signal), and the
+  stopping daemon then refuses it with 503 `server_stopping` instead of
+  starting a turn that would run while it goes away. Sent again under the same
+  request id after the restart, it runs once.
 """
+import http.client
 import json
 import os
 from pathlib import Path
@@ -252,6 +258,49 @@ try:
     cut_off(stopped, stopped_id)
     cut_off(crashed, crashed_id)
     print("PASS a command in the background a restart cut off is told to its chat once, without a turn", flush=True)
+
+    # stopping
+    marker = "ignores-term-" + uuid.uuid4().hex[:8]
+    closing = api("/threads", {"provider": "echo", "model": "echo-1"})["id"]
+    busy_turn = api(f"/threads/{closing}/turns", {"requestId": str(uuid.uuid4()), "text": "!tool bash " + json.dumps(
+        {"command": f"trap '' TERM; sleep 30; echo {marker}"})})["id"]
+    until(lambda: running(marker), "the command did not start")
+    late_id = str(uuid.uuid4())
+    body = json.dumps({"requestId": late_id, "text": "late message", "delivery": "steer"}).encode()
+    address = connection["url"].split("://", 1)[1]
+    late = http.client.HTTPConnection(address, timeout=60)
+    late.putrequest("POST", f"/v1/threads/{closing}/input")
+    for name, value in (("Authorization", "Bearer " + connection["token"]), ("Content-Type", "application/json"),
+                        ("Content-Length", str(len(body)))):
+        late.putheader(name, value)
+    late.endheaders()
+    # Half the request is in when the signal comes; the rest once the turn's
+    # input is shut.
+    late.send(body[:10])
+    time.sleep(0.3)
+    for pid in daemon_pids():
+        os.kill(pid, signal.SIGTERM)
+    time.sleep(0.4)
+    late.send(body[10:])
+    answer = late.getresponse()
+    said = json.loads(answer.read() or b"{}")
+    late.close()
+    assert answer.status == 503, (answer.status, said)
+    assert said.get("code") == "server_stopping" and said.get("retryable") is True, said
+    assert said.get("details", {}).get("reason") == "server_stopping", said
+    assert said.get("message") == "Haarness is shutting down. Send it again in a moment.", said
+    until(lambda: not daemon_pids(), "the stopped daemon is still listed", timeout=60)
+    connect()
+    texts = [item["data"]["text"] for item in api(f"/threads/{closing}/items")
+             if item["data"]["type"] == "user_message" and not item["data"].get("synthetic")]
+    assert "late message" not in texts, texts
+    assert api(f"/turns/{busy_turn}")["status"] == "interrupted"
+    assert api(f"/threads/{closing}/activity")["activeTurn"] is None, "a turn started by itself after the restart"
+    again = api(f"/threads/{closing}/input", {"requestId": late_id, "text": "late message", "delivery": "steer"})
+    assert again.get("turn"), again
+    until(lambda: api(f"/turns/{again['turn']['id']}")["status"] == "completed", "the message sent again did not run")
+    assert replies(closing)[-1] == "Echo: late message", replies(closing)
+    print("PASS a stopping daemon refuses a message that waited for its closing turn; sent again it runs", flush=True)
 finally:
     if connection:
         subprocess.run(args + ["serve", "--stop"], env=env, capture_output=True, timeout=60)

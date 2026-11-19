@@ -17,6 +17,7 @@ pub mod glob_braces;
 mod goal;
 mod image_budget;
 pub mod images;
+mod inert_text;
 pub mod instructions;
 pub mod links;
 pub mod made_paths;
@@ -125,6 +126,14 @@ pub const UNREAD_WHILE_WORKING: &str =
 /// `haarness run --session` or an editor over ACP sending to a chat busy
 /// elsewhere.
 pub const CHAT_BUSY: &str = "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.";
+
+/// Why a server that has begun to shut down refuses a new turn (with
+/// [`haarness_protocol::RefusalReason::ServerStopping`]), as the notice of a
+/// background result it keeps names it.
+pub const SERVER_STOPPING: &str = "Haarness is shutting down";
+
+/// What a request the shutdown refused answers: why, and what to do.
+pub const SERVER_STOPPING_RETRY: &str = "Haarness is shutting down. Send it again in a moment.";
 
 /// Why the server refuses to let a chat's agents do more without asking when
 /// the change comes from a program that runs for an agent (an agent's

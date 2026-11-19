@@ -3690,6 +3690,13 @@ fn failure_parts(error: &CoreError) -> (StatusCode, &'static str, bool) {
         ),
         CoreError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error", true),
         CoreError::Tool(_) => (StatusCode::UNPROCESSABLE_ENTITY, "tool_error", false),
+        // Shutting down passes: the same request goes through once the
+        // server is back.
+        CoreError::Refused(refusal)
+            if refusal.reason == haarness_protocol::RefusalReason::ServerStopping =>
+        {
+            (StatusCode::SERVICE_UNAVAILABLE, "server_stopping", true)
+        }
         CoreError::Refused(_) => (StatusCode::CONFLICT, "refused", false),
         CoreError::Cancelled => (StatusCode::CONFLICT, "cancelled", false),
     }
@@ -3837,6 +3844,31 @@ mod failure_tests {
         // Other failures say neither.
         let conflict = message(ApiFailure::from(CoreError::Conflict("big.bin".into()))).await;
         assert!(conflict.get("details").is_none());
+    }
+
+    /// A turn refused because the server is shutting down passes: 503, to
+    /// send again once it is back.
+    #[tokio::test]
+    async fn a_start_refused_for_the_shutdown_is_unavailable_and_retryable() {
+        let error = CoreError::Refused(Box::new(haarness_core::Refusal {
+            reason: haarness_protocol::RefusalReason::ServerStopping,
+            path: None,
+            message: haarness_core::SERVER_STOPPING_RETRY.into(),
+        }));
+        assert_eq!(
+            super::failure_parts(&error),
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "server_stopping",
+                true
+            )
+        );
+        let body = message(ApiFailure::from(error)).await;
+        assert_eq!(
+            body["message"],
+            "Haarness is shutting down. Send it again in a moment."
+        );
+        assert_eq!(body["details"]["reason"], "server_stopping");
     }
 }
 

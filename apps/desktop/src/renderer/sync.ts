@@ -52,6 +52,19 @@ function merge<V extends { id: string }>(items: V[], value: V) {
  * alone would drop that item, and with it a reply whose streamed text it had
  * replaced. A rewrite is the item's final form, so it wins either way.
  */
+/** The undo a message sent in the open chat just replaced, which the server
+ * dropped with the undone turns: a `thread.updated` of that chat, made by
+ * the new turn (its `turnId`), that clears the revert the chat had. A Redo
+ * clears it too, with no turn, and keeps the turns it restores. */
+export function replacedUndo(event: T.EventEnvelope, threads: T.Thread[], selected: string) {
+  if (event.type !== "thread.updated" || event.threadId !== selected || !event.turnId) return undefined;
+  if ((event.payload as Partial<T.Thread>).revert) return undefined;
+  return threads.find((thread) => thread.id === event.threadId)?.revert ?? undefined;
+}
+/** `items` without the turns `undo` took back, keeping the new turn's. */
+export function withoutUndone(items: T.Item[], undo: T.RevertState, turn: string) {
+  return items.filter((item) => item.sequence <= undo.sequence || item.turnId === turn);
+}
 export function landItems(read: T.Item[], events: T.EventEnvelope[], thread: string) {
   const items = new Map(read.map((item) => [item.id, item]));
   for (const event of events) {

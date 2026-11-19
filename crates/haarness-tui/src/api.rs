@@ -2529,6 +2529,9 @@ pub(crate) const COMPUTER_UNANSWERED: &str = "Your computer couldn't answer. Che
 pub(crate) const COMPUTER_UNREACHABLE: &str =
     "Your computer isn't reachable. Open Haarness on it, then try again.";
 pub(crate) const NOT_ANSWERING: &str = "Haarness isn't answering. Try again in a moment.";
+/// A server that has begun to shut down refused to start anything; sent
+/// again once it is back, the request goes through.
+pub(crate) const SHUTTING_DOWN: &str = "Haarness is shutting down. Send it again in a moment.";
 const SERVER_FAILED: &str = "Something went wrong on our side. Try again in a moment.";
 const TOO_SLOW: &str = "This took too long. Try again in a moment.";
 const TOO_MANY: &str = "Too many requests. Wait a moment, then try again.";
@@ -2552,6 +2555,9 @@ fn refusal_words(
 ) -> Option<&'static str> {
     if matches!(code, Some("bad_gateway" | "project_server_unavailable")) {
         return Some(COMPUTER_UNANSWERED);
+    }
+    if code == Some("server_stopping") {
+        return Some(SHUTTING_DOWN);
     }
     let offline = said.is_some_and(|said| {
         said.to_ascii_lowercase()
@@ -3268,6 +3274,16 @@ mod tests {
             Some(super::COMPUTER_UNREACHABLE)
         );
         assert_eq!(words(504, None, None, false), Some(super::NOT_ANSWERING));
+        // A server shutting down says what to do, whatever it said.
+        assert_eq!(
+            words(
+                503,
+                Some("server_stopping"),
+                Some("Haarness is shutting down"),
+                false
+            ),
+            Some(super::SHUTTING_DOWN)
+        );
         assert_eq!(
             words(500, None, Some("Internal Server Error"), false),
             Some(super::SERVER_FAILED)

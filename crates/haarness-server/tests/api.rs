@@ -1689,7 +1689,7 @@ async fn restart_recovery_reports_background_tasks_to_the_chat_that_launched_the
     }
     let shown = runtime.items(audit, None).await.unwrap();
     assert!(shown.iter().any(|item| matches!(&item.data,
-        haarness_protocol::ItemData::Error { message, retryable: false }
+        haarness_protocol::ItemData::Error { message, retryable: false, .. }
             if message.contains("\u{201c}Audit the parser\u{201d}") && message.contains("not resumed"))));
 
     // The person's next message carries the result to the model.
@@ -9360,7 +9360,7 @@ async fn a_background_result_its_chat_cannot_take_is_kept_for_the_next_message()
     );
     assert!(
         items.iter().any(|item| matches!(&item.data,
-            haarness_protocol::ItemData::Error { message, retryable: false }
+            haarness_protocol::ItemData::Error { message, retryable: false, .. }
                 if message.contains("\u{201c}slow independent check\u{201d} could not start a turn in this chat (Unknown agent: reviewer)")
                     && message.ends_with("your next message passes it to the agent."))),
         "a notice says why: {items:#?}"
@@ -15346,11 +15346,22 @@ async fn steered_runtime(
     Turn,
     Vec<haarness_protocol::QueueInputRequest>,
 ) {
+    steered_runtime_in(Arc::new(SqliteStore::in_memory().unwrap()), steers).await
+}
+
+/// `steered_runtime` over `store`, which a later runtime can open again.
+async fn steered_runtime_in(
+    store: Arc<SqliteStore>,
+    steers: &[(&str, bool)],
+) -> (
+    AgentRuntime,
+    DeferredGate,
+    Thread,
+    Turn,
+    Vec<haarness_protocol::QueueInputRequest>,
+) {
     let provider = DeferredGate::default();
-    let runtime = deferred_runtime(
-        provider.clone(),
-        Arc::new(SqliteStore::in_memory().unwrap()),
-    );
+    let runtime = deferred_runtime(provider.clone(), store);
     let thread = echo_thread(&runtime).await;
     let turn = runtime
         .start_turn(thread.id, turn_request("long refactor"))
@@ -15413,8 +15424,9 @@ async fn a_plain_stop_asks_for_nothing_haarness_steered_in_itself() {
 
 #[tokio::test]
 async fn a_shutdown_the_turn_stops_in_says_once_what_it_did_not_read() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
     let (runtime, provider, thread, turn, steers) =
-        steered_runtime(&[("keep the public names", false)]).await;
+        steered_runtime_in(store.clone(), &[("keep the public names", false)]).await;
     runtime
         .interrupt_active_turns("Haarness stopped")
         .await
@@ -15435,8 +15447,18 @@ async fn a_shutdown_the_turn_stops_in_says_once_what_it_did_not_read() {
         )),
         "{notices:?}"
     );
-    // Sent again, it runs once.
-    let rerun = runtime
+    // The stopping server starts nothing; sent again once it is back, it
+    // runs once.
+    let refused = runtime.queue_input(thread.id, steers[0].clone()).await;
+    assert!(
+        matches!(&refused, Err(CoreError::Refused(refusal))
+            if refusal.reason == haarness_protocol::RefusalReason::ServerStopping),
+        "{:?}",
+        refused.map(|response| response.turn)
+    );
+    let restarted = deferred_runtime(provider.clone(), store);
+    restarted.recover().await.unwrap();
+    let rerun = restarted
         .queue_input(thread.id, steers[0].clone())
         .await
         .unwrap()
@@ -15445,7 +15467,7 @@ async fn a_shutdown_the_turn_stops_in_says_once_what_it_did_not_read() {
     provider.wait().await;
     provider.next();
     assert_eq!(
-        wait_done(&runtime, &rerun).await.status,
+        wait_done(&restarted, &rerun).await.status,
         TurnStatus::Completed
     );
 }

@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createStore } from "solid-js/store";
-import { freshChat, landItems, reduceEvent, type Live } from "../src/renderer/sync";
-import type { EventEnvelope, Item } from "@haarness/sdk";
+import { freshChat, landItems, reduceEvent, replacedUndo, withoutUndone, type Live } from "../src/renderer/sync";
+import type { EventEnvelope, Item, Thread } from "@haarness/sdk";
 test("replayed durable items replace streamed text without duplicating the conversation", () => {
   const [state, set] = createStore<Live>({
     selected: "thread",
@@ -321,4 +321,23 @@ test("command reports keep each command whole and never take it back to running"
   event("command.updated", { ...rest, background: true, state: "stopped", endedBy: "person" });
   event("command.updated", { ...rest, background: true, state: "running" });
   assert.equal(state.shellCommands?.c1.state, "stopped");
+});
+test("a message sent after an undo drops the undone turns at once; a Redo keeps the turns it restores", () => {
+  const thread = { id: "chat", revert: { sequence: 2, snapshotId: "backup" } } as Thread;
+  const event = (turnId: string | null, revert: unknown = null) =>
+    ({ type: "thread.updated", threadId: "chat", turnId, payload: { id: "chat", revert }, eventId: 1, createdAt: "", schemaVersion: "1", serverInstanceId: "s" }) as EventEnvelope;
+  // The new turn clears the undo.
+  const undo = replacedUndo(event("new"), [thread], "chat");
+  assert.equal(undo?.sequence, 2);
+  const item = (sequence: number, turnId: string) => ({ id: String(sequence), threadId: "chat", turnId, sequence, createdAt: "", data: { type: "user_message", text: "x" } }) as Item;
+  assert.deepEqual(
+    withoutUndone([item(1, "old"), item(2, "old"), item(3, "undone"), item(4, "undone"), item(5, "new")], undo!, "new").map((value) => value.id),
+    ["1", "2", "5"],
+  );
+  // A Redo clears it with no turn: nothing is dropped.
+  assert.equal(replacedUndo(event(null), [thread], "chat"), undefined);
+  // Another chat, an undo still pending, or a chat with none: nothing either.
+  assert.equal(replacedUndo(event("new"), [thread], "other"), undefined);
+  assert.equal(replacedUndo(event("new", { sequence: 1, snapshotId: "b" }), [thread], "chat"), undefined);
+  assert.equal(replacedUndo(event("new"), [{ id: "chat" } as Thread], "chat"), undefined);
 });

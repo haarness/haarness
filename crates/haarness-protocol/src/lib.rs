@@ -543,6 +543,14 @@ pub enum ItemData {
     Error {
         message: String,
         retryable: bool,
+        /// The provider's safety check stopped this turn, so every item of
+        /// it is left out of later requests: the person's message, what the
+        /// model wrote and the tools it ran, though the chat still shows them
+        /// (a compaction made during the turn stays). A reworded message is
+        /// then not stopped again for the same history. Set only when the
+        /// stop is stored: older stops are still sent.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        turn_left_out: bool,
     },
     /// Attachments a provider refused, left out of every later request of
     /// this thread so one bad image does not fail each turn. The attachments
@@ -1678,13 +1686,17 @@ pub struct ApiErrorDetails {
     pub path: Option<String>,
 }
 
-/// Why a request was refused for good (see [`ApiErrorDetails::reason`]).
+/// Why a request was refused (see [`ApiErrorDetails::reason`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RefusalReason {
     /// Redo needs `path`, a file over 2 MiB, as an undone turn left it, and
     /// Undo has no copy of that: sending a message keeps the chat as it is.
     NoUndoCopy,
+    /// The server is shutting down and starts no new turn. Unlike the other
+    /// reasons it passes: the same request can be sent again once the
+    /// server is back (`retryable`, status 503).
+    ServerStopping,
     /// A reason from a newer server: `message` says it.
     #[serde(other)]
     Other,

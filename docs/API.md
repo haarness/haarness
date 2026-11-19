@@ -651,6 +651,13 @@ with that text.
 
 The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.
+From the moment it begins, the server starts no turn: a message sent then, or
+one that was waiting while a turn's input closed, is refused with `503`
+`server_stopping` (`retryable: true`, `details.reason` `server_stopping`,
+"Haarness is shutting down. Send it again in a moment.") and can be sent again under its `requestId` once the server is back. A message for
+the queue stays queued, and a background command's or subagent's result that
+arrives then is kept as one its chat refused (see above), "(Haarness is shutting
+down)" in its notice.
 Startup recovery marks orphaned queued/running turns interrupted and appends a
 retryable transcript notice while preserving prior items; provider streams and
 side-effecting tools are never replayed speculatively. Steering such a turn
@@ -1081,6 +1088,20 @@ kept. Any other refusal that names no image leaves out the newest images
 refusal before anything streamed is retried once per turn; a second refusal in
 the same turn fails it, and the next turn sends without the images. TUI and
 Desktop show the item as a notice.
+
+When the provider's safety check stops a turn (`provider_blocked`, or a
+provider's check refusing the whole request), the turn's `error` item carries
+`turn_left_out: true`: every item of that turn, from the person's message to
+the error, is left out of the thread's later requests and of its context
+estimate, in forks too, while the transcript keeps it. A `compaction` made
+during the turn stays, and so does a hidden `user_message` (`synthetic`,
+text starting `<left-out-turn>`) the turn leaves when it changed files or ran
+commands: the paths and a count, never its words. Gemini's `RECITATION` and
+a stopped compaction summary keep their turn. Desktop offers **Edit and resend** on that error while it
+ends the thread's latest turn (an undo of the turn), the TUI points to
+`/undo`; the phone apps and Cloud web show the error alone. An error without
+the field (any other failure, or a stop an older server stored) leaves its
+turn in later requests.
 
 Ultracode is an additive, provider-neutral workflow mode. `Thread.ultracode`
 stores the standing session preference; `CreateThreadRequest.ultracode` and

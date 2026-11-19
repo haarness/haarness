@@ -71,7 +71,7 @@ import {
   serverKey,
   serverProjects,
 } from "../servers";
-import { freshChat, landItems, reduceEvent, type Live } from "./sync";
+import { freshChat, landItems, reduceEvent, replacedUndo, withoutUndone, type Live } from "./sync";
 import {
   archivedByReader,
   keptTabs,
@@ -2798,6 +2798,12 @@ function createApp(saved?: Preferences) {
     if (envelope.eventId <= lastCursor) return;
     lastCursor = envelope.eventId;
     for (const journal of journals) journal.push(item as T.EventEnvelope);
+    // A message sent after an undo replaces the undone turns, which the
+    // server then drops: the open chat drops them too, at once, and reads
+    // its history again, or they would show once the undo is over.
+    const undone = replacedUndo(envelope, state.threads, state.selected);
+    const replaced = !!undone;
+    if (undone) set("items", (items) => withoutUndone(items, undone, envelope.turnId!));
     reduceEvent(state, set, item as T.EventEnvelope);
     // Goals pause, block and finish on their own; the TUI shows the message
     // in its status line, and Desktop beside the goal's chat composer.
@@ -2842,9 +2848,10 @@ function createApp(saved?: Preferences) {
     if (item.type === "assets.updated" || item.type === "configuration.reloaded")
       void catalogs().catch(showError);
     if (
-      ["thread.reverted", "thread.unreverted", "thread.compacted"].includes(
-        item.type,
-      ) &&
+      (replaced ||
+        ["thread.reverted", "thread.unreverted", "thread.compacted"].includes(
+          item.type,
+        )) &&
       "threadId" in item &&
       item.threadId === state.selected
     ) {
