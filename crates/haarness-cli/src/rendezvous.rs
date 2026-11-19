@@ -102,7 +102,10 @@ impl RuntimeDiscovery {
     /// that. One from before records said so (0.1.23 and older) is matched on
     /// the name of the executable it records (`haarness` when it records
     /// none), and on the process having started no later than the record was
-    /// written: whatever was given the pid afterwards started later.
+    /// written: whatever was given the pid afterwards started later. One of
+    /// that name that seems to have started later cannot be told: a clock
+    /// set back, or a file system that keeps coarse times, does the same to
+    /// the daemon itself.
     #[cfg(unix)]
     pub(crate) fn recorded_process_with(
         &self,
@@ -142,7 +145,7 @@ impl RuntimeDiscovery {
         if began <= written {
             RecordedProcess::Server
         } else {
-            RecordedProcess::Other
+            RecordedProcess::Unknown
         }
     }
 
@@ -387,9 +390,10 @@ mod tests {
         let fingerprint = format!("/somewhere/{this}:1:2:3:4");
         let older = record(pid, None, Some(&fingerprint));
         assert_eq!(older.recorded_process(now), Server);
-        // Written before this process started: it is not the one written of.
+        // Written before this process started: it may be a later program of
+        // the same name, or the clock moved; it is not taken for the server.
         let long_ago = Some(UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000));
-        assert_eq!(older.recorded_process(long_ago), Other);
+        assert_eq!(older.recorded_process(long_ago), RecordedProcess::Unknown);
     }
 
     /// A process that runs but cannot be read is never taken for the
@@ -424,7 +428,7 @@ mod tests {
         let before = running(|_| Some("haarness".into()), |_| Some(1_999));
         let after = running(|_| Some("haarness".into()), |_| Some(2_001));
         assert_eq!(older.recorded_process_with(written, &before), Server);
-        assert_eq!(older.recorded_process_with(written, &after), Other);
+        assert_eq!(older.recorded_process_with(written, &after), Unknown);
         let ended = ProcessProbe {
             ended: |_| true,
             ..unread

@@ -6105,11 +6105,8 @@ async fn stop_workspace_server_with(
     identify: impl Fn(&RuntimeDiscovery, Option<std::time::SystemTime>) -> RecordedProcess,
 ) -> Result<()> {
     let deadline = Instant::now() + wait;
+    let mut waiting = false;
     loop {
-        if let Some(live) = inspect_workspace_server(paths, workspace).await? {
-            return stop_answering_server(paths, workspace, &live.discovery).await;
-        }
-
         let discovery = match read_runtime(paths) {
             Ok(discovery) => discovery,
             Err(error)
@@ -6125,6 +6122,9 @@ async fn stop_workspace_server_with(
         let written = fs::metadata(&paths.runtime)
             .and_then(|metadata| metadata.modified())
             .ok();
+        if let Some(live) = inspect_discovered_server(discovery.clone(), workspace).await? {
+            return stop_answering_server(paths, workspace, &live.discovery).await;
+        }
         if discovery.workspace.as_deref().is_some_and(|actual| {
             comparable_workspace(Path::new(actual)) != comparable_workspace(workspace)
         }) {
@@ -6157,39 +6157,68 @@ async fn stop_workspace_server_with(
                 return Err(error).context("cannot inspect the Haarness workspace lease");
             }
         }
+        // A server that was starting may have recorded itself while the
+        // record read above was asked: that one is asked in turn.
+        if read_runtime(paths).ok().is_none_or(|now| {
+            now.pid != discovery.pid || now.url != discovery.url || now.started != discovery.started
+        }) {
+            continue;
+        }
 
         let found = identify(&discovery, written);
         if found == RecordedProcess::Server {
-            terminate_unreachable_server(discovery.pid, || {
-                identify(&discovery, written) == RecordedProcess::Server
+            return match terminate_unreachable_server(discovery.pid, || {
+                identify(&discovery, written)
             })
-            .await?;
-            remove_runtime_if_owner(paths, discovery.pid);
-            println!("Stopped unresponsive Haarness server {}.", discovery.pid);
-            return Ok(());
+            .await?
+            {
+                Terminated::Ended => {
+                    remove_runtime_if_owner(paths, discovery.pid);
+                    println!("Stopped unresponsive Haarness server {}.", discovery.pid);
+                    Ok(())
+                }
+                Terminated::Unconfirmed => Err(unconfirmed_server(discovery.pid, workspace)),
+            };
         }
         // The process discovery names is not that server any more (or cannot
         // be told), and the lease's holder has not recorded itself yet: a
         // server that is starting. It is stopped once it listens.
         if Instant::now() < deadline {
+            if !waiting {
+                waiting = true;
+                eprintln!(
+                    "Waiting up to {} seconds for the Haarness server that is starting for {}…",
+                    wait.as_secs(),
+                    workspace.display()
+                );
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
         if found == RecordedProcess::Other {
             anyhow::bail!(
-                "Haarness server {} has ended, and the new server for {} did not finish starting within {} seconds, so nothing was stopped.",
+                "Haarness server {} has ended, and the new server for {} is still not listening after {} seconds, so nothing was stopped. Its log may say why: `haarness logs --tail 50`.",
                 discovery.pid,
                 workspace.display(),
                 wait.as_secs()
             );
         }
-        anyhow::bail!(
-            "Haarness server {} for {} does not answer, and Haarness cannot confirm that process {} is still that server, so nothing was stopped. If it is Haarness, end it yourself.",
-            discovery.pid,
-            workspace.display(),
-            discovery.pid
-        );
+        return Err(unconfirmed_server(discovery.pid, workspace));
     }
+}
+
+/// Server `pid` does not answer, and whether that process is still it
+/// cannot be told: nothing was stopped, and the person can look.
+fn unconfirmed_server(pid: u32, workspace: &Path) -> anyhow::Error {
+    let remedy = if cfg!(windows) {
+        "end it in Task Manager".to_owned()
+    } else {
+        format!("end it with `kill {pid}`")
+    };
+    anyhow::anyhow!(
+        "Haarness server {pid} for {} does not answer, and Haarness cannot confirm that process {pid} is still that server, so nothing was stopped. If it is Haarness, {remedy}.",
+        workspace.display()
+    )
 }
 
 /// Ask the server `discovery` names, which answers, to stop, and wait for it.
@@ -6214,12 +6243,24 @@ async fn stop_answering_server(
     anyhow::bail!("server {} did not stop within 5 seconds", discovery.pid);
 }
 
+/// How [`terminate_unreachable_server`] left the server.
+#[cfg_attr(not(unix), allow(dead_code))] // never reached there
+enum Terminated {
+    /// It exited, or its pid is another program's now.
+    Ended,
+    /// It runs on, and whether it is still the server cannot be told.
+    Unconfirmed,
+}
+
 /// End server `pid`, which holds its folder's lease but does not answer:
 /// SIGTERM, then SIGKILL after 5 seconds. The caller has found that `pid` is
-/// still that server; `still_server` asks again before SIGKILL, since a pid
-/// given to another program meanwhile reads as alive.
+/// still that server; `now` asks again after SIGTERM and SIGKILL, since a
+/// pid given to another program meanwhile reads as alive.
 #[cfg(unix)]
-async fn terminate_unreachable_server(pid: u32, still_server: impl Fn() -> bool) -> Result<()> {
+async fn terminate_unreachable_server(
+    pid: u32,
+    now: impl Fn() -> RecordedProcess,
+) -> Result<Terminated> {
     use nix::{
         errno::Errno,
         sys::signal::{Signal, kill},
@@ -6237,7 +6278,12 @@ async fn terminate_unreachable_server(pid: u32, still_server: impl Fn() -> bool)
     while alive() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    if alive() && still_server() {
+    if alive() {
+        match now() {
+            RecordedProcess::Server => {}
+            RecordedProcess::Other => return Ok(Terminated::Ended),
+            RecordedProcess::Unknown => return Ok(Terminated::Unconfirmed),
+        }
         kill(target, Signal::SIGKILL)
             .with_context(|| format!("cannot kill unresponsive server {pid}"))?;
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -6245,17 +6291,26 @@ async fn terminate_unreachable_server(pid: u32, still_server: impl Fn() -> bool)
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    if alive() && still_server() {
-        anyhow::bail!("unresponsive server {pid} did not exit after SIGKILL");
+    if alive() {
+        match now() {
+            RecordedProcess::Server => {
+                anyhow::bail!("unresponsive server {pid} did not exit after SIGKILL")
+            }
+            RecordedProcess::Other => {}
+            RecordedProcess::Unknown => return Ok(Terminated::Unconfirmed),
+        }
     }
-    Ok(())
+    Ok(Terminated::Ended)
 }
 
 /// Never reached: nothing here is taken for a recorded server
 /// ([`RuntimeDiscovery::recorded_process`]).
 #[cfg(not(unix))]
 #[allow(clippy::unused_async)] // awaited like the Unix one
-async fn terminate_unreachable_server(pid: u32, _still_server: impl Fn() -> bool) -> Result<()> {
+async fn terminate_unreachable_server(
+    pid: u32,
+    _now: impl Fn() -> RecordedProcess,
+) -> Result<Terminated> {
     anyhow::bail!(
         "Haarness server {pid} owns the workspace lease but is unreachable; stop that process with the platform task manager"
     )
@@ -14443,6 +14498,14 @@ async fn inspect_workspace_server(
             return Ok(None);
         }
     };
+    inspect_discovered_server(discovery, expected_workspace).await
+}
+
+/// [`inspect_workspace_server`] for a record already read.
+async fn inspect_discovered_server(
+    discovery: RuntimeDiscovery,
+    expected_workspace: &Path,
+) -> Result<Option<LiveWorkspaceServer>> {
     let client = match haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token) {
         Ok(client) => client,
         Err(error) => {
@@ -18205,6 +18268,23 @@ request_timeout = 0
             )
         }
 
+        /// A `sleep` that ignores SIGTERM, as a server stuck past it does.
+        fn ignoring_term() -> Self {
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "trap '' TERM; echo ready; exec sleep 600"])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("start sleep");
+            let mut line = String::new();
+            std::io::BufRead::read_line(
+                &mut std::io::BufReader::new(child.stdout.take().expect("its output")),
+                &mut line,
+            )
+            .expect("its first line");
+            assert_eq!(line.trim(), "ready");
+            Self(child)
+        }
+
         fn running(&mut self) -> bool {
             self.0.try_wait().expect("sleep status").is_none()
         }
@@ -18326,7 +18406,7 @@ request_timeout = 0
 
         assert!(bystander.running(), "the program was signalled");
         assert!(error.contains("has ended"), "{error}");
-        assert!(error.contains("did not finish starting"), "{error}");
+        assert!(error.contains("is still not listening"), "{error}");
         assert!(error.contains("nothing was stopped"), "{error}");
         // The starting server replaces the record once it listens.
         assert!(paths.runtime.exists());
@@ -18364,7 +18444,7 @@ request_timeout = 0
             .to_string();
 
             assert!(bystander.running(), "{fingerprint:?}: signalled");
-            assert!(error.contains("did not finish starting"), "{error}");
+            assert!(error.contains("is still not listening"), "{error}");
             drop(bystander);
             fs::remove_dir_all(root).unwrap();
         }
@@ -18473,6 +18553,112 @@ request_timeout = 0
             Some("POST /v1/shutdown")
         );
         assert!(!paths.runtime.exists());
+        drop(bystander);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A server that was starting records itself while `serve --stop` asks
+    /// the old record's address, which takes its whole wait to fail. The new
+    /// record is asked in turn and its server stopped as it answers, never
+    /// taken for the unanswering one and signalled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_stop_asks_a_record_written_while_it_asked_the_old_one() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-stop-new-record-{}", uuid::Uuid::now_v7()));
+        let mut bystander = Bystander::start();
+        let pid = bystander.0.id();
+        let (paths, workspace, _lease) =
+            unanswered_record(&root, pid, Some("Sun Jun  3 08:15:00 2012".into()), None);
+        // An address that takes connections and never answers them.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut old = super::read_runtime(&paths).unwrap();
+        old.url = format!("http://{}", silent.local_addr().unwrap());
+        write_runtime(&paths, &old).unwrap();
+        let mut info = fixture_server_info(vec![
+            WORKSPACE_HISTORY_CAPABILITY.into(),
+            PTY_CAPABILITY.into(),
+        ]);
+        info.workspace = Some(workspace.display().to_string());
+        let (fake, address) = FakeServer::start(info, paths.runtime.clone()).await;
+        // The new record names a process that is what it says it is.
+        let new = RuntimeDiscovery {
+            url: format!("http://{address}"),
+            started: haarness_core::process_groups::process_start(pid),
+            ..old
+        };
+        let starting = {
+            let paths = paths.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                write_runtime(&paths, &new).unwrap();
+            })
+        };
+
+        stop_reaping(
+            &paths,
+            &workspace,
+            &mut bystander,
+            Duration::from_secs(10),
+            RuntimeDiscovery::recorded_process,
+        )
+        .await
+        .unwrap();
+
+        starting.await.unwrap();
+        assert!(bystander.running(), "the answering server was signalled");
+        assert_eq!(
+            fake.requests.lock().last().map(String::as_str),
+            Some("POST /v1/shutdown")
+        );
+        drop(silent);
+        drop(bystander);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A server that outlives SIGTERM, and then cannot be read: it is not
+    /// taken for ended, its record stays, and nothing more is sent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_stop_does_not_call_a_server_it_cannot_read_after_sigterm_ended() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-stop-unread-later-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let mut bystander = Bystander::ignoring_term();
+        let pid = bystander.0.id();
+        let (paths, workspace, _lease) = unanswered_record(&root, pid, None, None);
+        let asked = std::cell::Cell::new(0);
+        let identify = |_: &RuntimeDiscovery, _: Option<std::time::SystemTime>| {
+            asked.set(asked.get() + 1);
+            if asked.get() == 1 {
+                super::RecordedProcess::Server
+            } else {
+                super::RecordedProcess::Unknown
+            }
+        };
+
+        let error = stop_reaping(
+            &paths,
+            &workspace,
+            &mut bystander,
+            Duration::from_millis(300),
+            identify,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(bystander.running(), "it was sent SIGKILL");
+        assert!(
+            error.contains(&format!(
+                "cannot confirm that process {pid} is still that server"
+            )),
+            "{error}"
+        );
+        assert!(error.contains(&format!("`kill {pid}`")), "{error}");
+        assert!(paths.runtime.exists());
+        assert_eq!(asked.get(), 2);
         drop(bystander);
         fs::remove_dir_all(root).unwrap();
     }
