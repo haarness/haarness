@@ -342,13 +342,19 @@ pub fn visible_items(items: &[Item]) -> Vec<&Item> {
     visible
 }
 
+/// How the hidden note that stands in for a left-out turn which changed
+/// things begins (see [`left_out`]): what it changed, never what it said.
+pub const LEFT_OUT_NOTE: &str = "<left-out-turn>\n";
+
 /// The items of every turn whose stop by the provider's safety check left
 /// it out of later requests (`ItemData::Error::turn_left_out`): the person's
 /// message, what the model wrote, the calls it made and their results, and
 /// whatever else the turn stored, except a compaction made during it, whose
-/// summary stands for the history before it. A forked chat's copied items
-/// carry no turn, so there a turn runs from the message the person wrote to
-/// the next one, as requests group them.
+/// summary stands for the history before it, and the note
+/// ([`LEFT_OUT_NOTE`]) saying what the turn changed. A forked chat's copied
+/// items carry no turn, so there a turn runs from the message that opened
+/// it (the person's, or one Haarness sent, such as a background result) to
+/// the next one.
 pub fn left_out(items: &[Item]) -> std::collections::HashSet<crate::ItemId> {
     let mut left_out = std::collections::HashSet::new();
     if !items.iter().any(|item| {
@@ -370,14 +376,7 @@ pub fn left_out(items: &[Item]) -> std::collections::HashSet<crate::ItemId> {
                 copied = None;
                 return item.turn_id;
             }
-            if matches!(
-                item.data,
-                ItemData::UserMessage {
-                    queued: false,
-                    synthetic: false,
-                    ..
-                }
-            ) {
+            if opens_turn(&item.data) {
                 copied = Some(crate::TurnId(item.id.0));
             }
             copied
@@ -401,10 +400,38 @@ pub fn left_out(items: &[Item]) -> std::collections::HashSet<crate::ItemId> {
             .filter(|(item, turn)| {
                 turn.is_some_and(|turn| stopped.contains(&turn))
                     && !matches!(item.data, ItemData::Compaction { .. })
+                    && !left_out_note(&item.data)
             })
             .map(|(item, _)| item.id),
     );
     left_out
+}
+
+/// Whether `data` is the note a left-out turn leaves in its place.
+fn left_out_note(data: &ItemData) -> bool {
+    matches!(data, ItemData::UserMessage { text, synthetic: true, .. } if text.starts_with(LEFT_OUT_NOTE))
+}
+
+/// Whether a message with no turn of its own (a forked chat's copy) opened
+/// a turn: one the person wrote, or one Haarness sent to start a turn (a
+/// background result, a goal's continuation). Not the reminders and notes
+/// Haarness adds within a turn, a Stop hook's feedback, or steering.
+fn opens_turn(data: &ItemData) -> bool {
+    match data {
+        ItemData::UserMessage {
+            queued: false,
+            synthetic: false,
+            ..
+        } => true,
+        ItemData::UserMessage {
+            queued: false,
+            synthetic: true,
+            hook: None,
+            text,
+            ..
+        } => !text.starts_with("<system-reminder>") && !text.starts_with(LEFT_OUT_NOTE),
+        _ => false,
+    }
 }
 
 fn compacted_view(items: &[Item]) -> Vec<&Item> {
@@ -1241,6 +1268,103 @@ mod tests {
             .map(|item| item.sequence)
             .collect::<Vec<_>>();
         assert_eq!(visible, vec![1, 2, 6, 7, 8]);
+    }
+
+    /// In a fork, a stopped turn that a background result started runs from
+    /// that result: the person's turn before it, complete, stays. A turn's
+    /// reminders do not start one.
+    #[test]
+    fn a_forked_stopped_turn_a_background_result_started_keeps_the_turn_before_it() {
+        let hidden = |text: &str| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: true,
+            command_line: None,
+            hook: None,
+        };
+        let items = vec![
+            item(1, said("first question")),
+            item(
+                2,
+                hidden("<system-reminder>\nToday's date is 2026-11-19.\n</system-reminder>"),
+            ),
+            item(3, replied("first answer")),
+            item(
+                4,
+                hidden("<task id=\"t\" state=\"completed\">result</task>"),
+            ),
+            item(5, replied("partial")),
+            item(6, stopped(true)),
+            item(7, said("next")),
+        ];
+        let visible = visible_items(&items)
+            .into_iter()
+            .map(|item| item.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![1, 2, 3, 7]);
+        // A stopped turn the person started takes its reminder with it.
+        let items = vec![
+            item(1, said("first question")),
+            item(2, replied("first answer")),
+            item(3, said("the stopped request")),
+            item(
+                4,
+                hidden("<system-reminder>\nToday's date is 2026-11-19.\n</system-reminder>"),
+            ),
+            item(5, replied("partial")),
+            item(6, stopped(true)),
+        ];
+        let visible = visible_items(&items)
+            .into_iter()
+            .map(|item| item.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![1, 2]);
+    }
+
+    /// The note a turn that changed things leaves stays where the turn was,
+    /// in the chat and in a fork; the rest of the turn is left out.
+    #[test]
+    fn the_note_of_a_left_out_turn_stays_in_its_place() {
+        let turn = Some(crate::TurnId::new());
+        let note = ItemData::UserMessage {
+            text: format!("{LEFT_OUT_NOTE}It changed src/a.rs.\n</left-out-turn>"),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: true,
+            command_line: None,
+            hook: None,
+        };
+        let items = vec![
+            item(1, said("first question")),
+            in_turn(2, turn, said("the stopped request")),
+            in_turn(3, turn, replied("partial")),
+            in_turn(4, turn, note.clone()),
+            in_turn(5, turn, stopped(true)),
+            item(6, said("next")),
+        ];
+        let visible = visible_items(&items)
+            .into_iter()
+            .map(|item| item.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![1, 4, 6]);
+        let forked = items
+            .iter()
+            .cloned()
+            .map(|item| Item {
+                turn_id: None,
+                ..item
+            })
+            .collect::<Vec<_>>();
+        let visible = visible_items(&forked)
+            .into_iter()
+            .map(|item| item.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![1, 4, 6]);
+        // A person's message that only looks like one is theirs, and goes.
+        let mut typed = items.clone();
+        typed[3].data = said(&format!("{LEFT_OUT_NOTE}typed"));
+        assert!(!visible_items(&typed).iter().any(|item| item.sequence == 4));
     }
 
     fn usage(input_tokens: u64, output_tokens: u64, prompt: Option<PromptUsage>) -> ItemData {
