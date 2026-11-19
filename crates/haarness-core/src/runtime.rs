@@ -21308,6 +21308,15 @@ mod shell_reading_tests {
             // A file that is there is judged where it really is: through a
             // linked package, the package's own `.env`.
             "cat node_modules/@w/api/.env",
+            // A search reads its files; a pattern an option gives leaves
+            // every operand a file, wherever the option stands.
+            "grep -r KEY .env",
+            "grep -e KEY .env",
+            "grep .env -e KEY src",
+            "grep -f .env src",
+            "rg KEY .env",
+            "rg -n KEY -- .env",
+            "grep -rn '.env' .env",
         ] {
             assert_eq!(verdict(&defaults, command), Ask, "{command}");
         }
@@ -21398,6 +21407,17 @@ mod shell_reading_tests {
             "grep -rn '{{ .Env.' .goreleaser.yaml",
             "cat src/Theme.Env.ts",
             "echo .ENV >> .gitignore",
+            // A search's pattern is no path, in any case.
+            "grep -rn '.Env' src",
+            "grep -rn '.ENV' src",
+            "grep -rn '.env' src",
+            "grep -rn \"process.env\" src",
+            "rg -n --hidden '.Env' .",
+            "rg '.ENV' .",
+            "git grep -n '.Env'",
+            "git -C src grep -n '.env' -- .",
+            "ag '.ENV' src",
+            "grep -rn --include=*.ts -A 2 '.Env' src",
         ] {
             let asked: Vec<PermissionDecision> =
                 ask_plans("bash", &json!({ "command": command }), &project)
@@ -21586,12 +21606,14 @@ mod shell_reading_tests {
             assert!(asks(&engine, "cat .env").is_some());
             assert!(reads(&engine, ".env"));
         }
-        // A secret's name that is no file keeps what a remembered rule
-        // settled before: one Always on a search for `process.env`.
-        let card = asks(&in_project(&[]), "grep -rn process.env src").unwrap();
-        assert_eq!(card.remembered_rules(), ["bash:grep *"]);
-        for engine in answered(&[], "grep -rn process.env src") {
-            assert!(asks(&engine, "grep -rn import.meta.env src").is_none());
+        // A search's pattern names no file. A secret's name that is no file
+        // keeps what a remembered rule settled before: one Always on a
+        // search of history for `process.env`.
+        assert!(asks(&in_project(&[]), "grep -rn process.env src").is_none());
+        let card = asks(&in_project(&[]), "git log -S process.env").unwrap();
+        assert_eq!(card.remembered_rules(), ["bash:git log *"]);
+        for engine in answered(&[], "git log -S process.env") {
+            assert!(asks(&engine, "git log -S import.meta.env").is_none());
             assert!(asks(&engine, "grep TOKEN .env").is_some());
         }
         // A configured rule naming the command still settles a secret read;

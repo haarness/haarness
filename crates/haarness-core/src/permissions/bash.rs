@@ -2889,7 +2889,15 @@ impl Reader<'_> {
             && reads
             && value.contains(".env")
             && crate::permissions::is_secret_name(Path::new(value));
-        let cased = complete && taken == Taken::Read && !named && holds_env(value);
+        // One lookup before placing it: most such words name no file.
+        let cased = complete
+            && taken == Taken::Read
+            && !named
+            && holds_env(value)
+            && match home_expansion(raw, value) {
+                Some(expanded) => self.from().join(expanded).is_file(),
+                None => self.from().join(value).is_file(),
+            };
         let linked = complete && reads && !named && !globbed && is_link(self.from(), raw, value);
         let credential = complete && crate::permissions::may_name_credential_store(value);
         if outside.is_none() && !named && !cased && !linked && !credential {
@@ -2910,7 +2918,7 @@ impl Reader<'_> {
         let secret = !path.is_dir()
             && (named
                 || (linked && crate::permissions::is_secret_path(&path))
-                || (cased && path.is_file() && crate::permissions::is_secret_path(&path)));
+                || (cased && crate::permissions::is_secret_path(&path)));
         if outside.is_none() && !secret && !credential {
             return;
         }
@@ -3553,7 +3561,12 @@ impl Reader<'_> {
         // the file (`ls -l`, `stat`, `test -f`).
         if complete && !self.path_command(&name) && !LOOKS_ONLY.contains(&name.as_str()) {
             let prints = matches!(name.as_str(), "echo" | "printf");
-            for word in arguments {
+            let pattern = search_pattern(&name, arguments);
+            for (index, word) in arguments.iter().enumerate() {
+                // A search's pattern is no path (`grep -rn '.Env' src`).
+                if Some(index) == pattern {
+                    continue;
+                }
                 let (value, complete) = path_literal(word.node, source);
                 // An option's value as well (`--files0-from=<file>`).
                 let value = match value.split_once('=') {
@@ -3736,6 +3749,368 @@ fn holds_env(text: &str) -> bool {
     text.as_bytes()
         .windows(4)
         .any(|window| window.eq_ignore_ascii_case(b".env"))
+}
+
+/// The options of a search program, for [`search_pattern`]: short ones
+/// that take no value, take one (the rest of their cluster or the next
+/// word) or give the pattern, and long ones likewise, written in full.
+struct SearchOptions {
+    flags: &'static str,
+    valued: &'static str,
+    patterns: &'static str,
+    long_flags: &'static [&'static str],
+    long_valued: &'static [&'static str],
+    long_patterns: &'static [&'static str],
+}
+
+const GREP_OPTIONS: SearchOptions = SearchOptions {
+    flags: "EFGPHILRTUVZabchilnoqrsuvwxyzOSp0123456789",
+    valued: "ABCDdmX",
+    patterns: "ef",
+    long_flags: &[
+        "recursive",
+        "dereference-recursive",
+        "ignore-case",
+        "no-ignore-case",
+        "line-number",
+        "count",
+        "files-with-matches",
+        "files-without-match",
+        "only-matching",
+        "quiet",
+        "silent",
+        "no-messages",
+        "invert-match",
+        "word-regexp",
+        "line-regexp",
+        "extended-regexp",
+        "fixed-strings",
+        "basic-regexp",
+        "perl-regexp",
+        "with-filename",
+        "no-filename",
+        "null",
+        "null-data",
+        "text",
+        "byte-offset",
+        "initial-tab",
+        "line-buffered",
+        "color",
+        "colour",
+        "no-group-separator",
+    ],
+    long_valued: &[
+        "after-context",
+        "before-context",
+        "context",
+        "max-count",
+        "include",
+        "exclude",
+        "exclude-dir",
+        "exclude-from",
+        "label",
+        "binary-files",
+        "devices",
+        "directories",
+        "group-separator",
+    ],
+    long_patterns: &["regexp", "file"],
+};
+
+const RG_OPTIONS: SearchOptions = SearchOptions {
+    flags: "abcFHhIiLlNnoPpqSsUuVvwxz0.",
+    valued: "ABCEMTdgjmrt",
+    patterns: "ef",
+    long_flags: &[
+        "hidden",
+        "no-ignore",
+        "no-ignore-vcs",
+        "no-ignore-parent",
+        "no-ignore-dot",
+        "no-ignore-global",
+        "no-ignore-exclude",
+        "no-config",
+        "ignore-case",
+        "smart-case",
+        "case-sensitive",
+        "fixed-strings",
+        "word-regexp",
+        "line-regexp",
+        "invert-match",
+        "count",
+        "count-matches",
+        "files-with-matches",
+        "files-without-match",
+        "line-number",
+        "no-line-number",
+        "column",
+        "heading",
+        "no-heading",
+        "with-filename",
+        "no-filename",
+        "only-matching",
+        "follow",
+        "text",
+        "multiline",
+        "multiline-dotall",
+        "pcre2",
+        "json",
+        "vimgrep",
+        "unrestricted",
+        "sort-files",
+        "null",
+        "null-data",
+        "trim",
+        "pretty",
+        "quiet",
+        "stats",
+        "no-messages",
+        "search-zip",
+        "crlf",
+        "binary",
+        "passthru",
+        "one-file-system",
+        "byte-offset",
+        "line-buffered",
+        "block-buffered",
+    ],
+    long_valued: &[
+        "glob",
+        "iglob",
+        "type",
+        "type-not",
+        "type-add",
+        "type-clear",
+        "max-count",
+        "max-depth",
+        "max-filesize",
+        "max-columns",
+        "after-context",
+        "before-context",
+        "context",
+        "context-separator",
+        "color",
+        "colors",
+        "encoding",
+        "engine",
+        "replace",
+        "sort",
+        "sortr",
+        "threads",
+        "path-separator",
+        "ignore-file",
+        "pre",
+        "pre-glob",
+    ],
+    // `--files` and `--type-list` search no text.
+    long_patterns: &["regexp", "file", "files", "type-list"],
+};
+
+const AG_OPTIONS: SearchOptions = SearchOptions {
+    flags: "acDfFiLlnoQsStuUvwz0",
+    valued: "ABCGmp",
+    // `ag -g` lists the files whose names match: there is no pattern.
+    patterns: "g",
+    long_flags: &[
+        "hidden",
+        "all-types",
+        "all-text",
+        "ignore-case",
+        "case-sensitive",
+        "smart-case",
+        "literal",
+        "fixed-strings",
+        "word-regexp",
+        "invert-match",
+        "files-with-matches",
+        "files-without-matches",
+        "count",
+        "follow",
+        "unrestricted",
+        "skip-vcs-ignores",
+        "search-zip",
+        "column",
+        "nocolor",
+        "noheading",
+        "nofilename",
+        "nobreak",
+        "nonumbers",
+        "only-matching",
+        "null",
+        "vimgrep",
+        "silent",
+        "stats",
+    ],
+    long_valued: &[
+        "after",
+        "before",
+        "depth",
+        "max-count",
+        "ignore",
+        "ignore-dir",
+        "path-to-ignore",
+        "file-search-regex",
+    ],
+    long_patterns: &[],
+};
+
+const GIT_GREP_OPTIONS: SearchOptions = SearchOptions {
+    flags: "acEFGHhIiLlnopqrvWwz0123456789",
+    valued: "ABCm",
+    patterns: "ef",
+    long_flags: &[
+        "cached",
+        "untracked",
+        "no-index",
+        "exclude-standard",
+        "no-exclude-standard",
+        "recurse-submodules",
+        "text",
+        "textconv",
+        "no-textconv",
+        "ignore-case",
+        "word-regexp",
+        "invert-match",
+        "full-name",
+        "extended-regexp",
+        "basic-regexp",
+        "perl-regexp",
+        "fixed-strings",
+        "line-number",
+        "column",
+        "files-with-matches",
+        "name-only",
+        "files-without-match",
+        "null",
+        "only-matching",
+        "count",
+        "color",
+        "no-color",
+        "break",
+        "heading",
+        "show-function",
+        "function-context",
+        "quiet",
+        "recursive",
+        "no-recursive",
+    ],
+    long_valued: &[
+        "max-depth",
+        "threads",
+        "after-context",
+        "before-context",
+        "context",
+        "max-count",
+    ],
+    long_patterns: &[],
+};
+
+/// Where the pattern of a search stands among its `arguments`: `grep`,
+/// `egrep`, `fgrep`, `rg`, `ag` and `git grep` take their first operand as
+/// the pattern unless an option gives one (`-e`, `-f`, `--regexp`), and a
+/// pattern is no path to read. Only when every option before and after it
+/// is one Haarness knows, and only a literal word no glob expands, so a
+/// file operand is never taken for the pattern.
+fn search_pattern(name: &str, arguments: &[Word<'_>]) -> Option<usize> {
+    let (start, options) = match name {
+        "grep" | "egrep" | "fgrep" => (0, &GREP_OPTIONS),
+        "rg" => (0, &RG_OPTIONS),
+        "ag" => (0, &AG_OPTIONS),
+        "git" => (git_grep_at(arguments)? + 1, &GIT_GREP_OPTIONS),
+        _ => return None,
+    };
+    // The words an option at `index` takes, past its own; `None` when it
+    // is not known or gives the pattern.
+    let takes = |word: &Word<'_>, next: Option<&Word<'_>>| -> Option<usize> {
+        if !word.literal {
+            return None;
+        }
+        if let Some(long) = word.value.strip_prefix("--") {
+            let (name, attached) = long
+                .split_once('=')
+                .map_or((long, false), |(name, _)| (name, true));
+            if options.long_valued.contains(&name) {
+                return Some(usize::from(!attached && next.is_some()));
+            }
+            return (options.long_flags.contains(&name) && !options.long_patterns.contains(&name))
+                .then_some(0);
+        }
+        for (at, letter) in word.value.char_indices().skip(1) {
+            if options.valued.contains(letter) {
+                let attached = !word.value[at + letter.len_utf8()..].is_empty();
+                return Some(usize::from(!attached && next.is_some()));
+            }
+            if options.patterns.contains(letter) || !options.flags.contains(letter) {
+                return None;
+            }
+        }
+        Some(0)
+    };
+    let mut index = start;
+    let pattern = loop {
+        let word = arguments.get(index)?;
+        if word.literal && word.value == "--" {
+            break index + 1;
+        }
+        if !word.value.starts_with('-') || word.value == "-" {
+            break index;
+        }
+        index += 1 + takes(word, arguments.get(index + 1))?;
+    };
+    let word = arguments.get(pattern)?;
+    if !word.literal || unquoted_glob(&word.raw) {
+        return None;
+    }
+    // GNU programs read options after their operands too (`grep x f -e y`).
+    if pattern > index {
+        return Some(pattern);
+    }
+    let mut index = pattern + 1;
+    while let Some(word) = arguments.get(index) {
+        if word.literal && word.value == "--" {
+            break;
+        }
+        index += 1;
+        if word.value.starts_with('-') && word.value != "-" {
+            index += takes(word, arguments.get(index))?;
+        }
+    }
+    Some(pattern)
+}
+
+/// Where `grep` stands among `git`'s words, after options of git's own that
+/// Haarness knows (`git -C x grep …`, `git --no-pager grep …`).
+fn git_grep_at(arguments: &[Word<'_>]) -> Option<usize> {
+    let mut index = 0;
+    loop {
+        let word = arguments.get(index)?;
+        if !word.literal {
+            return None;
+        }
+        match word.value.as_str() {
+            "grep" => return Some(index),
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" => index += 2,
+            "--no-pager"
+            | "-P"
+            | "-p"
+            | "--paginate"
+            | "--bare"
+            | "--no-replace-objects"
+            | "--literal-pathspecs"
+            | "--glob-pathspecs"
+            | "--noglob-pathspecs"
+            | "--icase-pathspecs"
+            | "--no-optional-locks" => index += 1,
+            value
+                if ["--git-dir=", "--work-tree=", "--namespace="]
+                    .iter()
+                    .any(|prefix| value.starts_with(prefix)) =>
+            {
+                index += 1;
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// Whether a word as written holds a glob the shell expands: `*`, `?` or

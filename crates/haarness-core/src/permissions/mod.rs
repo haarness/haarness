@@ -483,8 +483,8 @@ const PATH_PERMISSIONS: [&str; 3] = ["read", "edit", "list"];
 /// names them) holds no secret. Packages ship `.env` files, often as test
 /// fixtures, so a file inside a `node_modules` folder is read without
 /// asking; `*` crosses `/`, so the two allows cover such a folder at any
-/// depth, in relative and absolute paths alike. The first also names a
-/// file whose name ends in `.env` in another case: see [`ANY_CASE_SECRET`].
+/// depth, in relative and absolute paths alike. They also name a file of
+/// settings whose name is spelled in another case: see [`fold_env_name`].
 const SECRET_READ_RULES: [(&str, PermissionDecision); 8] = [
     ("*.env", PermissionDecision::Ask),
     ("*.env.*", PermissionDecision::Ask),
@@ -496,14 +496,23 @@ const SECRET_READ_RULES: [(&str, PermissionDecision); 8] = [
     ("*/node_modules/*", PermissionDecision::Allow),
 ];
 
-/// The secret rule that names a path in any case: a name that ends in
-/// `.env` (`.ENV`, `Prod.Env`) is a file of settings however it is spelled,
-/// and on a disk that ignores case (macOS's and Windows' by default) `.ENV`
-/// is the file `.env`. The other rules match as written, so a source file
-/// such as `Theme.Env.ts` is no secret; on such a disk a word that spells
-/// `.env.local` otherwise reaches it by the name the disk gives it (the
-/// shell reading judges a file that is there by where it really is).
-const ANY_CASE_SECRET: &str = "*.env";
+/// `path` (a path, or the target of an operation) with its file's name in
+/// lower case, when that name is one of a file of settings spelled in
+/// another case: it ends in `.env` (`.ENV`, `Staging.Env`) or starts with
+/// `.env.` (`.ENV.LOCAL`). On a disk that ignores case (macOS's and
+/// Windows' by default) `.ENV` is the file `.env`. Other names, and the
+/// folders on the way, stay as written, so a source file such as
+/// `Theme.Env.ts` is no secret. `None` when nothing changes.
+fn fold_env_name(path: &str) -> Option<String> {
+    let start = path.rfind(['/', '\\']).map_or(0, |at| at + 1);
+    let name = &path[start..];
+    let folded = name.to_ascii_lowercase();
+    let settings = folded
+        .strip_suffix("env")
+        .is_some_and(|stem| stem.ends_with('.'))
+        || folded.starts_with(".env.");
+    (folded != name && settings).then(|| format!("{}{folded}", &path[..start]))
+}
 
 /// How a remembered rule for one shell command exactly as written starts:
 /// see [`exact_rule`].
@@ -544,8 +553,8 @@ fn is_exact_rule(pattern: &str) -> bool {
 /// and `..` are resolved lexically. Search tools leave such a secret-named
 /// file out and only say how many they left out; an explicit read of one
 /// still asks. Configured rules play no part, so every search hides the same
-/// files. A name that ends in `.env` counts in any case
-/// ([`ANY_CASE_SECRET`]), as the read rules read it.
+/// files. A file of settings counts in any case ([`fold_env_name`]), as the
+/// read rules read it.
 #[must_use]
 pub fn is_secret_path(path: &Path) -> bool {
     secret_by_rules(path, true)
@@ -562,13 +571,11 @@ pub(crate) fn is_secret_name(path: &Path) -> bool {
 fn secret_by_rules(path: &Path, any_case: bool) -> bool {
     let path = normalize_absolute(path);
     let path = path.to_string_lossy();
-    let folded = path.to_ascii_lowercase();
+    let folded = any_case.then(|| fold_env_name(&path)).flatten();
+    let path = folded.as_deref().unwrap_or(&path);
     SECRET_READ_RULES
         .iter()
-        .rfind(|(pattern, _)| {
-            wildcard_match(pattern, &path)
-                || (any_case && *pattern == ANY_CASE_SECRET && wildcard_match(pattern, &folded))
-        })
+        .rfind(|(pattern, _)| wildcard_match(pattern, path))
         .is_some_and(|(_, decision)| *decision == PermissionDecision::Ask)
 }
 
@@ -1135,7 +1142,8 @@ fn tool_denial<'a>(
 /// file's other spelling: a relative rule meets the project-relative path and
 /// an absolute rule the absolute one. A rule starting with `*` (the built-in
 /// secret rules) or `~` matches as written, so it means what it always did;
-/// `*.env` also names the path in another case ([`names_any_case`]).
+/// a secret rule also names a file of settings spelled in another case
+/// ([`is_secret_rule`]).
 fn rule_names(
     rule: &PermissionRule,
     operation: &str,
@@ -1145,32 +1153,36 @@ fn rule_names(
     if names_as_written(rule, operation, spellings, real_folders) {
         return true;
     }
-    if !operation.starts_with("read:")
-        || !names_any_case(rule)
-        || !operation.bytes().any(|byte| byte.is_ascii_uppercase())
-    {
+    let fold = |spelled: &str| {
+        spelled
+            .strip_prefix("read:")
+            .and_then(fold_env_name)
+            .map(|target| format!("read:{target}"))
+    };
+    if !is_secret_rule(rule) {
         return false;
     }
+    let Some(operation) = fold(operation) else {
+        return false;
+    };
     let spellings: Vec<(String, bool)> = spellings
         .iter()
-        .map(|(spelled, absolute)| (spelled.to_ascii_lowercase(), *absolute))
+        .map(|(spelled, absolute)| (fold(spelled).unwrap_or_else(|| spelled.clone()), *absolute))
         .collect();
-    names_as_written(
-        rule,
-        &operation.to_ascii_lowercase(),
-        &spellings,
-        real_folders,
-    )
+    names_as_written(rule, &operation, &spellings, real_folders)
 }
 
-/// Whether `rule` is the `read` rule for [`ANY_CASE_SECRET`], Haarness's or
-/// the same pattern configured: it names a path in any case, as
-/// [`is_secret_path`] reads one, so `Prod.ENV` asks as `prod.env` does and a
-/// configured `"*.env": "deny"` refuses it too.
-fn names_any_case(rule: &PermissionRule) -> bool {
-    rule.pattern
-        .strip_prefix("read:")
-        .is_some_and(|pattern| pattern == ANY_CASE_SECRET)
+/// Whether `rule` is one of the built-in `read` rules for secrets
+/// ([`SECRET_READ_RULES`]), Haarness's or the same pattern configured: it
+/// also names a file of settings spelled in another case, as
+/// [`is_secret_path`] reads one, so `Staging.ENV` asks as `staging.env`
+/// does and a configured `"*.env": "deny"` refuses it too.
+fn is_secret_rule(rule: &PermissionRule) -> bool {
+    rule.pattern.strip_prefix("read:").is_some_and(|pattern| {
+        SECRET_READ_RULES
+            .iter()
+            .any(|(secret, _)| *secret == pattern)
+    })
 }
 
 /// [`rule_names`] with the operation as written.
@@ -2098,11 +2110,11 @@ mod tests {
             configured.evaluate("read:node_modules/bottleneck/.env"),
             PermissionDecision::Deny
         );
-        // A name that ends in `.env` asks in any case (on a disk that
-        // ignores case, `.ENV` is `.env`), and a configured rule of the same
-        // pattern covers it too. Longer names are read as written: a source
-        // file, a template, a package's fixture. An answer for the file as
-        // it is spelled still opens it.
+        // A file of settings asks in any case (on a disk that ignores case,
+        // `.ENV` is `.env`), and a configured rule of the same pattern covers
+        // it too. Other names are read as written: a source file, a
+        // template, a package's fixture. An answer for the file as it is
+        // spelled still opens it.
         for path in [".ENV", "/project/deploy/Staging.ENV", "web/.Env"] {
             for (engine, decision) in [
                 (&engine, PermissionDecision::Ask),
@@ -2111,11 +2123,20 @@ mod tests {
                 assert_eq!(engine.evaluate(&format!("read:{path}")), decision, "{path}");
             }
         }
+        for path in [".ENV.LOCAL", "/project/web/.Env.Staging"] {
+            assert_eq!(
+                engine.evaluate(&format!("read:{path}")),
+                PermissionDecision::Ask,
+                "{path}"
+            );
+        }
         for path in [
             "/project/src/Theme.Env.ts",
             "lib/Settings.Env.cs",
+            "web/Prod.Env.Local",
             "/project/.ENV.SAMPLE",
             "node_modules/lib/.ENV",
+            "node_modules/lib/.ENV.LOCAL",
         ] {
             assert_eq!(
                 engine.evaluate(&format!("read:{path}")),
@@ -2173,6 +2194,8 @@ mod tests {
             ".ENV",
             ".Env",
             "deploy/Staging.ENV",
+            ".ENV.LOCAL",
+            ".ENV.SAMPLE",
             "web/Prod.Env.Local",
             "/Srv/Site/.env.STAGING",
             "src/Theme.Env.ts",
@@ -2187,12 +2210,14 @@ mod tests {
                 "{path}"
             );
         }
-        // A name that ends in `.env` counts in any case; a name that may
-        // be no file counts only as written.
+        // A file of settings counts in any case; a name that may be no file
+        // counts only as written.
         for path in [
             ".ENV",
             ".Env",
             "deploy/Staging.ENV",
+            ".ENV.LOCAL",
+            "web/.Env.Staging",
             "/Srv/Site/.env.STAGING",
             "Vendor/Node_Modules/lib/.Env",
         ] {
@@ -2202,6 +2227,7 @@ mod tests {
             "web/Prod.Env.Local",
             "src/Theme.Env.ts",
             "CONF.ENV.SAMPLE",
+            ".ENV.SAMPLE",
             "node_modules/lib/.ENV",
             "Notes.TXT",
         ] {
