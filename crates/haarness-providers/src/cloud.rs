@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures::StreamExt as _;
 use haarness_core::{
     CoreError, CoreResult, KeyCheck, ModelProvider, ProviderMessage, ProviderRequest,
     ProviderStream,
@@ -644,8 +645,15 @@ fn copilot_model(entry: &serde_json::Value) -> Option<(ModelInfo, CopilotWire)> 
 }
 
 /// The models assumed when none are configured: current Gemini models served
-/// through Vertex.
-const VERTEX_FALLBACK: &[&str] = &["gemini-4-argon", "gemini-3.8-flash"];
+/// through Vertex, the cheapest Gemini 4 model first, as a new chat starts on
+/// the first.
+const VERTEX_FALLBACK: &[&str] = &[
+    "gemini-4-hydrogen",
+    "gemini-4-neon",
+    "gemini-4-carbon",
+    "gemini-4-argon",
+    "gemini-3.8-flash",
+];
 
 /// Vertex's global endpoint for publisher models, which an API key reaches
 /// without naming a project: the key belongs to one.
@@ -664,6 +672,32 @@ fn vertex_project_url(project: &str, location: &str) -> String {
         format!("{location}-aiplatform.googleapis.com")
     };
     format!("https://{host}/v1/projects/{project}/locations/{location}/publishers/google")
+}
+
+/// The endpoint of the project an API key belongs to, at the global location,
+/// read from Google's refusal of a request to [`VERTEX_KEY_BASE_URL`]. Google
+/// answers that endpoint from one of the project's regional locations
+/// (asia-southeast1 for a key tried on 2026-11-19), where Gemini 4 Neon,
+/// Hydrogen and Carbon are not served: "Publisher model
+/// `projects/235…/locations/asia-southeast1/publishers/google/models/gemini-4-neon`
+/// was not found or your project does not have access to it". The same key
+/// reaches them at the project's global location.
+fn key_project_base_url(key_base_url: &str, refusal: &str) -> Option<String> {
+    const NAMED: &str = "Publisher model `projects/";
+    let rest = &refusal[refusal.find(NAMED)? + NAMED.len()..];
+    let (project, rest) = rest.split_once('/')?;
+    let location = rest.strip_prefix("locations/")?.split('/').next()?;
+    let project_like = !project.is_empty()
+        && project
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    if !project_like || location == VERTEX_DEFAULT_LOCATION {
+        return None;
+    }
+    let root = key_base_url.strip_suffix("/publishers/google")?;
+    Some(format!(
+        "{root}/projects/{project}/locations/{VERTEX_DEFAULT_LOCATION}/publishers/google"
+    ))
 }
 
 /// Google API keys (`AIza…`, and `AQ.…` for keys bound to a service account)
@@ -688,6 +722,11 @@ pub struct VertexProvider {
     token: Option<SecretString>,
     /// Whether `gcloud` may be asked for an access token.
     ambient: bool,
+    /// Where a key goes without a project: [`VERTEX_KEY_BASE_URL`].
+    key_base_url: String,
+    /// The global endpoint of each key's project, once Google named it (see
+    /// [`key_project_base_url`]).
+    key_projects: std::sync::Mutex<HashMap<String, String>>,
 }
 
 impl VertexProvider {
@@ -735,7 +774,73 @@ impl VertexProvider {
             models,
             token,
             ambient: true,
+            key_base_url: VERTEX_KEY_BASE_URL.to_owned(),
+            key_projects: std::sync::Mutex::default(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_key_base_url(mut self, key_base_url: String) -> Self {
+        self.key_base_url = key_base_url;
+        self
+    }
+
+    fn key_project(&self, key: &str) -> Option<String> {
+        self.key_projects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    }
+
+    fn remember_key_project(&self, key: String, base_url: String) {
+        tracing::info!(
+            provider = %self.instance.id,
+            "Vertex answered the key's project from a regional location; requests now go to the project's global location"
+        );
+        self.key_projects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, base_url);
+    }
+
+    /// The key's project, read from Google's refusal of a token count with
+    /// `model` at the endpoint without a project.
+    async fn learn_key_project(&self, key: &str, model: &str) -> Option<String> {
+        let headers =
+            headers_with(&self.instance.headers, [("x-goog-api-key", key.to_owned())]).ok()?;
+        let response = self
+            .client
+            .post(format!("{}/models/{model}:countTokens", self.key_base_url))
+            .headers(headers.map())
+            .json(&serde_json::json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]}))
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .ok()?;
+        if response.status() != reqwest::StatusCode::NOT_FOUND {
+            return None;
+        }
+        let refusal = response.text().await.ok()?;
+        let base_url = key_project_base_url(&self.key_base_url, &refusal)?;
+        self.remember_key_project(key.to_owned(), base_url.clone());
+        Some(base_url)
+    }
+
+    fn gemini(&self, base_url: String, auth: (&'static str, String)) -> CoreResult<GeminiProvider> {
+        let headers = headers_with(&self.instance.headers, [auth])?;
+        Ok(GeminiProvider::new(NativeInstance {
+            id: self.instance.id.clone(),
+            name: self.instance.name.clone(),
+            base_url,
+            api_key: None,
+            models: self.models.iter().map(|model| model.id.clone()).collect(),
+            discover_models: false,
+            model_defaults: self.instance.model_defaults,
+            assume_authenticated: true,
+            headers,
+        })
+        .with_http_client(self.client.clone()))
     }
 
     /// Send requests through `client`: for a provider a project defines, one
@@ -794,7 +899,9 @@ impl VertexProvider {
     fn endpoint(&self, credential: String) -> CoreResult<(String, (&'static str, String))> {
         let api_key = is_google_api_key(&credential);
         let base_url = match (self.instance.base_url.as_str(), api_key) {
-            ("", true) => VERTEX_KEY_BASE_URL.to_owned(),
+            ("", true) => self
+                .key_project(&credential)
+                .unwrap_or_else(|| self.key_base_url.clone()),
             ("", false) => {
                 return Err(CoreError::Provider(
                     "Vertex endpoint is not configured; set GOOGLE_VERTEX_PROJECT or GOOGLE_VERTEX_BASE_URL"
@@ -849,7 +956,26 @@ impl ModelProvider for VertexProvider {
             ))
             .headers(headers.map())
             .json(&serde_json::json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]}));
-        match crate::key_check::check(&self.instance.name, request).await {
+        let mut checked = crate::key_check::check(&self.instance.name, request).await;
+        // A model the key's project serves only at its global location is
+        // not found where Google answers a key without a project: count
+        // there instead.
+        if checked == KeyCheck::Unsupported
+            && base_url == self.key_base_url
+            && let Some(project_url) = self.learn_key_project(key.trim(), &model.id).await
+            && let Ok(headers) = headers_with(
+                &self.instance.headers,
+                [("x-goog-api-key", key.trim().to_owned())],
+            )
+        {
+            let request = self
+                .client
+                .post(format!("{project_url}/models/{}:countTokens", model.id))
+                .headers(headers.map())
+                .json(&serde_json::json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]}));
+            checked = crate::key_check::check(&self.instance.name, request).await;
+        }
+        match checked {
             // Google says this of any key Vertex does not take, a mistyped
             // one included: it reads as if keys were not allowed at all.
             KeyCheck::Rejected(Some(reason)) if google_refuses_keys(&reason) => {
@@ -864,22 +990,29 @@ impl ModelProvider for VertexProvider {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
-        let (base_url, auth) = self.endpoint(self.token().await?)?;
-        let headers = headers_with(&self.instance.headers, [auth])?;
-        GeminiProvider::new(NativeInstance {
-            id: self.instance.id.clone(),
-            name: self.instance.name.clone(),
-            base_url,
-            api_key: None,
-            models: self.models.iter().map(|model| model.id.clone()).collect(),
-            discover_models: false,
-            model_defaults: self.instance.model_defaults,
-            assume_authenticated: true,
-            headers,
-        })
-        .with_http_client(self.client.clone())
-        .stream(request, cancel)
-        .await
+        let credential = self.token().await?;
+        let (base_url, auth) = self.endpoint(credential.clone())?;
+        if base_url != self.key_base_url {
+            return self.gemini(base_url, auth)?.stream(request, cancel).await;
+        }
+        // A key without a project: a model its project serves only at the
+        // global location is refused before any reply, so the first event
+        // says whether to go there instead.
+        let mut events = self
+            .gemini(base_url, auth.clone())?
+            .stream(request.clone(), cancel.clone())
+            .await?;
+        let first = events.next().await;
+        if let Some(Err(CoreError::Provider(refusal))) = &first
+            && let Some(project_url) = key_project_base_url(&self.key_base_url, refusal)
+        {
+            self.remember_key_project(credential, project_url.clone());
+            return self
+                .gemini(project_url, auth)?
+                .stream(request, cancel)
+                .await;
+        }
+        Ok(Box::pin(futures::stream::iter(first).chain(events)))
     }
 }
 
@@ -892,7 +1025,6 @@ mod tests {
         http::{HeaderMap, header::CONTENT_TYPE},
         routing::post,
     };
-    use futures::StreamExt as _;
     use haarness_core::{ProviderEvent, ProviderMessage};
     use parking_lot::Mutex;
     use serde_json::{Value, json};
@@ -1021,7 +1153,13 @@ mod tests {
         vertex.models.clear();
         let models = VertexProvider::new(vertex, None).info().models;
         assert_eq!(models[0].id, VERTEX_FALLBACK[0]);
-        assert_eq!(models[0].reasoning_efforts, ["low", "medium", "high"]);
+        assert_eq!(models[0].id, "gemini-4-hydrogen");
+        assert_eq!(
+            models[0].reasoning_efforts,
+            ["low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(models[2].id, "gemini-4-carbon");
+        assert_eq!(models[2].reasoning_efforts, ["low", "medium", "high"]);
     }
 
     #[test]
@@ -1542,6 +1680,126 @@ mod tests {
                 .iter()
                 .all(|(headers, _)| !headers.contains_key("authorization"))
         );
+    }
+
+    #[test]
+    fn a_key_project_is_read_from_googles_refusal_at_a_regional_location() {
+        let base = "https://aiplatform.googleapis.com/v1/publishers/google";
+        let refusal = "HTTP 404 Not Found: Publisher model `projects/23528774258/locations/asia-southeast1/publishers/google/models/gemini-4-neon` was not found or your project does not have access to it.";
+        assert_eq!(
+            key_project_base_url(base, refusal).as_deref(),
+            Some(
+                "https://aiplatform.googleapis.com/v1/projects/23528774258/locations/global/publishers/google"
+            )
+        );
+        // Not found at the global location too: the model is not served.
+        assert_eq!(
+            key_project_base_url(
+                base,
+                "Publisher model `projects/23528774258/locations/global/publishers/google/models/gemini-9` was not found"
+            ),
+            None
+        );
+        assert_eq!(key_project_base_url(base, "HTTP 404 Not Found"), None);
+        assert_eq!(
+            key_project_base_url(
+                base,
+                "Publisher model `projects/a b/locations/us-east1/publishers/google/models/x` was not found"
+            ),
+            None
+        );
+    }
+
+    /// A key-only Vertex stand-in: the endpoint without a project answers
+    /// from a regional location that lacks `gemini-4-neon`; the project's
+    /// global location serves it.
+    async fn regional_key_fixture() -> (String, Capture) {
+        async fn regional(
+            State(capture): State<Capture>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> (axum::http::StatusCode, Json<Value>) {
+            capture.0.lock().push((headers, body));
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(
+                    json!({"error": {"code": 404, "message": "Publisher model `projects/235/locations/asia-southeast1/publishers/google/models/gemini-4-neon` was not found or your project does not have access to it.", "status": "NOT_FOUND"}}),
+                ),
+            )
+        }
+        async fn counted(
+            State(capture): State<Capture>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            capture.0.lock().push((headers, body));
+            Json(json!({"totalTokens": 1}))
+        }
+        let capture = Capture::default();
+        let router = Router::new()
+            .route(
+                "/v1/publishers/google/models/gemini-4-neon:streamGenerateContent",
+                post(regional),
+            )
+            .route(
+                "/v1/publishers/google/models/gemini-4-neon:countTokens",
+                post(regional),
+            )
+            .route(
+                "/v1/projects/235/locations/global/publishers/google/models/gemini-4-neon:streamGenerateContent",
+                post(vertex_fixture),
+            )
+            .route(
+                "/v1/projects/235/locations/global/publishers/google/models/gemini-4-neon:countTokens",
+                post(counted),
+            )
+            .with_state(capture.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{address}/v1/publishers/google"), capture)
+    }
+
+    #[tokio::test]
+    async fn a_key_goes_to_its_projects_global_location_for_a_model_its_region_lacks() {
+        let (key_base_url, capture) = regional_key_fixture().await;
+        let mut vertex = instance("google-vertex", String::new(), "AQ.bound-key");
+        vertex.models = vec!["gemini-4-neon".into()];
+        let provider = VertexProvider::new(vertex, None).with_key_base_url(key_base_url);
+        let neon = || ProviderRequest {
+            model: "gemini-4-neon".into(),
+            ..request()
+        };
+        let events = collect_text_with(&provider, neon()).await;
+        assert!(matches!(&events[0], ProviderEvent::TextDelta(text) if text == "hello"));
+        assert_eq!(capture.0.lock().len(), 2);
+        // The project is remembered: the next chat goes there at once.
+        let events = collect_text_with(&provider, neon()).await;
+        assert!(matches!(&events[0], ProviderEvent::TextDelta(text) if text == "hello"));
+        let requests = capture.0.lock();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests
+                .iter()
+                .all(|(headers, _)| headers["x-goog-api-key"] == "AQ.bound-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pasted_key_is_checked_at_its_projects_global_location_when_its_region_lacks_the_model()
+     {
+        let (key_base_url, capture) = regional_key_fixture().await;
+        let mut vertex = instance("google-vertex", String::new(), "unused");
+        vertex.api_key = None;
+        vertex.models = vec!["gemini-4-neon".into()];
+        let provider = VertexProvider::new(vertex, None).with_key_base_url(key_base_url);
+        assert_eq!(
+            provider.check_api_key("AQ.bound-key").await,
+            KeyCheck::Accepted
+        );
+        // Counted where the key was refused, again to read the project, then
+        // at the project's global location.
+        assert_eq!(capture.0.lock().len(), 3);
     }
 
     #[tokio::test]

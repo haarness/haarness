@@ -2321,14 +2321,14 @@ fn describe_model_refusal(
     // only the next day; a per-minute one was already waited out.
     if let Some(quota) = free_tier_quota(&lower) {
         let billing = "turn on billing for this API key's project in Google AI Studio";
-        // Google's free tier is for its Flash models.
-        let flash: Vec<_> = info
+        // Google's free tier is for its Flash models and Gemini 4 Hydrogen.
+        let free: Vec<_> = info
             .models
             .iter()
-            .filter(|listed| listed.id.contains("flash"))
+            .filter(|listed| listed.id.contains("flash") || listed.id.contains("hydrogen"))
             .cloned()
             .collect();
-        let such_as = match listed_alternatives(&flash, model).as_slice() {
+        let such_as = match listed_alternatives(&free, model).as_slice() {
             [] => String::new(),
             names => format!(", such as {}", spoken_list(names, "or")),
         };
@@ -29395,6 +29395,8 @@ mod tests {
         flash.display_name = "Gemini 3.8 Flash".into();
         let mut argon = model_info("gemini-4-argon", 1_048_576);
         argon.display_name = "Gemini 4 Argon".into();
+        let mut hydrogen = model_info("gemini-4-hydrogen", 1_048_576);
+        hydrogen.display_name = "Gemini 4 Hydrogen".into();
         let mut pro = model_info("gemini-2.5-pro", 1_048_576);
         pro.display_name = "Gemini 2.5 Pro".into();
         let catalog = haarness_protocol::ProviderInfo {
@@ -29402,6 +29404,7 @@ mod tests {
             name: "Google Gemini".into(),
             authenticated: true,
             models: vec![
+                hydrogen,
                 argon,
                 flash,
                 model_info("gemini-3.1-pro-preview", 1_048_576),
@@ -29432,7 +29435,7 @@ mod tests {
         assert_eq!(
             super::describe_model_refusal(&left_out, &catalog, "gemini-4-argon", true).as_deref(),
             Some(
-                "Google Gemini's free tier doesn't include Gemini 4 Argon. Choose another model for this chat, such as Gemini 3.8 Flash, or turn on billing for this API key's project in Google AI Studio."
+                "Google Gemini's free tier doesn't include Gemini 4 Argon. Choose another model for this chat, such as Gemini 4 Hydrogen or Gemini 3.8 Flash, or turn on billing for this API key's project in Google AI Studio."
             )
         );
         assert_eq!(
