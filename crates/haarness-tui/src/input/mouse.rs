@@ -336,6 +336,9 @@ async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> 
                 app.notice = "Edit cancelled · draft restored".into();
             }
         }
+        HitTarget::HeldMessages => {
+            app.return_held();
+        }
         HitTarget::ComputerResume => {
             crate::management::resume_computer(app, client).await?;
         }

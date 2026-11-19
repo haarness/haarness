@@ -154,25 +154,8 @@ async fn a_call_a_shutdown_outlived_ends_with_a_result() {
         release: Arc::new(tokio::sync::Semaphore::new(0)),
     });
     let provider = Provider::default();
-    let mut config = RuntimeConfig {
-        approval_mode: haarness_protocol::ApprovalMode::Review,
-        ..RuntimeConfig::default()
-    };
-    config.base_rules.push(PermissionRule {
-        pattern: "stubborn:*".into(),
-        decision: PermissionDecision::Allow,
-    });
-    let runtime = AgentRuntime::with_config(
-        Arc::new(SqliteStore::in_memory().unwrap()),
-        Arc::new(StaticProviderRegistry::new(vec![
-            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
-        ])),
-        Arc::new(Registry(tool.clone())),
-        EventBus::new(256),
-        std::env::temp_dir(),
-        String::new(),
-        config,
-    );
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let runtime = stubborn_runtime(store.clone(), tool.clone(), provider.clone());
     let thread = runtime
         .create_thread(CreateThreadRequest {
             provider: Some("scripted".into()),
@@ -223,13 +206,16 @@ async fn a_call_a_shutdown_outlived_ends_with_a_result() {
     })
     .await
     .expect("the stubborn turn ends");
-    let next = runtime
+    // The stopped server starts nothing; the next one does.
+    let restarted = stubborn_runtime(store, tool.clone(), provider.clone());
+    restarted.recover().await.unwrap();
+    let next = restarted
         .start_turn(thread.id, turn_request("and now?"))
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         while matches!(
-            runtime.turn(next.id).await.unwrap().status,
+            restarted.turn(next.id).await.unwrap().status,
             TurnStatus::Queued | TurnStatus::Running
         ) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -238,7 +224,7 @@ async fn a_call_a_shutdown_outlived_ends_with_a_result() {
     .await
     .expect("the next turn ends");
     assert_eq!(
-        runtime.turn(next.id).await.unwrap().status,
+        restarted.turn(next.id).await.unwrap().status,
         TurnStatus::Completed
     );
     let sent = provider.requests.lock().unwrap().last().cloned().unwrap();

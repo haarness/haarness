@@ -13,7 +13,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import { sizePusher } from "./terminal-size";
 import { optionKeys } from "./terminal-keys";
 import { terminalTheme, type ThemeId } from "../themes";
+import { SCROLLBACK, terminalOptions } from "./terminal-options";
 import {
+  clearPoints,
   inputQueue,
   linkWatch,
   RELAYED_RECONNECTING_AFTER,
@@ -109,12 +111,13 @@ export function TerminalPanel() {
         return [];
       }
       if (open) await ensureTerminal(connection, shown);
-      const values = ofFolder(
-        await window.haarness.api<PtyInfo[]>(connection, "listPtys", []),
-        shown,
-      );
+      const listed = await window.haarness.api<PtyInfo[]>(connection, "listPtys", []);
+      const values = ofFolder(listed, shown);
       if (id === generation && connection === app.state.connection?.id && shown === folder()) {
-        shownOutput.keep(connection + ":", values.map((value) => value.id));
+        // Only terminals the server no longer has are forgotten. This
+        // computer's chats share one server, and another chat's terminals
+        // keep where they were scrolled and cleared for when it is open again.
+        shownOutput.keep(connection + ":", listed.map((value) => value.id));
         setTabs(values);
         if (!values.some((value) => value.id === selected())) {
           // The terminal shown is gone (closed, or its server replaced). A
@@ -365,8 +368,6 @@ export function TerminalPanel() {
     </section>
   );
 }
-/** Lines a terminal view keeps above its screen. */
-const SCROLLBACK = 5000;
 function TerminalView(props: { id: string; onGone: () => void; onNew: () => void }) {
   const app = useApp();
   const [link, setLink] = createSignal<Link>("connected");
@@ -379,13 +380,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
   let disposed = false;
   onMount(() => {
     const connection = app.state.connection!.id;
-    terminal = new Terminal({
-      fontFamily: "SFMono-Regular, Menlo, Consolas, monospace",
-      fontSize: app.state.preferences.terminalFontSize,
-      cursorBlink: true,
-      scrollback: SCROLLBACK,
-      allowProposedApi: false,
-    });
+    terminal = new Terminal(terminalOptions(app.state.preferences.terminalFontSize));
     fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(host);
@@ -426,7 +421,11 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     const contextMenu = (event: MouseEvent) => {
       event.preventDefault();
       if (terminal.modes.mouseTrackingMode !== "none" && !event.shiftKey) return;
-      void window.haarness.terminalMenu(terminal.getSelection()).catch(() => {});
+      // Clear only where it clears: a full-screen program (less, vim, htop)
+      // keeps its alternate screen.
+      void window.haarness
+        .terminalMenu(terminal.getSelection(), terminal.buffer.active.type === "normal")
+        .catch(() => {});
     };
     host.addEventListener("contextmenu", contextMenu);
     onCleanup(() => host.removeEventListener("contextmenu", contextMenu));
@@ -448,6 +447,36 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       write: (bytes, done) => terminal.write(bytes, done),
       shown: () => shownOutput.get(key),
       show: (end) => shownOutput.set(key, end),
+      clearedAt: () => clearPoints.get(key),
+      cleared: (end) => clearPoints.set(key, end),
+      // xterm's clear keeps the line the cursor is on, the prompt, at the top;
+      // a selection would be left marking whatever takes its place.
+      clear: () => {
+        if (terminal.buffer.active.type !== "normal") return false;
+        terminal.clearSelection();
+        terminal.clear();
+        return true;
+      },
+    });
+    // On macOS main tells the window when ⌘K is pressed with the keyboard in
+    // the terminal (instead of Search, which keeps it everywhere else), so it
+    // has to know where the keyboard is. Every focus says so again, in case
+    // main let go of it meanwhile.
+    let keyboard = false;
+    const keyboardIn = (inside: boolean) => {
+      keyboard = inside;
+      void window.haarness.terminalFocus(inside).catch(() => {});
+    };
+    const focusIn = () => keyboardIn(true);
+    const focusOut = (event: FocusEvent) => {
+      if (!host.contains(event.relatedTarget as Node | null)) keyboardIn(false);
+    };
+    host.addEventListener("focusin", focusIn);
+    host.addEventListener("focusout", focusOut);
+    onCleanup(() => {
+      host.removeEventListener("focusin", focusIn);
+      host.removeEventListener("focusout", focusOut);
+      if (keyboard) keyboardIn(false);
     });
     // What xterm sends while a key, mouse, focus or paste event is being
     // handled is the person at the terminal, and always goes to the shell;
@@ -502,6 +531,8 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     });
     resize.observe(host);
     unsubscribe = window.haarness.onEvent((event) => {
+      // ⌘K in the terminal, or Clear in its menu.
+      if (event.kind === "menu" && event.data === "terminal-clear") return stream.clear();
       if (
         event.kind !== "pty" ||
         event.connection !== connection ||
@@ -520,6 +551,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       if (data.view && data.view !== view) return;
       if (data.type === "replay" && typeof data.start === "number" && typeof data.end === "number") {
         shownOutput.adopt(key, data.end);
+        clearPoints.kept(key, data.start);
         stream.replay(Math.min(Math.max(requested, data.start), data.end));
         if (replayStart === undefined) {
           replayStart = data.start;

@@ -283,7 +283,7 @@ try:
     offset = len(REQUESTS)
     run(['tmux', 'send-keys', '-l', '-t', session, 'REFUSE_EMPTY please answer'])
     run(['tmux', 'send-keys', '-t', session, 'Enter'])
-    until(lambda: 'safety check stopped' in pane(), 'TUI did not explain the refusal')
+    until(lambda: "Stopped by the provider's safety check" in pane(), 'TUI did not explain the refusal')
     until(lambda: not api('/turns/active'), 'refused turn stayed active')
     (EVIDENCE / 'refusal-tui.txt').write_text(pane())
     assert len(REQUESTS) - offset == 1, f'a refusal was retried: {len(REQUESTS) - offset} requests'
@@ -294,8 +294,9 @@ try:
     assert finished(errors[0]['turnId'])['status'] == 'failed', 'the refused turn did not fail'
     errors = [item['data'] for item in errors]
     assert not errors[0]['retryable'], errors
-    assert errors[0]['message'].startswith("The provider's safety check stopped this response (refusal)."), errors
-    assert 'rephrase the request or choose another model' in errors[0]['message'], errors
+    assert errors[0]['message'].startswith("Stopped by the provider's safety check (refusal)."), errors
+    assert "won't see this request again" in errors[0]['message'], errors
+    assert errors[0].get('turn_left_out') is True, errors
     assert not any(item['data']['type'] == 'assistant_message' for item in transcript), 'a refusal became a blank reply'
     stop = until(lambda: (root / 'stop-failure.jsonl').exists() and (root / 'stop-failure.jsonl').read_text().strip(), 'StopFailure hook did not run')
     stop = json.loads(stop.splitlines()[0])
@@ -311,7 +312,8 @@ try:
 
     transcript = items(partial)
     assert any(item['data'].get('text') == 'PARTIAL_BEFORE_REFUSAL' for item in transcript if item['data']['type'] == 'assistant_message'), transcript
-    assert any(item['data']['type'] == 'error' and 'safety check stopped' in item['data']['message'] for item in transcript), transcript
+    assert any(item['data']['type'] == 'error' and item['data']['message'].startswith("Stopped by the provider's safety check")
+               for item in transcript), transcript
     try:
         api(f'/threads/{partial}/btw', {'question': 'REFUSE_EMPTY side question'})
         raise AssertionError('a refused side question succeeded')

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  clearPoints,
   DISCONNECTED_AFTER,
   RECONNECTING_AFTER,
   inputQueue,
@@ -22,20 +23,33 @@ import {
  * A stand-in for xterm: written bytes are parsed later, in order, and a
  * write's callback runs right after its bytes are parsed. Parsing a query
  * (`?`) makes it answer, and the answer reaches the shell only while the
- * stream lets it.
+ * stream lets it. A clear notes how many bytes were parsed then; while
+ * `alternate` is set a full-screen program has the screen, and it does
+ * nothing.
  */
 function fakeTerminal(shown: Map<string, number>, key = "pty") {
   const queue: { bytes: Uint8Array; done?: () => void }[] = [];
   const answered: number[] = [];
+  const clears: number[] = [];
+  const screen = { alternate: false };
   const stream = terminalStream({
     write: (bytes, done) => void queue.push({ bytes, done }),
     shown: () => shown.get(key) ?? 0,
     show: (end) => shown.set(key, Math.max(end, shown.get(key) ?? 0)),
+    clearedAt: () => clearPoints.get(key),
+    cleared: (end) => clearPoints.set(key, end),
+    clear: () => {
+      if (screen.alternate) return false;
+      clears.push(parsed);
+      return true;
+    },
   });
   let parsed = 0;
   return {
     stream,
     answered,
+    clears,
+    screen,
     parse() {
       for (const { bytes, done } of queue.splice(0)) {
         for (const byte of bytes) {
@@ -105,6 +119,74 @@ test("the view's own bytes before a truncated replay are never answered, and the
   view.stream.bytes(text("x?"));
   view.parse();
   assert.deepEqual(view.answered, [16]);
+});
+
+test("a clear waits for the output before it, and a view shown again clears at the same point", () => {
+  const shown = new Map<string, number>();
+  const first = fakeTerminal(shown, "c:cleared");
+  first.stream.replay(0);
+  first.stream.bytes(text("seq\n1\n2\n$ "));
+  // ⌘K before xterm has drawn that output: it is cleared too.
+  first.stream.clear();
+  first.stream.bytes(text("ls\n"));
+  first.parse();
+  assert.deepEqual(first.clears, [10]);
+  assert.equal(clearPoints.get("c:cleared"), 10);
+  // Shown again, the replay holds all of it: the view clears after the same
+  // ten bytes, wherever the chunks break, and shows what came after.
+  for (const chunks of [["seq\n1\n2\n$ ls\n"], ["seq\n1\n2", "\n$ ", "ls\n"], ["s", "eq\n1\n2\n$ l", "s\n"]]) {
+    const again = fakeTerminal(shown, "c:cleared");
+    again.stream.replay(0);
+    for (const chunk of chunks) again.stream.bytes(text(chunk));
+    again.parse();
+    assert.deepEqual(again.clears, [10], chunks.join("|"));
+  }
+  // A reconnect from the view's cursor replays only newer output: no clear.
+  const reconnected = fakeTerminal(shown, "c:cleared");
+  reconnected.stream.replay(13);
+  reconnected.stream.bytes(text("x"));
+  reconnected.parse();
+  assert.deepEqual(reconnected.clears, []);
+});
+
+test("a clear point only moves on, and goes once the server no longer has the output before it", () => {
+  const view = fakeTerminal(new Map(), "c:moved");
+  view.stream.replay(0);
+  view.stream.bytes(text("0123456789"));
+  view.stream.clear();
+  view.parse();
+  assert.equal(clearPoints.get("c:moved"), 10);
+  // ⌘K in a view shown again, before its replay arrived, keeps the point.
+  const early = fakeTerminal(new Map(), "c:moved");
+  early.stream.clear();
+  early.parse();
+  assert.equal(clearPoints.get("c:moved"), 10);
+  // The server dropped output up to and past the point: nothing to clear.
+  clearPoints.kept("c:moved", 4);
+  assert.equal(clearPoints.get("c:moved"), 10);
+  clearPoints.kept("c:moved", 10);
+  assert.equal(clearPoints.get("c:moved"), undefined);
+  // A replay that starts after a point clears nothing.
+  clearPoints.set("c:moved", 10);
+  const later = fakeTerminal(new Map(), "c:moved");
+  later.stream.replay(12);
+  later.stream.bytes(text("abc"));
+  later.parse();
+  assert.deepEqual(later.clears, []);
+  // Terminals that are gone take their points with them.
+  shownOutput.keep("c:", []);
+  assert.equal(clearPoints.get("c:moved"), undefined);
+});
+
+test("a clear while a full-screen program has the alternate screen does nothing, and leaves no point", () => {
+  const view = fakeTerminal(new Map(), "c:less");
+  view.stream.replay(0);
+  view.stream.bytes(text("\u001b[?1049hpage"));
+  view.screen.alternate = true;
+  view.stream.clear();
+  view.parse();
+  assert.deepEqual(view.clears, []);
+  assert.equal(clearPoints.get("c:less"), undefined);
 });
 
 test("input typed while the connection is down is kept in order, up to a limit", () => {

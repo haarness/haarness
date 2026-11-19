@@ -85,7 +85,8 @@ version 1.
 - **Diffs.** The result of a call that changed files carries, after its text, one `diff` per file
   from the before and after texts the server recorded (`metadata.diffs`, and each step's for a
   `batch`), spelled as its locations are: `oldText` is absent for a new file and `newText` is empty
-  for a deleted one. A binary file, or one whose text the server cut at 32 KiB, gets no diff, and a
+  for a deleted one. A binary file, or one over 32 KiB (whose change the server keeps as a diff of
+  the changed lines rather than its texts), gets no diff, and a
   prompt's diffs carry at most 1 MB of text in all; the text result still names every file. A load
   replays the diffs as well, with the same limit; when the chat holds more, the latest are the ones
   sent.

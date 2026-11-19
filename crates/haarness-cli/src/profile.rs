@@ -157,7 +157,8 @@ pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> 
             if *push {
                 let _ = remote(args)?;
             }
-            let bytes = Archive::capture(&roots, name, (*scope).into())?;
+            let saved = Archive::capture(&roots, name, (*scope).into())?;
+            let bytes = saved.bytes;
             let fallback = format!("{}.profile.zip", slug(name));
             let output = destination(output.as_deref().unwrap_or(Path::new(&fallback)))?;
             haarness_profiles::write(&output, &bytes, *force)?;
@@ -170,7 +171,7 @@ pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> 
             } else {
                 None
             };
-            json!({"output":output, "manifest":manifest, "pushed":pushed})
+            json!({"output":output, "manifest":manifest, "pushed":pushed, "leftOut":saved.left_out})
         }
         Command::Inspect { file } => {
             serde_json::to_value(Archive::decode(&haarness_profiles::read(file)?)?.manifest)?
@@ -226,11 +227,12 @@ fn restore(roots: &Roots, bytes: &[u8], force: bool, dry_run: bool) -> Result<se
     // Which targets already exist, before a restore replaces them.
     let planned = archive.restore(roots, force, true)?;
     let overwrite: Vec<_> = planned
+        .targets
         .iter()
         .filter(|target| target.exists())
         .cloned()
         .collect();
-    let targets = if dry_run {
+    let restored = if dry_run {
         planned
     } else {
         archive.restore(roots, force, false)?
@@ -238,8 +240,9 @@ fn restore(roots: &Roots, bytes: &[u8], force: bool, dry_run: bool) -> Result<se
     Ok(json!({
         "name": archive.manifest.name,
         "dryRun": dry_run,
-        "targets": targets,
+        "targets": restored.targets,
         "overwrite": overwrite,
+        "inPlace": restored.in_place,
     }))
 }
 
@@ -258,6 +261,15 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                 files(manifest.entries.len()),
                 result["output"].as_str().unwrap_or_default()
             )?;
+            let left_out: Vec<&str> = result["leftOut"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            if let Some(line) = skipped_links(&left_out) {
+                writeln!(text, "{line}")?;
+            }
             if let Ok(record) =
                 serde_json::from_value::<haarness_profiles::Record>(result["pushed"].clone())
             {
@@ -287,7 +299,8 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                     .filter_map(serde_json::Value::as_str)
                     .collect()
             };
-            let (targets, overwrite) = (paths("targets"), paths("overwrite"));
+            let (targets, overwrite, in_place) =
+                (paths("targets"), paths("overwrite"), paths("inPlace"));
             let name = result["name"].as_str().unwrap_or_default();
             if result["dryRun"] == true {
                 writeln!(
@@ -302,6 +315,9 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                         "create"
                     };
                     writeln!(text, "  {action:<9}  {target}")?;
+                }
+                if let Some(line) = already_in_place(&in_place) {
+                    writeln!(text, "{line}")?;
                 }
                 if !force && !overwrite.is_empty() {
                     writeln!(
@@ -322,6 +338,9 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
                     files(targets.len()),
                     overwrite.len()
                 )?;
+                if let Some(line) = already_in_place(&in_place) {
+                    writeln!(text, "{line}")?;
+                }
             }
         }
         Command::Push { .. } => {
@@ -373,6 +392,44 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
         Command::Delete { id } => writeln!(text, "Deleted {id}")?,
     }
     Ok(text)
+}
+
+/// The line naming the links a save left out because they lead to files a
+/// profile does not save.
+fn skipped_links(paths: &[&str]) -> Option<String> {
+    let list = listed(paths);
+    match paths.len() {
+        0 => None,
+        1 => Some(format!(
+            "Skipped 1 link to files a profile does not save: {list}"
+        )),
+        count => Some(format!(
+            "Skipped {count} links to files a profile does not save: {list}"
+        )),
+    }
+}
+
+/// The line naming the files a restore left alone because a link inside the
+/// same folder already leads to the profile's bytes.
+fn already_in_place(paths: &[&str]) -> Option<String> {
+    let list = listed(paths);
+    match paths.len() {
+        0 => None,
+        1 => Some(format!("1 file is already in place through a link: {list}")),
+        count => Some(format!(
+            "{count} files are already in place through links: {list}"
+        )),
+    }
+}
+
+/// The first three paths, then how many more.
+fn listed(paths: &[&str]) -> String {
+    let (named, rest) = paths.split_at(paths.len().min(3));
+    if rest.is_empty() {
+        named.join(", ")
+    } else {
+        format!("{} and {} more", named.join(", "), rest.len())
+    }
 }
 
 fn files(count: usize) -> String {
@@ -538,4 +595,41 @@ async fn download(args: &ProfileArgs, id: Uuid) -> Result<Vec<u8>> {
     .await?;
     Archive::decode(&bytes)?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{already_in_place, skipped_links};
+
+    #[test]
+    fn a_save_names_the_links_it_left_out_in_one_line() {
+        assert_eq!(skipped_links(&[]), None);
+        assert_eq!(
+            skipped_links(&["/home/sam/.config/haarness/skills/fmt"]).as_deref(),
+            Some(
+                "Skipped 1 link to files a profile does not save: /home/sam/.config/haarness/skills/fmt"
+            )
+        );
+        assert_eq!(
+            skipped_links(&["/a", "/b"]).as_deref(),
+            Some("Skipped 2 links to files a profile does not save: /a, /b")
+        );
+        assert_eq!(
+            skipped_links(&["/a", "/b", "/c", "/d", "/e"]).as_deref(),
+            Some("Skipped 5 links to files a profile does not save: /a, /b, /c and 2 more")
+        );
+    }
+
+    #[test]
+    fn a_restore_names_the_files_already_in_place_in_one_line() {
+        assert_eq!(already_in_place(&[]), None);
+        assert_eq!(
+            already_in_place(&["/p/.agents/skills/fmt/SKILL.md"]).as_deref(),
+            Some("1 file is already in place through a link: /p/.agents/skills/fmt/SKILL.md")
+        );
+        assert_eq!(
+            already_in_place(&["/a", "/b", "/c", "/d"]).as_deref(),
+            Some("4 files are already in place through links: /a, /b, /c and 1 more")
+        );
+    }
 }

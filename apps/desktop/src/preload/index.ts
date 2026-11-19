@@ -66,7 +66,8 @@ const bridge: Bridge = {
   chromeReveal: () => invoke("chromeReveal"),
   logLevel: (action) => invoke("logLevel", action),
   exportLogs: () => invoke("exportLogs"),
-  terminalMenu: (selection) => invoke("terminalMenu", selection),
+  terminalMenu: (selection, clearable) => invoke("terminalMenu", selection, clearable),
+  terminalFocus: (focused) => invoke("terminalFocus", focused),
   reveal: (connection, path) => invoke("reveal", connection, path),
   terminal: (connection, action, id, input) =>
     invoke("terminal", connection, action, id, input),

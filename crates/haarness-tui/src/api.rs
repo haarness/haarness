@@ -27,6 +27,8 @@ pub struct Review {
     /// Changed paths the server did not return at all. `None` means the
     /// review is complete.
     pub omitted_files: Option<u64>,
+    /// Untracked files too large to read for their line counts.
+    pub uncounted: std::collections::BTreeSet<String>,
 }
 
 /// Turn a failed review request into something the reader can act on. The
@@ -77,6 +79,10 @@ const WORKSPACE_MUTATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// review into reqwest's bare "error sending request", which told the reader
 /// nothing about what had gone wrong.
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A model summary of a long chat can take minutes: `/compact` waits as long
+/// as Desktop, the phones and the web do.
+pub(crate) const COMPACT_TIMEOUT: Duration = Duration::from_secs(310);
 
 /// A request to an MCP server waits while the server is on its first start,
 /// which may take 2 minutes for a local server (a first `npx -y` download),
@@ -489,18 +495,25 @@ impl ApiClient {
     }
 
     /// Whether this client sends the files it attaches itself, read from
-    /// this computer, as data URLs; otherwise the server reads an attached
-    /// path from its own disk.
+    /// this computer, as data URLs, and to a server reached directly or to
+    /// another computer through Haarness Cloud's relay; otherwise the server
+    /// reads an attached path from its own disk.
     #[must_use]
-    pub fn uploads_attachments(&self) -> bool {
-        self.upload_attachments
+    pub fn uploads(&self) -> crate::media::Uploads {
+        if !self.upload_attachments {
+            crate::media::Uploads::No
+        } else if relayed(&self.endpoint().base) {
+            crate::media::Uploads::Relayed
+        } else {
+            crate::media::Uploads::Direct
+        }
     }
 
     async fn attachments(&self, sources: Vec<String>) -> Result<Vec<String>> {
-        if !self.upload_attachments {
-            return Ok(sources);
+        match self.uploads() {
+            crate::media::Uploads::No => Ok(sources),
+            uploads => crate::media::inline_sources(sources, uploads).await,
         }
-        crate::media::inline_sources(sources).await
     }
 
     fn endpoint(&self) -> ApiEndpoint {
@@ -1256,6 +1269,7 @@ impl ApiClient {
     ) -> Result<Item> {
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/compact"))
+            .timeout(COMPACT_TIMEOUT)
             .json(&request)
             .sent()
             .await?
@@ -1500,7 +1514,7 @@ impl ApiClient {
         let files: Vec<FileDiff> = self.review_get(&format!("/v1/threads/{id}/diff")).await?;
         Ok(Review {
             files,
-            omitted_files: None,
+            ..Review::default()
         })
     }
     pub async fn vcs_diff(&self, mode: &str) -> Result<Review> {
@@ -1522,6 +1536,11 @@ impl ApiClient {
             // The bound is a property of the response, and the server repeats
             // it on every entry so an array can carry it at all.
             omitted_files: files.first().and_then(|file| file.omitted_files),
+            uncounted: files
+                .iter()
+                .filter(|file| file.uncounted)
+                .map(|file| file.diff.file.clone())
+                .collect(),
             files: files.into_iter().map(|file| file.diff).collect(),
         })
     }
@@ -2383,6 +2402,9 @@ pub struct ApiRefusal {
     /// and the file it is about, from a server that names them.
     pub reason: Option<String>,
     pub path: Option<String>,
+    /// Its body said nothing a person reads: empty, an HTML page or a bare
+    /// status, as a proxy answers when it gives up.
+    pub wordless: bool,
 }
 
 impl std::fmt::Display for ApiRefusal {
@@ -2476,8 +2498,7 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
     let said = field("message")
         .or_else(|| field("error"))
         .or(plain.as_deref());
-    let relayed = path.contains("/remote-hosts/") || path.contains("/remote-sessions/");
-    let message = match refusal_words(status, code.as_deref(), said, relayed) {
+    let message = match refusal_words(status, code.as_deref(), said, relayed(&path)) {
         Some(words) => {
             let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
             let detail = compact.chars().take(512).collect::<String>();
@@ -2495,14 +2516,28 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     };
+    let text = (value.is_none())
+        .then(|| body.trim())
+        .filter(|text| !text.is_empty());
+    let wordless = field("message")
+        .or_else(|| field("error"))
+        .or(text)
+        .is_none_or(says_only_its_status);
     Err(ApiRefusal {
         status,
         code,
         message,
         reason: detail("reason"),
         path: detail("path"),
+        wordless,
     }
     .into())
+}
+
+/// Whether a request to `url` (or a path) goes through Haarness Cloud's
+/// relay to another of your computers.
+fn relayed(url: &str) -> bool {
+    url.contains("/remote-hosts/") || url.contains("/remote-sessions/")
 }
 
 /// Failures in plain words: the same words Desktop and the phones use.
@@ -2510,6 +2545,9 @@ pub(crate) const COMPUTER_UNANSWERED: &str = "Your computer couldn't answer. Che
 pub(crate) const COMPUTER_UNREACHABLE: &str =
     "Your computer isn't reachable. Open Haarness on it, then try again.";
 pub(crate) const NOT_ANSWERING: &str = "Haarness isn't answering. Try again in a moment.";
+/// A server that has begun to shut down refused to start anything; sent
+/// again once it is back, the request goes through.
+pub(crate) const SHUTTING_DOWN: &str = "Haarness is shutting down. Send it again in a moment.";
 const SERVER_FAILED: &str = "Something went wrong on our side. Try again in a moment.";
 const TOO_SLOW: &str = "This took too long. Try again in a moment.";
 const TOO_MANY: &str = "Too many requests. Wait a moment, then try again.";
@@ -2533,6 +2571,9 @@ fn refusal_words(
 ) -> Option<&'static str> {
     if matches!(code, Some("bad_gateway" | "project_server_unavailable")) {
         return Some(COMPUTER_UNANSWERED);
+    }
+    if code == Some("server_stopping") {
+        return Some(SHUTTING_DOWN);
     }
     let offline = said.is_some_and(|said| {
         said.to_ascii_lowercase()
@@ -2610,6 +2651,9 @@ fn says_only_its_status(said: &str) -> bool {
 #[derive(Debug)]
 pub struct Unanswered {
     message: &'static str,
+    /// It went out to a server on another computer and its answer was lost
+    /// on the way (not refused at connect, not this computer's own server).
+    lost_on_the_way: bool,
 }
 
 impl std::fmt::Display for Unanswered {
@@ -2620,10 +2664,29 @@ impl std::fmt::Display for Unanswered {
 
 impl std::error::Error for Unanswered {}
 
+/// Whether a refused request's body said nothing a person reads (see
+/// [`ApiRefusal::wordless`]).
+#[must_use]
+pub fn refused_wordless(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ApiRefusal>()
+        .is_some_and(|refusal| refusal.wordless)
+}
+
 /// Whether `error` is a request that got no answer (see [`Unanswered`]).
 #[must_use]
 pub fn unanswered(error: &anyhow::Error) -> bool {
     error.downcast_ref::<Unanswered>().is_some()
+}
+
+/// Whether `error` is a request that went through Cloud's relay to another
+/// computer and lost its answer on the way: not one refused at connect, nor
+/// one to a server on this computer, which got no answer because it is gone.
+#[must_use]
+pub fn lost_on_the_way(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<Unanswered>()
+        .is_some_and(|unanswered| unanswered.lost_on_the_way)
 }
 
 fn unanswered_error(error: reqwest::Error) -> anyhow::Error {
@@ -2649,7 +2712,15 @@ fn unanswered_error(error: reqwest::Error) -> anyhow::Error {
     } else {
         CANNOT_CONNECT
     };
-    Unanswered { message }.into()
+    // Through Cloud's relay to another computer, which may still be at it.
+    let relayed = error.url().is_some_and(|url| {
+        url.path().contains("/remote-hosts/") || url.path().contains("/remote-sessions/")
+    });
+    Unanswered {
+        message,
+        lost_on_the_way: relayed && !local && !error.is_connect(),
+    }
+    .into()
 }
 
 /// Whether `url` is on this computer: `localhost` or a loopback address.
@@ -2735,6 +2806,23 @@ mod tests {
         ApiClient, ApiEndpoint, EndpointCredentials, EndpointResolver, REVIEW_TIMEOUT, ServerAuth,
         SubscriptionEvent, compatible_server_info, parse_sse_frame, review_error,
     };
+
+    #[test]
+    fn a_client_says_how_the_files_it_attaches_reach_the_server() {
+        use crate::media::Uploads;
+        let local = ApiClient::new("http://127.0.0.1:1", "token").unwrap();
+        assert_eq!(local.uploads(), Uploads::No);
+        assert_eq!(local.with_attachment_uploads().uploads(), Uploads::Direct);
+        for relayed in [
+            "https://haarness.ai/api/v1/remote-hosts/h1/runtime/v1/host/workspaces/w1",
+            "https://haarness.ai/api/v1/remote-sessions/s1/runtime",
+        ] {
+            let client = ApiClient::new(relayed, "token")
+                .unwrap()
+                .with_attachment_uploads();
+            assert_eq!(client.uploads(), Uploads::Relayed, "{relayed}");
+        }
+    }
 
     /// A review that runs out of time has to name the thing the reader can
     /// change, not the transport that gave up.
@@ -3232,6 +3320,16 @@ mod tests {
             Some(super::COMPUTER_UNREACHABLE)
         );
         assert_eq!(words(504, None, None, false), Some(super::NOT_ANSWERING));
+        // A server shutting down says what to do, whatever it said.
+        assert_eq!(
+            words(
+                503,
+                Some("server_stopping"),
+                Some("Haarness is shutting down"),
+                false
+            ),
+            Some(super::SHUTTING_DOWN)
+        );
         assert_eq!(
             words(500, None, Some("Internal Server Error"), false),
             Some(super::SERVER_FAILED)

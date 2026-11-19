@@ -9,14 +9,57 @@ export const contextKinds = [
   "Compaction summary",
 ] as const;
 
+/** How the hidden note a left-out turn that changed things leaves begins. */
+const LEFT_OUT_NOTE = "<left-out-turn>\n";
+
+/** Whether a message with no turn of its own (a fork's copy) opened one: the
+ * person's, or one Haarness sent to start a turn, not a reminder, a note, a
+ * Stop hook's feedback or steering. As the runtime groups them. */
+function opensTurn(data: ItemData) {
+  if (data.type !== "user_message" || data.queued) return false;
+  if (!data.synthetic) return true;
+  return !data.hook && !data.text.startsWith("<system-reminder>") && !data.text.startsWith(LEFT_OUT_NOTE);
+}
+
+/** The ids of the items of every turn a safety stop left out of later
+ * requests (an error with `turn_left_out`), except a compaction made during
+ * it and its note of what it changed: what the runtime leaves out. */
+export function leftOut(items: Item[]) {
+  const left = new Set<string>();
+  if (!items.some((item) => item.data.type === "error" && item.data.turn_left_out)) return left;
+  let copied: string | null = null;
+  const turns = items.map((item) => {
+    if (item.turnId) {
+      copied = null;
+      return item.turnId;
+    }
+    if (opensTurn(item.data)) copied = "copied:" + item.id;
+    return copied;
+  });
+  const stopped = new Set(
+    items.flatMap((item, index) =>
+      item.data.type === "error" && item.data.turn_left_out && turns[index] ? [turns[index]] : [],
+    ),
+  );
+  items.forEach((item, index) => {
+    const data = item.data;
+    const note = data.type === "user_message" && !!data.synthetic && data.text.startsWith(LEFT_OUT_NOTE);
+    if (turns[index] && stopped.has(turns[index]) && data.type !== "compaction" && !note) left.add(item.id);
+  });
+  return left;
+}
+
 /** Saved text still retained after undo and the latest compaction. Mirrors the
- * runtime's summary + retained tail boundary, without pretending to tokenize
- * provider-specific system prompts, schemas or media. */
+ * runtime's summary + retained tail boundary, and the turns it leaves out,
+ * without pretending to tokenize provider-specific system prompts, schemas
+ * or media. */
 export function contextUsage(items: Item[], thread: Thread) {
   const history = items.filter((item) => item.threadId === thread.id);
-  const retained = history.filter(
+  const undone = history.filter(
     (item) => item.sequence <= (thread.revert?.sequence ?? Infinity),
   );
+  const left = leftOut(undone);
+  const retained = undone.filter((item) => !left.has(item.id));
   const summary = retained.findLast(
     (item) => item.data.type === "compaction",
   );

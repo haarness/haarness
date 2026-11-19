@@ -547,6 +547,7 @@ mod tests {
                     access_fingerprint: None,
                     trace_endpoint: None,
                     system_config_dir: None,
+                    started: None,
                 },
                 base,
             }),

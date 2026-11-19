@@ -1966,7 +1966,8 @@ async fn child_failure_recovers_queued_input_before_releasing_turn_admission() {
         &item.data,
         ItemData::Error {
             message,
-            retryable: true
+            retryable: true,
+            ..
         } if message.contains("Queued input could not be delivered")
     )));
 

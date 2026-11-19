@@ -1689,7 +1689,7 @@ async fn restart_recovery_reports_background_tasks_to_the_chat_that_launched_the
     }
     let shown = runtime.items(audit, None).await.unwrap();
     assert!(shown.iter().any(|item| matches!(&item.data,
-        haarness_protocol::ItemData::Error { message, retryable: false }
+        haarness_protocol::ItemData::Error { message, retryable: false, .. }
             if message.contains("\u{201c}Audit the parser\u{201d}") && message.contains("not resumed"))));
 
     // The person's next message carries the result to the model.
@@ -5246,6 +5246,68 @@ async fn structured_output_in_the_wrong_shape_is_asked_for_again() {
     let (status, rounds, _) = run(vec![ProviderEvent::TextDelta("Two.".into())]).await;
     assert_eq!(status, TurnStatus::Failed);
     assert_eq!(rounds, 3);
+}
+
+#[tokio::test]
+async fn structured_output_with_values_written_as_strings_is_read_without_asking_again() {
+    let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(ScriptedStructured {
+                rounds: rounds.clone(),
+                answers: vec![ProviderEvent::StructuredOutput(
+                    serde_json::json!({"count": "3", "tags": "bug", "done": "false"}),
+                )],
+            }) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(256),
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Structured".into()),
+            provider: Some("scripted".into()),
+            model: Some("scripted-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "done": {"type": "boolean"}
+        },
+        "required": ["count", "tags", "done"],
+        "additionalProperties": false
+    });
+    let turn = runtime
+        .start_workflow_agent_turn(thread.id, thread.id, turn_request("count"), Some(schema))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert_eq!(rounds.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(!items.iter().any(|item| matches!(
+        &item.data,
+        haarness_protocol::ItemData::UserMessage {
+            synthetic: true,
+            ..
+        }
+    )));
+    assert!(
+        items.iter().any(|item| matches!(
+            &item.data,
+            haarness_protocol::ItemData::AssistantMessage { text, .. }
+                if text == r#"{"count":3,"tags":["bug"],"done":false}"#
+        )),
+        "{items:?}"
+    );
 }
 
 /// Answers each round with its own events, keeping every request.
@@ -9298,7 +9360,7 @@ async fn a_background_result_its_chat_cannot_take_is_kept_for_the_next_message()
     );
     assert!(
         items.iter().any(|item| matches!(&item.data,
-            haarness_protocol::ItemData::Error { message, retryable: false }
+            haarness_protocol::ItemData::Error { message, retryable: false, .. }
                 if message.contains("\u{201c}slow independent check\u{201d} could not start a turn in this chat (Unknown agent: reviewer)")
                     && message.ends_with("your next message passes it to the agent."))),
         "a notice says why: {items:#?}"
@@ -15284,11 +15346,22 @@ async fn steered_runtime(
     Turn,
     Vec<haarness_protocol::QueueInputRequest>,
 ) {
+    steered_runtime_in(Arc::new(SqliteStore::in_memory().unwrap()), steers).await
+}
+
+/// `steered_runtime` over `store`, which a later runtime can open again.
+async fn steered_runtime_in(
+    store: Arc<SqliteStore>,
+    steers: &[(&str, bool)],
+) -> (
+    AgentRuntime,
+    DeferredGate,
+    Thread,
+    Turn,
+    Vec<haarness_protocol::QueueInputRequest>,
+) {
     let provider = DeferredGate::default();
-    let runtime = deferred_runtime(
-        provider.clone(),
-        Arc::new(SqliteStore::in_memory().unwrap()),
-    );
+    let runtime = deferred_runtime(provider.clone(), store);
     let thread = echo_thread(&runtime).await;
     let turn = runtime
         .start_turn(thread.id, turn_request("long refactor"))
@@ -15351,8 +15424,9 @@ async fn a_plain_stop_asks_for_nothing_haarness_steered_in_itself() {
 
 #[tokio::test]
 async fn a_shutdown_the_turn_stops_in_says_once_what_it_did_not_read() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
     let (runtime, provider, thread, turn, steers) =
-        steered_runtime(&[("keep the public names", false)]).await;
+        steered_runtime_in(store.clone(), &[("keep the public names", false)]).await;
     runtime
         .interrupt_active_turns("Haarness stopped")
         .await
@@ -15373,8 +15447,18 @@ async fn a_shutdown_the_turn_stops_in_says_once_what_it_did_not_read() {
         )),
         "{notices:?}"
     );
-    // Sent again, it runs once.
-    let rerun = runtime
+    // The stopping server starts nothing; sent again once it is back, it
+    // runs once.
+    let refused = runtime.queue_input(thread.id, steers[0].clone()).await;
+    assert!(
+        matches!(&refused, Err(CoreError::Refused(refusal))
+            if refusal.reason == haarness_protocol::RefusalReason::ServerStopping),
+        "{:?}",
+        refused.map(|response| response.turn)
+    );
+    let restarted = deferred_runtime(provider.clone(), store);
+    restarted.recover().await.unwrap();
+    let rerun = restarted
         .queue_input(thread.id, steers[0].clone())
         .await
         .unwrap()
@@ -15383,7 +15467,7 @@ async fn a_shutdown_the_turn_stops_in_says_once_what_it_did_not_read() {
     provider.wait().await;
     provider.next();
     assert_eq!(
-        wait_done(&runtime, &rerun).await.status,
+        wait_done(&restarted, &rerun).await.status,
         TurnStatus::Completed
     );
 }
@@ -15929,6 +16013,9 @@ mod small_window;
 
 #[path = "cases/background_commands.rs"]
 mod background_commands;
+
+#[path = "cases/compaction_task.rs"]
+mod compaction_task;
 
 // POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
 #[cfg(unix)]

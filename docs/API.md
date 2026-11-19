@@ -94,7 +94,7 @@ Primary resources:
 - `GET /v1/threads/{id}/items`, `/todos`, `/active`, `/background`, `/pending-question`, `/goal`
 - `GET /v1/threads/{id}/activity` → `{"activeTurn": Turn | null, "background": N, "lastTurn": Turn | null}` (all keys always present; `404` for an unknown chat): the turn running in the chat, how many background results it is still owed, and its newest turn by creation whatever its status (null for a chat without turns). `lastTurn` is read after the other two, so a consumer holding an earlier turn can tell a chat that went quiet with that turn as its newest (it was stopped while idle) from one where a follow-up turn started and ended between two reads. Work a chat started in the background (child agents launched with `background: true` or moved there, workflow runs started without waiting) delivers its result into that chat when it ends, starting a new turn when the chat is idle; work a stop cancelled owes nothing. A chat is quiet, and its last root turn is where it stopped, only with no active turn and `background` 0. A published chat's scope may read it for every chat in its tree. A background workflow run that is paused owes nothing until it is resumed. Servers before 2026-10-17 answer `404`; fall back to `/active` there.
 - `GET /v1/threads/{id}/diff` for the last completed turn that changed files and is not undone; `POST /v1/threads/{id}/revert` and `/unrevert` for stepwise undo/redo
-- `GET /v1/vcs/diff?mode=working|branch[&context=N][&summary=true][&path=FILE]` for bounded Git review, metadata-only listings, or one literal file. Entries are `ReviewFile` (a `FileDiff` plus optional `truncation` and `omittedFiles`); bounds are 1000 files, 512 KiB per patch and 8 MiB per response — see [large-diff review](LARGE-DIFF-REVIEW.md)
+- `GET /v1/vcs/diff?mode=working|branch[&context=N][&summary=true][&path=FILE]` for bounded Git review, metadata-only listings, or one literal file. Entries are `ReviewFile` (a `FileDiff` plus optional `truncation`, `omittedFiles` and `uncounted`); bounds are 1000 files, 512 KiB per patch, 8 MiB per response and 8 MiB read per untracked file — see [large-diff review](LARGE-DIFF-REVIEW.md)
 - `GET /v1/threads/{id}/diff/review[?summary=true|path=FILE]` for deferred last-turn review; see [large-diff review](LARGE-DIFF-REVIEW.md)
 - Project files, every path resolved inside the project: `GET /v1/files/list?path=…[&hidden=true]`; `GET /v1/files/content?path=…` (`content`, `encoding`, `mime`, `revision`, `size`; at most 10 MiB) and `PUT` with `{path, content, revision, encoding?}` (`utf8` or `base64`; a new file uses the empty content's SHA-256 as its revision, and a stale revision is `409`); `POST /v1/files/action` with `mkdir`, `rename` (`target`) or `delete` (`confirm`). Changes publish `files.updated`. `GET /v1/files/search?q=…[&limit=N]` (default 8, at most 50) is the `@` mention search. A query that is `~`, `.` or `..`, or starts with `/`, `~/`, `./` or `../`, browses the one folder it names instead: folders first, each ending in `/`. The server takes each entry's type from the folder listing and follows only links, four at a time. It waits 1.5 s for the folder and then half a second for its links: a folder still silent then gives `[]`, and a link still unresolved shows without its `/`. A folder or link that answers after that serves the searches of the next 10 s, and one still being looked up is not looked up again meanwhile, so an offline network volume never holds up the answer and holds one lookup per path
 - `GET /v1/files/preview`, `/v1/files/preview/current` and `POST /v1/files/preview/restore` serve the saved versions of [canvas previews](CANVAS-PREVIEW.md) (`files.preview.v1`)
@@ -142,7 +142,7 @@ same.
 
 Tool dispatch accepts a model's `functions.` namespace and unambiguous ASCII capitalization differences, and the names other coding agents give their tools for the same job (`read_file`, `write_file`, `run_command`, `run_shell_command`, `shell`, `list_directory`, `grep_search`, `edit_file` and a few more, each with one clear meaning) as the tool here that does it. Exact registered names take precedence, including names containing that prefix. Ambiguous case matches, spelling mistakes, and other namespaces are not guessed. Resolution uses the full registry before availability and permissions, so a disabled exact name cannot fall back to another tool. The canonical name passes through the same advertised-tool, availability, permission, hook, and snapshot checks. Batch planning applies the same resolution, rejects recursive batches, and records invalid arguments, unknown names, and unavailable tools as individual failures while continuing other well-formed calls.
 
-The runtime validates tool arguments against the tool's execution JSON Schema before permission prompts or execution, including direct host calls and tools handled internally by the runtime. Hook-rewritten arguments are validated again. Errors identify the field path and expected constraint without repeating rejected values, end with the fields the tool takes (their types, and which are required), and ask the model to correct the input. Validation invents no missing values; what it reads in place of what was written changes nothing the call does: scalars written as strings, fields named the way other agents name them (`file_path`, `old_string`, `cwd`, `cmd`, `directory`, `is_background`), a caption such as `description`, `explanation` or `justification`, an optional field given as `null`, and a shell command given as a list of words (run as exactly those words, quoted; not under cmd.exe). Native execution schemas retain existing compatibility behavior (shell `timeout_ms`, todo field aliases/default priority, and task continuation placeholders); the provider still sees the preferred input shape. A broken tool schema is reported as a tool-definition error. Unknown-name errors suggest the tool the model most likely meant and the core tools first; a deferred tool the model calls by name is loaded then and its call checked like any other; disabled tools instruct the model not to retry or change the spelling. A call that failed twice in a turn with the same error is not run a third time unchanged: the model is told what it failed with and to change it.
+The runtime validates tool arguments against the tool's execution JSON Schema before permission prompts or execution, including direct host calls and tools handled internally by the runtime. Hook-rewritten arguments are validated again. Errors identify the field path and expected constraint without repeating rejected values, end with the fields the tool takes (their types, and which are required), and ask the model to correct the input. Validation invents no missing values; what it reads in place of what was written changes nothing the call does: scalars written as strings, a list or an object written as its JSON text, one item written bare where the schema wants a list (`"queries": "browser"` reads as `["browser"]`; text with a space, a comma or a double quote in it could be several items and is refused; a word for no value or a boolean, `null`, `none`, `nil`, `undefined`, `true` or `false` in any letter case, is no item; and a number where the schema also takes a number is that number or refused, never a one-item list), fields named the way other agents name them (`file_path`, `old_string`, `cwd`, `cmd`, `directory`, `is_background`), a caption such as `description`, `explanation` or `justification`, an optional field given as `null`, and a shell command given as a list of words (run as exactly those words, quoted; not under cmd.exe). A whole number written as text that no 64-bit integer holds (`"123456789012345678901"`) stays text, so a `number` field refuses it rather than taking a float near it. A structured answer a schema asks for (a workflow agent's `schema`) is read the same way before it is checked, so `{"count": "3"}` for an integer costs no second round. Native execution schemas retain existing compatibility behavior (shell `timeout_ms`, todo field aliases/default priority, and task continuation placeholders); the provider still sees the preferred input shape. A broken tool schema is reported as a tool-definition error. Unknown-name errors suggest the tool the model most likely meant and the core tools first; a deferred tool the model calls by name is loaded then and its call checked like any other; disabled tools instruct the model not to retry or change the spelling. A call that failed twice in a turn with the same error is not run a third time unchanged: the model is told what it failed with and to change it.
 
 Desktop message actions and the TUI message picker offer assistant replies only.
 They fork with `{upToSequence}` to include the selected reply and exclude later
@@ -178,8 +178,20 @@ titles, transcript content, attachments, tool arguments/results, goal text,
 and loop prompts with redaction markers before the archive leaves the server.
 
 Compaction accepts an optional caller `summary`; omitting it asks the server to
-generate a real summary with the thread model. Before committing, the server
-confirms any pending revert, captures a versioned exact todo checkpoint, and
+generate a real summary with the thread model. Once started, that summary is the
+server's own work: a request that goes away before the answer (a proxy's time
+limit, a closed page) leaves it running, and the compaction still lands and is
+announced with `thread.compacted`. Meanwhile another compaction of the chat is
+refused with 409 ("already being compacted"). A turn that starts in the chat
+ends the summary at once, since it could no longer be committed (409, "thread
+changed"), and so does Stop on the idle chat (409, "compaction stopped"). Stopping the server waits for one
+whose request is still open; one nobody waits for any more ends with the server
+before it commits, leaving the chat as it was. Clients that lose the request
+(release 0.1.24 or later) wait for `thread.compacted` instead, and give up when
+the chat gets another item or turn, the server's instance changes, or five
+minutes pass. Before
+committing, the server confirms any pending revert, captures a versioned exact
+todo checkpoint, and
 records what stays in view beside the summary. The person's latest request
 always does, word for word and with what it attached, and with what else they
 wrote in its turn. Then come the configured recent turns when they fit under
@@ -511,6 +523,18 @@ message when its turn ends. A person's own `!` command and a workflow's
 the chat's commands or waits for one with the `bash_output` tool and stops one
 with `bash_stop`; both are offered wherever `bash` is.
 
+What these hidden messages quote cannot end the tags Haarness wrote around it,
+so nothing in it reads as Haarness's own words or the person's: a closing tag
+that could end its block, in any case and also spelled with invisible or
+full-width characters, starts with `&lt;` instead of `<`. That is
+`</command_output>` or `</command>` in a command's output, and `</summary>`
+or `</command>` in its line; `</task_result>` (`</task_error>`) or `</task>`
+in a subagent's reply, and `</summary>` or `</task>` in its task's
+description; and `</workflow_result>` (`</workflow_error>`) or `</workflow>`
+in a workflow run's result (error). Everything else stays as written, so code
+such as `Vec<T>` or `a < b && c > d`, and a README's
+`<details><summary>Logs</summary>`, reach the agent unchanged.
+
 Each command is a `ShellCommandInfo`: `id`, `threadId` (the chat whose agent
 ran it), `rootThreadId`, `turnId` and `callId` (the `bash` call that started
 it), `command` (the line as it runs, cut to 8 KiB), `workdir` when the call
@@ -639,6 +663,13 @@ with that text.
 
 The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.
+From the moment it begins, the server starts no turn: a message sent then, or
+one that was waiting while a turn's input closed, is refused with `503`
+`server_stopping` (`retryable: true`, `details.reason` `server_stopping`,
+"Haarness is shutting down. Send it again in a moment.") and can be sent again under its `requestId` once the server is back. A message for
+the queue stays queued, and a background command's or subagent's result that
+arrives then is kept as one its chat refused (see above), "(Haarness is shutting
+down)" in its notice.
 Startup recovery marks orphaned queued/running turns interrupted and appends a
 retryable transcript notice while preserving prior items; provider streams and
 side-effecting tools are never replayed speculatively. Steering such a turn
@@ -914,7 +945,8 @@ or the message is queued, all of them within 10 s together, and adds each after
 the text (after a command's string `arguments`) as a block under
 `MCP resource: setup · docs:docs://setup`. Its text is fenced, and cut past
 50 KiB (128 KiB for all of a message's resources) with a note that says where
-the whole text was saved; its images and PDFs join `attachments` (10 MiB
+the whole text was saved, or why it could not be (a full disk, say: the
+message is sent all the same); its images and PDFs join `attachments` (10 MiB
 together, and only while the message's media stay within 20 MiB, the
 person's own attachments first). A resource that is not read is named in its
 block with `(not read)`, and the block holds only the reason: the MCP server's
@@ -986,7 +1018,10 @@ audio and video together (text files do not count), the most providers take
 inline. Since a stored message is sent again with every later request of its
 chat, turn and queued-input requests refuse more with `400` naming the size and
 the limit ("scan.pdf is 21 MiB, over the 20 MiB limit for media in one
-message"). That includes a message queued to run later (`delivery: "queue"`)
+message"). A server reached through Haarness Cloud's relay is sent less: Cloud
+carries at most 16 MiB in a request (`413` beyond it) and the media go in base64,
+so Desktop and a terminal UI attached through Cloud hold a message's media to
+11 MiB, as the phone apps do, and say so as a file is attached. That includes a message queued to run later (`delivery: "queue"`)
 and the attachments a queue edit adds to one: they are checked when they
 arrive, so a message that could never start never waits at the head of the
 queue. When its turn comes it is not refused for them again: a file that
@@ -1066,6 +1101,20 @@ refusal before anything streamed is retried once per turn; a second refusal in
 the same turn fails it, and the next turn sends without the images. TUI and
 Desktop show the item as a notice.
 
+When the provider's safety check stops a turn (`provider_blocked`, or a
+provider's check refusing the whole request), the turn's `error` item carries
+`turn_left_out: true`: every item of that turn, from the person's message to
+the error, is left out of the thread's later requests and of its context
+estimate, in forks too, while the transcript keeps it. A `compaction` made
+during the turn stays, and so does a hidden `user_message` (`synthetic`,
+text starting `<left-out-turn>`) the turn leaves when it changed files or ran
+commands: the paths and a count, never its words. Gemini's `RECITATION` and
+a stopped compaction summary keep their turn. Desktop offers **Edit and resend** on that error while it
+ends the thread's latest turn (an undo of the turn), the TUI points to
+`/undo`; the phone apps and Cloud web show the error alone. An error without
+the field (any other failure, or a stop an older server stored) leaves its
+turn in later requests.
+
 Ultracode is an additive, provider-neutral workflow mode. `Thread.ultracode`
 stores the standing session preference; `CreateThreadRequest.ultracode` and
 `PATCH /v1/threads/{id}` update it. Every `Turn` records the effective
@@ -1085,7 +1134,10 @@ direct workflow commands and API starts are unaffected.
 
 Dynamic workflow starts accept exactly one of `name`, inline `source`, or
 explicit `path`, plus optional JSON `args`, workflow-wide `agent`, `model`, and
-`variant`, launching `threadId`, `wait`, and bounded `timeoutMs`. Named definitions come from the static project/global/
+`variant`, launching `threadId`, `wait`, and bounded `timeoutMs`. A native
+workflow's `args` must be an object; a string holding an object's JSON text
+(`"{\"target\":\"src\"}"`, as a model may write the `workflow` tool's `args`)
+is read as that object, and any other value is refused. Named definitions come from the static project/global/
 plugin catalog. Each run executes in a dedicated child session and persists an
 immutable source snapshot and SHA-256, status, phase, structured status,
 ordered logs, warnings, child-agent records, result/error, and timestamps.

@@ -38,11 +38,13 @@ import { terminalAnswers } from "./terminal-answers";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
 import { matchesShortcut, shortcutLabel } from "../renderer/search";
+import { clearsTerminal } from "../renderer/terminal-keys";
 import { cancelled, errorText, failureDetail, failureMessage } from "../renderer/error-text";
 /** Native dialogs speak the language chosen in Settings, like the menus do. */
 const say = (key: string) => translate(data().preferences.language, key);
 import { ApiError, authorizationHeaders, type ServerAuth } from "@haarness/sdk";
 import { onceMoreForUnknownSender } from "./unknown-sender";
+import { alreadyCompacting, cutOnTheWay, DID_NOT_COME_BACK, withDeadline } from "./api-deadlines";
 import { browseRemote, openRemote, remoteLocationId, responseFailure } from "./remote-projects";
 import { connectHost, createRelay, hostBrowse, hostCatalog, hostServerId } from "./remote-hosts";
 import { withThreadKinds } from "../thread-kinds";
@@ -77,7 +79,7 @@ import {
   type WorkspaceOperationResponse,
 } from "@haarness/sdk";
 import { z } from "zod";
-import type { Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
+import type { CompactionCut, Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
 import { themeColors } from "../themes";
 import { serverKey } from "../servers";
 import {
@@ -207,6 +209,8 @@ const commandOwners = new Map<string, number>();
 const sideQuestions = new Map<string, { owner: number; abort: AbortController }>();
 /** Windows whose keyboard is in the side chat, where ⌘W closes its thread in front. */
 const sideChatKeyboard = new Set<number>();
+/** Windows whose keyboard is in a terminal, where ⌘K clears it on macOS. */
+const terminalKeyboard = new Set<number>();
 /** When each window last reloaded a page that stopped; one that stops again sooner asks. */
 const pageReloads = new Map<number, number>();
 const PAGE_RELOAD_EVERY_MS = 60_000;
@@ -238,7 +242,11 @@ const answerers = terminalAnswers();
 // and keep the outage going by refusing new ones while
 // `haarnessTerminalOutage` is set.
 if (process.env.HAARNESS_DESKTOP_TEST === "1")
-  Object.assign(globalThis, { haarnessTerminalSockets: terminals, haarnessTerminalOutage: false });
+  Object.assign(globalThis, {
+    haarnessTerminalSockets: terminals,
+    haarnessTerminalOutage: false,
+    haarnessTerminalKeyboard: terminalKeyboard,
+  });
 const terminalOutage = () =>
   process.env.HAARNESS_DESKTOP_TEST === "1" &&
   (globalThis as { haarnessTerminalOutage?: boolean }).haarnessTerminalOutage === true;
@@ -1360,7 +1368,22 @@ function installHandlers() {
     if (typeof fn !== "function")
       throw new Error("This server operation is not available");
     // A refusal for want of telling who asked is asked once more, on a new connection.
-    const result = await onceMoreForUnknownSender(async () => fn.apply(client, input.args));
+    const args = withDeadline(input.method, input.args);
+    const sent = Date.now();
+    const result = await onceMoreForUnknownSender(async () => fn.apply(client, args)).catch(
+      (error: unknown) => {
+        // The server goes on with a compaction whose request a relay or proxy
+        // cut: the window waits for it to land, with what to say if it never does.
+        const item = connections.get(input.connection);
+        const relay = !!item?.view.remoteHost;
+        const path = { relayed: relay, version: item?.view.info.version, outForMs: Date.now() - sent };
+        if (input.method !== "compact" || !cutOnTheWay(error, path)) throw error;
+        // What is said if the summary never lands: another compaction's wait
+        // that runs out did not come back; a cut, what cut it.
+        const said = alreadyCompacting(error) ? DID_NOT_COME_BACK : failureMessage(error, { relay });
+        return { compactionCut: said } satisfies CompactionCut;
+      },
+    );
     return input.method === "listThreads"
       ? withThreadKinds(result, (id) => client.listItems(id))
       : result;
@@ -1450,6 +1473,10 @@ function installHandlers() {
   handle("sideChatFocus", (win, focused: unknown) => {
     if (focused === true) sideChatKeyboard.add(win.id);
     else sideChatKeyboard.delete(win.id);
+  });
+  handle("terminalFocus", (win, focused: unknown) => {
+    if (focused === true) terminalKeyboard.add(win.id);
+    else terminalKeyboard.delete(win.id);
   });
   // A side question's answer arrives as "btw" events with the id the window
   // chose, and the call answers with the last of them (done or error), so the
@@ -1850,11 +1877,18 @@ function installHandlers() {
   );
   handle("exportLogs", (win) => exportLogs(win, say));
   // The terminal's right-click menu (see Terminal.tsx), with the text
-  // selected there.
-  handle("terminalMenu", (win, raw: unknown) =>
+  // selected there. Clear goes back to the window, whose terminal clears.
+  handle("terminalMenu", (win, raw: unknown, clearable: unknown) =>
     showContextMenu(
       win,
-      terminalMenuItems(z.string().parse(raw), { t: say, copy: (text) => clipboard.writeText(text) }),
+      terminalMenuItems(z.string().parse(raw), {
+        t: say,
+        copy: (text) => clipboard.writeText(text),
+        platform: process.platform,
+        ...(clearable === false
+          ? {}
+          : { clear: () => send(win, { kind: "menu", data: "terminal-clear" }) }),
+      }),
     ),
   );
   // An image a reply links to on another host, once the person asks for it.
@@ -2116,6 +2150,10 @@ function createWindow() {
     for (const side of sideQuestions.values())
       if (side.owner === win.id) side.abort.abort();
   });
+  // A new page starts with no terminal holding the keyboard. A navigation the
+  // window refuses (a file dropped on it) leaves the page, and so the flag,
+  // as they were: only one that took place clears it.
+  win.webContents.on("did-navigate", () => terminalKeyboard.delete(win.id));
   win.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
     const keys = {
@@ -2133,6 +2171,14 @@ function createWindow() {
     if (side && matchesShortcut(keys, side, process.platform)) {
       event.preventDefault();
       send(win, { kind: "menu", data: "side-chat" });
+      return;
+    }
+    // ⌘K with the keyboard in a terminal clears it, as in Terminal and
+    // iTerm2; neither the page nor the menu's Search hears it, and Search
+    // keeps it everywhere else.
+    if (terminalKeyboard.has(win.id) && clearsTerminal(keys, process.platform)) {
+      event.preventDefault();
+      send(win, { kind: "menu", data: "terminal-clear" });
       return;
     }
     // ⌘W (Ctrl+W elsewhere) closes the side chat's thread in front while the
@@ -2158,6 +2204,7 @@ function createWindow() {
     for (const side of sideQuestions.values())
       if (side.owner === win.id) side.abort.abort();
     sideChatKeyboard.delete(win.id);
+    terminalKeyboard.delete(win.id);
     pageReloads.delete(win.id);
     terminals.close(win.id);
     answerers.forget(win.id);

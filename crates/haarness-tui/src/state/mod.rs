@@ -1206,6 +1206,11 @@ pub struct App {
     /// Review currently being fetched for the `/diff` viewer, on a worker
     /// task. Leaving the viewer cancels it; a frame collects it.
     pub(crate) diff_load: Option<crate::commands::DiffLoad>,
+    /// `/compact` requests running on worker tasks; see `compaction`.
+    pub(crate) compactions: Vec<crate::compaction::Compaction>,
+    /// Messages sent while their chat was being compacted, sent once it is
+    /// over; see `compaction`.
+    pub(crate) held: Vec<crate::compaction::Held>,
     /// OSC notification queued by the reducer, drained by the event loop.
     pub pending_notification: Option<String>,
     /// "Finished" banners waiting out their grace; see `state::completion`.
@@ -1472,6 +1477,8 @@ impl App {
             workspace_ref_operation: None,
             workspace_mutation: None,
             diff_load: None,
+            compactions: Vec::new(),
+            held: Vec::new(),
             pending_notification: None,
             completions: completion::HeldCompletions::default(),
             notification_toast: None,
@@ -2973,9 +2980,10 @@ impl App {
     }
 
     /// A bracketed paste or terminal file drop into the prompt: dropped
-    /// media becomes attachments, anything else is text. `uploads` says the
-    /// client sends files to the server whole (an attached server).
-    pub fn paste_into_prompt(&mut self, text: &str, uploads: bool) {
+    /// media becomes attachments, anything else is text. `uploads` says
+    /// whether the client sends files to the server whole (an attached
+    /// server), and how: to another computer through Cloud's relay, fewer.
+    pub fn paste_into_prompt(&mut self, text: &str, uploads: crate::media::Uploads) {
         // A shell command reads only the prompt's text, so in shell mode a
         // dropped file stays its path.
         let dropped = if self.shell_mode {

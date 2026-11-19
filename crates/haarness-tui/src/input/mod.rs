@@ -1268,6 +1268,10 @@ pub async fn handle_key_at(
                 // must never reach running work, not even as a second press.
                 app.escape_interrupt = None;
                 app.notice = "Edit cancelled · draft restored".into();
+            } else if app.return_held() {
+                // Messages waiting for the chat's compaction come back to the
+                // prompt, to be edited or sent once it is done.
+                app.escape_interrupt = None;
             } else if let Some(turn) = app.active_turn {
                 app.ctrl_c_action = None;
                 let target = InterruptTarget::Turn(turn);
@@ -1406,6 +1410,10 @@ pub async fn handle_key_at(
                 && (app.shell_mode || app.composer.text().trim_start().starts_with('/'))
             {
                 app.notice = "Commands cannot be queued. Use a normal message or Steer.".into();
+            } else if app.shell_mode && app.holds_for_compaction() {
+                // What it writes would make the server drop the summary being
+                // written; the command stays in the prompt.
+                app.refuse_while_compacting(crate::compaction::WAIT_FOR_COMPACTION);
             } else if app.shell_mode {
                 let command = crate::resource_mentions::plain(&app.composer.take());
                 app.save_prompt_history();
@@ -1453,6 +1461,16 @@ pub async fn handle_key_at(
                     );
                 }
                 app.refuse_command(notice);
+            } else if (!app.composer.text().trim().is_empty() || !app.attachments.is_empty())
+                && app.holds_for_compaction()
+            {
+                // Sent now, it would make the server drop the summary being
+                // written: it waits above the prompt until the chat is compacted.
+                app.hold_for_compaction(key.modifiers.contains(KeyModifiers::ALT));
+                app.scroll_to_bottom();
+                app.undo_draft = None;
+                app.mention_resources.want = None;
+                app.autocomplete_hidden = false;
             } else if !app.composer.text().trim().is_empty() || !app.attachments.is_empty() {
                 // Resolve before taking the draft; a failed settings read must
                 // preserve text and attachments for retry.
@@ -1686,7 +1704,7 @@ pub(crate) fn apply_mention(app: &mut App, client: &ApiClient) -> bool {
             .map(|workspace| std::path::Path::new(workspace).join(&path))
     };
     if let Some(absolute) = absolute
-        && !client.uploads_attachments()
+        && client.uploads() == crate::media::Uploads::No
         && crate::media::mime_for_path(&absolute).is_some()
     {
         app.composer.replace_range(start, end, "");

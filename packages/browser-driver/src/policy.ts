@@ -113,16 +113,83 @@ export function browserSiteAccess<Category extends string>(
 ): Record<Category, SiteDecision> {
   // Rules hold canonical origins; read the same site however it is spelled.
   const origin = policyOrigin(input)?.origin ?? input;
-  const match = (pattern: string) => {
-    if (pattern === origin) return true;
-    const index = pattern.indexOf("*.");
-    if (index < 0 || !origin.startsWith(pattern.slice(0, index))) return false;
-    const host = origin.slice(index), suffix = pattern.slice(index + 2);
-    if (!host.endsWith(suffix)) return false;
-    const subdomain = host.slice(0, -suffix.length);
-    return subdomain.length > 1 && subdomain.endsWith(".");
+  const decide = (origin: string) => {
+    const match = (pattern: string) => {
+      if (pattern === origin) return true;
+      const index = pattern.indexOf("*.");
+      if (index < 0 || !origin.startsWith(pattern.slice(0, index))) return false;
+      const host = origin.slice(index), suffix = pattern.slice(index + 2);
+      if (!host.endsWith(suffix)) return false;
+      const subdomain = host.slice(0, -suffix.length);
+      return subdomain.length > 1 && subdomain.endsWith(".");
+    };
+    return policy.sites.filter(site => match(site.origin)).sort((a,b) =>
+      Number(a.origin.includes("*")) - Number(b.origin.includes("*")) || b.origin.length - a.origin.length
+    )[0] ?? policy.defaults;
   };
-  return policy.sites.filter(site => match(site.origin)).sort((a,b) =>
-    Number(a.origin.includes("*")) - Number(b.origin.includes("*")) || b.origin.length - a.origin.length
-  )[0] ?? policy.defaults;
+  const access = decide(origin);
+  // An IPv6 address that carries an IPv4 one reaches that host: the IPv4
+  // address's rule holds too, where it is stricter.
+  const ipv4 = carriedIPv4Origin(origin);
+  if (!ipv4) return access;
+  const other = decide(ipv4);
+  const strictness = { allow: 0, ask: 1, deny: 2 } as const;
+  const stricter: Partial<Record<Category, SiteDecision>> = {};
+  for (const category of Object.keys(policy.defaults) as Category[]) {
+    const [mine, theirs] = [access[category], other[category]];
+    stricter[category] = strictness[theirs] > strictness[mine] ? theirs : mine;
+  }
+  return stricter as Record<Category, SiteDecision>;
+}
+
+/**
+ * The IPv4 address an IPv6 address carries, where a connection to the IPv6
+ * address reaches that IPv4 host: IPv4-mapped (`::ffff:169.254.169.254`),
+ * IPv4-compatible (`::169.254.169.254`) and the well-known NAT64 prefix
+ * (`64:ff9b::169.254.169.254`). `::` and `::1` carry none. `address` is the
+ * IPv6 address as a URL's host writes it, inside its brackets or not.
+ */
+export function carriedIPv4(address: string): string | undefined {
+  const text = address.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!text.includes(":")) return;
+  const halves = text.split("::");
+  if (halves.length > 2) return;
+  const words = (part: string) => (part ? part.split(":") : []);
+  const head = words(halves[0]!), tail = halves.length === 2 ? words(halves[1]!) : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 1 ? missing !== 0 : missing < 1) return;
+  const groups = [...head, ...Array<string>(missing).fill("0"), ...tail];
+  if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return;
+  const [a, b, c, d, e, f, g, h] = groups.map((group) => parseInt(group, 16)) as [
+    number, number, number, number, number, number, number, number,
+  ];
+  const zero = a === 0 && b === 0 && c === 0 && d === 0 && e === 0;
+  const carries =
+    (zero && f === 0xffff) || (a === 0x64 && b === 0xff9b && c === 0 && d === 0 && e === 0 && f === 0) || (zero && f === 0 && g !== 0);
+  if (!carries) return;
+  return [g >> 8, g & 255, h >> 8, h & 255].join(".");
+}
+
+/**
+ * The IPv6 addresses that carry `ipv4` (see `carriedIPv4`), as a URL writes
+ * them: `[::ffff:a9fe:a9fe]`, `[::a9fe:a9fe]` and `[64:ff9b::a9fe:a9fe]` for
+ * `169.254.169.254`. None for anything that is not a dotted IPv4 address.
+ */
+export function carryingIPv6(ipv4: string): string[] {
+  const octets = ipv4.split(".").map((octet) => (/^\d{1,3}$/.test(octet) ? Number(octet) : NaN));
+  if (octets.length !== 4 || octets.some((octet) => !(octet >= 0 && octet <= 255))) return [];
+  const [a, b, c, d] = octets as [number, number, number, number];
+  const high = ((a << 8) | b).toString(16), low = ((c << 8) | d).toString(16);
+  const words = `${high}:${low}`;
+  return [`[::ffff:${words}]`, ...(high === "0" ? [] : [`[::${words}]`]), `[64:ff9b::${words}]`];
+}
+
+/** `origin` with its IPv6 host written as the IPv4 address it carries, when it carries one. */
+function carriedIPv4Origin(origin: string) {
+  if (!URL.canParse(origin)) return;
+  const url = new URL(origin);
+  const ipv4 = url.hostname.startsWith("[") ? carriedIPv4(url.hostname) : undefined;
+  if (!ipv4) return;
+  url.hostname = ipv4;
+  return url.origin;
 }

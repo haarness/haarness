@@ -317,6 +317,15 @@ export interface NotificationTarget {
   connection: string;
   thread: string;
 }
+/** What the window gets for a compaction whose request a relay or proxy cut
+ * on its way: the server goes on with it, so the window waits for its
+ * `thread.compacted`, and says `compactionCut` only if it never comes. */
+export interface CompactionCut {
+  compactionCut: string;
+}
+/** How long a compaction may take, its request and any wait after it
+ * together: as long as the phones and the web wait. */
+export const COMPACTION_WAIT_MS = 310_000;
 export interface DesktopEvent {
   kind:
     | "browser"
@@ -500,8 +509,14 @@ export interface Bridge {
   logLevel(action: "status" | "detail-on" | "detail-off"): Promise<import("./diagnostics").LogLevelStatus>;
   /** Saves this computer's logs where the person chooses and shows the zip; null when cancelled. */
   exportLogs(): Promise<import("./diagnostics").ExportedLogs | null>;
-  /** Opens the terminal's right-click menu: Copy for `selection`, when there is one, and Paste. */
-  terminalMenu(selection: string): Promise<void>;
+  /** Opens the terminal's right-click menu: Copy for `selection`, when there
+   * is one, Paste, and Clear unless `clearable` is false (a full-screen
+   * program has the alternate screen). Clear comes back as a `menu` event,
+   * `terminal-clear`. */
+  terminalMenu(selection: string, clearable?: boolean): Promise<void>;
+  /** The keyboard came into (or left) a terminal, where ⌘K clears it
+   * instead of opening Search on macOS; main sends `terminal-clear`. */
+  terminalFocus(focused: boolean): Promise<void>;
   reveal(connection: string, path?: string): Promise<void>;
   /** `write` (the person's keys) and `answer` (xterm answering a program's
    * query, which only one window does per terminal) answer false when the

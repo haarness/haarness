@@ -60,6 +60,8 @@ pub enum HitTarget {
     QueueItem(RequestId),
     /// The strip's editing line: cancel the edit and restore the draft.
     QueueEditCancel,
+    /// Messages waiting for the chat's compaction: back to the prompt.
+    HeldMessages,
     /// `/mac resume` on a step paused on computer use's strip: the agent goes on.
     ComputerResume,
     /// A project file an answer mentions, by its span's encoded reference

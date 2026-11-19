@@ -19,5 +19,11 @@ walkdir.workspace = true
 zip.workspace = true
 utoipa.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+same-file.workspace = true
+
 [lints]
 workspace = true

@@ -1359,6 +1359,23 @@ impl ThreadRepository for SqliteStore {
             .collect()
     }
 
+    async fn items_holding(&self, id: ThreadId, text: &str) -> CoreResult<Vec<Item>> {
+        // SQLite's lower() folds ASCII letters only, as the search does.
+        let connection = self.connection.lock();
+        let mut statement = connection
+            .prepare(
+                "SELECT id,thread_id,turn_id,sequence,data_json,created_at FROM items
+             WHERE thread_id=?1 AND deleted=0 AND instr(lower(data_json),lower(?2))>0
+             ORDER BY sequence",
+            )
+            .map_err(storage)?;
+        let rows = statement
+            .query_map(params![id.to_string(), text], raw_item)
+            .map_err(storage)?;
+        rows.map(|row| row.map_err(storage).and_then(decode_item))
+            .collect()
+    }
+
     async fn recent_items(&self, id: ThreadId, limit: usize) -> CoreResult<Vec<Item>> {
         let connection = self.connection.lock();
         let mut statement = connection
@@ -2207,6 +2224,7 @@ impl ThreadRepository for SqliteStore {
             ended.push(ItemData::Error {
                 message: recovered_turn_message(person),
                 retryable: true,
+                turn_left_out: false,
             });
             for (index, data) in ended.into_iter().enumerate() {
                 let item = Item {
@@ -2880,6 +2898,74 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["kept"]);
+        // Narrowed reads leave it out too.
+        assert_eq!(
+            store
+                .items_holding(thread.id, "discarded")
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    /// A narrowed read gives the chat's items whose stored form holds the
+    /// text in any ASCII letter case, in order, and no other chat's.
+    #[tokio::test]
+    async fn items_holding_text_are_read_in_any_ascii_case_and_in_order() {
+        let store = SqliteStore::in_memory().unwrap();
+        let thread = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let other = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let note = |text: &str| ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        };
+        store
+            .append_items(
+                thread.id,
+                None,
+                vec![
+                    note("Ship the RELEASE"),
+                    note("lunch"),
+                    note("release notes"),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .append_item(other.id, None, note("release"))
+            .await
+            .unwrap();
+        let texts = |items: Vec<Item>| -> Vec<String> {
+            items
+                .into_iter()
+                .filter_map(|item| match item.data {
+                    ItemData::AssistantMessage { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            texts(store.items_holding(thread.id, "Release").await.unwrap()),
+            ["Ship the RELEASE", "release notes"]
+        );
+        assert_eq!(
+            texts(store.items_holding(thread.id, "").await.unwrap()).len(),
+            3
+        );
+        assert!(
+            store
+                .items_holding(thread.id, "dinner")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -3211,6 +3297,7 @@ mod tests {
             vec![ItemData::Error {
                 message: command.command_id.clone(),
                 retryable: false,
+                turn_left_out: false,
             }]
         };
         let written = store.recover_interrupted_commands(&report).await.unwrap();
@@ -3325,6 +3412,7 @@ mod tests {
             vec![ItemData::Error {
                 message: format!("{} {}", command.command_id, command.command),
                 retryable: false,
+                turn_left_out: false,
             }]
         };
         let written = store.recover_interrupted_commands(&report).await.unwrap();
@@ -4786,6 +4874,7 @@ mod tests {
             vec![ItemData::Error {
                 message: format!("NOTICE {}", task.description),
                 retryable: false,
+                turn_left_out: false,
             }]
         };
         let (stopped, written) = store.recover_interrupted_tasks(&report).await.unwrap();
@@ -4945,6 +5034,7 @@ mod tests {
             vec![ItemData::Error {
                 message: "NOTICE".into(),
                 retryable: false,
+                turn_left_out: false,
             }]
         };
         let (_, written) = store.recover_interrupted_tasks(&report).await.unwrap();
@@ -5022,7 +5112,9 @@ mod tests {
             .iter()
             .filter(|item| item.turn_id == Some(turn.id))
             .filter_map(|item| match &item.data {
-                ItemData::Error { message, retryable } => Some((message, retryable)),
+                ItemData::Error {
+                    message, retryable, ..
+                } => Some((message, retryable)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -5176,7 +5268,7 @@ mod tests {
                     item.turn_id == Some(turn.id)
                         && matches!(
                             &item.data,
-                            ItemData::Error { message, retryable }
+                            ItemData::Error { message, retryable, .. }
                                 if message == RECOVERED_TURN_MESSAGE && *retryable
                         )
                 })

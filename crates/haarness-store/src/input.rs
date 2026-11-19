@@ -722,6 +722,7 @@ mod tests {
             ItemData::Error {
                 message: "Queued input could not be delivered".into(),
                 retryable: true,
+                turn_left_out: false,
             },
         ] {
             store

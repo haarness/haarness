@@ -430,6 +430,13 @@ impl ConfiguredHooks {
         if entry.event == "Stop" && outcome.halt {
             outcome.block = None;
         }
+        // Why it answered as it did, kept with an answer that counts.
+        outcome.reason = outcome
+            .permission
+            .and(deny_reason.as_deref())
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_owned);
         // A permission deny stops the action only where the runtime reads it.
         let denied = outcome.permission == Some(PermissionDecision::Deny)
             && matches!(entry.event.as_str(), "PreToolUse" | "PermissionRequest");
@@ -492,13 +499,18 @@ impl ConfiguredHooks {
                     None => combined.context = Some(context),
                 }
             }
-            // Deny outranks allow when several hooks answer.
-            match (combined.permission, outcome.permission) {
-                (_, Some(PermissionDecision::Deny)) => {
-                    combined.permission = Some(PermissionDecision::Deny);
-                }
-                (None, decision) => combined.permission = decision,
-                _ => {}
+            // When several hooks answer, the strictest answer stands, in
+            // whatever order they ran: deny, then ask, then allow. Its reason
+            // is the first one given for that answer.
+            let (answer, held) = (
+                outcome.permission.map(strictness),
+                combined.permission.map(strictness),
+            );
+            if answer > held {
+                combined.permission = outcome.permission;
+                combined.reason = outcome.reason.clone();
+            } else if answer.is_some() && answer == held && combined.reason.is_none() {
+                combined.reason = outcome.reason.clone();
             }
             if outcome.permission == Some(PermissionDecision::Allow) {
                 always = Some(always.unwrap_or(true) && outcome.always);
@@ -510,6 +522,16 @@ impl ConfiguredHooks {
         combined.always =
             combined.permission == Some(PermissionDecision::Allow) && always == Some(true);
         combined
+    }
+}
+
+/// How strict a hook's permission answer is: a stricter one outranks a
+/// looser one another hook gave for the same call.
+fn strictness(decision: PermissionDecision) -> u8 {
+    match decision {
+        PermissionDecision::Allow => 0,
+        PermissionDecision::Ask => 1,
+        PermissionDecision::Deny => 2,
     }
 }
 
@@ -525,11 +547,46 @@ fn enterable(folder: &Path) -> bool {
 /// The process for `entry`, started in `folders.cwd` and told
 /// `folders.project` as its project folder.
 fn hook_command(entry: &HookEntry, folders: Folders<'_>) -> tokio::process::Command {
-    let (program, arguments) = hook_invocation(entry, folders.project);
+    hook_command_with(entry, folders, &haarness_ripgrep::tool_folders())
+}
+
+/// [`hook_command`], with `tools` the tool folders Desktop named
+/// (`HAARNESS_TOOL_PATH`), which a hook also finds its programs in, as an
+/// agent's command does: a shell hook gets them at the end of `PATH` after
+/// its login profile ran, and a program run without a shell after the
+/// server's own `PATH`. Windows names none.
+fn hook_command_with(
+    entry: &HookEntry,
+    folders: Folders<'_>,
+    tools: &[PathBuf],
+) -> tokio::process::Command {
+    let (program, mut arguments) = hook_invocation(entry, folders.project);
+    let tools: &[PathBuf] = if cfg!(windows) { &[] } else { tools };
+    let shell_form = entry.args.is_empty()
+        && shell_kind(&program) == Some(ShellKind::Posix)
+        && matches!(arguments.as_slice(), [flag, _] if flag == "-lc");
+    if shell_form && !tools.is_empty() {
+        let script = format!("{}\n{}", haarness_ripgrep::FOLDERS_LAST, arguments[1]);
+        arguments.truncate(1);
+        arguments.push(script);
+        arguments.push(program.clone());
+        arguments.extend(
+            tools
+                .iter()
+                .filter_map(|tool| tool.to_str().map(str::to_owned)),
+        );
+    }
     let mut command = tokio::process::Command::new(program);
     command.args(arguments);
     for name in haarness_core::private_env_names() {
         command.env_remove(name);
+    }
+    if !entry.args.is_empty()
+        && !tools.is_empty()
+        && let Some(path) =
+            haarness_ripgrep::with_folders(std::env::var_os("PATH").as_deref(), tools)
+    {
+        command.env("PATH", path);
     }
     command
         .current_dir(folders.cwd)
@@ -745,6 +802,8 @@ struct HookOutcome {
     block: Option<String>,
     context: Option<String>,
     permission: Option<PermissionDecision>,
+    /// Why the hook gave `permission`: its `permissionDecisionReason`.
+    reason: Option<String>,
     updated_input: Option<Value>,
     always: bool,
     /// A hook answered `continue: false`, with this `stopReason` if any.
@@ -759,6 +818,7 @@ impl From<HookOutcome> for HookDecision {
             block: outcome.block,
             context: outcome.context,
             permission: outcome.permission,
+            reason: outcome.reason,
             updated_input: outcome.updated_input,
             always: outcome.always,
         }
@@ -2091,6 +2151,89 @@ mod tests {
         );
     }
 
+    /// A hook finds its programs in the tool folders Desktop named, as an
+    /// agent's command does: a shell hook after its login profile ran (so a
+    /// profile that puts `~/.cargo/bin` first while it is missing still does),
+    /// and a program run without a shell after the server's own PATH.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hooks_find_programs_in_the_tool_folders_after_the_profile() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("haarness-hook-tools-{}", uuid::Uuid::now_v7()));
+        let home = root.join("home");
+        let system = root.join("system");
+        let cargo = home.join(".cargo/bin");
+        let local = home.join(".local/bin");
+        let probe = |folder: &Path, name: &str, says: &str| {
+            std::fs::create_dir_all(folder).unwrap();
+            std::fs::write(folder.join(name), format!("#!/bin/sh\necho {says}\n")).unwrap();
+            std::fs::set_permissions(folder.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        };
+        probe(&system, "haarness-probe-shadowed", "system");
+        probe(&cargo, "haarness-probe-shadowed", "cargo");
+        probe(&local, "haarness-probe-local", "local");
+        std::fs::write(
+            home.join(".cargo/setup.sh"),
+            "case \":$PATH:\" in\n  *\":$HOME/.cargo/bin:\"*) ;;\n  *) PATH=\"$HOME/.cargo/bin:$PATH\"; export PATH ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::write(home.join(".profile"), ". \"$HOME/.cargo/setup.sh\"\n").unwrap();
+        let entry = |command: &str, args: &[&str]| HookEntry {
+            event: "Stop".into(),
+            matcher: None,
+            command: command.into(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            shell: None,
+            timeout: Duration::from_secs(5),
+            plugin_root: None,
+            asynchronous: false,
+        };
+        let folders = Folders {
+            cwd: &root,
+            project: &root,
+            chat_folder_gone: false,
+        };
+        let tools = [cargo.clone(), local.clone()];
+        let shell = entry(
+            "haarness-probe-shadowed; haarness-probe-local; printf 'args:%s\\n' \"$#\"",
+            &[],
+        );
+        let run = |mut command: tokio::process::Command| async move {
+            let output = command
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        let mut command = hook_command_with(&shell, folders, &tools);
+        command
+            .env("HOME", &home)
+            .env("PATH", format!("{}:/usr/bin:/bin", system.display()));
+        assert_eq!(run(command).await, "cargo\nlocal\nargs:0\n");
+        // Without tool folders the hook runs as it always did.
+        let mut command = hook_command_with(&shell, folders, &[]);
+        command
+            .env("HOME", &home)
+            .env("PATH", format!("{}:/usr/bin:/bin", system.display()));
+        assert_eq!(run(command).await, "cargo\nargs:0\n");
+        // A program run without a shell is looked for after the server's PATH.
+        let command = hook_command_with(&entry("haarness-probe-local", &["x"]), folders, &tools);
+        let path = command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| value)
+            .map(std::env::split_paths)
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(path.last(), Some(&local));
+        assert_eq!(run(command).await, "local\n");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn shell_hooks_never_read_the_project_folder_name_as_shell_syntax() {
@@ -2282,6 +2425,48 @@ mod tests {
         assert!(!mixed.always);
         let failed = run(vec![&format!("{always}; exit 1")]).await;
         assert!(failed.permission.is_none() && !failed.always);
+    }
+
+    #[tokio::test]
+    async fn the_strictest_answer_of_several_pre_tool_hooks_stands_in_any_order() {
+        let run = |answers: &[&str]| {
+            let hooks = ConfiguredHooks::new(
+                ConfiguredHooks::parse_block(&json!({
+                    "PreToolUse": [{"matcher": "Bash", "hooks": answers
+                        .iter()
+                        .map(|answer| json!({"command": format!(
+                            r#"echo '{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":"{answer}"}}}}'"#
+                        )}))
+                        .collect::<Vec<_>>()}]
+                })),
+                std::env::temp_dir(),
+            );
+            async move {
+                hooks
+                    .pre_tool_use(
+                        &HookCall::new(ThreadId::new()),
+                        "bash",
+                        &json!({"command": "git push"}),
+                    )
+                    .await
+                    .permission
+            }
+        };
+        for (answers, strictest) in [
+            (&["allow", "ask"][..], PermissionDecision::Ask),
+            (&["ask", "allow"][..], PermissionDecision::Ask),
+            (
+                &["allow", "deny", "ask", "allow"][..],
+                PermissionDecision::Deny,
+            ),
+            (&["deny", "allow"][..], PermissionDecision::Deny),
+            (&["ask", "deny"][..], PermissionDecision::Deny),
+            (&["allow", "allow"][..], PermissionDecision::Allow),
+            (&["allow", "none"][..], PermissionDecision::Allow),
+            (&["none", "ask"][..], PermissionDecision::Ask),
+        ] {
+            assert_eq!(run(answers).await, Some(strictest), "{answers:?}");
+        }
     }
 
     #[tokio::test]

@@ -543,6 +543,14 @@ pub enum ItemData {
     Error {
         message: String,
         retryable: bool,
+        /// The provider's safety check stopped this turn, so every item of
+        /// it is left out of later requests: the person's message, what the
+        /// model wrote and the tools it ran, though the chat still shows them
+        /// (a compaction made during the turn stays). A reworded message is
+        /// then not stopped again for the same history. Set only when the
+        /// stop is stored: older stops are still sent.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        turn_left_out: bool,
     },
     /// Attachments a provider refused, left out of every later request of
     /// this thread so one bad image does not fail each turn. The attachments
@@ -634,8 +642,11 @@ pub enum FileDiffStatus {
 
 /// Bounded file-change payload shared by Git review and snapshot/turn diffs.
 /// Git responses normally carry `patch`; snapshot responses normally carry
-/// `before` and `after`. A missing body with `truncated=true` remains an
-/// honest metadata-only change instead of returning an unbounded payload.
+/// `before` and `after`. A tool's change carries `before` and `after` too,
+/// or, for a file over its body limit, a bounded `patch` of the change
+/// alone (hunks without file headers). A missing body with `truncated=true`
+/// remains an honest metadata-only change instead of returning an unbounded
+/// payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiff {
@@ -673,7 +684,7 @@ pub enum DiffTruncation {
 /// to apply to produce it.
 ///
 /// It flattens, so the wire shape is a strict superset of `FileDiff` and the
-/// endpoint keeps returning the same array of the same objects; both added
+/// endpoint keeps returning the same array of the same objects; the added
 /// fields are optional and defaulted, so an older client — or the generated
 /// TypeScript SDK before it is regenerated — decodes these responses
 /// unchanged and simply does not see them.
@@ -691,6 +702,11 @@ pub struct ReviewFile {
     /// review listed everything that changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted_files: Option<u64>,
+    /// An untracked text file too large to read for its line counts: its
+    /// `additions` are zero rather than counted, and it has no body. Absent
+    /// for every file whose counts are real.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub uncounted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1426,6 +1442,21 @@ pub struct PendingPermissionInfo {
         deserialize_with = "lenient_review"
     )]
     pub review: Option<PermissionReview>,
+    /// A `PreToolUse` hook asked about the call, and nothing else makes the
+    /// request a person's alone. The hook asks again next time, so the
+    /// request offers no Always (`allowAlways` is `false`, apart from a
+    /// Chrome site's, whose Always is for this chat), yet `--yolo` and Yolo
+    /// answer it once, as any ask a person configured. Never set on a request
+    /// that always asks (a read of where sign-ins are kept, a Cloud action
+    /// that spends money), even when a hook asked too: `hookReason` still
+    /// says so there. Older servers send none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hook_asked: bool,
+    /// Why a hook asked about the call, as it said (its
+    /// `permissionDecisionReason`), for the card to show; none when it gave
+    /// no reason or no hook asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_reason: Option<String>,
 }
 
 /// The script file a shell command runs, as the server read it when the
@@ -1655,13 +1686,17 @@ pub struct ApiErrorDetails {
     pub path: Option<String>,
 }
 
-/// Why a request was refused for good (see [`ApiErrorDetails::reason`]).
+/// Why a request was refused (see [`ApiErrorDetails::reason`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RefusalReason {
     /// Redo needs `path`, a file over 2 MiB, as an undone turn left it, and
     /// Undo has no copy of that: sending a message keeps the chat as it is.
     NoUndoCopy,
+    /// The server is shutting down and starts no new turn. Unlike the other
+    /// reasons it passes: the same request can be sent again once the
+    /// server is back (`retryable`, status 503).
+    ServerStopping,
     /// A reason from a newer server: `message` says it.
     #[serde(other)]
     Other,

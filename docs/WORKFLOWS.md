@@ -104,7 +104,9 @@ The model-facing `workflow` tool can read, start, wait for, inspect, create,
 cancel, pause, resume, and delete runs. Creation writes
 `.haarness/workflows/<name>.ts` in the project (the name a lowercase slug of
 letters, digits, `-` and `_`), never overwrites an existing file, and follows the
-normal workflow and edit permission decisions. Haarness
+normal workflow and edit permission decisions. A native workflow's `args`
+written as the JSON text of an object (`"args": "{\"target\":\"src\"}"`) start
+it with that object. Haarness
 advertises this tool to a primary model turn only when the request contains a
 standalone `workflow`/`workflows` word, the turn explicitly sets
 `tools.workflow=true`, or Ultracode is active. Ordinary child agents do not
@@ -167,7 +169,9 @@ tool-capable OpenAI-compatible providers. Claude models with adaptive thinking,
 directly or through a Haarness router, use Claude's native JSON output instead,
 because Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse a forced tool choice. The captured value is serialized
 canonically and validated again after the turn before the workflow receives
-`result.data`. Ordinary agent turns and schema-free workflow agents keep their
+`result.data`. A value the model wrote as a string where the schema wants
+another type (`"count": "3"`, `"tags": "bug"` for a list) is read as that type
+first, as a tool call's arguments are, so it costs no second round. Ordinary agent turns and schema-free workflow agents keep their
 normal text/tool behavior.
 
 `@haarness-ai/plugin` is a runtime-provided compatibility module; workflows do

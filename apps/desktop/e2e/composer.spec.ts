@@ -1045,6 +1045,108 @@ test("an edit's preview opens its file in Review, and an added file reads in one
   }
 });
 
+test("a patch far into a large file previews its real lines, and Review lists a file too large to count", async ({}, info) => {
+  const numbered = (number: number) => `line ${String(number).padStart(5, "0")} of a large file, as written`;
+  const { page, errors, close } = await launch(info, async (workspace) => {
+    const lines = Array.from({ length: 1000 }, (_, index) => numbered(index + 1) + "\n").join("");
+    await writeFile(join(workspace, "large.txt"), lines);
+    gitCheckout(workspace);
+    // Untracked, and over what a review reads of one file.
+    await writeFile(join(workspace, "dump.log"), "a line of a long log\n".repeat(420_000));
+  });
+  const shots = process.env.HAARNESS_SCREENSHOTS;
+  const picture = (name: string) => (shots ? join(shots, name) : info.outputPath(name));
+  try {
+    const patch = `*** Begin Patch\n*** Update File: large.txt\n@@\n-${numbered(990)}\n+line 00990 was patched\n*** End Patch\n`;
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("!tool apply_patch " + JSON.stringify({ input: patch }));
+    await input.press("Enter");
+    const row = page.locator(".tool-call").filter({ hasText: "large.txt" });
+    await expect(row).toHaveAttribute("data-status", "done");
+    if ((await row.getAttribute("open")) === null) await row.locator(":scope > summary").click();
+    // The lines the patch changed, from line 987 on, not the start of the file.
+    const lines = row.locator(".change-lines .diff-line");
+    await expect(lines.locator("code")).toHaveText([
+      numbered(987),
+      numbered(988),
+      numbered(989),
+      numbered(990),
+      "line 00990 was patched",
+      numbered(991),
+      numbered(992),
+      numbered(993),
+    ]);
+    await expect(row.locator(".change-lines .remove code")).toHaveText(numbered(990));
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await row.screenshot({ path: picture(`large-file-patch-${value}.png`) });
+    }
+    await theme(page, "light");
+    await row.getByRole("button", { name: "Show in Review", exact: true }).click();
+    await expect(page.locator('.diff-file[data-file="large.txt"]')).toBeVisible();
+    const list = page.locator(".review-file-list");
+    if (!(await list.isVisible())) await page.getByRole("button", { name: "Toggle changed files", exact: true }).click();
+    const dump = list.locator(".file-entry").filter({ hasText: "dump.log" });
+    await expect(dump.locator(".uncounted")).toHaveText("too large to count");
+    await expect(dump.locator(".added, .removed")).toHaveCount(0);
+    const large = list.locator(".file-entry").filter({ hasText: "large.txt" });
+    await expect(large.locator(".added")).toHaveText("+1");
+    await expect(large.locator(".removed")).toHaveText("−1");
+    // The sums leave the uncounted file out, and a quiet mark says so
+    // without pushing the view controls off the totals' row.
+    const totals = page.locator(".review .diff-totals");
+    await expect(totals.locator(".added")).toHaveText("+1");
+    await expect(totals).toContainText("2 files");
+    const mark = totals.getByRole("img", { name: "1 not counted" });
+    await expect(mark).toHaveAttribute("title", "1 not counted");
+    await expect(totals).not.toContainText("not counted");
+    const rows = await page.evaluate(() => {
+      const top = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+      const totals = top(".review .diff-totals");
+      const view = top(".review .review-view");
+      return { totals: totals.top + totals.height / 2, view: [view.top, view.bottom] };
+    });
+    expect(rows.view[0] < rows.totals && rows.totals < rows.view[1]).toBe(true);
+    const parts = [page.locator(".review .panel-toolbar"), page.locator(".review-tree")];
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await shot(page, parts, picture(`review-too-large-${value}.png`));
+    }
+    await theme(page, "light");
+    // Right to left, the words take the counts' place at the row's other end,
+    // and a row's counts still read "+1 −1".
+    await page.evaluate(() => window.haarness.preferences({ language: "ar" } as never));
+    try {
+      await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+      await expect(dump.locator(".uncounted")).toHaveText("أكبر من أن تُعدّ أسطره");
+      await expect(totals.getByRole("img", { name: "لم تُحسب: 1" })).toBeVisible();
+      const signFirst = (count: ReturnType<Page["locator"]>) =>
+        count.evaluate((element) => {
+          // The sign and the number may be separate text nodes.
+          const left = (node: Node, at: number) => {
+            const range = document.createRange();
+            range.setStart(node, at);
+            range.setEnd(node, at + 1);
+            return range.getBoundingClientRect().left;
+          };
+          const first = element.firstChild!;
+          const last = element.lastChild!;
+          return left(first, 0) < left(last, last.textContent!.length - 1);
+        });
+      expect(await signFirst(large.locator(".added"))).toBe(true);
+      expect(await signFirst(large.locator(".removed"))).toBe(true);
+      await shot(page, parts, picture("review-too-large-rtl.png"));
+    } finally {
+      await page.evaluate(() => window.haarness.preferences({ language: "en" } as never));
+    }
+    await dump.click();
+    await expect(page.locator('.diff-file[data-file="dump.log"]')).toContainText("This diff was truncated by the server.");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test("the queue's Steer now has an arrow of its own, and Remove hands the keyboard on", async ({}, info) => {
   const { page, errors, close } = await launch(info);
   try {
@@ -1395,7 +1497,7 @@ test("a right-click offers what fits where it lands, nothing on the sidebar, and
     }
     await contextMenus(app);
 
-    // The terminal's own menu: Paste, and Copy for what is selected there.
+    // The terminal's own menu: Paste, Copy for what is selected there, and Clear.
     await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
     const shell = page.locator(".xterm-helper-textarea");
     await expect(shell).toBeFocused();
@@ -1403,7 +1505,7 @@ test("a right-click offers what fits where it lands, nothing on the sidebar, and
     const screen = (await page.locator(".xterm-screen").boundingBox())!;
     const blank = { x: screen.x + screen.width - 20, y: screen.y + screen.height - 20 };
     await page.mouse.click(blank.x, blank.y, { button: "right" });
-    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Paste"]);
+    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Paste", "-", "Clear"]);
     await shell.focus();
     await page.keyboard.type("printf 'menu%sproof\\n' -");
     await page.keyboard.press("Enter");
@@ -1412,7 +1514,7 @@ test("a right-click offers what fits where it lands, nothing on the sidebar, and
     const word = (await proof.boundingBox())!;
     await page.mouse.dblclick(word.x + 12, word.y + word.height / 2);
     await page.mouse.click(word.x + 12, word.y + word.height / 2, { button: "right" });
-    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Copy", "Paste"]);
+    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Copy", "Paste", "-", "Clear"]);
     const saved = await app.evaluate(({ clipboard }) => clipboard.readText());
     try {
       await page.mouse.click(word.x + 12, word.y + word.height / 2, { button: "right" });

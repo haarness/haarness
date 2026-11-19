@@ -22,7 +22,7 @@
  * page that ends up somewhere it may not be.
  */
 import type { Policy } from "./browser";
-import { policyOrigin, siteAccess } from "./policy";
+import { carryingIPv6, policyOrigin, siteAccess } from "./policy";
 
 export interface FetchContext {
   policy: Policy;
@@ -52,13 +52,17 @@ export function fetchPatterns(policy: Policy): RequestPattern[] {
 }
 
 /**
- * A rule's origin as Chrome may spell a request to it: as written, and with
- * the trailing dot of a fully qualified domain (`https://example.com.:8443`),
- * which Chrome keeps in the URL.
+ * A rule's origin as Chrome may spell a request to it: as written, with the
+ * trailing dot of a fully qualified domain (`https://example.com.:8443`),
+ * which Chrome keeps in the URL, and for an IPv4 address with the IPv6
+ * addresses that carry it (`http://[::ffff:a9fe:a9fe]`), which reach the
+ * same host.
  */
 function spellings(origin: string) {
   const match = /^([a-z][a-z\d+.-]*:\/\/)([^/:[\]]+)(:\d+)?$/i.exec(origin);
-  if (!match || /^[\d.]+$/.test(match[2])) return [origin];
+  if (!match) return [origin];
+  if (/^[\d.]+$/.test(match[2]))
+    return [origin, ...carryingIPv6(match[2]).map((host) => `${match[1]}${host}${match[3] ?? ""}`)];
   return [origin, `${match[1]}${match[2]}.${match[3] ?? ""}`];
 }
 

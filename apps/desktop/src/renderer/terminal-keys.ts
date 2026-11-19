@@ -1,4 +1,5 @@
 import type { Preferences } from "../shared";
+import { matchesShortcut } from "./search";
 
 export type OptionAsMeta = Preferences["terminalOptionAsMeta"];
 
@@ -35,4 +36,17 @@ export function optionKeys() {
       left = right = false;
     },
   };
+}
+
+/**
+ * Whether a key pressed with the keyboard in the terminal clears it: ⌘K on
+ * macOS, as in Terminal, iTerm2 and VS Code. Elsewhere Ctrl+K belongs to the
+ * shell, which cuts the line after the cursor, so there the terminal's
+ * right-click menu has Clear and no key does.
+ */
+export function clearsTerminal(
+  event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey"> & { code?: string },
+  platform: string,
+) {
+  return platform === "darwin" && matchesShortcut(event, "Mod+K", platform);
 }

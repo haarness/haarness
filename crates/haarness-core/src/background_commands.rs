@@ -141,7 +141,9 @@ pub struct CommandProcess {
 /// saved to a file (all of it while the command has a deadline in the
 /// foreground, else its first [`OUTPUT_SAVED_LIMIT`] bytes) and the end is
 /// kept in memory ([`OUTPUT_TAIL_KEPT`]), so a long-running command's middle
-/// can be dropped.
+/// can be dropped. A file that cannot be made or written (a full disk, a
+/// folder that cannot be written) leaves the command running: its output is
+/// then kept in memory alone, and [`Self::save_failure`] says why.
 pub struct CommandOutput {
     /// Where the file is: renamed once the command runs in the background
     /// (see [`BACKGROUND_FILE_PREFIX`]).
@@ -160,6 +162,10 @@ struct OutputState {
     tail: Vec<u8>,
     /// The file is still there to read.
     file_kept: bool,
+    /// The folder the file was to be in and the system's words for why it
+    /// could not be made or written, once that happened: from then on only
+    /// the end kept in memory holds the output.
+    failure: Option<(PathBuf, String)>,
 }
 
 /// A page of output (see [`CommandOutput::read`]).
@@ -189,29 +195,62 @@ impl CommandOutput {
                 save_limit,
                 tail: Vec::new(),
                 file_kept: true,
+                failure: None,
             }),
             size: watch::Sender::new(0),
             file: tokio::sync::Mutex::new(Some(file)),
         }
     }
 
-    /// Add what the command printed. One writer at a time: the server's pump.
-    pub async fn append(&self, bytes: &[u8]) -> std::io::Result<()> {
-        if bytes.is_empty() {
-            return Ok(());
+    /// Output with no file, because none could be made in `folder`
+    /// (`error`): only its end is kept, in memory.
+    #[must_use]
+    pub fn without_file(folder: PathBuf, error: &std::io::Error) -> Self {
+        Self {
+            path: Mutex::new(PathBuf::new()),
+            state: Mutex::new(OutputState {
+                size: 0,
+                saved: 0,
+                save_limit: 0,
+                tail: Vec::new(),
+                file_kept: false,
+                failure: Some((folder, error.to_string())),
+            }),
+            size: watch::Sender::new(0),
+            file: tokio::sync::Mutex::new(None),
         }
-        let room = {
+    }
+
+    /// Add what the command printed. One writer at a time: the server's pump.
+    /// A write the file refuses ends saving (see [`Self::save_failure`]);
+    /// what is printed is still counted and its end kept.
+    pub async fn append(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut room = {
             let state = self.state.lock();
             let room = state.save_limit.saturating_sub(state.saved);
             usize::try_from(room).unwrap_or(usize::MAX).min(bytes.len())
         };
-        if room > 0
-            && let Some(file) = self.file.lock().await.as_mut()
-        {
-            // Flushed before it counts as saved: a reader opens the file
-            // and reads up to that point.
-            file.write_all(&bytes[..room]).await?;
-            file.flush().await?;
+        if room > 0 {
+            let mut file = self.file.lock().await;
+            match file.as_mut() {
+                Some(open) => {
+                    // Flushed before it counts as saved: a reader opens the
+                    // file and reads up to that point.
+                    let written = async {
+                        open.write_all(&bytes[..room]).await?;
+                        open.flush().await
+                    };
+                    if let Err(error) = written.await {
+                        drop(file.take());
+                        self.stop_saving(&error);
+                        room = 0;
+                    }
+                }
+                None => room = 0,
+            }
         }
         let size = {
             let mut state = self.state.lock();
@@ -225,15 +264,46 @@ impl CommandOutput {
             state.size
         };
         self.size.send_replace(size);
-        Ok(())
     }
 
     /// The command printed its last: flush and close the file.
-    pub async fn finish(&self) -> std::io::Result<()> {
-        if let Some(mut file) = self.file.lock().await.take() {
-            file.flush().await?;
+    pub async fn finish(&self) {
+        let file = self.file.lock().await.take();
+        if let Some(mut file) = file
+            && let Err(error) = file.flush().await
+        {
+            drop(file);
+            self.stop_saving(&error);
         }
-        Ok(())
+    }
+
+    /// The file refused a write (`error`): it goes, since it no longer holds
+    /// the whole start and takes room a full disk needs, and the output is
+    /// kept in memory alone from now on.
+    fn stop_saving(&self, error: &std::io::Error) {
+        // Held until the file is gone, so a move to the background cannot
+        // rename it in between and leave it behind.
+        let path = self.path.lock();
+        tracing::warn!(
+            %error,
+            file = %path.display(),
+            "a command's output file could not be written; its output is kept in memory only"
+        );
+        {
+            let mut state = self.state.lock();
+            state.file_kept = false;
+            let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
+            state.failure.get_or_insert((folder, error.to_string()));
+        }
+        let _ = std::fs::remove_file(&*path);
+    }
+
+    /// Why the output is not saved to a file, when its file could not be
+    /// made or written: the folder it was to be in, and the system's words
+    /// (`No space left on device (os error 28)`).
+    #[must_use]
+    pub fn save_failure(&self) -> Option<(PathBuf, String)> {
+        self.state.lock().failure.clone()
     }
 
     /// Save at most `limit` bytes from the start from now on.
@@ -344,60 +414,72 @@ impl CommandOutput {
     }
 
     async fn read_bytes(&self, cursor: u64, limit: u64) -> std::io::Result<OutputPage> {
-        let (size, saved, tail_start, file_kept) = {
-            let state = self.state.lock();
-            (
-                state.size,
-                state.saved,
-                state.size - state.tail.len() as u64,
-                state.file_kept,
-            )
-        };
-        let mut start = cursor.min(size);
-        let mut forced = false;
-        if start < tail_start && (start >= saved || !file_kept) {
-            start = tail_start;
-            forced = true;
-        }
-        let end = start.saturating_add(limit).min(size);
-        let mut bytes = if start >= tail_start {
-            let state = self.state.lock();
-            // The tail may have moved on since: read what is still there.
-            let tail_start = state.size - state.tail.len() as u64;
-            if start < tail_start {
-                forced = true;
+        loop {
+            let (size, saved, tail_start, file_kept) = {
+                let state = self.state.lock();
+                (
+                    state.size,
+                    state.saved,
+                    state.size - state.tail.len() as u64,
+                    state.file_kept,
+                )
+            };
+            let mut start = cursor.min(size);
+            let mut forced = false;
+            if start < tail_start && (start >= saved || !file_kept) {
                 start = tail_start;
+                forced = true;
             }
-            let from = usize::try_from(start - tail_start).unwrap_or(usize::MAX);
-            let to = usize::try_from(end.max(start) - tail_start)
-                .unwrap_or(usize::MAX)
-                .min(state.tail.len());
-            state.tail[from.min(to)..to].to_vec()
-        } else {
-            let to = end.min(saved);
-            let mut file = tokio::fs::File::open(self.path()).await?;
-            file.seek(std::io::SeekFrom::Start(start)).await?;
-            let mut bytes = vec![0; usize::try_from(to - start).unwrap_or(0)];
-            file.read_exact(&mut bytes).await?;
-            bytes
-        };
-        if forced {
-            let skipped = bytes.len() - whole_start(&bytes).len();
-            bytes.drain(..skipped);
-            start += skipped as u64;
+            let end = start.saturating_add(limit).min(size);
+            let mut bytes = if start >= tail_start {
+                let state = self.state.lock();
+                // The tail may have moved on since: read what is still there.
+                let tail_start = state.size - state.tail.len() as u64;
+                if start < tail_start {
+                    forced = true;
+                    start = tail_start;
+                }
+                let from = usize::try_from(start - tail_start).unwrap_or(usize::MAX);
+                let to = usize::try_from(end.max(start) - tail_start)
+                    .unwrap_or(usize::MAX)
+                    .min(state.tail.len());
+                state.tail[from.min(to)..to].to_vec()
+            } else {
+                match self.read_saved(start, end.min(saved)).await {
+                    Ok(bytes) => bytes,
+                    // The file went since the look above (a write it refused
+                    // removed it): what memory keeps is read instead.
+                    Err(_) if !self.file_kept() => continue,
+                    Err(error) => return Err(error),
+                }
+            };
+            if forced {
+                let skipped = bytes.len() - whole_start(&bytes).len();
+                bytes.drain(..skipped);
+                start += skipped as u64;
+            }
+            let mut end = start + bytes.len() as u64;
+            if end < size {
+                let whole = whole_end(&bytes);
+                bytes.truncate(whole);
+                end = start + bytes.len() as u64;
+            }
+            return Ok(OutputPage {
+                start,
+                end,
+                bytes,
+                size,
+            });
         }
-        let mut end = start + bytes.len() as u64;
-        if end < size {
-            let whole = whole_end(&bytes);
-            bytes.truncate(whole);
-            end = start + bytes.len() as u64;
-        }
-        Ok(OutputPage {
-            start,
-            end,
-            bytes,
-            size,
-        })
+    }
+
+    /// The saved bytes from `start` to `end`, read from the file.
+    async fn read_saved(&self, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
+        let mut file = tokio::fs::File::open(self.path()).await?;
+        file.seek(std::io::SeekFrom::Start(start)).await?;
+        let mut bytes = vec![0; usize::try_from(end - start).unwrap_or(0)];
+        file.read_exact(&mut bytes).await?;
+        Ok(bytes)
     }
 }
 
@@ -1093,11 +1175,19 @@ impl CommandEntry {
             .map(|path| format!("\n<output_file>{}</output_file>", path.display()))
             .unwrap_or_default();
         format!(
-            "{}\n<summary>{}</summary>\n<command_output>\n{output}\n</command_output>{file}\n</command>",
+            "{}\n<summary>{}</summary>\n<command_output>\n{}\n</command_output>{file}\n</command>",
             notice_tag(&info),
-            ended_summary(&info),
+            notice_text(&ended_summary(&info), "summary"),
+            notice_text(&output, "command_output"),
         )
     }
+}
+
+/// What a command printed or ran, as its notice quotes it inside its `tag`:
+/// it cannot end that tag or the notice, so nothing it prints reads as
+/// Haarness's own words; any other text reads as printed.
+pub(crate) fn notice_text<'a>(text: &'a str, tag: &str) -> std::borrow::Cow<'a, str> {
+    crate::envelope::closing_tags_broken(text, &[tag, "command"])
 }
 
 /// The opening tag of a command's notice.
@@ -1512,15 +1602,15 @@ impl ShellCall {
                     .ended_at
                     .map_or(0, |ended| (ended - current.started_at).num_milliseconds());
                 return Err(CoreError::Tool(format!(
-                    "command timed out after {ran} ms: this chat already ran as many commands in the background as execution.shell_background_per_chat allows ({}), so it stayed in the foreground with its deadline; output saved to {}",
+                    "command timed out after {ran} ms: this chat already ran as many commands in the background as execution.shell_background_per_chat allows ({}), so it stayed in the foreground with its deadline; {}",
                     call.settings.shell_background_per_chat,
-                    entry.process.output.path().display()
+                    output_reference(&entry.process.output)
                 )));
             }
             return Err(CoreError::Tool(format!(
-                "command timed out after {} ms; output saved to {}",
+                "command timed out after {} ms; {}",
                 request.timeout_ms.unwrap_or(call.settings.shell_timeout_ms),
-                entry.process.output.path().display()
+                output_reference(&entry.process.output)
             )));
         }
         if let Some(error) = &end.error {
@@ -1531,6 +1621,34 @@ impl ShellCall {
             end,
             stopped_by: current.ended_by,
         })
+    }
+}
+
+/// What a result that shows none of a command's output says of it: the
+/// file that keeps it, or, when no file could (see
+/// [`CommandOutput::save_failure`]), why, with the end of what it printed.
+#[must_use]
+pub fn output_reference(output: &CommandOutput) -> String {
+    if output.file_kept() {
+        return format!("output saved to {}", output.path().display());
+    }
+    let (tail, _) = output.tail(NOTICE_BYTES);
+    let text = String::from_utf8_lossy(&tail);
+    let lines = text.lines().collect::<Vec<_>>();
+    let end = lines[lines.len().saturating_sub(NOTICE_LINES)..].join("\n");
+    let why = output
+        .save_failure()
+        .map(|(folder, error)| {
+            format!(
+                "saving its output in {} failed ({error}); ",
+                folder.display()
+            )
+        })
+        .unwrap_or_default();
+    if end.is_empty() {
+        format!("{why}it printed nothing")
+    } else {
+        format!("{why}the end of what it printed:\n{end}")
     }
 }
 
@@ -1742,6 +1860,14 @@ pub(crate) async fn bash_output(
             "\n{} bytes of output before this are no longer kept.",
             page.start - cursor
         );
+        if let Some((folder, error)) = output.save_failure() {
+            let _ = write!(
+                report,
+                " Saving its output in {} failed ({error}), so only its last {} KiB stay in memory.",
+                folder.display(),
+                OUTPUT_TAIL_KEPT / 1024
+            );
+        }
     }
     if from > cursor || lines_left_out {
         let _ = write!(
@@ -2072,8 +2198,8 @@ mod tests {
     async fn a_page_never_splits_a_character_and_says_what_was_dropped() {
         let dir = fixture();
         let output = output(dir.path(), u64::MAX).await;
-        output.append("aé".as_bytes()).await.unwrap();
-        output.append("b".as_bytes()).await.unwrap();
+        output.append("aé".as_bytes()).await;
+        output.append("b".as_bytes()).await;
         // A limit that ends inside é stops before it.
         let page = output.read(0, 2).await.unwrap();
         assert_eq!((page.text().as_str(), page.start, page.end), ("a", 0, 1));
@@ -2085,11 +2211,10 @@ mod tests {
         // next whole one.
         let dir2 = fixture();
         let small = self::output(dir2.path(), 3).await;
-        small.append(&[b'x'; 4]).await.unwrap();
+        small.append(&[b'x'; 4]).await;
         small
             .append("é".repeat(OUTPUT_TAIL_KEPT / 2 + 1).as_bytes())
-            .await
-            .unwrap();
+            .await;
         let page = small.read(4, 16).await.unwrap();
         assert!(page.start > 4, "{page:?}");
         assert!(page.text().starts_with('é'), "{:?}", page.text());
@@ -2105,7 +2230,7 @@ mod tests {
         let output = output(dir.path(), u64::MAX).await;
         let chunk = [b'x'; 1000];
         for written in 1..=200_u64 {
-            output.append(&chunk).await.unwrap();
+            output.append(&chunk).await;
             // What counts as saved is on disk already: a reader opening the
             // file finds all of it.
             assert_eq!(
@@ -2118,6 +2243,63 @@ mod tests {
             let page = output.read(0, PAGE_MAX).await.unwrap();
             assert_eq!(page.end, written * 1000, "after {written} writes");
         }
+    }
+
+    #[tokio::test]
+    async fn a_file_that_refuses_a_write_leaves_the_output_in_memory() {
+        let dir = fixture();
+        let path = dir.path().join("out");
+        tokio::fs::write(&path, b"").await.unwrap();
+        // Opened to read only, as a full disk would refuse: every write fails.
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let output = CommandOutput::new(path.clone(), file, u64::MAX);
+        output.append(b"first line\n").await;
+        output.append(&vec![b'x'; OUTPUT_TAIL_KEPT]).await;
+        output.append(b"\nlast line\n").await;
+        output.finish().await;
+        assert_eq!(output.size(), (OUTPUT_TAIL_KEPT + 22) as u64);
+        let (tail, cut) = output.tail(OUTPUT_TAIL_KEPT);
+        assert!(cut && tail.ends_with(b"\nlast line\n"));
+        let (folder, error) = output.save_failure().expect("the failure is kept");
+        assert_eq!(folder, dir.path());
+        assert!(!error.is_empty());
+        // The file no longer counts, and goes: its start is missing.
+        assert!(!output.file_kept() && output.saved() == 0);
+        assert!(!path.exists());
+        // A read from the start gets the earliest byte memory keeps.
+        let page = output.read(0, 16).await.unwrap();
+        assert_eq!(page.start, 22);
+        let reference = output_reference(&output);
+        assert!(
+            reference.starts_with(&format!(
+                "saving its output in {} failed ({error}); the end of what it printed:\n",
+                dir.path().display()
+            )) && reference.ends_with("\nlast line"),
+            "{reference}"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_without_a_file_is_kept_in_memory() {
+        let dir = fixture();
+        let error = std::io::Error::other("No space left on device");
+        let output = CommandOutput::without_file(dir.path().to_path_buf(), &error);
+        assert_eq!(
+            output_reference(&output),
+            format!(
+                "saving its output in {} failed (No space left on device); it printed nothing",
+                dir.path().display()
+            )
+        );
+        output.append("Filesystem 100%\n日本".as_bytes()).await;
+        output.finish().await;
+        assert!(!output.file_kept() && !output.discard_file().await);
+        let page = output.read(0, PAGE_MAX).await.unwrap();
+        assert_eq!(page.text(), "Filesystem 100%\n日本");
+        assert!(output_reference(&output).ends_with("printed:\nFilesystem 100%\n日本"));
+        // Nothing to rename for the background.
+        output.mark_background();
+        assert_eq!(output.path(), PathBuf::new());
     }
 
     #[test]
@@ -2243,8 +2425,22 @@ mod tests {
         Arc<CommandOutput>,
         watch::Sender<Option<ProcessEnd>>,
     ) {
-        let (end, ended) = watch::channel(None);
         let output = output(dir, u64::MAX).await;
+        started_with(dir, registry, thread, output).await
+    }
+
+    /// [`started`], its output going to `output`.
+    async fn started_with(
+        dir: &Path,
+        registry: &Arc<ShellCommands>,
+        thread: ThreadId,
+        output: Arc<CommandOutput>,
+    ) -> (
+        Arc<CommandEntry>,
+        Arc<CommandOutput>,
+        watch::Sender<Option<ProcessEnd>>,
+    ) {
+        let (end, ended) = watch::channel(None);
         let call = ShellCall::new(ShellCallInner {
             commands: Arc::clone(registry),
             hooks: Arc::new(Quiet),
@@ -2285,6 +2481,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_background_command_whose_file_refuses_writes_runs_on_and_says_why() {
+        let dir = fixture();
+        let registry = Arc::new(ShellCommands::default());
+        let thread = ThreadId::new();
+        let path = dir.path().join("out");
+        tokio::fs::write(&path, b"").await.unwrap();
+        // Opened to read only: every write fails, as on a full disk.
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let output = Arc::new(CommandOutput::new(path, file, u64::MAX));
+        let (entry, output, end) = started_with(dir.path(), &registry, thread, output).await;
+        output.append(b"first\n").await;
+        output.append(&vec![b'x'; OUTPUT_TAIL_KEPT]).await;
+        output.append(b"\nstill printing\n").await;
+        assert_eq!(entry.info().state, ShellCommandState::Running);
+        let threads = HashSet::from([thread]);
+        let id = entry.info().id;
+        let read = bash_output(
+            &registry,
+            &threads,
+            &json!({"id": id, "cursor": 0}),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .text;
+        let (_, error) = output.save_failure().unwrap();
+        assert!(
+            read.contains(&format!(
+                "22 bytes of output before this are no longer kept. Saving its output in {} failed ({error}), so only its last 64 KiB stay in memory.",
+                dir.path().display()
+            )),
+            "{read:.400}"
+        );
+        output.finish().await;
+        end.send_replace(Some(ProcessEnd {
+            exit_code: Some(0),
+            ..ProcessEnd::default()
+        }));
+        entry.settled(Duration::from_secs(2)).await;
+        // Its end names no file: there is none.
+        assert!(entry.output_file().is_none());
+        let notice = entry.notice();
+        assert!(
+            notice.contains("still printing") && !notice.contains("<output_file>"),
+            "{notice}"
+        );
+    }
+
+    #[tokio::test]
     async fn bash_output_pages_forward_from_a_cursor_it_was_given() {
         let dir = fixture();
         let registry = Arc::new(ShellCommands::default());
@@ -2294,7 +2539,7 @@ mod tests {
         for line in 0..2000 {
             let _ = writeln!(lines, "line-{line:04}-{}", "x".repeat(40));
         }
-        output.append(lines.as_bytes()).await.unwrap();
+        output.append(lines.as_bytes()).await;
         let threads = HashSet::from([thread]);
         let id = entry.info().id;
         let cancel = CancellationToken::new();
@@ -2358,15 +2603,14 @@ mod tests {
         // A progress bar redraws its line with a carriage return.
         output
             .append(b"progress 10%\rprogress 100%\rdone in 3s\n")
-            .await
-            .unwrap();
+            .await;
         let pattern = regex::Regex::new("^done").unwrap();
         let (found, _) = search(&entry, &pattern, 0).await.unwrap();
         assert_eq!(found.as_deref(), Some("done in 3s"));
         // A line that never ends: the next search starts near its end,
         // not at its start again.
         let start = output.size();
-        output.append(&vec![b'.'; 2 * 1024 * 1024]).await.unwrap();
+        output.append(&vec![b'.'; 2 * 1024 * 1024]).await;
         let missing = regex::Regex::new("never").unwrap();
         let (found, next) = search(&entry, &missing, start).await.unwrap();
         assert!(found.is_none());
@@ -2383,8 +2627,8 @@ mod tests {
         let registry = Arc::new(ShellCommands::default());
         // All of its output is in memory when it ends: the file goes then.
         let (small, output, end) = started(dir.path(), &registry, ThreadId::new()).await;
-        output.append(b"done\n").await.unwrap();
-        output.finish().await.unwrap();
+        output.append(b"done\n").await;
+        output.finish().await;
         end.send_replace(Some(ProcessEnd::default()));
         small.settled(Duration::from_secs(2)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2393,11 +2637,8 @@ mod tests {
         // More than memory keeps: the file stays while the command is
         // listed, and goes when it is forgotten.
         let (large, output, end) = started(dir.path(), &registry, ThreadId::new()).await;
-        output
-            .append(&vec![b'x'; OUTPUT_TAIL_KEPT + 10])
-            .await
-            .unwrap();
-        output.finish().await.unwrap();
+        output.append(&vec![b'x'; OUTPUT_TAIL_KEPT + 10]).await;
+        output.finish().await;
         end.send_replace(Some(ProcessEnd::default()));
         large.settled(Duration::from_secs(2)).await;
         tokio::time::sleep(Duration::from_millis(50)).await;

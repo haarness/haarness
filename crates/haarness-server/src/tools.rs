@@ -668,7 +668,7 @@ impl Tool for ExecuteTool {
                 } else if within_tool_output_limits(&compact) {
                     output(compact)
                 } else {
-                    cut_laid_out(&laid_out, &tool_output_dir(), false).await?.0
+                    cut_laid_out(&laid_out, &tool_output_dir(), false).await.0
                 }
             }
         };
@@ -1329,12 +1329,13 @@ impl Tool for ManagementTool {
             ),
             ManagementKind::SessionManage => (
                 "session_manage",
-                "Inspect durable sessions without changing them. List recent sessions, search their visible transcript, read a compact item window, or get a digest of status, todos, and child tasks. Prefer digest/read over dumping entire transcripts.",
+                "Inspect durable sessions without changing them. List recent sessions, search the visible transcript of every session (most recently active first; each match is a short excerpt with its sequence, and a search that runs long stops and says where to go on), read a compact item window, or get a digest of status, todos, and child tasks. Prefer digest/read over dumping entire transcripts.",
                 json!({
-                    "threadId": {"type":"string","description":"Thread UUID or unique UUID prefix. Defaults to the current session for read/digest."},
+                    "threadId": {"type":"string","description":"Thread UUID or unique UUID prefix. Defaults to the current session for read/digest; for search, only that session."},
                     "query": {"type":"string","description":"Search text for list/search."},
                     "includeArchived": {"type":"boolean","description":"Include archived sessions."},
-                    "after": {"type":"integer","minimum":0,"description":"Return items after this durable sequence."},
+                    "before": {"type":"string","description":"For search: only sessions last active before this RFC 3339 time, or those left after the point a search that stopped early gives, passed as it gives it."},
+                    "after": {"type":"integer","minimum":0,"description":"Return items after this durable sequence; for search, with threadId."},
                     "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Maximum results/items."}
                 }),
                 vec!["list", "search", "read", "digest"],
@@ -1852,7 +1853,15 @@ async fn fetch_page(
     }
     let kind = crate::webfetch::kind(content_type.as_deref(), &body);
     let crate::webfetch::Kind::Text { html, .. } = kind else {
-        return fetched_file(&page, kind, content_type.as_deref(), body, media_max_bytes).await;
+        return fetched_file(
+            &page,
+            kind,
+            content_type.as_deref(),
+            body,
+            media_max_bytes,
+            &tool_output_dir(),
+        )
+        .await;
     };
     // A challenge some services answer with 200 instead of the page.
     if let Some(service) = crate::webfetch::bot_check(status.as_u16(), &headers, &body) {
@@ -1936,15 +1945,16 @@ async fn read_head(mut response: reqwest::Response, limit: usize) -> Vec<u8> {
     body
 }
 
-/// A fetched file that is not text: a PDF or an image is saved and attached
-/// for the model, as `read` attaches one; any other file is saved, and the
-/// model is told where.
+/// A fetched file that is not text: a PDF or an image is saved (in
+/// `directory`) and attached for the model, as `read` attaches one; any
+/// other file is saved, and the model is told where.
 async fn fetched_file(
     page: &url::Url,
     kind: crate::webfetch::Kind,
     content_type: Option<&str>,
     body: Vec<u8>,
     media_max_bytes: u64,
+    directory: &Path,
 ) -> CoreResult<ToolOutput> {
     use crate::webfetch::Kind;
     let size = body.len() as u64;
@@ -1953,12 +1963,29 @@ async fn fetched_file(
         Kind::Image(extension) => extension,
         Kind::Other | Kind::Text { .. } => "bin",
     };
+    // A file that is not text reaches the model only through the saved
+    // copy: a save that fails says so, rather than in the system's bare
+    // words.
+    let unsaved = |error: std::io::Error| {
+        CoreError::Tool(format!(
+            "{page} was fetched ({}), but saving it in {} failed ({error}), so it cannot be read.",
+            crate::webfetch::size(size),
+            directory.display()
+        ))
+    };
     let (path, mut file) =
-        crate::data_folder::new_private_file_with(&tool_output_dir(), "fetched", extension)
+        crate::data_folder::new_private_file_with(directory, "fetched", extension)
             .await
-            .map_err(tool_error)?;
-    file.write_all(&body).await.map_err(tool_error)?;
-    file.flush().await.map_err(tool_error)?;
+            .map_err(unsaved)?;
+    let written = async {
+        file.write_all(&body).await?;
+        file.flush().await
+    };
+    if let Err(error) = written.await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(unsaved(error));
+    }
     drop(file);
     let saved = path.display().to_string();
     let title = page
@@ -3196,7 +3223,7 @@ struct WholeOutput {
     /// The [`ScriptCall`] it is kept for.
     call: u64,
     /// The file the cut text names, or `None` for JSON that fit once laid
-    /// out, which is not cut.
+    /// out, which is not cut, and for a cut whose whole could not be saved.
     file: Option<PathBuf>,
     /// The cut text the call gave, by its length and hash: what a script is
     /// handed must start with it (hooks may add to its end), so a server
@@ -3204,7 +3231,8 @@ struct WholeOutput {
     /// that is not cut names no file, so it must be all that is handed.
     cut: (usize, [u8; 32]),
     /// The server's text when the file holds another form of it (JSON
-    /// laid out a value a line), else `None`: the file is the text.
+    /// laid out a value a line) or there is no file, else `None`: the file
+    /// is the text.
     text: Option<String>,
     metadata: Value,
 }
@@ -3230,7 +3258,8 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
     let script = SCRIPT_CALL.try_with(|call| *call).ok();
     let whole = script.map(|_| text.clone());
     let (capped, saved) = cut_mcp_text(text, directory, false).await?;
-    let Some((file, reformatted)) = saved else {
+    // Not cut: as it came, or its JSON laid out.
+    let Value::Object(cut) = capped.metadata else {
         if let (Some(call), Some(whole)) = (script, whole)
             && capped.text != whole
         {
@@ -3247,12 +3276,11 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
             metadata,
         });
     };
-    let Value::Object(cut) = capped.metadata else {
-        unreachable!("a cut output says where it was saved");
-    };
     let mut merged = match metadata.clone() {
         Value::Null => serde_json::Map::new(),
-        Value::Object(object) if !cut.keys().any(|key| object.contains_key(key)) => object,
+        // Both names are Haarness's whether or not a file was saved, so a
+        // server's own `outputPath` never reads as where the whole is.
+        Value::Object(object) if !CUT_KEYS.iter().any(|key| object.contains_key(*key)) => object,
         Value::Object(mut object) => {
             let mut own = serde_json::Map::new();
             for key in ["attachments", "diffs", "mcp_app"] {
@@ -3267,11 +3295,17 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
     };
     merged.extend(cut);
     if let (Some(call), Some(whole)) = (script, whole) {
+        // With no file saved (a full disk), the script gets the whole from
+        // memory.
+        let (file, text) = match saved {
+            Some((file, reformatted)) => (Some(file), reformatted.then_some(whole)),
+            None => (None, Some(whole)),
+        };
         keep_whole_output(WholeOutput {
             call,
-            file: Some(file),
+            file,
             cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
-            text: reformatted.then_some(whole),
+            text,
             metadata,
         });
     }
@@ -3281,17 +3315,41 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
     })
 }
 
+/// The metadata a cut MCP text carries (see [`capped_mcp_output`]).
+const CUT_KEYS: [&str; 2] = ["truncated", "outputPath"];
+
 fn keep_whole_output(kept: WholeOutput) {
-    let mut outputs = WHOLE_OUTPUTS.lock();
+    keep_within(
+        &mut WHOLE_OUTPUTS.lock(),
+        kept,
+        WHOLE_OUTPUTS_KEPT,
+        WHOLE_TEXT_BYTES_KEPT,
+    );
+}
+
+/// Adds `kept` to `outputs`, the oldest going first past `most` of them,
+/// and past `most_bytes` of texts the oldest of those holding text, so one
+/// large text never costs other calls their files. A text larger than
+/// `most_bytes` on its own is not kept: its call gets what the model gets.
+fn keep_within(
+    outputs: &mut std::collections::VecDeque<WholeOutput>,
+    kept: WholeOutput,
+    most: usize,
+    most_bytes: usize,
+) {
+    let bytes = |kept: &WholeOutput| kept.text.as_ref().map_or(0, String::len);
+    if bytes(&kept) > most_bytes {
+        return;
+    }
     outputs.push_back(kept);
-    while outputs.len() > WHOLE_OUTPUTS_KEPT
-        || outputs
-            .iter()
-            .filter_map(|kept| kept.text.as_ref().map(String::len))
-            .sum::<usize>()
-            > WHOLE_TEXT_BYTES_KEPT
-    {
+    while outputs.len() > most {
         outputs.pop_front();
+    }
+    while outputs.iter().map(bytes).sum::<usize>() > most_bytes {
+        let Some(oldest) = outputs.iter().position(|kept| kept.text.is_some()) else {
+            break;
+        };
+        outputs.remove(oldest);
     }
 }
 
@@ -3319,17 +3377,19 @@ pub(crate) async fn take_whole_mcp_output(
         *outputs = others;
         own
     };
-    let named = if output.metadata.get("truncated") == Some(&Value::Bool(true)) {
-        Some(Path::new(output.metadata.get("outputPath")?.as_str()?))
-    } else {
-        None
+    // A cut names the file that holds the whole, unless none could be saved.
+    let truncated = output.metadata.get("truncated") == Some(&Value::Bool(true));
+    let named = match output.metadata.get("outputPath") {
+        Some(path) if truncated => Some(Path::new(path.as_str()?)),
+        _ => None,
     };
     let kept = own.into_iter().rev().find(|kept| {
         let (length, hash) = kept.cut;
         let text = output.text.as_bytes();
-        let start = match kept.file {
-            Some(_) => text.get(..length),
-            None => (text.len() == length).then_some(text),
+        let start = if truncated {
+            text.get(..length)
+        } else {
+            (text.len() == length).then_some(text)
         };
         kept.file.as_deref() == named && start.is_some_and(|start| cut_fingerprint(start) == hash)
     })?;
@@ -3876,15 +3936,45 @@ impl Tool for BuiltinTool {
                     )));
                 }
                 let pattern = string(&args, "pattern")?;
+                // `src/**/*.{ts,tsx}` stands for a pattern for each
+                // alternative: the glob crate has no braces, and read as
+                // written it finds nothing.
+                let alternatives =
+                    haarness_core::glob_braces::alternatives(pattern).map_err(|error| {
+                        CoreError::Invalid(format!(
+                            "glob pattern `{pattern}` is not valid: {error}"
+                        ))
+                    })?;
                 // A `..` would leave the folder the outside-folder check
                 // judged; the folder is given as `path` instead.
-                if climbs(pattern) {
+                if alternatives.iter().any(|alternative| climbs(alternative)) {
                     return Err(CoreError::Invalid(
                         "a glob pattern cannot contain `..`; pass the folder to search as path"
                             .into(),
                     ));
                 }
-                let pattern = root.join(pattern).to_string_lossy().into_owned();
+                // Checked before the folder is joined to it, so a mistake is
+                // named where the model wrote it.
+                for alternative in &alternatives {
+                    if let Err(error) = glob::Pattern::new(alternative) {
+                        return Err(invalid_glob(pattern, alternative, &error));
+                    }
+                }
+                // The folder matches itself alone, `[slug]` and all.
+                let base = crate::bounded_glob::literal(&root);
+                let patterns: Vec<String> = alternatives
+                    .iter()
+                    .map(|alternative| {
+                        let path = Path::new(alternative);
+                        if path.has_root() || path.is_absolute() {
+                            root.join(path)
+                        } else {
+                            Path::new(&base).join(path)
+                        }
+                        .to_string_lossy()
+                        .into_owned()
+                    })
+                    .collect();
                 let workspace = haarness_core::paths::canonicalize(&context.workspace)
                     .unwrap_or_else(|_| context.workspace.clone());
                 // A file a `read` rule denies is left out like a secret one.
@@ -3901,7 +3991,7 @@ impl Tool for BuiltinTool {
                 // at and at one of folder entries read.
                 let walk = tokio::task::spawn_blocking(move || {
                     glob_walk(
-                        &pattern,
+                        &patterns,
                         &GlobScope {
                             root,
                             workspace,
@@ -3920,7 +4010,7 @@ impl Tool for BuiltinTool {
                     found = walk => found.map_err(tool_error)??,
                 };
                 let mut listed = truncate_output(found.values.join("\n")).await?;
-                if listed.text.is_empty() && !(found.stopped || found.large || found.partial) {
+                if listed.text.is_empty() && !found.partial && found.limit.is_none() {
                     // `*.py` finds nothing in `src` when the files are in
                     // `src/app`: models write it first, then guess. Not when
                     // matches were left out: then there were some.
@@ -3937,12 +4027,11 @@ impl Tool for BuiltinTool {
                     };
                 }
                 let output = with_skipped(listed, found.skipped, found.partial);
-                Ok(if found.stopped {
-                    with_stop(output, GLOB_LOOK_LIMIT)
-                } else if found.large {
-                    with_read_stop(output, GLOB_ENTRY_LIMIT)
-                } else {
-                    output
+                Ok(match found.limit {
+                    Some(GlobLimit::Looked) => with_stop(output, GLOB_LOOK_LIMIT),
+                    Some(GlobLimit::Linked) => with_read_stop(output, GLOB_ENTRY_LIMIT),
+                    Some(GlobLimit::Braces) => with_braces_stop(output, GLOB_ENTRY_LIMIT),
+                    None => output,
                 })
             }
             Kind::Grep => {
@@ -5419,16 +5508,25 @@ struct GlobLimits {
     entries: usize,
 }
 
-/// What a glob found: its matches, what it left out, and whether it stopped
-/// at a limit (`stopped` for [`GLOB_LOOK_LIMIT`], `large` for
-/// [`GLOB_ENTRY_LIMIT`]).
+/// What a glob found: its matches, what it left out, and the limit it
+/// stopped at, when it did.
 #[derive(Default)]
 struct GlobFound {
     values: Vec<String>,
     skipped: Skipped,
     partial: bool,
-    stopped: bool,
-    large: bool,
+    limit: Option<GlobLimit>,
+}
+
+/// The limit a glob stopped at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlobLimit {
+    /// [`GLOB_LOOK_LIMIT`] matches looked at.
+    Looked,
+    /// [`GLOB_ENTRY_LIMIT`] folder entries read through links.
+    Linked,
+    /// The same budget, shared by the walks for further brace alternatives.
+    Braces,
 }
 
 /// Where a glob looks: the canonical folder it searches, the canonical
@@ -5440,10 +5538,17 @@ struct GlobScope {
     named: PathBuf,
 }
 
-/// Walk `pattern` (already joined to the scope's root) within `limits`.
-/// Runs synchronously; the caller keeps it off the async workers.
+/// Walk `patterns` (the alternatives of one pattern, each already joined to
+/// the scope's root) within `limits`, which they share: as few walks as
+/// [`crate::bounded_glob::walks`] needs, one for `**/*.{ts,tsx}`. The first
+/// reads as one pattern's would; the walks after it share one budget of
+/// folder entries with it, all of them counted (`braces_large` when they
+/// reach it), since each would otherwise read the tree again. A path two
+/// walks match is listed once, and the paths of several come in the order
+/// one walk lists them. Runs synchronously; the caller keeps it off the
+/// async workers.
 fn glob_walk(
-    pattern: &str,
+    patterns: &[String],
     scope: &GlobScope,
     secrets: &SecretFilter,
     cancel: &tokio_util::sync::CancellationToken,
@@ -5451,70 +5556,117 @@ fn glob_walk(
 ) -> CoreResult<GlobFound> {
     let mut folders = HashMap::<PathBuf, bool>::new();
     let mut found = GlobFound::default();
-    let stop = cancel.clone();
-    let mut walk = crate::bounded_glob::Walk::new(pattern)
-        .map_err(tool_error)?
-        .linked_entries(limits.entries)
-        .stop_when(move || stop.is_cancelled());
-    for (looked, path) in walk.by_ref().enumerate() {
-        if cancel.is_cancelled() {
-            return Err(CoreError::Cancelled);
+    // Each path listed, with what the output says of it.
+    let mut listed = Vec::<(PathBuf, String)>::new();
+    let walks = crate::bounded_glob::walks(patterns).map_err(tool_error)?;
+    let mut seen = (walks.len() > 1).then(std::collections::HashSet::<PathBuf>::new);
+    let mut looked = 0;
+    // Folder entries the walks have read, against the budget of those after
+    // the first.
+    let mut spent = 0;
+    for (index, walk) in walks.into_iter().enumerate() {
+        let stop = cancel.clone();
+        let walk = if index == 0 {
+            walk.linked_entries(limits.entries)
+        } else {
+            walk.entries(limits.entries.saturating_sub(spent))
+        };
+        let mut walk = walk.stop_when(move || stop.is_cancelled());
+        for path in walk.by_ref() {
+            if cancel.is_cancelled() {
+                return Err(CoreError::Cancelled);
+            }
+            if listed.len() == 10_000 {
+                found.partial = true;
+                break;
+            }
+            if looked == limits.matches {
+                found.partial = true;
+                found.limit = Some(GlobLimit::Looked);
+                break;
+            }
+            if let Some(seen) = seen.as_mut()
+                && !seen.insert(path.clone())
+            {
+                continue;
+            }
+            looked += 1;
+            // A part starting with `.`, such as `.*`, also matches `.` and `..`.
+            if !path.strip_prefix(&scope.root).is_ok_and(|relative| {
+                !relative
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir)
+            }) {
+                continue;
+            }
+            // `**` follows linked folders (never one back up the tree): a match
+            // in a folder a link takes out of the project and the searched folder
+            // is left out, as a list of that folder would ask first.
+            let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
+            let inside = *folders.entry(parent).or_insert_with_key(|parent| {
+                haarness_core::paths::canonicalize(parent).is_ok_and(|real| {
+                    real.starts_with(&scope.root) || real.starts_with(&scope.workspace)
+                })
+            });
+            if !inside {
+                found.skipped.outside += 1;
+                continue;
+            }
+            // `*` matches dotfiles and `**` follows linked folders, so each file
+            // is checked by where it really leads as well.
+            if !path.is_dir()
+                && let Some(hidden) = secrets.hides(&path)
+            {
+                found.skipped.count(hidden);
+                continue;
+            }
+            // Relative with `/`, as grep and the file listing write it (Windows
+            // writes `\\`); a path outside the folder as the system does.
+            let value = match path.strip_prefix(&scope.named) {
+                Ok(relative) if cfg!(windows) => relative.to_string_lossy().replace('\\', "/"),
+                Ok(relative) => relative.display().to_string(),
+                Err(_) => path.display().to_string(),
+            };
+            listed.push((path, value));
         }
-        if found.values.len() == 10_000 {
-            found.partial = true;
+        spent += walk.entries_listed();
+        match walk.cut() {
+            Some(crate::bounded_glob::Cut::Stopped) => return Err(CoreError::Cancelled),
+            Some(crate::bounded_glob::Cut::Large) => {
+                found.partial = true;
+                // The look limit, when it was met too, says more.
+                found.limit.get_or_insert(if index == 0 {
+                    GlobLimit::Linked
+                } else {
+                    GlobLimit::Braces
+                });
+            }
+            None => {}
+        }
+        if found.partial {
             break;
         }
-        if looked == limits.matches {
-            found.partial = true;
-            found.stopped = true;
-            break;
-        }
-        // A part starting with `.`, such as `.*`, also matches `.` and `..`.
-        if !path.strip_prefix(&scope.root).is_ok_and(|relative| {
-            !relative
-                .components()
-                .any(|part| part == std::path::Component::ParentDir)
-        }) {
-            continue;
-        }
-        // `**` follows linked folders (never one back up the tree): a match
-        // in a folder a link takes out of the project and the searched folder
-        // is left out, as a list of that folder would ask first.
-        let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
-        let inside = *folders.entry(parent).or_insert_with_key(|parent| {
-            haarness_core::paths::canonicalize(parent).is_ok_and(|real| {
-                real.starts_with(&scope.root) || real.starts_with(&scope.workspace)
-            })
-        });
-        if !inside {
-            found.skipped.outside += 1;
-            continue;
-        }
-        // `*` matches dotfiles and `**` follows linked folders, so each file
-        // is checked by where it really leads as well.
-        if !path.is_dir()
-            && let Some(hidden) = secrets.hides(&path)
-        {
-            found.skipped.count(hidden);
-            continue;
-        }
-        // Relative with `/`, as grep and the file listing write it (Windows
-        // writes `\\`); a path outside the folder as the system does.
-        found.values.push(match path.strip_prefix(&scope.named) {
-            Ok(relative) if cfg!(windows) => relative.to_string_lossy().replace('\\', "/"),
-            Ok(relative) => relative.display().to_string(),
-            Err(_) => path.display().to_string(),
-        });
     }
-    match walk.cut() {
-        Some(crate::bounded_glob::Cut::Stopped) => return Err(CoreError::Cancelled),
-        Some(crate::bounded_glob::Cut::Large) => {
-            found.partial = true;
-            found.large = true;
-        }
-        None => {}
+    if seen.is_some() {
+        listed.sort_by(|(first, _), (second, _)| first.cmp(second));
     }
+    found.values = listed.into_iter().map(|(_, value)| value).collect();
     Ok(found)
+}
+
+/// A pattern the glob crate cannot read, named as the model wrote it: the
+/// alternative of its braces at fault too, when it has several.
+fn invalid_glob(pattern: &str, alternative: &str, error: &glob::PatternError) -> CoreError {
+    let within = if alternative == pattern {
+        String::new()
+    } else {
+        format!(" (its alternative `{alternative}`)")
+    };
+    CoreError::Invalid(format!(
+        "glob pattern `{pattern}` is not valid{within}: {} at character {}",
+        error.msg,
+        error.pos + 1
+    ))
 }
 
 /// Ends a glob's output saying it stopped at its budget, so an empty or short
@@ -5523,6 +5675,18 @@ fn with_stop(output: ToolOutput, limit: usize) -> ToolOutput {
     with_note(
         output,
         &format!("(stopped after looking at {limit} matches; narrow the pattern or the path)"),
+    )
+}
+
+/// Ends a glob's output saying its walks for further brace alternatives
+/// stopped at the budget of folder entries they share.
+fn with_braces_stop(output: ToolOutput, entries: usize) -> ToolOutput {
+    with_note(
+        output,
+        &format!(
+            "(stopped after reading {entries} folder entries for the alternatives in its braces; \
+             narrow the pattern or the path)"
+        ),
     )
 }
 
@@ -6153,6 +6317,11 @@ fn output(text: String) -> ToolOutput {
 /// in snapshots; this payload exists only to render an immediate review.
 const TOOL_DIFF_MAX_FILES: usize = 64;
 const TOOL_DIFF_BODY_MAX_BYTES: usize = 32 * 1_024;
+/// A file with a body over that limit keeps a unified diff of its change
+/// instead, in the room its two bodies would have had.
+const TOOL_DIFF_PATCH_MAX_BYTES: usize = 2 * TOOL_DIFF_BODY_MAX_BYTES;
+/// Unchanged lines kept on each side of a change in that diff, as Git keeps.
+const TOOL_DIFF_PATCH_CONTEXT: usize = 3;
 const TOOL_DIFF_LINE_BUDGET: Duration = Duration::from_millis(500);
 
 enum ExistingDiffBody {
@@ -6232,7 +6401,9 @@ fn opaque_file_diff(
     after: Option<&str>,
     binary: bool,
 ) -> FileDiff {
-    let mut diff = text_file_diff(file, status, before, after);
+    // With one side unknown there is no change to diff, so the side that is
+    // known stays as its (possibly cut) text.
+    let mut diff = body_file_diff(file, status, before, after);
     diff.binary = binary;
     // A body is necessarily missing when the old bytes cannot be represented
     // as UTF-8 or could not be read. Keep that limitation explicit on the wire.
@@ -6240,7 +6411,64 @@ fn opaque_file_diff(
     diff
 }
 
+/// A text file's change: its bodies when they fit the limit, otherwise a
+/// bounded unified diff of the change itself. A cut body would show only the
+/// start of a large file, where an edit further down looks like no change,
+/// and a cut in the middle of the file like one.
 fn text_file_diff(
+    file: &str,
+    status: FileDiffStatus,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> FileDiff {
+    if [before, after]
+        .into_iter()
+        .flatten()
+        .all(|body| body.len() <= TOOL_DIFF_BODY_MAX_BYTES)
+    {
+        return body_file_diff(file, status, before, after);
+    }
+    let (before, after) = (before.unwrap_or_default(), after.unwrap_or_default());
+    let (additions, deletions, (patch, truncated)) = match status {
+        // A file added or removed whole is all one side: its lines are the
+        // diff, read only as far as the bound, with nothing to compare.
+        FileDiffStatus::Added => {
+            let lines = line_count(after);
+            (
+                lines,
+                0,
+                whole_file_patch(after, similar::ChangeTag::Insert, lines),
+            )
+        }
+        FileDiffStatus::Deleted => {
+            let lines = line_count(before);
+            (
+                0,
+                lines,
+                whole_file_patch(before, similar::ChangeTag::Delete, lines),
+            )
+        }
+        FileDiffStatus::Modified => {
+            let (old, new) = (text_lines(before), text_lines(after));
+            let diff = line_diff(&old, &new);
+            let (additions, deletions) = changed_lines(&diff);
+            (additions, deletions, bounded_patch(&diff))
+        }
+    };
+    FileDiff {
+        file: file.to_owned(),
+        status,
+        additions,
+        deletions,
+        patch,
+        before: None,
+        after: None,
+        binary: false,
+        truncated,
+    }
+}
+
+fn body_file_diff(
     file: &str,
     status: FileDiffStatus,
     before: Option<&str>,
@@ -6279,6 +6507,379 @@ fn bounded_diff_body(body: &str) -> (String, bool) {
     (body[..end].to_owned(), true)
 }
 
+/// What Git writes after a last line that has no line end.
+const NO_LINE_END: &str = "\\ No newline at end of file\n";
+/// Bytes of a cut long line kept before the point where it starts to differ
+/// from the line it replaces: enough to read what the change follows, and in
+/// a terminal row, the change itself.
+const CUT_LINE_LEAD: usize = 40;
+/// The least room left in which a hunk too long to keep whole is still kept
+/// in part: enough for a line or two on each side of its change.
+const CUT_HUNK_MIN_ROOM: usize = 1_024;
+
+/// `diff` as the hunks of a unified diff, numbered as the files are, with no
+/// file headers (the entry names its file), in at most
+/// [`TOOL_DIFF_PATCH_MAX_BYTES`]. Hunks are kept whole while they fit; of the
+/// first hunk too long for the room left, the lines from its first change
+/// that fit, when there is room for some. Hunks are made one at a time and no line is copied before it is known to
+/// fit, so a huge change costs no more than the bound. Says whether any of
+/// the change was left out.
+fn bounded_patch(diff: &similar::TextDiff<'_, '_, '_, str>) -> (Option<String>, bool) {
+    let mut patch = String::new();
+    for group in hunk_groups(diff.ops(), TOOL_DIFF_PATCH_CONTEXT) {
+        let room = TOOL_DIFF_PATCH_MAX_BYTES - patch.len();
+        if let Some(hunk) = PatchHunk::whole(diff, &group, room) {
+            patch.push_str(&hunk);
+            continue;
+        }
+        if patch.is_empty() || room >= CUT_HUNK_MIN_ROOM {
+            patch.push_str(&PatchHunk::cut(diff, &group, room));
+        }
+        return (Some(patch), true);
+    }
+    (Some(patch).filter(|patch| !patch.is_empty()), false)
+}
+
+/// The diff of a file added or removed whole, `lines` long: one hunk of its
+/// lines from the first, as many as fit the bound, and of a first line too
+/// long on its own, its start. The text is read no further than that.
+fn whole_file_patch(text: &str, tag: similar::ChangeTag, lines: u64) -> (Option<String>, bool) {
+    if text.is_empty() {
+        return (None, false);
+    }
+    let lines = usize::try_from(lines).unwrap_or(usize::MAX);
+    let (old_most, new_most) = if tag == similar::ChangeTag::Insert {
+        (0, lines)
+    } else {
+        (lines, 0)
+    };
+    let mut hunk = PatchHunk::new(0, old_most, 0, new_most, TOOL_DIFF_PATCH_MAX_BYTES);
+    for line in text.split_inclusive('\n') {
+        if hunk.push(tag, line) {
+            continue;
+        }
+        if hunk.body.is_empty() {
+            let limit = hunk.limit;
+            hunk.cut_line(tag, line, 0, limit);
+        }
+        return (Some(hunk.finish()), true);
+    }
+    (Some(hunk.finish()), false)
+}
+
+/// The ops of each hunk, with `context` unchanged lines around its changes,
+/// as `TextDiff::grouped_ops` groups them, made one hunk at a time: a diff of
+/// many changes has far more hunks than the bounded diff keeps.
+fn hunk_groups(
+    ops: &[similar::DiffOp],
+    context: usize,
+) -> impl Iterator<Item = Vec<similar::DiffOp>> + '_ {
+    let last = ops.len().saturating_sub(1);
+    let mut next = 0;
+    let mut pending = Vec::new();
+    std::iter::from_fn(move || {
+        while let Some(&op) = ops.get(next) {
+            let at = next;
+            next += 1;
+            let similar::DiffOp::Equal {
+                mut old_index,
+                mut new_index,
+                mut len,
+            } = op
+            else {
+                pending.push(op);
+                continue;
+            };
+            // The unchanged lines before the first change and after the
+            // last keep only their context.
+            if at == 0 {
+                let skipped = len.saturating_sub(context);
+                old_index += skipped;
+                new_index += skipped;
+                len -= skipped;
+            }
+            if at == last {
+                len = len.min(context);
+            }
+            // A longer unchanged run between two changes ends one hunk and
+            // starts the next.
+            if len > context * 2 {
+                pending.push(similar::DiffOp::Equal {
+                    old_index,
+                    new_index,
+                    len: context,
+                });
+                let skipped = len - context;
+                let next_hunk = vec![similar::DiffOp::Equal {
+                    old_index: old_index + skipped,
+                    new_index: new_index + skipped,
+                    len: context,
+                }];
+                return Some(std::mem::replace(&mut pending, next_hunk));
+            }
+            pending.push(similar::DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            });
+        }
+        let hunk = std::mem::take(&mut pending);
+        hunk.iter()
+            .any(|op| op.tag() != similar::DiffTag::Equal)
+            .then_some(hunk)
+    })
+}
+
+/// One hunk of a [`bounded_patch`] as it is written.
+struct PatchHunk {
+    old_start: usize,
+    new_start: usize,
+    old_lines: usize,
+    new_lines: usize,
+    body: String,
+    /// Bytes the body may take: the room left less the longest header the
+    /// hunk could have.
+    limit: usize,
+}
+
+impl PatchHunk {
+    /// A hunk from these zero-based first lines, of at most these lengths,
+    /// in `room` bytes.
+    fn new(
+        old_start: usize,
+        old_most: usize,
+        new_start: usize,
+        new_most: usize,
+        room: usize,
+    ) -> Self {
+        let longest = Self::header(old_start, old_most, new_start, new_most);
+        Self {
+            old_start,
+            new_start,
+            old_lines: 0,
+            new_lines: 0,
+            body: String::new(),
+            limit: room.saturating_sub(longest.len()),
+        }
+    }
+
+    fn of(ops: &[similar::DiffOp], room: usize) -> Self {
+        let (old_start, new_start) = ops
+            .first()
+            .map_or((0, 0), |op| (op.old_range().start, op.new_range().start));
+        let (old_end, new_end) = ops
+            .last()
+            .map_or((0, 0), |op| (op.old_range().end, op.new_range().end));
+        Self::new(
+            old_start,
+            old_end - old_start,
+            new_start,
+            new_end - new_start,
+            room,
+        )
+    }
+
+    /// The hunk with all its lines, or `None` when they do not fit `room`.
+    fn whole(
+        diff: &similar::TextDiff<'_, '_, '_, str>,
+        ops: &[similar::DiffOp],
+        room: usize,
+    ) -> Option<String> {
+        let mut hunk = Self::of(ops, room);
+        for op in ops {
+            for change in diff.iter_changes(op) {
+                if !hunk.push(change.tag(), change.value()) {
+                    return None;
+                }
+            }
+        }
+        Some(hunk.finish())
+    }
+
+    /// The start of a hunk too long for `room`, from its first change, so
+    /// the lines kept always show one: as many lines as fit. Of a replacement
+    /// too long for what is left, the first lines of both sides, so what was
+    /// replaced and what replaced it both show.
+    fn cut(
+        diff: &similar::TextDiff<'_, '_, '_, str>,
+        ops: &[similar::DiffOp],
+        room: usize,
+    ) -> String {
+        let ops = match ops.first() {
+            Some(op) if op.tag() == similar::DiffTag::Equal => &ops[1..],
+            _ => ops,
+        };
+        let mut hunk = Self::of(ops, room);
+        for op in ops {
+            if let similar::DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } = *op
+            {
+                let old = &diff.old_slices()[old_index..old_index + old_len];
+                let new = &diff.new_slices()[new_index..new_index + new_len];
+                let room = hunk.limit - hunk.body.len();
+                if Self::size_within(old.iter().chain(new), room).is_none() {
+                    hunk.split(old, new);
+                    break;
+                }
+            }
+            for change in diff.iter_changes(op) {
+                if hunk.push(change.tag(), change.value()) {
+                    continue;
+                }
+                if hunk.body.is_empty() {
+                    let limit = hunk.limit;
+                    hunk.cut_line(change.tag(), change.value(), 0, limit);
+                }
+                return hunk.finish();
+            }
+        }
+        hunk.finish()
+    }
+
+    /// Of a replacement too long for the room left: the first lines of each
+    /// side in half of it (or in what the other side leaves). A first line
+    /// too long for its half is cut a little before where the two first
+    /// lines start to differ, so the change itself shows on both sides.
+    fn split(&mut self, old: &[&str], new: &[&str]) {
+        let room = self.limit - self.body.len();
+        let old_room = match (
+            Self::size_within(old.iter(), room / 2),
+            Self::size_within(new.iter(), room / 2),
+        ) {
+            (Some(size), _) => size,
+            (None, Some(size)) => room - size,
+            (None, None) => room / 2,
+        };
+        let start = match (old.first(), new.first()) {
+            (Some(old), Some(new)) => {
+                let differs = old
+                    .bytes()
+                    .zip(new.bytes())
+                    .take_while(|(old, new)| old == new)
+                    .count();
+                let mut start = differs.saturating_sub(CUT_LINE_LEAD);
+                // Bytes before `differs` are the same in both lines, so a
+                // boundary in one is a boundary in the other.
+                while !old.is_char_boundary(start) {
+                    start -= 1;
+                }
+                start
+            }
+            _ => 0,
+        };
+        let middle = self.body.len() + old_room;
+        self.side(similar::ChangeTag::Delete, old, start, middle);
+        let limit = self.limit;
+        self.side(similar::ChangeTag::Insert, new, start, limit);
+    }
+
+    /// The lines of one side of a replacement while they end within `end`
+    /// bytes of body; of a first one too long, the stretch from `start`.
+    fn side(&mut self, tag: similar::ChangeTag, lines: &[&str], start: usize, end: usize) {
+        for (index, line) in lines.iter().enumerate() {
+            if self.body.len() + Self::size(line) <= end {
+                self.line(tag, line);
+                continue;
+            }
+            if index == 0 {
+                let room = end.saturating_sub(self.body.len());
+                self.cut_line(tag, line, start, room);
+            }
+            break;
+        }
+    }
+
+    /// Bytes `value` takes as a line of the hunk.
+    fn size(value: &str) -> usize {
+        // A last line without its line feed gets one, and Git's note.
+        1 + value.len()
+            + if value.ends_with('\n') {
+                0
+            } else {
+                1 + NO_LINE_END.len()
+            }
+    }
+
+    /// Bytes `lines` take together, when that is at most `room`.
+    fn size_within<'a>(mut lines: impl Iterator<Item = &'a &'a str>, room: usize) -> Option<usize> {
+        lines.try_fold(0, |total: usize, line| {
+            Some(total + Self::size(line)).filter(|total| *total <= room)
+        })
+    }
+
+    /// Adds one line when it fits, and says whether it did.
+    fn push(&mut self, tag: similar::ChangeTag, value: &str) -> bool {
+        if self.body.len() + Self::size(value) > self.limit {
+            return false;
+        }
+        self.line(tag, value);
+        true
+    }
+
+    fn line(&mut self, tag: similar::ChangeTag, value: &str) {
+        self.write(tag, value);
+        if !value.ends_with('\n') {
+            self.body.push('\n');
+            self.body.push_str(NO_LINE_END);
+        }
+    }
+
+    /// A line too long for `room` bytes: as much of it from byte `start` as
+    /// fits.
+    fn cut_line(&mut self, tag: similar::ChangeTag, value: &str, start: usize, room: usize) {
+        let text = value.strip_suffix('\n').unwrap_or(value);
+        let start = start.min(text.len());
+        let mut end = text.len().min(start + room.saturating_sub(2));
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.write(tag, &text[start..end]);
+        self.body.push('\n');
+    }
+
+    fn write(&mut self, tag: similar::ChangeTag, text: &str) {
+        let sign = match tag {
+            similar::ChangeTag::Equal => ' ',
+            similar::ChangeTag::Delete => '-',
+            similar::ChangeTag::Insert => '+',
+        };
+        self.body.push(sign);
+        self.body.push_str(text);
+        if tag != similar::ChangeTag::Insert {
+            self.old_lines += 1;
+        }
+        if tag != similar::ChangeTag::Delete {
+            self.new_lines += 1;
+        }
+    }
+
+    fn finish(self) -> String {
+        let mut hunk = Self::header(
+            self.old_start,
+            self.old_lines,
+            self.new_start,
+            self.new_lines,
+        );
+        hunk.push_str(&self.body);
+        hunk
+    }
+
+    /// `@@ -1,3 +1,4 @@`: one-based first lines, where an empty side names
+    /// the line before it.
+    fn header(old_start: usize, old_lines: usize, new_start: usize, new_lines: usize) -> String {
+        let first = |start: usize, lines: usize| if lines == 0 { start } else { start + 1 };
+        format!(
+            "@@ -{},{old_lines} +{},{new_lines} @@\n",
+            first(old_start, old_lines),
+            first(new_start, new_lines)
+        )
+    }
+}
+
 /// Lines added and removed by a line diff, the same count `git diff` and the
 /// Review panel give. Unchanged lines inside an edited region are not
 /// changes: a replacement that keeps four of its lines adds and removes the
@@ -6295,22 +6896,39 @@ fn line_changes(status: FileDiffStatus, before: Option<&str>, after: Option<&str
             if before == after {
                 return (0, 0);
             }
-            // Lines keep their terminators here, so a changed final newline
-            // still counts as the one-line mutation it is.
-            let diff = similar::TextDiff::configure()
-                .timeout(TOOL_DIFF_LINE_BUDGET)
-                .diff_lines(before, after);
-            diff.ops()
-                .iter()
-                .fold((0, 0), |(additions, deletions), op| match op.tag() {
-                    similar::DiffTag::Equal => (additions, deletions),
-                    _ => (
-                        additions + u64::try_from(op.new_range().len()).unwrap_or(u64::MAX),
-                        deletions + u64::try_from(op.old_range().len()).unwrap_or(u64::MAX),
-                    ),
-                })
+            changed_lines(&line_diff(&text_lines(before), &text_lines(after)))
         }
     }
+}
+
+/// A text's lines with their line ends. Only a line feed ends a line, as Git
+/// and editors count them: a carriage return alone stays inside its line, so
+/// line numbers match the file's.
+fn text_lines(text: &str) -> Vec<&str> {
+    text.split_inclusive('\n').collect()
+}
+
+/// Lines keep their terminators here, so a changed final newline still
+/// counts as the one-line mutation it is.
+fn line_diff<'lines, 'text>(
+    before: &'lines [&'text str],
+    after: &'lines [&'text str],
+) -> similar::TextDiff<'text, 'text, 'lines, str> {
+    similar::TextDiff::configure()
+        .timeout(TOOL_DIFF_LINE_BUDGET)
+        .diff_slices(before, after)
+}
+
+fn changed_lines(diff: &similar::TextDiff<'_, '_, '_, str>) -> (u64, u64) {
+    diff.ops()
+        .iter()
+        .fold((0, 0), |(additions, deletions), op| match op.tag() {
+            similar::DiffTag::Equal => (additions, deletions),
+            _ => (
+                additions + u64::try_from(op.new_range().len()).unwrap_or(u64::MAX),
+                deletions + u64::try_from(op.old_range().len()).unwrap_or(u64::MAX),
+            ),
+        })
 }
 
 fn line_count(body: &str) -> u64 {
@@ -6348,33 +6966,78 @@ pub(crate) async fn truncate_output_at(text: String, directory: &Path) -> CoreRe
         return Ok(output(text));
     }
     let preview = output_preview(&text);
-    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
-        .await
-        .map_err(tool_error)?;
-    file.write_all(text.as_bytes()).await.map_err(tool_error)?;
-    file.flush().await.map_err(tool_error)?;
+    let saved = save_whole(text.as_bytes(), directory, "tool").await;
     let removed = text.len().saturating_sub(preview.len());
-    let notice = cut_notice(&path, removed, false);
+    let notice = cut_notice(&saved, removed, false);
     Ok(ToolOutput {
         text: format!("{preview}\n\n{notice}"),
-        metadata: json!({"truncated": true, "outputPath": path}),
+        metadata: cut_metadata(&saved),
     })
 }
 
-/// What follows the start of a cut output: where the whole of it is, how to
-/// read it, and how much is left out.
-fn cut_notice(path: &Path, removed: usize, failed: bool) -> String {
+/// Saves the whole of a cut text in a new file of `directory`, for the cut
+/// to name. A save that fails (a full disk, a folder that cannot be
+/// written) costs only the file: it is logged, what it left is removed, and
+/// the system's words for it come back for the note, since the cut text is
+/// still worth having.
+pub(crate) async fn save_whole(
+    bytes: &[u8],
+    directory: &Path,
+    prefix: &str,
+) -> Result<PathBuf, String> {
+    let (path, mut file) = crate::data_folder::new_private_file(directory, prefix)
+        .await
+        .map_err(|error| unsaved(directory, &error))?;
+    let written = async {
+        file.write_all(bytes).await?;
+        file.flush().await
+    };
+    if let Err(error) = written.await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(unsaved(directory, &error));
+    }
+    Ok(path)
+}
+
+/// Why a save in `directory` failed, as a cut's note says it, logged.
+fn unsaved(directory: &Path, error: &std::io::Error) -> String {
+    tracing::warn!(
+        %error,
+        folder = %directory.display(),
+        "the whole of a cut tool output could not be saved; the cut is returned without it"
+    );
+    format!(
+        "Saving all of it in {} failed ({error})",
+        directory.display()
+    )
+}
+
+/// A cut output's metadata: cut, and where the whole is when it was saved.
+fn cut_metadata(saved: &Result<PathBuf, String>) -> Value {
+    match saved {
+        Ok(path) => json!({"truncated": true, "outputPath": path}),
+        Err(_) => json!({"truncated": true}),
+    }
+}
+
+/// What follows the start of a cut output: where the whole of it is and
+/// how to read it, or why it could not be saved, and how much is left out.
+fn cut_notice(saved: &Result<PathBuf, String>, removed: usize, failed: bool) -> String {
     let lead = if failed {
         "The tool call failed and its output was truncated."
     } else {
         "The tool call succeeded but its output was truncated."
     };
-    format!(
-        "{lead} Full output saved to: {}\n\
-         Use grep on that path or read it with offset/limit.\n\n\
-         ...{removed} bytes truncated...",
-        path.display()
-    )
+    let whole = match saved {
+        Ok(path) => format!(
+            "Full output saved to: {}\n\
+             Use grep on that path or read it with offset/limit.",
+            path.display()
+        ),
+        Err(why) => format!("{why}, so only the part above can be read."),
+    };
+    format!("{lead} {whole}\n\n...{removed} bytes truncated...")
 }
 
 /// An MCP server's text as it is cut for the model (a tool's result or
@@ -6385,9 +7048,9 @@ fn cut_notice(path: &Path, removed: usize, failed: bool) -> String {
 /// the file can be read by line, and a line longer than what is left of the
 /// 50 KiB is cut inside it rather than left out. JSON that fits once
 /// indented (written with wider indents than two spaces, say) is not cut.
-/// Gives the output (the text, or its JSON indented) and, when it was cut,
-/// the file holding the whole and whether it holds it indented rather than
-/// as it came.
+/// Gives the output (the text, or its JSON indented; cut, its metadata says
+/// so) and, when it was cut and the whole could be saved, the file holding
+/// the whole and whether it holds it indented rather than as it came.
 pub(crate) async fn cut_mcp_text(
     text: String,
     directory: &Path,
@@ -6402,34 +7065,29 @@ pub(crate) async fn cut_mcp_text(
     if reformatted && within_tool_output_limits(&readable) {
         return Ok((output(readable), None));
     }
-    let (cut, path) = cut_laid_out(&readable, directory, failed).await?;
-    Ok((cut, Some((path, reformatted))))
+    let (cut, path) = cut_laid_out(&readable, directory, failed).await;
+    Ok((cut, path.map(|path| (path, reformatted))))
 }
 
 /// `readable`, text past the limits as [`cut_mcp_text`] lays it out, cut:
-/// its start, then where the whole was saved in `directory`.
+/// its start, then where the whole was saved in `directory` (the file too),
+/// or why it could not be.
 async fn cut_laid_out(
     readable: &str,
     directory: &Path,
     failed: bool,
-) -> CoreResult<(ToolOutput, PathBuf)> {
+) -> (ToolOutput, Option<PathBuf>) {
     let preview = filled_preview(readable);
-    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
-        .await
-        .map_err(tool_error)?;
-    file.write_all(readable.as_bytes())
-        .await
-        .map_err(tool_error)?;
-    file.flush().await.map_err(tool_error)?;
+    let saved = save_whole(readable.as_bytes(), directory, "tool").await;
     let removed = readable.len().saturating_sub(preview.len());
-    let notice = cut_notice(&path, removed, failed);
-    Ok((
+    let notice = cut_notice(&saved, removed, failed);
+    (
         ToolOutput {
             text: format!("{preview}\n\n{notice}"),
-            metadata: json!({"truncated": true, "outputPath": path}),
+            metadata: cut_metadata(&saved),
         },
-        path,
-    ))
+        saved.ok(),
+    )
 }
 
 /// A line longer than this is taken for data written on one line (JSON,
@@ -6702,7 +7360,8 @@ fn write_json(json: &str, indent: usize, out: &mut String) {
 }
 
 /// The first 50 KiB (and at most 2,000 lines) of `text`, the line that
-/// passes the limit cut where it does, at a character boundary.
+/// passes the limit cut where it does, keeping its characters whole (see
+/// [`whole_cut`]).
 fn filled_preview(text: &str) -> &str {
     let mut end = 0;
     for (index, line) in text.split_inclusive('\n').enumerate() {
@@ -6710,10 +7369,7 @@ fn filled_preview(text: &str) -> &str {
             break;
         }
         if end + line.len() > TOOL_OUTPUT_MAX_BYTES {
-            end = TOOL_OUTPUT_MAX_BYTES;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
+            end = whole_cut(text, TOOL_OUTPUT_MAX_BYTES);
             break;
         }
         end += line.len();
@@ -6721,20 +7377,72 @@ fn filled_preview(text: &str) -> &str {
     text[..end].trim_end_matches(['\n', '\r'])
 }
 
+/// The most a cut keeps of a cluster of characters shown as one (an emoji
+/// with its skin tone and joiners, a flag, a letter with its marks) by
+/// leaving it out whole; a longer one (marks stacked without end) is cut
+/// between two of its characters instead.
+const CLUSTER_BYTES: usize = 64;
+
+/// Where text cut at byte `end` of `text` ends: there, when no character or
+/// cluster of them spans it, else before the character or cluster `end`
+/// falls in (see [`CLUSTER_BYTES`]), so an emoji, a flag or a CJK character
+/// is never shown in part.
+pub(crate) fn whole_cut(text: &str, end: usize) -> usize {
+    let mut end = end.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut cursor = unicode_segmentation::GraphemeCursor::new(end, text.len(), true);
+    if cursor.is_boundary(text, 0).unwrap_or(true) {
+        return end;
+    }
+    match cursor.prev_boundary(text, 0) {
+        Ok(Some(start)) if end - start <= CLUSTER_BYTES => start,
+        _ => end,
+    }
+}
+
+/// The least room the head of a long line after others is shown in: less
+/// would show a fragment (a path cut short) rather than a start worth
+/// reading.
+const LONG_LINE_HEAD_MIN: usize = 256;
+
+/// The start of `text` a native tool's cut output shows: whole lines, up to
+/// 2,000 of them and 50 KiB. A line too long to show whole (minified code, a
+/// JSON dump) shows its head, ending in a cut mark, when it is the first,
+/// so the preview is never empty, or when it is data on one line (over
+/// [`LONG_LINE_BYTES`]) after shorter ones and at least
+/// [`LONG_LINE_HEAD_MIN`] bytes are left for it (a head cut shorter than
+/// 2,000 characters says only that the line goes on); any other line that
+/// does not fit is left out whole, so no path or match is shown in part.
 fn output_preview(text: &str) -> String {
     let mut preview = Vec::new();
     let mut bytes = 0;
     for line in text.lines().take(TOOL_OUTPUT_MAX_LINES) {
         let size = line.len() + usize::from(!preview.is_empty());
         if bytes + size > TOOL_OUTPUT_MAX_BYTES {
-            // A first line too long to show whole (minified code, a JSON
-            // dump) shows its head, so the preview is never empty.
             if preview.is_empty() {
                 return text::shown(line, true).into_owned();
             }
+            if line.len() > LONG_LINE_BYTES {
+                let room = TOOL_OUTPUT_MAX_BYTES.saturating_sub(bytes + 1);
+                // Its first 2,000 characters, when they fit; the line whole
+                // never does.
+                let head = text::shown(line, false);
+                if head.len() <= room {
+                    preview.push(head);
+                } else if room >= LONG_LINE_HEAD_MIN + text::LINE_PART_CUT.len() {
+                    let end = whole_cut(line, room - text::LINE_PART_CUT.len());
+                    preview.push(std::borrow::Cow::Owned(format!(
+                        "{}{}",
+                        &line[..end],
+                        text::LINE_PART_CUT
+                    )));
+                }
+            }
             break;
         }
-        preview.push(line);
+        preview.push(std::borrow::Cow::Borrowed(line));
         bytes += size;
     }
     preview.join("\n")
@@ -9514,7 +10222,9 @@ export default workflow({
 
     #[test]
     fn mutation_diff_metadata_is_bounded_and_snapshot_scoped() {
-        let oversized = "é".repeat(TOOL_DIFF_BODY_MAX_BYTES);
+        // One line longer than the whole diff may be, replaced: the start of
+        // both, each in half the room, cut between characters.
+        let oversized = "é".repeat(TOOL_DIFF_PATCH_MAX_BYTES);
         let diff = text_file_diff(
             "large.txt",
             FileDiffStatus::Modified,
@@ -9522,14 +10232,32 @@ export default workflow({
             Some(&oversized.replace('é', "x")),
         );
         assert!(diff.truncated);
-        assert!(diff.before.as_ref().unwrap().len() <= TOOL_DIFF_BODY_MAX_BYTES);
-        assert!(diff.after.as_ref().unwrap().len() <= TOOL_DIFF_BODY_MAX_BYTES);
+        assert_eq!((diff.before.as_ref(), diff.after.as_ref()), (None, None));
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        let patch = diff.patch.unwrap();
+        assert!(patch.len() <= TOOL_DIFF_PATCH_MAX_BYTES, "{}", patch.len());
         assert!(
-            diff.before
-                .as_ref()
-                .unwrap()
-                .is_char_boundary(diff.before.as_ref().unwrap().len())
+            patch.starts_with("@@ -1,1 +1,1 @@\n-éé"),
+            "{}",
+            &patch[..40]
         );
+        let (removed, added) = patch.split_once("é\n+").unwrap();
+        assert!(removed.len() > TOOL_DIFF_PATCH_MAX_BYTES / 2 - 64);
+        assert!(added.len() > TOOL_DIFF_PATCH_MAX_BYTES / 2 - 64);
+        assert!(added.ends_with("x\n") && !added.contains('é'));
+        assert_well_formed(&patch);
+        // A side that cannot be read has no change to diff: the other stays
+        // as its cut text.
+        let opaque = opaque_file_diff(
+            "large.txt",
+            FileDiffStatus::Modified,
+            None,
+            Some(&oversized),
+            true,
+        );
+        assert!(opaque.truncated && opaque.patch.is_none());
+        let after = opaque.after.unwrap();
+        assert!(after.len() <= TOOL_DIFF_BODY_MAX_BYTES && oversized.starts_with(&after));
 
         let workspace = PathBuf::from("/tmp/haarness-side-effect-classification");
         let registry = NativeToolRegistry::new(workspace);
@@ -9548,6 +10276,532 @@ export default workflow({
             !registry.get("task").unwrap().side_effectful(),
             "child turns own their workspace mutation snapshots"
         );
+    }
+
+    /// Every hunk of a stored diff holds exactly the lines its header counts,
+    /// so a reader that trusts the counts reads it right.
+    fn assert_well_formed(patch: &str) {
+        let mut hunks = 0;
+        let mut expected = (0, 0);
+        let mut seen = (0, 0);
+        for line in patch.lines() {
+            if let Some(header) = line.strip_prefix("@@ -") {
+                assert_eq!(seen, expected, "{patch}");
+                let (old, new) = header.trim_end_matches(" @@").split_once(" +").unwrap();
+                let count =
+                    |range: &str| range.split_once(',').unwrap().1.parse::<usize>().unwrap();
+                expected = (count(old), count(new));
+                seen = (0, 0);
+                hunks += 1;
+                continue;
+            }
+            match line.chars().next() {
+                Some(' ') => seen = (seen.0 + 1, seen.1 + 1),
+                Some('-') => seen.0 += 1,
+                Some('+') => seen.1 += 1,
+                Some('\\') => {}
+                other => panic!("{other:?} in {patch}"),
+            }
+        }
+        assert_eq!(seen, expected, "{patch}");
+        assert!(hunks > 0, "{patch}");
+    }
+
+    /// A file of `bytes / 40` numbered lines, a little under `bytes` long.
+    fn numbered_lines(bytes: usize) -> String {
+        (1..=bytes / 40).fold(String::new(), |text, number| {
+            text + &format!("line {number:05} of a large file, as written\n")
+        })
+    }
+
+    #[tokio::test]
+    async fn an_edit_far_into_a_large_file_stores_its_real_change() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-large-diff-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&root).unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let context = tool_context(&workspace);
+        let text = numbered_lines(40_000);
+        // Line 875 starts past the 32 KiB a body keeps.
+        assert!(text.find("line 00875").unwrap() > TOOL_DIFF_BODY_MAX_BYTES);
+        std::fs::write(workspace.join("large.txt"), &text).unwrap();
+        let edited = registry
+            .get("edit")
+            .unwrap()
+            .execute(
+                json!({"path":"large.txt","old":"line 00875 of","new":"line 00875 (changed) of"}),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> =
+            serde_json::from_value(edited.metadata["diffs"].clone()).unwrap();
+        let [diff] = diffs.as_slice() else {
+            panic!("{diffs:?}")
+        };
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        assert_eq!((diff.before.as_ref(), diff.after.as_ref()), (None, None));
+        assert!(!diff.truncated);
+        assert_eq!(
+            diff.patch.as_deref(),
+            Some(
+                "@@ -872,7 +872,7 @@\n \
+                 line 00872 of a large file, as written\n \
+                 line 00873 of a large file, as written\n \
+                 line 00874 of a large file, as written\n\
+                 -line 00875 of a large file, as written\n\
+                 +line 00875 (changed) of a large file, as written\n \
+                 line 00876 of a large file, as written\n \
+                 line 00877 of a large file, as written\n \
+                 line 00878 of a large file, as written\n"
+            )
+        );
+
+        // An edit near the start that makes the file longer: one hunk, and
+        // nothing that looks like a change where a body would have been cut.
+        let grown = registry
+            .get("edit")
+            .unwrap()
+            .execute(
+                json!({"path":"large.txt","old":"line 00025 of a large file","new":"line 00025 of a large file, now with a good deal more text on it"}),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> = serde_json::from_value(grown.metadata["diffs"].clone()).unwrap();
+        let patch = diffs[0].patch.as_deref().unwrap();
+        assert_eq!(patch.matches("@@ -").count(), 1, "{patch}");
+        assert!(patch.starts_with("@@ -22,7 +22,7 @@\n"), "{patch}");
+        assert_eq!(
+            patch
+                .lines()
+                .filter(|line| line.starts_with(['-', '+']))
+                .collect::<Vec<_>>(),
+            [
+                "-line 00025 of a large file, as written",
+                "+line 00025 of a large file, now with a good deal more text on it, as written"
+            ]
+        );
+
+        // A patch to the same file, a new large file and its removal store
+        // the same form.
+        let patched = registry
+            .get("apply_patch")
+            .unwrap()
+            .execute(
+                json!({"input":"*** Begin Patch\n*** Update File: large.txt\n@@\n-line 00990 of a large file, as written\n+line 00990 was patched\n*** End Patch\n"}),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> =
+            serde_json::from_value(patched.metadata["diffs"].clone()).unwrap();
+        let patch = diffs[0].patch.as_deref().unwrap();
+        assert!(patch.starts_with("@@ -987,7 +987,7 @@\n"), "{patch}");
+        assert!(patch.contains("\n+line 00990 was patched\n"), "{patch}");
+        assert!(diffs[0].before.is_none() && !diffs[0].truncated);
+
+        let written = registry
+            .get("write")
+            .unwrap()
+            .execute(json!({"path":"copy.txt","content":text}), context.clone())
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> =
+            serde_json::from_value(written.metadata["diffs"].clone()).unwrap();
+        assert_eq!(diffs[0].status, FileDiffStatus::Added);
+        assert_eq!((diffs[0].additions, diffs[0].deletions), (1_000, 0));
+        let patch = diffs[0].patch.as_deref().unwrap();
+        assert!(
+            patch.starts_with("@@ -0,0 +1,1000 @@\n+line 00001 "),
+            "{patch}"
+        );
+        assert!(diffs[0].after.is_none() && !diffs[0].truncated);
+        assert_well_formed(patch);
+
+        let removed = registry
+            .get("apply_patch")
+            .unwrap()
+            .execute(
+                json!({"input":"*** Begin Patch\n*** Delete File: copy.txt\n*** End Patch\n"}),
+                context,
+            )
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> =
+            serde_json::from_value(removed.metadata["diffs"].clone()).unwrap();
+        assert_eq!(diffs[0].status, FileDiffStatus::Deleted);
+        assert!(
+            diffs[0]
+                .patch
+                .as_deref()
+                .unwrap()
+                .starts_with("@@ -1,1000 +0,0 @@\n-line 00001 ")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_huge_change_stores_a_bounded_diff_of_whole_hunks() {
+        // Every tenth line changes: far more hunks than fit.
+        let before = numbered_lines(200 << 10);
+        let after: String = before
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                if index % 10 == 5 {
+                    format!("{line} (changed)\n")
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect();
+        let diff = text_file_diff(
+            "huge.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&after),
+        );
+        assert_eq!(
+            (diff.additions, diff.deletions),
+            (
+                before.lines().count() as u64 / 10,
+                before.lines().count() as u64 / 10
+            )
+        );
+        assert!(diff.truncated);
+        let patch = diff.patch.unwrap();
+        assert!(patch.len() <= TOOL_DIFF_PATCH_MAX_BYTES, "{}", patch.len());
+        assert!(
+            patch.len() > TOOL_DIFF_PATCH_MAX_BYTES - 1_024,
+            "{}",
+            patch.len()
+        );
+        assert_well_formed(&patch);
+        // Whole hunks only: the last one ends in its trailing context.
+        assert!(
+            patch.ends_with("9 of a large file, as written\n"),
+            "{patch}"
+        );
+
+        // A rewrite of every line is one hunk too long for the bound: the
+        // first lines of both sides, from the first change.
+        let before = numbered_lines(100 << 10);
+        let rewritten = before.replace("as written", "as rewritten");
+        let diff = text_file_diff(
+            "huge.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&rewritten),
+        );
+        assert!(diff.truncated);
+        let patch = diff.patch.unwrap();
+        assert!(patch.len() <= TOOL_DIFF_PATCH_MAX_BYTES, "{}", patch.len());
+        assert!(patch.starts_with("@@ -1,"), "{}", &patch[..80]);
+        assert!(patch.contains("\n-line 00001 of a large file, as written\n"));
+        assert!(patch.contains("\n+line 00001 of a large file, as rewritten\n"));
+        let removed = patch.lines().filter(|line| line.starts_with('-')).count();
+        let added = patch.lines().filter(|line| line.starts_with('+')).count();
+        assert!(removed > 700 && added > 700, "{removed} {added}");
+        assert_well_formed(&patch);
+
+        // A last line without its line end says so, as Git does.
+        let diff = text_file_diff(
+            "huge.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&format!("{before}tail")),
+        );
+        assert!(
+            diff.patch
+                .as_deref()
+                .unwrap()
+                .ends_with("+tail\n\\ No newline at end of file\n")
+        );
+        assert!(!diff.truncated);
+        // A large file written over with the same text has no change.
+        let same = text_file_diff(
+            "huge.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&before),
+        );
+        assert_eq!(
+            (same.patch, same.truncated, same.additions),
+            (None, false, 0)
+        );
+        // One changed line of an 8 MB file is one small hunk.
+        let big = numbered_lines(8 << 20);
+        let changed = big.replacen("line 100000 of", "line 100000 (changed) of", 1);
+        let diff = text_file_diff(
+            "big.txt",
+            FileDiffStatus::Modified,
+            Some(&big),
+            Some(&changed),
+        );
+        assert_eq!(
+            (diff.additions, diff.deletions, diff.truncated),
+            (1, 1, false)
+        );
+        let patch = diff.patch.unwrap();
+        assert!(patch.starts_with("@@ -99997,7 +99997,7 @@\n"), "{patch}");
+        assert_eq!(patch.lines().count(), 9, "{patch}");
+    }
+
+    /// A changed line longer than the bound shows both what it was and what
+    /// it is, each cut a little before where they first differ, so the change
+    /// itself is in both.
+    #[test]
+    fn a_changed_line_longer_than_the_bound_keeps_both_sides() {
+        // A minified file: one line of 112 KB, no line end.
+        let minified = (0..12_500).fold(String::new(), |text, index| {
+            text + &format!("v{index:05}=1;")
+        });
+        for (number, at) in [(100, 900), (8_000, 72_000)] {
+            let old = format!("v{number:05}=1;");
+            let new = format!("v{number:05}=2;");
+            assert_eq!(minified.find(&old), Some(at));
+            let edited = minified.replacen(&old, &new, 1);
+            let diff = text_file_diff(
+                "app.min.js",
+                FileDiffStatus::Modified,
+                Some(&minified),
+                Some(&edited),
+            );
+            assert_eq!((diff.additions, diff.deletions), (1, 1));
+            assert!(diff.truncated);
+            let patch = diff.patch.unwrap();
+            assert!(patch.len() <= TOOL_DIFF_PATCH_MAX_BYTES, "{}", patch.len());
+            assert_well_formed(&patch);
+            let lines: Vec<&str> = patch.lines().collect();
+            assert_eq!(lines.len(), 3, "{}", &patch[..200]);
+            assert_eq!(lines[0], "@@ -1,1 +1,1 @@");
+            let start = at + "v00000=".len() - CUT_LINE_LEAD;
+            assert!(
+                lines[1]
+                    .strip_prefix('-')
+                    .unwrap()
+                    .starts_with(&minified[start..start + 100])
+            );
+            assert!(
+                lines[2]
+                    .strip_prefix('+')
+                    .unwrap()
+                    .starts_with(&edited[start..start + 100])
+            );
+            assert!(lines[1].contains(&old) && lines[2].contains(&new));
+            assert!(lines[1].len() > 30_000 && lines[2].len() > 30_000);
+        }
+
+        // A 100 KB line in a file of short ones: numbered as the file is.
+        let long = format!("{}OLD{}\n", "x".repeat(50_000), "y".repeat(50_000));
+        let before: String = (1..=20)
+            .map(|number| {
+                if number == 10 {
+                    long.clone()
+                } else {
+                    format!("line {number}\n")
+                }
+            })
+            .collect();
+        let after = before.replacen("OLD", "NEW", 1);
+        let diff = text_file_diff(
+            "data.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&after),
+        );
+        let patch = diff.patch.unwrap();
+        assert!(
+            patch.starts_with("@@ -10,1 +10,1 @@\n-"),
+            "{}",
+            &patch[..40]
+        );
+        let lines: Vec<&str> = patch.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].ends_with('x') || lines[1].contains("xOLDy"));
+        assert!(lines[1].contains("xOLDy") && lines[2].contains("xNEWy"));
+        assert!(diff.truncated);
+        assert_well_formed(&patch);
+
+        // A short change, then one in a long line further down: the first
+        // whole, and of the second, both sides in the room left.
+        let before: String = (1..=600)
+            .map(|number| {
+                if number == 500 {
+                    long.clone()
+                } else {
+                    format!("line {number}\n")
+                }
+            })
+            .collect();
+        let after = before
+            .replacen("line 10\n", "line ten\n", 1)
+            .replacen("OLD", "NEW", 1);
+        let diff = text_file_diff(
+            "data.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&after),
+        );
+        assert_eq!((diff.additions, diff.deletions), (2, 2));
+        let patch = diff.patch.unwrap();
+        assert!(patch.starts_with("@@ -7,7 +7,7 @@\n"), "{}", &patch[..80]);
+        assert!(
+            patch.contains("\n+line ten\n line 11\n line 12\n line 13\n@@ -500,1 +500,1 @@\n-"),
+            "{}",
+            &patch[..200]
+        );
+        assert!(patch.contains("xOLDy") && patch.contains("xNEWy"));
+        assert!(patch.len() <= TOOL_DIFF_PATCH_MAX_BYTES && diff.truncated);
+        assert_well_formed(&patch);
+
+        // A large file removed whole whose one line is longer than the bound.
+        let diff = text_file_diff(
+            "data.txt",
+            FileDiffStatus::Deleted,
+            Some(&long.repeat(2)),
+            None,
+        );
+        let patch = diff.patch.unwrap();
+        assert!(
+            patch.starts_with("@@ -1,1 +0,0 @@\n-xxx"),
+            "{}",
+            &patch[..40]
+        );
+        assert!(patch.len() <= TOOL_DIFF_PATCH_MAX_BYTES && diff.truncated);
+        assert_eq!(diff.deletions, 2);
+    }
+
+    /// Only a line feed ends a line, as Git counts: a carriage return alone
+    /// earlier in the file does not move the numbers, and a CRLF file keeps
+    /// its line ends inside the diff's lines.
+    #[test]
+    fn a_large_file_diff_numbers_lines_as_git_does() {
+        let text = numbered_lines(40_000);
+        let with_progress = text.replacen(
+            "line 00003 of a large file, as written",
+            "progress 10%\rprogress 20%",
+            1,
+        );
+        let edited = with_progress.replacen("line 00875 of", "line 00875 (changed) of", 1);
+        let diff = text_file_diff(
+            "large.txt",
+            FileDiffStatus::Modified,
+            Some(&with_progress),
+            Some(&edited),
+        );
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        let patch = diff.patch.unwrap();
+        assert!(patch.starts_with("@@ -872,7 +872,7 @@\n"), "{patch}");
+        // The small-file count reads lines the same way.
+        let line = "progress 10%\rprogress 20%\n";
+        assert_eq!(
+            line_changes(
+                FileDiffStatus::Modified,
+                Some(line),
+                Some("progress 10%\rdone\n")
+            ),
+            (1, 1)
+        );
+
+        let crlf = text.replace('\n', "\r\n");
+        let edited = crlf.replacen("line 00875 of", "line 00875 (changed) of", 1);
+        let diff = text_file_diff(
+            "large.txt",
+            FileDiffStatus::Modified,
+            Some(&crlf),
+            Some(&edited),
+        );
+        let patch = diff.patch.unwrap();
+        assert!(patch.starts_with("@@ -872,7 +872,7 @@\n"), "{patch}");
+        assert!(patch.contains("\n-line 00875 of a large file, as written\r\n"));
+        assert!(patch.contains("\n+line 00875 (changed) of a large file, as written\r\n"));
+        assert_eq!(patch.matches("\r\n").count(), 8);
+        assert_well_formed(&patch);
+    }
+
+    /// Hunks made one at a time are the hunks the diff library groups.
+    #[test]
+    fn hunks_are_grouped_as_the_diff_library_groups_them() {
+        let base = numbered_lines(20_000);
+        let lines: Vec<&str> = base.lines().collect();
+        let edit = |changed: &[usize]| -> String {
+            lines
+                .iter()
+                .enumerate()
+                .filter_map(|(index, line)| {
+                    if changed.contains(&index) {
+                        (index % 3 != 0).then(|| format!("{line}!\n"))
+                    } else {
+                        Some(format!("{line}\n"))
+                    }
+                })
+                .collect()
+        };
+        for changed in [
+            vec![],
+            vec![0],
+            vec![lines.len() - 1],
+            vec![0, 1, 2, lines.len() - 1],
+            vec![10, 16, 17, 25, 40, 46, 300],
+            (0..lines.len()).step_by(7).collect(),
+        ] {
+            let after = edit(&changed);
+            let (old, new) = (text_lines(&base), text_lines(&after));
+            let diff = line_diff(&old, &new);
+            for context in [0, 1, 3] {
+                assert_eq!(
+                    hunk_groups(diff.ops(), context).collect::<Vec<_>>(),
+                    diff.grouped_ops(context),
+                    "{changed:?} {context}"
+                );
+            }
+        }
+    }
+
+    /// Moving a large file with a patch keeps a diff of each end.
+    #[tokio::test]
+    async fn a_large_file_moved_by_a_patch_keeps_a_diff_of_each_end() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-large-move-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&root).unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let text = numbered_lines(40_000);
+        std::fs::write(workspace.join("large.txt"), &text).unwrap();
+        let moved = registry
+            .get("apply_patch")
+            .unwrap()
+            .execute(
+                json!({"input":"*** Begin Patch\n*** Update File: large.txt\n*** Move to: moved.txt\n@@\n-line 00990 of a large file, as written\n+line 00990 was moved\n*** End Patch\n"}),
+                tool_context(&workspace),
+            )
+            .await
+            .unwrap();
+        let diffs: Vec<FileDiff> = serde_json::from_value(moved.metadata["diffs"].clone()).unwrap();
+        let [deleted, added] = diffs.as_slice() else {
+            panic!("{diffs:?}")
+        };
+        assert_eq!(
+            (deleted.file.as_str(), deleted.status, deleted.deletions),
+            ("large.txt", FileDiffStatus::Deleted, 1_000)
+        );
+        let patch = deleted.patch.as_deref().unwrap();
+        assert!(patch.starts_with("@@ -1,1000 +0,0 @@\n-line 00001 "));
+        assert!(!deleted.truncated && deleted.before.is_none());
+        assert_well_formed(patch);
+        assert_eq!(
+            (added.file.as_str(), added.status, added.additions),
+            ("moved.txt", FileDiffStatus::Added, 1_000)
+        );
+        let patch = added.patch.as_deref().unwrap();
+        assert!(patch.starts_with("@@ -0,0 +1,1000 @@\n+line 00001 "));
+        assert!(patch.contains("\n+line 00990 was moved\n"));
+        assert!(!added.truncated && added.after.is_none());
+        assert_well_formed(patch);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
@@ -9841,6 +11095,69 @@ export default workflow({
             run("list", json!({"path":"conf.env.d"})).await.text,
             none(1)
         );
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    /// A name that ends in `.env` counts in any case (`.ENV` is `.env` on a
+    /// disk that ignores case); a longer one, such as a source file's, as
+    /// written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_tools_skip_secret_names_in_any_case() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-secret-case-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("web")).unwrap();
+        let workspace = haarness_core::paths::canonicalize(&workspace).unwrap();
+        for file in [
+            "STAGING.ENV",
+            "web/Local.ENV",
+            "web/Theme.Env.ts",
+            "CONF.ENV.SAMPLE",
+            "notes.txt",
+        ] {
+            std::fs::write(workspace.join(file), format!("needle {file}\n")).unwrap();
+        }
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |tool: &'static str, args: Value| {
+            let registry = &registry;
+            let context = ToolContext {
+                execution: haarness_core::ExecutionSettings::default(),
+                thread_id: ThreadId::new(),
+                turn_id: TurnId::new(),
+                workspace: workspace.clone(),
+                authorized_external_paths: Vec::new(),
+                cancel: CancellationToken::new(),
+                invoker: None,
+            };
+            async move {
+                registry
+                    .get(tool)
+                    .unwrap()
+                    .execute(args, context)
+                    .await
+                    .unwrap()
+            }
+        };
+        let grep = run("grep", json!({"pattern":"needle"})).await;
+        for kept in [
+            "needle web/Theme.Env.ts",
+            "needle CONF.ENV.SAMPLE",
+            "needle notes.txt",
+        ] {
+            assert!(grep.text.contains(kept), "{kept}: {}", grep.text);
+        }
+        for secret in ["needle STAGING.ENV", "needle web/Local.ENV"] {
+            assert!(!grep.text.contains(secret), "{secret}: {}", grep.text);
+        }
+        assert_eq!(grep.metadata["skipped"], 2);
+        let glob = run("glob", json!({"pattern":"**/*"})).await;
+        for kept in ["web/Theme.Env.ts", "CONF.ENV.SAMPLE"] {
+            assert!(glob.text.contains(kept), "{kept}: {}", glob.text);
+        }
+        assert!(!glob.text.contains("STAGING.ENV"), "{}", glob.text);
+        assert!(!glob.text.contains("Local.ENV"), "{}", glob.text);
+        let named = run("grep", json!({"pattern":"needle","path":"STAGING.ENV"})).await;
+        assert_eq!(named.metadata["skipped"], 1, "{}", named.text);
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
@@ -10229,11 +11546,25 @@ export default workflow({
         let cancel = CancellationToken::new();
         // Every folder reached without a link is read whatever the budget, as on a
         // repository far larger than it; only the linked folder is cut.
-        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(0)).unwrap();
-        assert!(found.large && found.partial && !found.stopped);
+        let found = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits_entries(0),
+        )
+        .unwrap();
+        assert!(found.partial && found.limit == Some(GlobLimit::Linked));
         assert_eq!(found.values, ["a.txt", "b/c.txt", "d/e.txt"]);
-        let all = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(100)).unwrap();
-        assert!(!all.large && !all.partial);
+        let all = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits_entries(100),
+        )
+        .unwrap();
+        assert!(!all.partial && all.limit.is_none());
         assert_eq!(
             all.values,
             ["a.txt", "b/c.txt", "d/e.txt", "z-linked/e.txt"]
@@ -10252,6 +11583,43 @@ export default workflow({
             matches: 1_000,
             entries,
         }
+    }
+
+    /// Alternatives that need walks of their own read the tree again each:
+    /// the first reads as one pattern would, the ones after it share one
+    /// budget of folder entries with it.
+    #[cfg(unix)]
+    #[test]
+    fn walks_for_further_brace_alternatives_share_one_budget() {
+        let workspace = haarness_core::paths::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("haarness-glob-braces-{}", uuid::Uuid::now_v7()));
+        for file in ["a/x.txt", "a/deep/y.txt", "b/z.txt", "b/w.md"] {
+            let path = workspace.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let scope = GlobScope {
+            root: workspace.clone(),
+            workspace: workspace.clone(),
+            named: workspace.clone(),
+        };
+        let secrets = SecretFilter::new(&workspace, ".", &workspace, None);
+        let cancel = CancellationToken::new();
+        let patterns = ["a/**/*.txt", "b/**/*.txt", "b/**/*.md"]
+            .map(|pattern| workspace.join(pattern).to_string_lossy().into_owned());
+        let found = glob_walk(&patterns, &scope, &secrets, &cancel, limits_entries(3)).unwrap();
+        assert!(found.partial && found.limit == Some(GlobLimit::Braces));
+        assert_eq!(found.values, ["a/deep/y.txt", "a/x.txt"]);
+        let all = glob_walk(&patterns, &scope, &secrets, &cancel, limits_entries(100)).unwrap();
+        assert!(!all.partial && all.limit.is_none());
+        assert_eq!(all.values, ["a/deep/y.txt", "a/x.txt", "b/w.md", "b/z.txt"]);
+        assert_eq!(
+            with_braces_stop(output(String::new()), 3).text,
+            "(stopped after reading 3 folder entries for the alternatives in its braces; narrow \
+             the pattern or the path)"
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[cfg(unix)]
@@ -10277,16 +11645,36 @@ export default workflow({
         let pattern = workspace.join("**/*").to_string_lossy().into_owned();
         let cancel = CancellationToken::new();
         // Matches left out count against the budget too.
-        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits(10)).unwrap();
-        assert!(found.stopped && found.partial);
+        let found = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits(10),
+        )
+        .unwrap();
+        assert!(found.partial && found.limit == Some(GlobLimit::Looked));
         assert!(found.skipped.outside >= 7, "{}", found.skipped.outside);
         assert!(found.values.len() + found.skipped.outside <= 10);
-        let everything = glob_walk(&pattern, &scope, &secrets, &cancel, limits(1_000)).unwrap();
-        assert!(!everything.stopped && !everything.partial);
+        let everything = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits(1_000),
+        )
+        .unwrap();
+        assert!(!everything.partial && everything.limit.is_none());
         assert_eq!(everything.skipped.outside, 30);
         cancel.cancel();
         assert!(matches!(
-            glob_walk(&pattern, &scope, &secrets, &cancel, limits(1_000)),
+            glob_walk(
+                std::slice::from_ref(&pattern),
+                &scope,
+                &secrets,
+                &cancel,
+                limits(1_000)
+            ),
             Err(CoreError::Cancelled)
         ));
         let stopped = with_stop(output(String::new()), 10);
@@ -10316,6 +11704,251 @@ export default workflow({
             "head preview kept the tail"
         );
         tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    /// A folder for saved output that cannot be made (it would be under a
+    /// file), as a full disk or a folder that cannot be written refuses a
+    /// save, in a folder of the test's own.
+    fn unwritable_folder() -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("haarness-unsaved-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file"), "").unwrap();
+        let folder = root.join("file/tool-output");
+        (root, folder)
+    }
+
+    /// A save that failed lost the whole result: the model got "Not a
+    /// directory" or "No space left on device" instead of the preview.
+    #[tokio::test]
+    async fn a_cut_output_whose_whole_cannot_be_saved_still_shows_its_start() {
+        let (root, folder) = unwritable_folder();
+        let body = (0..3_000)
+            .map(|line| format!("line {line}: {}", "x".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_output_at(body.clone(), &folder).await.unwrap();
+        assert_eq!(result.metadata, json!({"truncated": true}));
+        assert!(result.text.starts_with("line 0: "), "{:.80}", result.text);
+        assert!(!result.text.contains("line 2999:"));
+        let note = format!(
+            "The tool call succeeded but its output was truncated. Saving all of it in {} failed (",
+            folder.display()
+        );
+        assert!(
+            result.text.contains(&note),
+            "{}",
+            &result.text[result.text.len() - 300..]
+        );
+        assert!(
+            result
+                .text
+                .contains("), so only the part above can be read.\n\n..."),
+            "{}",
+            &result.text[result.text.len() - 300..]
+        );
+        // An MCP tool's text (and a failure's) is cut the same way.
+        for failed in [false, true] {
+            let (cut, saved) = cut_mcp_text(body.clone(), &folder, failed).await.unwrap();
+            assert!(saved.is_none());
+            assert_eq!(cut.metadata, json!({"truncated": true}));
+            assert!(cut.text.starts_with("line 0: ") && cut.text.len() < 52 * 1024);
+            assert!(cut.text.contains("so only the part above can be read."));
+            assert_eq!(
+                cut.text
+                    .contains("The tool call failed and its output was truncated."),
+                failed
+            );
+        }
+        // So is a fetched page, which a save that fails no longer loses;
+        // a fetched file, which has no preview, says why it cannot be read.
+        let page = url::Url::parse("https://example.com/report.pdf").unwrap();
+        let fetched = fetched_file(
+            &page,
+            crate::webfetch::Kind::Pdf,
+            Some("application/pdf"),
+            b"%PDF-1.7\n".to_vec(),
+            u64::MAX,
+            &folder,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            fetched.contains(&format!(
+                "https://example.com/report.pdf was fetched (9 bytes), but saving it in {} failed (",
+                folder.display()
+            )) && fetched.ends_with("), so it cannot be read."),
+            "{fetched}"
+        );
+        assert!(root.join("file").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A script's MCP call gets the whole text from memory when no file
+    /// could hold it, as the model gets the cut.
+    #[tokio::test]
+    async fn a_script_gets_the_whole_mcp_text_its_save_could_not_keep() {
+        let (root, folder) = unwritable_folder();
+        let script = ScriptCall::new();
+        let text = "row\n".repeat(20_000);
+        let output = script
+            .run(capped_mcp_output(
+                ToolOutput {
+                    text: text.clone(),
+                    metadata: json!({"rows": 20_000}),
+                },
+                &folder,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(output.metadata, json!({"rows": 20_000, "truncated": true}));
+        assert!(output.text.contains("so only the part above can be read."));
+        let (whole, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
+        assert_eq!(
+            (whole, metadata, file),
+            (text.clone(), json!({"rows": 20_000}), None)
+        );
+        // A server's own `outputPath` moves under `structuredContent`, saved
+        // or not, so it never reads as where the whole is.
+        let script = ScriptCall::new();
+        let named = json!({"outputPath": "/srv/report.txt", "rows": 1});
+        let output = script
+            .run(capped_mcp_output(
+                ToolOutput {
+                    text: text.clone(),
+                    metadata: named.clone(),
+                },
+                &folder,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            output.metadata,
+            json!({"structuredContent": named.clone(), "truncated": true})
+        );
+        let (whole, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
+        assert_eq!((whole, metadata, file), (text, named, None));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// One large text no longer clears what other calls kept: a text larger
+    /// than the budget alone is not kept, and past the budget only texts go,
+    /// oldest first, never an entry whose whole is in a file.
+    #[test]
+    fn a_large_kept_text_never_costs_other_calls_their_files() {
+        let entry = |call: u64, file: Option<&str>, text: Option<usize>| WholeOutput {
+            call,
+            file: file.map(PathBuf::from),
+            cut: (0, [0; 32]),
+            text: text.map(|bytes| "x".repeat(bytes)),
+            metadata: Value::Null,
+        };
+        let calls = |outputs: &std::collections::VecDeque<WholeOutput>| {
+            outputs.iter().map(|kept| kept.call).collect::<Vec<_>>()
+        };
+        let mut outputs = std::collections::VecDeque::new();
+        keep_within(&mut outputs, entry(1, Some("/a"), None), 4, 100);
+        keep_within(&mut outputs, entry(2, None, Some(60)), 4, 100);
+        keep_within(&mut outputs, entry(3, None, Some(101)), 4, 100);
+        assert_eq!(calls(&outputs), [1, 2]);
+        keep_within(&mut outputs, entry(4, Some("/b"), Some(10)), 4, 100);
+        keep_within(&mut outputs, entry(5, None, Some(50)), 4, 100);
+        assert_eq!(calls(&outputs), [1, 4, 5]);
+        // Past the count, the oldest goes whatever it holds.
+        for call in 6..=7 {
+            keep_within(&mut outputs, entry(call, Some("/c"), None), 4, 100);
+        }
+        assert_eq!(calls(&outputs), [4, 5, 6, 7]);
+    }
+
+    /// An emoji, a flag or a family sits on the cut: it is left out whole
+    /// rather than shown in part.
+    #[test]
+    fn a_cut_never_splits_an_emoji_or_a_flag() {
+        let flag = "\u{1f1ef}\u{1f1f5}"; // 🇯🇵
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}"; // 👨‍👩‍👧
+        // Cut inside the flag, and between its two letters.
+        let text = format!("ab{flag}cd");
+        assert_eq!(whole_cut(&text, 3), 2);
+        assert_eq!(whole_cut(&text, 6), 2);
+        assert_eq!(whole_cut(&text, 10), 10);
+        // Inside the family, after a joiner and after a whole person.
+        let text = format!("a{family}b");
+        for end in [2, 5, 8, 12] {
+            assert_eq!(whole_cut(&text, end), 1, "{end}");
+        }
+        assert_eq!(whole_cut(&text, 1 + family.len()), 1 + family.len());
+        // CJK stays whole; marks stacked past the bound are cut between
+        // two of them.
+        assert_eq!(whole_cut("日本", 4), 3);
+        let stacked = format!("e{}", "\u{301}".repeat(100));
+        assert_eq!(whole_cut(&stacked, 101), 101);
+        // A read's line of 2,000 characters ending inside a flag.
+        let line = format!("{}{flag}{flag}", "x".repeat(1_999));
+        assert_eq!(
+            text::shown(&line, false),
+            format!("{}{}", "x".repeat(1_999), text::LINE_CUT)
+        );
+        // An MCP text filling the 50 KiB with flags.
+        let flags = format!("x{}", flag.repeat(TOOL_OUTPUT_MAX_BYTES / 8 + 1));
+        assert_eq!(
+            filled_preview(&flags),
+            format!("x{}", flag.repeat(TOOL_OUTPUT_MAX_BYTES / 8 - 1))
+        );
+    }
+
+    /// A long line after a short one (a heading, then minified JSON) shows
+    /// its head instead of leaving the preview with the heading alone; a
+    /// later short line that does not fit is left out whole.
+    #[test]
+    fn a_preview_shows_the_head_of_a_long_later_line() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let heading = "## Response";
+        let text = format!("{heading}\n{}\nafter", family.repeat(10_000));
+        let preview = output_preview(&text);
+        let kept = family.repeat(2_000 / 5);
+        assert_eq!(preview, format!("{heading}\n{kept}{}", text::LINE_CUT));
+        // Less room than its first 2,000 characters: the part that fits,
+        // whole, ending in a mark that claims no length.
+        let filler = "y".repeat(TOOL_OUTPUT_MAX_BYTES - 1_001);
+        let text = format!("{filler}\n{}", family.repeat(1_000));
+        let preview = output_preview(&text);
+        let tail = &preview[filler.len() + 1..];
+        let fits = (1_000 - text::LINE_PART_CUT.len()) / family.len();
+        assert_eq!(
+            tail,
+            format!("{}{}", family.repeat(fits), text::LINE_PART_CUT)
+        );
+        // A line of fewer than 2,000 characters that does not fit is cut
+        // with the mark too, never shown whole with it.
+        let wide = "日".repeat(1_500);
+        let preview = output_preview(&format!("{filler}\n{wide}"));
+        let tail = &preview[filler.len() + 1..];
+        let fits = (1_000 - text::LINE_PART_CUT.len()) / 3;
+        assert_eq!(
+            tail,
+            format!("{}{}", "日".repeat(fits), text::LINE_PART_CUT)
+        );
+        // Too little room for a start worth reading: a long grep match is
+        // left out rather than shown as part of its path.
+        for left in [12, 100, 255] {
+            let filler = "y".repeat(TOOL_OUTPUT_MAX_BYTES - left - 1);
+            let matched = format!(
+                "src/components/settings/a.txt:1:{}{}",
+                "q".repeat(2_000),
+                text::LINE_CUT
+            );
+            let preview = output_preview(&format!("{filler}\n{matched}\nlast"));
+            assert_eq!(preview, filler, "{left}");
+        }
+        // A path that does not fit is never shown in part.
+        let paths = (0..2_000)
+            .map(|index| format!("src/{}/module_{index:05}/file.rs", "deep".repeat(5)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = output_preview(&paths);
+        assert!(preview.lines().count() < 2_000);
+        assert!(preview.lines().all(|line| line.ends_with("/file.rs")));
     }
 
     #[test]
@@ -11247,6 +12880,109 @@ export default workflow({
             .await
             .unwrap();
         assert_eq!(none.text, "No files found");
+    }
+
+    /// `src/**/*.{ts,tsx}`, as models write it, answered "No files found":
+    /// the glob crate has no braces. Each alternative is walked now.
+    #[tokio::test]
+    async fn a_glob_with_brace_alternatives_finds_each_of_them() {
+        let (root, _) = read_fixture("README.md", b"# app\n");
+        for file in [
+            "src/b.tsx",
+            "src/a.ts",
+            "src/lib/c.ts",
+            "src/lib/d.js",
+            "test/e.ts",
+            "a{b",
+            "{x}",
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        let glob = |pattern: &str| {
+            let root = root.clone();
+            let args = json!({"pattern": pattern});
+            async move { edit_in(&root, "glob", args).await }
+        };
+        // In the order one walk would list them, each once.
+        let found = glob("src/**/*.{ts,tsx}").await.unwrap();
+        assert_eq!(found.text, "src/a.ts\nsrc/b.tsx\nsrc/lib/c.ts");
+        let found = glob("{src,test}/**/*.{ts,t{s,s}x}").await.unwrap();
+        assert_eq!(found.text, "src/a.ts\nsrc/b.tsx\nsrc/lib/c.ts\ntest/e.ts");
+        // Braces with no comma, or left open, are the name as written.
+        assert_eq!(glob("a{b").await.unwrap().text, "a{b");
+        assert_eq!(glob("{x}").await.unwrap().text, "{x}");
+        // An alternative may not climb out of the folder either.
+        let climbs = glob("{..,src}/*.ts").await.unwrap_err().to_string();
+        assert!(climbs.contains("cannot contain `..`"), "{climbs}");
+        let many = glob("{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}").await.unwrap_err();
+        assert_eq!(
+            many.to_string(),
+            CoreError::Invalid(
+                "glob pattern `{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}` is not valid: its {a,b} alternatives stand for more than 32 patterns".into()
+            )
+            .to_string()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A malformed pattern says so, named as the model wrote it, never as
+    /// the folder joined to it nor as files that are not there.
+    #[tokio::test]
+    async fn a_malformed_glob_is_named_as_written() {
+        let (root, _) = read_fixture("visible.ts", b"x\n");
+        let refused = |pattern: &str| {
+            let root = root.clone();
+            let args = json!({"pattern": pattern});
+            async move { edit_in(&root, "glob", args).await.unwrap_err().to_string() }
+        };
+        let unclosed = refused("src/[").await;
+        assert!(
+            unclosed.ends_with(
+                "glob pattern `src/[` is not valid: invalid range pattern at character 5"
+            ),
+            "{unclosed}"
+        );
+        let stars = refused("*.{ts,a***}").await;
+        assert!(
+            stars.contains("glob pattern `*.{ts,a***}` is not valid (its alternative `*.a***`): "),
+            "{stars}"
+        );
+        // A true miss still reads as one.
+        let miss = edit_in(&root, "glob", json!({"pattern": "*.txt"}))
+            .await
+            .unwrap();
+        assert!(miss.text.starts_with("No files found"), "{}", miss.text);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A folder named as a route segment (`app/[slug]`) was read as a
+    /// pattern, a class of one letter, so a glob in it found nothing.
+    #[tokio::test]
+    async fn a_glob_in_a_folder_whose_name_looks_like_a_pattern_finds_its_files() {
+        let (root, _) = read_fixture("README.md", b"# app\n");
+        let folder = root.join("app/[slug]");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("page.tsx"), "x").unwrap();
+        let found = edit_in(
+            &root,
+            "glob",
+            json!({"path": "app/[slug]", "pattern": "*.tsx"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.text, "app/[slug]/page.tsx");
+        // An absolute pattern inside the folder reads as before.
+        let absolute = edit_in(
+            &root,
+            "glob",
+            json!({"pattern": root.join("README.*").to_string_lossy()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(absolute.text, "README.md");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Told to "set replaceAll", Qwen2.5 Coder set it on the other edit and

@@ -1805,7 +1805,7 @@
         "type": "object"
       },
       "FileDiff": {
-        "description": "Bounded file-change payload shared by Git review and snapshot/turn diffs.\nGit responses normally carry `patch`; snapshot responses normally carry\n`before` and `after`. A missing body with `truncated=true` remains an\nhonest metadata-only change instead of returning an unbounded payload.",
+        "description": "Bounded file-change payload shared by Git review and snapshot/turn diffs.\nGit responses normally carry `patch`; snapshot responses normally carry\n`before` and `after`. A tool's change carries `before` and `after` too,\nor, for a file over its body limit, a bounded `patch` of the change\nalone (hunks without file headers). A missing body with `truncated=true`\nremains an honest metadata-only change instead of returning an unbounded\npayload.",
         "properties": {
           "additions": {
             "format": "int64",
@@ -3408,6 +3408,10 @@
               "retryable": {
                 "type": "boolean"
               },
+              "turn_left_out": {
+                "description": "The provider's safety check stopped this turn, so every item of\nit is left out of later requests: the person's message, what the\nmodel wrote and the tools it ran, though the chat still shows them\n(a compaction made during the turn stays). A reworded message is\nthen not stopped again for the same history. Set only when the\nstop is stored: older stops are still sent.",
+                "type": "boolean"
+              },
               "type": {
                 "enum": [
                   "error"
@@ -4451,6 +4455,17 @@
             "description": "Only a person may answer: Auto, Yolo, `--yolo`, hooks and configured\nrules never do, so clients must not answer it automatically. Its\n\"always\" lasts for this chat only (a Chrome site approval).",
             "type": "boolean"
           },
+          "hookAsked": {
+            "description": "A `PreToolUse` hook asked about the call, and nothing else makes the\nrequest a person's alone. The hook asks again next time, so the\nrequest offers no Always (`allowAlways` is `false`, apart from a\nChrome site's, whose Always is for this chat), yet `--yolo` and Yolo\nanswer it once, as any ask a person configured. Never set on a request\nthat always asks (a read of where sign-ins are kept, a Cloud action\nthat spends money), even when a hook asked too: `hookReason` still\nsays so there. Older servers send none.",
+            "type": "boolean"
+          },
+          "hookReason": {
+            "description": "Why a hook asked about the call, as it said (its\n`permissionDecisionReason`), for the card to show; none when it gave\nno reason or no hook asked.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "operation": {
             "type": "string"
           },
@@ -5269,9 +5284,10 @@
         "type": "object"
       },
       "RefusalReason": {
-        "description": "Why a request was refused for good (see [`ApiErrorDetails::reason`]).",
+        "description": "Why a request was refused (see [`ApiErrorDetails::reason`]).",
         "enum": [
           "no_undo_copy",
+          "server_stopping",
           "other"
         ],
         "type": "string"
@@ -5508,12 +5524,16 @@
                     "$ref": "#/components/schemas/DiffTruncation"
                   }
                 ]
+              },
+              "uncounted": {
+                "description": "An untracked text file too large to read for its line counts: its\n`additions` are zero rather than counted, and it has no body. Absent\nfor every file whose counts are real.",
+                "type": "boolean"
               }
             },
             "type": "object"
           }
         ],
-        "description": "One entry of a Git review: a [`FileDiff`] plus the bounds the review had\nto apply to produce it.\n\nIt flattens, so the wire shape is a strict superset of `FileDiff` and the\nendpoint keeps returning the same array of the same objects; both added\nfields are optional and defaulted, so an older client \u2014 or the generated\nTypeScript SDK before it is regenerated \u2014 decodes these responses\nunchanged and simply does not see them."
+        "description": "One entry of a Git review: a [`FileDiff`] plus the bounds the review had\nto apply to produce it.\n\nIt flattens, so the wire shape is a strict superset of `FileDiff` and the\nendpoint keeps returning the same array of the same objects; the added\nfields are optional and defaulted, so an older client \u2014 or the generated\nTypeScript SDK before it is regenerated \u2014 decodes these responses\nunchanged and simply does not see them."
       },
       "ReviewFinding": {
         "properties": {

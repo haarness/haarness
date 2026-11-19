@@ -404,6 +404,8 @@ impl App {
                 )?
                 .with_attachment_uploads()
             };
+            // Messages waiting for a compaction are kept as the chat's draft.
+            self.return_held();
             save_current(self, current)?;
             let connection = prepare(target, self).await?;
             self.pending_server = Some(Box::new(connection));

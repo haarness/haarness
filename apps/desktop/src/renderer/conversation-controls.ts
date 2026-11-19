@@ -1,9 +1,11 @@
-import { createSignal } from "solid-js";
+import { createEffect, createSignal } from "solid-js";
 import { formatNumber, t } from "./i18n";
 import type { Item, Thread } from "@haarness/sdk";
 import { useApp } from "./state";
 import { lastUserMessage, unrestoredFiles } from "./conversation-history";
 import { shortcutLabel, type SearchEntry } from "./search";
+import { CHAT_CHANGED, isCompactionCut, stoppedOnPurpose, watchCompaction } from "./compaction-wait";
+import { COMPACTION_WAIT_MS, type CompactionCut } from "../shared";
 
 export const historyCommands = [
   { name: "undo", description: "Undo the last turn and restore its prompt" },
@@ -25,6 +27,16 @@ export function createConversationControls(props: {
   const owner = () => app.state.connection?.id + ":" + app.state.selected;
   const [pending, setPending] = createSignal<string[]>([]);
   const busy = () => pending().includes(owner());
+  // A compaction that failed after its chat was left: said in that chat,
+  // once it is open again, not in whichever chat is open now.
+  const [late, setLate] = createSignal<Record<string, string>>({});
+  createEffect(() => {
+    const key = owner();
+    const said = late()[key];
+    if (said === undefined) return;
+    setLate(({ [key]: _, ...rest }) => rest);
+    app.showError(new Error(said));
+  });
   const disabled = (action: string) =>
     !app.state.ready ||
     !thread() ||
@@ -48,9 +60,14 @@ export function createConversationControls(props: {
     const connection = app.state.connection!.id;
     const key = owner();
     const before = [...app.state.items];
+    const started = Date.now();
+    const compaction =
+      action === "compact"
+        ? watchCompaction(connection, id, app.state.connection?.info.serverInstanceId)
+        : undefined;
     setPending((values) => [...values, key]);
     try {
-      const value = await window.haarness.api<Thread | Item>(
+      const value = await window.haarness.api<Thread | Item | CompactionCut>(
         connection,
         action === "undo"
           ? "revertThread"
@@ -59,6 +76,17 @@ export function createConversationControls(props: {
             : "compact",
         action === "redo" ? [id] : [id, {}],
       );
+      // Cut on its way through a relay (or another compaction is under
+      // way): the server goes on, and the chat stays compacting until the
+      // summary lands.
+      if (compaction && isCompactionCut(value))
+        try {
+          await compaction.until(started + COMPACTION_WAIT_MS, value.compactionCut, t(CHAT_CHANGED));
+        } catch (error) {
+          if (owner() === key) throw error;
+          setLate((values) => ({ ...values, [key]: (error as Error).message }));
+          return;
+        }
       if (owner() !== key) return;
       await app.refresh();
       if (owner() !== key) return;
@@ -94,7 +122,12 @@ export function createConversationControls(props: {
             ? t("Last turn undone") + leftNote
             : t("Turn restored") + leftNote,
       );
+    } catch (error) {
+      // Stop, as the person asked: nothing failed.
+      if (action === "compact" && stoppedOnPurpose(error)) return;
+      throw error;
     } finally {
+      compaction?.stop();
       setPending((values) => values.filter((value) => value !== key));
     }
   }
@@ -133,5 +166,19 @@ export function createConversationControls(props: {
             : []),
         ],
   );
-  return { busy, disabled, invoke };
+  /** A safety stop's Edit and resend: Undo takes the stopped turn back and puts
+   * its message in the box. Where Undo has no checkpoints (a folder that is
+   * not a repository and has not turned them on) the message comes back all
+   * the same, and the turn stays in view: later requests leave it out anyway. */
+  async function editStopped() {
+    const message = lastUserMessage(app.state.items, thread()?.revert?.sequence);
+    try {
+      await invoke("undo");
+    } catch (error) {
+      if (!/snapshots are disabled/i.test(error instanceof Error ? error.message : String(error)))
+        throw error;
+      props.restored(message);
+    }
+  }
+  return { busy, disabled, invoke, editStopped };
 }

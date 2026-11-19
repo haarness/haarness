@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item, ItemData, Thread, UnrestoredFile } from "@haarness/sdk";
-import { retainedItems, lastUserMessage, findConversationMessages, unrestoredFiles, unrestoredReason } from "../src/renderer/conversation-history";
+import { editableStop, retainedItems, lastUserMessage, findConversationMessages, unrestoredFiles, unrestoredReason } from "../src/renderer/conversation-history";
 const item = (sequence: number, data: ItemData): Item => ({ id: String(sequence), threadId: "thread", turnId: "turn", sequence, createdAt: "2026-09-11T00:00:00Z", data });
 test("undo boundaries hide future messages without destroying redo history", () => {
   const items = [item(1, { type: "user_message", text: "first" }), item(2, { type: "assistant_message", text: "reply" }), item(3, { type: "user_message", text: "second" }), item(4, { type: "user_message", text: "internal", synthetic: true })];
@@ -39,4 +39,21 @@ test("an undo names the files it left as they are, those left for their size apa
   assert.deepEqual([big, env, notes].map(unrestoredReason), ["too large for Undo", "ignored", "outside the folder"]);
   assert.equal(unrestoredReason(other), undefined);
   assert.equal(unrestoredReason({ path: "x", reason: "linked" } as unknown as UnrestoredFile), undefined);
+});
+test("only the safety stop that ended the latest turn offers to edit its message", () => {
+  const stop = (sequence: number, turnLeftOut?: boolean) =>
+    item(sequence, { type: "error", message: "Stopped by the provider's safety check (refusal).", retryable: false, ...(turnLeftOut === undefined ? {} : { turn_left_out: turnLeftOut }) });
+  const items = [item(1, { type: "user_message", text: "ask" }), item(2, { type: "assistant_message", text: "partial" }), stop(3, true)];
+  assert.equal(editableStop(items, items[2]), true);
+  // Other rows, and other errors, offer nothing.
+  assert.equal(editableStop(items, items[1]), false);
+  assert.equal(editableStop(items, undefined), false);
+  assert.equal(editableStop([...items.slice(0, 2), stop(3, false)], stop(3, false)), false);
+  // A stop an older server stored, which its later requests still send.
+  assert.equal(editableStop([...items.slice(0, 2), stop(3)], stop(3)), false);
+  // Once another turn began, Undo would take that one back instead.
+  const later = [...items, item(4, { type: "user_message", text: "reworded" })];
+  assert.equal(editableStop(later, later[2]), false);
+  const resumed = [...items, item(4, { type: "user_message", text: "<task id=1>", synthetic: true })];
+  assert.equal(editableStop(resumed, resumed[2]), false);
 });

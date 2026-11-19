@@ -52,10 +52,24 @@ pub enum Cut {
 /// One component of the pattern.
 struct Part {
     pattern: Pattern,
+    /// More patterns a name may match instead, for a last part shared by
+    /// several patterns (see [`walks`]).
+    others: Vec<Pattern>,
     /// No wildcard as `glob` reads it: the entry is looked up, not listed.
     plain: bool,
     /// `**`.
     recursive: bool,
+}
+
+impl Part {
+    fn patterns(&self) -> impl Iterator<Item = &Pattern> {
+        std::iter::once(&self.pattern).chain(&self.others)
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        self.patterns()
+            .any(|pattern| pattern.matches_with(name, MatchOptions::new()))
+    }
 }
 
 /// A path met on the way.
@@ -98,6 +112,8 @@ pub struct Walk {
     links: Links,
     stop: Option<Box<dyn Fn() -> bool + Send>>,
     looked: usize,
+    /// Every folder entry read, whether it counts against `entries` or not.
+    listed: usize,
     cut: Option<Cut>,
     /// Paths still to look at: each with the part it meets next, or `None`
     /// once it matched the whole pattern.
@@ -120,6 +136,7 @@ impl Walk {
             for text in pattern[root_len..].split_terminator(std::path::is_separator) {
                 parts.push(Part {
                     pattern: Pattern::new(text)?,
+                    others: Vec::new(),
                     plain: !text.contains(['*', '?', '[']),
                     recursive: text == "**",
                 });
@@ -127,6 +144,7 @@ impl Walk {
             if root_len == pattern.len() {
                 parts.push(Part {
                     pattern: Pattern::default(),
+                    others: Vec::new(),
                     plain: true,
                     recursive: false,
                 });
@@ -144,6 +162,7 @@ impl Walk {
             links: Links::Unlooped,
             stop: None,
             looked: 0,
+            listed: 0,
             cut: None,
             todo: Vec::new(),
             real: HashMap::new(),
@@ -186,6 +205,17 @@ impl Walk {
     /// Why the walk ended early, when it did.
     pub fn cut(&self) -> Option<Cut> {
         self.cut
+    }
+
+    /// How many folder entries the walk has read that count against its
+    /// budget ([`Walk::entries`] or [`Walk::linked_entries`]).
+    pub fn entries_read(&self) -> usize {
+        self.looked
+    }
+
+    /// How many folder entries the walk has read, all of them.
+    pub fn entries_listed(&self) -> usize {
+        self.listed
     }
 
     /// A `**` going into `entry`'s folder, unless it is one the walk leaves.
@@ -292,22 +322,21 @@ impl Walk {
         if counted {
             self.looked += children.len();
         }
+        self.listed += children.len();
         // Taken from the end, so in name order.
         children.sort_by(|first, second| second.1.cmp(&first.1));
         self.todo
             .extend(children.into_iter().map(|(child, _)| (child, Some(at))));
         // A part that starts with `.` also matches `.` and `..`.
-        if self.parts[at].pattern.as_str().starts_with('.') {
-            for special in [".", ".."] {
-                if self.parts[at]
-                    .pattern
-                    .matches_with(special, MatchOptions::new())
-                {
-                    // `..` leads above the folder, as a link would: what is
-                    // read through it counts against a budget of linked
-                    // entries.
-                    self.add(at, Entry::named(entry.path.join(special), true));
-                }
+        for special in [".", ".."] {
+            if self.parts[at].patterns().any(|pattern| {
+                pattern.as_str().starts_with('.')
+                    && pattern.matches_with(special, MatchOptions::new())
+            }) {
+                // `..` leads above the folder, as a link would: what is
+                // read through it counts against a budget of linked
+                // entries.
+                self.add(at, Entry::named(entry.path.join(special), true));
             }
         }
     }
@@ -362,10 +391,7 @@ impl Iterator for Walk {
             let Some(name) = entry.path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if self.parts[at]
-                .pattern
-                .matches_with(name, MatchOptions::new())
-            {
+            if self.parts[at].matches(name) {
                 if at == last {
                     if !self.require_folder || entry.folder {
                         return Some(entry.path);
@@ -420,6 +446,69 @@ fn verbatim(root: &str) -> bool {
 #[cfg(not(windows))]
 fn verbatim(_root: &str) -> bool {
     false
+}
+
+/// Walks that list what `patterns` (the alternatives of one pattern) match,
+/// as few as can: those that differ only in their last part share one walk,
+/// which matches that part against each, so the tree is read once rather
+/// than once for each. The part has a wildcard (`**/*.ts` and `**/*.tsx`),
+/// or comes after `**` (`**/package.json` and `**/tsconfig.json`), where a
+/// walk matches every name it lists against it either way. Each other
+/// pattern gets a walk of its own. The walks come in the order of the first
+/// pattern of each.
+pub fn walks(patterns: &[String]) -> Result<Vec<Walk>, PatternError> {
+    let mut walks: Vec<(Option<&str>, Walk)> = Vec::new();
+    for pattern in patterns {
+        let shared = shared_start(pattern);
+        if let Some((start, last)) = shared
+            && let Some((_, walk)) = walks.iter_mut().find(|(other, _)| *other == Some(start))
+            && let Some(part) = walk.parts.last_mut()
+        {
+            part.others.push(Pattern::new(last)?);
+            // Listed and matched by name, not looked up.
+            part.plain = false;
+            continue;
+        }
+        let walk = Walk::new(pattern)?;
+        // A pattern whose walk ends in `**`, in a name looked up, or that has
+        // no parts (a verbatim root) walks alone.
+        let joins = match walk.parts.as_slice() {
+            [.., before, last] => !last.recursive && (!last.plain || before.recursive),
+            [last] => !last.recursive && !last.plain,
+            [] => false,
+        };
+        walks.push((shared.filter(|_| joins).map(|(start, _)| start), walk));
+    }
+    Ok(walks.into_iter().map(|(_, walk)| walk).collect())
+}
+
+/// `pattern` up to its last part, and that part, when another pattern of
+/// the same start may share its walk: the part has a wildcard, or comes
+/// right after `**`, is not `**` itself, and the pattern does not end with a
+/// separator (which asks for folders only).
+fn shared_start(pattern: &str) -> Option<(&str, &str)> {
+    if pattern.ends_with(std::path::is_separator) {
+        return None;
+    }
+    let split = pattern.rfind(std::path::is_separator)? + 1;
+    let (start, last) = pattern.split_at(split);
+    let after_double_star = start[..split - 1].rsplit(std::path::is_separator).next() == Some("**");
+    (split >= root_len(pattern)
+        && last != "**"
+        && (last.contains(['*', '?', '[']) || after_double_star))
+        .then_some((start, last))
+}
+
+/// `path` written as a pattern that matches it alone: each name's `*`, `?`,
+/// `[` and `]` stand for themselves (a folder named `[slug]`), while its
+/// root (a drive or share on Windows, `\\?\` included) is kept as written.
+pub fn literal(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let root = root_len(&text).min(text.len());
+    match text.get(..root) {
+        Some(start) => format!("{start}{}", Pattern::escape(&text[root..])),
+        None => Pattern::escape(&text),
+    }
 }
 
 #[cfg(test)]
@@ -700,6 +789,85 @@ mod tests {
         // Named, it is read as any folder.
         let named = format!("{}/.git/*.md", root.display());
         assert_eq!(walked(&named, Links::Once), [root.join(".git/RULES.md")]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Alternatives that differ only in a last wildcard part share one walk
+    /// of the tree, which lists what each would, once, in walk order.
+    #[test]
+    fn alternatives_that_differ_in_their_last_part_share_a_walk() {
+        let root = tree(
+            "shared-walk",
+            &[
+                "src/a.ts",
+                "src/b.tsx",
+                "src/c.js",
+                "src/lib/d.ts",
+                "src/.e.ts",
+                "README.md",
+                "CHANGELOG.md",
+                "package.json",
+                "web/package.json",
+                "web/tsconfig.json",
+            ],
+        );
+        let at = |pattern: &str| format!("{}/{pattern}", root.display());
+        let walked = |patterns: &[String]| {
+            walks(patterns)
+                .unwrap()
+                .into_iter()
+                .map(Iterator::collect::<Vec<_>>)
+                .collect::<Vec<_>>()
+        };
+        let shared = [at("src/**/*.ts"), at("src/**/*.tsx"), at("src/**/.*")];
+        let found = walked(&shared);
+        assert_eq!(found.len(), 1);
+        let mut each: Vec<PathBuf> = shared.iter().flat_map(|pattern| globbed(pattern)).collect();
+        each.sort();
+        each.dedup();
+        let mut once = found[0].clone();
+        once.sort();
+        assert_eq!(once, each);
+        // Names after `**`, files and folders alike, with a wildcard beside
+        // them: one walk, what each would find.
+        let named = [
+            at("**/package.json"),
+            at("**/tsconfig.json"),
+            at("**/lib"),
+            at("**/*.md"),
+        ];
+        let found = walked(&named);
+        assert_eq!(found.len(), 1);
+        let mut each: Vec<PathBuf> = named.iter().flat_map(|pattern| globbed(pattern)).collect();
+        each.sort();
+        each.dedup();
+        let mut once = found[0].clone();
+        once.sort();
+        assert_eq!(once, each);
+        assert_eq!(once.len(), 6, "{once:?}");
+        // A different start, a name looked up, `**` and a folders-only
+        // pattern each walk alone.
+        for patterns in [
+            [at("src/*.ts"), at("src/lib/*.ts")],
+            [at("README.md"), at("CHANGELOG.md")],
+            [at("src/**"), at("src/*")],
+            [at("src/*/"), at("src/*")],
+        ] {
+            assert_eq!(walked(&patterns).len(), 2, "{patterns:?}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_literal_path_matches_itself_alone() {
+        let root = tree("literal", &["app/[slug]/page.tsx", "app/s/page.tsx"]);
+        let pattern = format!("{}/*.tsx", literal(&root.join("app/[slug]")));
+        assert_eq!(
+            walked(&pattern, Links::Once),
+            [root.join("app/[slug]/page.tsx")]
+        );
+        // A plain root is as it was.
+        assert_eq!(literal(&root), root.to_string_lossy());
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -9,6 +9,8 @@ const shown = new Map<string, number>();
 const started = new Set<string>();
 /** Where views were scrolled up to when they went; see `scrollPlaces`. */
 const places = new Map<string, ScrollPlace>();
+/** Where terminals were last cleared in this window; see `clearPoints`. */
+const clears = new Map<string, number>();
 export const shownOutput = {
   get: (key: string) => shown.get(key) ?? 0,
   set: (key: string, end: number) => shown.set(key, Math.max(end, shown.get(key) ?? 0)),
@@ -23,12 +25,30 @@ export const shownOutput = {
   },
   /** Forget terminals that are gone. */
   keep: (prefix: string, ids: readonly string[]) => {
-    for (const key of [...shown.keys(), ...started, ...places.keys()])
+    for (const key of [...shown.keys(), ...started, ...places.keys(), ...clears.keys()])
       if (key.startsWith(prefix) && !ids.includes(key.slice(prefix.length))) {
         shown.delete(key);
         started.delete(key);
         places.delete(key);
+        clears.delete(key);
       }
+  },
+};
+
+/**
+ * Where each terminal was last cleared in this window (⌘K, or Clear in its
+ * menu), as the server counts bytes, by `<connection>:<pty>`. The server
+ * still holds the output before it, and a view shown again replays that
+ * output; it clears itself again at this point (see `terminalStream`), so
+ * the cleared lines never come back.
+ */
+export const clearPoints = {
+  get: (key: string) => clears.get(key),
+  set: (key: string, end: number) => clears.set(key, Math.max(end, clears.get(key) ?? 0)),
+  /** The server's output now starts at `start`: a clear at or before it has
+   * nothing left to clear. */
+  kept: (key: string, start: number) => {
+    if ((clears.get(key) ?? Infinity) <= start) clears.delete(key);
   },
 };
 
@@ -101,13 +121,20 @@ export function restoredLine(
  *
  * Gate changes are queued between writes (`write(empty, done)` calls back
  * once xterm has parsed everything before it), since xterm answers while it
- * parses, a moment after the write.
+ * parses, a moment after the write. Clears are queued the same way.
  */
 export function terminalStream(input: {
   write: (bytes: Uint8Array, done?: () => void) => void;
   /** How far this terminal's output was already shown. */
   shown: () => number;
   show: (end: number) => void;
+  /** Where the person last cleared this terminal (see `clearPoints`). */
+  clearedAt?: () => number | undefined;
+  cleared?: (end: number) => void;
+  /** Clears the view's screen and scrollback, keeping the line the cursor is
+   * on, and says whether it did (a full-screen program's alternate screen is
+   * left alone). Called once xterm has parsed everything written before. */
+  clear?: () => boolean;
 }) {
   let offset = 0;
   let open = true;
@@ -119,24 +146,42 @@ export function terminalStream(input: {
       open = state;
     });
   };
+  const feed = (bytes: Uint8Array) => {
+    const seen = Math.max(0, Math.min(bytes.length, input.shown() - offset));
+    if (seen) {
+      plan(false);
+      input.write(bytes.subarray(0, seen));
+    }
+    if (seen < bytes.length) {
+      plan(true);
+      input.write(bytes.subarray(seen));
+    }
+    offset += bytes.length;
+    input.show(offset);
+  };
   return {
     /** A replay starts at `from`, as the server counts bytes. */
     replay(from: number) {
       offset = from;
     },
-    /** Output from the server, continuing at the current offset. */
+    /** Output from the server, continuing at the current offset. A replay
+     * that passes the point where the person cleared the terminal clears it
+     * there again, so it shows what it showed then. */
     bytes(bytes: Uint8Array) {
-      const seen = Math.max(0, Math.min(bytes.length, input.shown() - offset));
-      if (seen) {
-        plan(false);
-        input.write(bytes.subarray(0, seen));
-      }
-      if (seen < bytes.length) {
-        plan(true);
-        input.write(bytes.subarray(seen));
-      }
-      offset += bytes.length;
-      input.show(offset);
+      const cut = (input.clearedAt?.() ?? -1) - offset;
+      if (cut <= 0 || cut > bytes.length) return feed(bytes);
+      feed(bytes.subarray(0, cut));
+      input.write(new Uint8Array(), () => void input.clear?.());
+      if (cut < bytes.length) feed(bytes.subarray(cut));
+    },
+    /** The person cleared the terminal (⌘K, or Clear in its menu): once
+     * xterm has parsed the output before, the view clears, and the point is
+     * kept for the replays to come. */
+    clear() {
+      const at = offset;
+      input.write(new Uint8Array(), () => {
+        if (input.clear?.()) input.cleared?.(at);
+      });
     },
     /** The server's count after what it sent. */
     cursor(end: number) {

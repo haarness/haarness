@@ -517,11 +517,13 @@ fn fields_taken(tool: &ToolDefinition) -> Option<String> {
 /// and that is exactly one written out (Llama 3.1 sends `"timeout": "0"` and
 /// `"run_in_background": "false"`), or where it wants an array or an object
 /// and the string is the JSON of one (Llama 3.1 sends multiedit's `edits` as
-/// the text `"[{\"old\": …}]"`), is that value, when every fault was such
-/// a string and the arguments then pass. `None` otherwise: valid arguments,
-/// any other fault, and a string the schema takes as a string are never
-/// changed. In `anyOf` or `oneOf` the value is changed only when exactly one
-/// alternative takes it. Nested objects and arrays are read the same way.
+/// the text `"[{\"old\": …}]"`), or where it wants an array and the string
+/// is one item of it written bare (`"queries": "browser"`), is that value,
+/// when every fault was such a string and the arguments then pass. `None`
+/// otherwise: valid arguments, any other fault, and a string the schema
+/// takes as a string are never changed. In `anyOf` or `oneOf` the value is
+/// changed only when exactly one alternative takes it. Nested objects and
+/// arrays are read the same way.
 pub(crate) fn coerced_arguments(tool: &ToolDefinition, arguments: &Value) -> Option<Value> {
     let validator = jsonschema::validator_for(&tool.input_schema).ok()?;
     let coerced = coerced_once(tool, &validator, arguments)?;
@@ -567,25 +569,71 @@ fn coerced_once(
                             _ => false,
                         })
                     })
+                    .or_else(|| {
+                        // A number where the schema also takes numbers is
+                        // that number or nothing, never a list of it.
+                        let number = written_scalar(text).is_some_and(|value| value.is_number())
+                            && wanted
+                                .iter()
+                                .any(|kind| matches!(kind, JsonType::Number | JsonType::Integer));
+                        (!number && wanted.iter().any(|kind| matches!(kind, JsonType::Array)))
+                            .then(|| written_item(text))
+                            .flatten()
+                    })
             }
             ValidationErrorKind::AnyOf { .. } | ValidationErrorKind::OneOfNotValid { .. } => {
                 let alternatives = tool
                     .input_schema
                     .pointer(error.schema_path().as_str())?
                     .as_array()?;
-                let value = written_scalar(text)?;
-                let mut taking = 0;
-                for alternative in alternatives {
-                    // An alternative read alone may lean on the rest of the
-                    // schema (`$ref`): one that can't be read alone stops it.
-                    if jsonschema::validator_for(alternative)
-                        .ok()?
-                        .is_valid(&value)
-                    {
-                        taking += 1;
+                // An alternative read alone may lean on the rest of the
+                // schema (`$ref`): one that can't be read alone stops it.
+                let validators = alternatives
+                    .iter()
+                    .map(jsonschema::validator_for)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                // What the text reads as first decides: a value no
+                // alternative takes gives way to the next reading, but one
+                // that several take is no telling which was meant. An
+                // alternative takes a value as it is or with the strings in
+                // it read as its own types (`["3"]` as a list of integers).
+                let scalar = written_scalar(text);
+                // A number where an alternative takes numbers is that number
+                // or nothing, never a list of it.
+                let item = if scalar.as_ref().is_some_and(Value::is_number)
+                    && alternatives.iter().any(takes_numbers)
+                {
+                    None
+                } else {
+                    written_item(text)
+                };
+                let mut chosen = None;
+                for value in [scalar, written_structure(text), item]
+                    .into_iter()
+                    .flatten()
+                {
+                    let mut taken: Vec<Value> = validators
+                        .iter()
+                        .zip(alternatives)
+                        .filter_map(|(validator, alternative)| {
+                            if validator.is_valid(&value) {
+                                return Some(value.clone());
+                            }
+                            let alone = ToolDefinition {
+                                name: tool.name.clone(),
+                                description: String::new(),
+                                input_schema: alternative.clone(),
+                            };
+                            coerced_arguments(&alone, &value)
+                        })
+                        .collect();
+                    if !taken.is_empty() {
+                        chosen = (taken.len() == 1).then(|| taken.remove(0));
+                        break;
                     }
                 }
-                (taking == 1).then_some(value)
+                chosen
             }
             _ => None,
         }?;
@@ -811,7 +859,10 @@ fn with_escaped_controls(text: &str) -> Option<String> {
 /// one that a model writes for a scalar: `true`, `false` (or `True` and
 /// `False`, as Python writes them), `null` or a number
 /// in JSON's own form (`-3`, `1.5`, `1e5`; not `01`, `+1`, `.5`, `1.` or
-/// `0x10`). An integer is one only within what a JSON integer holds.
+/// `0x10`). An integer is one only within what a JSON integer holds, and a
+/// whole number written without a fraction or an exponent is one only
+/// within what an `i64` or a `u64` holds: past that it would read as a
+/// nearby float, and an id that long would no longer be the one sent.
 fn written_scalar(text: &str) -> Option<Value> {
     let text = text.trim();
     match text {
@@ -827,8 +878,54 @@ fn written_scalar(text: &str) -> Option<Value> {
         return None;
     }
     match serde_json::from_str::<Value>(text).ok()? {
+        Value::Number(number)
+            if number.is_f64()
+                && text
+                    .strip_prefix('-')
+                    .unwrap_or(text)
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit()) =>
+        {
+            None
+        }
         Value::Number(number) => Some(Value::Number(number)),
         _ => None,
+    }
+}
+
+/// A list of one item, for text written bare where the schema wants a list:
+/// `"queries": "browser"` for `["browser"]`. Only text that can be no more
+/// than one item reads so: none with a space, a comma or a double quote in
+/// it, which could be several items or the JSON of one, none that opens a
+/// JSON array or object, which is a broken one, and no word that stands for
+/// no value or a boolean in some language (`null`, `None`, `nil`,
+/// `undefined`, `true`, `False`, in any case), which is no item. The list's
+/// own schema still decides whether it takes the item.
+fn written_item(text: &str) -> Option<Value> {
+    let text = text.trim();
+    if text.is_empty()
+        || matches!(
+            text.to_ascii_lowercase().as_str(),
+            "null" | "none" | "nil" | "undefined" | "true" | "false"
+        )
+        || text.starts_with(['[', '{'])
+        || text
+            .contains(|character: char| character.is_whitespace() || matches!(character, ',' | '"'))
+    {
+        return None;
+    }
+    Some(Value::Array(vec![Value::String(text.to_owned())]))
+}
+
+/// Whether `schema` names a number type (`"integer"` or `"number"`, alone
+/// or in a list of types).
+fn takes_numbers(schema: &Value) -> bool {
+    match schema.get("type") {
+        Some(Value::String(kind)) => matches!(kind.as_str(), "number" | "integer"),
+        Some(Value::Array(kinds)) => kinds
+            .iter()
+            .any(|kind| matches!(kind.as_str(), Some("number" | "integer"))),
+        _ => false,
     }
 }
 
@@ -1153,6 +1250,122 @@ mod tests {
         }
     }
 
+    #[test]
+    fn one_item_written_bare_where_a_list_is_wanted_reads_as_that_list() {
+        assert_eq!(
+            coerced_arguments(
+                &crate::load_tool_definition(),
+                &json!({"queries": "browser"})
+            ),
+            Some(json!({"queries": ["browser"]}))
+        );
+        // An MCP server's tool, as Python servers describe an optional list.
+        let issue = definition(json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "labels": {"type": "array", "items": {"type": "string"}},
+                "ids": {"type": "array", "items": {"type": "integer"}},
+                "assignees": {"anyOf": [
+                    {"type": "array", "items": {"type": "string"}},
+                    {"type": "null"}
+                ]},
+                "milestones": {"type": ["array", "null"], "items": {"type": "string"}},
+                "ids_or_none": {"anyOf": [
+                    {"type": "array", "items": {"type": "integer"}},
+                    {"type": "null"}
+                ]},
+                "pair": {"type": "array", "items": {"type": "string"}, "minItems": 2},
+            },
+            "required": ["title"],
+            "additionalProperties": false,
+        }));
+        let one = |key: &str, text: &str| {
+            coerced_arguments(&issue, &json!({"title": "Crash", key: text}))
+                .map(|value| value[key].clone())
+        };
+        assert_eq!(one("labels", "bug"), Some(json!(["bug"])));
+        assert_eq!(one("labels", " bug "), Some(json!(["bug"])));
+        assert_eq!(one("labels", "src/main.rs"), Some(json!(["src/main.rs"])));
+        // The item is then read as the list's items are.
+        assert_eq!(one("ids", "3"), Some(json!([3])));
+        assert_eq!(one("assignees", "octocat"), Some(json!(["octocat"])));
+        assert_eq!(one("milestones", "v1"), Some(json!(["v1"])));
+        // As Python servers describe an optional list of integers.
+        assert_eq!(one("ids_or_none", "3"), Some(json!([3])));
+        // Text that could be several items, a broken list, or an item the
+        // list does not take is refused, as before; so is a word for no
+        // value or a boolean.
+        for text in [
+            "a b",
+            "a,b",
+            "a\nb",
+            "[1",
+            "[bug",
+            "{x",
+            "",
+            " ",
+            "\"bug\"",
+            "say \"hi\"",
+            "None",
+            "none",
+            "NULL",
+            "nil",
+            "undefined",
+            "true",
+            "false",
+            "True",
+            "False",
+            "TRUE",
+        ] {
+            for key in ["labels", "assignees", "milestones"] {
+                assert_eq!(one(key, text), None, "{key}: {text:?}");
+            }
+        }
+        // `null` is no item of a list, and no value where the list may be
+        // none.
+        assert_eq!(one("labels", "null"), None);
+        assert_eq!(one("assignees", "null"), Some(Value::Null));
+        assert_eq!(one("milestones", "null"), Some(Value::Null));
+        assert_eq!(one("ids", "x"), None);
+        assert_eq!(one("pair", "a"), None);
+        // A string the schema takes as a string is never made a list.
+        assert_eq!(coerced_arguments(&issue, &json!({"title": "bug"})), None);
+    }
+
+    #[test]
+    fn a_whole_number_past_what_an_integer_holds_stays_the_text_sent() {
+        let tool = bash_like();
+        let one = |key: &str, text: &str| {
+            coerced_arguments(&tool, &json!({"command": "x", key: text}))
+                .map(|value| value[key].clone())
+        };
+        // It would read as 1.2345678901234568e20, another number.
+        for text in ["123456789012345678901", "-123456789012345678901"] {
+            assert_eq!(one("ratio", text), None, "{text}");
+            assert_eq!(one("timeout", text), None, "{text}");
+        }
+        // Within what an i64 or a u64 holds it reads exactly.
+        assert_eq!(
+            one("ratio", "18446744073709551615"),
+            Some(json!(18_446_744_073_709_551_615_u64))
+        );
+        assert_eq!(
+            one("ratio", "-9223372036854775808"),
+            Some(json!(-9_223_372_036_854_775_808_i64))
+        );
+        assert_eq!(
+            one("timeout", "9007199254740993"),
+            Some(json!(9_007_199_254_740_993_u64))
+        );
+        // A fraction or an exponent says a float was meant.
+        assert_eq!(
+            one("ratio", "123456789012345678901.5"),
+            Some(json!(123_456_789_012_345_678_901.5_f64))
+        );
+        assert_eq!(one("ratio", "1e21"), Some(json!(1e21)));
+    }
+
     fn read_like() -> ToolDefinition {
         ToolDefinition {
             name: "read".into(),
@@ -1437,6 +1650,41 @@ mod tests {
         assert_eq!(
             coerced_arguments(&tool, &json!({"one": "true"})),
             Some(json!({"one": true}))
+        );
+        // A list's JSON, or one item of it, where only one alternative is
+        // a list.
+        assert_eq!(
+            coerced_arguments(&tool, &json!({"one": " [1, 2] "})),
+            Some(json!({"one": [1, 2]}))
+        );
+        assert_eq!(
+            coerced_arguments(&tool, &json!({"one": "src"})),
+            Some(json!({"one": ["src"]}))
+        );
+        // A number one alternative takes is that number, not a list of it;
+        // one the number alternative refuses is no list item either.
+        let number_or_list = definition(json!({
+            "type": "object",
+            "properties": {
+                "n": {"anyOf": [
+                    {"type": "integer", "minimum": 1},
+                    {"type": "array", "items": {"type": "string"}}
+                ]},
+                "m": {"type": ["integer", "array"], "items": {"type": "string"}},
+            },
+        }));
+        assert_eq!(
+            coerced_arguments(&number_or_list, &json!({"n": "3"})),
+            Some(json!({"n": 3}))
+        );
+        assert_eq!(coerced_arguments(&number_or_list, &json!({"n": "0"})), None);
+        assert_eq!(
+            coerced_arguments(&number_or_list, &json!({"m": "1.5"})),
+            None
+        );
+        assert_eq!(
+            coerced_arguments(&number_or_list, &json!({"n": "src"})),
+            Some(json!({"n": ["src"]}))
         );
         // Two do: no telling which was meant.
         assert_eq!(coerced_arguments(&tool, &json!({"either": "5"})), None);

@@ -609,10 +609,7 @@ async fn bare_compact_requests_a_server_generated_summary_over_real_http() {
         },
         created_at: Utc::now(),
     };
-    let responses = [
-        serde_json::to_string(&compacted).unwrap(),
-        serde_json::to_string(&vec![compacted.clone()]).unwrap(),
-    ];
+    let responses = [serde_json::to_string(&compacted).unwrap()];
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -655,6 +652,14 @@ async fn bare_compact_requests_a_server_generated_summary_over_real_http() {
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
 
     app.execute_command("/compact", &client).await.unwrap();
+    // The summary is asked for on a worker task; the tick takes its answer.
+    for _ in 0..500 {
+        app.poll_compactions();
+        if app.compacting_since().is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
     assert_eq!(app.notice, "Compaction checkpoint created");
     assert!(matches!(
@@ -2465,6 +2470,8 @@ fn new_item_kinds_render_in_the_transcript() {
             call_id: None,
             created_at: chrono::Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         });
     let text: String = app
         .lines((100, 40))
@@ -8669,7 +8676,7 @@ async fn a_typed_answer_that_did_not_land_comes_back_to_the_prompt() {
         let mut app = asked_free_text(&thread, &["q-typed"]).await;
         let (client, _) = answering_server(thread.id, reply).await;
         type_text(&mut app, "the release branch ", &client).await;
-        app.paste_into_prompt(&paste, false);
+        app.paste_into_prompt(&paste, crate::media::Uploads::No);
         let typed = app.composer.text().to_owned();
         assert!(typed.contains("[#1 pasted 12 lines]"), "{typed}");
         let sent = crate::input::handle_key(
@@ -9720,6 +9727,8 @@ fn pending_permission_fixture(
         call_id: None,
         created_at: Utc::now(),
         review: None,
+        hook_asked: false,
+        hook_reason: None,
     }
 }
 
@@ -9750,6 +9759,40 @@ fn an_edit_card_draws_and_copies_the_tabs_of_its_changed_lines() {
     let copy = copied(&lines);
     assert!(copy.contains("- \techo \"build\""), "{copy:?}");
     assert!(copy.contains("+ \techo \"built\"\tdone"), "{copy:?}");
+}
+
+/// A card a hook asked for says so in the review note's row, with the
+/// hook's reason, and offers Allow once and Reject only.
+#[test]
+fn a_card_a_hook_asked_for_says_so_with_its_reason() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mut pending = pending_permission_fixture(&thread, "hook-asked");
+    pending.permission = "bash".into();
+    pending.operation = "bash:git push".into();
+    pending.detail = serde_json::json!({"command": "git push"});
+    pending.patterns = vec!["git push".into()];
+    pending.allow_always = Some(false);
+    pending.hook_asked = true;
+    pending.hook_reason = Some("Pushes need a second look\u{202e}".into());
+    app.pending_permissions.push(pending.clone());
+    app.permission_focus = true;
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("Asked by a hook: Pushes need a second look"),
+        "{text}"
+    );
+    assert!(!text.contains('\u{202e}'), "{text}");
+    assert!(
+        text.contains("Allow once") && !text.contains("Always"),
+        "{text}"
+    );
+    // Without a reason, the note alone.
+    pending.hook_reason = None;
+    app.pending_permissions = vec![pending];
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Asked by a hook"), "{text}");
+    assert!(!text.contains("Asked by a hook:"), "{text}");
 }
 
 #[test]
@@ -9968,6 +10011,8 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
             call_id: None,
             created_at: Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         });
     app.permission_focus = true;
 
@@ -11856,6 +11901,8 @@ async fn a_compact_terminal_shows_the_waiting_request_and_its_answers() {
             call_id: None,
             created_at: Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         }],
         &offline_client(),
     )
@@ -11982,6 +12029,108 @@ async fn approval_hints_use_plain_words_and_the_toast_yields_to_the_card() {
     assert!(!app.notice.contains("session"), "{}", app.notice);
 }
 
+/// The safety stop that ended the latest turn points to `/undo`, which puts
+/// the message back in the prompt; an older stop, a later turn, a running
+/// turn or an undo already made leave the error alone.
+#[test]
+fn a_safety_stop_that_ended_the_latest_turn_points_to_undo() {
+    let thread = fixture_thread();
+    let words = "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit and resend it or pick another model.";
+    let stop = |turn_left_out| {
+        message_item(
+            3,
+            &thread,
+            ItemData::Error {
+                message: words.into(),
+                retryable: false,
+                turn_left_out,
+            },
+        )
+    };
+    let asked = message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: "the request".into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+            command_line: None,
+            hook: None,
+        },
+    );
+    let partial = message_item(
+        2,
+        &thread,
+        ItemData::AssistantMessage {
+            text: "partial".into(),
+            note: false,
+        },
+    );
+    let render = |app: &App| -> String {
+        crate::view::transcript::transcript_lines(app, 100)
+            .lines
+            .iter()
+            .map(|line| line_text(line) + "\n")
+            .collect()
+    };
+    let hint = "/undo to edit and resend";
+    let mut app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        vec![asked.clone(), partial.clone(), stop(true)],
+        vec![],
+        vec![],
+    );
+    let text = render(&app);
+    assert!(text.contains(&format!("    {hint}\n")), "{text}");
+    assert!(
+        text.find("× Stopped by").unwrap() < text.find(hint).unwrap(),
+        "{text}"
+    );
+    app.language = crate::locale::Language::Japanese;
+    assert!(render(&app).contains("/undo で編集して再送信"));
+    app.language = crate::locale::Language::English;
+    // While a turn runs, /undo would stop it first.
+    app.active_turn = Some(haarness_protocol::TurnId::new());
+    assert!(!render(&app).contains(hint));
+    app.active_turn = None;
+    // A fork has a parent and /undo of its own; a subagent's chat has not.
+    app.thread.parent_id = Some(haarness_protocol::ThreadId::new());
+    assert!(render(&app).contains(hint));
+    app.thread.is_subagent = true;
+    assert!(!render(&app).contains(hint));
+    app.thread.is_subagent = false;
+    app.thread.parent_id = None;
+    // Once another turn began, /undo takes that one back.
+    app.items.push(message_item(
+        4,
+        &thread,
+        ItemData::UserMessage {
+            text: "reworded".into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+            command_line: None,
+            hook: None,
+        },
+    ));
+    assert!(!render(&app).contains(hint));
+    // A stop an older server stored is still sent: nothing to point to.
+    let older = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        vec![asked, partial, stop(false)],
+        vec![],
+        vec![],
+    );
+    let text = render(&older);
+    assert!(
+        text.contains("× Stopped by") && !text.contains(hint),
+        "{text}"
+    );
+}
+
 #[test]
 fn a_rejected_tool_and_a_stopped_turn_read_as_choices_not_failures() {
     let thread = fixture_thread();
@@ -12034,6 +12183,7 @@ fn a_rejected_tool_and_a_stopped_turn_read_as_choices_not_failures() {
         ItemData::Error {
             message: "operation cancelled".into(),
             retryable: false,
+            turn_left_out: false,
         },
     );
     let app = App::new(
@@ -13377,6 +13527,7 @@ fn provider_failure_text_wraps_instead_of_leaking_past_the_chat_pane() {
         ItemData::Error {
             message: "Provider rejected the request (cyber_policy): Rephrase the request or use an account authorized for this security work.".into(),
             retryable: false,
+            turn_left_out: false,
         },
     )];
     let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
@@ -13489,6 +13640,8 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
             call_id: None,
             created_at: Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         });
     app.children.insert(
         "task-hover".into(),
@@ -20832,32 +20985,38 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
     app.yolo = true;
     app.approval_server = true;
-    let (client, server) =
-        workspace_http_status_client(vec![(200, "{}".into()), (200, "{}".into())], false).await;
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into()); 3], false).await;
     let other_chat = ThreadId::new();
-    for (id, owner, root, always) in [
-        ("own", thread.id, thread.id, true),
-        ("child", ThreadId::new(), thread.id, true),
-        ("other-chat", other_chat, other_chat, true),
-        ("always-asks", thread.id, thread.id, false),
+    for (id, owner, root, always, hook) in [
+        ("own", thread.id, thread.id, true, false),
+        ("child", ThreadId::new(), thread.id, true, false),
+        ("other-chat", other_chat, other_chat, true, false),
+        ("always-asks", thread.id, thread.id, false, false),
+        // A hook's ask offers no Always, yet --yolo answers it once.
+        ("hook-asked", thread.id, thread.id, false, true),
     ] {
         let event = fixture_event(
             "permission.requested",
             owner,
             root,
-            serde_json::json!({"permissionId":id,"permission":"external_directory","allowAlways":always}),
+            serde_json::json!({"permissionId":id,"permission":"bash","allowAlways":always,"hookAsked":hook}),
         );
         app.reduce(event.clone(), &client).await.unwrap();
         // A replayed event is not answered twice.
         app.reduce(event, &client).await.unwrap();
     }
     let requests = server.await.unwrap();
-    assert_eq!(requests.len(), 2, "{requests:#?}");
+    assert_eq!(requests.len(), 3, "{requests:#?}");
     assert!(requests[0].contains("/permissions/own"), "{}", requests[0]);
     assert!(
         requests[1].contains("/permissions/child"),
         "{}",
         requests[1]
+    );
+    assert!(
+        requests[2].contains("/permissions/hook-asked"),
+        "{}",
+        requests[2]
     );
     assert!(
         requests
@@ -20894,6 +21053,7 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
             (200, info.to_string()),
             (200, mode.to_string()),
             (200, "{}".into()),
+            (200, "{}".into()),
         ],
         false,
     )
@@ -20916,11 +21076,19 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
         call_id: None,
         created_at: chrono::Utc::now(),
         review: None,
+        hook_asked: false,
+        hook_reason: None,
+    };
+    let hook_asked = haarness_protocol::PendingPermissionInfo {
+        allow_always: Some(false),
+        hook_asked: true,
+        ..waiting("hook-waiting", thread.id, thread.id)
     };
     app.hydrate_permissions(
         vec![
             waiting("waiting", thread.id, thread.id),
             waiting("elsewhere", other_chat, other_chat),
+            hook_asked,
         ],
         &client,
     )
@@ -20928,6 +21096,10 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
     let requests = server.await.unwrap();
     assert!(
         requests[2].contains("/permissions/waiting"),
+        "{requests:#?}"
+    );
+    assert!(
+        requests[3].contains("/permissions/hook-waiting"),
         "{requests:#?}"
     );
     assert!(app.pending_permissions.is_empty());
@@ -24360,6 +24532,62 @@ async fn review_opens_loading_and_is_collected_by_a_later_frame() {
     server.await.unwrap();
 }
 
+/// An untracked file too large for the server to count says so where its
+/// counts would be, and why it has no lines, instead of claiming none.
+#[tokio::test]
+async fn review_names_a_file_too_large_to_count() {
+    let body = serde_json::json!([
+        {
+            "file": "dump.log",
+            "status": "added",
+            "additions": 0,
+            "deletions": 0,
+            "truncated": true,
+            "truncation": "file_too_large",
+            "uncounted": true
+        },
+        {
+            "file": "notes.md",
+            "status": "added",
+            "additions": 1,
+            "deletions": 0,
+            "patch": "@@ -0,0 +1 @@\n+# Notes\n"
+        }
+    ])
+    .to_string();
+    let (client, server) = workspace_http_client(vec![body], false).await;
+    let mut app = selector_fixture();
+    app.open_diff_viewer(crate::diffview::DiffSource::WorkingTree, &client);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while viewer_of(&app).loading {
+            app.sync_diff_layout(120);
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("review delivered");
+    let rows: Vec<String> = app.lines((120, 30)).iter().map(line_text).collect();
+    let header = |name: &str| {
+        rows.iter()
+            .find(|row| row.contains(name) && row.contains("added"))
+            .unwrap_or_else(|| panic!("{name} header in {rows:#?}"))
+    };
+    let dump = header("dump.log");
+    assert!(dump.contains("too large to count  added"), "{dump:?}");
+    assert!(!dump.contains("+0"), "{dump:?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Too large to read here; its lines are not counted")),
+        "{rows:#?}"
+    );
+    let notes = header("notes.md");
+    assert!(notes.contains("+1 −0  added"), "{notes:?}");
+    // The totals leave it out, and say so.
+    assert!(rows[0].contains("+1 −0"), "{:?}", rows[0]);
+    assert!(rows[0].contains("1 not counted"), "{:?}", rows[0]);
+    server.await.unwrap();
+}
+
 /// A review that cannot be fetched has to say something the reader can act
 /// on, not reqwest's bare transport text.
 #[tokio::test]
@@ -24426,6 +24654,9 @@ mod display_tests;
 
 #[path = "background_tests.rs"]
 mod background_tests;
+
+#[path = "compaction_tests.rs"]
+mod compaction_tests;
 
 #[path = "reply_files_tests.rs"]
 mod reply_files_tests;
@@ -24601,6 +24832,7 @@ fn undo_redo_and_diff_failures_read_as_what_to_do() {
             message: message.into(),
             reason: None,
             path: None,
+            wordless: false,
         }
         .into()
     };
@@ -25360,6 +25592,36 @@ async fn an_undo_whose_history_cannot_be_read_keeps_the_undone_prompt() {
     server.await.unwrap();
     assert_eq!(app.composer.text(), "write the file");
     assert!(app.refresh_needed);
+}
+
+/// Where Undo has no checkpoints, `/undo` after a safety stop still puts its
+/// message back in the prompt; any other refusal says why, as before.
+#[tokio::test]
+async fn undo_without_checkpoints_still_brings_back_a_stopped_request() {
+    let (mut app, thread) = undo_fixture();
+    app.items.push(message_item(
+        5,
+        &thread,
+        ItemData::Error {
+            message: "Stopped by the provider's safety check (refusal).".into(),
+            retryable: false,
+            turn_left_out: true,
+        },
+    ));
+    let refused = r#"{"code":"invalid_request","message":"invalid request: snapshots are disabled","retryable":false}"#;
+    let (client, server) = workspace_http_status_client(vec![(400, refused.into())], false).await;
+    app.execute_command("/undo", &client).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(app.composer.text(), "write the file");
+    assert!(!app.notice.contains("Undo failed"), "{}", app.notice);
+
+    // Without a stop to bring back, the refusal is said.
+    let (mut app, _) = undo_fixture();
+    let (client, server) = workspace_http_status_client(vec![(400, refused.into())], false).await;
+    app.execute_command("/undo", &client).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(app.composer.text(), "");
+    assert!(app.notice.starts_with("Undo failed"), "{}", app.notice);
 }
 
 #[tokio::test]
@@ -27599,14 +27861,14 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
 
     app.shell_mode = true;
     app.composer.set_text("open ".into());
-    app.paste_into_prompt(&dropped, false);
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
     assert!(app.attachments.is_empty());
     assert_eq!(app.composer.text(), format!("open {dropped}"));
 
     // Out of shell mode the same drop is an attachment.
     app.shell_mode = false;
     app.composer.clear();
-    app.paste_into_prompt(&dropped, false);
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
     assert_eq!(
         app.attachments,
         vec![dunce::canonicalize(&image).unwrap().display().to_string()]
@@ -27618,7 +27880,7 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
     let readme = root.join("README.md");
     std::fs::write(&readme, "# Notes\n").unwrap();
     app.notice.clear();
-    app.paste_into_prompt(&readme.display().to_string(), false);
+    app.paste_into_prompt(&readme.display().to_string(), crate::media::Uploads::No);
     assert_eq!(app.composer.text(), readme.display().to_string());
     assert!(app.notice.is_empty(), "{}", app.notice);
     assert_eq!(app.attachments.len(), 1);
@@ -27664,7 +27926,7 @@ fn a_drop_of_media_and_other_files_attaches_the_media_and_types_the_rest() {
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
 
     app.composer.set_text_split("compare ", "with the notes");
-    app.paste_into_prompt(&dropped, false);
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
     assert_eq!(
         app.attachments,
         vec![dunce::canonicalize(&image).unwrap().display().to_string()]
@@ -27684,7 +27946,7 @@ fn a_drop_of_media_and_other_files_attaches_the_media_and_types_the_rest() {
     app.notice.clear();
     app.composer.set_text("ls -l ".into());
     let short = format!("{} {} ", as_dropped(&image), as_dropped(&others[0]));
-    app.paste_into_prompt(&short, false);
+    app.paste_into_prompt(&short, crate::media::Uploads::No);
     assert!(app.attachments.is_empty());
     assert_eq!(app.composer.text(), format!("ls -l {short}"));
     assert!(app.notice.is_empty(), "{}", app.notice);
@@ -27722,14 +27984,17 @@ fn a_mixed_drop_over_a_limit_is_reported_and_kept_as_text() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
 
-    app.paste_into_prompt(&dropped, false);
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
     assert!(app.attachments.is_empty());
     assert_eq!(app.composer.expanded_text(), dropped);
     assert_eq!(app.notice, "Attach at most 8 files at once");
 
     // Media alone over the limit are refused whole, as before.
     app.composer.clear();
-    app.paste_into_prompt(&dropped[..dropped.rfind(' ').unwrap()], false);
+    app.paste_into_prompt(
+        &dropped[..dropped.rfind(' ').unwrap()],
+        crate::media::Uploads::No,
+    );
     assert!(app.composer.is_empty());
     assert_eq!(app.notice, "Attach at most 8 files at once");
 
@@ -27758,22 +28023,22 @@ fn dropping_an_attached_file_again_says_it_is_attached_already() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
 
-    app.paste_into_prompt(&as_dropped(&first), false);
+    app.paste_into_prompt(&as_dropped(&first), crate::media::Uploads::No);
     assert_eq!(app.notice, "Attached 1 file · backspace removes");
-    app.paste_into_prompt(&as_dropped(&first), false);
+    app.paste_into_prompt(&as_dropped(&first), crate::media::Uploads::No);
     assert_eq!(app.notice, "Already attached");
     assert_eq!(app.attachments.len(), 1);
     // The other files of such a drop still go in as text.
     app.paste_into_prompt(
         &format!("{} {}", as_dropped(&first), as_dropped(&readme)),
-        false,
+        crate::media::Uploads::No,
     );
     assert_eq!(app.notice, "Already attached");
     assert_eq!(app.composer.text(), as_dropped(&readme));
     // Only what is new is counted.
     app.paste_into_prompt(
         &format!("{} {}", as_dropped(&first), as_dropped(&second)),
-        false,
+        crate::media::Uploads::No,
     );
     assert_eq!(app.notice, "Attached 1 file · backspace removes");
     assert_eq!(app.attachments.len(), 2);
@@ -27782,10 +28047,10 @@ fn dropping_an_attached_file_again_says_it_is_attached_already() {
     app.attachments.clear();
     app.paste_into_prompt(
         &format!("{} {}", as_dropped(&first), as_dropped(&second)),
-        false,
+        crate::media::Uploads::No,
     );
     assert_eq!(app.notice, "2 Dateien angehängt · backspace entfernt");
-    app.paste_into_prompt(&as_dropped(&second), false);
+    app.paste_into_prompt(&as_dropped(&second), crate::media::Uploads::No);
     assert_eq!(app.notice, "Bereits angehängt");
 
     let _ = std::fs::remove_dir_all(root);

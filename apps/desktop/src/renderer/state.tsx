@@ -71,7 +71,7 @@ import {
   serverKey,
   serverProjects,
 } from "../servers";
-import { freshChat, landItems, reduceEvent, type Live } from "./sync";
+import { freshChat, landItems, reduceEvent, replacedUndo, withoutUndone, type Live } from "./sync";
 import {
   archivedByReader,
   keptTabs,
@@ -104,7 +104,7 @@ import { createProjectOverview } from "./project-overview";
 import { carryDraft } from "./draft-carry";
 import { commandBody, messageBody } from "./send-request";
 import { BACKGROUND_COMMANDS, goneKey, laterCommand, liveCommand } from "./shell-commands";
-import { checkAttachments, fileAttachments, type Attachment } from "./media";
+import { attachmentBytes, checkAttachments, fileAttachments, relayRefusal, type Attachment } from "./media";
 import type { SearchEntry } from "./search";
 import { requestedReasoning } from "./reasoning";
 import {
@@ -1889,9 +1889,40 @@ function createApp(saved?: Preferences) {
     });
     return pending;
   }
-  const addAttachments = (key: string, values: Attachment[]) =>
-    setAttachmentDraft(key, (items) => checkAttachments([...items, ...values]));
+  /** Whether the message of draft `key` goes to another of your computers,
+   * through Haarness Cloud's relay, which carries less than a server here
+   * takes. */
+  function relayedDraft(key: string) {
+    if (key.startsWith("new:")) return !!project()?.remoteHost;
+    let connection: unknown;
+    try {
+      [connection] = JSON.parse(key) as unknown[];
+    } catch {
+      return false;
+    }
+    const location =
+      state.recent.find((item) => item.id === connection) ??
+      (state.connection?.id === connection ? state.connection : undefined);
+    return !!location?.remoteHost;
+  }
+  /** Adds files to a draft. Files a message to another computer could not
+   * carry are refused as they are attached, with a quiet notice, and the
+   * draft keeps what it held. */
+  async function addAttachments(key: string, values: Attachment[]) {
+    let refused: string | undefined;
+    await setAttachmentDraft(key, (items) => {
+      const next = [...items, ...values];
+      refused = relayedDraft(key) ? relayRefusal(attachmentBytes(next)) : undefined;
+      return refused ? items : checkAttachments(next);
+    });
+    if (refused) notify(refused, "blocked");
+  }
   async function attachFiles(key: string, files: File[]) {
+    // Their sizes alone can say so, before they are read.
+    const refused = relayedDraft(key)
+      ? relayRefusal(attachmentBytes(attachmentDrafts.get(key)) + files.reduce((total, file) => total + file.size, 0))
+      : undefined;
+    if (refused) return notify(refused, "blocked");
     await addAttachments(key, await fileAttachments(files));
   }
   createEffect(() => {
@@ -2767,6 +2798,12 @@ function createApp(saved?: Preferences) {
     if (envelope.eventId <= lastCursor) return;
     lastCursor = envelope.eventId;
     for (const journal of journals) journal.push(item as T.EventEnvelope);
+    // A message sent after an undo replaces the undone turns, which the
+    // server then drops: the open chat drops them too, at once, and reads
+    // its history again, or they would show once the undo is over.
+    const undone = replacedUndo(envelope, state.threads, state.selected);
+    const replaced = !!undone;
+    if (undone) set("items", (items) => withoutUndone(items, undone, envelope.turnId!));
     reduceEvent(state, set, item as T.EventEnvelope);
     // Goals pause, block and finish on their own; the TUI shows the message
     // in its status line, and Desktop beside the goal's chat composer.
@@ -2811,9 +2848,10 @@ function createApp(saved?: Preferences) {
     if (item.type === "assets.updated" || item.type === "configuration.reloaded")
       void catalogs().catch(showError);
     if (
-      ["thread.reverted", "thread.unreverted", "thread.compacted"].includes(
-        item.type,
-      ) &&
+      (replaced ||
+        ["thread.reverted", "thread.unreverted", "thread.compacted"].includes(
+          item.type,
+        )) &&
       "threadId" in item &&
       item.threadId === state.selected
     ) {

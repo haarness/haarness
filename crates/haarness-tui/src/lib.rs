@@ -4,6 +4,7 @@ pub mod api;
 mod background;
 mod chrome;
 mod commands;
+mod compaction;
 mod config;
 mod connect;
 mod diff;
@@ -953,9 +954,18 @@ async fn run_with_client(
                                     "key handling failed"
                                 );
                                 app.notice = "Ready".into();
+                                // A server shutting down says so in the
+                                // person's language; the draft stays.
+                                let said = if crate::api::refusal_code(&error)
+                                    == Some("server_stopping")
+                                {
+                                    app.language.text(crate::api::SHUTTING_DOWN).to_owned()
+                                } else {
+                                    format!("{error:#}")
+                                };
                                 app.show_toast(
                                     Some("Error".into()),
-                                    format!("{error:#}"),
+                                    said,
                                     ToastVariant::Error,
                                     Duration::from_secs(7),
                                 );
@@ -1023,7 +1033,7 @@ async fn run_with_client(
                         if app.permission_focus {
                             app.release_permission_focus(true);
                         }
-                        app.paste_into_prompt(&text, client.uploads_attachments());
+                        app.paste_into_prompt(&text, client.uploads());
                     }
                     TerminalEvent::Mouse(mouse) => {
                         if let Some(terminal) = &mut app.terminal {
@@ -1126,14 +1136,21 @@ async fn run_with_client(
                         // partial stream against the authoritative transcript.
                         // A restarted server read its configuration afresh:
                         // its info comes with the restart, else it is read.
+                        let instance = app.server_info.as_ref().map(|info| info.server_instance_id);
                         match info {
                             Some(info) => app.adopt_server_info(*info),
                             None => app.refresh_server_info(&client, None).await,
+                        }
+                        if instance.is_some()
+                            && instance != app.server_info.as_ref().map(|info| info.server_instance_id)
+                        {
+                            app.server_restarted();
                         }
                         app.input_queue = client.input_queue(app.thread.id).await.unwrap_or_default();
                         if let Ok(items) = client.items(app.thread.id).await {
                             app.items = items;
                             app.hydrate_child_links();
+                            app.compaction_rows_loaded();
                         }
                         if let Ok(todos) = client.todos(app.thread.id).await {
                             app.todos = todos;
@@ -1319,6 +1336,8 @@ async fn run_with_client(
                 app.poll_remote_control(&client);
                 app.poll_chrome(&client);
                 app.poll_command_output(&client);
+                app.poll_compactions();
+                app.release_held(&client).await;
                 app.poll_logs();
                 if app.goal_refresh_needed && app.tick.is_multiple_of(10) {
                     hydrate_goal_snapshot(&mut app, &client).await;
@@ -1350,6 +1369,8 @@ async fn run_with_client(
         )
         .await;
     }
+    // Messages waiting for a compaction are kept as the chat's draft.
+    app.return_held();
     let draft_save = servers::save_current(&app, &client);
     event_task.abort();
     statusline_task.abort();

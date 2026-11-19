@@ -35,6 +35,19 @@ export function unrestoredReason(file: UnrestoredFile) {
       return undefined;
   }
 }
+/** Whether `item` is the stop by the provider's safety check that ended
+ * the chat's latest turn, which the server left out of later requests: its
+ * row offers to edit the message, which Undo puts back in the composer. A
+ * later turn, or one an older server stored, has nothing to offer. */
+export function editableStop(items: Item[], item: Item | undefined) {
+  if (item?.data.type !== "error" || !item.data.turn_left_out) return false;
+  return !items.some(
+    (later) =>
+      later.sequence > item.sequence &&
+      later.data.type === "user_message" &&
+      !later.data.queued,
+  );
+}
 export function lastUserMessage(items: Item[], boundary = Infinity) {
   return items.findLast(
     (item) =>

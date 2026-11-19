@@ -67,7 +67,14 @@ Tracked changes claim the file bound first, so untracked scratch in a working
 tree cannot push the work under review out of its own diff. Untracked files are
 read directly rather than through a `git diff --no-index` process per file, and
 a file whose first 8000 bytes contain a NUL is reported as `binary` instead of
-being diffed. `.gitignore`, nested ignore files and the usual excludes are
+being diffed. An untracked text file over 8 MiB, the most a review shows of
+one file, is read no further than those first bytes: it is listed as
+`uncounted`, with no line counts and no body, so a large log or dump left in
+the tree costs nothing on each refresh. Desktop's file list says "too large to
+count" in place of its counts, and the TUI's `/diff` says the same in its file
+header. The review's totals leave such files out: in Desktop a quiet info mark
+after the file count says how many ("1 not counted" when pointed at), and the
+TUI's header says it in words. `.gitignore`, nested ignore files and the usual excludes are
 honoured by the same `git ls-files --others --exclude-standard` listing as
 before.
 
@@ -122,7 +129,7 @@ the user's own configuration are emptied too.
 Creating, resetting and removing a worktree are started by the person and keep
 the repository's own filters and hooks, as Git does for any checkout.
 
-Each entry of the response is a `ReviewFile`: a `FileDiff` plus two optional,
+Each entry of the response is a `ReviewFile`: a `FileDiff` plus optional,
 defaulted fields, so the wire shape stays a superset of `FileDiff` and existing
 clients are unaffected.
 
@@ -131,6 +138,9 @@ clients are unaffected.
 - `omittedFiles` — changed paths the response does not list at all. The
   response is an array with nowhere else to put it, so every entry repeats the
   same count; a review that listed everything omits the field.
+- `uncounted` — an untracked text file too large to read for its line counts:
+  `additions` is zero rather than counted, `truncation` is `file_too_large`,
+  and there is no body. Absent for every file whose counts are real.
 
 A single-file request (`path=`) is a deferred-detail fetch and may spend the
 whole response budget on that one file.

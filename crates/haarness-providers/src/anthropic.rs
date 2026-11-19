@@ -1435,10 +1435,9 @@ pub(crate) mod tests {
             assert_eq!(reason, "refusal");
             let error = ProviderEvent::finish_error(reason).expect("a refusal is not a completion");
             assert!(matches!(error, CoreError::ProviderBlocked(_)), "{error:?}");
-            assert!(
-                error
-                    .to_string()
-                    .contains("safety check stopped this response"),
+            assert_eq!(
+                CoreError::provider_blocked_reason(&error.to_string()),
+                Some("refusal"),
                 "{error}"
             );
         }

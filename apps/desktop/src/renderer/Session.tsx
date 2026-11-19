@@ -18,7 +18,7 @@ import {
   createConversationControls,
   historyCommands,
 } from "./conversation-controls";
-import { retainedItems, unrestoredFiles } from "./conversation-history";
+import { editableStop, retainedItems, unrestoredFiles } from "./conversation-history";
 import { hookNote } from "./hook-note";
 import { UnrestoredFiles } from "./UnrestoredFiles";
 import { PromptContextControls, pasteLabel } from "./PromptContext";
@@ -1364,6 +1364,13 @@ export function Session() {
   );
   /** Each command's line by its id, which a step reading or stopping it names. */
   const lines = createMemo(() => commandLines(retainedItems(state.items, thread())));
+  /** The safety stop that ended the latest turn, whose row offers to edit
+   * the message. */
+  const stopToEdit = createMemo(() => {
+    const items = retainedItems(state.items, thread());
+    const stop = items.findLast((item) => item.data.type === "error" && item.data.turn_left_out);
+    return editableStop(items, stop) ? stop!.id : undefined;
+  });
   const commandLine = (id: string) => lines().get(id);
   /* File → Send to background (no key unless the person gives it one): the
      reply carries on without waiting for its running commands and
@@ -2720,6 +2727,11 @@ export function Session() {
                     commandLine={commandLine}
                     reply={reply(rows()[row.index])}
                     fork={() => app.run(() => fork(rows()[row.index]))}
+                    edit={
+                      rows()[row.index]?.id === stopToEdit() && !controls.disabled("undo")
+                        ? () => app.run(controls.editStopped)
+                        : undefined
+                    }
                   />
                   <replyComment.Spot item={rows()[row.index]?.id} />
                 </div>
@@ -3471,6 +3483,9 @@ function Message(props: {
   /** For a reply: whether it is its turn's last text, which carries the
    * turn's footer, and the turn's whole reply, which Copy takes. */
   reply?: { last: boolean; text: string };
+  /** For the safety stop that ended the latest turn, while Undo can take
+   * that turn back: puts its message back in the composer to edit. */
+  edit?: () => void;
 }) {
   const app = useApp();
   const content = () => props.item?.data;
@@ -3728,12 +3743,21 @@ function Message(props: {
                       }
                     </For>
                   </span>
-                  <Show when={recovery()}>
-                    <button
-                      class="inline-error-action"
-                      onClick={() => app.set("settings", recovery()!.pane)}
-                    >
-                      {t(recovery()!.label)}
+                  <Show
+                    when={props.edit}
+                    fallback={
+                      <Show when={recovery()}>
+                        <button
+                          class="inline-error-action"
+                          onClick={() => app.set("settings", recovery()!.pane)}
+                        >
+                          {t(recovery()!.label)}
+                        </button>
+                      </Show>
+                    }
+                  >
+                    <button class="inline-error-action" onClick={() => props.edit?.()}>
+                      {t("Edit and resend")}
                     </button>
                   </Show>
                 </div>
@@ -4134,8 +4158,11 @@ function Permission(props: {
           </pre>
         </Show>
         {/* Why Auto's reviewer left this to the person: one quiet line under
-            the command, there from the card's first paint, above the script. */}
+            the command, there from the card's first paint, above the script.
+            A request a hook asked about, which no reviewer sees, says so in
+            the same place. */}
         <ReviewNote review={props.review} />
+        <HookNote permission={props.permission} review={props.review} />
         <Show when={script()?.withheld ? script() : undefined}>
           {(item) => (
             <p class="approval-script-note">
@@ -4499,6 +4526,27 @@ function ReviewNote(props: { review?: T.PermissionReview | null }) {
           </Show>
         </p>
       )}
+    </Show>
+  );
+}
+
+/** That a hook asked about the request, with its reason, as one quiet line in
+ * the review note's place; nothing for any other request. A request that
+ * always asks carries only the hook's reason, not its mark. */
+function HookNote(props: { permission: T.PendingPermissionInfo; review?: T.PermissionReview | null }) {
+  return (
+    <Show when={!props.review && (props.permission.hookAsked || props.permission.hookReason)}>
+      <p class="approval-review">
+        {t("Asked by a hook")}
+        <Show when={props.permission.hookReason?.trim()}>
+          {(reason) => (
+            <>
+              {": "}
+              <bdi>{reason()}</bdi>
+            </>
+          )}
+        </Show>
+      </p>
     </Show>
   );
 }

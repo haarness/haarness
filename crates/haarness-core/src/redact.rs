@@ -599,13 +599,14 @@ pub fn text(text: &str) -> String {
     // apart with them) or a lone `--`, past the assignments, the shell's
     // words that open a command (`if`, `do`, `then` …) and the wrappers
     // before it (`sudo -u x`, `env`, `timeout 5`, `nice -n 5`, `watch -n 5`,
-    // `docker exec -it <container>`, `docker compose run <service>`,
-    // `docker run <image>`, `ssh <host>` …), each from any folder, and the
-    // program's folder. Never a word's value, such as `--name mysql`.
+    // `arch -arm64`, `docker exec -it <container>`, `docker compose run
+    // <service>`, `docker run <image>`, `ssh <host>` …), each from any
+    // folder, and the program's folder. Never a word's value, such as
+    // `--name mysql`.
     const AT: &str = concat!(
         r#"((?:^|[;&|(){}`!\n]|\$\(|["':]|[ \t]{2}|[ \t]--[ \t])[ \t]*(?:(?:"#,
         r#"[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|if|then|else|elif|do|while|until|(?:[^\s;&|'"]*/)?(?:"#,
-        r#"(?:sudo|doas|env|nohup|nice|time|exec|command|builtin|xargs|stdbuf|caffeinate|setsid|ionice|chrt|taskset|watch)(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*"#,
+        r#"(?:sudo|doas|env|nohup|nice|time|exec|command|builtin|xargs|stdbuf|caffeinate|arch|setsid|ionice|chrt|taskset|watch)(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*"#,
         r#"|g?timeout(?:[ \t]+-[^\s;&|]+)*[ \t]+[^\s;&|]+"#,
         r#"|(?:(?:docker|podman|nerdctl)(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*(?:[ \t]+(?:compose|container))?|docker-compose|podman-compose)"#,
         r#"(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*[ \t]+(?:exec|run)(?:[ \t]+-[^\s;&|]+(?:[ \t]+[^\s;&|-][^\s;&|]*)?)*[ \t]+[^\s;&|-][^\s;&|]*"#,
@@ -2103,6 +2104,14 @@ mod tests {
             (
                 "sudo -u mysql mysql -pPRIVATE",
                 "sudo -u mysql mysql -p[redacted]",
+            ),
+            (
+                "arch -arm64 mysql -pPRIVATE",
+                "arch -arm64 mysql -p[redacted]",
+            ),
+            (
+                "arch -x86_64 -e A=1 redis-cli -a PRIVATE ping",
+                "arch -x86_64 -e A=1 redis-cli -a [redacted] ping",
             ),
             (
                 "kubectl exec -it db -- mysql -pPRIVATE",

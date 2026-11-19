@@ -79,6 +79,7 @@ import PanelLeft from "lucide-solid/icons/panel-left";
 import PanelRight from "lucide-solid/icons/panel-right";
 import Paperclip from "lucide-solid/icons/paperclip";
 import ImageIcon from "lucide-solid/icons/image";
+import Info from "lucide-solid/icons/info";
 import Pencil from "lucide-solid/icons/pencil";
 import Pin from "lucide-solid/icons/pin";
 import PinOff from "lucide-solid/icons/pin-off";
@@ -207,6 +208,8 @@ const catalog = {
   mic: Mic,
   jump: ArrowDown,
   alert: TriangleAlert,
+  /** A quiet note on something, read by pointing at it. */
+  info: Info,
   error: CircleAlert,
   question: CircleHelp,
   external: ArrowUpRight,

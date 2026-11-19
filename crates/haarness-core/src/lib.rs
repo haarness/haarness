@@ -11,11 +11,14 @@ pub mod chat_folders;
 pub mod chat_temp;
 mod config;
 pub mod definitions;
+pub mod envelope;
 mod events;
 mod execution;
+pub mod glob_braces;
 mod goal;
 mod image_budget;
 pub mod images;
+mod inert_text;
 pub mod instructions;
 pub mod links;
 pub mod made_paths;
@@ -52,7 +55,7 @@ pub use background::{BackgroundHandoff, BackgroundProbe};
 pub use background_commands::{
     BACKGROUND_FILE_PREFIX, CommandOutput, CommandProcess, CommandRequest, CommandRun,
     OUTPUT_SAVED_LIMIT, OUTPUT_TAIL_KEPT, OutputPage, ProcessControl, ProcessEnd, ShellCall,
-    StopSignal, spoken_duration, whole_end, whole_start,
+    StopSignal, output_reference, spoken_duration, whole_end, whole_start,
 };
 pub use config::{CompactionSettings, CustomAgent, OutputStyle, RuntimeConfig};
 pub use events::{
@@ -73,8 +76,9 @@ pub use ports::*;
 pub use prompts::{PromptFile, PromptMode, PromptName, Prompts};
 pub use runtime::{
     AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, FailureKind, PROMPT_BLOCKED,
-    ResourceMentionPolicy, SUBAGENT_TASK_DESCRIPTION, StaticProviderRegistry, is_stream_cut,
-    prompt_blocked, refusal_reason, shorten_title, webfetch_address, webfetch_redirect_verdict,
+    ResourceMentionPolicy, SUBAGENT_TASK_DESCRIPTION, StaticProviderRegistry, embedded_ipv4,
+    is_stream_cut, prompt_blocked, refusal_reason, shorten_title, webfetch_address,
+    webfetch_redirect_verdict,
 };
 pub use stream_limits::{
     DEFAULT_RESPONSE_TOTAL, DEFAULT_STREAM_IDLE, StreamLimits, response_timeout, stream_stall,
@@ -123,6 +127,14 @@ pub const UNREAD_WHILE_WORKING: &str =
 /// `haarness run --session` or an editor over ACP sending to a chat busy
 /// elsewhere.
 pub const CHAT_BUSY: &str = "This chat already has a turn running, started in another window or run. It takes a new message once that turn finishes or is stopped.";
+
+/// Why a server that has begun to shut down refuses a new turn (with
+/// [`haarness_protocol::RefusalReason::ServerStopping`]), as the notice of a
+/// background result it keeps names it.
+pub const SERVER_STOPPING: &str = "Haarness is shutting down";
+
+/// What a request the shutdown refused answers: why, and what to do.
+pub const SERVER_STOPPING_RETRY: &str = "Haarness is shutting down. Send it again in a moment.";
 
 /// Why the server refuses to let a chat's agents do more without asking when
 /// the change comes from a program that runs for an agent (an agent's

@@ -199,14 +199,20 @@ async fn spawn(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let (path, file) = crate::data_folder::new_private_file(directory, "tool")
-        .await
-        .map_err(|e| {
-            CoreError::Tool(format!(
-                "The command did not start: Haarness could not make a file for its output in {} ({e}). Free some disk space there, or check that its folder can be written.",
-                directory.display()
-            ))
-        })?;
+    // A full disk or a folder that cannot be written does not stop the
+    // command (`df -h` is what finds the space to free): its output is then
+    // kept in memory alone.
+    let output = match crate::data_folder::new_private_file(directory, "tool").await {
+        Ok((path, file)) => CommandOutput::new(path, file, save_limit),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                folder = %directory.display(),
+                "a command's output file could not be made; its output is kept in memory only"
+            );
+            CommandOutput::without_file(directory.to_path_buf(), &error)
+        }
+    };
     let mut command = Command::from(command);
     command.kill_on_drop(true);
     let mut command = process_wrap::tokio::CommandWrap::from(command);
@@ -238,7 +244,7 @@ async fn spawn(
     let recorded = haarness_core::process_groups::recorded(Some(leader));
     let stdout = child.stdout().take().expect("piped stdout");
     let stderr = child.stderr().take().expect("piped stderr");
-    let output = Arc::new(CommandOutput::new(path, file, save_limit));
+    let output = Arc::new(output);
     let stats = Arc::new(parking_lot::Mutex::new(Stats::default()));
     let control = Arc::new(GroupControl {
         leader,
@@ -384,17 +390,14 @@ async fn pump(mut pump: Pump) {
         } else {
             err_characters.push(bytes)
         };
-        if let Err(error) = pump.output.append(&whole).await {
-            failure = Some(error.to_string());
-            break;
-        }
+        // A write its file refuses (a full disk) leaves the output in
+        // memory; the command runs on.
+        pump.output.append(&whole).await;
     }
     for rest in [out_characters.finish(), err_characters.finish()] {
-        let _ = pump.output.append(&rest).await;
+        pump.output.append(&rest).await;
     }
-    if let Err(error) = pump.output.finish().await {
-        failure.get_or_insert(error.to_string());
-    }
+    pump.output.finish().await;
     if failure.is_some() || status.is_none() {
         pump.control.signal(StopSignal::Kill);
     }
@@ -480,8 +483,8 @@ pub(crate) async fn run(
         biased;
         () = cancel.cancelled() => Err(CoreError::Cancelled),
         () = deadline => Err(CoreError::Tool(format!(
-            "command timed out after {timeout_ms} ms; output saved to {}",
-            process.output.path().display()
+            "command timed out after {timeout_ms} ms; {}",
+            haarness_core::output_reference(&process.output)
         ))),
         ended = end.wait_for(Option::is_some) => {
             Ok(ended.ok().and_then(|ended| ended.clone()).unwrap_or_default())
@@ -567,7 +570,8 @@ pub(crate) async fn run_call(
 }
 
 /// The result of a command that ended while its call waited: its exit code
-/// and the end of its output, with all of it in a file when that is cut.
+/// and the end of its output, with all of it in a file when that is cut (or
+/// why no file could hold it).
 async fn ended_output(
     spawned: &Spawned,
     end: &ProcessEnd,
@@ -605,7 +609,18 @@ async fn ended_output(
     if stdout_cut {
         metadata["stdoutCut"] = json!(true);
     }
-    let notice = if truncated || stdout_cut {
+    let notice = if let Some((folder, error)) = output.save_failure() {
+        // No file holds it: the end shown is all there is, and the note
+        // says why.
+        if truncated {
+            format!(
+                "Saving its full output in {} failed ({error}); only its end is shown.\n",
+                folder.display()
+            )
+        } else {
+            String::new()
+        }
+    } else if truncated || stdout_cut {
         metadata["outputPath"] = json!(output.path());
         if saved < total {
             metadata["outputSavedBytes"] = json!(saved);
@@ -930,6 +945,79 @@ mod tests {
         );
         // Its end is still what the command shows.
         assert!(output.text.ends_with("0123456789"), "{:.200}", output.text);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_command_whose_output_cannot_be_saved_runs_and_shows_its_end() {
+        let root = fixture();
+        // The output folder would be under a file, so nothing can be saved
+        // there, as on a full disk.
+        std::fs::write(root.join("blocked"), "").unwrap();
+        let folder = root.join("blocked/tool-output");
+        let run_here = |command: &'static str, timeout_ms: u64| {
+            let (root, folder) = (root.clone(), folder.clone());
+            async move {
+                run(
+                    command,
+                    &root,
+                    timeout_ms,
+                    &CancellationToken::new(),
+                    &folder,
+                    &BTreeMap::new(),
+                    None,
+                    None,
+                )
+                .await
+            }
+        };
+        // Short output is all there: nothing to say.
+        let short = run_here("printf 'Filesystem Use%%\\n/dev/disk1 100%%\\n'", 0)
+            .await
+            .unwrap();
+        assert_eq!(short.text, "exit: 0\nFilesystem Use%\n/dev/disk1 100%\n");
+        assert!(
+            short.metadata.get("outputPath").is_none(),
+            "{}",
+            short.metadata
+        );
+        // Long output shows its end, and why there is no file.
+        let long = run_here(
+            "awk 'BEGIN {for(i=0;i<50000;i++) print i}'; exit 3",
+            600_001,
+        )
+        .await
+        .unwrap();
+        assert_eq!(long.metadata["exit"], 3);
+        assert_eq!(long.metadata["truncated"], true);
+        assert!(
+            long.metadata.get("outputPath").is_none(),
+            "{}",
+            long.metadata
+        );
+        let notice = format!(
+            "exit: 3\nSaving its full output in {} failed (",
+            folder.display()
+        );
+        assert!(long.text.starts_with(&notice), "{:.300}", long.text);
+        assert!(
+            long.text.contains("); only its end is shown.\n") && long.text.ends_with("\n49999"),
+            "{:.300}",
+            long.text
+        );
+        // A deadline names what it printed last instead of a file.
+        let error = run_here("printf 'started\\n'; sleep 30", 1_500)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "command timed out after 1500 ms; saving its output in {} failed (",
+                folder.display()
+            )) && error.ends_with("the end of what it printed:\nstarted"),
+            "{error}"
+        );
+        assert!(root.join("blocked").is_file());
         std::fs::remove_dir_all(root).unwrap();
     }
 

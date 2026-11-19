@@ -147,7 +147,10 @@ impl FailureKind {
         {
             return Self::Internal;
         }
-        if lower.starts_with("the provider's safety check stopped this response") {
+        // Its words now, and as older builds stored them.
+        if lower.starts_with(&crate::PROVIDER_BLOCKED.to_ascii_lowercase())
+            || lower.starts_with("the provider's safety check stopped this response")
+        {
             return Self::Blocked;
         }
 
