@@ -12,7 +12,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { sizePusher } from "./terminal-size";
 import { optionKeys } from "./terminal-keys";
-import { terminalTheme, type ThemeId } from "../themes";
+import { TERMINAL_MINIMUM_CONTRAST, terminalTheme, type ThemeId } from "../themes";
 import {
   clearPoints,
   inputQueue,
@@ -386,6 +386,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       fontSize: app.state.preferences.terminalFontSize,
       cursorBlink: true,
       scrollback: SCROLLBACK,
+      minimumContrastRatio: TERMINAL_MINIMUM_CONTRAST,
       allowProposedApi: false,
     });
     fit = new FitAddon();

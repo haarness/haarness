@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { SELECTION_SHARE, terminalTheme, themes, themeColors } from "../src/themes";
+import { SELECTION_SHARE, TERMINAL_MINIMUM_CONTRAST, terminalTheme, themes, themeColors } from "../src/themes";
 
 function luminance(hex: string) {
   const channels = [1, 3, 5].map(
@@ -50,6 +50,12 @@ test("terminal black is dark and white light in every palette, so black text sta
     }
 });
 
+/** The sixteen colours a program picks from. */
+const ansi = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"].flatMap((name) => [
+  name,
+  "bright" + name[0].toUpperCase() + name.slice(1),
+]);
+
 test("text selected in the terminal is marked as selected text is everywhere else, and stands out from the page", () => {
   // The app's selection: the primary colour mixed at this share.
   const css = readFileSync(new URL("../src/renderer/base.css", import.meta.url), "utf8");
@@ -86,6 +92,35 @@ test("text selected in the terminal is marked as selected text is everywhere els
       const selected = over(colors.background, colors.selectionBackground);
       // It was about 1.2:1, hard to find on the page.
       assert.ok(contrast(selected, colors.background) >= 1.5, `${name}: selection on the page`);
-      assert.ok(contrast(colors.foreground, selected) >= 4.5, `${name}: text on the selection`);
+      // Every colour a program writes in reads on it: xterm draws selected
+      // text in the selection's own text colour when the theme has one.
+      const drawn: Record<string, string> = colors;
+      for (const role of ["foreground", ...ansi])
+        assert.ok(
+          contrast(colors.selectionForeground ?? drawn[role], selected) >= 4.5,
+          `${name}: ${role} text on the selection`,
+        );
+    }
+});
+
+test("terminal text never vanishes on the page, and cyan is a teal of its own", () => {
+  // xterm lightens or darkens text below this contrast with what is behind
+  // it (black on the dark page, white on the light one); the view sets it.
+  assert.equal(TERMINAL_MINIMUM_CONTRAST, 4.5);
+  const view = readFileSync(new URL("../src/renderer/Terminal.tsx", import.meta.url), "utf8");
+  assert.match(view, /minimumContrastRatio: TERMINAL_MINIMUM_CONTRAST,/);
+  const contrast = (x: string, y: string) => {
+    const a = luminance(x),
+      b = luminance(y);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  };
+  for (const theme of themes)
+    for (const mode of ["light", "dark"] as const) {
+      const colors = terminalTheme(theme.id, mode);
+      const name = `${theme.name} ${mode}`;
+      assert.equal(colors.brightCyan, colors.cyan, name);
+      for (const other of ["foreground", "green", "blue"] as const)
+        assert.notEqual(colors.cyan, colors[other], `${name}: cyan is ${other}`);
+      assert.ok(contrast(colors.cyan, colors.background) >= 4.5, `${name}: cyan on the page`);
     }
 });
