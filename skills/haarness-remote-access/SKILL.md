@@ -53,6 +53,7 @@ Read [the live script](../../scripts/test-remote-live.py) before running. It is 
 
 - Discovery/hidden files, published root/children and denied siblings/host/terminal operations.
 - 10 MiB binary equality, 200 reads at concurrency 20, 48 held streams beside a request (no per-host cap), then reader cleanup.
+- A 13 MiB attachment refused with Cloud's `413 payload_too_large` while the computer stays connected, and a 10 MiB file sent while the proxy slows Cloud's side to 768 KiB/s arriving whole on one connection (Cloud's send deadline, lease and the connector's silence all hold).
 - Approved work completing through a disconnect without duplicate effects; project close/reopen and native daemon replacement with fresh endpoint/token discovery.
 - PTY idle keepalive beyond 40 seconds, Python sync/async and TypeScript HTTP/events/PTYs.
 - Session-only publication forgery denial and CLI enable/status/disable/forget/fresh registration.

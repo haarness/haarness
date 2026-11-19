@@ -51,12 +51,14 @@ def project_folder(name):
 class Proxy:
     """Loopback TCP proxy in front of Cloud. `cut` drops every connection and
     refuses new ones, as a network change or a Cloud restart does, while the
-    processes behind it keep running; `resume` lets them back in."""
+    processes behind it keep running; `resume` lets them back in. `rate`
+    (bytes a second), when set, slows what Cloud sends, as a slow link does."""
 
     def __init__(self, upstream):
         self.upstream = (upstream.host, upstream.port)
         self.lock = threading.Lock()
         self.open = set()
+        self.rate = None
         probe = net.socket()
         probe.bind(("127.0.0.1", 0))
         self.port = probe.getsockname()[1]
@@ -87,15 +89,17 @@ class Proxy:
                 continue
             with self.lock:
                 self.open.update((client, server))
-            for source, sink in ((client, server), (server, client)):
+            for source, sink, down in ((client, server, False), (server, client, True)):
                 threading.Thread(
-                    target=self._pipe, args=(source, sink), daemon=True
+                    target=self._pipe, args=(source, sink, down), daemon=True
                 ).start()
 
-    def _pipe(self, source, sink):
+    def _pipe(self, source, sink, down):
         try:
-            while data := source.recv(65536):
+            while data := source.recv(16384 if down and self.rate else 65536):
                 sink.sendall(data)
+                if down and self.rate:
+                    time.sleep(len(data) / self.rate)
         except OSError:
             pass
         finally:
@@ -961,6 +965,61 @@ try:
         and base64.b64decode(downloaded["content"]) == binary
     )
     proof("10 MiB binary upload/read across bounded relay chunks")
+
+    def pdf(mib):
+        """A message carrying a PDF of `mib` MiB, as Desktop or a phone sends it."""
+        data = b"%PDF-1.4\n" + bytes(mib * 1024 * 1024 - 9)
+        return {
+            "requestId": str(uuid.uuid4()),
+            "text": f"A {mib} MiB scan",
+            "attachments": [
+                "data:application/pdf;name=scan.pdf;base64,"
+                + base64.b64encode(data).decode()
+            ],
+        }
+
+    # More than Cloud relays is refused in plain words before the computer
+    # hears of it, and the computer stays connected.
+    seen = (ROOT / "connector.log").stat().st_size
+    try:
+        runtime.start_turn(a["id"], pdf(13), options={"timeout": 90})
+    except ApiError as error:
+        assert (error.status, error.code) == (413, "payload_too_large"), (
+            error.status,
+            error.code,
+        )
+        assert "16 MiB" in str(error) and not error.retryable, str(error)
+    else:
+        raise AssertionError("a 13 MiB attachment went through the relay")
+    assert cloud.get_remote_host(hid)["connected"]
+    assert runtime.get_thread(a["id"])["id"] == a["id"]
+    proof("a 13 MiB attachment is refused with 413 in plain words; the computer stays up")
+    # A large request over a slow link (a 10 MiB file: its relay frame is
+    # about 18 MB, at 768 KiB/s) arrives whole, and the connection holds
+    # meanwhile: neither Cloud's send nor the connector's silence takes it
+    # for a dead relay.
+    slow = bytes(reversed(binary))
+    proxy.rate = 768 * 1024
+    try:
+        started = time.monotonic()
+        runtime.write_file(
+            {
+                "path": "slow-upload.bin",
+                "content": base64.b64encode(slow).decode(),
+                "encoding": "base64",
+                "revision": empty,
+            },
+            options={"timeout": 180},
+        )
+        took = time.monotonic() - started
+    finally:
+        proxy.rate = None
+    assert took > 12, took
+    assert base64.b64decode(runtime.read_file({"path": "slow-upload.bin"})["content"]) == slow
+    assert cloud.get_remote_host(hid)["connected"]
+    ended = (ROOT / "connector.log").read_text()[seen:]
+    assert "Remote connection ended" not in ended, ended[-2000:]
+    proof(f"a 10 MiB file over a slow link arrives whole in {took:.0f} s on one connection")
 
     def concurrent(n):
         return runtime.get_thread(a["id"] if n % 2 else b["id"])["id"]
