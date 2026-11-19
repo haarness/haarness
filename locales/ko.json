@@ -2911,6 +2911,7 @@
   "Attached 1 file · backspace removes": "파일 1개 첨부됨 · backspace로 제거",
   "Attached {count} files · backspace removes": "파일 {count}개 첨부됨 · backspace로 제거",
   "Already attached": "이미 첨부됨",
+  "Attach at most {count} files at once": "한 번에 최대 {count}개 파일까지 첨부 가능",
   "It rated this action critical risk.": "이 작업을 치명적 위험으로 평가했습니다.",
   "It rated this action low risk, and your messages do not clearly ask for it.": "이 작업을 낮은 위험으로 평가했고, 메시지에서 명확히 요청하지 않았습니다.",
   "It rated this action medium risk, and your messages do not clearly ask for it.": "이 작업을 중간 위험으로 평가했고, 메시지에서 명확히 요청하지 않았습니다.",

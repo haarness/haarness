@@ -2911,6 +2911,7 @@
   "Attached 1 file · backspace removes": "1 fichier joint · backspace pour retirer",
   "Attached {count} files · backspace removes": "{count} fichiers joints · backspace pour retirer",
   "Already attached": "Déjà joint",
+  "Attach at most {count} files at once": "Joignez au plus {count} fichiers à la fois",
   "It rated this action critical risk.": "Elle a jugé cette action à risque critique.",
   "It rated this action low risk, and your messages do not clearly ask for it.": "Elle a jugé cette action à risque faible, et vos messages ne la demandent pas clairement.",
   "It rated this action medium risk, and your messages do not clearly ask for it.": "Elle a jugé cette action à risque moyen, et vos messages ne la demandent pas clairement.",

@@ -2911,6 +2911,7 @@
   "Attached 1 file · backspace removes": "Priložena 1 datoteka · backspace uklanja",
   "Attached {count} files · backspace removes": "Priložene datoteke: {count} · backspace uklanja",
   "Already attached": "Već priloženo",
+  "Attach at most {count} files at once": "Najveći broj datoteka odjednom: {count}",
   "It rated this action critical risk.": "Ocijenio je ovu radnju kritično rizičnom.",
   "It rated this action low risk, and your messages do not clearly ask for it.": "Ocijenio je ovu radnju niskim rizikom, a vaše poruke je jasno ne traže.",
   "It rated this action medium risk, and your messages do not clearly ask for it.": "Ocijenio je ovu radnju srednjim rizikom, a vaše poruke je jasno ne traže.",

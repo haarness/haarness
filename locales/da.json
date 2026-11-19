@@ -2911,6 +2911,7 @@
   "Attached 1 file · backspace removes": "1 fil vedhæftet · backspace fjerner",
   "Attached {count} files · backspace removes": "{count} filer vedhæftet · backspace fjerner",
   "Already attached": "Allerede vedhæftet",
+  "Attach at most {count} files at once": "Vedhæft højst {count} filer ad gangen",
   "It rated this action critical risk.": "Den vurderede handlingen som kritisk risiko.",
   "It rated this action low risk, and your messages do not clearly ask for it.": "Den vurderede handlingen som lav risiko, og dine beskeder beder ikke tydeligt om den.",
   "It rated this action medium risk, and your messages do not clearly ask for it.": "Den vurderede handlingen som mellem risiko, og dine beskeder beder ikke tydeligt om den.",

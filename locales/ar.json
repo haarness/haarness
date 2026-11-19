@@ -2911,6 +2911,7 @@
   "Attached 1 file · backspace removes": "أُرفق ملف واحد · backspace للإزالة",
   "Attached {count} files · backspace removes": "الملفات المرفقة: {count} · backspace للإزالة",
   "Already attached": "مرفق بالفعل",
+  "Attach at most {count} files at once": "الحد الأقصى للملفات المرفقة دفعة واحدة: {count}",
   "It rated this action critical risk.": "قيّمت هذا الإجراء بأنه بالغ الخطورة.",
   "It rated this action low risk, and your messages do not clearly ask for it.": "قيّمت هذا الإجراء بأنه منخفض الخطورة، ورسائلك لا تطلبه بوضوح.",
   "It rated this action medium risk, and your messages do not clearly ask for it.": "قيّمت هذا الإجراء بأنه متوسط الخطورة، ورسائلك لا تطلبه بوضوح.",

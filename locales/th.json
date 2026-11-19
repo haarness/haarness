@@ -2911,6 +2911,7 @@
   "Attached 1 file · backspace removes": "แนบ 1 ไฟล์แล้ว · backspace เพื่อลบ",
   "Attached {count} files · backspace removes": "แนบ {count} ไฟล์แล้ว · backspace เพื่อลบ",
   "Already attached": "แนบไว้แล้ว",
+  "Attach at most {count} files at once": "แนบได้สูงสุดครั้งละ {count} ไฟล์",
   "It rated this action critical risk.": "ประเมินการดำเนินการนี้ว่ามีความเสี่ยงร้ายแรง",
   "It rated this action low risk, and your messages do not clearly ask for it.": "ประเมินการดำเนินการนี้ว่ามีความเสี่ยงต่ำ และข้อความของคุณไม่ได้ขออย่างชัดเจน",
   "It rated this action medium risk, and your messages do not clearly ask for it.": "ประเมินการดำเนินการนี้ว่ามีความเสี่ยงปานกลาง และข้อความของคุณไม่ได้ขออย่างชัดเจน",

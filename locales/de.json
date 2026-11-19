@@ -2911,6 +2911,7 @@
   "Attached 1 file · backspace removes": "1 Datei angehängt · backspace entfernt",
   "Attached {count} files · backspace removes": "{count} Dateien angehängt · backspace entfernt",
   "Already attached": "Bereits angehängt",
+  "Attach at most {count} files at once": "Höchstens {count} Dateien auf einmal anhängen",
   "It rated this action critical risk.": "Es hat diese Aktion als kritisches Risiko eingestuft.",
   "It rated this action low risk, and your messages do not clearly ask for it.": "Es hat diese Aktion als geringes Risiko eingestuft, und deine Nachrichten verlangen sie nicht eindeutig.",
   "It rated this action medium risk, and your messages do not clearly ask for it.": "Es hat diese Aktion als mittleres Risiko eingestuft, und deine Nachrichten verlangen sie nicht eindeutig.",

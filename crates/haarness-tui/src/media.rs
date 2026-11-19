@@ -241,7 +241,10 @@ fn attachable(
     uploads: bool,
 ) -> Result<Vec<String>, String> {
     if candidates.len() > MAX_ATTACHMENTS {
-        return Err(format!("Attach at most {MAX_ATTACHMENTS} files at once"));
+        return Err(language.format(
+            "Attach at most {count} files at once",
+            &[("count", &MAX_ATTACHMENTS.to_string())],
+        ));
     }
     // Counted as the server counts the message, what is attached already
     // included. Images are left out: it shrinks each to a few MB, so only
@@ -845,6 +848,13 @@ mod tests {
                 keep_text: true,
             })
         );
+        // The count is said in the interface language.
+        let german = paths_from_paste(&nine, &[], Language::German, false).unwrap_err();
+        assert_eq!(
+            german.reason,
+            Language::German.format("Attach at most {count} files at once", &[("count", "8")])
+        );
+        assert_ne!(german.reason, "Attach at most 8 files at once");
 
         let _ = std::fs::remove_dir_all(root);
     }

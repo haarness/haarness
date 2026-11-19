@@ -2911,6 +2911,7 @@
   "Attached 1 file · backspace removes": "1 dosya eklendi · backspace kaldırır",
   "Attached {count} files · backspace removes": "{count} dosya eklendi · backspace kaldırır",
   "Already attached": "Zaten ekli",
+  "Attach at most {count} files at once": "Tek seferde en fazla {count} dosya ekleyin",
   "It rated this action critical risk.": "Bu eylemi kritik risk olarak değerlendirdi.",
   "It rated this action low risk, and your messages do not clearly ask for it.": "Bu eylemi düşük risk olarak değerlendirdi ve mesajlarınız bunu açıkça istemiyor.",
   "It rated this action medium risk, and your messages do not clearly ask for it.": "Bu eylemi orta risk olarak değerlendirdi ve mesajlarınız bunu açıkça istemiyor.",

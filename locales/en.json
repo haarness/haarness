@@ -2911,6 +2911,7 @@
   "Attached 1 file · backspace removes": "Attached 1 file · backspace removes",
   "Attached {count} files · backspace removes": "Attached {count} files · backspace removes",
   "Already attached": "Already attached",
+  "Attach at most {count} files at once": "Attach at most {count} files at once",
   "It rated this action critical risk.": "It rated this action critical risk.",
   "It rated this action low risk, and your messages do not clearly ask for it.": "It rated this action low risk, and your messages do not clearly ask for it.",
   "It rated this action medium risk, and your messages do not clearly ask for it.": "It rated this action medium risk, and your messages do not clearly ask for it.",

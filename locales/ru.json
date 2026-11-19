@@ -2911,6 +2911,7 @@
   "Attached 1 file · backspace removes": "Прикреплён 1 файл · backspace удаляет",
   "Attached {count} files · backspace removes": "Прикреплено файлов: {count} · backspace удаляет",
   "Already attached": "Уже прикреплено",
+  "Attach at most {count} files at once": "Максимум файлов за раз: {count}",
   "It rated this action critical risk.": "Действие оценено как критически рискованное.",
   "It rated this action low risk, and your messages do not clearly ask for it.": "Действие оценено как малорискованное, а ваши сообщения явно его не просят.",
   "It rated this action medium risk, and your messages do not clearly ask for it.": "Действие оценено как среднего риска, а ваши сообщения явно его не просят.",
