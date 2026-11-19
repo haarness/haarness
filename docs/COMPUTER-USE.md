@@ -10,7 +10,7 @@ The feature exists only on macOS, in builds that embed the helper (all macOS rel
 
 ## Switching it on
 
-- **Desktop:** open **Settings → Computer use**, read the terms, tick **I have read and agree to these terms** and press **Agree and turn on**. When the person agreed to an earlier version of the terms, one quiet line beside the agreement says so, and agreeing again is the same single step. Then grant **Accessibility** and **Screen Recording** from the **macOS permissions** rows: the first press brings up macOS's own prompts, later presses open the matching System Settings page.
+- **Desktop:** open **Settings → Computer use** and switch on **Agents may use this Mac**. Then grant **Accessibility** and **Screen Recording** from the **macOS permissions** rows: the first press brings up macOS's own prompts, later presses open the matching System Settings page.
 - **Terminal UI:** `/mac` opens the same choices as a server-authored view. It is listed on macOS only.
 - **CLI:** `haarness mac on` switches it on; `haarness mac permissions` raises the macOS prompts and opens System Settings.
 

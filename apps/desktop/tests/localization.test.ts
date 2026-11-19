@@ -328,7 +328,6 @@ test("keys translated through a variable are in the catalog", () => {
     "Screen Recording", "Required for screenshots. Agents can still read apps without it, just not see them.",
     "Apps without a rule", "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.",
     "Mark each click on screen", "A ring marks the spot for a moment before each click.",
-    "Terms for computer use", "You agree to these before agents use this Mac.",
     // Settings navigation and search titles.
     ...Object.values(settingsTitles),
     ...settingsSections.map(([section]) => section),

@@ -78,7 +78,6 @@ export const settingsControls = [
   ["computer", "Apps without a rule", "ask allow default approval apps"],
   ["computer", "Mark each click on screen", "ring marker pointer click highlight"],
   ["computer", "App rules", "allow ask never deny bundle identifier apps"],
-  ["computer", "Terms for computer use", "agree agreement withdraw terms"],
   ["general", "Turn completion notifications", "task finished failed alerts always never unfocused background"],
   ["general", "Permission notifications", "approval needed alerts notify"],
   ["general", "Question notifications", "input answer needed alerts notify"],
@@ -123,7 +122,6 @@ export const macOnlyControls: ReadonlySet<string> = new Set([
   "Apps without a rule",
   "Mark each click on screen",
   "App rules",
-  "Terms for computer use",
 ]);
 /** Sections Settings lists on macOS only. */
 export const macOnlySections: ReadonlySet<string> = new Set(["computer"]);
