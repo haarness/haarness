@@ -316,6 +316,15 @@ export function themeColors(id: ThemeId, appearance: Appearance): Colors {
   };
 }
 
+/** Selected text: the primary colour at 30%, as `::selection` mixes it in
+ * base.css. The terminal takes it as a colour of its own, since xterm reads
+ * no CSS mixes. */
+export const SELECTION_SHARE = 0.3;
+function selectionColor(colors: Colors) {
+  const alpha = Math.round(SELECTION_SHARE * 255).toString(16).padStart(2, "0");
+  return colors.primary.slice(0, 7) + alpha;
+}
+
 /**
  * The terminal's colours, from the palette's roles. Programs take ANSI black
  * to be dark and white to be light whatever the background: a program that
@@ -332,7 +341,7 @@ export function terminalTheme(id: ThemeId, appearance: Appearance) {
     background: colors.page,
     foreground: colors.text,
     cursor: colors.primary,
-    selectionBackground: colors.selected,
+    selectionBackground: selectionColor(colors),
     black,
     brightBlack: colors.muted,
     red: colors.danger,
