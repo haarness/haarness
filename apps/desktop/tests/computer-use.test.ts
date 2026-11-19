@@ -19,6 +19,7 @@ import { describeTool, toolActivity, toolInput } from "../src/renderer/transcrip
 import { readToolImage, screenToolImage } from "../src/renderer/project-images";
 import { canAutoApprove } from "../src/renderer/approval-mode";
 import { toolGroups } from "../src/renderer/settings-lists";
+import { settingsControls, settingsKeywords } from "../src/renderer/settings-catalog";
 import { dictionaries } from "../src/localization";
 
 const root = "/Users/sam/work/app";
@@ -328,4 +329,19 @@ test("the switch turns computer use on and off in one step, accepting an earlier
   const earlier = { terms: { version: "2", accepted: false } };
   assert.deepEqual(switchRequest(earlier, true), { action: "accept", version: "2" });
   assert.deepEqual(switchRequest(earlier, false), { action: "enable", enabled: false });
+});
+
+test("Settings search finds no terms, agreement or withdrawal under Computer use", () => {
+  const words = [
+    settingsKeywords.computer,
+    ...settingsControls.filter(([section]) => section === "computer").flatMap(([, title, keywords]) => [title, keywords]),
+  ].join(" ");
+  assert.doesNotMatch(words, /terms|agree|withdraw/i);
+});
+
+test("the catalogs keep no sentence of the computer use terms", () => {
+  const leftovers = Object.keys(dictionaries.en).filter((key) =>
+    /your responsibility|these terms|Withdraw agreement|Terms for computer use|Agree and turn on|Use it for$/.test(key),
+  );
+  assert.deepEqual(leftovers, []);
 });

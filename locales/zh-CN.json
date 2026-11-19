@@ -3101,7 +3101,6 @@
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "另一位用户正在这台 Mac 的屏幕上登录，因此智能体无法从此账户使用它。",
   "Use a bundle identifier like com.apple.TextEdit.": "请使用 Bundle ID，例如 com.apple.TextEdit。",
   "Needed to read app contents and to click, type and press keys.": "读取应用内容以及点击、输入和按键时需要。",
-  "An agent asks before acting in an app you haven't allowed, except in a chat set to Yolo, which approves everything. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "智能体在你未允许的应用中操作前会先询问，设为 Yolo 的对话除外，Yolo 会批准一切。你允许某个应用后，智能体会在其中直接操作，其所作所为仍由你负责。",
   "Always allow {app}": "始终允许{app}",
   "Agents won't ask before using {app} again, in any chat. You can change this in Settings → Computer use.": "此后在任何对话中，智能体使用{app}前都不会再询问。可在 设置 → 电脑操控 中更改。",
   "Click {target} in {app}": "在{app}中点按{target}",

@@ -33,7 +33,7 @@ export const settingsKeywords: Record<string, string> = {
   general:
     "language locale translation english appearance theme font notifications reasoning editor enter preferences steer queue input delivery project global inherited usage statistics telemetry privacy logs diagnostics",
   browser: "web browser Chromium agent control enabled disabled localhost URL history downloads uploads cookies cache site permissions approval chrome google edge brave extension real profile signed in accounts",
-  computer: "computer use mac screen apps accessibility screen recording click type keys agent control desktop automation native apps terms",
+  computer: "computer use mac screen apps accessibility screen recording click type keys agent control desktop automation native apps",
   shortcuts: "keyboard hotkey keybind key binding accelerators",
   servers: "connections remote host url token switch computer",
   projects: "folders workspace directory configuration forget open",

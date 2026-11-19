@@ -3101,7 +3101,6 @@
   "This Mac's screen belongs to another signed-in user, so agents can't use it from this account.": "На экране этого Mac вошёл другой пользователь, поэтому агенты не могут пользоваться им из этой учётной записи.",
   "Use a bundle identifier like com.apple.TextEdit.": "Укажите идентификатор пакета, например com.apple.TextEdit.",
   "Needed to read app contents and to click, type and press keys.": "Нужно, чтобы читать содержимое приложений, нажимать, вводить текст и клавиши.",
-  "An agent asks before acting in an app you haven't allowed, except in a chat set to Yolo, which approves everything. Once you allow an app it acts there without asking, and what it does remains your responsibility.": "Агент спрашивает, прежде чем действовать в приложении, которое вы не разрешили, кроме чата в режиме Yolo, который одобряет всё. Разрешённое приложение агент использует без вопросов, а ответственность за его действия остаётся на вас.",
   "Always allow {app}": "Всегда разрешать {app}",
   "Agents won't ask before using {app} again, in any chat. You can change this in Settings → Computer use.": "Агенты больше не будут спрашивать перед использованием {app} ни в одном чате. Изменить это можно в разделе Настройки → Управление компьютером.",
   "Click {target} in {app}": "Нажать {target} в {app}",
