@@ -178,8 +178,15 @@ titles, transcript content, attachments, tool arguments/results, goal text,
 and loop prompts with redaction markers before the archive leaves the server.
 
 Compaction accepts an optional caller `summary`; omitting it asks the server to
-generate a real summary with the thread model. Before committing, the server
-confirms any pending revert, captures a versioned exact todo checkpoint, and
+generate a real summary with the thread model. Once started, that summary is the
+server's own work: a request that goes away before the answer (a proxy's time
+limit, a closed page) leaves it running, and the compaction still lands and is
+announced with `thread.compacted`. Meanwhile another compaction of the chat is
+refused with 409 ("already being compacted"). Stop does not end it. Stopping
+the server waits for one whose request is still open; one nobody waits for any
+more ends with the server before it commits, leaving the chat as it was. Before
+committing, the server confirms any pending revert, captures a versioned exact
+todo checkpoint, and
 records what stays in view beside the summary. The person's latest request
 always does, word for word and with what it attached, and with what else they
 wrote in its turn. Then come the configured recent turns when they fit under

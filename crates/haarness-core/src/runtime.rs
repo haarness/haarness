@@ -3382,6 +3382,9 @@ pub struct AgentRuntime {
     /// it has started: the steering is taken meanwhile.
     answers_owed: Arc<DashMap<ThreadId, TurnId>>,
     title_jobs: Arc<Mutex<HashSet<ThreadId>>>,
+    /// Chats whose summary for a compaction someone asked for is being made,
+    /// until its task ends: one at a time per chat.
+    compactions: Arc<Mutex<HashSet<ThreadId>>>,
     prepared_prompts: Arc<Mutex<crate::side_question::PreparedPrompts>>,
     workspace: PathBuf,
     permissions: Arc<DashMap<String, PendingPermission>>,
@@ -3472,6 +3475,35 @@ impl Drop for TitleJob {
     }
 }
 
+/// A chat's place in [`AgentRuntime::compactions`], given back when the
+/// compaction's task ends, however it ends.
+struct CompactionClaim {
+    thread_id: ThreadId,
+    claims: Arc<Mutex<HashSet<ThreadId>>>,
+}
+
+impl CompactionClaim {
+    fn take(claims: &Arc<Mutex<HashSet<ThreadId>>>, thread_id: ThreadId) -> CoreResult<Self> {
+        if !claims.lock().insert(thread_id) {
+            return Err(already_compacting());
+        }
+        Ok(Self {
+            thread_id,
+            claims: Arc::clone(claims),
+        })
+    }
+}
+
+impl Drop for CompactionClaim {
+    fn drop(&mut self) {
+        self.claims.lock().remove(&self.thread_id);
+    }
+}
+
+fn already_compacting() -> CoreError {
+    CoreError::Conflict("this chat is already being compacted".into())
+}
+
 impl AgentRuntime {
     #[must_use]
     pub fn new(
@@ -3560,6 +3592,7 @@ impl AgentRuntime {
             turn_admissions: Arc::new(DashMap::new()),
             answers_owed: Arc::new(DashMap::new()),
             title_jobs: Arc::new(Mutex::new(HashSet::new())),
+            compactions: Arc::new(Mutex::new(HashSet::new())),
             prepared_prompts: Arc::new(
                 Mutex::new(crate::side_question::PreparedPrompts::default()),
             ),
@@ -6360,6 +6393,10 @@ impl AgentRuntime {
                 "cannot compact while a turn is running".into(),
             ));
         }
+        // A caller's summary would only make the one being written stale.
+        if self.compactions.lock().contains(&id) {
+            return Err(already_compacting());
+        }
         self.confirm_revert_before_compaction(id).await?;
         let thread = self.repository.get_thread(id).await?;
         let items = self.repository.list_items(id, None).await?;
@@ -6376,8 +6413,32 @@ impl AgentRuntime {
         Ok(item)
     }
     /// Generate the compaction summary with the thread's model, then record
-    /// it. Refused while a turn is active.
+    /// it. Refused while a turn is active or the chat is already being
+    /// compacted.
+    ///
+    /// The work is a task of its own that the caller waits for: a caller
+    /// that stops waiting (a request a proxy cut at its time limit, a page
+    /// closed meanwhile) does not stop it, and the compaction still lands
+    /// and is announced. Stop does not end it; a shutdown that does not wait
+    /// for it drops it before it commits, leaving the chat as it was.
     pub async fn compact_with_llm(&self, id: ThreadId) -> CoreResult<Item> {
+        let claim = CompactionClaim::take(&self.compactions, id)?;
+        let runtime = self.clone();
+        let work = tokio::spawn(
+            async move {
+                let _claim = claim;
+                runtime.summarize_and_compact(id).await
+            }
+            .in_current_span(),
+        );
+        match work.await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => Err(CoreError::Cancelled),
+        }
+    }
+
+    async fn summarize_and_compact(&self, id: ThreadId) -> CoreResult<Item> {
         let admission_lock = turn_admission_lock(&self.turn_admissions, id);
         let (thread, items) = {
             let _admission_guard = admission_lock.lock().await;
@@ -9023,6 +9084,7 @@ impl AgentRuntime {
             turn_admissions: self.turn_admissions.clone(),
             answers_owed: self.answers_owed.clone(),
             title_jobs: self.title_jobs.clone(),
+            compactions: self.compactions.clone(),
             prepared_prompts: self.prepared_prompts.clone(),
             thread,
             turn: turn.clone(),
@@ -9526,6 +9588,7 @@ struct RunnerTask {
     /// it has started: the steering is taken meanwhile.
     answers_owed: Arc<DashMap<ThreadId, TurnId>>,
     title_jobs: Arc<Mutex<HashSet<ThreadId>>>,
+    compactions: Arc<Mutex<HashSet<ThreadId>>>,
     prepared_prompts: Arc<Mutex<crate::side_question::PreparedPrompts>>,
     thread: Thread,
     turn: Turn,
@@ -16522,6 +16585,7 @@ impl RunnerTask {
             turn_admissions: self.turn_admissions.clone(),
             answers_owed: self.answers_owed.clone(),
             title_jobs: self.title_jobs.clone(),
+            compactions: self.compactions.clone(),
             prepared_prompts: self.prepared_prompts.clone(),
             thread: child.clone(),
             turn: turn.clone(),
@@ -16888,6 +16952,7 @@ impl RunnerTask {
             turn_admissions: self.turn_admissions.clone(),
             answers_owed: self.answers_owed.clone(),
             title_jobs: self.title_jobs.clone(),
+            compactions: self.compactions.clone(),
             prepared_prompts: self.prepared_prompts.clone(),
             workspace: self.runtime_workspace.clone(),
             permissions: self.permissions.clone(),
