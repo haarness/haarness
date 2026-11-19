@@ -270,6 +270,9 @@ test("a terminal scrolled up opens where it was when shown again", async () => {
   await page.keyboard.press("Control+Tab");
   await expect(shown).not.toHaveAttribute("data-cycle-tab", id!);
   await expect.poll(top).not.toBe(place);
+  // The step puts the keyboard in the terminal it shows a moment later (a
+  // task after drawing it); the next key waits for it, as a person's would.
+  await expect(input()).toBeFocused();
   await page.keyboard.press("Control+Shift+Tab");
   await expect(shown).toHaveAttribute("data-cycle-tab", id!);
   await expect.poll(top).toBe(place);
@@ -534,7 +537,6 @@ test("⌘K with the keyboard in the terminal clears it, does nothing under a ful
   await input().blur();
   await input().focus();
   await inTerminal(true);
-
 
   // Under less, ⌘K leaves its screen and the lines behind it alone.
   await settle("printf 'before-%s\\n' less", "before-less");
