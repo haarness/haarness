@@ -12,8 +12,9 @@ use std::borrow::Cow;
 /// `text` with each closing tag of one of `names` broken: its `<` is
 /// written `&lt;`. Any case counts, and so do spaces around the `/`, the
 /// invisible characters a terminal or editor shows as nothing
-/// (`<\u{200B}/task>`, `</ta\u{200B}sk>`) and the full-width forms
-/// (`＜／ｔａｓｋ＞`). Every other angle bracket stays as it is, so command
+/// (`<\u{200B}/task>`, `</ta\u{200B}sk>`), the full-width and small forms
+/// (`＜／ｔａｓｋ＞`, `﹤/task>`) and the division and fraction slashes
+/// (`<∕task>`). Every other angle bracket stays as it is, so command
 /// output and code (`Vec<T>`, `<div>`) read as they were printed.
 #[must_use]
 pub fn closing_tags_broken<'a>(text: &'a str, names: &[&str]) -> Cow<'a, str> {
@@ -21,7 +22,7 @@ pub fn closing_tags_broken<'a>(text: &'a str, names: &[&str]) -> Cow<'a, str> {
     let mut kept = 0;
     for (at, open) in text
         .char_indices()
-        .filter(|(_, character)| matches!(character, '<' | '\u{FF1C}'))
+        .filter(|(_, character)| matches!(character, '<' | '\u{FF1C}' | '\u{FE64}'))
     {
         let after = at + open.len_utf8();
         if closes(&text[after..], names) {
@@ -87,10 +88,12 @@ fn invisible(character: char) -> bool {
     )
 }
 
-/// A full-width form as its ASCII character (`／` as `/`, `ｔ` as `t`), and
-/// the ideographic space as a space; anything else as it is.
+/// A full-width form as its ASCII character (`／` as `/`, `ｔ` as `t`), the
+/// division and fraction slashes (`∕`, `⁄`) as `/`, and the ideographic
+/// space as a space; anything else as it is.
 fn narrow(character: char) -> char {
     match character {
+        '\u{2215}' | '\u{2044}' => '/',
         '\u{FF01}'..='\u{FF5E}' => {
             char::from_u32(u32::from(character) - 0xFEE0).unwrap_or(character)
         }
@@ -145,6 +148,10 @@ mod tests {
             ("<\u{3000}/command>", "&lt;\u{3000}/command>"),
             ("</com-mand>", "</com-mand>"),
             ("\u{FF1C}div\u{FF1E}", "\u{FF1C}div\u{FF1E}"),
+            ("<\u{2215}command>", "&lt;\u{2215}command>"),
+            ("<\u{2044}command>", "&lt;\u{2044}command>"),
+            ("\u{FE64}/command\u{FE65}", "&lt;/command\u{FE65}"),
+            ("a \u{2215} b, 1\u{2044}2", "a \u{2215} b, 1\u{2044}2"),
         ] {
             assert_eq!(closing_tags_broken(text, &names), broken, "{text:?}");
         }
