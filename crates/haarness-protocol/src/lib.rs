@@ -1663,13 +1663,17 @@ pub struct ApiErrorDetails {
     pub path: Option<String>,
 }
 
-/// Why a request was refused for good (see [`ApiErrorDetails::reason`]).
+/// Why a request was refused (see [`ApiErrorDetails::reason`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RefusalReason {
     /// Redo needs `path`, a file over 2 MiB, as an undone turn left it, and
     /// Undo has no copy of that: sending a message keeps the chat as it is.
     NoUndoCopy,
+    /// The server is shutting down and starts no new turn. Unlike the other
+    /// reasons it passes: the same request can be sent again once the
+    /// server is back (`retryable`, status 503).
+    ServerStopping,
     /// A reason from a newer server: `message` says it.
     #[serde(other)]
     Other,

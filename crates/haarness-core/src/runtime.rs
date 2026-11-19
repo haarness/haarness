@@ -732,6 +732,20 @@ fn failure_message(error: &mut CoreError) -> Option<&mut String> {
     }
 }
 
+/// The refusal of a turn once the server has begun to shut down.
+fn server_stopping() -> CoreError {
+    CoreError::Refused(Box::new(crate::Refusal {
+        reason: haarness_protocol::RefusalReason::ServerStopping,
+        path: None,
+        message: crate::SERVER_STOPPING.into(),
+    }))
+}
+
+fn is_server_stopping(error: &CoreError) -> bool {
+    matches!(error, CoreError::Refused(refusal)
+        if refusal.reason == haarness_protocol::RefusalReason::ServerStopping)
+}
+
 /// A chat's provider this server doesn't have now. A model runtime on the
 /// computer is listed only while it answers, so its chats find it gone once
 /// it stops; another provider was disconnected since the chat began.
@@ -3489,6 +3503,9 @@ pub struct AgentRuntime {
     /// Concurrent child agents' first requests for one prompt prefix: the
     /// first goes alone so the others can read the cache it writes.
     prefix_warmup: crate::prefix_warmup::PrefixWarmup,
+    /// Why the server is shutting down, once it has begun to: from then on
+    /// no turn starts (see [`AgentRuntime::interrupt_active_turns`]).
+    stopping: Arc<Mutex<Option<String>>>,
     run_stances: Arc<RunStances>,
 }
 
@@ -3633,6 +3650,7 @@ impl AgentRuntime {
             run_ended: Arc::new(DashMap::new()),
             approval_modes,
             prefix_warmup: crate::prefix_warmup::PrefixWarmup::default(),
+            stopping: Arc::new(Mutex::new(None)),
             run_stances: Arc::new(RunStances::default()),
         }
     }
@@ -4712,6 +4730,9 @@ impl AgentRuntime {
                     self.publish_input_queue(id).await?;
                     Ok(Some(turn))
                 }
+                // The server is shutting down: the message stays queued for
+                // the next start, where Send runs it.
+                Err(error) if is_server_stopping(&error) => Ok(None),
                 // Another turn was running: the message waits in the queue,
                 // and that turn's end runs it. It reads the queue only once it
                 // has left `active`, so this holds though it has ended since.
@@ -8811,6 +8832,12 @@ impl AgentRuntime {
             }
             return Err(CoreError::Conflict(crate::CHAT_BUSY.into()));
         }
+        // A shutdown under way starts nothing: what waited at a turn's gate
+        // as it closed, a background result that arrived then, a queued
+        // message a turn's end would run. Nothing here is stored yet.
+        if self.stopping.lock().is_some() {
+            return Err(server_stopping());
+        }
         let thread = self
             .with_chat_folder(self.repository.get_thread(thread_id).await?)
             .await?;
@@ -8917,6 +8944,12 @@ impl AgentRuntime {
             started_calls: Mutex::new(HashSet::new()),
         });
         self.active.insert(thread_id, active.clone());
+        // A shutdown that began after the check above may not have found
+        // this turn among the active ones: it stops as they do.
+        if let Some(reason) = self.stopping.lock().clone() {
+            *active.stop_reason.lock() = Some(reason);
+            cancel.cancel();
+        }
 
         let setup = async {
             // A runtime circuit breaker parks an otherwise-active pursuit
@@ -9130,6 +9163,7 @@ impl AgentRuntime {
             answer_steer: AtomicBool::new(false),
             reviews_running: std::sync::atomic::AtomicUsize::new(0),
             prefix_warmup: self.prefix_warmup.clone(),
+            stopping: self.stopping.clone(),
             run_stances: self.run_stances.clone(),
             unattended,
         });
@@ -9394,6 +9428,9 @@ impl AgentRuntime {
     /// cancellation cleanup, after which any straggler is made durably
     /// interrupted so a restart can never display a phantom running turn.
     pub async fn interrupt_active_turns(&self, reason: &str) -> CoreResult<u64> {
+        // First no turn starts any more: one would run tools while the server
+        // goes away, and be found interrupted at the next start.
+        *self.stopping.lock() = Some(reason.to_owned());
         // Commands stop beside the turns, and the server waits for them
         // too (as long as for the turns) so their ends are recorded first.
         let commands = self.stop_commands_for_shutdown().await;
@@ -9678,6 +9715,7 @@ struct RunnerTask {
     /// `reviewing` from the first until the last ends.
     reviews_running: std::sync::atomic::AtomicUsize,
     prefix_warmup: crate::prefix_warmup::PrefixWarmup,
+    stopping: Arc<Mutex<Option<String>>>,
     run_stances: Arc<RunStances>,
     /// A turn nobody can answer: a schedule's run and the subagents and
     /// results it starts. A `--yolo` client (the terminal UI, `haarness
@@ -16639,6 +16677,7 @@ impl RunnerTask {
             answer_steer: AtomicBool::new(false),
             reviews_running: std::sync::atomic::AtomicUsize::new(0),
             prefix_warmup: self.prefix_warmup.clone(),
+            stopping: self.stopping.clone(),
             run_stances: self.run_stances.clone(),
             unattended: self.unattended,
         });
@@ -16966,6 +17005,7 @@ impl RunnerTask {
             run_ended: self.run_ended.clone(),
             approval_modes: self.approval_modes.clone(),
             prefix_warmup: self.prefix_warmup.clone(),
+            stopping: self.stopping.clone(),
             run_stances: self.run_stances.clone(),
         }
     }
@@ -24370,6 +24410,20 @@ mod tests {
             data,
             created_at: Utc::now(),
         }
+    }
+
+    /// A start the shutdown refuses names it in a few words, which also
+    /// read well inside the notice of a background result kept for the next
+    /// message ("… could not start a turn in this chat (Haarness is shutting
+    /// down); …").
+    #[test]
+    fn a_start_refused_for_the_shutdown_says_so_plainly() {
+        let refused = super::server_stopping();
+        assert!(super::is_server_stopping(&refused));
+        assert_eq!(super::refusal_reason(&refused), "Haarness is shutting down");
+        assert!(!super::is_server_stopping(&CoreError::Conflict(
+            crate::CHAT_BUSY.into()
+        )));
     }
 
     /// The deferred tools a turn names go to the model before the message

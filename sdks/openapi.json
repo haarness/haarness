@@ -5273,9 +5273,10 @@
         "type": "object"
       },
       "RefusalReason": {
-        "description": "Why a request was refused for good (see [`ApiErrorDetails::reason`]).",
+        "description": "Why a request was refused (see [`ApiErrorDetails::reason`]).",
         "enum": [
           "no_undo_copy",
+          "server_stopping",
           "other"
         ],
         "type": "string"
