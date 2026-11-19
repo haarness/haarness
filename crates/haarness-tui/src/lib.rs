@@ -953,9 +953,18 @@ async fn run_with_client(
                                     "key handling failed"
                                 );
                                 app.notice = "Ready".into();
+                                // A server shutting down says so in the
+                                // person's language; the draft stays.
+                                let said = if crate::api::refusal_code(&error)
+                                    == Some("server_stopping")
+                                {
+                                    app.language.text(crate::api::SHUTTING_DOWN).to_owned()
+                                } else {
+                                    format!("{error:#}")
+                                };
                                 app.show_toast(
                                     Some("Error".into()),
-                                    format!("{error:#}"),
+                                    said,
                                     ToastVariant::Error,
                                     Duration::from_secs(7),
                                 );

@@ -233,3 +233,11 @@ test("a redo Undo has no copy for says why in the reader's words, with its file,
   const top = new ApiError(409, "refused", "Something else entirely.", false, loose);
   assert.equal(failureMessage(top), "Something else entirely.");
 });
+test("a server shutting down asks for the message again in a moment, in the reader's words", () => {
+  const body = { code: "server_stopping", message: "Haarness is shutting down", retryable: true, details: { reason: "server_stopping" } };
+  const stopping = errorText(new ApiError(503, "server_stopping", "Haarness is shutting down", true, body));
+  assert.equal(stopping.message, "Haarness is shutting down. Send it again in a moment.");
+  assert.equal(stopping.known, true);
+  // As main hands it to the window, on one line.
+  assert.equal(failureMessage(new ApiError(503, "server_stopping", "Haarness is shutting down", true, body)), "Haarness is shutting down. Send it again in a moment.");
+});

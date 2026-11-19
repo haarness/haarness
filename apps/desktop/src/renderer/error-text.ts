@@ -48,6 +48,9 @@ const sentences = {
   tooLarge: "This is too large to send.",
   signInRefused: "The server refused the token or password. Check it, then try again.",
   refused: "That didn't go through. Try again.",
+  // The server has begun to shut down and starts nothing; the request,
+  // sent again under its id, goes through once it is back.
+  stopping: "Haarness is shutting down. Send it again in a moment.",
 } as const;
 /** Refusals a server names by their `reason`, said with the file they are
  * about: no retry can do them, and the words say what to do instead. */
@@ -226,6 +229,7 @@ export function errorText(error: unknown, options: { relay?: boolean } = {}): Er
     const path = pattern.exec(text)?.[1];
     if (path) return { message: key, values: { path }, known: true };
   }
+  if (code === "server_stopping") return known(sentences.stopping);
   const status = typeof raw === "number" ? raw : statusLine(text)?.status;
   if (code === "bad_gateway" || code === "project_server_unavailable" || computerFailed.test(text))
     return known(copy.computer);
