@@ -20631,6 +20631,15 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     // open, after links and `..`: a link `notes.txt -> .env` still asks, and
     // `node_modules/x/../../.env` is not a file inside node_modules.
     let mut patterns = vec![target.clone()];
+    // A glob walks each alternative of its braces, so each meets the rules
+    // too: a rule written for `secret/**` sees `{secret,docs}/**`.
+    if name == "glob" {
+        for alternative in crate::glob_braces::alternatives(&target).unwrap_or_default() {
+            if !patterns.contains(&alternative) {
+                patterns.push(alternative);
+            }
+        }
+    }
     // A fetch also meets the rules for the address it really reads, so case,
     // a user name, a trailing dot, the default port or `..` cannot step
     // around a rule written for the plain address.
@@ -27880,6 +27889,49 @@ mod tests {
         );
         assert_eq!(grep.last().unwrap().permission, "grep");
         assert_eq!(grep.last().unwrap().patterns, vec!["unsafe"]);
+    }
+
+    /// The glob tool walks each alternative of a pattern's braces, so a rule
+    /// written for one of them (`glob:secret/**`) meets it inside braces.
+    #[test]
+    fn a_glob_rule_meets_each_alternative_of_a_pattern() {
+        let engine = crate::PermissionEngine::new(vec![
+            crate::PermissionRule {
+                pattern: "*".into(),
+                decision: crate::PermissionDecision::Allow,
+            },
+            crate::PermissionRule {
+                pattern: "glob:secret/**".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+        ]);
+        let plan = |pattern: &str| {
+            super::ask_plans(
+                "glob",
+                &json!({"pattern": pattern}),
+                std::path::Path::new("/workspace"),
+            )
+            .pop()
+            .unwrap()
+        };
+        let denied = |plan: &super::AskPlan| {
+            plan.patterns.iter().any(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Deny
+            })
+        };
+        let braced = plan("{secret,docs}/**");
+        assert_eq!(
+            braced.patterns,
+            vec!["{secret,docs}/**", "secret/**", "docs/**"]
+        );
+        assert!(denied(&braced));
+        // Without braces, or with braces that stand for themselves, the
+        // pattern is all there is, as before.
+        for pattern in ["docs/**", "{x}/*.md", "{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}"] {
+            let unbraced = plan(pattern);
+            assert_eq!(unbraced.patterns, vec![pattern], "{pattern}");
+            assert!(!denied(&unbraced), "{pattern}");
+        }
     }
 
     #[test]

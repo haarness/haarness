@@ -29,7 +29,7 @@
    and one reached through a link, are written as before.
 10. glob_braces: `src/**/*.{ts,tsx}` lists both kinds of file, once each, in walk order; a malformed
    pattern is named as written instead of answering No files found; a folder named `[slug]` given
-   as path is searched.
+   as path is searched; a `glob` rule written for `secret/**` refuses `{secret,docs}/**`.
 11. unsaved: with a tool output folder that cannot be made (its name taken by a file), a grep past
    50 KB still shows its start with the reason, a shell command's output is kept in memory (its end
    shown with the reason), and a command in the background runs to its end.
@@ -443,6 +443,12 @@ def case_glob_braces():
     output = tool(files, 'glob', {'path': 'braces/app/[slug]', 'pattern': '*.tsx'})
     assert listed(output) == ['braces/app/[slug]/page.tsx'], output
     passed('a glob in a folder named [slug] finds its files and no other folder\'s')
+    guarded = project('braces-rules', {'permission': {'glob': {'secret/**': 'deny'}}})
+    (guarded / 'secret').mkdir(exist_ok=True)
+    (guarded / 'secret' / 'key.txt').write_text('x\n')
+    output = tool(guarded, 'glob', {'pattern': '{secret,docs}/**'})
+    assert "denied by permission rule 'glob:secret/**'" in output and 'key.txt' not in output, output
+    passed('a glob rule written for secret/** refuses {secret,docs}/**')
 
 
 def unsaved_checks(folder, environment, saved_in, reason):

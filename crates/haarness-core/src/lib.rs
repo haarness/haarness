@@ -12,6 +12,7 @@ mod config;
 pub mod definitions;
 mod events;
 mod execution;
+pub mod glob_braces;
 mod goal;
 mod image_budget;
 pub mod images;

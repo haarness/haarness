@@ -3906,11 +3906,15 @@ impl Tool for BuiltinTool {
                     )));
                 }
                 let pattern = string(&args, "pattern")?;
-                // `src/**/*.{ts,tsx}` is a walk for each alternative: the glob
-                // crate has no braces, and read as written it finds nothing.
-                let alternatives = crate::bounded_glob::alternatives(pattern).map_err(|error| {
-                    CoreError::Invalid(format!("glob pattern `{pattern}` is not valid: {error}"))
-                })?;
+                // `src/**/*.{ts,tsx}` stands for a pattern for each
+                // alternative: the glob crate has no braces, and read as
+                // written it finds nothing.
+                let alternatives =
+                    haarness_core::glob_braces::alternatives(pattern).map_err(|error| {
+                        CoreError::Invalid(format!(
+                            "glob pattern `{pattern}` is not valid: {error}"
+                        ))
+                    })?;
                 // A `..` would leave the folder the outside-folder check
                 // judged; the folder is given as `path` instead.
                 if alternatives.iter().any(|alternative| climbs(alternative)) {
@@ -3976,7 +3980,7 @@ impl Tool for BuiltinTool {
                     found = walk => found.map_err(tool_error)??,
                 };
                 let mut listed = truncate_output(found.values.join("\n")).await?;
-                if listed.text.is_empty() && !(found.stopped || found.large || found.partial) {
+                if listed.text.is_empty() && !found.partial && found.limit.is_none() {
                     // `*.py` finds nothing in `src` when the files are in
                     // `src/app`: models write it first, then guess. Not when
                     // matches were left out: then there were some.
@@ -3993,12 +3997,11 @@ impl Tool for BuiltinTool {
                     };
                 }
                 let output = with_skipped(listed, found.skipped, found.partial);
-                Ok(if found.stopped {
-                    with_stop(output, GLOB_LOOK_LIMIT)
-                } else if found.large {
-                    with_read_stop(output, GLOB_ENTRY_LIMIT)
-                } else {
-                    output
+                Ok(match found.limit {
+                    Some(GlobLimit::Looked) => with_stop(output, GLOB_LOOK_LIMIT),
+                    Some(GlobLimit::Linked) => with_read_stop(output, GLOB_ENTRY_LIMIT),
+                    Some(GlobLimit::Braces) => with_braces_stop(output, GLOB_ENTRY_LIMIT),
+                    None => output,
                 })
             }
             Kind::Grep => {
@@ -5422,16 +5425,25 @@ struct GlobLimits {
     entries: usize,
 }
 
-/// What a glob found: its matches, what it left out, and whether it stopped
-/// at a limit (`stopped` for [`GLOB_LOOK_LIMIT`], `large` for
-/// [`GLOB_ENTRY_LIMIT`]).
+/// What a glob found: its matches, what it left out, and the limit it
+/// stopped at, when it did.
 #[derive(Default)]
 struct GlobFound {
     values: Vec<String>,
     skipped: Skipped,
     partial: bool,
-    stopped: bool,
-    large: bool,
+    limit: Option<GlobLimit>,
+}
+
+/// The limit a glob stopped at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlobLimit {
+    /// [`GLOB_LOOK_LIMIT`] matches looked at.
+    Looked,
+    /// [`GLOB_ENTRY_LIMIT`] folder entries read through links.
+    Linked,
+    /// The same budget, shared by the walks for further brace alternatives.
+    Braces,
 }
 
 /// Where a glob looks: the canonical folder it searches, the canonical
@@ -5444,10 +5456,14 @@ struct GlobScope {
 }
 
 /// Walk `patterns` (the alternatives of one pattern, each already joined to
-/// the scope's root) one after another within `limits`, which they share.
-/// A path two of them match is listed once, and the paths of several come
-/// in the order one walk lists them. Runs synchronously; the caller keeps
-/// it off the async workers.
+/// the scope's root) within `limits`, which they share: as few walks as
+/// [`crate::bounded_glob::walks`] needs, one for `**/*.{ts,tsx}`. The first
+/// reads as one pattern's would; the walks after it share one budget of
+/// folder entries with it, all of them counted (`braces_large` when they
+/// reach it), since each would otherwise read the tree again. A path two
+/// walks match is listed once, and the paths of several come in the order
+/// one walk lists them. Runs synchronously; the caller keeps it off the
+/// async workers.
 fn glob_walk(
     patterns: &[String],
     scope: &GlobScope,
@@ -5459,15 +5475,20 @@ fn glob_walk(
     let mut found = GlobFound::default();
     // Each path listed, with what the output says of it.
     let mut listed = Vec::<(PathBuf, String)>::new();
-    let mut seen = (patterns.len() > 1).then(std::collections::HashSet::<PathBuf>::new);
+    let walks = crate::bounded_glob::walks(patterns).map_err(tool_error)?;
+    let mut seen = (walks.len() > 1).then(std::collections::HashSet::<PathBuf>::new);
     let mut looked = 0;
-    let mut linked_read = 0;
-    for pattern in patterns {
+    // Folder entries the walks have read, against the budget of those after
+    // the first.
+    let mut spent = 0;
+    for (index, walk) in walks.into_iter().enumerate() {
         let stop = cancel.clone();
-        let mut walk = crate::bounded_glob::Walk::new(pattern)
-            .map_err(tool_error)?
-            .linked_entries(limits.entries.saturating_sub(linked_read))
-            .stop_when(move || stop.is_cancelled());
+        let walk = if index == 0 {
+            walk.linked_entries(limits.entries)
+        } else {
+            walk.entries(limits.entries.saturating_sub(spent))
+        };
+        let mut walk = walk.stop_when(move || stop.is_cancelled());
         for path in walk.by_ref() {
             if cancel.is_cancelled() {
                 return Err(CoreError::Cancelled);
@@ -5478,7 +5499,7 @@ fn glob_walk(
             }
             if looked == limits.matches {
                 found.partial = true;
-                found.stopped = true;
+                found.limit = Some(GlobLimit::Looked);
                 break;
             }
             if let Some(seen) = seen.as_mut()
@@ -5525,12 +5546,17 @@ fn glob_walk(
             };
             listed.push((path, value));
         }
-        linked_read += walk.entries_read();
+        spent += walk.entries_listed();
         match walk.cut() {
             Some(crate::bounded_glob::Cut::Stopped) => return Err(CoreError::Cancelled),
             Some(crate::bounded_glob::Cut::Large) => {
                 found.partial = true;
-                found.large = true;
+                // The look limit, when it was met too, says more.
+                found.limit.get_or_insert(if index == 0 {
+                    GlobLimit::Linked
+                } else {
+                    GlobLimit::Braces
+                });
             }
             None => {}
         }
@@ -5566,6 +5592,18 @@ fn with_stop(output: ToolOutput, limit: usize) -> ToolOutput {
     with_note(
         output,
         &format!("(stopped after looking at {limit} matches; narrow the pattern or the path)"),
+    )
+}
+
+/// Ends a glob's output saying its walks for further brace alternatives
+/// stopped at the budget of folder entries they share.
+fn with_braces_stop(output: ToolOutput, entries: usize) -> ToolOutput {
+    with_note(
+        output,
+        &format!(
+            "(stopped after reading {entries} folder entries for the alternatives in its braces; \
+             narrow the pattern or the path)"
+        ),
     )
 }
 
@@ -10369,7 +10407,7 @@ export default workflow({
             limits_entries(0),
         )
         .unwrap();
-        assert!(found.large && found.partial && !found.stopped);
+        assert!(found.partial && found.limit == Some(GlobLimit::Linked));
         assert_eq!(found.values, ["a.txt", "b/c.txt", "d/e.txt"]);
         let all = glob_walk(
             std::slice::from_ref(&pattern),
@@ -10379,7 +10417,7 @@ export default workflow({
             limits_entries(100),
         )
         .unwrap();
-        assert!(!all.large && !all.partial);
+        assert!(!all.partial && all.limit.is_none());
         assert_eq!(
             all.values,
             ["a.txt", "b/c.txt", "d/e.txt", "z-linked/e.txt"]
@@ -10398,6 +10436,43 @@ export default workflow({
             matches: 1_000,
             entries,
         }
+    }
+
+    /// Alternatives that need walks of their own read the tree again each:
+    /// the first reads as one pattern would, the ones after it share one
+    /// budget of folder entries with it.
+    #[cfg(unix)]
+    #[test]
+    fn walks_for_further_brace_alternatives_share_one_budget() {
+        let workspace = haarness_core::paths::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("haarness-glob-braces-{}", uuid::Uuid::now_v7()));
+        for file in ["a/x.txt", "a/deep/y.txt", "b/z.txt", "b/w.md"] {
+            let path = workspace.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let scope = GlobScope {
+            root: workspace.clone(),
+            workspace: workspace.clone(),
+            named: workspace.clone(),
+        };
+        let secrets = SecretFilter::new(&workspace, ".", &workspace, None);
+        let cancel = CancellationToken::new();
+        let patterns = ["a/**/*.txt", "b/**/*.txt", "b/**/*.md"]
+            .map(|pattern| workspace.join(pattern).to_string_lossy().into_owned());
+        let found = glob_walk(&patterns, &scope, &secrets, &cancel, limits_entries(3)).unwrap();
+        assert!(found.partial && found.limit == Some(GlobLimit::Braces));
+        assert_eq!(found.values, ["a/deep/y.txt", "a/x.txt"]);
+        let all = glob_walk(&patterns, &scope, &secrets, &cancel, limits_entries(100)).unwrap();
+        assert!(!all.partial && all.limit.is_none());
+        assert_eq!(all.values, ["a/deep/y.txt", "a/x.txt", "b/w.md", "b/z.txt"]);
+        assert_eq!(
+            with_braces_stop(output(String::new()), 3).text,
+            "(stopped after reading 3 folder entries for the alternatives in its braces; narrow \
+             the pattern or the path)"
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[cfg(unix)]
@@ -10431,7 +10506,7 @@ export default workflow({
             limits(10),
         )
         .unwrap();
-        assert!(found.stopped && found.partial);
+        assert!(found.partial && found.limit == Some(GlobLimit::Looked));
         assert!(found.skipped.outside >= 7, "{}", found.skipped.outside);
         assert!(found.values.len() + found.skipped.outside <= 10);
         let everything = glob_walk(
@@ -10442,7 +10517,7 @@ export default workflow({
             limits(1_000),
         )
         .unwrap();
-        assert!(!everything.stopped && !everything.partial);
+        assert!(!everything.partial && everything.limit.is_none());
         assert_eq!(everything.skipped.outside, 30);
         cancel.cancel();
         assert!(matches!(
