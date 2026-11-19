@@ -303,6 +303,12 @@ async fn stop_on_the_idle_chat_ends_the_summary() {
         .expect("Stop did not end the summary")
         .unwrap();
     assert_eq!(answer.status(), reqwest::StatusCode::CONFLICT);
+    // Said as what happened, not as a bare cancellation.
+    assert!(
+        error_message(answer)
+            .await
+            .contains("compaction stopped before its summary was written")
+    );
     assert!(fixture.compactions().await.is_empty());
 
     compacts_again(&fixture).await;

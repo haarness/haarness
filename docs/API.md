@@ -184,7 +184,7 @@ limit, a closed page) leaves it running, and the compaction still lands and is
 announced with `thread.compacted`. Meanwhile another compaction of the chat is
 refused with 409 ("already being compacted"). A turn that starts in the chat
 ends the summary at once, since it could no longer be committed (409, "thread
-changed"), and so does Stop on the idle chat. Stopping the server waits for one
+changed"), and so does Stop on the idle chat (409, "compaction stopped"). Stopping the server waits for one
 whose request is still open; one nobody waits for any more ends with the server
 before it commits, leaving the chat as it was. Clients that lose the request
 (release 0.1.24 or later) wait for `thread.compacted` instead, and give up when
