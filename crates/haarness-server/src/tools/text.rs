@@ -16,6 +16,9 @@ use tokio_util::sync::CancellationToken;
 pub(super) const LINE_CHARS: usize = 2_000;
 /// What a line cut at [`LINE_CHARS`] ends with.
 pub(super) const LINE_CUT: &str = "… (line truncated to 2000 characters)";
+/// What a line cut shorter than that ends with, where a cut output ran out
+/// of room for it.
+pub(super) const LINE_PART_CUT: &str = "… (line truncated)";
 /// Bytes of a line `read` keeps: enough for [`LINE_CHARS`] characters,
 /// since none takes more than four.
 const READ_LINE_BYTES: usize = LINE_CHARS * 4;

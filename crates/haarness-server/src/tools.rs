@@ -6898,11 +6898,12 @@ const LONG_LINE_HEAD_MIN: usize = 256;
 
 /// The start of `text` a native tool's cut output shows: whole lines, up to
 /// 2,000 of them and 50 KiB. A line too long to show whole (minified code, a
-/// JSON dump) shows its head, ending in the cut mark, when it is the first,
+/// JSON dump) shows its head, ending in a cut mark, when it is the first,
 /// so the preview is never empty, or when it is data on one line (over
 /// [`LONG_LINE_BYTES`]) after shorter ones and at least
-/// [`LONG_LINE_HEAD_MIN`] bytes are left for it; any other line that does
-/// not fit is left out whole, so no path or match is shown in part.
+/// [`LONG_LINE_HEAD_MIN`] bytes are left for it (a head cut shorter than
+/// 2,000 characters says only that the line goes on); any other line that
+/// does not fit is left out whole, so no path or match is shown in part.
 fn output_preview(text: &str) -> String {
     let mut preview = Vec::new();
     let mut bytes = 0;
@@ -6919,12 +6920,12 @@ fn output_preview(text: &str) -> String {
                 let head = text::shown(line, false);
                 if head.len() <= room {
                     preview.push(head);
-                } else if room >= LONG_LINE_HEAD_MIN + text::LINE_CUT.len() {
-                    let end = whole_cut(line, room - text::LINE_CUT.len());
+                } else if room >= LONG_LINE_HEAD_MIN + text::LINE_PART_CUT.len() {
+                    let end = whole_cut(line, room - text::LINE_PART_CUT.len());
                     preview.push(std::borrow::Cow::Owned(format!(
                         "{}{}",
                         &line[..end],
-                        text::LINE_CUT
+                        text::LINE_PART_CUT
                     )));
                 }
             }
@@ -10788,20 +10789,26 @@ export default workflow({
         let kept = family.repeat(2_000 / 5);
         assert_eq!(preview, format!("{heading}\n{kept}{}", text::LINE_CUT));
         // Less room than its first 2,000 characters: the part that fits,
-        // whole, ending in the cut mark.
+        // whole, ending in a mark that claims no length.
         let filler = "y".repeat(TOOL_OUTPUT_MAX_BYTES - 1_001);
         let text = format!("{filler}\n{}", family.repeat(1_000));
         let preview = output_preview(&text);
         let tail = &preview[filler.len() + 1..];
-        let fits = (1_000 - text::LINE_CUT.len()) / family.len();
-        assert_eq!(tail, format!("{}{}", family.repeat(fits), text::LINE_CUT));
+        let fits = (1_000 - text::LINE_PART_CUT.len()) / family.len();
+        assert_eq!(
+            tail,
+            format!("{}{}", family.repeat(fits), text::LINE_PART_CUT)
+        );
         // A line of fewer than 2,000 characters that does not fit is cut
         // with the mark too, never shown whole with it.
         let wide = "日".repeat(1_500);
         let preview = output_preview(&format!("{filler}\n{wide}"));
         let tail = &preview[filler.len() + 1..];
-        let fits = (1_000 - text::LINE_CUT.len()) / 3;
-        assert_eq!(tail, format!("{}{}", "日".repeat(fits), text::LINE_CUT));
+        let fits = (1_000 - text::LINE_PART_CUT.len()) / 3;
+        assert_eq!(
+            tail,
+            format!("{}{}", "日".repeat(fits), text::LINE_PART_CUT)
+        );
         // Too little room for a start worth reading: a long grep match is
         // left out rather than shown as part of its path.
         for left in [12, 100, 255] {

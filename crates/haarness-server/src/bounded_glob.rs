@@ -449,11 +449,13 @@ fn verbatim(_root: &str) -> bool {
 }
 
 /// Walks that list what `patterns` (the alternatives of one pattern) match,
-/// as few as can: those that differ only in a last part with a wildcard
-/// (`**/*.ts` and `**/*.tsx`) share one walk, which matches that part
-/// against each, so the tree is read once rather than once for each. Each
-/// other pattern gets a walk of its own. The walks come in the order of the
-/// first pattern of each.
+/// as few as can: those that differ only in their last part share one walk,
+/// which matches that part against each, so the tree is read once rather
+/// than once for each. The part has a wildcard (`**/*.ts` and `**/*.tsx`),
+/// or comes after `**` (`**/package.json` and `**/tsconfig.json`), where a
+/// walk matches every name it lists against it either way. Each other
+/// pattern gets a walk of its own. The walks come in the order of the first
+/// pattern of each.
 pub fn walks(patterns: &[String]) -> Result<Vec<Walk>, PatternError> {
     let mut walks: Vec<(Option<&str>, Walk)> = Vec::new();
     for pattern in patterns {
@@ -463,31 +465,37 @@ pub fn walks(patterns: &[String]) -> Result<Vec<Walk>, PatternError> {
             && let Some(part) = walk.parts.last_mut()
         {
             part.others.push(Pattern::new(last)?);
+            // Listed and matched by name, not looked up.
+            part.plain = false;
             continue;
         }
         let walk = Walk::new(pattern)?;
-        // A pattern whose walk ends in anything but a wildcard part (`**`, a
-        // name looked up, a verbatim root with no parts) walks alone.
-        let joins = walk
-            .parts
-            .last()
-            .is_some_and(|part| !part.plain && !part.recursive);
+        // A pattern whose walk ends in `**`, in a name looked up, or that has
+        // no parts (a verbatim root) walks alone.
+        let joins = match walk.parts.as_slice() {
+            [.., before, last] => !last.recursive && (!last.plain || before.recursive),
+            [last] => !last.recursive && !last.plain,
+            [] => false,
+        };
         walks.push((shared.filter(|_| joins).map(|(start, _)| start), walk));
     }
     Ok(walks.into_iter().map(|(_, walk)| walk).collect())
 }
 
 /// `pattern` up to its last part, and that part, when another pattern of
-/// the same start may share its walk: the part has a wildcard, is not
-/// `**`, and the pattern does not end with a separator (which asks for
-/// folders only).
+/// the same start may share its walk: the part has a wildcard, or comes
+/// right after `**`, is not `**` itself, and the pattern does not end with a
+/// separator (which asks for folders only).
 fn shared_start(pattern: &str) -> Option<(&str, &str)> {
     if pattern.ends_with(std::path::is_separator) {
         return None;
     }
     let split = pattern.rfind(std::path::is_separator)? + 1;
     let (start, last) = pattern.split_at(split);
-    (split >= root_len(pattern) && last.contains(['*', '?', '[']) && last != "**")
+    let after_double_star = start[..split - 1].rsplit(std::path::is_separator).next() == Some("**");
+    (split >= root_len(pattern)
+        && last != "**"
+        && (last.contains(['*', '?', '[']) || after_double_star))
         .then_some((start, last))
 }
 
@@ -798,6 +806,9 @@ mod tests {
                 "src/.e.ts",
                 "README.md",
                 "CHANGELOG.md",
+                "package.json",
+                "web/package.json",
+                "web/tsconfig.json",
             ],
         );
         let at = |pattern: &str| format!("{}/{pattern}", root.display());
@@ -817,6 +828,23 @@ mod tests {
         let mut once = found[0].clone();
         once.sort();
         assert_eq!(once, each);
+        // Names after `**`, files and folders alike, with a wildcard beside
+        // them: one walk, what each would find.
+        let named = [
+            at("**/package.json"),
+            at("**/tsconfig.json"),
+            at("**/lib"),
+            at("**/*.md"),
+        ];
+        let found = walked(&named);
+        assert_eq!(found.len(), 1);
+        let mut each: Vec<PathBuf> = named.iter().flat_map(|pattern| globbed(pattern)).collect();
+        each.sort();
+        each.dedup();
+        let mut once = found[0].clone();
+        once.sort();
+        assert_eq!(once, each);
+        assert_eq!(once.len(), 6, "{once:?}");
         // A different start, a name looked up, `**` and a folders-only
         // pattern each walk alone.
         for patterns in [
