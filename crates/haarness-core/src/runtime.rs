@@ -20951,7 +20951,8 @@ fn on_this_computer_or_network(host: &str) -> bool {
 /// address reaches that IPv4 host: IPv4-mapped (`::ffff:169.254.169.254`),
 /// IPv4-compatible (`::169.254.169.254`) and the well-known NAT64 prefix
 /// (`64:ff9b::169.254.169.254`). `::` and `::1` carry none.
-fn embedded_ipv4(ip: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+#[must_use]
+pub fn embedded_ipv4(ip: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
     let segments = ip.segments();
     let carries = match segments[..6] {
         [0, 0, 0, 0, 0, 0xffff] | [0x64, 0xff9b, 0, 0, 0, 0] => true,

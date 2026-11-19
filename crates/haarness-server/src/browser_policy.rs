@@ -73,21 +73,31 @@ impl BrowserPolicy {
         if !self.enabled {
             return PermissionDecision::Deny;
         }
-        let access = policy_origin(resource)
-            .and_then(|origin| {
-                most_specific(
-                    self.sites
-                        .iter()
-                        .map(|site| (site.origin.as_str(), &site.access)),
-                    &origin,
-                )
-            })
-            .unwrap_or(&self.defaults);
-        match method {
-            "files.upload" | "files.drop" => access.uploads,
-            "files.get" => access.downloads,
-            _ => access.browsing,
-        }
+        let decide = |origin: Option<&str>| {
+            let access = origin
+                .and_then(|origin| {
+                    most_specific(
+                        self.sites
+                            .iter()
+                            .map(|site| (site.origin.as_str(), &site.access)),
+                        origin,
+                    )
+                })
+                .unwrap_or(&self.defaults);
+            match method {
+                "files.upload" | "files.drop" => access.uploads,
+                "files.get" => access.downloads,
+                _ => access.browsing,
+            }
+        };
+        let origin = policy_origin(resource);
+        let decision = decide(origin.as_deref());
+        // An IPv6 address that carries an IPv4 one reaches that host: the
+        // IPv4 address's rule holds too, where it is stricter.
+        origin
+            .as_deref()
+            .and_then(carried_ipv4_origin)
+            .map_or(decision, |ipv4| stricter(decision, decide(Some(&ipv4))))
     }
 }
 
@@ -144,6 +154,20 @@ pub fn web_origin(resource: &str) -> Option<String> {
 #[must_use]
 pub fn policy_origin(resource: &str) -> Option<String> {
     url::Url::parse(resource).ok().map(site_of)
+}
+
+/// `origin` with its host written as the IPv4 address it carries, when the
+/// host is an IPv6 address that carries one (`http://[::ffff:a9fe:a9fe]` as
+/// `http://169.254.169.254`): a connection to it reaches that IPv4 host.
+fn carried_ipv4_origin(origin: &str) -> Option<String> {
+    let mut url = url::Url::parse(origin).ok()?;
+    let ip = match url.host() {
+        Some(url::Host::Ipv6(ip)) => ip,
+        _ => return None,
+    };
+    let ipv4 = haarness_core::embedded_ipv4(ip)?;
+    url.set_host(Some(&ipv4.to_string())).ok()?;
+    Some(url.origin().ascii_serialization())
 }
 
 fn site_of(mut url: url::Url) -> String {
@@ -490,17 +514,26 @@ impl ChromePolicy {
         if !self.enabled {
             return PermissionDecision::Deny;
         }
-        web_origin(resource)
-            .and_then(|origin| {
-                most_specific(
-                    self.sites
-                        .iter()
-                        .map(|site| (site.origin.as_str(), &site.access)),
-                    &origin,
-                )
-            })
-            .unwrap_or(&self.defaults)
-            .get(category)
+        let decide = |origin: Option<&str>| {
+            origin
+                .and_then(|origin| {
+                    most_specific(
+                        self.sites
+                            .iter()
+                            .map(|site| (site.origin.as_str(), &site.access)),
+                        origin,
+                    )
+                })
+                .unwrap_or(&self.defaults)
+                .get(category)
+        };
+        let origin = web_origin(resource);
+        let decision = decide(origin.as_deref());
+        // As for the agent's browser: the IPv4 address's rule holds too.
+        origin
+            .as_deref()
+            .and_then(carried_ipv4_origin)
+            .map_or(decision, |ipv4| stricter(decision, decide(Some(&ipv4))))
     }
     /// The strictest decision across what one browser operation needs.
     #[must_use]
@@ -1064,6 +1097,47 @@ mod tests {
             access: BrowserAccess::default(),
         });
         assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn a_rule_for_an_ipv4_address_holds_for_the_ipv6_addresses_that_carry_it() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let policy = shared(
+            serde_json::json!([
+                {"origin": "http://169.254.169.254", "browsing": "deny", "downloads": "deny", "uploads": "deny"},
+                {"origin": "http://10.0.0.2", "browsing": "allow", "downloads": "allow", "uploads": "allow"},
+            ]),
+            "ask",
+        );
+        let chrome: ChromePolicy = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "defaults": {"browsing": "ask", "downloads": "ask", "uploads": "ask", "scripts": "ask"},
+            "sites": [{"origin": "http://169.254.169.254", "browsing": "deny", "downloads": "deny", "uploads": "deny", "scripts": "deny"}],
+        }))
+        .unwrap();
+        for url in [
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::ffff:169.254.169.254]/latest/meta-data",
+            "http://[::ffff:a9fe:a9fe]/latest/meta-data",
+            "http://[::a9fe:a9fe]/",
+            "http://[64:ff9b::a9fe:a9fe]/",
+        ] {
+            assert_eq!(policy.decision("navigate", url), Deny, "{url}");
+            assert_eq!(
+                chrome.decision(ChromeCategory::Browsing, url),
+                Deny,
+                "Chrome: {url}"
+            );
+        }
+        // Another port is another site, and an allow for the IPv4 address
+        // never loosens what holds for its IPv6 spelling.
+        assert_eq!(
+            policy.decision("navigate", "http://[::ffff:a9fe:a9fe]:8080/"),
+            Ask
+        );
+        assert_eq!(policy.decision("navigate", "http://10.0.0.2/"), Allow);
+        assert_eq!(policy.decision("navigate", "http://[::ffff:a00:2]/"), Ask);
+        assert_eq!(policy.decision("navigate", "http://[fd00::1]/"), Ask);
     }
 
     fn shared(sites: serde_json::Value, browsing: &str) -> BrowserPolicy {
