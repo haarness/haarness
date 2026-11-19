@@ -1127,9 +1127,15 @@ async fn run_with_client(
                         // partial stream against the authoritative transcript.
                         // A restarted server read its configuration afresh:
                         // its info comes with the restart, else it is read.
+                        let instance = app.server_info.as_ref().map(|info| info.server_instance_id);
                         match info {
                             Some(info) => app.adopt_server_info(*info),
                             None => app.refresh_server_info(&client, None).await,
+                        }
+                        if instance.is_some()
+                            && instance != app.server_info.as_ref().map(|info| info.server_instance_id)
+                        {
+                            app.server_restarted();
                         }
                         app.input_queue = client.input_queue(app.thread.id).await.unwrap_or_default();
                         if let Ok(items) = client.items(app.thread.id).await {
@@ -1353,6 +1359,8 @@ async fn run_with_client(
         )
         .await;
     }
+    // Messages waiting for a compaction are kept as the chat's draft.
+    app.return_held();
     let draft_save = servers::save_current(&app, &client);
     event_task.abort();
     statusline_task.abort();

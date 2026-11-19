@@ -7,6 +7,7 @@
 //! A message sent meanwhile would start a turn, and the server then throws
 //! the summary away (the chat changed under it). So it waits above the
 //! prompt, queued, and goes out once the compaction is over, whichever way.
+//! Leaving the chat or quitting puts it back in the chat's draft instead.
 
 use std::time::{Duration, Instant};
 
@@ -15,15 +16,26 @@ use haarness_protocol::{CompactRequest, Item, ItemData, ThreadId};
 use crate::api::ApiClient;
 use crate::state::{App, ToastVariant};
 
+/// The first release whose server finishes a summary whose request went.
+const FINISHES_CUT_COMPACTIONS: [u64; 3] = [0, 1, 24];
+
+/// Said when the chat changed while a compaction waited for its summary.
+pub(crate) const CHAT_CHANGED: &str = "The chat changed while it was being summarised";
+
+/// Said when `!` or a command that starts a turn waits for a compaction.
+pub(crate) const WAIT_FOR_COMPACTION: &str =
+    "The chat is being compacted · try again once it's done";
+
 /// One `/compact` this TUI asked for.
 pub(crate) struct Compaction {
     thread: ThreadId,
     started: Instant,
     /// The request, until it answers.
     answer: Option<tokio::sync::oneshot::Receiver<anyhow::Result<Item>>>,
-    /// What a request that got no answer from the server said. The server
-    /// finishes a summary whose request went, so this waits for the
-    /// compaction to arrive, and says it only if it never does.
+    /// What the request said when its answer never came from the server
+    /// (or the server said another compaction was under way). The server
+    /// finishes that summary, so this waits for the compaction's row, and
+    /// says it only if the row never comes.
     unanswered: Option<String>,
 }
 
@@ -107,6 +119,32 @@ impl App {
             .collect()
     }
 
+    /// Put the open chat's waiting messages back in the prompt, oldest first
+    /// and ahead of whatever is typed there, with their attachments: when the
+    /// person takes them back, leaves the chat or quits, and when one could
+    /// not go out. Whether anything came back.
+    pub(crate) fn return_held(&mut self) -> bool {
+        let thread = self.thread.id;
+        let (mine, others): (Vec<Held>, Vec<Held>) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition(|held| held.thread == thread);
+        self.held = others;
+        if mine.is_empty() {
+            return false;
+        }
+        let mut texts: Vec<String> = mine.iter().map(|held| held.text.clone()).collect();
+        let draft = self.composer.expanded_text();
+        if !draft.trim().is_empty() {
+            texts.push(draft);
+        }
+        self.composer.set_text(texts.join("\n\n"));
+        let mut attachments: Vec<String> =
+            mine.into_iter().flat_map(|held| held.attachments).collect();
+        attachments.append(&mut self.attachments);
+        self.attachments = attachments;
+        true
+    }
+
     /// Send the open chat's waiting messages, in order, once nothing is
     /// compacting it: each as Enter would send it now.
     pub(crate) async fn release_held(&mut self, client: &ApiClient) {
@@ -119,60 +157,56 @@ impl App {
                 return;
             };
             let held = self.held.remove(index);
-            if !self.send_held(held, client).await {
+            if let Err(error) = self.send_held(&held, client).await {
+                // It and every one after it come back together, in order.
+                self.held.insert(index, held);
+                self.return_held();
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "a held message could not be sent"
+                );
+                self.show_compaction_error(self.thread.id, format!("{error:#}"));
                 return;
             }
         }
     }
 
     /// Send `held` as Enter does: queued, steering a turn that runs, or as a
-    /// turn of its own. What does not go out comes back to the prompt, ahead
-    /// of whatever is typed there now, so nothing is lost.
-    async fn send_held(&mut self, held: Held, client: &ApiClient) -> bool {
+    /// turn of its own. Fails, sending nothing, when it did not go out.
+    async fn send_held(&mut self, held: &Held, client: &ApiClient) -> anyhow::Result<()> {
         let own = std::mem::replace(&mut self.attachments, held.attachments.clone());
-        let delivery = if held.queue {
-            Ok(haarness_protocol::InputDelivery::Queue)
-        } else {
-            client.input_delivery().await
-        };
-        let sent = match delivery {
-            Ok(delivery) => {
-                self.input_delivery = Some(delivery);
-                if delivery == haarness_protocol::InputDelivery::Queue {
-                    self.defer_prompt(held.text.clone(), client).await
-                } else if self.active_turn.is_some() {
-                    self.queue_prompt(held.text.clone(), client).await
-                } else {
-                    self.submit_prompt(held.text.clone(), client).await
-                }
+        let sent = async {
+            let delivery = if held.queue {
+                haarness_protocol::InputDelivery::Queue
+            } else {
+                client.input_delivery().await?
+            };
+            self.input_delivery = Some(delivery);
+            if delivery == haarness_protocol::InputDelivery::Queue {
+                self.defer_prompt(held.text.clone(), client).await
+            } else if self.active_turn.is_some() {
+                self.queue_prompt(held.text.clone(), client).await
+            } else {
+                self.submit_prompt(held.text.clone(), client).await
             }
+        }
+        .await;
+        self.attachments = own;
+        match sent {
+            Ok(true) => Ok(()),
+            // Refused here, with the reason in the band.
+            Ok(false) => Err(anyhow::anyhow!(self.notice.clone())),
             Err(error) => Err(error),
-        };
-        if matches!(sent, Ok(true)) {
-            self.attachments = own;
-            return true;
         }
-        let draft = self.composer.expanded_text();
-        if draft.trim().is_empty() {
-            self.composer.set_text(held.text);
-        } else {
-            self.composer.set_text(format!("{}\n\n{draft}", held.text));
-        }
-        self.attachments = held.attachments;
-        self.attachments.extend(own);
-        if let Err(error) = sent {
-            tracing::warn!(
-                error = format!("{error:#}"),
-                "a held message could not be sent"
-            );
-            self.show_compaction_error(format!("{error:#}"));
-        }
-        false
     }
 
     /// Take delivery of what the compaction requests answered.
     pub(crate) fn poll_compactions(&mut self) {
         let now = Instant::now();
+        let finishes = self
+            .server_info
+            .as_ref()
+            .is_some_and(|info| crate::updates::at_least(&info.version, FINISHES_CUT_COMPACTIONS));
         let mut index = 0;
         while index < self.compactions.len() {
             let compaction = &mut self.compactions[index];
@@ -187,13 +221,24 @@ impl App {
                     self.compaction_done(compaction.thread, item);
                 }
                 Some(Ok(Err(error))) => {
-                    if crate::api::unanswered(&error) || unanswered_by_gateway(&error) {
+                    if already_compacting(&error) || (finishes && cut_on_the_way(&error)) {
                         compaction.answer = None;
                         compaction.unanswered = Some(format!("{error:#}"));
                         index += 1;
                     } else {
-                        self.compactions.remove(index);
-                        self.compaction_refused(&error);
+                        let compaction = self.compactions.remove(index);
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            status = ?crate::api::refusal_status(&error),
+                            "compaction failed"
+                        );
+                        // A turn or an item came in while it summarized.
+                        let said = if error.to_string().contains("thread changed") {
+                            self.language.text(CHAT_CHANGED).to_owned()
+                        } else {
+                            format!("{error:#}")
+                        };
+                        self.show_compaction_error(compaction.thread, said);
                     }
                 }
                 Some(Err(tokio::sync::oneshot::error::TryRecvError::Closed)) => {
@@ -203,7 +248,7 @@ impl App {
                 None if overdue => {
                     let compaction = self.compactions.remove(index);
                     if let Some(said) = compaction.unanswered {
-                        self.show_compaction_error(said);
+                        self.show_compaction_error(compaction.thread, said);
                     }
                 }
                 Some(Err(tokio::sync::oneshot::error::TryRecvError::Empty)) | None => index += 1,
@@ -216,6 +261,33 @@ impl App {
     pub(crate) fn compaction_arrived(&mut self, thread: ThreadId) {
         self.compactions
             .retain(|compaction| compaction.thread != thread || compaction.answer.is_some());
+    }
+
+    /// Something else happened in `thread` (another item, a turn): a summary
+    /// waited for there could no longer be committed, so the wait ends.
+    pub(crate) fn chat_changed_while_compacting(&mut self, thread: ThreadId) {
+        let before = self.compactions.len();
+        self.compactions
+            .retain(|compaction| compaction.thread != thread || compaction.answer.is_some());
+        if self.compactions.len() < before {
+            let said = self.language.text(CHAT_CHANGED).to_owned();
+            self.show_compaction_error(thread, said);
+        }
+    }
+
+    /// The server is another process now: summaries waited for died with
+    /// the one before.
+    pub(crate) fn server_restarted(&mut self) {
+        let (gone, kept): (Vec<Compaction>, Vec<Compaction>) =
+            std::mem::take(&mut self.compactions)
+                .into_iter()
+                .partition(|compaction| compaction.answer.is_none());
+        self.compactions = kept;
+        for compaction in gone {
+            if let Some(said) = compaction.unanswered {
+                self.show_compaction_error(compaction.thread, said);
+            }
+        }
     }
 
     /// Requests that got no answer and now wait for the compaction itself.
@@ -239,6 +311,8 @@ impl App {
     }
 
     fn compaction_done(&mut self, thread: ThreadId, item: Item) {
+        // It answers whoever else waited for this chat's compaction too.
+        self.compaction_arrived(thread);
         if thread != self.thread.id {
             return;
         }
@@ -254,18 +328,19 @@ impl App {
         self.notice = "Compaction checkpoint created".into();
     }
 
-    fn compaction_refused(&mut self, error: &anyhow::Error) {
-        tracing::warn!(
-            error = format!("{error:#}"),
-            status = ?crate::api::refusal_status(error),
-            "compaction failed"
-        );
-        self.show_compaction_error(format!("{error:#}"));
-    }
-
-    fn show_compaction_error(&mut self, said: String) {
+    /// Say why `thread`'s compaction failed: under that chat's title when it
+    /// is not the one open.
+    fn show_compaction_error(&mut self, thread: ThreadId, said: String) {
+        let title = if thread == self.thread.id {
+            "Error".to_owned()
+        } else {
+            self.threads
+                .iter()
+                .find(|chat| chat.id == thread)
+                .map_or_else(|| "Error".to_owned(), |chat| chat.title.clone())
+        };
         self.show_toast(
-            Some("Error".into()),
+            Some(title),
             said,
             ToastVariant::Error,
             Duration::from_secs(7),
@@ -273,12 +348,33 @@ impl App {
     }
 }
 
-/// A proxy between this TUI and the server (a time limit on the way through
-/// Cloud, Cloud's relay losing the computer's answer) gave up on the request:
-/// the server itself never said no. Its own failures (a provider that failed
-/// the summary) always name their own code.
-fn unanswered_by_gateway(error: &anyhow::Error) -> bool {
-    crate::api::refusal_status(error)
-        .is_some_and(|status| matches!(status.as_u16(), 502 | 504 | 524))
-        && crate::api::refusal_code(error).is_none_or(|code| code == "bad_gateway")
+/// The server said another compaction of the chat is under way: one this
+/// TUI or another client asked for, which lands as its own row.
+fn already_compacting(error: &anyhow::Error) -> bool {
+    crate::api::refusal_status(error) == Some(reqwest::StatusCode::CONFLICT)
+        && error.to_string().contains("already being compacted")
+}
+
+/// The request's answer was lost on its way back from another computer,
+/// while that computer goes on with the summary: the connection to it
+/// dropped, a proxy gave up (Cloudflare's 524 at its time limit, a gateway's
+/// 502 or 504 with no error of the server's own), or Cloud lost the
+/// computer's connection mid-request. The server's own failures (the model
+/// failing the summary, Cloud's word that the computer's runtime failed)
+/// always name their code and are not cuts.
+fn cut_on_the_way(error: &anyhow::Error) -> bool {
+    if crate::api::lost_on_the_way(error) {
+        return true;
+    }
+    let code = crate::api::refusal_code(error);
+    match crate::api::refusal_status(error).map(|status| status.as_u16()) {
+        Some(502 | 504 | 524) => code.is_none(),
+        Some(409) => {
+            code == Some("remote_offline")
+                || error
+                    .to_string()
+                    .eq_ignore_ascii_case(crate::api::COMPUTER_UNREACHABLE)
+        }
+        _ => false,
+    }
 }

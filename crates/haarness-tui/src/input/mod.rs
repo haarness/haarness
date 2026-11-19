@@ -1268,6 +1268,10 @@ pub async fn handle_key_at(
                 // must never reach running work, not even as a second press.
                 app.escape_interrupt = None;
                 app.notice = "Edit cancelled · draft restored".into();
+            } else if app.return_held() {
+                // Messages waiting for the chat's compaction come back to the
+                // prompt, to be edited or sent once it is done.
+                app.escape_interrupt = None;
             } else if let Some(turn) = app.active_turn {
                 app.ctrl_c_action = None;
                 let target = InterruptTarget::Turn(turn);
@@ -1406,6 +1410,10 @@ pub async fn handle_key_at(
                 && (app.shell_mode || app.composer.text().trim_start().starts_with('/'))
             {
                 app.notice = "Commands cannot be queued. Use a normal message or Steer.".into();
+            } else if app.shell_mode && app.holds_for_compaction() {
+                // What it writes would make the server drop the summary being
+                // written; the command stays in the prompt.
+                app.refuse_command(crate::compaction::WAIT_FOR_COMPACTION);
             } else if app.shell_mode {
                 let command = crate::resource_mentions::plain(&app.composer.take());
                 app.save_prompt_history();

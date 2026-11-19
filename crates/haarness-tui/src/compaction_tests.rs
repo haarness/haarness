@@ -178,8 +178,16 @@ async fn a_slow_compaction_leaves_the_tui_usable_and_ends_with_its_row() {
     assert!(app.notification_toast.is_none());
 }
 
+/// A server whose release finishes a summary whose request was cut.
+fn finishing(app: &mut App) {
+    app.server_info = Some(haarness_protocol::ServerInfo {
+        version: "0.1.24".into(),
+        ..side_server_info(vec![])
+    });
+}
+
 #[tokio::test]
-async fn a_second_compaction_shows_the_refusal_plainly_while_the_first_runs_on() {
+async fn a_second_compaction_waits_quietly_for_the_first_to_land() {
     let thread = fixture_thread();
     let item = compaction_item(&thread, "first summary");
     let server = serve(vec![
@@ -203,13 +211,14 @@ async fn a_second_compaction_shows_the_refusal_plainly_while_the_first_runs_on()
 
     compact(&mut app, &client).await;
     accepted(&server, 1).await;
+    // Asked again (here, or by another client the TUI does not know of):
+    // the server's answer is a summary under way, waited for as its own.
     compact(&mut app, &client).await;
-    poll_until(&mut app, "the refusal was never shown", |app| {
-        app.notification_toast.is_some()
+    poll_until(&mut app, "the second request never answered", |app| {
+        app.compactions_waiting_for_row() == 1
     })
     .await;
-    let toast = app.notification_toast.as_ref().unwrap();
-    assert_eq!(toast.message, "this chat is already being compacted");
+    assert!(app.notification_toast.is_none(), "nothing failed");
     assert!(band(&app).contains("compacting"), "the first one runs on");
 
     server.release.add_permits(1);
@@ -237,6 +246,7 @@ async fn a_request_a_proxy_cut_waits_for_the_compaction_row() {
     let client =
         crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    finishing(&mut app);
 
     // The server goes on summarizing; the compaction's row says it landed.
     compact(&mut app, &client).await;
@@ -454,17 +464,327 @@ async fn a_waiting_message_that_cannot_go_out_comes_back_ahead_of_the_draft() {
     compact(&mut app, &client).await;
     // Held before the answer is taken.
     enter(&mut app, "first message", &client).await;
+    enter(&mut app, "second message", &client).await;
     app.composer.set_text("typed meanwhile".into());
     poll_until(&mut app, "the summary never landed", |app| {
         app.compacting_since().is_none()
     })
     .await;
     app.release_held(&client).await;
+    // Both come back at once, in order, ahead of the draft, with one toast.
     assert!(app.held_messages().is_empty());
     assert_eq!(
         app.composer.expanded_text(),
-        "first message\n\ntyped meanwhile"
+        "first message\n\nsecond message\n\ntyped meanwhile"
     );
     assert!(app.notification_toast.is_some(), "why it did not go out");
     assert!(turns_started(&server).is_empty());
+}
+
+/// A chat being compacted, with nothing needed from a server: the request
+/// fails at once, and nothing takes its answer until the test polls.
+fn compacting_offline() -> App {
+    let mut app = selector_fixture();
+    app.start_compaction(None, &offline_client());
+    app
+}
+
+#[tokio::test]
+async fn held_messages_come_back_on_esc_or_a_click_on_their_strip() {
+    let mut app = compacting_offline();
+    let client = offline_client();
+    enter(&mut app, "first", &client).await;
+    enter(&mut app, "second", &client).await;
+    app.composer.set_text("draft".into());
+    press_key(&mut app, KeyCode::Esc).await;
+    assert!(app.held_messages().is_empty());
+    assert_eq!(app.composer.expanded_text(), "first\n\nsecond\n\ndraft");
+
+    app.composer.clear();
+    enter(&mut app, "third", &client).await;
+    assert!(frame_text(&app, (100, 30)).contains("Queued · 1"));
+    click_hit(
+        &mut app,
+        &crate::view::frame::HitTarget::HeldMessages,
+        &client,
+    )
+    .await;
+    assert!(app.held_messages().is_empty());
+    assert_eq!(app.composer.expanded_text(), "third");
+}
+
+#[tokio::test]
+async fn leaving_the_chat_or_quitting_keeps_held_messages_as_its_draft() {
+    let mut app = compacting_offline();
+    let thread = app.thread.clone();
+    let other = app.threads[1].clone();
+    let client = offline_client();
+    enter(&mut app, "first", &client).await;
+    enter(&mut app, "second", &client).await;
+    app.composer.set_text("draft".into());
+    let (navigation, server) = navigation_client().await;
+    app.switch_thread(other.clone(), &navigation).await.unwrap();
+    server.await.unwrap();
+    assert!(
+        app.held.is_empty(),
+        "nothing waits for a chat that is not open"
+    );
+    assert_eq!(
+        app.drafts.get(&thread.id).map(|draft| draft.text.as_str()),
+        Some("first\n\nsecond\n\ndraft")
+    );
+
+    // Quitting does the same for the open chat: its draft is saved as it is.
+    let mut app = compacting_offline();
+    enter(&mut app, "waiting at quit", &client).await;
+    app.return_held();
+    assert_eq!(
+        crate::servers::Draft::from_app(&app).text,
+        "waiting at quit"
+    );
+}
+
+#[tokio::test]
+async fn shell_commands_and_command_prompts_wait_for_the_compaction() {
+    let mut app = compacting_offline();
+    let client = offline_client();
+    press_key(&mut app, KeyCode::Char('!')).await;
+    app.composer.set_text("git status".into());
+    press_key(&mut app, KeyCode::Enter).await;
+    assert_eq!(
+        app.composer.expanded_text(),
+        "git status",
+        "the command stays"
+    );
+    assert_eq!(app.notice, crate::compaction::WAIT_FOR_COMPACTION);
+
+    app.shell_mode = false;
+    app.composer.clear();
+    assert!(!app.submit_prompt("/plan it".into(), &client).await.unwrap());
+    assert_eq!(app.notice, crate::compaction::WAIT_FOR_COMPACTION);
+}
+
+#[tokio::test]
+async fn the_wait_running_out_lets_held_messages_go_out() {
+    let mut app = selector_fixture();
+    finishing(&mut app);
+    let thread = app.thread.clone();
+    let server = serve(vec![
+        (
+            false,
+            http(
+                "524 A Timeout Occurred",
+                "text/html",
+                "<html>timeout</html>",
+            ),
+        ),
+        info(),
+        turn_started(&thread),
+    ])
+    .await;
+    let client =
+        crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
+    compact(&mut app, &client).await;
+    enter(&mut app, "after the wait", &client).await;
+    poll_until(&mut app, "the cut never answered", |app| {
+        app.compactions_waiting_for_row() == 1
+    })
+    .await;
+    app.release_held(&client).await;
+    assert_eq!(app.held_messages(), ["after the wait"], "still waiting");
+
+    app.age_compactions(crate::api::COMPACT_TIMEOUT);
+    app.poll_compactions();
+    assert!(app.notification_toast.is_some(), "the cut is said");
+    app.release_held(&client).await;
+    assert!(app.held_messages().is_empty());
+    let turns = turns_started(&server);
+    assert_eq!(turns.len(), 1);
+    assert!(turns[0].contains("after the wait"));
+}
+
+#[tokio::test]
+async fn a_turn_another_client_starts_ends_the_wait_and_lets_held_messages_go() {
+    let mut app = selector_fixture();
+    finishing(&mut app);
+    let thread = app.thread.clone();
+    let server = serve(vec![
+        (
+            false,
+            http(
+                "524 A Timeout Occurred",
+                "text/html",
+                "<html>timeout</html>",
+            ),
+        ),
+        info(),
+        turn_started(&thread),
+    ])
+    .await;
+    let client =
+        crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
+    compact(&mut app, &client).await;
+    enter(&mut app, "said meanwhile", &client).await;
+    poll_until(&mut app, "the cut never answered", |app| {
+        app.compactions_waiting_for_row() == 1
+    })
+    .await;
+    app.reduce(
+        fixture_event("turn.started", thread.id, thread.id, serde_json::json!({})),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(app.compacting_since().is_none());
+    assert_eq!(
+        app.notification_toast
+            .as_ref()
+            .map(|toast| toast.message.as_str()),
+        Some(crate::compaction::CHAT_CHANGED)
+    );
+    app.release_held(&client).await;
+    assert!(app.held_messages().is_empty());
+    assert_eq!(turns_started(&server).len(), 1);
+}
+
+/// What one failed `/compact` request leaves: a wait for the compaction's
+/// row (`true`), or the failure said at once.
+/// Boxed: the app it holds is large.
+fn waits_after(
+    response: String,
+    finishes: bool,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = bool>>> {
+    Box::pin(async move {
+        let mut app = selector_fixture();
+        if finishes {
+            finishing(&mut app);
+        }
+        let server = serve(vec![(false, response)]).await;
+        let client =
+            crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token")
+                .unwrap();
+        compact(&mut app, &client).await;
+        poll_until(&mut app, "the request never answered", |app| {
+            app.compactions_waiting_for_row() == 1 || app.compacting_since().is_none()
+        })
+        .await;
+        let waits = app.compactions_waiting_for_row() == 1;
+        assert_eq!(waits, app.notification_toast.is_none());
+        waits
+    })
+}
+
+#[tokio::test]
+async fn only_answers_lost_on_the_way_from_a_server_that_finishes_them_are_waited_for() {
+    let json = |status: &str, body: &str| http(status, "application/json", body);
+    let cloudflare = || {
+        http(
+            "524 A Timeout Occurred",
+            "text/html",
+            "<html>timeout</html>",
+        )
+    };
+    assert!(waits_after(cloudflare(), true).await);
+    assert!(
+        !waits_after(cloudflare(), false).await,
+        "an older server's summary died with its request"
+    );
+    // Cloud lost the computer's connection while the request was out.
+    assert!(
+        waits_after(
+            json(
+                "409 Conflict",
+                r#"{"code":"remote_offline","message":"This computer is offline or its connection changed"}"#,
+            ),
+            true,
+        )
+        .await
+    );
+    // Another compaction under way: whatever the release, it lands as a row.
+    assert!(
+        waits_after(
+            json(
+                "409 Conflict",
+                r#"{"code":"conflict","message":"conflict: this chat is already being compacted"}"#,
+            ),
+            false,
+        )
+        .await
+    );
+    // The computer's runtime failed the request, or the model failed the summary.
+    assert!(
+        !waits_after(
+            json(
+                "502 Bad Gateway",
+                r#"{"code":"bad_gateway","message":"Your computer couldn't answer."}"#,
+            ),
+            true,
+        )
+        .await
+    );
+    assert!(
+        !waits_after(
+            json(
+                "502 Bad Gateway",
+                r#"{"code":"provider_error","message":"provider error: overloaded"}"#,
+            ),
+            true,
+        )
+        .await
+    );
+    // A server on this computer that dropped the request is gone, and its
+    // summary with it.
+    assert!(!waits_after(String::new(), true).await);
+}
+
+#[tokio::test]
+async fn a_server_restart_ends_the_wait_for_a_cut_compaction() {
+    let mut app = selector_fixture();
+    finishing(&mut app);
+    let server = serve(vec![(
+        false,
+        http(
+            "524 A Timeout Occurred",
+            "text/html",
+            "<html>timeout</html>",
+        ),
+    )])
+    .await;
+    let client =
+        crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
+    compact(&mut app, &client).await;
+    poll_until(&mut app, "the cut never answered", |app| {
+        app.compactions_waiting_for_row() == 1
+    })
+    .await;
+    app.server_restarted();
+    assert!(app.compacting_since().is_none());
+    assert!(app.notification_toast.is_some());
+}
+
+#[tokio::test]
+async fn a_summary_a_turn_voided_is_said_in_plain_words() {
+    let mut app = selector_fixture();
+    let server = serve(vec![(
+        false,
+        http(
+            "409 Conflict",
+            "application/json",
+            r#"{"code":"conflict","message":"conflict: thread changed while the compaction summary was generated; retry compaction"}"#,
+        ),
+    )])
+    .await;
+    let client =
+        crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
+    compact(&mut app, &client).await;
+    poll_until(&mut app, "the refusal never came", |app| {
+        app.compacting_since().is_none()
+    })
+    .await;
+    assert_eq!(
+        app.notification_toast
+            .as_ref()
+            .map(|toast| toast.message.as_str()),
+        Some(crate::compaction::CHAT_CHANGED)
+    );
 }

@@ -4077,6 +4077,11 @@ impl App {
             self.notice = "A turn is already running".into();
             return Ok(());
         }
+        // Its turn would make the server drop the summary being written.
+        if !workflow && self.holds_for_compaction() {
+            self.refuse_command(crate::compaction::WAIT_FOR_COMPACTION);
+            return Ok(());
+        }
         let arguments = if workflow {
             parse_workflow_args(arguments).map_err(anyhow::Error::msg)?
         } else if arguments.is_empty() {
@@ -4140,6 +4145,12 @@ impl App {
     pub async fn submit_prompt(&mut self, text: String, client: &ApiClient) -> Result<bool> {
         self.normalize_reasoning();
         if self.still_sending() {
+            return Ok(false);
+        }
+        // A command's prompt (`/plan …`) while the chat is compacted: its
+        // turn would make the server drop the summary being written.
+        if self.holds_for_compaction() {
+            self.refuse_command(crate::compaction::WAIT_FOR_COMPACTION);
             return Ok(false);
         }
         if self.active_turn.is_some() {
@@ -4229,6 +4240,10 @@ impl App {
         // the command that leaves it (`/new`) was typed over it.
         self.return_undo_draft();
         self.undo_draft = None;
+        // So do messages waiting for the chat's compaction.
+        if thread.id != previous_thread {
+            self.return_held();
+        }
         if self.composer.is_empty() && self.attachments.is_empty() {
             self.drafts.remove(&previous_thread);
         } else {

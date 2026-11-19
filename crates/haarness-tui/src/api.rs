@@ -2615,6 +2615,9 @@ fn says_only_its_status(said: &str) -> bool {
 #[derive(Debug)]
 pub struct Unanswered {
     message: &'static str,
+    /// It went out to a server on another computer and its answer was lost
+    /// on the way (not refused at connect, not this computer's own server).
+    lost_on_the_way: bool,
 }
 
 impl std::fmt::Display for Unanswered {
@@ -2629,6 +2632,16 @@ impl std::error::Error for Unanswered {}
 #[must_use]
 pub fn unanswered(error: &anyhow::Error) -> bool {
     error.downcast_ref::<Unanswered>().is_some()
+}
+
+/// Whether `error` is a request that reached out to another computer and
+/// lost its answer on the way: not one refused at connect, nor one to a
+/// server on this computer, which got no answer because it is gone.
+#[must_use]
+pub fn lost_on_the_way(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<Unanswered>()
+        .is_some_and(|unanswered| unanswered.lost_on_the_way)
 }
 
 fn unanswered_error(error: reqwest::Error) -> anyhow::Error {
@@ -2654,7 +2667,11 @@ fn unanswered_error(error: reqwest::Error) -> anyhow::Error {
     } else {
         CANNOT_CONNECT
     };
-    Unanswered { message }.into()
+    Unanswered {
+        message,
+        lost_on_the_way: !local && !error.is_connect(),
+    }
+    .into()
 }
 
 /// Whether `url` is on this computer: `localhost` or a loopback address.

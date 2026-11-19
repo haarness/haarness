@@ -786,6 +786,8 @@ impl App {
                 if let Ok(item) = serde_json::from_value::<Item>(event.payload.clone()) {
                     if matches!(item.data, ItemData::Compaction { .. }) {
                         self.compaction_arrived(item.thread_id);
+                    } else {
+                        self.chat_changed_while_compacting(item.thread_id);
                     }
                     // The prompt a turn starts with: a person's own, not a
                     // background result the runtime delivered.
@@ -1172,6 +1174,7 @@ impl App {
                     // The next queued prompt began: a "finished" banner the
                     // conversation was holding is not true.
                     self.completions.resume(thread_id);
+                    self.chat_changed_while_compacting(thread_id);
                 }
                 if event.thread_id == Some(self.root_thread_id) {
                     self.root_active_turn = event.turn_id;
