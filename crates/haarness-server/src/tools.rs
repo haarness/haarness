@@ -6827,13 +6827,18 @@ pub(crate) fn whole_cut(text: &str, end: usize) -> usize {
     }
 }
 
+/// The least room the head of a long line after others is shown in: less
+/// would show a fragment (a path cut short) rather than a start worth
+/// reading.
+const LONG_LINE_HEAD_MIN: usize = 256;
+
 /// The start of `text` a native tool's cut output shows: whole lines, up to
 /// 2,000 of them and 50 KiB. A line too long to show whole (minified code, a
-/// JSON dump) shows its head when it is the first, so the preview is never
-/// empty, or when it is data on one line ([`LONG_LINE_BYTES`] or more) that
-/// a shorter line before it would otherwise come without; any other line
-/// that does not fit is left out whole, so no path or match is shown in
-/// part.
+/// JSON dump) shows its head, ending in the cut mark, when it is the first,
+/// so the preview is never empty, or when it is data on one line (over
+/// [`LONG_LINE_BYTES`]) after shorter ones and at least
+/// [`LONG_LINE_HEAD_MIN`] bytes are left for it; any other line that does
+/// not fit is left out whole, so no path or match is shown in part.
 fn output_preview(text: &str) -> String {
     let mut preview = Vec::new();
     let mut bytes = 0;
@@ -6844,15 +6849,19 @@ fn output_preview(text: &str) -> String {
                 return text::shown(line, true).into_owned();
             }
             if line.len() > LONG_LINE_BYTES {
-                let head = text::shown(line, true);
                 let room = TOOL_OUTPUT_MAX_BYTES.saturating_sub(bytes + 1);
+                // Its first 2,000 characters, when they fit; the line whole
+                // never does.
+                let head = text::shown(line, false);
                 if head.len() <= room {
                     preview.push(head);
-                } else {
-                    let end = whole_cut(line, room);
-                    if end > 0 {
-                        preview.push(std::borrow::Cow::Borrowed(&line[..end]));
-                    }
+                } else if room >= LONG_LINE_HEAD_MIN + text::LINE_CUT.len() {
+                    let end = whole_cut(line, room - text::LINE_CUT.len());
+                    preview.push(std::borrow::Cow::Owned(format!(
+                        "{}{}",
+                        &line[..end],
+                        text::LINE_CUT
+                    )));
                 }
             }
             break;
@@ -10627,12 +10636,33 @@ export default workflow({
         let preview = output_preview(&text);
         let kept = family.repeat(2_000 / 5);
         assert_eq!(preview, format!("{heading}\n{kept}{}", text::LINE_CUT));
-        // Lines that leave too little room: the part that fits, whole.
-        let filler = "y".repeat(TOOL_OUTPUT_MAX_BYTES - 100);
+        // Less room than its first 2,000 characters: the part that fits,
+        // whole, ending in the cut mark.
+        let filler = "y".repeat(TOOL_OUTPUT_MAX_BYTES - 1_001);
         let text = format!("{filler}\n{}", family.repeat(1_000));
         let preview = output_preview(&text);
         let tail = &preview[filler.len() + 1..];
-        assert_eq!(tail, family.repeat(99 / family.len()));
+        let fits = (1_000 - text::LINE_CUT.len()) / family.len();
+        assert_eq!(tail, format!("{}{}", family.repeat(fits), text::LINE_CUT));
+        // A line of fewer than 2,000 characters that does not fit is cut
+        // with the mark too, never shown whole with it.
+        let wide = "日".repeat(1_500);
+        let preview = output_preview(&format!("{filler}\n{wide}"));
+        let tail = &preview[filler.len() + 1..];
+        let fits = (1_000 - text::LINE_CUT.len()) / 3;
+        assert_eq!(tail, format!("{}{}", "日".repeat(fits), text::LINE_CUT));
+        // Too little room for a start worth reading: a long grep match is
+        // left out rather than shown as part of its path.
+        for left in [12, 100, 255] {
+            let filler = "y".repeat(TOOL_OUTPUT_MAX_BYTES - left - 1);
+            let matched = format!(
+                "src/components/settings/a.txt:1:{}{}",
+                "q".repeat(2_000),
+                text::LINE_CUT
+            );
+            let preview = output_preview(&format!("{filler}\n{matched}\nlast"));
+            assert_eq!(preview, filler, "{left}");
+        }
         // A path that does not fit is never shown in part.
         let paths = (0..2_000)
             .map(|index| format!("src/{}/module_{index:05}/file.rs", "deep".repeat(5)))
