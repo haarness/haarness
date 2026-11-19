@@ -328,7 +328,10 @@ fn decode_path(value: &str) -> Option<PathBuf> {
 const BACKSLASH_ESCAPES: bool = !cfg!(windows);
 
 /// Small shell-word reader for the forms terminal emulators emit when files
-/// are dropped: quoted paths or spaces escaped with a backslash.
+/// are dropped: quoted paths or spaces escaped with a backslash. A word ends
+/// at an ASCII space, tab or line break, the blanks a terminal escapes in a
+/// path, and nowhere else: the name macOS gives a screenshot keeps a narrow
+/// no-break space before AM or PM, unescaped.
 fn shellish_words(value: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -354,7 +357,7 @@ fn shellish_words(value: &str) -> Vec<String> {
             }
             continue;
         }
-        if character.is_whitespace() && quote.is_none() {
+        if character.is_ascii_whitespace() && quote.is_none() {
             if !current.is_empty() {
                 words.push(std::mem::take(&mut current));
             }
@@ -426,6 +429,34 @@ mod tests {
         );
     }
 
+    /// A terminal escapes ASCII spaces alone, so the narrow no-break space
+    /// macOS writes before a screenshot's AM or PM, like any other Unicode
+    /// space, is part of the word.
+    #[test]
+    fn a_unicode_space_is_part_of_a_dropped_word() {
+        assert_eq!(
+            shellish_words(
+                "/tmp/9.41.00\u{202f}AM.png\t/tmp/a\u{a0}b.png\n/tmp/c\u{3000}d.png  /tmp/e.png"
+            ),
+            vec![
+                "/tmp/9.41.00\u{202f}AM.png",
+                "/tmp/a\u{a0}b.png",
+                "/tmp/c\u{3000}d.png",
+                "/tmp/e.png",
+            ]
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            shellish_words(
+                "/tmp/Screenshot\\ at\\ 9.41.00\u{202f}AM.png /tmp/Screenshot\\ at\\ 9.41.05\u{202f}PM.png"
+            ),
+            vec![
+                "/tmp/Screenshot at 9.41.00\u{202f}AM.png",
+                "/tmp/Screenshot at 9.41.05\u{202f}PM.png",
+            ]
+        );
+    }
+
     #[test]
     fn recognizes_a_real_dropped_image_path() {
         let root = std::env::temp_dir().join(format!("haarness-media-{}", uuid::Uuid::now_v7()));
@@ -445,6 +476,46 @@ mod tests {
         assert_eq!(
             paths,
             vec![dunce::canonicalize(&image).unwrap().display().to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Two macOS screenshots dropped at once: their names' spaces escaped,
+    /// the narrow no-break space before AM not.
+    #[test]
+    fn two_dropped_screenshots_both_attach() {
+        let root = std::env::temp_dir().join(format!("haarness-shots-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let shots: Vec<_> = ["9.41.00", "9.41.05"]
+            .iter()
+            .map(|time| {
+                let shot = root.join(format!("Screenshot 2026-11-19 at {time}\u{202f}AM.png"));
+                std::fs::write(&shot, b"png fixture").unwrap();
+                shot
+            })
+            .collect();
+        // As a terminal drops them: spaces escaped, or each path quoted on Windows.
+        let dropped = shots
+            .iter()
+            .map(|shot| {
+                if cfg!(windows) {
+                    format!("\"{}\"", shot.display())
+                } else {
+                    shot.display().to_string().replace(' ', "\\ ")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert_eq!(
+            paths_from_paste(&format!("{dropped} "), &[], Language::English, false),
+            Ok(Some(
+                shots
+                    .iter()
+                    .map(|shot| dunce::canonicalize(shot).unwrap().display().to_string())
+                    .collect()
+            ))
         );
 
         let _ = std::fs::remove_dir_all(root);

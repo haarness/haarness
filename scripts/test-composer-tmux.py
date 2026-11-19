@@ -2,10 +2,10 @@
 """The TUI's composer features in a real tmux pane, on the echo provider:
 long pastes (its own, one pasted again to open its chip, and Desktop's),
 slash commands shown as typed, the thinking display (Compact, Show, Hide),
-and files dropped into the prompt (media attached, other files and every
-file in shell mode kept as paths, media over a message's limit refused with
-the draft kept). Pane captures, with their colours, go to
-COMPOSER_TMUX_EVIDENCE."""
+and files dropped into the prompt (media attached, one at a time or several
+at once, other files and every file in shell mode kept as paths, media over
+a message's limit refused with the draft kept). Pane captures, with their
+colours, go to COMPOSER_TMUX_EVIDENCE."""
 import json
 import os
 import shlex
@@ -240,8 +240,9 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
             handle.write(b"%PDF-1.7\n")
             handle.truncate(21 * 1024 * 1024)
 
-        def drop(path):
-            run("tmux", "set-buffer", "-b", "composer", str(path).replace(" ", "\\ "))
+        def drop(*paths):
+            """Several files dropped at once come as one paste, a space apart."""
+            run("tmux", "set-buffer", "-b", "composer", " ".join(str(path).replace(" ", "\\ ") for path in paths))
             run("tmux", "paste-buffer", "-p", "-b", "composer", "-t", session)
 
         def draft():
@@ -276,11 +277,27 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
         until(lambda: "one.png" not in composer(), "Backspace did not remove the screenshots")
         checks.append("Drops: README.md and a .pdf that is not a PDF stay their paths, no command list; a real PDF and two 12 MiB screenshots are attached")
 
+        # Two macOS screenshots in one drop: the terminal escapes the spaces
+        # in their names but not the narrow no-break space before AM.
+        shots = [drops / f"Screenshot 2026-11-19 at 9.41.0{second}\u202fAM.png" for second in (0, 5)]
+        for shot in shots:
+            shot.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+        drop(*shots)
+        until(lambda: "Attached 2 files" in pane(), "two screenshots dropped at once were not both attached")
+        assert "Screenshot\\" not in draft() and "9.41.05\u202fAM.png" in composer(), composer()
+        screen("drop-two-at-once")
+        keys("BSpace")
+        keys("BSpace")
+        until(lambda: "9.41.0" not in composer(), "Backspace did not remove the two screenshots")
+        checks.append("Drops at once: two screenshots with a narrow no-break space in their names both attach")
+
         text("!")
         until(lambda: "shell — Enter runs the command" in pane(), "shell mode did not open")
         text("ls -l ")
         drop(drops / "screen shot.png")
-        until(lambda: f"{drops}/screen\\ shot.png" in draft(), "a file dropped in shell mode did not stay its path")
+        # Compared without spaces: a long path wraps at its escaped space.
+        kept = f"ls -l {drops}/screen\\ shot.png".replace(" ", "")
+        until(lambda: kept in draft().replace(" ", ""), "a file dropped in shell mode did not stay its path")
         assert "Attached" not in pane(), pane()
         screen("drop-shell")
         keys("Enter")
