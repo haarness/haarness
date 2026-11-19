@@ -729,55 +729,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// `path` as seen from the working folder, through `..`: how a command
-    /// or a list of the project's files names a file.
-    fn relative(path: &Path) -> PathBuf {
-        let up = std::env::current_dir()
-            .unwrap()
-            .components()
-            .filter(|part| matches!(part, std::path::Component::Normal(_)))
-            .count();
-        let mut relative: PathBuf = std::iter::repeat_n("..", up).collect();
-        relative.extend(
-            path.components()
-                .filter(|part| matches!(part, std::path::Component::Normal(_))),
-        );
-        relative
-    }
-
     /// Text that names files without being a drop, such as a command run on
     /// an image or a list of changed files, stays text when it mixes media
     /// and other files. Media alone are attached, as they always were.
     #[test]
     fn a_paste_that_only_names_files_is_not_a_drop() {
-        let root = std::env::temp_dir().join(format!("haarness-named-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&root).unwrap();
-        let script = root.join("resize.sh");
-        let image = root.join("icon.png");
-        let other = root.join("logo.png");
-        let readme = root.join("README.md");
-        for file in [&script, &image, &other] {
-            std::fs::write(file, b"fixture").unwrap();
+        // In the working folder, so its files have relative names on every
+        // system, whatever drive the temporary folder is on.
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
         }
-        std::fs::write(&readme, "# Notes\n").unwrap();
-        assert!(relative(&image).is_file(), "{}", relative(&image).display());
+        let name = PathBuf::from(format!("haarness-named-{}", uuid::Uuid::now_v7()));
+        let fixture = Fixture(std::env::current_dir().unwrap().join(&name));
+        std::fs::create_dir(&fixture.0).unwrap();
+        let [script, image, other, readme] =
+            ["resize.sh", "icon.png", "logo.png", "README.md"].map(|file| name.join(file));
+        for file in [&script, &image, &other, &readme] {
+            std::fs::write(fixture.0.join(file.file_name().unwrap()), b"fixture").unwrap();
+        }
+        assert!(
+            image.is_relative() && image.is_file(),
+            "{}",
+            image.display()
+        );
+        let absolute = |path: &Path| fixture.0.join(path.file_name().unwrap());
 
         for text in [
             // A command run on an image, its words relative.
-            format!(
-                "{} {}",
-                relative(&script).display(),
-                relative(&image).display()
-            ),
-            format!("{} {}", relative(&script).display(), image.display()),
+            format!("{} {}", script.display(), image.display()),
+            format!("{} {}", script.display(), absolute(&image).display()),
             // A list of files, one a line, as `git diff --name-only` prints.
+            format!("{}\n{}", readme.display(), image.display()),
             format!(
                 "{}\n{}",
-                relative(&readme).display(),
-                relative(&image).display()
+                absolute(&readme).display(),
+                absolute(&image).display()
             ),
-            format!("{}\n{}", readme.display(), image.display()),
-            format!("{}\r\n{}", image.display(), readme.display()),
+            format!(
+                "{}\r\n{}",
+                absolute(&image).display(),
+                absolute(&readme).display()
+            ),
         ] {
             assert_eq!(
                 paths_from_paste(&text, &[], Language::English, false),
@@ -787,12 +782,12 @@ mod tests {
         }
         // Media alone are attached however they are named.
         for text in [
+            format!("{} {}", image.display(), other.display()),
             format!(
-                "{} {}",
-                relative(&image).display(),
-                relative(&other).display()
+                "{}\n{}",
+                absolute(&image).display(),
+                absolute(&other).display()
             ),
-            format!("{}\n{}", image.display(), other.display()),
         ] {
             assert_eq!(
                 paths_from_paste(&text, &[], Language::English, false)
@@ -802,8 +797,6 @@ mod tests {
                 "{text:?}"
             );
         }
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A drop whose media break a limit is refused, but when it named other
