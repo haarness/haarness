@@ -70,16 +70,20 @@ impl<F: FnMut()> Drop for Cleanup<F> {
     }
 }
 
-/// The folder's server, as its runtime record names it.
-fn recorded_server(data: &std::path::Path) -> serde_json::Value {
+/// The folder's runtime record, which names its server.
+fn record_file(data: &std::path::Path) -> std::path::PathBuf {
     let workspaces = data.join("cache/workspaces");
-    let record = std::fs::read_dir(&workspaces)
+    std::fs::read_dir(&workspaces)
         .expect("workspace cache")
         .flatten()
         .map(|entry| entry.path().join("runtime.json"))
         .find(|path| path.exists())
-        .expect("the folder's runtime.json");
-    serde_json::from_slice(&std::fs::read(record).expect("read runtime.json"))
+        .expect("the folder's runtime.json")
+}
+
+/// The folder's server, as its runtime record names it.
+fn recorded_server(data: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(record_file(data)).expect("read runtime.json"))
         .expect("runtime JSON")
 }
 
@@ -276,6 +280,155 @@ fn a_second_serve_listens_beside_the_running_server() {
         assert!(info.status().is_success());
     });
     assert_eq!(recorded_server(&data), daemon);
+    drop(stop);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A `sleep` this test started, ended with the test however that ends.
+#[cfg(unix)]
+struct Sleep(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for Sleep {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A runtime record outlives a server that died (a crash, `kill -9`, a
+/// restart), the system may give its pid to another program, and a server
+/// that is starting holds the folder's lease before it records itself.
+/// `serve --stop` signals only a process that is still the server its record
+/// names. Here the folder's own server holds the lease while the record names
+/// a `sleep` this test started, at an address nothing answers.
+#[cfg(unix)]
+#[test]
+fn serve_stop_signals_only_the_server_its_record_names() {
+    let root = std::env::temp_dir().join(format!("haarness-serve-stop-pid-{}", Uuid::now_v7()));
+    let workspace = root.join("workspace");
+    let data = root.join("data");
+    let home = root.join("home");
+    for directory in [&workspace, &data, &home] {
+        std::fs::create_dir_all(directory).expect("create fixture directory");
+    }
+    let haarness = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_haarness"));
+        command
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--data-dir")
+            .arg(&data)
+            .current_dir(&workspace)
+            .env("HOME", &home)
+            .env("HAARNESS_HOME", &home)
+            .env("HAARNESS_TEST_PROVIDER", "1")
+            .env("RUST_LOG", "warn")
+            .env_remove("HAARNESS_SERVER_TOKEN")
+            .env_remove("HAARNESS_SERVER_PASSWORD")
+            .stdin(Stdio::null());
+        command
+    };
+    let stop = Cleanup(|| {
+        let _ = haarness()
+            .args(["serve", "--stop"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    });
+    let started = haarness()
+        .args(["serve", "--daemon", "--port", "0"])
+        .output()
+        .expect("launch haarness serve --daemon");
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let file = record_file(&data);
+    let server = recorded_server(&data);
+    // Dropped before `stop`: a failed assertion puts the server's own record
+    // back, so `serve --stop` still finds the server to stop.
+    let original = std::fs::read(&file).expect("read runtime.json");
+    let _restore = Cleanup(|| {
+        let _ = std::fs::write(&file, &original);
+    });
+    assert!(
+        server["started"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "the record says when its server started: {server}"
+    );
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+    let unanswered = format!("http://{}", closed.local_addr().expect("free port"));
+    drop(closed);
+    let rewrite = |record: &serde_json::Value| {
+        std::fs::write(&file, serde_json::to_vec(record).expect("record JSON"))
+            .expect("rewrite runtime.json");
+    };
+    let stop_output = || {
+        haarness()
+            .args(["serve", "--stop"])
+            .output()
+            .expect("haarness serve --stop")
+    };
+
+    // A pid goes to another program only once its server has ended, so that
+    // program starts later; macOS says when a process started to the second.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let mut sleep = Sleep(
+        Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("start sleep"),
+    );
+    let mut stale = server.clone();
+    stale["pid"] = sleep.0.id().into();
+    stale["url"] = unanswered.clone().into();
+    // As written now, with the start time, and as servers before it wrote it.
+    for record in [stale.clone(), {
+        let mut older = stale.clone();
+        older
+            .as_object_mut()
+            .expect("record object")
+            .remove("started");
+        older
+    }] {
+        rewrite(&record);
+        let output = stop_output();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        assert!(
+            stderr.contains("still starting, so nothing was stopped"),
+            "{stderr}"
+        );
+        assert!(
+            sleep.0.try_wait().expect("sleep status").is_none(),
+            "serve --stop signalled a program that is not the server ({record})"
+        );
+    }
+
+    // The server itself, alive but not answering, is still ended.
+    let mut unanswering = server.clone();
+    unanswering["url"] = unanswered.into();
+    rewrite(&unanswering);
+    let output = stop_output();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&format!(
+            "Stopped unresponsive Haarness server {}.",
+            server["pid"]
+        )),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(!file.exists());
+    assert!(sleep.0.try_wait().expect("sleep status").is_none());
+    drop(sleep);
     drop(stop);
     let _ = std::fs::remove_dir_all(root);
 }

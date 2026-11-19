@@ -5141,6 +5141,7 @@ mod tests {
                 ),
                 trace_endpoint: None,
                 system_config_dir: None,
+                started: None,
             };
             crate::write_private_json(&folder.join("runtime.json"), &record).unwrap();
         }

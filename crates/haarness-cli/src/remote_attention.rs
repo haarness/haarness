@@ -582,7 +582,7 @@ impl Watching {
                 Route::Direct
             } else {
                 Route::Gateway {
-                    record: server.record.discovery.clone(),
+                    record: Box::new(server.record.discovery.clone()),
                 }
             };
             let follower = follow(
@@ -765,7 +765,7 @@ enum Route {
     Direct,
     /// Another project's server, which the gateway finds with
     /// `ensure_workspace_server`.
-    Gateway { record: RuntimeDiscovery },
+    Gateway { record: Box<RuntimeDiscovery> },
 }
 
 impl Route {
@@ -3066,6 +3066,7 @@ mod tests {
             access_fingerprint: access,
             trace_endpoint: None,
             system_config_dir: None,
+            started: None,
         }
     }
 
@@ -3102,7 +3103,7 @@ mod tests {
         assert!(Route::Direct.reaches(Some(&info("0", true))));
         assert!(
             !Route::Gateway {
-                record: record(None, None)
+                record: Box::new(record(None, None))
             }
             .reaches(None),
             "a server that has not answered yet"
