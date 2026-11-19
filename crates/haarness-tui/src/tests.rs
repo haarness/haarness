@@ -27692,6 +27692,61 @@ fn a_drop_of_media_and_other_files_attaches_the_media_and_types_the_rest() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Dropping media the prompt holds already says so instead of counting
+/// nothing attached; the drop notices read in the interface language.
+#[test]
+fn dropping_an_attached_file_again_says_it_is_attached_already() {
+    let root = std::env::temp_dir().join(format!("haarness-drop-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let as_dropped = |path: &std::path::Path| {
+        if cfg!(windows) {
+            format!("\"{}\"", path.display())
+        } else {
+            path.display().to_string().replace(' ', "\\ ")
+        }
+    };
+    let first = root.join("screen shot.png");
+    let second = root.join("diagram.png");
+    let readme = root.join("README.md");
+    std::fs::write(&first, b"png fixture").unwrap();
+    std::fs::write(&second, b"png fixture").unwrap();
+    std::fs::write(&readme, "# Notes\n").unwrap();
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+
+    app.paste_into_prompt(&as_dropped(&first), false);
+    assert_eq!(app.notice, "Attached 1 file · backspace removes");
+    app.paste_into_prompt(&as_dropped(&first), false);
+    assert_eq!(app.notice, "Already attached");
+    assert_eq!(app.attachments.len(), 1);
+    // The other files of such a drop still go in as text.
+    app.paste_into_prompt(
+        &format!("{} {}", as_dropped(&first), as_dropped(&readme)),
+        false,
+    );
+    assert_eq!(app.notice, "Already attached");
+    assert_eq!(app.composer.text(), as_dropped(&readme));
+    // Only what is new is counted.
+    app.paste_into_prompt(
+        &format!("{} {}", as_dropped(&first), as_dropped(&second)),
+        false,
+    );
+    assert_eq!(app.notice, "Attached 1 file · backspace removes");
+    assert_eq!(app.attachments.len(), 2);
+
+    app.language = crate::locale::Language::German;
+    app.attachments.clear();
+    app.paste_into_prompt(
+        &format!("{} {}", as_dropped(&first), as_dropped(&second)),
+        false,
+    );
+    assert_eq!(app.notice, "2 Dateien angehängt · backspace entfernt");
+    app.paste_into_prompt(&as_dropped(&second), false);
+    assert_eq!(app.notice, "Bereits angehängt");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn computer_event(
     thread: &Thread,
     id: &str,

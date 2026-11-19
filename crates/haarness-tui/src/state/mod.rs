@@ -2989,10 +2989,16 @@ impl App {
                 // Other files dropped with the media stay their paths, typed
                 // in where the caret is, never folded into a paste chip.
                 self.composer.insert_str(&dropped.text);
-                self.notice = format!(
-                    "Attached {added} file{} · backspace removes",
-                    if added == 1 { "" } else { "s" }
-                );
+                // Media the prompt holds already get no second chip.
+                self.notice = if added == 0 {
+                    self.language.text("Already attached").to_owned()
+                } else {
+                    self.language.count(
+                        added as u64,
+                        "Attached 1 file · backspace removes",
+                        "Attached {count} files · backspace removes",
+                    )
+                };
             }
             Ok(None) => self.composer.paste(text),
             Err(error) => self.notice = error,
