@@ -10,18 +10,24 @@
 use std::borrow::Cow;
 
 /// `text` with each closing tag of one of `names` broken: its `<` is
-/// written `&lt;`. Any case counts, and so do spaces around the `/`. Every
-/// other angle bracket stays as it is, so command output and code
-/// (`Vec<T>`, `<div>`) read as they were printed.
+/// written `&lt;`. Any case counts, and so do spaces around the `/`, the
+/// invisible characters a terminal or editor shows as nothing
+/// (`<\u{200B}/task>`, `</ta\u{200B}sk>`) and the full-width forms
+/// (`＜／ｔａｓｋ＞`). Every other angle bracket stays as it is, so command
+/// output and code (`Vec<T>`, `<div>`) read as they were printed.
 #[must_use]
 pub fn closing_tags_broken<'a>(text: &'a str, names: &[&str]) -> Cow<'a, str> {
     let mut broken = String::new();
     let mut kept = 0;
-    for (at, _) in text.match_indices('<') {
-        if closes(&text[at + 1..], names) {
+    for (at, open) in text
+        .char_indices()
+        .filter(|(_, character)| matches!(character, '<' | '\u{FF1C}'))
+    {
+        let after = at + open.len_utf8();
+        if closes(&text[after..], names) {
             broken.push_str(&text[kept..at]);
             broken.push_str("&lt;");
-            kept = at + 1;
+            kept = after;
         }
     }
     if kept == 0 {
@@ -31,9 +37,19 @@ pub fn closing_tags_broken<'a>(text: &'a str, names: &[&str]) -> Cow<'a, str> {
     Cow::Owned(broken)
 }
 
-/// Whether `rest`, the text after a `<`, closes a tag named in `names`.
+/// Whether `rest`, the text after a `<`, closes a tag named in `names`, read
+/// as a model would see it: invisible characters left out and full-width
+/// forms as their ASCII ones.
 fn closes(rest: &str, names: &[&str]) -> bool {
-    let Some(rest) = rest.trim_start().strip_prefix('/') else {
+    let longest = names.iter().map(|name| name.len()).max().unwrap_or(0);
+    let seen: String = rest
+        .chars()
+        .filter(|character| !invisible(*character))
+        .map(narrow)
+        // Room for spaces, the `/`, the name and what follows it.
+        .take(longest + 64)
+        .collect();
+    let Some(rest) = seen.trim_start().strip_prefix('/') else {
         return false;
     };
     let rest = rest.trim_start();
@@ -44,6 +60,43 @@ fn closes(rest: &str, names: &[&str]) -> bool {
                 character.is_alphanumeric() || "_-:.".contains(character)
             })
     })
+}
+
+/// A character that takes no room on screen: zero-width spaces and joiners,
+/// direction marks and isolates, the soft hyphen, variation selectors,
+/// combining marks and tag characters.
+fn invisible(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00AD}'
+            | '\u{0300}'..='\u{036F}'
+            | '\u{061C}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{17B4}'
+            | '\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// A full-width form as its ASCII character (`／` as `/`, `ｔ` as `t`), and
+/// the ideographic space as a space; anything else as it is.
+fn narrow(character: char) -> char {
+    match character {
+        '\u{FF01}'..='\u{FF5E}' => {
+            char::from_u32(u32::from(character) - 0xFEE0).unwrap_or(character)
+        }
+        '\u{3000}' => ' ',
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -73,6 +126,25 @@ mod tests {
             ("</", "</"),
             ("</comm", "</comm"),
             ("é</command>é", "é&lt;/command>é"),
+            // Invisible characters and full-width forms read as a model sees
+            // them; a visible character between still parts the name.
+            ("<\u{200B}/command>", "&lt;\u{200B}/command>"),
+            ("</com\u{200B}mand>", "&lt;/com\u{200B}mand>"),
+            (
+                "<\u{2066}/\u{FEFF}command\u{E0020}>",
+                "&lt;\u{2066}/\u{FEFF}command\u{E0020}>",
+            ),
+            (
+                "\u{FF1C}\u{FF0F}command\u{FF1E}",
+                "&lt;\u{FF0F}command\u{FF1E}",
+            ),
+            (
+                "\u{FF1C}\u{FF0F}\u{FF43}\u{FF4F}\u{FF4D}\u{FF4D}\u{FF41}\u{FF4E}\u{FF44}\u{FF1E}",
+                "&lt;\u{FF0F}\u{FF43}\u{FF4F}\u{FF4D}\u{FF4D}\u{FF41}\u{FF4E}\u{FF44}\u{FF1E}",
+            ),
+            ("<\u{3000}/command>", "&lt;\u{3000}/command>"),
+            ("</com-mand>", "</com-mand>"),
+            ("\u{FF1C}div\u{FF1E}", "\u{FF1C}div\u{FF1E}"),
         ] {
             assert_eq!(closing_tags_broken(text, &names), broken, "{text:?}");
         }

@@ -469,13 +469,13 @@ pub(crate) fn interrupted_report(command: &crate::StrandedCommand) -> Vec<ItemDa
     let _ = write!(
         tag,
         "\n<summary>`{}` was cut off: Haarness stopped while it ran in the background, and it was not started again. Check what it left behind before you run it again.</summary>",
-        notice_text(&line)
+        notice_text(&line, "summary")
     );
     if !command.tail.is_empty() {
         let _ = write!(
             tag,
             "\n<command_output>\n{}\n</command_output>",
-            notice_text(&command.tail)
+            notice_text(&command.tail, "command_output")
         );
     }
     tag.push_str("\n</command>");
