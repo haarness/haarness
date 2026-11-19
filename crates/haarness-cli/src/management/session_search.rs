@@ -5,7 +5,7 @@ use super::{core_error, item_visible_text, limit, optional_string, required_stri
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use haarness_core::{AgentRuntime, CoreError, ToolContext};
-use haarness_protocol::{Item, ItemData, Thread};
+use haarness_protocol::{Item, ItemData, Thread, ThreadId};
 use serde_json::{Value, json};
 use std::{fmt::Write as _, time::Duration};
 use uuid::Uuid;
@@ -27,48 +27,68 @@ enum Stop {
     Size,
 }
 
-/// Where a search goes on from: the chats after this point in the order a
-/// search reads them (most recently active first, then by id), given as
-/// `"<time> <chat id>"`, or the chats last active before a bare time.
+/// Where a search goes on from: the chats after a point in the order a run
+/// of searches reads them, given as `"<time> <chat id> <run's start>"`. A
+/// bare time stands for the chats last active before it.
 struct Cursor {
     time: DateTime<Utc>,
     id: Option<Uuid>,
+    /// When the run's first search began.
+    since: Option<DateTime<Utc>>,
 }
 
 impl Cursor {
     fn parse(text: &str) -> Result<Self> {
-        let refused =
-            || format!("before '{text}' is not an RFC 3339 time, alone or followed by a chat id");
+        let refused = || {
+            format!(
+                "before '{text}' is not an RFC 3339 time, alone or as a search that stopped gave it"
+            )
+        };
+        let time = |word: &str| {
+            DateTime::parse_from_rfc3339(word)
+                .map(|time| time.with_timezone(&Utc))
+                .with_context(refused)
+        };
         let mut words = text.split_whitespace();
-        let time = DateTime::parse_from_rfc3339(words.next().unwrap_or_default())
-            .with_context(refused)?
-            .with_timezone(&Utc);
+        let at = time(words.next().unwrap_or_default())?;
         let id = words
             .next()
             .map(|id| Uuid::parse_str(id).with_context(refused))
             .transpose()?;
+        let since = words.next().map(time).transpose()?;
         if words.next().is_some() {
             anyhow::bail!(refused());
         }
-        Ok(Self { time, id })
+        Ok(Self {
+            time: at,
+            id,
+            since,
+        })
     }
 
-    /// The point just after `thread`.
-    fn after(thread: &Thread) -> String {
-        format!(
-            "{} {}",
-            thread
-                .updated_at
-                .to_rfc3339_opts(SecondsFormat::AutoSi, true),
-            thread.id
-        )
+    /// The point just after the chat at `place`, in a run that began at
+    /// `since`.
+    fn after((at, id): Place, since: DateTime<Utc>) -> String {
+        let written = |time: DateTime<Utc>| time.to_rfc3339_opts(SecondsFormat::AutoSi, true);
+        format!("{} {id} {}", written(at), written(since))
     }
+}
 
-    fn admits(&self, thread: &Thread) -> bool {
-        match self.id {
-            None => thread.updated_at < self.time,
-            Some(id) => (thread.updated_at, thread.id.0) < (self.time, id),
+/// A chat's place in the order a run of searches reads chats, last first.
+type Place = (DateTime<Utc>, Uuid);
+
+/// Where `thread` comes in a run of searches that began at `since`: by when
+/// it was last active, most recent first, then by id; or, when it has been
+/// active since the run began, after every other chat, since it may have
+/// moved past the point where the run goes on. `None` for the calling chat
+/// then: each search of it makes it active again, and the run's first
+/// search read it first, as the most recently active.
+fn place(thread: &Thread, since: Option<DateTime<Utc>>, calling: ThreadId) -> Option<Place> {
+    match since {
+        Some(since) if thread.updated_at > since => {
+            (thread.id != calling).then_some((DateTime::UNIX_EPOCH, thread.id.0))
         }
+        _ => Some((thread.updated_at, thread.id.0)),
     }
 }
 
@@ -85,10 +105,12 @@ pub(super) async fn search(
     time: Duration,
 ) -> Result<Value> {
     let started = tokio::time::Instant::now();
+    let began = Utc::now();
     let needle = required_string(input, "query")?.to_ascii_lowercase();
     let before = optional_string(input, "before")
         .map(Cursor::parse)
         .transpose()?;
+    let since = before.as_ref().and_then(|before| before.since);
     let include_archived = input
         .get("includeArchived")
         .and_then(Value::as_bool)
@@ -105,12 +127,18 @@ pub(super) async fn search(
                 .list_threads(include_archived)
                 .await
                 .map_err(core_error)?;
-            threads.retain(|thread| before.as_ref().is_none_or(|before| before.admits(thread)));
+            threads.retain(|thread| match &before {
+                None => true,
+                Some(Cursor { time, id: None, .. }) => thread.updated_at < *time,
+                Some(Cursor {
+                    time, id: Some(id), ..
+                }) => place(thread, since, context.thread_id)
+                    .is_some_and(|place| place < (*time, *id)),
+            });
             threads
         }
     };
-    threads
-        .sort_by(|left, right| (right.updated_at, right.id.0).cmp(&(left.updated_at, left.id.0)));
+    threads.sort_by_key(|thread| std::cmp::Reverse(place(thread, since, context.thread_id)));
     let fragment = stored_fragment(&needle);
 
     let mut chats = Vec::new();
@@ -200,7 +228,11 @@ pub(super) async fn search(
         Some(last) => threads
             .last()
             .is_some_and(|oldest| oldest.id != last.id)
-            .then(|| Cursor::after(last)),
+            .then(|| {
+                place(last, since, context.thread_id)
+                    .map(|place| Cursor::after(place, since.unwrap_or(began)))
+            })
+            .flatten(),
         None => None,
     };
     let reason = match stop {
@@ -229,7 +261,8 @@ pub(super) async fn search(
             result["next"] = json!({"before": cursor});
             let _ = write!(
                 note,
-                " For {}, search again with \"before\": \"{cursor}\".",
+                " For {}, search again with \"before\": \"{cursor}\"; chats active since the \
+                 first of these searches began come last then, so a chat may come twice.",
                 if cut.is_some() {
                     "the chats after it"
                 } else {
@@ -277,7 +310,9 @@ fn item_match(item: &Item, needle: &str, own: bool) -> Option<Value> {
         ItemData::ToolCall {
             name, arguments, ..
         } if own
-            && (name == "session_manage" || arguments.to_string().contains("session_manage")) =>
+            && (name == "session_manage"
+                || matches!(name.as_str(), "batch" | "execute" | "workflow")
+                    && arguments.to_string().contains("session_manage")) =>
         {
             return None;
         }
@@ -566,13 +601,14 @@ mod tests {
         assert_eq!(result["searched"], json!({"chats": 1, "of": 4}));
         assert!(result.get("restOfChat").is_none(), "{result}");
         let next = result["next"]["before"].as_str().unwrap().to_owned();
-        assert!(next.ends_with(&third.to_string()), "{next}");
+        assert!(next.contains(&format!(" {third} ")), "{next}");
         let stopped = result["stopped"].as_str().unwrap();
         assert_eq!(
             stopped,
             format!(
                 "Stopped at the limit of 2 matches, with 1 of 4 chats searched. For the chats \
-                 not searched yet, search again with \"before\": \"{next}\"."
+                 not searched yet, search again with \"before\": \"{next}\"; chats active since the \
+                 first of these searches began come last then, so a chat may come twice."
             )
         );
         // Going on from there finds the older ones, and nothing twice.
@@ -612,7 +648,7 @@ mod tests {
             stopped.contains(&format!(
                 "Chat {third} was searched up to item 1: for its later matches, search again \
                  with \"threadId\": \"{third}\", \"after\": 1. For the chats after it, search \
-                 again with \"before\": \"{next}\"."
+                 again with \"before\": \"{next}\";"
             )),
             "{stopped}"
         );
@@ -628,7 +664,11 @@ mod tests {
         assert_eq!(titles(&older), ["second"], "{older}");
 
         // A bad time is refused, naming the field.
-        for before in ["yesterday", "2026-11-19T03:39:03Z not-an-id"] {
+        for before in [
+            "yesterday",
+            "2026-11-19T03:39:03Z not-an-id",
+            "2026-11-19T03:39:03Z 01a1f1f3-4cc0-7592-85e5-0d2f0cf157c9 later",
+        ] {
             let error = search(
                 &chats.runtime,
                 &query(json!({"before": before})),
@@ -641,6 +681,41 @@ mod tests {
             .to_string();
             assert!(error.contains(&format!("before '{before}'")), "{error}");
         }
+    }
+
+    #[tokio::test]
+    async fn going_on_reaches_a_chat_that_became_active_in_between() {
+        let chats = Chats::new();
+        let older = chats.chat("older", vec![said("canary release")]).await;
+        chats.chat("middle", vec![said("canary release")]).await;
+        let here = chats.chat("here", vec![said("canary release")]).await;
+        let input = |before: Option<&str>| {
+            let mut input = json!({"action": "search", "query": "canary release", "limit": 1});
+            if let Some(before) = before {
+                input["before"] = json!(before);
+            }
+            input
+        };
+        let first = chats.search(input(None), here, SEARCH_TIME).await;
+        assert_eq!(titles(&first), ["here"]);
+        // Before the next call the oldest chat gets a message: it is now
+        // the most recently active, past the point the search gave.
+        chats
+            .store
+            .append_item(older, None, said("lunch"))
+            .await
+            .unwrap();
+        let mut seen = Vec::new();
+        let mut before = first["next"]["before"].as_str().map(str::to_owned);
+        for _ in 0..10 {
+            let Some(point) = before.take() else { break };
+            let result = chats.search(input(Some(&point)), here, SEARCH_TIME).await;
+            seen.extend(titles(&result).into_iter().map(str::to_owned));
+            before = result["next"]["before"].as_str().map(str::to_owned);
+        }
+        // Both are reached, once each, the one active since last, and the
+        // calling chat is not read again for its own activity.
+        assert_eq!(seen, ["middle", "older"]);
     }
 
     #[tokio::test]
@@ -709,6 +784,11 @@ mod tests {
                         "execute",
                         json!({"code": "return await tools.session_manage({action: 'search', query: 'zebra'})"}),
                     ),
+                    // An edit that mentions the tool is no search.
+                    call(
+                        "edit",
+                        json!({"path": "tools.rs", "old": "session_manage", "new": "zebra"}),
+                    ),
                 ],
             )
             .await;
@@ -731,12 +811,13 @@ mod tests {
             let chats = &chats;
             async move { chats.search(input, here, SEARCH_TIME).await }
         };
-        // Its own calls hold the query, made directly or through batch or
-        // Code Mode; another chat's call is found.
+        // Its own searches hold the query, made directly or through batch
+        // or Code Mode; its other calls and another chat's search are found.
         let result = run("zebra").await;
         assert_eq!(
             kinds(&result),
             [
+                ("here".to_owned(), "tool_call".to_owned()),
                 ("other".to_owned(), "tool_call".to_owned()),
                 ("other".to_owned(), "user_message".to_owned()),
                 ("other".to_owned(), "tool_call".to_owned()),
@@ -744,7 +825,8 @@ mod tests {
             ],
             "{result}"
         );
-        assert_eq!(result["chats"][0]["matches"][2]["tool"], "bash");
+        assert_eq!(result["chats"][0]["matches"][0]["tool"], "edit");
+        assert_eq!(result["chats"][1]["matches"][2]["tool"], "bash");
         // Text JSON stores escaped, a call's name and arguments together,
         // and letters in another ASCII case.
         for query in [

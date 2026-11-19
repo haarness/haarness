@@ -1331,7 +1331,7 @@ impl Tool for ManagementTool {
                     "threadId": {"type":"string","description":"Thread UUID or unique UUID prefix. Defaults to the current session for read/digest; for search, only that session."},
                     "query": {"type":"string","description":"Search text for list/search."},
                     "includeArchived": {"type":"boolean","description":"Include archived sessions."},
-                    "before": {"type":"string","description":"For search: only sessions last active before this RFC 3339 time, or after the point a search that stopped early gives (a time and a session id)."},
+                    "before": {"type":"string","description":"For search: only sessions last active before this RFC 3339 time, or those left after the point a search that stopped early gives, passed as it gives it."},
                     "after": {"type":"integer","minimum":0,"description":"Return items after this durable sequence; for search, with threadId."},
                     "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Maximum results/items."}
                 }),
