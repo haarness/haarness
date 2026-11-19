@@ -17,8 +17,8 @@ Usage:
   python3 scripts/permission-corpus.py diff <before.jsonl> <after.jsonl>
 
 `--lines` reads the lines from a JSON list instead of the corpus below. `--temp` reads them as lines of
-a chat whose own temp folder is `<root>/chats/1a2b3c4d` (it is also the run's `TMPDIR`, so a build
-from before chats had one reads `$TMPDIR` as that folder too).
+a chat whose own temp folder is `<root>/chats/1a2b3c4d`, with `<root>/server-tmp` as the run's own
+`TMPDIR`, which a build from before chats had one, and a line that sets the variable, reads `$TMPDIR` as.
 """
 import json
 import os
@@ -267,6 +267,7 @@ def run(binary, out, root=None, lines=None, temp=False):
     if temp:
         (chat / 'build').mkdir(parents=True, exist_ok=True)
         (chat / 'out.txt').write_text('x\n')
+        (root / 'server-tmp').mkdir(exist_ok=True)
     lines = json.loads(Path(lines).read_text()) if lines else CORPUS
     corpus = root / 'corpus.json'
     corpus.write_text(json.dumps(lines))
@@ -274,7 +275,7 @@ def run(binary, out, root=None, lines=None, temp=False):
     env = {**os.environ, 'HAARNESS_PERMISSION_CORPUS': str(corpus),
            'HAARNESS_PERMISSION_CORPUS_PROJECT': str(project), 'HAARNESS_PERMISSION_CORPUS_OUT': str(raw)}
     if temp:
-        env.update({'HAARNESS_PERMISSION_CORPUS_TEMP': str(chat), 'TMPDIR': str(chat)})
+        env.update({'HAARNESS_PERMISSION_CORPUS_TEMP': str(chat), 'TMPDIR': str(root / 'server-tmp')})
     subprocess.run([binary, '--exact', 'runtime::permission_corpus::permission_corpus', '--ignored',
                     '--test-threads', '1'], env=env, check=True, capture_output=True)
     text = raw.read_text()
