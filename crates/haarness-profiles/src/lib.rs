@@ -356,6 +356,11 @@ impl Archive {
     }
 
     pub fn capture(roots: &Roots, name: &str, scope: Scope) -> Result<Saved> {
+        Self::capture_from(roots, name, scope, std::env::home_dir().as_deref())
+    }
+
+    /// [`Archive::capture`] for a person whose home folder is `home`.
+    fn capture_from(roots: &Roots, name: &str, scope: Scope, home: Option<&Path>) -> Result<Saved> {
         validate_name(name)?;
         let mut files = BTreeMap::new();
         let mut walk = Walk::default();
@@ -413,7 +418,16 @@ impl Archive {
             }
         }
         if scope != Scope::Global {
-            let project = Place::new(&roots.project, "project", Reach::SavedOrMarkdown);
+            let mut project =
+                Place::new(&roots.project, "project", Reach::Project { markdown: true });
+            // A project that is the home folder, or holds it, holds the
+            // person's own notes too: no Markdown file there comes in by a link.
+            if home
+                .and_then(|home| fs::canonicalize(home).ok())
+                .is_some_and(|home| home.starts_with(&project.real))
+            {
+                project.reach = Reach::Project { markdown: false };
+            }
             for name in CONFIG_FILES.iter().chain(PROJECT_DIRS.iter()) {
                 collect(
                     &roots.project.join(name),
@@ -752,17 +766,21 @@ enum Reach {
     /// data folders also hold sign-ins, history and other state of this
     /// computer.
     Saved,
-    /// To what a profile saves from the project, or to a Markdown file in it
-    /// (an `AGENTS.md` kept as `CLAUDE.md`). A project also holds files no
-    /// profile carries, such as untracked secrets, and may be the home folder.
-    SavedOrMarkdown,
+    /// To what a profile saves from the project and, with `markdown`, to a
+    /// Markdown file in it (an `AGENTS.md` kept as `CLAUDE.md`) outside hidden
+    /// folders other than the project's own configuration folders, and
+    /// outside any `Library`. A project also holds files no profile carries,
+    /// such as untracked secrets.
+    Project { markdown: bool },
 }
 
 /// A folder a profile saves from. A symbolic link met while saving it is
 /// saved as what it leads to only when that is inside this folder and within
 /// its reach, and so is every file the save opens.
 struct Place<'a> {
-    /// The folder's real path, every link on the way to it resolved.
+    /// The folder's real path, every link on the way to it resolved. Real
+    /// paths here all come from `fs::canonicalize`, so on Windows they share
+    /// one form (`\\?\` included) and compare as they should.
     real: PathBuf,
     /// The archive path its contents are saved under.
     prefix: &'a str,
@@ -794,7 +812,7 @@ struct Walk {
 impl<'a> Place<'a> {
     fn new(folder: &Path, prefix: &'a str, reach: Reach) -> Self {
         Self {
-            real: dunce::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf()),
+            real: fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf()),
             prefix,
             reach,
         }
@@ -824,12 +842,17 @@ impl<'a> Place<'a> {
         match self.reach {
             Reach::Whole => true,
             Reach::Saved => portable,
-            Reach::SavedOrMarkdown => {
+            Reach::Project { markdown } => {
                 portable
                     || PROJECT_DIRS.contains(&relative)
-                    || (Path::new(relative)
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                    || (markdown
+                        && Path::new(relative)
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                        && relative.split('/').all(|part| {
+                            part != "Library"
+                                && (!part.starts_with('.') || PROJECT_DIRS.contains(&part))
+                        })
                         && real.is_file())
             }
         }
@@ -838,13 +861,22 @@ impl<'a> Place<'a> {
     /// The verdict for `path`: a link, or a saved folder that is, or sits
     /// under, one.
     fn judge(&self, path: &Path, scope: Scope, holding: &[PathBuf]) -> Result<Link> {
-        let target = match dunce::canonicalize(path) {
-            Ok(target) => target,
-            Err(_) if path.is_symlink() && fs::metadata(path).is_err() => return Ok(Link::Skip),
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("profile source cannot be resolved: {}", path.display())
-                });
+        let mut again = true;
+        let target = loop {
+            match fs::canonicalize(path) {
+                Ok(target) => break target,
+                // A link that leads nowhere has nothing to save.
+                Err(_) if path.is_symlink() && fs::metadata(path).is_err() => {
+                    return Ok(Link::Skip);
+                }
+                // A link replaced by a file while it was being resolved
+                // (macOS then says "Invalid argument") is judged as it is now.
+                Err(_) if again && !path.is_symlink() => again = false,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("profile source cannot be resolved: {}", path.display())
+                    });
+                }
             }
         };
         let Some(relative) = self.inside(&target) else {
@@ -852,7 +884,7 @@ impl<'a> Place<'a> {
         };
         let parent = path
             .parent()
-            .and_then(|parent| dunce::canonicalize(parent).ok());
+            .and_then(|parent| fs::canonicalize(parent).ok());
         if parent
             .iter()
             .chain(holding)
@@ -978,6 +1010,8 @@ fn save(
         }
         let metadata = file.metadata()?;
         ensure!(metadata.is_file(), "profile source is not regular");
+        #[cfg(unix)]
+        waiting(&file)?;
         walk.used -= files.get(&path).map_or(0, |(bytes, _)| bytes.len());
         ensure!(
             metadata.len() <= (MAX_EXPANDED - walk.used) as u64,
@@ -1016,6 +1050,16 @@ fn open(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// Let reads of the regular file `file` wait as usual again, once opening it
+/// could not wait on a pipe: a file kept in the cloud is fetched, not refused.
+#[cfg(unix)]
+fn waiting(file: &File) -> Result<()> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    let flags = OFlag::from_bits_truncate(fcntl(file, FcntlArg::F_GETFL)?);
+    fcntl(file, FcntlArg::F_SETFL(flags - OFlag::O_NONBLOCK))?;
+    Ok(())
+}
+
 /// The real path of the file `opened` holds, as the system names it, which
 /// a link put in place of `path` since it was opened does not change. Where
 /// the system cannot say (Windows, Linux without `/proc`), the real path of
@@ -1035,7 +1079,7 @@ fn held(opened: &File, path: &Path) -> Option<PathBuf> {
             return Some(real);
         }
     }
-    let real = dunce::canonicalize(path).ok()?;
+    let real = fs::canonicalize(path).ok()?;
     still_names(opened, &real).then_some(real)
 }
 

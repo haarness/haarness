@@ -70,9 +70,11 @@ A symbolic link is followed only when it leads to files the profile would
 save anyway, and is then saved as those files under the link's own name: a
 skill shared by `.agents` and `.haarness`, a command linked to an agent's file
 in the configuration folder, or anything inside an installed plugin's own
-folder. In a project, a link may also lead to a Markdown file anywhere in it,
-so an `AGENTS.md` that points at `CLAUDE.md` comes along. A saved folder that is
-itself a link follows the same rule. Any other link is left out and the save
+folder. In a project, a link may also lead to a Markdown file in it, so an
+`AGENTS.md` that points at `CLAUDE.md` comes along; not to one in a hidden folder
+other than `.haarness`, `.agents` and `.opencode`, in a `Library` folder, or
+anywhere in a project that is the home folder. A saved folder that is itself a
+link follows the same rule. Any other link is left out and the save
 carries on: a skill linked in from a dotfiles repository, a link to `.env` or
 `.npmrc` or a secrets folder in the project, to `~/.ssh` when saving from the
 home folder, or to the configuration folder's sign-ins. `profile save` names

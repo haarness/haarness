@@ -800,7 +800,11 @@ fn a_file_is_judged_by_what_was_opened_not_by_its_path() {
     let file = open(&link).unwrap();
     fs::remove_file(&link).unwrap();
     symlink("SKILL.md", &link).unwrap();
-    let project = Place::new(&source.project, "project", Reach::SavedOrMarkdown);
+    let project = Place::new(
+        &source.project,
+        "project",
+        Reach::Project { markdown: true },
+    );
     let opened = held(&file, &link);
     assert!(
         opened
@@ -852,9 +856,15 @@ fn a_link_swapped_while_saving_never_brings_in_a_file_outside() {
             }
         })
     };
+    // A save may fail when a file changes under it; one that succeeds
+    // never carries the secret.
+    let mut saved = 0;
     for _ in 0..150 {
-        let saved = Archive::capture(&source, "race", Scope::Local).unwrap();
-        let archive = Archive::decode(&saved.bytes).unwrap();
+        let Ok(capture) = Archive::capture(&source, "race", Scope::Local) else {
+            continue;
+        };
+        saved += 1;
+        let archive = Archive::decode(&capture.bytes).unwrap();
         assert!(
             archive.files.values().all(|data| data != b"race secret"),
             "a save carried the secret"
@@ -862,27 +872,97 @@ fn a_link_swapped_while_saving_never_brings_in_a_file_outside() {
     }
     stop.store(true, Ordering::Relaxed);
     swapper.join().unwrap();
+    assert!(saved > 0, "no save succeeded");
 }
 
 #[test]
 fn only_a_link_that_leads_nowhere_is_passed_over_quietly() {
     let fixture = Fixture::new();
     let source = fixture.roots("source");
-    let project = Place::new(&source.project, "project", Reach::SavedOrMarkdown);
-    // A saved folder that cannot be resolved is an error, not an empty save.
-    assert!(
-        project
-            .judge(&source.project.join(".haarness"), Scope::Local, &[])
-            .is_err()
-    );
+    put(&source.project, ".haarness/skills/x/SKILL.md", "skill");
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink("gone", source.project.join(".agents")).unwrap();
-        assert!(matches!(
-            project.judge(&source.project.join(".agents"), Scope::Local, &[]),
-            Ok(Link::Skip)
-        ));
+        // A link inside a saved folder whose file is gone, and a saved
+        // folder that is such a link.
+        use std::os::unix::fs::symlink;
+        symlink(
+            "gone.md",
+            source.project.join(".haarness/skills/x/notes.md"),
+        )
+        .unwrap();
+        symlink("gone", source.project.join(".agents")).unwrap();
+        let saved = Archive::capture(&source, "gone", Scope::Local).unwrap();
+        assert!(saved.left_out.is_empty(), "{:?}", saved.left_out);
+        let archive = Archive::decode(&saved.bytes).unwrap();
+        let names: Vec<_> = archive.files.keys().map(String::as_str).collect();
+        assert_eq!(names, ["project/.haarness/skills/x/SKILL.md"]);
     }
+    // Anything else that cannot be resolved is an error, not an empty save.
+    let project = Place::new(
+        &source.project,
+        "project",
+        Reach::Project { markdown: true },
+    );
+    assert!(
+        project
+            .judge(&source.project.join(".opencode"), Scope::Local, &[])
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_brings_in_markdown_only_from_the_projects_own_files() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    // A project that is the home folder brings in no Markdown by a link.
+    let home = fixture.0.join("home");
+    let roots = Roots {
+        config: home.join(".config/haarness"),
+        data: home.join(".local/share/haarness"),
+        project: home.clone(),
+    };
+    for path in [&roots.config, &roots.data] {
+        fs::create_dir_all(path).unwrap();
+    }
+    put(&home, ".ssh/README.md", "ssh notes");
+    put(&home, "Documents/vault/passwords.md", "password notes");
+    let notes = home.join(".agents/skills/notes");
+    put(&notes, "SKILL.md", "notes");
+    symlink("../../../.ssh/README.md", notes.join("ssh.md")).unwrap();
+    symlink(
+        "../../../Documents/vault/passwords.md",
+        notes.join("vault.md"),
+    )
+    .unwrap();
+    let saved = Archive::capture_from(&roots, "home", Scope::Local, Some(&home)).unwrap();
+    assert_eq!(
+        saved.left_out,
+        [notes.join("ssh.md"), notes.join("vault.md")]
+    );
+    let archive = Archive::decode(&saved.bytes).unwrap();
+    let names: Vec<_> = archive.files.keys().map(String::as_str).collect();
+    assert_eq!(names, ["project/.agents/skills/notes/SKILL.md"]);
+    // Nor from a hidden folder or a `Library` in any other project.
+    let source = fixture.roots("source");
+    put(&source.project, ".github/notes.md", "hidden notes");
+    put(&source.project, "Library/notes.md", "library notes");
+    put(&source.project, "docs/agents.md", "shared instructions");
+    let skill = source.project.join(".haarness/skills/notes");
+    put(&skill, "SKILL.md", "notes");
+    symlink("../../../.github/notes.md", skill.join("hidden.md")).unwrap();
+    symlink("../../../Library/notes.md", skill.join("library.md")).unwrap();
+    symlink("../../../docs/agents.md", skill.join("agents.md")).unwrap();
+    let saved = Archive::capture_from(&source, "project", Scope::Local, Some(&home)).unwrap();
+    assert_eq!(
+        saved.left_out,
+        [skill.join("hidden.md"), skill.join("library.md")]
+    );
+    let archive = Archive::decode(&saved.bytes).unwrap();
+    assert_eq!(
+        archive.files["project/.haarness/skills/notes/agents.md"],
+        b"shared instructions"
+    );
 }
 
 #[cfg(unix)]
