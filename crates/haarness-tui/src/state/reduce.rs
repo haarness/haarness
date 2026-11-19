@@ -403,6 +403,19 @@ impl App {
                 | "configuration.reload_queued"
                 | "configuration.reload_failed"
         );
+        // A compaction landing in any chat, open or not, ends a wait for it
+        // there; anything else written in a chat being compacted means its
+        // summary can no longer land.
+        if event.event_type == "item.created"
+            && !self.compactions.is_empty()
+            && let Ok(item) = serde_json::from_value::<Item>(event.payload.clone())
+        {
+            if matches!(item.data, ItemData::Compaction { .. }) {
+                self.compaction_arrived(item.thread_id);
+            } else {
+                self.chat_changed_while_compacting(item.thread_id);
+            }
+        }
         if !on_current && !in_root && !following_workflows && !global_activity {
             return Ok(());
         }
@@ -784,11 +797,6 @@ impl App {
             }
             "item.created" => {
                 if let Ok(item) = serde_json::from_value::<Item>(event.payload.clone()) {
-                    if matches!(item.data, ItemData::Compaction { .. }) {
-                        self.compaction_arrived(item.thread_id);
-                    } else {
-                        self.chat_changed_while_compacting(item.thread_id);
-                    }
                     // The prompt a turn starts with: a person's own, not a
                     // background result the runtime delivered.
                     if let ItemData::UserMessage {

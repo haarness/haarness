@@ -3178,5 +3178,6 @@
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app, the agent uses it without checking with you, and what it does remains your responsibility.": "En agent spør før den handler i en app du ikke har tillatt. I en chat satt til Auto kan Auto-kontrolløren svare for deg, unntatt i apper du har satt til å spørre hver gang; en chat satt til Yolo godkjenner alt. Når du har tillatt en app, bruker agenten den uten å sjekke med deg, og det den gjør, er fortsatt ditt ansvar.",
   "The chat changed while it was being summarised": "Chatten endret seg mens den ble oppsummert",
   "The chat is being compacted · try again once it's done": "Chatten komprimeres · prøv igjen når den er ferdig",
-  "This chat is already being compacted": "Denne chatten komprimeres allerede"
+  "This chat is already being compacted": "Denne chatten komprimeres allerede",
+  "The summary didn't come back in time": "Oppsummeringen kom ikke tilbake i tide"
 }

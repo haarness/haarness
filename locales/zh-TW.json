@@ -3178,5 +3178,6 @@
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app, the agent uses it without checking with you, and what it does remains your responsibility.": "代理程式在你未允許的 App 中操作前會先詢問。在設為自動的對話中，自動模式的審核模型可能會代你回答，但你設為每次都詢問的 App 除外；設為 Yolo 的對話會核准一切。你允許某個 App 後，代理程式會直接使用它而不再向你確認，其所作所為仍由你負責。",
   "The chat changed while it was being summarised": "對話在產生摘要期間有所變更",
   "The chat is being compacted · try again once it's done": "正在壓縮對話 · 完成後再試",
-  "This chat is already being compacted": "此對話已在壓縮中"
+  "This chat is already being compacted": "此對話已在壓縮中",
+  "The summary didn't come back in time": "摘要未能及時傳回"
 }

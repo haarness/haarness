@@ -2388,6 +2388,9 @@ pub struct ApiRefusal {
     /// and the file it is about, from a server that names them.
     pub reason: Option<String>,
     pub path: Option<String>,
+    /// Its body said nothing a person reads: empty, an HTML page or a bare
+    /// status, as a proxy answers when it gives up.
+    pub wordless: bool,
 }
 
 impl std::fmt::Display for ApiRefusal {
@@ -2500,12 +2503,20 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     };
+    let text = (value.is_none())
+        .then(|| body.trim())
+        .filter(|text| !text.is_empty());
+    let wordless = field("message")
+        .or_else(|| field("error"))
+        .or(text)
+        .is_none_or(says_only_its_status);
     Err(ApiRefusal {
         status,
         code,
         message,
         reason: detail("reason"),
         path: detail("path"),
+        wordless,
     }
     .into())
 }
@@ -2628,15 +2639,24 @@ impl std::fmt::Display for Unanswered {
 
 impl std::error::Error for Unanswered {}
 
+/// Whether a refused request's body said nothing a person reads (see
+/// [`ApiRefusal::wordless`]).
+#[must_use]
+pub fn refused_wordless(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ApiRefusal>()
+        .is_some_and(|refusal| refusal.wordless)
+}
+
 /// Whether `error` is a request that got no answer (see [`Unanswered`]).
 #[must_use]
 pub fn unanswered(error: &anyhow::Error) -> bool {
     error.downcast_ref::<Unanswered>().is_some()
 }
 
-/// Whether `error` is a request that reached out to another computer and
-/// lost its answer on the way: not one refused at connect, nor one to a
-/// server on this computer, which got no answer because it is gone.
+/// Whether `error` is a request that went through Cloud's relay to another
+/// computer and lost its answer on the way: not one refused at connect, nor
+/// one to a server on this computer, which got no answer because it is gone.
 #[must_use]
 pub fn lost_on_the_way(error: &anyhow::Error) -> bool {
     error
@@ -2667,9 +2687,13 @@ fn unanswered_error(error: reqwest::Error) -> anyhow::Error {
     } else {
         CANNOT_CONNECT
     };
+    // Through Cloud's relay to another computer, which may still be at it.
+    let relayed = error.url().is_some_and(|url| {
+        url.path().contains("/remote-hosts/") || url.path().contains("/remote-sessions/")
+    });
     Unanswered {
         message,
-        lost_on_the_way: !local && !error.is_connect(),
+        lost_on_the_way: relayed && !local && !error.is_connect(),
     }
     .into()
 }

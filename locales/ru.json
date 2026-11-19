@@ -3178,5 +3178,6 @@
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app, the agent uses it without checking with you, and what it does remains your responsibility.": "Агент спрашивает, прежде чем действовать в приложении, которое вы не разрешили. В чате в режиме Авто проверяющий режима Авто может ответить за вас, кроме приложений, для которых вы выбрали запрос каждый раз; чат в режиме Yolo одобряет всё. Разрешённым приложением агент пользуется, не сверяясь с вами, а ответственность за его действия остаётся на вас.",
   "The chat changed while it was being summarised": "Чат изменился во время подготовки сводки",
   "The chat is being compacted · try again once it's done": "Чат сжимается · повторите попытку, когда это завершится",
-  "This chat is already being compacted": "Этот чат уже сжимается"
+  "This chat is already being compacted": "Этот чат уже сжимается",
+  "The summary didn't come back in time": "Сводка не пришла вовремя"
 }

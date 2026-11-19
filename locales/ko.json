@@ -3178,5 +3178,6 @@
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app, the agent uses it without checking with you, and what it does remains your responsibility.": "에이전트는 허용하지 않은 앱에서 작업하기 전에 묻습니다. 자동으로 설정한 채팅에서는 매번 묻도록 설정한 앱을 제외하고 자동 모드 검토자가 대신 답할 수 있으며, Yolo로 설정한 채팅은 모든 것을 승인합니다. 앱을 허용하면 에이전트는 사용자에게 확인하지 않고 그 앱을 사용하며, 그 결과에 대한 책임은 여전히 사용자에게 있습니다.",
   "The chat changed while it was being summarised": "요약하는 동안 채팅이 변경되었습니다",
   "The chat is being compacted · try again once it's done": "채팅을 압축하는 중입니다 · 완료된 후 다시 시도하세요",
-  "This chat is already being compacted": "이 채팅은 이미 압축 중입니다"
+  "This chat is already being compacted": "이 채팅은 이미 압축 중입니다",
+  "The summary didn't come back in time": "요약이 제때 돌아오지 않았습니다"
 }

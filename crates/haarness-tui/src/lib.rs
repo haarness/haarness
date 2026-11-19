@@ -1141,6 +1141,7 @@ async fn run_with_client(
                         if let Ok(items) = client.items(app.thread.id).await {
                             app.items = items;
                             app.hydrate_child_links();
+                            app.compaction_rows_loaded();
                         }
                         if let Ok(todos) = client.todos(app.thread.id).await {
                             app.todos = todos;

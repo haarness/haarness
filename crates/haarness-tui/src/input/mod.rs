@@ -1413,7 +1413,7 @@ pub async fn handle_key_at(
             } else if app.shell_mode && app.holds_for_compaction() {
                 // What it writes would make the server drop the summary being
                 // written; the command stays in the prompt.
-                app.refuse_command(crate::compaction::WAIT_FOR_COMPACTION);
+                app.refuse_while_compacting(crate::compaction::WAIT_FOR_COMPACTION);
             } else if app.shell_mode {
                 let command = crate::resource_mentions::plain(&app.composer.take());
                 app.save_prompt_history();

@@ -52,7 +52,8 @@ shows comes from that server over REST and SSE, and quitting it never stops the 
   the server restarts first; a message sent meanwhile waits above the prompt as queued, since a turn
   started then would void the summary, and goes out once the compaction is over; Esc or a click
   brings it back to the prompt, as do leaving the chat and quitting, which keep it as the chat's
-  draft, and a send that fails; `!` commands and commands that start a turn wait with a note),
+  draft, and a send that fails, always as prose (a shell command typed meanwhile stays as its own
+  `!` line); `!` commands, commands that start a turn and a second `/compact` wait with a note),
   `statusline.rs`, `theme.rs`, `keybindings.rs`.
 - `locale.rs`: the 17 interface catalogs in `locales/`, shared with Desktop. Visible text is looked up
   by its English text, so every new string needs a key in each catalog (see

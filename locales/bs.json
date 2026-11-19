@@ -3178,5 +3178,6 @@
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app, the agent uses it without checking with you, and what it does remains your responsibility.": "Agent pita prije nego što radi u aplikaciji koju niste dozvolili. U razgovoru postavljenom na Auto, recenzent za Auto može odgovoriti umjesto vas, osim u aplikacijama za koje ste postavili da pitaju svaki put; razgovor postavljen na Yolo odobrava sve. Kad dozvolite aplikaciju, agent je koristi bez provjere s vama, a za ono što uradi i dalje ste odgovorni vi.",
   "The chat changed while it was being summarised": "Razgovor se promijenio dok se sažimao",
   "The chat is being compacted · try again once it's done": "Razgovor se sažima · pokušajte ponovo kada završi",
-  "This chat is already being compacted": "Ovaj razgovor se već sažima"
+  "This chat is already being compacted": "Ovaj razgovor se već sažima",
+  "The summary didn't come back in time": "Sažetak se nije vratio na vrijeme"
 }

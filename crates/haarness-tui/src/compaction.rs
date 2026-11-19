@@ -26,6 +26,16 @@ pub(crate) const CHAT_CHANGED: &str = "The chat changed while it was being summa
 pub(crate) const WAIT_FOR_COMPACTION: &str =
     "The chat is being compacted · try again once it's done";
 
+/// Said when `/compact` is asked again while the chat is being compacted.
+pub(crate) const ALREADY_COMPACTING: &str = "This chat is already being compacted";
+
+/// Said when another compaction under way never landed within the wait.
+pub(crate) const DID_NOT_COME_BACK: &str = "The summary didn't come back in time";
+
+/// How long Cloud's word that it lost the computer must come after the
+/// request went: one said sooner never reached the computer at all.
+const LOST_AFTER: Duration = Duration::from_secs(5);
+
 /// One `/compact` this TUI asked for.
 pub(crate) struct Compaction {
     thread: ThreadId,
@@ -37,6 +47,9 @@ pub(crate) struct Compaction {
     /// finishes that summary, so this waits for the compaction's row, and
     /// says it only if the row never comes.
     unanswered: Option<String>,
+    /// The chat's newest item when it was asked for: a compaction after it
+    /// in the chat's history is the one waited for.
+    seen_sequence: u64,
 }
 
 /// A message sent while its chat was being compacted, waiting to go out.
@@ -57,6 +70,11 @@ impl App {
     /// Ask the server for a compaction of the open chat, with the person's
     /// own summary when they gave one, and return at once.
     pub(crate) fn start_compaction(&mut self, summary: Option<String>, client: &ApiClient) {
+        // One at a time: asked again, it would only wait for the first.
+        if self.compacting_since().is_some() {
+            self.refuse_while_compacting(ALREADY_COMPACTING);
+            return;
+        }
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let client = client.clone();
         let thread = self.thread.id;
@@ -72,12 +90,27 @@ impl App {
             };
             let _ = sender.send(client.compact(thread, request).await);
         });
+        let seen_sequence = self
+            .items
+            .iter()
+            .map(|item| item.sequence)
+            .max()
+            .unwrap_or(0);
         self.compactions.push(Compaction {
             thread,
             started: Instant::now(),
             answer: Some(receiver),
             unanswered: None,
+            seen_sequence,
         });
+    }
+
+    /// Refuse what would void the open chat's compaction, with `reason`: on
+    /// a card too, since the band says `compacting` meanwhile.
+    pub(crate) fn refuse_while_compacting(&mut self, reason: &'static str) {
+        let said = self.language.text(reason).to_owned();
+        self.show_toast(None, said, ToastVariant::Warning, Duration::from_secs(5));
+        self.refuse_command(reason);
     }
 
     /// When the open chat's oldest running compaction started, if one runs.
@@ -134,7 +167,14 @@ impl App {
         }
         let mut texts: Vec<String> = mine.iter().map(|held| held.text.clone()).collect();
         let draft = self.composer.expanded_text();
-        if !draft.trim().is_empty() {
+        if self.shell_mode {
+            // Never prose in a shell line: the prompt leaves shell mode and
+            // the command stays as a line of its own.
+            self.shell_mode = false;
+            if !draft.trim().is_empty() {
+                texts.push(format!("!{draft}"));
+            }
+        } else if !draft.trim().is_empty() {
             texts.push(draft);
         }
         self.composer.set_text(texts.join("\n\n"));
@@ -221,7 +261,13 @@ impl App {
                     self.compaction_done(compaction.thread, item);
                 }
                 Some(Ok(Err(error))) => {
-                    if already_compacting(&error) || (finishes && cut_on_the_way(&error)) {
+                    let out_for = now.duration_since(compaction.started);
+                    if already_compacting(&error) {
+                        compaction.answer = None;
+                        compaction.unanswered =
+                            Some(self.language.text(DID_NOT_COME_BACK).to_owned());
+                        index += 1;
+                    } else if finishes && cut_on_the_way(&error, out_for) {
                         compaction.answer = None;
                         compaction.unanswered = Some(format!("{error:#}"));
                         index += 1;
@@ -261,6 +307,27 @@ impl App {
     pub(crate) fn compaction_arrived(&mut self, thread: ThreadId) {
         self.compactions
             .retain(|compaction| compaction.thread != thread || compaction.answer.is_some());
+    }
+
+    /// The open chat's history was read again (opening it, a resync): a
+    /// compaction in it newer than what a wait began with is the one waited
+    /// for, which landed while its row went unseen.
+    pub(crate) fn compaction_rows_loaded(&mut self) {
+        let thread = self.thread.id;
+        let newest = self
+            .items
+            .iter()
+            .filter(|item| matches!(item.data, ItemData::Compaction { .. }))
+            .map(|item| item.sequence)
+            .max();
+        let Some(newest) = newest else {
+            return;
+        };
+        self.compactions.retain(|compaction| {
+            compaction.thread != thread
+                || compaction.answer.is_some()
+                || newest <= compaction.seen_sequence
+        });
     }
 
     /// Something else happened in `thread` (another item, a turn): a summary
@@ -356,24 +423,30 @@ fn already_compacting(error: &anyhow::Error) -> bool {
 }
 
 /// The request's answer was lost on its way back from another computer,
-/// while that computer goes on with the summary: the connection to it
-/// dropped, a proxy gave up (Cloudflare's 524 at its time limit, a gateway's
-/// 502 or 504 with no error of the server's own), or Cloud lost the
-/// computer's connection mid-request. The server's own failures (the model
-/// failing the summary, Cloud's word that the computer's runtime failed)
-/// always name their code and are not cuts.
-fn cut_on_the_way(error: &anyhow::Error) -> bool {
+/// while that computer goes on with the summary (the same rule Desktop and
+/// the web keep): Cloudflare's 524 at its time limit; any 5xx a proxy said
+/// with no error of the server's own and nothing to read (an HTML page, an
+/// empty body); Cloud losing the computer's connection once the request had
+/// been out a while; or the connection through Cloud's relay dropping. The
+/// server's own failures (the model failing the summary, Cloud's word that
+/// the computer's runtime failed) name their code and are not cuts.
+fn cut_on_the_way(error: &anyhow::Error, out_for: Duration) -> bool {
     if crate::api::lost_on_the_way(error) {
         return true;
     }
     let code = crate::api::refusal_code(error);
     match crate::api::refusal_status(error).map(|status| status.as_u16()) {
-        Some(502 | 504 | 524) => code.is_none(),
+        Some(524) => true,
+        // A proxy's own answer: no error of the server's, nothing to read.
+        Some(500..=599) => code.is_none() && crate::api::refused_wordless(error),
+        // Cloud lost the computer after the request reached it; said at once,
+        // the computer was not there to take it.
         Some(409) => {
-            code == Some("remote_offline")
-                || error
-                    .to_string()
-                    .eq_ignore_ascii_case(crate::api::COMPUTER_UNREACHABLE)
+            out_for >= LOST_AFTER
+                && (code == Some("remote_offline")
+                    || error
+                        .to_string()
+                        .eq_ignore_ascii_case(crate::api::COMPUTER_UNREACHABLE))
         }
         _ => false,
     }

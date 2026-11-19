@@ -3178,5 +3178,6 @@
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app, the agent uses it without checking with you, and what it does remains your responsibility.": "Ein Agent fragt, bevor er in einer App handelt, die du nicht erlaubt hast. In einem Chat auf Auto kann der Prüfer des Auto-Modus für dich antworten, außer in Apps, die du auf „Jedes Mal fragen“ gestellt hast; ein Chat auf Yolo genehmigt alles. Hast du eine App erlaubt, nutzt der Agent sie, ohne sich bei dir zu vergewissern, und was er tut, bleibt deine Verantwortung.",
   "The chat changed while it was being summarised": "Der Chat hat sich während der Zusammenfassung geändert",
   "The chat is being compacted · try again once it's done": "Der Chat wird komprimiert · versuche es danach noch einmal",
-  "This chat is already being compacted": "Dieser Chat wird bereits komprimiert"
+  "This chat is already being compacted": "Dieser Chat wird bereits komprimiert",
+  "The summary didn't come back in time": "Die Zusammenfassung kam nicht rechtzeitig zurück"
 }

@@ -4079,7 +4079,7 @@ impl App {
         }
         // Its turn would make the server drop the summary being written.
         if !workflow && self.holds_for_compaction() {
-            self.refuse_command(crate::compaction::WAIT_FOR_COMPACTION);
+            self.refuse_while_compacting(crate::compaction::WAIT_FOR_COMPACTION);
             return Ok(());
         }
         let arguments = if workflow {
@@ -4150,7 +4150,7 @@ impl App {
         // A command's prompt (`/plan …`) while the chat is compacted: its
         // turn would make the server drop the summary being written.
         if self.holds_for_compaction() {
-            self.refuse_command(crate::compaction::WAIT_FOR_COMPACTION);
+            self.refuse_while_compacting(crate::compaction::WAIT_FOR_COMPACTION);
             return Ok(false);
         }
         if self.active_turn.is_some() {
@@ -4265,6 +4265,9 @@ impl App {
                 .unwrap_or(0),
         );
         self.thread = thread;
+        // A compaction waited for here that landed while another chat was
+        // open is in what was just read.
+        self.compaction_rows_loaded();
         if let Some(id) = abandoned {
             archive_untouched(
                 &mut self.threads,

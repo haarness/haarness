@@ -187,23 +187,17 @@ fn finishing(app: &mut App) {
 }
 
 #[tokio::test]
-async fn a_second_compaction_waits_quietly_for_the_first_to_land() {
+async fn a_second_compaction_is_refused_here_while_the_first_runs() {
     let thread = fixture_thread();
     let item = compaction_item(&thread, "first summary");
-    let server = serve(vec![
-        (
-            true,
-            http("200 OK", "application/json", &serde_json::to_string(&item).unwrap()),
+    let server = serve(vec![(
+        true,
+        http(
+            "200 OK",
+            "application/json",
+            &serde_json::to_string(&item).unwrap(),
         ),
-        (
-            false,
-            http(
-                "409 Conflict",
-                "application/json",
-                r#"{"code":"conflict","message":"conflict: this chat is already being compacted","retryable":true}"#,
-            ),
-        ),
-    ])
+    )])
     .await;
     let client =
         crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
@@ -211,14 +205,16 @@ async fn a_second_compaction_waits_quietly_for_the_first_to_land() {
 
     compact(&mut app, &client).await;
     accepted(&server, 1).await;
-    // Asked again (here, or by another client the TUI does not know of):
-    // the server's answer is a summary under way, waited for as its own.
     compact(&mut app, &client).await;
-    poll_until(&mut app, "the second request never answered", |app| {
-        app.compactions_waiting_for_row() == 1
-    })
-    .await;
-    assert!(app.notification_toast.is_none(), "nothing failed");
+    assert_eq!(app.notice, crate::compaction::ALREADY_COMPACTING);
+    // Said on a card: the band says `compacting` meanwhile.
+    assert_eq!(
+        app.notification_toast
+            .as_ref()
+            .map(|toast| toast.message.as_str()),
+        Some(crate::compaction::ALREADY_COMPACTING)
+    );
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1, "not asked again");
     assert!(band(&app).contains("compacting"), "the first one runs on");
 
     server.release.add_permits(1);
@@ -653,6 +649,7 @@ async fn a_turn_another_client_starts_ends_the_wait_and_lets_held_messages_go() 
 fn waits_after(
     response: String,
     finishes: bool,
+    out_for: Duration,
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = bool>>> {
     Box::pin(async move {
         let mut app = selector_fixture();
@@ -664,6 +661,8 @@ fn waits_after(
             crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token")
                 .unwrap();
         compact(&mut app, &client).await;
+        // As if the request had been out that long when its answer came.
+        app.age_compactions(out_for);
         poll_until(&mut app, "the request never answered", |app| {
             app.compactions_waiting_for_row() == 1 || app.compacting_since().is_none()
         })
@@ -676,6 +675,7 @@ fn waits_after(
 
 #[tokio::test]
 async fn only_answers_lost_on_the_way_from_a_server_that_finishes_them_are_waited_for() {
+    let now = Duration::ZERO;
     let json = |status: &str, body: &str| http(status, "application/json", body);
     let cloudflare = || {
         http(
@@ -684,41 +684,57 @@ async fn only_answers_lost_on_the_way_from_a_server_that_finishes_them_are_waite
             "<html>timeout</html>",
         )
     };
-    assert!(waits_after(cloudflare(), true).await);
+    assert!(waits_after(cloudflare(), true, now).await);
     assert!(
-        !waits_after(cloudflare(), false).await,
+        !waits_after(cloudflare(), false, now).await,
         "an older server's summary died with its request"
     );
-    // Cloud lost the computer's connection while the request was out.
+    // Any 5xx a proxy says with nothing to read.
     assert!(
         waits_after(
-            json(
-                "409 Conflict",
-                r#"{"code":"remote_offline","message":"This computer is offline or its connection changed"}"#,
+            http(
+                "500 Internal Server Error",
+                "text/html",
+                "<html>oops</html>"
             ),
             true,
+            now,
         )
         .await
     );
-    // Another compaction under way: whatever the release, it lands as a row.
+    assert!(waits_after(http("503 Service Unavailable", "text/plain", ""), true, now).await);
+    // A sentence is someone's answer, not a cut.
     assert!(
-        waits_after(
-            json(
-                "409 Conflict",
-                r#"{"code":"conflict","message":"conflict: this chat is already being compacted"}"#,
+        !waits_after(
+            http(
+                "502 Bad Gateway",
+                "text/plain",
+                "The upstream server sent an invalid response.",
             ),
-            false,
+            true,
+            now,
         )
         .await
     );
-    // The computer's runtime failed the request, or the model failed the summary.
+    // Cloud lost the computer's connection: a cut once the request had been
+    // out a while; said at once, the computer was not there to take it.
+    let lost = || {
+        json(
+            "409 Conflict",
+            r#"{"error":{"code":"conflict","message":"Remote host is offline or its connection changed. Try again."}}"#,
+        )
+    };
+    assert!(waits_after(lost(), true, Duration::from_secs(6)).await);
+    assert!(!waits_after(lost(), true, now).await);
+    // The computer's runtime failed the request, or the model the summary.
     assert!(
         !waits_after(
             json(
                 "502 Bad Gateway",
-                r#"{"code":"bad_gateway","message":"Your computer couldn't answer."}"#,
+                r#"{"error":{"code":"bad_gateway","message":"Your computer couldn't answer. Check that Haarness is open and up to date on it, then try again."}}"#,
             ),
             true,
+            now,
         )
         .await
     );
@@ -729,12 +745,122 @@ async fn only_answers_lost_on_the_way_from_a_server_that_finishes_them_are_waite
                 r#"{"code":"provider_error","message":"provider error: overloaded"}"#,
             ),
             true,
+            now,
         )
         .await
     );
     // A server on this computer that dropped the request is gone, and its
     // summary with it.
-    assert!(!waits_after(String::new(), true).await);
+    assert!(!waits_after(String::new(), true, now).await);
+}
+
+#[tokio::test]
+async fn another_clients_compaction_is_waited_for_and_said_plainly_if_it_never_lands() {
+    let mut app = selector_fixture();
+    let server = serve(vec![(
+        false,
+        http(
+            "409 Conflict",
+            "application/json",
+            r#"{"code":"conflict","message":"conflict: this chat is already being compacted"}"#,
+        ),
+    )])
+    .await;
+    let client =
+        crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
+    compact(&mut app, &client).await;
+    poll_until(&mut app, "the request never answered", |app| {
+        app.compactions_waiting_for_row() == 1
+    })
+    .await;
+    assert!(app.notification_toast.is_none());
+    app.age_compactions(crate::api::COMPACT_TIMEOUT);
+    app.poll_compactions();
+    assert_eq!(
+        app.notification_toast
+            .as_ref()
+            .map(|toast| toast.message.as_str()),
+        Some(crate::compaction::DID_NOT_COME_BACK)
+    );
+}
+
+/// A wait for chat A's cut compaction while chat B is open.
+async fn waiting_in_another_chat() -> (App, Thread) {
+    let mut app = selector_fixture();
+    finishing(&mut app);
+    let waiting = app.thread.clone();
+    let server = serve(vec![(
+        false,
+        http(
+            "524 A Timeout Occurred",
+            "text/html",
+            "<html>timeout</html>",
+        ),
+    )])
+    .await;
+    let client =
+        crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
+    compact(&mut app, &client).await;
+    poll_until(&mut app, "the cut never answered", |app| {
+        app.compactions_waiting_for_row() == 1
+    })
+    .await;
+    let other = app.threads[1].clone();
+    let (navigation, server) = navigation_client().await;
+    app.switch_thread(other, &navigation).await.unwrap();
+    server.await.unwrap();
+    (app, waiting)
+}
+
+#[tokio::test]
+async fn a_compaction_landing_while_another_chat_is_open_ends_its_wait() {
+    let (mut app, waiting) = Box::pin(waiting_in_another_chat()).await;
+    let landed = compaction_item(&waiting, "landed meanwhile");
+    app.reduce(
+        fixture_event(
+            "item.created",
+            waiting.id,
+            waiting.id,
+            serde_json::json!(landed),
+        ),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.compactions_waiting_for_row(), 0);
+    // Nothing is said when the wait would have run out.
+    app.age_compactions(crate::api::COMPACT_TIMEOUT);
+    app.poll_compactions();
+    assert!(app.notification_toast.is_none());
+}
+
+#[tokio::test]
+async fn a_landing_whose_row_went_unseen_ends_the_wait_once_the_chat_is_read() {
+    let (mut app, waiting) = Box::pin(waiting_in_another_chat()).await;
+    // Back in the chat: its history, read again, holds the compaction.
+    app.thread = waiting.clone();
+    app.items = vec![compaction_item(&waiting, "landed unseen")];
+    app.compaction_rows_loaded();
+    assert_eq!(app.compactions_waiting_for_row(), 0);
+    assert!(app.compacting_since().is_none());
+}
+
+#[tokio::test]
+async fn held_messages_never_come_back_as_a_shell_command() {
+    let mut app = compacting_offline();
+    let client = offline_client();
+    enter(&mut app, "fix the failing tests", &client).await;
+    press_key(&mut app, KeyCode::Char('!')).await;
+    app.composer.set_text("cargo test".into());
+    press_key(&mut app, KeyCode::Enter).await;
+    assert!(app.shell_mode, "refused, the command stays");
+    assert!(app.return_held());
+    assert!(!app.shell_mode, "the prompt is prose again");
+    assert_eq!(
+        app.composer.expanded_text(),
+        "fix the failing tests\n\n!cargo test"
+    );
+    assert!(!crate::servers::Draft::from_app(&app).shell);
 }
 
 #[tokio::test]

@@ -24609,6 +24609,7 @@ fn undo_redo_and_diff_failures_read_as_what_to_do() {
             message: message.into(),
             reason: None,
             path: None,
+            wordless: false,
         }
         .into()
     };

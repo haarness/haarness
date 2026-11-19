@@ -3178,5 +3178,6 @@
   "An agent asks before acting in an app you haven't allowed. In a chat set to Auto, Auto's reviewer may answer for you, except in apps you set to ask every time; a chat set to Yolo approves everything. Once you allow an app, the agent uses it without checking with you, and what it does remains your responsibility.": "Bir ajan, izin vermediğiniz bir uygulamada işlem yapmadan önce sorar. Otomatik'e ayarlı bir sohbette, her seferinde soracak şekilde ayarladığınız uygulamalar dışında Otomatik modun denetleyicisi sizin yerinize yanıt verebilir; Yolo'ya ayarlı bir sohbet her şeyi onaylar. Bir uygulamaya izin verdiğinizde ajan onu size danışmadan kullanır ve yaptıklarının sorumluluğu sizde kalır.",
   "The chat changed while it was being summarised": "Sohbet özetlenirken değişti",
   "The chat is being compacted · try again once it's done": "Sohbet sıkıştırılıyor · bittiğinde yeniden deneyin",
-  "This chat is already being compacted": "Bu sohbet zaten sıkıştırılıyor"
+  "This chat is already being compacted": "Bu sohbet zaten sıkıştırılıyor",
+  "The summary didn't come back in time": "Özet zamanında gelmedi"
 }
