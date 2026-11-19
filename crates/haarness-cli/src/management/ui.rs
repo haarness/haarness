@@ -2147,19 +2147,22 @@ impl ManagementService {
         }
         Ok(())
     }
-    fn profile_roots(&self) -> haarness_profiles::Roots {
-        haarness_profiles::Roots {
-            config: self.paths.config_dir().to_path_buf(),
-            data: self.paths.data.clone(),
-            project: self.workspace.clone(),
-        }
+    /// The folders a profile saves from and restores into, by their real
+    /// paths as `haarness profile` takes them: a data folder an older layout
+    /// left as a link to its new place is not refused for being one.
+    fn profile_roots(&self) -> Result<haarness_profiles::Roots> {
+        Ok(haarness_profiles::Roots {
+            config: dunce::canonicalize(self.paths.config_dir())?,
+            data: dunce::canonicalize(&self.paths.data)?,
+            project: dunce::canonicalize(&self.workspace)?,
+        })
     }
     fn profile_view(&self, input: &Value) -> Result<View> {
         let catalog = haarness_profiles::Catalog::new(&self.paths.data);
         if text(input, "action") == "restore_preview" {
             let id: Uuid = required_string(input, "id")?.parse()?;
             let archive = haarness_profiles::Archive::decode(&catalog.download(id)?)?;
-            let targets = archive.restore(&self.profile_roots(), true, true)?;
+            let targets = archive.restore(&self.profile_roots()?, true, true)?;
             return Ok(View {
                 title: "Restore configuration profile".into(),
                 lines: std::iter::once("These files will be replaced:".into())
@@ -2221,7 +2224,7 @@ impl ManagementService {
                 };
                 catalog.put(
                     &haarness_profiles::Archive::capture(
-                        &self.profile_roots(),
+                        &self.profile_roots()?,
                         required_string(input, "name")?,
                         scope,
                     )?
@@ -2232,7 +2235,7 @@ impl ManagementService {
                 let archive = haarness_profiles::Archive::decode(
                     &catalog.download(required_string(input, "id")?.parse()?)?,
                 )?;
-                archive.restore(&self.profile_roots(), input["force"] == true, false)?;
+                archive.restore(&self.profile_roots()?, input["force"] == true, false)?;
             }
             "remove" => {
                 catalog.remove(required_string(input, "id")?.parse()?)?;
@@ -3076,6 +3079,59 @@ api_key_envs = ["GATEWAY_KEY", "TEAM_GATEWAY_KEY"]
             .collect();
         assert_eq!(icons, [("Disable demo", &json!(icon))]);
         crate::marketplace::TEST_ICON_ORIGINS.set(None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Saving a profile from the settings screen works where the data
+    /// folder is a link to the one an older layout kept, as on upgraded
+    /// installs, with a plugin installed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_profile_saves_where_the_data_folder_is_a_link() {
+        use std::sync::Arc;
+        let root =
+            std::env::temp_dir().join(format!("haarness-ui-profile-link-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join("home")).unwrap();
+        fs::create_dir_all(root.join("legacy")).unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
+        std::os::unix::fs::symlink(root.join("legacy"), root.join("home/data")).unwrap();
+        let paths = crate::Paths::new(Some(&root.join("home"))).unwrap();
+        let plugin = root.join("plugin");
+        fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+        fs::write(
+            plugin.join(".claude-plugin/plugin.json"),
+            r#"{"name":"kept"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(paths.data.join("plugins")).unwrap();
+        fs::write(
+            paths.data.join("plugins/installed.json"),
+            json!({"kept":{"path":plugin,"enabled":true}}).to_string(),
+        )
+        .unwrap();
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let skills: Arc<dyn haarness_core::SkillRegistry> = Arc::new(
+            haarness_server::FilesystemSkillRegistry::new(vec![(paths.skills.clone(), true)]),
+        );
+        let mcp = Arc::new(haarness_mcp::NativeMcpRegistry::with_auth_dir(
+            paths.data.join("mcp-oauth"),
+        ));
+        let data = paths.data.clone();
+        let service =
+            crate::management::ManagementService::new(paths, workspace, true, skills, mcp);
+        service
+            .ui_request(
+                "profiles",
+                &json!({"action":"save","name":"kept","scope":"global"}),
+            )
+            .await
+            .unwrap();
+        let saved = haarness_profiles::Catalog::new(&data)
+            .list("", 0, 10)
+            .unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].entry_count, 1);
         fs::remove_dir_all(root).unwrap();
     }
 }
