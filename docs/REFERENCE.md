@@ -282,8 +282,16 @@ owns its chats, terminals and schedules. When the terminal UI, Desktop or anothe
 credentials and passes every request to that server, which keeps its runtime record,
 so clients go on finding it. Stopping that `serve` (Ctrl-C, or `POST /v1/shutdown` at
 its address) closes only its address; `haarness serve --stop` stops the folder's
-server. `serve --yolo` refuses while a server runs: it cannot change how that server
-approves.
+server. A server that holds its folder but no longer answers is ended on macOS and
+Linux with SIGTERM, then SIGKILL, and only while its process is still that server:
+the runtime record keeps when the server started, so a program the system later
+gave the same pid (after a crash or a restart) is never signalled. A record written
+by 0.1.23 or older counts only for a process running the executable it names that
+started before the record was written. When the recorded server has ended and a new
+one is starting, `serve --stop` waits up to 10 seconds for the new one to listen and
+stops it then; if it does not, or if the process cannot be read to tell, nothing is
+stopped and the command says why. `serve --yolo` refuses while a server runs: it
+cannot change how that server approves.
 
 Desktop's **Connect to server** form requires only a Server URL. Name is optional,
 and **Username and password** expands to optional username/password fields. Saved

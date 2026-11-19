@@ -379,11 +379,12 @@ fn parse_proc_stat(stat: &str, boot: &str) -> Option<Probe> {
     })
 }
 
-/// Elsewhere on Unix: `ps`, which macOS always has: the group and the start
-/// time it prints (to the second, in the C locale).
+/// Elsewhere on Unix: `/bin/ps`, which macOS always has (by its path, so a
+/// `PATH` without it changes nothing): the group and the start time it
+/// prints (to the second, in the C locale).
 #[cfg(all(unix, not(target_os = "linux")))]
 fn probe(pid: i32) -> Probe {
-    let Ok(output) = std::process::Command::new("ps")
+    let Ok(output) = std::process::Command::new("/bin/ps")
         .args(["-o", "pgid=,lstart=", "-p", &pid.to_string()])
         .env("LC_ALL", "C")
         .env("TZ", "UTC")
