@@ -5145,7 +5145,8 @@ fn program_name(value: &str) -> String {
 /// word: `-e` a script and `-f` a script file (so `-es/f/g/` is a script
 /// and `-ne's/a/b/p'` holds one), `-i` and `-I` a backup suffix (`-ie` is
 /// `-i` with the suffix `e`; the next word only as BSD's `sed -i ''` and
-/// `sed -i .bak` give it, empty or a name with a leading `.` and no `/`),
+/// `sed -i .bak` give it, empty or a name with a leading `.` and no `/`,
+/// which may also be GNU's file),
 /// and GNU's `-l` a line length (a number; BSD's
 /// `-l` takes none). A long option may be shortened as getopt allows
 /// (`--expr=…`, `--fi prog`, `--in-place`'s `--in`). Without `-e` or `-f`
@@ -5160,6 +5161,10 @@ fn sed_in_place<'s, 't>(arguments: &'s [Word<'t>]) -> Option<Vec<&'s Word<'t>>> 
     let mut scripted = false;
     let mut ended = false;
     let mut operands = Vec::new();
+    // A `.bak`-like word after a bare `-i`: BSD's suffix, or GNU's file in
+    // the folder sed runs in (`sed -e … -i .zshrc`), so it counts as a file
+    // too.
+    let mut suffixes = Vec::new();
     let mut index = 0;
     while let Some(word) = arguments.get(index) {
         index += 1;
@@ -5205,11 +5210,14 @@ fn sed_in_place<'s, 't>(arguments: &'s [Word<'t>]) -> Option<Vec<&'s Word<'t>>> 
                     // a path after `-i` is a file, not BSD's suffix.
                     let next = arguments.get(index);
                     if rest.is_empty()
-                        && next.is_some_and(|next| {
+                        && let Some(next) = next.filter(|next| {
                             next.value.is_empty()
                                 || (next.value.starts_with('.') && !next.value.contains('/'))
                         })
                     {
+                        if !next.value.is_empty() {
+                            suffixes.push(next);
+                        }
                         index += 1;
                     }
                 }
@@ -5220,7 +5228,13 @@ fn sed_in_place<'s, 't>(arguments: &'s [Word<'t>]) -> Option<Vec<&'s Word<'t>>> 
             break;
         }
     }
-    in_place.then(|| operands.into_iter().skip(usize::from(!scripted)).collect())
+    in_place.then(|| {
+        operands
+            .into_iter()
+            .skip(usize::from(!scripted))
+            .chain(suffixes)
+            .collect()
+    })
 }
 
 /// The command macOS `arch` runs: the words after its own options, which
@@ -11663,6 +11677,21 @@ mod readings {
         ] {
             assert_eq!(found(command), vec![placed(&file_text)], "{command}");
         }
+        // A `.bak`-like word after a bare `-i` may be GNU's file in the
+        // folder sed runs in.
+        let settings = outside_real.join("cache").join(".settings");
+        std::fs::write(&settings, "x").unwrap();
+        for command in [
+            "cd ../outside/cache && sed -e 's/a/b/' -i .settings",
+            "cd ../outside/cache && sed -i .settings 's/a/b/' notes.txt",
+        ] {
+            assert_eq!(
+                found(command),
+                vec![placed(&settings.display().to_string())],
+                "{command}"
+            );
+        }
+        std::fs::remove_file(&settings).unwrap();
         for command in [
             format!("cp new.bin {out}/cache/"),
             format!("cp -t {out}/cache new.bin"),
