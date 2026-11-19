@@ -1326,11 +1326,12 @@ impl Tool for ManagementTool {
             ),
             ManagementKind::SessionManage => (
                 "session_manage",
-                "Inspect durable sessions without changing them. List recent sessions, search their visible transcript, read a compact item window, or get a digest of status, todos, and child tasks. Prefer digest/read over dumping entire transcripts.",
+                "Inspect durable sessions without changing them. List recent sessions, search the visible transcript of every session (most recently active first; each match is a short excerpt with its sequence, and a search that runs long stops and says where to go on), read a compact item window, or get a digest of status, todos, and child tasks. Prefer digest/read over dumping entire transcripts.",
                 json!({
                     "threadId": {"type":"string","description":"Thread UUID or unique UUID prefix. Defaults to the current session for read/digest."},
                     "query": {"type":"string","description":"Search text for list/search."},
                     "includeArchived": {"type":"boolean","description":"Include archived sessions."},
+                    "before": {"type":"string","description":"For search: only sessions last active before this RFC 3339 time, as a search that stopped early gives it."},
                     "after": {"type":"integer","minimum":0,"description":"Return items after this durable sequence."},
                     "limit": {"type":"integer","minimum":1,"maximum":100,"description":"Maximum results/items."}
                 }),

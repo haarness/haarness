@@ -31,6 +31,7 @@ use std::{
 use tokio::net::TcpListener;
 
 mod capabilities;
+mod session_search;
 mod ui;
 
 #[derive(Clone)]
@@ -1301,33 +1302,7 @@ impl ManagementService {
                 ))
             }
             "search" => {
-                let query = required_string(input, "query")?.to_ascii_lowercase();
-                let mut matches = Vec::new();
-                let mut threads = runtime
-                    .list_threads(include_archived)
-                    .await
-                    .map_err(core_error)?;
-                threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-                // Transcript search is intentionally bounded. A model should
-                // refine its query instead of making one call load every
-                // historical transcript into server memory.
-                for thread in threads.into_iter().take(200) {
-                    for item in runtime.items(thread.id, None).await.map_err(core_error)? {
-                        if item_visible_text(&item.data)
-                            .is_some_and(|text| text.to_ascii_lowercase().contains(&query))
-                        {
-                            matches.push(json!({
-                                "thread": thread_summary(thread.clone()),
-                                "sequence": item.sequence,
-                                "item": item.data,
-                            }));
-                            if matches.len() >= limit(input) {
-                                return Ok(Value::Array(matches));
-                            }
-                        }
-                    }
-                }
-                Ok(Value::Array(matches))
+                session_search::search(&runtime, input, context, session_search::SEARCH_TIME).await
             }
             "read" => {
                 let thread = self.resolve_thread(input, context.thread_id).await?;
@@ -2043,7 +2018,10 @@ impl ManagementRegistry for ManagementService {
             }
             _ => Err(anyhow::anyhow!("unknown management resource '{resource}'")),
         }
-        .map_err(|error| CoreError::Tool(error.to_string()))?;
+        .map_err(|error| match error.downcast_ref::<CoreError>() {
+            Some(CoreError::Cancelled) => CoreError::Cancelled,
+            _ => CoreError::Tool(error.to_string()),
+        })?;
         let action = arguments
             .get("action")
             .and_then(Value::as_str)
@@ -2083,9 +2061,18 @@ impl ManagementRegistry for ManagementService {
                 json!({"resource":resource,"action":action,"status":"waiting_for_idle"}),
             );
         }
+        let text = serde_json::to_string_pretty(&result)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        // A search's matches are in its text already; its metadata says how
+        // far it got.
+        if resource == "session_manage"
+            && action == "search"
+            && let Some(result) = result.as_object_mut()
+        {
+            result.remove("chats");
+        }
         Ok(ToolOutput {
-            text: serde_json::to_string_pretty(&result)
-                .map_err(|error| CoreError::Storage(error.to_string()))?,
+            text,
             metadata: json!({"title": format!("{resource} {action}"), "management": result}),
         })
     }

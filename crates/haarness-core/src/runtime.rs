@@ -5225,6 +5225,16 @@ impl AgentRuntime {
     ) -> CoreResult<Vec<haarness_protocol::Item>> {
         self.repository.list_items(id, after).await
     }
+    /// The thread's items whose stored form holds `text` in any ASCII letter
+    /// case, oldest first, or more of them where the store cannot narrow:
+    /// what a search reads before it checks each item itself.
+    pub async fn items_holding(
+        &self,
+        id: ThreadId,
+        text: &str,
+    ) -> CoreResult<Vec<haarness_protocol::Item>> {
+        self.repository.items_holding(id, text).await
+    }
     /// Size of the context the thread's next request carries, measured the
     /// way automatic compaction measures it, against the model's window and
     /// the size at which compaction starts. History an undo removed is

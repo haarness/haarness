@@ -301,6 +301,13 @@ pub trait ThreadRepository: Send + Sync {
         Ok(None)
     }
     async fn list_items(&self, id: ThreadId, after: Option<u64>) -> CoreResult<Vec<Item>>;
+    /// The items of a thread whose stored form holds `text` in any ASCII
+    /// letter case, oldest first: a narrowing for a search, which still
+    /// checks each item it gets. Stores that can narrow override it; the
+    /// default reads them all.
+    async fn items_holding(&self, id: ThreadId, _text: &str) -> CoreResult<Vec<Item>> {
+        self.list_items(id, None).await
+    }
     /// The newest `limit` items of a thread, oldest first. Stores that can
     /// read only that many override it; the default reads them all.
     async fn recent_items(&self, id: ThreadId, limit: usize) -> CoreResult<Vec<Item>> {
