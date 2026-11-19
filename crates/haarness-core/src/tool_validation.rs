@@ -591,7 +591,9 @@ fn coerced_once(
                     .ok()?;
                 // What the text reads as first decides: a value no
                 // alternative takes gives way to the next reading, but one
-                // that several take is no telling which was meant.
+                // that several take is no telling which was meant. An
+                // alternative takes a value as it is or with the strings in
+                // it read as its own types (`["3"]` as a list of integers).
                 let mut chosen = None;
                 for value in [
                     written_scalar(text),
@@ -601,12 +603,23 @@ fn coerced_once(
                 .into_iter()
                 .flatten()
                 {
-                    let taking = validators
+                    let mut taken: Vec<Value> = validators
                         .iter()
-                        .filter(|validator| validator.is_valid(&value))
-                        .count();
-                    if taking > 0 {
-                        chosen = (taking == 1).then_some(value);
+                        .zip(alternatives)
+                        .filter_map(|(validator, alternative)| {
+                            if validator.is_valid(&value) {
+                                return Some(value.clone());
+                            }
+                            let alone = ToolDefinition {
+                                name: tool.name.clone(),
+                                description: String::new(),
+                                input_schema: alternative.clone(),
+                            };
+                            coerced_arguments(&alone, &value)
+                        })
+                        .collect();
+                    if !taken.is_empty() {
+                        chosen = (taken.len() == 1).then(|| taken.remove(0));
                         break;
                     }
                 }
@@ -873,12 +886,15 @@ fn written_scalar(text: &str) -> Option<Value> {
 /// A list of one item, for text written bare where the schema wants a list:
 /// `"queries": "browser"` for `["browser"]`. Only text that can be no more
 /// than one item reads so: none with a space, a comma or a double quote in
-/// it, which could be several items or the JSON of one, and none that opens
-/// a JSON array or object, which is a broken one. The list's own schema
-/// still decides whether it takes the item.
+/// it, which could be several items or the JSON of one, none that opens a
+/// JSON array or object, which is a broken one, and no word that stands for
+/// no value or a boolean (`null`, `None`, `true`, `False`), which is no
+/// item. The list's own schema still decides whether it takes the item.
 fn written_item(text: &str) -> Option<Value> {
     let text = text.trim();
     if text.is_empty()
+        || text == "None"
+        || written_scalar(text).is_some_and(|value| !value.is_number())
         || text.starts_with(['[', '{'])
         || text
             .contains(|character: char| character.is_whitespace() || matches!(character, ',' | '"'))
@@ -1230,6 +1246,10 @@ mod tests {
                     {"type": "null"}
                 ]},
                 "milestones": {"type": ["array", "null"], "items": {"type": "string"}},
+                "ids_or_none": {"anyOf": [
+                    {"type": "array", "items": {"type": "integer"}},
+                    {"type": "null"}
+                ]},
                 "pair": {"type": "array", "items": {"type": "string"}, "minItems": 2},
             },
             "required": ["title"],
@@ -1246,8 +1266,11 @@ mod tests {
         assert_eq!(one("ids", "3"), Some(json!([3])));
         assert_eq!(one("assignees", "octocat"), Some(json!(["octocat"])));
         assert_eq!(one("milestones", "v1"), Some(json!(["v1"])));
+        // As Python servers describe an optional list of integers.
+        assert_eq!(one("ids_or_none", "3"), Some(json!([3])));
         // Text that could be several items, a broken list, or an item the
-        // list does not take is refused, as before.
+        // list does not take is refused, as before; so is a word for no
+        // value or a boolean.
         for text in [
             "a b",
             "a,b",
@@ -1259,11 +1282,21 @@ mod tests {
             " ",
             "\"bug\"",
             "say \"hi\"",
+            "None",
+            "true",
+            "false",
+            "True",
+            "False",
         ] {
             for key in ["labels", "assignees", "milestones"] {
                 assert_eq!(one(key, text), None, "{key}: {text:?}");
             }
         }
+        // `null` is no item of a list, and no value where the list may be
+        // none.
+        assert_eq!(one("labels", "null"), None);
+        assert_eq!(one("assignees", "null"), Some(Value::Null));
+        assert_eq!(one("milestones", "null"), Some(Value::Null));
         assert_eq!(one("ids", "x"), None);
         assert_eq!(one("pair", "a"), None);
         // A string the schema takes as a string is never made a list.
