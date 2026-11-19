@@ -102,7 +102,8 @@ def environment(name):
     (data / 'config').mkdir(parents=True, exist_ok=True)
     return data / 'config', {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home), 'HAARNESS_HOME': str(home),
                   'HAARNESS_DATA_DIR': str(data), 'USER': os.environ.get('USER', 'fixture'),
-                  'LANG': 'en_US.UTF-8', 'HAARNESS_TEST_PROVIDER': '1'}
+                  'LANG': 'en_US.UTF-8', 'HAARNESS_TEST_PROVIDER': '1',
+                  'HAARNESS_TEST_CHAT_TEMP': e2e_env.CHAT_TEMP}
 
 
 def project(name, config=None):

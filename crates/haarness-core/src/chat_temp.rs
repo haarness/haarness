@@ -19,7 +19,8 @@
 //! (checked as [`crate::paths::own_private_folder`] checks a folder), each
 //! named by the last eight hex digits of its chat's id, or a longer end of
 //! it when another chat holds that name. On Windows they are in the user's
-//! own temp folder.
+//! own temp folder. A test run names a folder of its own instead
+//! ([`TEST_FOLDER_ENV`]).
 //!
 //! Beside each folder, `<name>.chat` records the chat it is for. Only a
 //! folder so recorded is ever taken away, only for the chat its record
@@ -38,6 +39,12 @@ pub const VARIABLES: [&str; 3] = ["TMPDIR", "TMP", "TEMP"];
 /// How long the folder of an archived chat, or of a chat the server does
 /// not hold, is kept after anything in it, or its record, last changed.
 pub const IDLE_LIMIT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Names the folder a test run's chats' folders go in (`<it>/chats`), in
+/// place of `/tmp/haarness-<uid>`, so a run never leaves folders in the one
+/// a person's servers share. Read only by a debug build or under the test
+/// providers (`HAARNESS_TEST_PROVIDER`), never by a person's release build.
+pub const TEST_FOLDER_ENV: &str = "HAARNESS_TEST_CHAT_TEMP";
 
 /// How a record's file name ends.
 const RECORD: &str = ".chat";
@@ -378,9 +385,20 @@ fn modified(path: &Path) -> SystemTime {
 }
 
 /// The folder all chats' folders are in, made when `make` and missing;
-/// `None` when it is not this user's alone. A test binary has one of its own.
+/// `None` when it is not this user's alone. A test run's is in the folder
+/// [`TEST_FOLDER_ENV`] names, and a test binary has one of its own.
 fn chats_folder(make: bool) -> Option<PathBuf> {
-    let base = if haarness_protocol::test_binary() {
+    let base = if let Some(named) = named_test_folder() {
+        // Named: that folder or none, never the shared one.
+        if !named.is_absolute() {
+            return None;
+        }
+        let folder = crate::paths::canonicalize(named).ok()?;
+        if !private(&folder, false) {
+            return None;
+        }
+        folder
+    } else if haarness_protocol::test_binary() {
         let folder = haarness_protocol::test_folder();
         if make {
             std::fs::create_dir_all(&folder).ok()?;
@@ -391,6 +409,14 @@ fn chats_folder(make: bool) -> Option<PathBuf> {
     };
     let chats = base.join("chats");
     private(&chats, make).then_some(chats)
+}
+
+/// The folder [`TEST_FOLDER_ENV`] names, when this build reads it.
+fn named_test_folder() -> Option<PathBuf> {
+    if !cfg!(debug_assertions) && std::env::var_os("HAARNESS_TEST_PROVIDER").is_none() {
+        return None;
+    }
+    std::env::var_os(TEST_FOLDER_ENV).map(PathBuf::from)
 }
 
 /// Whether `folder` is this user's alone, made so when `make` and missing.
