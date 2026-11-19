@@ -9,7 +9,10 @@ Then a provider added to project A with its key, and a project B (as a cloned re
 defines the same id at a second fixture and makes it its model: that fixture is sent nothing, `haarness
 run` fails before sending and says why, the TUI keeps a message for it and points to Connect, lists the
 provider as not connected and says why where it is connected, and connecting it there saves the key
-for that address too, after which a run gets its answer. With HAARNESS_UPGRADE_FROM naming an older Haarness binary, a key that
+for that address too, after which a run gets its answer. A project C whose provider's server answers
+every request with a redirect to another port: that port is sent nothing, `haarness run` and the TUI
+say where the redirect pointed (without its user name, password or query) and that `base_url` can be
+pointed there, and the daemon log names the model list's redirect. With HAARNESS_UPGRADE_FROM naming an older Haarness binary, a key that
 binary saved for a project's provider keeps working in that project after the update, and is not sent
 to a project opened after it.
 Runs the real binary, daemon and TUI under tmux with an isolated profile.
@@ -75,6 +78,24 @@ class Fixture(BaseHTTPRequestHandler):
             {"choices": [{"delta": {}, "finish_reason": "stop"}]},
         ]
         self.send(200, "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n", "text/event-stream")
+
+
+class Redirecting(BaseHTTPRequestHandler):
+    """Sends every request on to `self.server.target`, with a user name, password and query a message must not show."""
+
+    def log_message(self, *_):
+        pass
+
+    def redirect(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.server.seen.append((self.command, self.path))
+        target = self.server.target.replace("://", "://who:pw@", 1)
+        self.send_response(307)
+        self.send_header("Location", f"{target}{self.path.split('?')[0]}?token=redirect-secret")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_GET = do_POST = redirect
 
 
 def main():
@@ -247,6 +268,62 @@ def main():
         assert answered.returncode == 0 and "custom-endpoint-proof" in answered.stdout, answered
         assert ("POST", "/openai/v1/chat/completions", True) in elsewhere.seen, elsewhere.seen
         print("TUI project provider keys: ok")
+
+        # Project C: its provider's server sends every request on to another port.
+        landing = fixture([])
+        port_l = landing.server_address[1]
+        redirector = ThreadingHTTPServer(("127.0.0.1", 0), Redirecting)
+        redirector.seen, redirector.target = [], f"http://127.0.0.1:{port_l}"
+        threading.Thread(target=redirector.serve_forever, daemon=True).start()
+        try:
+            port_r = redirector.server_address[1]
+            project_c = root / "ws-c"
+            (project_c / ".haarness").mkdir(parents=True)
+            (project_c / ".haarness/haarness.json").write_text(json.dumps({
+                "model": "moved-gateway/gateway-coder",
+                "providers": {
+                    "moved-gateway": {
+                        "name": "Moved gateway", "base_url": f"http://127.0.0.1:{port_r}/openai/v1",
+                        "models": ["gateway-coder"], "requires_auth": False},
+                    # Names no models, so Haarness asks the server for its list.
+                    "moved-list": {
+                        "name": "Moved list", "base_url": f"http://127.0.0.1:{port_r}/listed/v1", "requires_auth": False}}}))
+            pointed = f"redirected this request to http://127.0.0.1:{port_l}/openai/v1/chat/completions."
+            advice = "If you trust that address, change the provider's base_url to point there."
+            subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+            subprocess.run(["tmux", "new-session", "-d", "-x", "120", "-y", "40", "-s", session, pane_command(env, [binary, "--workspace", project_c])], check=True)
+            wait_for("Project C did not open", "Ask anything", timeout=60)
+            keys("Say the proof word.", literal=True)
+            keys("Enter")
+            wait_for("The TUI did not say where the redirect pointed", f"127.0.0.1:{port_l}/openai/v1/chat/completions", timeout=60)
+            time.sleep(1)
+            shown = " ".join(pane().split())
+            print("\n".join(line.strip() for line in pane().splitlines() if line.strip()).split("Say the proof word.")[-1].strip())
+            # The usage panel shares the lines the notice wraps onto, so each phrase is looked for alone.
+            for phrase in ("Provider error: HTTP 307 Temporary Redirect", f"http://127.0.0.1:{port_l}/openai/v1/chat/completions.",
+                           "doesn't follow a provider's redirect away from its address", "change the provider's base_url"):
+                assert phrase in shown, (phrase, shown)
+            assert "who:pw" not in shown and "redirect-secret" not in shown, shown
+            done = subprocess.run([binary, "--workspace", project_c, "run", "Say the proof word."], env=env, capture_output=True, text=True, timeout=180)
+            said = " ".join((done.stdout + done.stderr).split())
+            assert done.returncode != 0 and pointed in said and advice in said, done
+            assert "who:pw" not in said and "redirect-secret" not in said, said
+            print(next(line for line in (done.stdout + done.stderr).splitlines() if "redirected" in line).strip())
+            assert ("POST", "/openai/v1/chat/completions") in redirector.seen, redirector.seen
+            assert ("GET", "/listed/v1/models") in redirector.seen, redirector.seen
+            assert not landing.seen, landing.seen
+            logged = [line for path in root.rglob("haarness.log*") if path.is_file() for line in path.read_text(errors="replace").splitlines()
+                      if "redirected its model list away from its address" in line]
+            assert logged and all(f"to=http://127.0.0.1:{port_l}/listed/v1/models" in line and "redirect-secret" not in line and "who:pw" not in line
+                                  for line in logged), logged
+            # Once a process (the TUI's server, then `haarness run`), however often the list is asked for.
+            processes = [line.split()[1] for line in logged]
+            assert len(processes) == len(set(processes)), logged
+            print(logged[0].strip())
+            print("Redirect to another server: ok")
+        finally:
+            redirector.shutdown()
+            landing.shutdown()
 
         upgrade_from = os.environ.get("HAARNESS_UPGRADE_FROM")
         if upgrade_from:
