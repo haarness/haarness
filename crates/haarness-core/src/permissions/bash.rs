@@ -2249,6 +2249,19 @@ impl Reader<'_> {
             }
             "env" => {
                 let options = Options::with(arguments, "uCPSa", "", ENV_LONG);
+                // An emptied environment (`-i`, `-`), a variable taken away
+                // (`-u`) or a split text (`-S`, which may hold either).
+                if options.flags.contains('i')
+                    || ["u", "unset", "S", "split-string"]
+                        .iter()
+                        .any(|name| options.value(name).is_some())
+                    || options
+                        .rest
+                        .first()
+                        .is_some_and(|dash| dash.literal && dash.value == "-")
+                {
+                    note_temp_reset();
+                }
                 let folders: Vec<&Given<'_, '_>> = options.all(&["C", "chdir"]).collect();
                 let folder = self.wrapper_folder(&folders, source);
                 if let Some(split) = options.value("S").or_else(|| options.value("split-string")) {
@@ -2266,6 +2279,8 @@ impl Reader<'_> {
                 }
             }
             "sudo" | "doas" => {
+                // What it runs gets an environment of its own.
+                note_temp_reset();
                 let options = if name == "sudo" {
                     Options::sudo(arguments)
                 } else {
@@ -2338,6 +2353,7 @@ impl Reader<'_> {
                 }
             }
             "su" => {
+                note_temp_reset();
                 if let Some(text) = su_command(arguments) {
                     self.nested(&text, depth);
                 }
@@ -2355,14 +2371,22 @@ impl Reader<'_> {
                 }
             }
             "builtin" | "nohup" | "setsid" | "busybox" | "pkexec" => {
+                if name == "pkexec" {
+                    note_temp_reset();
+                }
                 let options = Options::read(arguments, "", "", &["user"]);
                 self.invocation(options.rest, stdin, source, depth);
             }
             "exec" => {
                 let options = Options::read(arguments, "a", "", &[]);
-                // `-l` makes what it runs a login shell, `-c` empties its
+                // `-l` makes what it runs a login shell, and so does a name
+                // given with `-a` that starts with `-`; `-c` empties its
                 // environment.
-                if options.flags.contains(['l', 'c']) {
+                if options.flags.contains(['l', 'c'])
+                    || options
+                        .value("a")
+                        .is_some_and(|name| name.starts_with('-') || name.contains(['$', '`']))
+                {
                     note_temp_reset();
                 }
                 self.invocation(options.rest, stdin, source, depth);
@@ -7489,18 +7513,22 @@ fn note_temp_reset() {
 }
 
 /// Whether `shell` (one of [`SHELLS`]), given `arguments`, reads startup
-/// files that may set `TMPDIR` again: zsh and fish always do; bash and the
-/// others when told to be a login or interactive shell (`-l` or `-i` in any
-/// cluster, `--login`, `--interactive`, `--rcfile`, `--init-file`), and bash
-/// also when the server's `BASH_ENV` names a file. Options are read up to the
-/// first word that is none; one only known when it runs counts.
+/// files that may set `TMPDIR` again: bash, zsh and fish always may (bash
+/// reads the file `BASH_ENV` names, which a login profile or the line itself
+/// can export); the others when told to be a login or interactive shell (`-l`
+/// or `-i` in any cluster, `--login`, `--interactive`, `--rcfile`,
+/// `--init-file`), and ksh and mksh with `-E` too. Options are read up to the
+/// first word that is none, past `-c` as the shells do; one only known when
+/// it runs counts.
 fn reads_startup_files(shell: &str, arguments: &[Word<'_>]) -> bool {
-    if matches!(shell, "zsh" | "fish") {
+    if matches!(shell, "bash" | "zsh" | "fish") {
         return true;
     }
-    if shell == "bash" && std::env::var_os("BASH_ENV").is_some_and(|file| !file.is_empty()) {
-        return true;
-    }
+    let startup = if matches!(shell, "ksh" | "mksh") {
+        &['l', 'i', 'E'][..]
+    } else {
+        &['l', 'i'][..]
+    };
     let mut words = arguments.iter();
     while let Some(word) = words.next() {
         if !word.literal {
@@ -7518,15 +7546,12 @@ fn reads_startup_files(shell: &str, arguments: &[Word<'_>]) -> bool {
             continue;
         }
         let letters = &value[1..];
-        if letters.contains(['l', 'i']) {
+        if letters.contains(startup) {
             return true;
         }
-        // `-c` takes the script, and `-o` and `-O` an option's name.
-        if letters.contains(['c', 'o', 'O']) {
+        // `-o` and `-O` take an option's name.
+        if letters.contains(['o', 'O']) {
             words.next();
-            if letters.contains('c') {
-                return false;
-            }
         }
     }
     false

@@ -27965,6 +27965,25 @@ mod tests {
             "exec -l bash -c 'echo x > \"$TMPDIR/n8.txt\"'",
             "timeout 5 bash -lc 'echo x > \"$TMPDIR/n9.txt\"'",
             "bash -l <<'EOF'\necho x > \"$TMPDIR/n10.txt\"\nEOF",
+            // bash reads the file `BASH_ENV` names, which a profile or the
+            // line may export, and options go on past `-c`.
+            "bash -c 'rm -rf \"$TMPDIR\"/*'",
+            "bash <<'EOF'\necho x > \"$TMPDIR/n11.txt\"\nEOF",
+            "BASH_ENV=./x.sh bash -c 'echo x > \"$TMPDIR/n12.txt\"'",
+            "sh -c -l 'echo x > \"$TMPDIR/n13.txt\"'",
+            "sh -c -i 'echo x > \"$TMPDIR/n14.txt\"'",
+            "ksh -E -c 'echo x > \"$TMPDIR/n15.txt\"'",
+            "exec -a -sh sh -c 'echo x > \"$TMPDIR/n16.txt\"'",
+            // Wrappers that hand what they run another environment, however
+            // they are spelled.
+            "/usr/bin/sudo -n sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "\"sudo\" -n sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "\\sudo -n sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "/usr/bin/doas sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "/usr/bin/pkexec sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "/bin/su -c 'rm -rf \"$TMPDIR\"/*'",
+            "env -S-i sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "env -0i sh -c 'rm -rf \"$TMPDIR\"/*'",
             // Text the line does not show, wherever it runs.
             "if . ./env.sh; then echo x > \"$TMPDIR/c1.txt\"; fi",
             "command . ./env.sh; echo x > \"$TMPDIR/c2.txt\"",
@@ -27979,17 +27998,16 @@ mod tests {
             );
         }
         // A shell that reads none keeps the folder.
-        if std::env::var_os("BASH_ENV").is_none() {
-            for command in [
-                "bash -c 'echo x > \"$TMPDIR/ok1.txt\"'",
-                "sh -c 'echo x > \"$TMPDIR/ok2.txt\"'",
-                "bash -e -o pipefail -c 'echo x > \"$TMPDIR/ok3.txt\"'",
-            ] {
-                assert!(
-                    !outside("bash", shell(command), Some(&temp)),
-                    "{command} asks"
-                );
-            }
+        for command in [
+            "sh -c 'echo x > \"$TMPDIR/ok1.txt\"'",
+            "sh -e -o pipefail -c 'echo x > \"$TMPDIR/ok2.txt\"'",
+            "sh -c 'echo x > \"$TMPDIR/ok3.txt\"' -l",
+            "dash -c 'rm -rf \"$TMPDIR\"/*'",
+        ] {
+            assert!(
+                !outside("bash", shell(command), Some(&temp)),
+                "{command} asks"
+            );
         }
         // Whether the command must get the folder in the variables: only
         // when its check read them as the folder.
@@ -27997,7 +28015,7 @@ mod tests {
             super::chat_ask_plans_named("bash", &shell(command), &workspace, Some(&temp)).1
         };
         assert!(named("echo x > \"$TMPDIR/a\""));
-        assert!(named("bash -c 'cat $TMPDIR/a'"));
+        assert!(named("sh -c 'cat $TMPDIR/a'"));
         for command in [
             "echo hello",
             "git status --short",

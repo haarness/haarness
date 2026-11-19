@@ -593,6 +593,40 @@ async fn a_login_profile_cannot_move_the_chat_s_temp_folder() {
     haarness_core::chat_temp::remove(thread);
 }
 
+/// A login profile that exports `BASH_ENV` makes every nested bash read a
+/// file that may set `TMPDIR` again: a line that runs one is checked as
+/// before and asks, while `sh -c` keeps the chat's folder.
+#[tokio::test]
+async fn a_nested_bash_is_checked_as_before_since_bash_env_may_move_the_folder() {
+    let fixture = Fixture::new();
+    let home = fixture.0.join("home");
+    std::fs::create_dir_all(home.join("mytmp")).unwrap();
+    std::fs::write(home.join("mytmp/keep.txt"), "keep").unwrap();
+    std::fs::write(
+        home.join(".profile"),
+        "export BASH_ENV=\"$HOME/.bashenv\"\n",
+    )
+    .unwrap();
+    std::fs::write(home.join(".bashenv"), "export TMPDIR=\"$HOME/mytmp\"\n").unwrap();
+    let (runtime, _) = runtime(
+        &fixture.project(),
+        Some(Arc::new(ProfileHome(home.clone()))),
+    );
+    let thread = new_chat(&runtime).await;
+    asks_outside(&runtime, thread, &bash(r#"bash -c 'rm -rf "$TMPDIR"/*'"#)).await;
+    assert!(home.join("mytmp/keep.txt").is_file());
+    runs_unasked(
+        &runtime,
+        thread,
+        &bash(r#"sh -c 'echo x > "$TMPDIR/sh.txt"'"#),
+    )
+    .await;
+    let folder = haarness_core::chat_temp::existing(thread).unwrap();
+    assert!(folder.join("sh.txt").is_file());
+    assert!(!home.join("mytmp/sh.txt").exists());
+    haarness_core::chat_temp::remove(thread);
+}
+
 /// A login profile that keeps `TMPDIR` read-only stops only a command whose
 /// check read it as the chat's folder, with a line that says what to change;
 /// any other command runs as before.

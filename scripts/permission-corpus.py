@@ -150,7 +150,11 @@ CORPUS = [
     'bash --login -c \'echo x > "$TMPDIR/n3.txt"\'', 'zsh -c \'echo x > "$TMPDIR/n4.txt"\'',
     'bash -ic \'echo x > "$TMPDIR/n5.txt"\' 2>/dev/null', 'exec -l bash -c \'echo x > "$TMPDIR/c3.txt"\'',
     'if . ./env.sh; then echo x > "$TMPDIR/c1.txt"; fi', 'command . ./env.sh; echo x > "$TMPDIR/c2.txt"',
-    'bash -c \'echo x > "$TMPDIR/ok.txt"\'',
+    'bash -c \'echo x > "$TMPDIR/ok.txt"\'', 'sh -c \'echo x > "$TMPDIR/ok.txt"\'',
+    'bash -c -l \'rm -rf "$TMPDIR"/*\'', 'sh -c -l \'rm -rf "$TMPDIR"/*\'',
+    'BASH_ENV=./x.sh bash -c \'rm -rf "$TMPDIR"/*\'', 'exec -a -sh sh -c \'rm -rf "$TMPDIR"/*\'',
+    '/usr/bin/sudo -n sh -c \'rm -rf "$TMPDIR"/*\'', 'env -S-i sh -c \'rm -rf "$TMPDIR"/*\'',
+    'env -0i sh -c \'rm -rf "$TMPDIR"/*\'', '/bin/su -c \'rm -rf "$TMPDIR"/*\'',
     # Files
     'rm -rf node_modules && npm install', 'rm -rf ~/Library/Caches/foo', 'cat ~/.zshrc', 'cat ../outside/secret',
     'cp .env.example .env', 'mv build dist', 'chmod +x run.sh && ./run.sh', 'bash run.sh', 'sudo rm -rf /tmp/x',
