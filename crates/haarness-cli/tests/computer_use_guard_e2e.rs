@@ -252,6 +252,35 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
+/// A person switches computer use on from a terminal of their own in one step, from a Mac where it was never on:
+/// nothing to read or type first, even with no terminal to type into.
+#[test]
+fn a_person_s_haarness_mac_on_switches_on_in_one_step() {
+    let fixture = Fixture::new();
+    assert_eq!(fixture.status()["enabled"], false);
+    let on = fixture
+        .haarness()
+        .args(["mac", "on"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run haarness mac on");
+    let said = String::from_utf8_lossy(&on.stdout);
+    assert!(
+        on.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&on.stderr)
+    );
+    assert!(said.starts_with("Computer use: on"), "{said}");
+    assert_eq!(fixture.status()["enabled"], true);
+    let off = fixture
+        .haarness()
+        .args(["mac", "off"])
+        .output()
+        .expect("run haarness mac off");
+    assert!(off.status.success());
+    assert_eq!(fixture.status()["enabled"], false);
+}
+
 #[test]
 fn only_a_person_widens_computer_use_or_ends_a_pause_even_from_a_program_left_running() {
     let fixture = Fixture::new();
