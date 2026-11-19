@@ -157,7 +157,11 @@ fn without_split_character(bytes: &[u8]) -> &[u8] {
 /// whose bytes went on, `long`) ending in [`LINE_CUT`].
 pub(super) fn shown(text: &str, long: bool) -> Cow<'_, str> {
     match text.char_indices().nth(LINE_CHARS) {
-        Some((end, _)) => Cow::Owned(format!("{}{LINE_CUT}", &text[..end])),
+        // An emoji or flag the cut falls in is left out whole.
+        Some((end, _)) => Cow::Owned(format!(
+            "{}{LINE_CUT}",
+            &text[..super::whole_cut(text, end)]
+        )),
         None if long => Cow::Owned(format!("{text}{LINE_CUT}")),
         None => Cow::Borrowed(text),
     }

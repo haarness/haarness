@@ -58,6 +58,8 @@ url.workspace = true
 uuid.workspace = true
 sha2.workspace = true
 similar.workspace = true
+# Where a cut output may end without splitting an emoji or a flag.
+unicode-segmentation = "1.13"
 
 [lints]
 workspace = true

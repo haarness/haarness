@@ -6719,7 +6719,8 @@ fn write_json(json: &str, indent: usize, out: &mut String) {
 }
 
 /// The first 50 KiB (and at most 2,000 lines) of `text`, the line that
-/// passes the limit cut where it does, at a character boundary.
+/// passes the limit cut where it does, keeping its characters whole (see
+/// [`whole_cut`]).
 fn filled_preview(text: &str) -> &str {
     let mut end = 0;
     for (index, line) in text.split_inclusive('\n').enumerate() {
@@ -6727,10 +6728,7 @@ fn filled_preview(text: &str) -> &str {
             break;
         }
         if end + line.len() > TOOL_OUTPUT_MAX_BYTES {
-            end = TOOL_OUTPUT_MAX_BYTES;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
+            end = whole_cut(text, TOOL_OUTPUT_MAX_BYTES);
             break;
         }
         end += line.len();
@@ -6738,20 +6736,62 @@ fn filled_preview(text: &str) -> &str {
     text[..end].trim_end_matches(['\n', '\r'])
 }
 
+/// The most a cut keeps of a cluster of characters shown as one (an emoji
+/// with its skin tone and joiners, a flag, a letter with its marks) by
+/// leaving it out whole; a longer one (marks stacked without end) is cut
+/// between two of its characters instead.
+const CLUSTER_BYTES: usize = 64;
+
+/// Where text cut at byte `end` of `text` ends: there, when no character or
+/// cluster of them spans it, else before the character or cluster `end`
+/// falls in (see [`CLUSTER_BYTES`]), so an emoji, a flag or a CJK character
+/// is never shown in part.
+pub(crate) fn whole_cut(text: &str, end: usize) -> usize {
+    let mut end = end.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut cursor = unicode_segmentation::GraphemeCursor::new(end, text.len(), true);
+    if cursor.is_boundary(text, 0).unwrap_or(true) {
+        return end;
+    }
+    match cursor.prev_boundary(text, 0) {
+        Ok(Some(start)) if end - start <= CLUSTER_BYTES => start,
+        _ => end,
+    }
+}
+
+/// The start of `text` a native tool's cut output shows: whole lines, up to
+/// 2,000 of them and 50 KiB. A line too long to show whole (minified code, a
+/// JSON dump) shows its head when it is the first, so the preview is never
+/// empty, or when it is data on one line ([`LONG_LINE_BYTES`] or more) that
+/// a shorter line before it would otherwise come without; any other line
+/// that does not fit is left out whole, so no path or match is shown in
+/// part.
 fn output_preview(text: &str) -> String {
     let mut preview = Vec::new();
     let mut bytes = 0;
     for line in text.lines().take(TOOL_OUTPUT_MAX_LINES) {
         let size = line.len() + usize::from(!preview.is_empty());
         if bytes + size > TOOL_OUTPUT_MAX_BYTES {
-            // A first line too long to show whole (minified code, a JSON
-            // dump) shows its head, so the preview is never empty.
             if preview.is_empty() {
                 return text::shown(line, true).into_owned();
             }
+            if line.len() > LONG_LINE_BYTES {
+                let head = text::shown(line, true);
+                let room = TOOL_OUTPUT_MAX_BYTES.saturating_sub(bytes + 1);
+                if head.len() <= room {
+                    preview.push(head);
+                } else {
+                    let end = whole_cut(line, room);
+                    if end > 0 {
+                        preview.push(std::borrow::Cow::Borrowed(&line[..end]));
+                    }
+                }
+            }
             break;
         }
-        preview.push(line);
+        preview.push(std::borrow::Cow::Borrowed(line));
         bytes += size;
     }
     preview.join("\n")
@@ -10438,6 +10478,69 @@ export default workflow({
             (text, json!({"rows": 20_000}), None)
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An emoji, a flag or a family sits on the cut: it is left out whole
+    /// rather than shown in part.
+    #[test]
+    fn a_cut_never_splits_an_emoji_or_a_flag() {
+        let flag = "\u{1f1ef}\u{1f1f5}"; // 🇯🇵
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}"; // 👨‍👩‍👧
+        // Cut inside the flag, and between its two letters.
+        let text = format!("ab{flag}cd");
+        assert_eq!(whole_cut(&text, 3), 2);
+        assert_eq!(whole_cut(&text, 6), 2);
+        assert_eq!(whole_cut(&text, 10), 10);
+        // Inside the family, after a joiner and after a whole person.
+        let text = format!("a{family}b");
+        for end in [2, 5, 8, 12] {
+            assert_eq!(whole_cut(&text, end), 1, "{end}");
+        }
+        assert_eq!(whole_cut(&text, 1 + family.len()), 1 + family.len());
+        // CJK stays whole; marks stacked past the bound are cut between
+        // two of them.
+        assert_eq!(whole_cut("日本", 4), 3);
+        let stacked = format!("e{}", "\u{301}".repeat(100));
+        assert_eq!(whole_cut(&stacked, 101), 101);
+        // A read's line of 2,000 characters ending inside a flag.
+        let line = format!("{}{flag}{flag}", "x".repeat(1_999));
+        assert_eq!(
+            text::shown(&line, false),
+            format!("{}{}", "x".repeat(1_999), text::LINE_CUT)
+        );
+        // An MCP text filling the 50 KiB with flags.
+        let flags = format!("x{}", flag.repeat(TOOL_OUTPUT_MAX_BYTES / 8 + 1));
+        assert_eq!(
+            filled_preview(&flags),
+            format!("x{}", flag.repeat(TOOL_OUTPUT_MAX_BYTES / 8 - 1))
+        );
+    }
+
+    /// A long line after a short one (a heading, then minified JSON) shows
+    /// its head instead of leaving the preview with the heading alone; a
+    /// later short line that does not fit is left out whole.
+    #[test]
+    fn a_preview_shows_the_head_of_a_long_later_line() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let heading = "## Response";
+        let text = format!("{heading}\n{}\nafter", family.repeat(10_000));
+        let preview = output_preview(&text);
+        let kept = family.repeat(2_000 / 5);
+        assert_eq!(preview, format!("{heading}\n{kept}{}", text::LINE_CUT));
+        // Lines that leave too little room: the part that fits, whole.
+        let filler = "y".repeat(TOOL_OUTPUT_MAX_BYTES - 100);
+        let text = format!("{filler}\n{}", family.repeat(1_000));
+        let preview = output_preview(&text);
+        let tail = &preview[filler.len() + 1..];
+        assert_eq!(tail, family.repeat(99 / family.len()));
+        // A path that does not fit is never shown in part.
+        let paths = (0..2_000)
+            .map(|index| format!("src/{}/module_{index:05}/file.rs", "deep".repeat(5)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = output_preview(&paths);
+        assert!(preview.lines().count() < 2_000);
+        assert!(preview.lines().all(|line| line.ends_with("/file.rs")));
     }
 
     #[test]

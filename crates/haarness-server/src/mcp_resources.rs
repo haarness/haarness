@@ -470,10 +470,7 @@ async fn cut(text: String, room: usize, directory: &Path) -> String {
             // is cut inside it, so a heading before it does not come alone;
             // a shorter one is left out whole.
             if kept == 0 || line.len() > crate::tools::LONG_LINE_BYTES {
-                kept = room.min(text.len());
-                while !text.is_char_boundary(kept) {
-                    kept -= 1;
-                }
+                kept = crate::tools::whole_cut(&text, room);
             }
             break;
         }
