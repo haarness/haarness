@@ -1092,17 +1092,40 @@ test("a patch far into a large file previews its real lines, and Review lists a 
     const large = list.locator(".file-entry").filter({ hasText: "large.txt" });
     await expect(large.locator(".added")).toHaveText("+1");
     await expect(large.locator(".removed")).toHaveText("−1");
+    // The sums leave the uncounted file out, and say so.
+    const totals = page.locator(".review .diff-totals");
+    await expect(totals.locator(".added")).toHaveText("+1");
+    await expect(totals).toContainText("2 files");
+    await expect(totals).toContainText("1 not counted");
+    const parts = [page.locator(".review .panel-toolbar"), page.locator(".review-tree")];
     for (const value of ["light", "dark"] as const) {
       await theme(page, value);
-      await page.locator(".review-tree").screenshot({ path: picture(`review-too-large-${value}.png`) });
+      await shot(page, parts, picture(`review-too-large-${value}.png`));
     }
     await theme(page, "light");
-    // Right to left, the words take the counts' place at the row's other end.
+    // Right to left, the words take the counts' place at the row's other end,
+    // and a row's counts still read "+1 −1".
     await page.evaluate(() => window.haarness.preferences({ language: "ar" } as never));
     try {
       await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
       await expect(dump.locator(".uncounted")).toHaveText("أكبر من أن تُعدّ أسطره");
-      await page.locator(".review-tree").screenshot({ path: picture("review-too-large-rtl.png") });
+      await expect(totals).toContainText("لم تُحسب: 1");
+      const signFirst = (count: ReturnType<Page["locator"]>) =>
+        count.evaluate((element) => {
+          // The sign and the number may be separate text nodes.
+          const left = (node: Node, at: number) => {
+            const range = document.createRange();
+            range.setStart(node, at);
+            range.setEnd(node, at + 1);
+            return range.getBoundingClientRect().left;
+          };
+          const first = element.firstChild!;
+          const last = element.lastChild!;
+          return left(first, 0) < left(last, last.textContent!.length - 1);
+        });
+      expect(await signFirst(large.locator(".added"))).toBe(true);
+      expect(await signFirst(large.locator(".removed"))).toBe(true);
+      await shot(page, parts, picture("review-too-large-rtl.png"));
     } finally {
       await page.evaluate(() => window.haarness.preferences({ language: "en" } as never));
     }

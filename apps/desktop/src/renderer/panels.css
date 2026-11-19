@@ -593,12 +593,18 @@
   height: 28px;
 }
 /* The added/removed counts are a trailing column, so they never shrink and
-   never reflow as the digits change. */
+   never reflow as the digits change; "+4 −0" reads left to right in every
+   language. */
 .review .file-entry > .added,
 .review .file-entry > .removed,
 .review .file-entry > .uncounted {
   flex: none;
   font-variant-numeric: tabular-nums;
+}
+.review .file-entry > .added,
+.review .file-entry > .removed {
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 /* A file too large to count says so in the counts' place, quietly. */
 .review .file-entry > .uncounted {
