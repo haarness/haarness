@@ -1766,3 +1766,141 @@ async fn parity_a_command_that_denies_reading_still_brings_its_own_files() {
         "{output}"
     );
 }
+
+/// Hooks on every shell command, each printing one permission answer.
+#[cfg(unix)]
+fn answering_hooks(workspace: &Path, answers: &[&str]) -> Arc<dyn haarness_core::HookPort> {
+    let hooks: Vec<serde_json::Value> = answers
+        .iter()
+        .map(|answer| {
+            json!({"command": format!(
+                r#"echo '{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":"{answer}"}}}}'"#
+            )})
+        })
+        .collect();
+    Arc::new(haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(
+            &json!({"PreToolUse": [{"matcher": "Bash", "hooks": hooks}]}),
+        ),
+        workspace.to_owned(),
+    ))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parity_a_later_hook_s_allow_does_not_undo_an_earlier_hook_s_ask() {
+    let fixture = Fixture::new();
+    let project = fixture.0.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(fixture.0.join("outside")).unwrap();
+    std::fs::write(fixture.0.join("outside/f"), "OUTSIDE_CANARY").unwrap();
+    for answers in [["allow", "ask"], ["ask", "allow"]] {
+        let runtime = runtime(
+            &project,
+            RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..RuntimeConfig::default()
+            },
+            None,
+        )
+        .with_hooks(answering_hooks(&project, &answers));
+        let thread = echo_thread(&runtime).await;
+        // The folder outside the project asks, whichever hook ran first.
+        let turn = send(
+            &runtime,
+            &thread,
+            &format!("!tool bash {}", json!({"command": "cat ../outside/f"})),
+        )
+        .await;
+        let asked = pending(&runtime).await;
+        assert_eq!(asked.permission, "external_directory", "{answers:?}");
+        answer(&runtime, &asked.permission_id, Reply::Reject).await;
+        wait_done(&runtime, &turn).await;
+        let outputs = tool_outputs(&runtime, &thread).await;
+        assert!(
+            !outputs
+                .iter()
+                .any(|(output, _)| output.contains("OUTSIDE_CANARY")),
+            "{answers:?}: {outputs:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parity_a_hook_that_asks_shows_the_call_s_card() {
+    use haarness_protocol::ApprovalMode;
+    let fixture = Fixture::new();
+    let command = json!({"command": "printf made >> made.txt"});
+    let script = format!("!tool bash {command}");
+    let made = || std::fs::read_to_string(fixture.0.join("made.txt")).unwrap_or_default();
+    let in_mode = |mode: ApprovalMode| {
+        let runtime = Arc::new(
+            runtime(
+                &fixture.0,
+                RuntimeConfig {
+                    approval_mode: mode,
+                    ..RuntimeConfig::default()
+                },
+                None,
+            )
+            .with_hooks(answering_hooks(&fixture.0, &["ask"])),
+        );
+        async move {
+            let thread = echo_thread(&runtime).await;
+            (runtime, thread)
+        }
+    };
+
+    // Review: the command, which the rules allow, waits for the person. The
+    // hook asks again next time, so the card offers no Always, and an
+    // Always answer counts once.
+    let (runtime, thread) = in_mode(ApprovalMode::Review).await;
+    let turn = send(&runtime, &thread, &script).await;
+    let asked = pending(&runtime).await;
+    assert_eq!(asked.permission, "bash");
+    assert_eq!(asked.allow_always, Some(false));
+    assert!(asked.always_patterns.is_empty(), "{asked:?}");
+    answer(&runtime, &asked.permission_id, Reply::Always).await;
+    assert_success(&runtime, &thread, &turn).await;
+    assert_eq!(made(), "made");
+    let turn = send(&runtime, &thread, &script).await;
+    let asked = pending(&runtime).await;
+    assert_eq!(asked.permission, "bash");
+    answer(&runtime, &asked.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    assert_eq!(made(), "made");
+
+    // A person's own command asks the same way.
+    let direct = {
+        let (runtime, id, command) = (Arc::clone(&runtime), thread.id, command.clone());
+        tokio::spawn(async move {
+            runtime
+                .run_direct_tool(id, "bash", command, CancellationToken::new())
+                .await
+        })
+    };
+    let asked = pending(&runtime).await;
+    assert_eq!(asked.permission, "bash");
+    assert_eq!(asked.allow_always, Some(false));
+    answer(&runtime, &asked.permission_id, Reply::Reject).await;
+    assert!(direct.await.unwrap().unwrap().is_error);
+    assert_eq!(made(), "made");
+
+    // Auto: the card goes to the person, not to the reviewer.
+    let (runtime, thread) = in_mode(ApprovalMode::Auto).await;
+    let turn = send(&runtime, &thread, &script).await;
+    let asked = pending(&runtime).await;
+    assert_eq!(asked.permission, "bash");
+    assert!(asked.review.is_none());
+    answer(&runtime, &asked.permission_id, Reply::Once).await;
+    assert_success(&runtime, &thread, &turn).await;
+    assert_eq!(made(), "mademade");
+
+    // Yolo answers it, as it answers every ask a person configured.
+    let (runtime, thread) = in_mode(ApprovalMode::Yolo).await;
+    let turn = send(&runtime, &thread, &script).await;
+    assert_success(&runtime, &thread, &turn).await;
+    assert!(runtime.pending_permissions().is_empty());
+    assert_eq!(made(), "mademademade");
+}

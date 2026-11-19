@@ -7297,6 +7297,8 @@ impl AgentRuntime {
             .flat_map(|plan| plan.external_paths.iter().cloned())
             .collect();
         let mut pending_plans = Vec::new();
+        // Plans nothing asked about, for the card a hook's ask shows.
+        let mut quiet = Vec::new();
         // Asks only a person answers (a configuration file edit).
         let mut protected = HashSet::new();
         // Asks a person configured about something narrower than a whole
@@ -7366,10 +7368,25 @@ impl AgentRuntime {
                     PermissionDecision::Allow => {}
                 }
             }
-            if allowed.is_err() || asked.is_empty() {
+            if allowed.is_err() {
                 continue;
             }
-            pending_plans.push(plan.asking(asked));
+            if asked.is_empty() {
+                quiet.push(plan);
+            } else {
+                pending_plans.push(plan.asking(asked));
+            }
+        }
+        let hook_asks = hook_permission == Some(PermissionDecision::Ask);
+        if hook_asks
+            && allowed.is_ok()
+            && pending_plans.is_empty()
+            && let Some(plan) = hook_card(quiet)
+        {
+            for pattern in &plan.patterns {
+                causes.insert(plan.operation(pattern), (AskCause::Hook, None));
+            }
+            pending_plans.push(plan);
         }
         for plan in combine_browser_approvals(name, pending_plans) {
             if allowed.is_err() {
@@ -7429,7 +7446,13 @@ impl AgentRuntime {
                 );
                 continue;
             }
-            let always_rules = plan.always_rules();
+            // A request a hook asked about offers no Always, so it names no
+            // rule one would keep.
+            let always_rules = if hook_asks {
+                Vec::new()
+            } else {
+                plan.always_rules()
+            };
             let card = plan.card_detail(&arguments, asked);
             // Same rule as model calls: in a chat in Auto the reviewer
             // answers a workflow's eligible requests (with it off, they are
@@ -7437,9 +7460,12 @@ impl AgentRuntime {
             // person's own call there is approved once, and in Yolo every
             // one is.
             let review_on = components.config.auto_review.enabled;
-            let reviewable = !asked
-                .iter()
-                .any(|pattern| personal.contains(&plan.operation(pattern)));
+            // What a hook asked, like an ask a person configured, goes to a
+            // person in Auto.
+            let reviewable = !hook_asks
+                && !asked
+                    .iter()
+                    .any(|pattern| personal.contains(&plan.operation(pattern)));
             // What only a person answers stays theirs, apart from what
             // Auto's reviewer may answer while it is on (computer use, see
             // `Tool::reviewer_may_answer`), and never in a published chat,
@@ -7580,6 +7606,7 @@ impl AgentRuntime {
                     reviewer: reviewer.clone(),
                     review_abort: review_now.then(CancellationToken::new),
                     own_call: !agent_work,
+                    hook_asked: hook_asks,
                 },
             );
             drop(approval_gate);
@@ -7671,7 +7698,7 @@ impl AgentRuntime {
                 let mut requested = json!({
                     "permissionId": id,
                     "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
-                    "allowAlways": !forced,
+                    "allowAlways": !forced && !hook_asks,
                     "explicit": explicit,
                     "operation": operation,
                     "detail": card,
@@ -7941,10 +7968,11 @@ impl AgentRuntime {
             }
             decision => decision,
         };
+        // A request that offers no Always takes any allow as once.
+        let once_only = (pending.forced && !explicit) || pending.hook_asked;
         let allowed = match decision {
             decision
-                if pending.forced
-                    && !explicit
+                if once_only
                     && !matches!(
                         decision,
                         PermissionReplyDecision::Reject | PermissionReplyDecision::Refuse
@@ -8061,9 +8089,9 @@ impl AgentRuntime {
             }
         }
         self.publish_permission_resolved(id, &pending, allowed);
-        // A forced request offers nothing longer, so any allow of it is once.
-        let once = allowed
-            && (matches!(decision, PermissionReplyDecision::Once) || (pending.forced && !explicit));
+        // A forced or hook-asked request offers nothing longer, so any allow
+        // of it is once.
+        let once = allowed && (matches!(decision, PermissionReplyDecision::Once) || once_only);
         let _ = pending.sender.send(PermissionResolution {
             allowed,
             feedback: reply.feedback,
@@ -9976,6 +10004,7 @@ struct StatusState {
     since: Option<DateTime<Utc>>,
 }
 
+#[allow(clippy::struct_excessive_bools)] // independent facts about one request, each read on its own
 struct PendingPermission {
     repository_scope: Option<String>,
     forced: bool,
@@ -10024,6 +10053,10 @@ struct PendingPermission {
     /// A person's own call (`!`, a client's tool call), which Auto approves
     /// once without a review: turning Auto on releases it.
     own_call: bool,
+    /// A `PreToolUse` hook asked about the call. The hook asks again next
+    /// time, so the request offers no Always (an Always answer is taken as
+    /// once) and no other request's Always answers it.
+    hook_asked: bool,
 }
 
 /// Where Auto's reviewer is with a waiting request.
@@ -10483,7 +10516,7 @@ async fn review_waiting(
 /// clients replace the card they show by its id.
 fn publish_requested(events: &EventBus, id: &str, pending: &PendingPermission) {
     let mut payload = json!(pending.info(id));
-    payload["allowAlways"] = json!(!pending.forced);
+    payload["allowAlways"] = json!(!pending.forced && !pending.hook_asked);
     events.publish_scoped(
         "permission.requested",
         Some(pending.thread_id),
@@ -10679,7 +10712,7 @@ impl PendingPermission {
         PendingPermissionInfo {
             permission_id: id.to_owned(),
             repository_scope: self.repository_scope.clone(),
-            allow_always: self.forced.then_some(false),
+            allow_always: (self.forced || self.hook_asked).then_some(false),
             explicit: !self.explicit_operations.is_empty(),
             operation: self.operation.clone(),
             permission: self.permission.clone(),
@@ -10702,6 +10735,7 @@ impl PendingPermission {
     /// does not release a `cat` of another `.env`.
     fn covered_by(&self, rules: &[PermissionRule]) -> bool {
         !self.forced
+            && !self.hook_asked
             && self.exact_rules.iter().all(|exact| {
                 rules.iter().any(|rule| {
                     rule.decision == PermissionDecision::Allow && rule.pattern == *exact
@@ -14883,6 +14917,8 @@ impl RunnerTask {
             .collect();
         let engine = self.permission_engine_for_tool(agent, name);
         let mut pending_plans = Vec::new();
+        // Plans nothing asked about, for the card a hook's ask shows.
+        let mut quiet = Vec::new();
         // Asks only a person answers (a configuration file edit).
         let mut protected = HashSet::new();
         // Asks a person configured about something narrower than a whole
@@ -14957,9 +14993,21 @@ impl RunnerTask {
                     PermissionDecision::Allow => {}
                 }
             }
-            if !asked.is_empty() {
+            if asked.is_empty() {
+                quiet.push(plan);
+            } else {
                 pending_plans.push(plan.asking(asked));
             }
+        }
+        let hook_asks = hook_permission == Some(PermissionDecision::Ask);
+        if hook_asks
+            && pending_plans.is_empty()
+            && let Some(plan) = hook_card(quiet)
+        {
+            for pattern in &plan.patterns {
+                causes.insert(plan.operation(pattern), (AskCause::Hook, None));
+            }
+            pending_plans.push(plan);
         }
         for plan in combine_browser_approvals(name, pending_plans) {
             let forced = plan.patterns.iter().any(|pattern| {
@@ -14977,10 +15025,13 @@ impl RunnerTask {
                         .is_some_and(|tool| tool.explicit_approval(&arguments, operation))
                 })
                 .collect();
-            let reviewable = !plan
-                .patterns
-                .iter()
-                .any(|pattern| personal.contains(&plan.operation(pattern)));
+            // What a hook asked, like an ask a person configured, goes to a
+            // person in Auto.
+            let reviewable = !hook_asks
+                && !plan
+                    .patterns
+                    .iter()
+                    .any(|pattern| personal.contains(&plan.operation(pattern)));
             let yolo_answers = yolo_may_answer(tool.as_deref(), &arguments, &plan, &protected);
             let resolution = self
                 .ask_permission(
@@ -14991,6 +15042,7 @@ impl RunnerTask {
                         forced,
                         yolo_answers,
                         definition_shell.is_none_or(|snippet| snippet.ask),
+                        hook_asks,
                     ),
                     explicit,
                     reviewable,
@@ -15357,23 +15409,30 @@ impl RunnerTask {
     /// it all the same (see [`crate::Tool::yolo_answers`]), and whether
     /// anyone may be asked: when not, only Yolo (or `--yolo`) and the
     /// `PermissionRequest` hooks answer, and what would go to Auto's
-    /// reviewer or a card comes back [`AnsweredBy::NotAsked`]. `why`: why it
-    /// asks, for the log lines.
+    /// reviewer or a card comes back [`AnsweredBy::NotAsked`]; and whether a
+    /// `PreToolUse` hook asked about the call, which no rule then answers
+    /// and no Always settles. `why`: why it asks, for the log lines.
     #[allow(clippy::too_many_arguments)]
     async fn ask_permission(
         &self,
         agent: &str,
         plan: &AskPlan,
         detail: &serde_json::Value,
-        asks: (bool, bool, bool),
+        asks: (bool, bool, bool, bool),
         explicit_operations: Vec<String>,
         reviewable: bool,
         tool: (&str, &str),
         why: &AskWhy,
     ) -> CoreResult<PermissionResolution> {
-        let (forced, yolo_answers, may_ask) = asks;
+        let (forced, yolo_answers, may_ask, hook_asked) = asks;
         let operation = plan.describe(&plan.patterns);
-        let always_rules = plan.always_rules();
+        // A request a hook asked about offers no Always, so it names no rule
+        // one would keep.
+        let always_rules = if hook_asked {
+            Vec::new()
+        } else {
+            plan.always_rules()
+        };
         let remembered = plan.remembered_rules();
         let explicit = !explicit_operations.is_empty();
         // Yolo is yes to everything: a `--yolo` turn or a chat in Yolo
@@ -15416,7 +15475,7 @@ impl RunnerTask {
             // mid-run. A single turn's flag (a schedule, `run --yolo`, ACP, a
             // `--yolo` terminal UI) approves once: its rules would otherwise
             // reach every chat on this server.
-            if self.config.auto_approve {
+            if self.config.auto_approve && !hook_asked {
                 let mut session = self.session_rules.lock();
                 for pattern in &remembered {
                     session.push(PermissionRule {
@@ -15458,6 +15517,7 @@ impl RunnerTask {
             // chat in Auto, which approves once and records nothing either.
             let always = (!forced
                 && !explicit
+                && !hook_asked
                 && !self.unattended
                 && hook_may_remember(plan)
                 && !self.approval_modes.is_auto(self.thread.id).await)
@@ -15572,6 +15632,7 @@ impl RunnerTask {
             let session_rules = self.session_rules.lock();
             let refreshed = self.permission_engine_with_session_rules(agent, &session_rules);
             if !forced
+                && !hook_asked
                 && plan.patterns.iter().all(|pattern| {
                     let operation = plan.operation(pattern);
                     if explicit_operations.contains(&operation) {
@@ -15641,6 +15702,7 @@ impl RunnerTask {
                     reviewer: reviewer.clone(),
                     review_abort: review_now.then(CancellationToken::new),
                     own_call: false,
+                    hook_asked,
                 },
             );
         }
@@ -15721,7 +15783,7 @@ impl RunnerTask {
             let mut requested = json!({
                     "permissionId": id,
                     "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
-                    "allowAlways": !forced,
+                    "allowAlways": !forced && !hook_asked,
                     "explicit": explicit,
                     "operation": operation,
                     "detail": detail,
@@ -19867,6 +19929,27 @@ fn yolo_may_answer(
         })
 }
 
+/// The card a call shows because a `PreToolUse` hook asked about it, where
+/// no rule asked: the call's plan about the tool itself rather than a
+/// folder outside the project it names, asking about each of its patterns
+/// as a rule asking about the whole tool would. `None` when the call names
+/// nothing to ask about.
+fn hook_card(quiet: Vec<AskPlan>) -> Option<AskPlan> {
+    let mut quiet: Vec<AskPlan> = quiet
+        .into_iter()
+        .filter(|plan| !plan.patterns.is_empty())
+        .collect();
+    let at = quiet
+        .iter()
+        .position(|plan| plan.permission != "external_directory")
+        .unwrap_or(0);
+    (at < quiet.len()).then(|| {
+        let plan = quiet.swap_remove(at);
+        let patterns = plan.patterns.clone();
+        plan.asking(patterns)
+    })
+}
+
 /// Why a scheduled run's Chrome site or computer use gate failed instead of waiting.
 fn cannot_ask(operations: &[String]) -> String {
     if let Some(apps) = computer_targets(operations) {
@@ -19952,6 +20035,8 @@ enum AskCause {
     /// Only an answer given in this chat settles it (a Chrome site,
     /// computer use, an extension tool's own approval).
     Explicit,
+    /// A `PreToolUse` hook asked, where nothing else did.
+    Hook,
 }
 
 impl AskCause {
@@ -19998,6 +20083,7 @@ impl AskCause {
             Self::SecretViaShell => "secret_via_shell",
             Self::Tool => "tool",
             Self::Explicit => "explicit",
+            Self::Hook => "hook",
         }
     }
 }
@@ -21371,6 +21457,7 @@ mod shell_reading_tests {
             reviewer: None,
             review_abort: None,
             own_call: false,
+            hook_asked: false,
         }
     }
 

@@ -1,13 +1,14 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Locator, type Page } from "@playwright/test";
-import { mkdtemp, mkdir, writeFile, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, realpath } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { stopChatHome } from "./fixtures/chat-home";
 import { isolatedEnv } from "./fixtures/isolated-env";
 
-// The hook editor's matcher, and a question a PreToolUse hook answers, in a
-// real Desktop against a real server with the echo provider.
+// The hook editor's matcher, a question a PreToolUse hook answers, and the
+// card a PreToolUse hook's ask brings up, in a real Desktop against a real
+// server with the echo provider.
 let app: ElectronApplication, page: Page, root: string, workspace: string;
 let env: Record<string, string>;
 const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
@@ -55,12 +56,18 @@ test.beforeAll(async () => {
       "if data['tool_input'].get('prompt') == 'Which test suite should I run?':",
       "    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse',",
       "        'updatedInput': dict(data['tool_input'], answers=[['Unit tests']])}}))",
+      "if 'deploy' in data['tool_input'].get('command', ''):",
+      "    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'ask'}}))",
     ].join("\n"),
   );
   const command = (matcher: string) => [{ matcher, hooks: [{ type: "command", command: `python3 ${JSON.stringify(hook)}` }] }];
   await writeFile(
     join(workspace, "haarness.json"),
-    JSON.stringify({ hooks: { PreToolUse: command("question"), SessionEnd: command("clear") } }, null, 1),
+    JSON.stringify(
+      { hooks: { PreToolUse: [...command("question"), ...command("Bash")], SessionEnd: command("clear") } },
+      null,
+      1,
+    ),
   );
   env = isolatedEnv();
   Object.assign(env, {
@@ -240,5 +247,33 @@ test("a question a hook answered shows its answer and says the hook answered it"
   // Answered, its row says what was asked and what came back.
   await expect(asked.locator(".tool-answer")).toHaveText("Blue");
   await expect(asked.locator(".tool-target")).toHaveCSS("font-family", /^(?!.*mono)/i);
+  expect(errors).toEqual([]);
+});
+
+test("a command a hook asks about waits for the person, with no Always", async () => {
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  const box = page.getByRole("textbox", { name: "Message", exact: true });
+  await box.fill(" !tool bash " + JSON.stringify({ command: "printf deployed > deploy.txt" }));
+  await page.getByRole("button", { name: /Send message|Send guidance/ }).click();
+  // The rules run the command and the chat is in Auto, yet the hook's ask
+  // reaches the person, not the reviewer. It asks again next time, so the
+  // card offers no Always.
+  const allow = page.getByRole("button", { name: "Allow once", exact: true });
+  await expect(allow).toBeVisible({ timeout: 30000 });
+  await expect(page.getByRole("button", { name: "Deny", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Always allow", exact: true })).toHaveCount(0);
+  const [asked] = await api("listPermissions");
+  expect(asked.permission).toBe("bash");
+  expect(asked.allowAlways).toBe(false);
+  expect(asked.alwaysPatterns ?? []).toEqual([]);
+  expect(asked.review ?? null).toBeNull();
+  await shot("hook-ask-card-light");
+  await theme("dark");
+  await shot("hook-ask-card-dark");
+  await theme("light");
+  await allow.click();
+  await expect.poll(async () => (await api("activeTurns")).length, { timeout: 30000 }).toBe(0);
+  await expect.poll(async () => (await api("listPermissions")).length).toBe(0);
+  expect(await readFile(join(workspace, "deploy.txt"), "utf8")).toBe("deployed");
   expect(errors).toEqual([]);
 });
