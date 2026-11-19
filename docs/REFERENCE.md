@@ -286,10 +286,12 @@ server. A server that holds its folder but no longer answers is ended on macOS a
 Linux with SIGTERM, then SIGKILL, and only while its process is still that server:
 the runtime record keeps when the server started, so a program the system later
 gave the same pid (after a crash or a restart) is never signalled. A record written
-by 0.1.23 or older counts only for a process running the executable it names. When
-the recorded server has ended and a new one is still starting, `serve --stop` says
-so, stops nothing and can be run again a moment later. `serve --yolo` refuses while
-a server runs: it cannot change how that server approves.
+by 0.1.23 or older counts only for a process running the executable it names that
+started before the record was written. When the recorded server has ended and a new
+one is starting, `serve --stop` waits up to 10 seconds for the new one to listen and
+stops it then; if it does not, or if the process cannot be read to tell, nothing is
+stopped and the command says why. `serve --yolo` refuses while a server runs: it
+cannot change how that server approves.
 
 Desktop's **Connect to server** form requires only a Server URL. Name is optional,
 and **Username and password** expands to optional username/password fields. Saved
