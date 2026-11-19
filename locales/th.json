@@ -3158,5 +3158,9 @@
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "ถามก่อนหมายถึงการอนุมัติหนึ่งครั้งต่อแอปในแต่ละแชท ซึ่งในโหมดอัตโนมัติ ผู้ตรวจจะเป็นผู้อนุมัติเมื่อเปิดใช้อยู่",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "ขณะที่เอเจนต์ทำงาน แถบด้านบนของหน้าจอจะแสดงแอปที่ใช้อยู่ พร้อมปุ่มหยุดชั่วคราวและหยุด กด Esc ก็หยุดได้เช่นกันขณะที่เอเจนต์ดำเนินการในแอปที่อยู่หน้าสุด",
   "Esc stops it too, while it acts in the frontmost app": "กด Esc เพื่อหยุดได้เช่นกันขณะดำเนินการในแอปที่อยู่หน้าสุด",
-  "Asked by a hook": "ฮุกขอให้ยืนยัน"
+  "Asked by a hook": "ฮุกขอให้ยืนยัน",
+  "The chat changed while it was being summarised": "แชทเปลี่ยนไประหว่างที่กำลังสรุป",
+  "The chat is being compacted · try again once it's done": "กำลังบีบอัดแชท · ลองอีกครั้งเมื่อเสร็จแล้ว",
+  "This chat is already being compacted": "แชทนี้กำลังถูกบีบอัดอยู่แล้ว",
+  "The summary didn't come back in time": "สรุปไม่กลับมาทันเวลา"
 }

@@ -3158,5 +3158,9 @@
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "먼저 묻기는 각 채팅에서 앱마다 한 번 승인하는 것이며, 자동에서는 검토자가 켜져 있으면 검토자가 승인합니다.",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "에이전트가 작업하는 동안 화면 위쪽 막대에 사용 중인 앱과 일시 중지, 중지 버튼이 표시됩니다. 가장 앞에 있는 앱을 조작하는 동안에는 Esc 키로도 중지됩니다.",
   "Esc stops it too, while it acts in the frontmost app": "가장 앞에 있는 앱을 조작하는 동안에는 Esc 키로도 중지할 수 있습니다",
-  "Asked by a hook": "훅이 확인을 요청함"
+  "Asked by a hook": "훅이 확인을 요청함",
+  "The chat changed while it was being summarised": "요약하는 동안 채팅이 변경되었습니다",
+  "The chat is being compacted · try again once it's done": "채팅을 압축하는 중입니다 · 완료된 후 다시 시도하세요",
+  "This chat is already being compacted": "이 채팅은 이미 압축 중입니다",
+  "The summary didn't come back in time": "요약이 제때 돌아오지 않았습니다"
 }

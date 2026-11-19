@@ -1206,6 +1206,11 @@ pub struct App {
     /// Review currently being fetched for the `/diff` viewer, on a worker
     /// task. Leaving the viewer cancels it; a frame collects it.
     pub(crate) diff_load: Option<crate::commands::DiffLoad>,
+    /// `/compact` requests running on worker tasks; see `compaction`.
+    pub(crate) compactions: Vec<crate::compaction::Compaction>,
+    /// Messages sent while their chat was being compacted, sent once it is
+    /// over; see `compaction`.
+    pub(crate) held: Vec<crate::compaction::Held>,
     /// OSC notification queued by the reducer, drained by the event loop.
     pub pending_notification: Option<String>,
     /// "Finished" banners waiting out their grace; see `state::completion`.
@@ -1472,6 +1477,8 @@ impl App {
             workspace_ref_operation: None,
             workspace_mutation: None,
             diff_load: None,
+            compactions: Vec::new(),
+            held: Vec::new(),
             pending_notification: None,
             completions: completion::HeldCompletions::default(),
             notification_toast: None,

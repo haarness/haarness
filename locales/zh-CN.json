@@ -3158,5 +3158,9 @@
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "“先询问”是指每个对话中每个应用需批准一次；在自动模式下，审核模型开启时由它批准。",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "智能体工作时，屏幕顶部的条带会显示正在使用的应用，并提供“暂停”和“停止”。它在最前端的应用中操作时，按 Esc 也可停止。",
   "Esc stops it too, while it acts in the frontmost app": "在最前端的应用中操作时，按 Esc 也可停止",
-  "Asked by a hook": "由钩子请求确认"
+  "Asked by a hook": "由钩子请求确认",
+  "The chat changed while it was being summarised": "对话在生成摘要期间发生了变化",
+  "The chat is being compacted · try again once it's done": "正在压缩对话 · 完成后再试",
+  "This chat is already being compacted": "此对话已在压缩中",
+  "The summary didn't come back in time": "摘要未能及时返回"
 }

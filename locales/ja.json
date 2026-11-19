@@ -3158,5 +3158,9 @@
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "「先に確認」では、各チャットでアプリごとに1回承認します。自動では、審査役がオンのときは審査役が承認します。",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "エージェントが作業している間、画面上部の帯に使用中のアプリと「一時停止」「停止」が表示されます。最前面のアプリを操作している間は Esc キーでも停止します。",
   "Esc stops it too, while it acts in the frontmost app": "最前面のアプリを操作中は Esc キーでも停止できます",
-  "Asked by a hook": "フックが確認を要求"
+  "Asked by a hook": "フックが確認を要求",
+  "The chat changed while it was being summarised": "要約している間にチャットが変更されました",
+  "The chat is being compacted · try again once it's done": "チャットを圧縮しています · 完了してからもう一度お試しください",
+  "This chat is already being compacted": "このチャットはすでに圧縮中です",
+  "The summary didn't come back in time": "要約が時間内に戻りませんでした"
 }

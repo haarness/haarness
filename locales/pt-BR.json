@@ -3158,5 +3158,9 @@
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Perguntar antes significa uma aprovação por app em cada conversa, dada pelo revisor do Auto no modo Auto quando ele está ativado.",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Enquanto um agente trabalha, uma faixa no topo da tela mostra o app em uso, com Pausar e Parar. Esc também interrompe enquanto ele age no app mais à frente.",
   "Esc stops it too, while it acts in the frontmost app": "Esc também interrompe enquanto ele age no app mais à frente",
-  "Asked by a hook": "Perguntado por um hook"
+  "Asked by a hook": "Perguntado por um hook",
+  "The chat changed while it was being summarised": "A conversa mudou enquanto era resumida",
+  "The chat is being compacted · try again once it's done": "A conversa está sendo compactada · tente de novo quando terminar",
+  "This chat is already being compacted": "Esta conversa já está sendo compactada",
+  "The summary didn't come back in time": "O resumo não voltou a tempo"
 }

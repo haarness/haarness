@@ -3158,5 +3158,9 @@
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "«Сначала спрашивать» — это одно одобрение на приложение в каждом чате; в режиме Авто его даёт проверяющий, когда он включён.",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Пока агент работает, полоса вверху экрана показывает используемое приложение и кнопки «Пауза» и «Остановить». Esc тоже останавливает его, пока он действует в самом переднем приложении.",
   "Esc stops it too, while it acts in the frontmost app": "Esc тоже останавливает, пока он действует в самом переднем приложении",
-  "Asked by a hook": "Запрошено хуком"
+  "Asked by a hook": "Запрошено хуком",
+  "The chat changed while it was being summarised": "Чат изменился во время подготовки сводки",
+  "The chat is being compacted · try again once it's done": "Чат сжимается · повторите попытку, когда это завершится",
+  "This chat is already being compacted": "Этот чат уже сжимается",
+  "The summary didn't come back in time": "Сводка не пришла вовремя"
 }

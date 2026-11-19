@@ -3158,5 +3158,9 @@
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Spørg først betyder én godkendelse pr. app i hver chat, som Auto-bedømmeren giver i Auto, når den er slået til.",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Mens en agent arbejder, viser en bjælke øverst på skærmen den app, der bruges, med Pause og Stop. Esc stopper den også, mens den handler i den forreste app.",
   "Esc stops it too, while it acts in the frontmost app": "Esc stopper det også, mens det handler i den forreste app",
-  "Asked by a hook": "Spurgt af en hook"
+  "Asked by a hook": "Spurgt af en hook",
+  "The chat changed while it was being summarised": "Chatten ændrede sig, mens den blev opsummeret",
+  "The chat is being compacted · try again once it's done": "Chatten komprimeres · prøv igen, når den er færdig",
+  "This chat is already being compacted": "Denne chat komprimeres allerede",
+  "The summary didn't come back in time": "Opsummeringen kom ikke tilbage i tide"
 }

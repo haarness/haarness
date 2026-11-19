@@ -16014,6 +16014,9 @@ mod small_window;
 #[path = "cases/background_commands.rs"]
 mod background_commands;
 
+#[path = "cases/compaction_task.rs"]
+mod compaction_task;
+
 // POSIX shell commands for the agent's shell tool, which runs cmd.exe on Windows.
 #[cfg(unix)]
 #[path = "cases/agent_files.rs"]

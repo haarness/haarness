@@ -181,6 +181,11 @@ fn parse(version: &str) -> Option<([u64; 3], Vec<&str>)> {
     Some((parsed, pre))
 }
 
+/// Whether `version`'s release numbers are `minimum` or later.
+pub(crate) fn at_least(version: &str, minimum: [u64; 3]) -> bool {
+    parse(version).is_some_and(|(numbers, _)| numbers >= minimum)
+}
+
 /// SemVer: whether `a` is a later version than `b`.
 fn newer(a: &str, b: &str) -> bool {
     let (Some((left, left_pre)), Some((right, right_pre))) = (parse(a), parse(b)) else {
