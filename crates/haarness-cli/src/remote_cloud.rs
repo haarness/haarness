@@ -1035,6 +1035,29 @@ fn request_label(frame: &Frame) -> String {
         .take(200)
         .collect()
 }
+/// Whether `path` (without its query) is one of the host routes the
+/// connector serves: the server's info, the gateway's project catalog,
+/// folder browser, open and close, and each project's own API through the
+/// gateway. Anything else the host server answers is for Haarness's own
+/// programs on this computer, such as the key a server vouches with for who
+/// sent what it forwards, and never crosses the relay; nor do the routes of
+/// that kind on a project's own server.
+fn host_route(path: &str) -> bool {
+    if matches!(
+        path,
+        "/v1/info" | "/v1/host/projects" | "/v1/host/directories" | "/v1/host/open"
+    ) {
+        return true;
+    }
+    if let Some(workspace) = path.strip_prefix("/v1/host/projects/") {
+        return !workspace.contains('/');
+    }
+    path.strip_prefix("/v1/host/workspaces/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(_, inner)| {
+            inner.starts_with("v1/") && inner != "v1/host" && !inner.starts_with("v1/host/")
+        })
+}
 fn validate_path(path: &str, target: &Target, thread: Option<Uuid>) -> Result<()> {
     let path = path.split('?').next().unwrap_or(path);
     ensure!(
@@ -1045,10 +1068,7 @@ fn validate_path(path: &str, target: &Target, thread: Option<Uuid>) -> Result<()
                 .any(|part| part == "." || part == ".." || part.is_empty()),
         "Invalid relay path"
     );
-    ensure!(
-        path == "/v1/info" || path.starts_with("/v1/host/"),
-        "Choose a registered host project first"
-    );
+    ensure!(host_route(path), "Choose a registered host project first");
     if let Some(shared) = target.thread {
         ensure!(
             thread == Some(shared),
@@ -4840,6 +4860,48 @@ mod tests {
         }
         assert!(validate_path("/v1/host/workspaces/project/v1/info", &target, None).is_err());
         assert!(validate_path("/v1/host/workspaces/project/v1/info", &target, Some(chat)).is_ok());
+        assert!(
+            validate_path(
+                "/v1/host/workspaces/project/v1/host/forwarding",
+                &target,
+                Some(chat)
+            )
+            .is_err()
+        );
+
+        // The whole computer: the routes the connector declares, and none of
+        // the host server's own, such as the key it vouches with.
+        let computer = Target {
+            thread: None,
+            ..target
+        };
+        for path in [
+            "/v1/info",
+            "/v1/host/projects",
+            "/v1/host/projects/workspace-1",
+            "/v1/host/directories?path=%2FUsers",
+            "/v1/host/open",
+            "/v1/host/workspaces/w1/v1/threads",
+            "/v1/host/workspaces/w1/v1/threads/t/turns?wait=1",
+            "/v1/host/workspaces/home/v1/ptys/p/connect",
+        ] {
+            assert!(validate_path(path, &computer, None).is_ok(), "{path}");
+        }
+        for path in [
+            "/v1/host/forwarding",
+            "/v1/host/forwarding?again=1",
+            "/v1/host/other",
+            "/v1/host/projects/w1/more",
+            "/v1/host/workspaces/w1",
+            "/v1/host/workspaces/w1/healthz",
+            "/v1/host/workspaces/w1/v1/host/forwarding",
+            "/v1/host/workspaces/w1/v1/host",
+            "/v1/threads",
+            "/v1/shutdown",
+            "/v1/manage/remote-control",
+        ] {
+            assert!(validate_path(path, &computer, None).is_err(), "{path}");
+        }
     }
 
     /// What a fake Haarness server holds; the tests change it as they go.
