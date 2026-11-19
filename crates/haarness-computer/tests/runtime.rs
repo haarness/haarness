@@ -338,7 +338,7 @@ fn names(lab: &Lab) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn the_switch_alone_offers_the_tools_and_offering_them_starts_no_helper() {
+async fn the_switch_offers_the_tools_and_offering_them_starts_no_helper() {
     let lab = Lab::new(json!({}));
     assert!(names(&lab).is_empty());
     // Off, with an agreement an earlier build recorded: off.
@@ -346,6 +346,16 @@ async fn the_switch_alone_offers_the_tools_and_offering_them_starts_no_helper() 
         json!({"enabled": false, "terms": {"version": "2", "acceptedAt": "2026-11-07T00:00:00Z"}}),
     );
     assert!(names(&lab).is_empty());
+    // On beside an agreement to terms earlier builds replaced since: they kept it off, and so does this one, saving
+    // it off rather than handing agents the screen by itself.
+    lab.settings(
+        json!({"enabled": true, "terms": {"version": "0", "acceptedAt": "2026-01-01T00:00:00Z"}}),
+    );
+    assert!(names(&lab).is_empty());
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(lab.root.join("config/computer-use.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["enabled"], false);
     let all = [
         "mac_apps",
         "mac_click",
@@ -356,10 +366,9 @@ async fn the_switch_alone_offers_the_tools_and_offering_them_starts_no_helper() 
         "mac_snapshot",
         "mac_type",
     ];
-    // On, whatever an earlier build recorded about its terms.
+    // On: switched on here, or on with the agreement earlier builds accept today.
     for on in [
         Lab::on(),
-        json!({"enabled": true, "terms": {"version": "0", "acceptedAt": "2026-01-01T00:00:00Z"}}),
         json!({"enabled": true, "terms": {"version": "2", "acceptedAt": "2026-11-07T00:00:00Z"}}),
     ] {
         lab.settings(on.clone());

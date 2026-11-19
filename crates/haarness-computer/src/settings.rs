@@ -18,9 +18,11 @@ pub const FILE_NAME: &str = "computer-use.json";
 
 /// Earlier builds kept computer use off until the person accepted versioned terms, recorded in this file as
 /// `terms: {"version", "acceptedAt"}`, and the last version they asked for was this one. This build has no terms: it
-/// keeps whatever record the file holds, and switching on writes this version when the record names another, so an
-/// earlier build reading the same file (a server not yet restarted after an update, or a downgrade) sees computer use
-/// on as well, rather than off behind terms. The status reports it as accepted for earlier clients.
+/// keeps whatever record the file holds, and switching on writes this version when the file holds no such record, so
+/// an earlier build reading the same file (a server not yet restarted after an update, or a downgrade) sees computer
+/// use on as well, rather than off behind terms. A file whose switch is on beside any other record was off for those
+/// builds, and reads as off here too (see [`Settings::settle`]). The status reports the terms as accepted for earlier
+/// clients.
 pub(crate) const EARLIER_TERMS_VERSION: &str = "2";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +31,7 @@ pub struct Settings {
     /// The person's switch: agents use the screen only while it is on.
     pub enabled: bool,
     /// The record earlier builds look for before they use the screen (see [`EARLIER_TERMS_VERSION`]). This build
-    /// never reads it.
+    /// reads it only to settle a file they wrote.
     #[serde(rename = "terms", skip_serializing_if = "Option::is_none")]
     earlier_terms: Option<Value>,
     /// What happens in an app without a rule: `ask` (the default) or `allow`.
@@ -57,17 +59,31 @@ impl Settings {
     /// [`EARLIER_TERMS_VERSION`]); off leaves it as it is, since the switch alone says off to every build.
     pub fn switch(&mut self, on: bool) {
         self.enabled = on;
-        if on
-            && self
-                .earlier_terms
-                .as_ref()
-                .is_none_or(|terms| terms["version"] != EARLIER_TERMS_VERSION)
-        {
+        if on && !self.earlier_terms_current() {
             self.earlier_terms = Some(json!({
                 "version": EARLIER_TERMS_VERSION,
                 "acceptedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             }));
         }
+    }
+
+    /// Whether the file holds the record earlier builds accept today: version 2, with the date they read too.
+    fn earlier_terms_current(&self) -> bool {
+        self.earlier_terms.as_ref().is_some_and(|terms| {
+            terms["version"] == EARLIER_TERMS_VERSION && terms["acceptedAt"].is_string()
+        })
+    }
+
+    /// Switches off a file whose switch is on beside a record earlier builds no longer accept (an agreement to terms
+    /// they replaced since, or one they cannot read): they kept computer use off, so it stays off rather than coming
+    /// back on by itself, until the person switches it on. A file with no record follows its switch, as no build ever
+    /// wrote one switched on. Says whether it switched off.
+    fn settle(&mut self) -> bool {
+        if self.enabled && self.earlier_terms.is_some() && !self.earlier_terms_current() {
+            self.enabled = false;
+            return true;
+        }
+        false
     }
 
     /// The rule for `bundle`: an exact rule first, then the longest matching prefix rule.
@@ -137,7 +153,7 @@ impl Store {
     /// The settings now: off when the file is missing or unreadable.
     #[must_use]
     pub fn get(&self) -> Settings {
-        let stamp = self.stamp();
+        let mut stamp = self.stamp();
         if let Some((cached, settings)) = self.cache.lock().as_ref()
             && *cached == stamp
         {
@@ -147,7 +163,21 @@ impl Store {
             None => Settings::default(),
             Some(_) => {
                 match fs::read(&self.path).map(|bytes| serde_json::from_slice::<Settings>(&bytes)) {
-                    Ok(Ok(settings)) => settings.sanitized(),
+                    Ok(Ok(settings)) => {
+                        let mut settings = settings.sanitized();
+                        // Saved off, so the file says what every build reads. A change under way saves it anyway.
+                        if settings.settle()
+                            && let Some(_guard) = self.write.try_lock()
+                        {
+                            match self.write_file(&settings) {
+                                Ok(()) => stamp = self.stamp(),
+                                Err(error) => {
+                                    tracing::warn!(%error, path = %self.path.display(), "could not save computer use as off");
+                                }
+                            }
+                        }
+                        settings
+                    }
                     Ok(Err(error)) => {
                         tracing::warn!(%error, path = %self.path.display(), "ignoring unreadable computer use settings (computer use stays off)");
                         Settings::default()
@@ -169,6 +199,13 @@ impl Store {
         let mut settings = self.get();
         change(&mut settings);
         let settings = settings.sanitized();
+        self.write_file(&settings)?;
+        *self.cache.lock() = Some((self.stamp(), settings.clone()));
+        Ok(settings)
+    }
+
+    /// Writes `settings` over the file. Callers hold the write lock.
+    fn write_file(&self, settings: &Settings) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -182,7 +219,7 @@ impl Store {
             #[cfg(unix)]
             std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
             let mut file = options.open(&temp)?;
-            file.write_all(&serde_json::to_vec_pretty(&settings).map_err(io::Error::other)?)?;
+            file.write_all(&serde_json::to_vec_pretty(settings).map_err(io::Error::other)?)?;
             file.write_all(b"\n")?;
             file.sync_all()?;
             fs::rename(&temp, &self.path)
@@ -190,9 +227,7 @@ impl Store {
         if result.is_err() {
             let _ = fs::remove_file(&temp);
         }
-        result?;
-        *self.cache.lock() = Some((self.stamp(), settings.clone()));
-        Ok(settings)
+        result
     }
 }
 
@@ -210,33 +245,72 @@ mod tests {
     }
 
     #[test]
-    fn the_switch_alone_says_on_whatever_terms_an_earlier_build_recorded() {
+    fn a_file_reads_as_on_or_off_as_the_release_before_read_it_and_one_switch_turns_it_on() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
-        // On, though the agreement is to terms an earlier build later replaced, or there is none: on.
-        for earlier in [
-            json!({"enabled": true, "terms": {"version": "1", "acceptedAt": "2026-01-01T00:00:00Z"}}),
-            json!({"enabled": true}),
-        ] {
-            fs::write(store.path(), earlier.to_string()).unwrap();
-            assert!(store.get().enabled, "{earlier}");
+        let saved =
+            || -> Value { serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap() };
+        let write = |file: &Value| {
+            // Another length or another moment: the next read sees the change.
             std::thread::sleep(std::time::Duration::from_millis(20));
+            fs::write(store.path(), file.to_string()).unwrap();
+        };
+        let current = json!({"version": "2", "acceptedAt": "2026-11-07T00:00:00Z"});
+        // On with today's record, off with any record, and on with none (no build wrote that, so the switch says).
+        for (file, on) in [
+            (json!({"enabled": true, "terms": current}), true),
+            (json!({"enabled": false, "terms": current}), false),
+            (
+                json!({"enabled": false, "terms": {"version": "1", "acceptedAt": "2026-01-01T00:00:00Z"}}),
+                false,
+            ),
+            (json!({"enabled": false}), false),
+            (json!({"enabled": true}), true),
+        ] {
+            write(&file);
+            assert_eq!(store.get().enabled, on, "{file}");
+            assert_eq!(saved(), file, "nothing to save: {file}");
         }
-        // Off with today's agreement on record: off.
-        fs::write(
-            store.path(),
-            json!({"enabled": false, "terms": {"version": "2", "acceptedAt": "2026-11-07T00:00:00Z"}})
-                .to_string(),
-        )
-        .unwrap();
-        assert!(!store.get().enabled);
-        // Switched on in one step, and another process changing the file is seen on the next read.
-        let mut settings = store.update(|settings| settings.switch(true)).unwrap();
-        assert!(settings.enabled);
+        // On beside a record the release before no longer accepted, or could not read: it was off there, so it is
+        // off here, and saved off with the record as it was.
+        for terms in [
+            json!({"version": "1", "acceptedAt": "2026-01-01T00:00:00Z"}),
+            json!({"version": "2"}),
+            json!("x"),
+        ] {
+            write(&json!({"enabled": true, "terms": terms}));
+            assert!(!store.get().enabled, "{terms}");
+            assert_eq!(saved()["enabled"], false, "{terms}");
+            assert_eq!(saved()["terms"], terms);
+            // One step turns it on, with the record earlier builds accept.
+            let on = store.update(|settings| settings.switch(true)).unwrap();
+            assert!(on.enabled);
+            assert!(store.get().enabled);
+            assert_eq!(saved()["terms"]["version"], "2");
+            assert!(saved()["terms"]["acceptedAt"].is_string());
+        }
+        // Another process changing the file is seen on the next read.
+        let mut settings = store.get();
         settings.enabled = false;
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(store.path(), serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         assert!(!store.get().enabled);
+    }
+
+    #[test]
+    fn a_change_under_way_saves_the_settled_switch_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        fs::write(
+            store.path(),
+            json!({"enabled": true, "terms": {"version": "1", "acceptedAt": "2026-01-01T00:00:00Z"}}).to_string(),
+        )
+        .unwrap();
+        let settings = store.update(|settings| settings.ring = false).unwrap();
+        assert!(!settings.enabled);
+        let file: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(file["enabled"], false);
+        assert_eq!(file["ring"], false);
     }
 
     /// How earlier builds read the file: on only with `enabled` and an agreement to version 2.
