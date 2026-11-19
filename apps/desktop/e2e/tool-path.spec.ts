@@ -10,7 +10,7 @@ import { isolatedEnv } from "./fixtures/isolated-env";
 // the agent's commands run under `sh -l`, which never reads a zsh profile: a
 // tool in ~/.local/bin or ~/.cargo/bin, or nvm's default node, must still be
 // found, after the person's own folders and never from a folder anyone may
-// write to. The echo provider runs the command for real, in a home folder of
+// write to, and a `~/.profile` that puts ~/.cargo/bin first still does. The echo provider runs the command for real, in a home folder of
 // the test's own.
 let app: ElectronApplication | undefined;
 let page: Page;
@@ -47,6 +47,15 @@ test.beforeAll(async () => {
   await tool(join(home, ".local/bin"), "haarness-probe-both", "found-in-local-bin");
   await tool(join(home, ".cargo/bin"), "haarness-probe-cargo", "found-in-cargo-bin");
   await tool(own, "haarness-probe-both", "found-in-own-folder");
+  // A setup file such as rustup's and uv's, read by `~/.profile`: it puts its
+  // folder first, but only while that folder is not on PATH yet.
+  await tool(own, "haarness-probe-rustup", "found-rustup-on-desktop-path");
+  await tool(join(home, ".cargo/bin"), "haarness-probe-rustup", "found-rustup-in-cargo-bin");
+  await writeFile(
+    join(home, ".cargo/setup.sh"),
+    'case ":$PATH:" in\n  *":$HOME/.cargo/bin:"*) ;;\n  *) PATH="$HOME/.cargo/bin:$PATH"; export PATH ;;\nesac\n',
+  );
+  await writeFile(join(home, ".profile"), '. "$HOME/.cargo/setup.sh"\n');
   // A folder anyone may write to is never added, even one Haarness knows.
   await tool(join(home, "go/bin"), "haarness-probe-open", "found-in-open-folder", 0o777);
   // nvm with two versions; its default reaches 18 through the LTS aliases.
@@ -106,6 +115,7 @@ test("a command finds the tools in the person's own folders when Desktop starts 
     "haarness-probe-both",
     "command -v haarness-probe-open || echo open-folder-skipped",
     "haarness-probe-node",
+    "haarness-probe-rustup",
   ].join("; ");
   const box = page.getByRole("textbox", { name: "Message", exact: true });
   await box.fill(" !tool bash " + JSON.stringify({ command }));
@@ -121,9 +131,10 @@ test("a command finds the tools in the person's own folders when Desktop starts 
   await expect.poll(async () => (await api("activeTurns")).length, { timeout: 30000 }).toBe(0);
   const output = await result();
   // One line per command, in order: the person's own folder still comes
-  // first for the name both folders have, and nvm's is its default version.
+  // first for the name both folders have, nvm's is its default version, and
+  // the profile's setup file still put ~/.cargo/bin first.
   expect(output).toMatch(
-    /found-in-local-bin\s+found-in-cargo-bin\s+found-in-own-folder\s+open-folder-skipped\s+found-nvm-default-18/,
+    /found-in-local-bin\s+found-in-cargo-bin\s+found-in-own-folder\s+open-folder-skipped\s+found-nvm-default-18\s+found-rustup-in-cargo-bin/,
   );
   expect(output).not.toContain("not found");
   // The transcript shows the same.

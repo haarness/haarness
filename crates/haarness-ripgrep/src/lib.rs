@@ -176,8 +176,54 @@ fn path_with_binary(binary: &Path, existing: Option<&OsStr>) -> io::Result<OsStr
     env::join_paths(paths).map_err(io::Error::other)
 }
 
+/// The variable in which Desktop names the usual homes of tools a person
+/// installs (`~/.local/bin`, `~/.cargo/bin`, version managers' folders), in
+/// `PATH`'s form. An app opened from the Dock or the Finder has none of them on
+/// `PATH`, and the login shell commands run in reads `~/.profile` but never a
+/// zsh or bash profile, where they are usually added.
+pub const TOOL_PATH: &str = "HAARNESS_TOOL_PATH";
+
+/// The folders `HAARNESS_TOOL_PATH` names: only absolute ones that a `PATH`
+/// can hold.
+pub fn tool_folders() -> Vec<PathBuf> {
+    folders_from(env::var_os(TOOL_PATH).as_deref())
+}
+
+fn folders_from(value: Option<&OsStr>) -> Vec<PathBuf> {
+    value
+        .into_iter()
+        .flat_map(env::split_paths)
+        .filter(|folder| folder.is_absolute() && env::join_paths([folder]).is_ok())
+        .collect()
+}
+
+/// `path` with each tool folder it lacks added at its end, so a program it
+/// already finds is still the one found; for the server's own lookups
+/// (language servers, formatters, MCP launchers). `path` as it is when there
+/// is nothing to add.
+pub fn with_tool_folders(path: Option<&OsStr>) -> Option<OsString> {
+    with_folders(path, &tool_folders())
+}
+
+/// `path` with each of `folders` it lacks added at its end.
+pub fn with_folders(path: Option<&OsStr>, folders: &[PathBuf]) -> Option<OsString> {
+    let mut paths: Vec<PathBuf> = path.into_iter().flat_map(env::split_paths).collect();
+    let before = paths.len();
+    for folder in folders {
+        if !paths.contains(folder) {
+            paths.push(folder.clone());
+        }
+    }
+    if paths.len() == before {
+        return path.map(OsStr::to_os_string);
+    }
+    env::join_paths(paths)
+        .ok()
+        .or_else(|| path.map(OsStr::to_os_string))
+}
+
 /// Keep the existing login-shell behavior, restoring the bundled directory after
-/// profiles run. Pass its path as an argument, never interpolate it as shell code.
+/// profiles run, then adding each of [`tool_folders`] they left off `PATH`. Pass its path as an argument, never interpolate it as shell code.
 /// When the bundled rg cannot be put in place, the command still runs, with
 /// `PATH` as it is (said once in the log). On Windows `windows_bash` is the
 /// bash to run it in (Git for Windows'), else it runs in cmd.exe.
@@ -191,10 +237,10 @@ fn shell_from(
     windows_bash: Option<&Path>,
 ) -> io::Result<Command> {
     match binary {
-        Ok(binary) => shell_with_binary(script, Some(&binary), windows_bash),
+        Ok(binary) => shell_with_binary(script, Some(&binary), windows_bash, &tool_folders()),
         Err(error) => {
             unavailable(&error);
-            shell_with_binary(script, None, windows_bash)
+            shell_with_binary(script, None, windows_bash, &tool_folders())
         }
     }
 }
@@ -222,9 +268,13 @@ fn shell_with_binary(
     script: &str,
     binary: Option<&Path>,
     windows_bash: Option<&Path>,
+    tools: &[PathBuf],
 ) -> io::Result<Command> {
     #[cfg(windows)]
     let mut command = {
+        // Desktop names no tool folders on Windows, whose apps get the
+        // person's PATH from the registry.
+        let _ = tools;
         use std::os::windows::process::CommandExt as _;
         if let Some(bash) = windows_bash {
             // A login shell, as elsewhere, so Git's profile puts its tools
@@ -264,11 +314,22 @@ fn shell_with_binary(
         } else {
             ""
         };
+        // Then each tool folder the profiles did not put on PATH goes last:
+        // one a profile put first (rustup's and uv's setup files do so only
+        // while it is missing) stays first, and nothing found before moves.
+        let tools_last = if tools.is_empty() {
+            ""
+        } else {
+            "for __haarness_folder do case \":$PATH:\" in \
+             *\":$__haarness_folder:\"*) ;; \
+             *) PATH=\"${PATH:+$PATH:}$__haarness_folder\" ;; esac; done; \
+             unset __haarness_folder; export PATH; set --; "
+        };
         command
             .args([
                 "-lc",
                 &format!(
-                    "{restore}shift; \
+                    "{restore}shift; {tools_last}\
                      command unset CDPATH 2>/dev/null || :\n{script}"
                 ),
                 "sh",
@@ -276,6 +337,7 @@ fn shell_with_binary(
             .arg(binary.map_or_else(PathBuf::new, |binary| {
                 binary.parent().expect("binary directory").to_path_buf()
             }))
+            .args(tools)
             .env_remove("CDPATH");
         command
     };
@@ -334,7 +396,7 @@ mod tests {
             "printf %s \"$BASH_EXECUTION_STRING\"\n# second line\t\u{65e5}\u{672c} \\\n",
             "printf %s \"$BASH_EXECUTION_STRING\" # ends in a backslash \\",
         ] {
-            let output = shell_with_binary(script, None, Some(bash))
+            let output = shell_with_binary(script, None, Some(bash), &[])
                 .unwrap()
                 .stdin(std::process::Stdio::null())
                 .output()
@@ -435,7 +497,8 @@ mod tests {
         home: &Path,
         cdpath: Option<&Path>,
     ) -> std::process::Output {
-        let mut command = shell_with_binary(script, Some(&folder.join("bin/rg")), None).unwrap();
+        let mut command =
+            shell_with_binary(script, Some(&folder.join("bin/rg")), None, &[]).unwrap();
         command.current_dir(folder).env("HOME", home);
         if let Some(cdpath) = cdpath {
             command.env("CDPATH", cdpath);
@@ -508,6 +571,7 @@ mod tests {
             "command -v rg; rg --version; printf 'args:%s' \"$#\"",
             Some(&binary),
             None,
+            &[],
         )
         .unwrap()
         .env("PATH", "/usr/bin:/bin")
@@ -518,5 +582,91 @@ mod tests {
         assert!(output.starts_with(binary.to_str().unwrap()), "{output}");
         assert!(output.contains(&format!("ripgrep {VERSION}")));
         assert!(output.contains("args:0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_folders_are_absolute_and_go_after_what_a_path_has() {
+        assert_eq!(
+            folders_from(Some(OsStr::new("/a/bin:relative/bin::/b/bin"))),
+            [PathBuf::from("/a/bin"), PathBuf::from("/b/bin")]
+        );
+        assert!(folders_from(None).is_empty());
+        let tools = [PathBuf::from("/a/bin"), PathBuf::from("/usr/bin")];
+        assert_eq!(
+            with_folders(Some(OsStr::new("/usr/bin:/bin")), &tools),
+            Some(OsString::from("/usr/bin:/bin:/a/bin"))
+        );
+        // Nothing to add: the PATH as it is, word for word.
+        assert_eq!(
+            with_folders(Some(OsStr::new("/a/bin/:/usr/bin")), &[]),
+            Some(OsString::from("/a/bin/:/usr/bin"))
+        );
+        assert_eq!(
+            with_folders(None, &tools),
+            Some(OsString::from("/a/bin:/usr/bin"))
+        );
+        assert_eq!(with_folders(None, &[]), None);
+    }
+
+    /// An executable `name` in `folder` that prints `says`.
+    #[cfg(unix)]
+    fn probe(folder: &Path, name: &str, says: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join(name), format!("#!/bin/sh\necho {says}\n")).unwrap();
+        fs::set_permissions(folder.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The tool folders go on PATH after the login profile ran: a profile
+    /// line that puts one first while it is missing (as rustup's and uv's
+    /// setup files do) still does, the others go last, and the script gets
+    /// none of them as arguments.
+    #[cfg(unix)]
+    #[test]
+    fn tool_folders_go_last_after_the_profile_which_may_put_one_first() {
+        let home = tempfile::tempdir().unwrap();
+        let system = tempfile::tempdir().unwrap();
+        let cargo = home.path().join(".cargo/bin");
+        let local = home.path().join(".local/bin");
+        probe(system.path(), "haarness-probe-shadowed", "system");
+        probe(system.path(), "haarness-probe-kept", "system");
+        probe(&cargo, "haarness-probe-shadowed", "cargo");
+        probe(&local, "haarness-probe-kept", "local");
+        probe(&local, "haarness-probe-local", "local");
+        fs::write(
+            home.path().join(".cargo/setup.sh"),
+            "case \":$PATH:\" in\n  *\":$HOME/.cargo/bin:\"*) ;;\n  *) PATH=\"$HOME/.cargo/bin:$PATH\"; export PATH ;;\nesac\n",
+        )
+        .unwrap();
+        let path = format!("{}:/usr/bin:/bin", system.path().display());
+        let run = |tools: &[PathBuf]| {
+            let output = shell_with_binary(
+                "haarness-probe-shadowed; haarness-probe-kept; haarness-probe-local; printf 'args:%s\\n' \"$#\"",
+                None,
+                None,
+                tools,
+            )
+            .unwrap()
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        let tools = [cargo.clone(), local.clone()];
+        // Without a profile both go last: the system's copies still win.
+        assert_eq!(run(&tools), "system\nsystem\nlocal\nargs:0\n");
+        fs::write(
+            home.path().join(".profile"),
+            ". \"$HOME/.cargo/setup.sh\"\n",
+        )
+        .unwrap();
+        assert_eq!(run(&tools), "cargo\nsystem\nlocal\nargs:0\n");
+        // And with no tool folders named, the profile's PATH is all there is.
+        let output = run(&[]);
+        assert!(output.starts_with("cargo\nsystem\n"), "{output}");
+        assert!(!output.contains("local\n"), "{output}");
     }
 }

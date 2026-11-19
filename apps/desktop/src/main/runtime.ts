@@ -9,7 +9,7 @@ import { Haarness, type ServerAuth } from "@haarness/sdk";
 import type { Connection, DesktopEvent } from "../shared";
 import { localArgs } from "./validation";
 import { isChatHome } from "./chat-home";
-import { toolPath } from "./tool-path";
+import { toolEnvironment } from "./tool-path";
 export interface ProjectConnection {
   view: Connection;
   client: Haarness;
@@ -77,14 +77,16 @@ export async function executable() {
     "Haarness executable is missing. Run npm run desktop:dev from the repository, or reinstall the desktop app.",
   );
 }
+// Worked out once per run: the folders are looked at on the main thread.
+let tools: ReturnType<typeof toolEnvironment> | undefined;
 export function environment() {
-  const PATH = toolPath({
+  tools ??= toolEnvironment({
     platform: process.platform,
     env: process.env,
     accountHome: app.getPath("home"),
     bundled: app.isPackaged ? [join(process.resourcesPath, "bin")] : [],
   });
-  return { ...process.env, PATH };
+  return { ...process.env, ...tools };
 }
 export async function invoke(
   workspace: string,
