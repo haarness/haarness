@@ -54,7 +54,7 @@ const RECORD: &str = ".chat";
 /// are its time), and even the longest leaves room below the socket limit.
 const NAME_LENGTHS: [usize; 4] = [8, 12, 16, 20];
 
-/// How many files and folders [`Recorded::untouched`] and the cleanup look
+/// How many files and folders [`Recorded::unused_for`] and the cleanup look
 /// at in one folder; past it a folder counts as in use.
 const MAX_LOOKED_AT: usize = 20_000;
 
@@ -106,32 +106,44 @@ impl Recorded {
         self.chat
     }
 
-    /// How long since anything in the folder changed, or a command of its
-    /// chat last started (which touches its record). A folder too large to
-    /// look through counts as just used.
+    /// Whether nothing in the folder changed, and no command of its chat
+    /// started (which touches its record), for `limit`. The look stops at the
+    /// first entry newer than that; in a folder too large to look through
+    /// whole, the record's and the folder's own times decide.
     #[must_use]
-    pub fn untouched(&self, now: SystemTime) -> Duration {
-        let mut newest = modified(&record(&self.chats, &self.name));
-        let mut pending = vec![self.chats.join(&self.name)];
+    pub fn unused_for(&self, limit: Duration, now: SystemTime) -> bool {
+        self.unused_within(limit, now, MAX_LOOKED_AT)
+    }
+
+    fn unused_within(&self, limit: Duration, now: SystemTime, most: usize) -> bool {
+        let fresh = |time: SystemTime| now.duration_since(time).map_or(true, |age| age < limit);
+        let folder = self.chats.join(&self.name);
+        if fresh(modified(&record(&self.chats, &self.name))) || fresh(modified(&folder)) {
+            return false;
+        }
+        let mut pending = vec![folder];
         let mut looked = 0;
         while let Some(path) = pending.pop() {
-            looked += 1;
-            if looked > MAX_LOOKED_AT {
-                return Duration::ZERO;
-            }
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            let Ok(entries) = std::fs::read_dir(&path) else {
                 continue;
             };
-            if let Ok(time) = metadata.modified() {
-                newest = newest.max(time);
-            }
-            if metadata.is_dir()
-                && let Ok(entries) = std::fs::read_dir(&path)
-            {
-                pending.extend(entries.flatten().map(|entry| entry.path()));
+            for entry in entries.flatten() {
+                looked += 1;
+                if looked > most {
+                    return true;
+                }
+                let Ok(metadata) = entry.metadata() else {
+                    continue;
+                };
+                if metadata.modified().is_ok_and(fresh) {
+                    return false;
+                }
+                if metadata.is_dir() {
+                    pending.push(entry.path());
+                }
             }
         }
-        now.duration_since(newest).unwrap_or_default()
+        true
     }
 }
 
@@ -441,37 +453,25 @@ fn private(folder: &Path, make: bool) -> bool {
 }
 
 /// `/tmp/haarness-<uid>` as the system spells it (`/private/tmp/…` on a
-/// Mac); when someone else holds that name, a `haarness-<uid>-<8 hex>` this
-/// process made for itself.
+/// Mac). When someone else holds that name, the first of
+/// `haarness-<uid>-1` to `-8` that is this user's, or else can be made so:
+/// the same for every process, so a chat finds its folder again after a
+/// restart and the start's cleanup sees every chat's folder.
 #[cfg(unix)]
 fn shared_base(make: bool) -> Option<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt as _;
-    static OWN: Mutex<Option<PathBuf>> = Mutex::new(None);
     let temp = crate::paths::canonicalize("/tmp").ok()?;
     let user = nix::unistd::geteuid().as_raw();
-    let named = temp.join(format!("haarness-{user}"));
-    if private(&named, make) {
-        return Some(named);
-    }
-    let mut own = OWN.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(folder) = own.as_ref().filter(|folder| private(folder, make)) {
-        return Some(folder.clone());
+    let names: Vec<PathBuf> = std::iter::once(format!("haarness-{user}"))
+        .chain((1..=8).map(|number| format!("haarness-{user}-{number}")))
+        .map(|name| temp.join(name))
+        .collect();
+    if let Some(found) = names.iter().find(|folder| private(folder, false)) {
+        return Some(found.clone());
     }
     if !make {
         return None;
     }
-    for _ in 0..8 {
-        let folder = temp.join(format!("haarness-{user}-{:08x}", rand::random::<u32>()));
-        if std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&folder)
-            .is_ok()
-        {
-            *own = Some(folder.clone());
-            return Some(folder);
-        }
-    }
-    None
+    names.into_iter().find(|folder| private(folder, true))
 }
 
 /// `haarness` in the user's own temp folder, `%LOCALAPPDATA%\\Temp`, whatever
@@ -680,8 +680,9 @@ mod tests {
                 .unwrap();
         };
         let recorded = || recorded_in(&chats).remove(0);
+        let unused = || recorded().unused_for(IDLE_LIMIT, SystemTime::now());
         // Just made and used.
-        assert!(recorded().untouched(SystemTime::now()) < Duration::from_secs(60));
+        assert!(!unused());
         for path in [
             folder.join("sub/file"),
             folder.join("sub"),
@@ -690,16 +691,27 @@ mod tests {
         ] {
             age(&path, old);
         }
-        let untouched = recorded().untouched(SystemTime::now());
-        assert!(untouched >= IDLE_LIMIT, "{untouched:?}");
+        assert!(unused());
         // A file written lately in a folder below.
         std::fs::write(folder.join("sub/file"), "y").unwrap();
-        assert!(recorded().untouched(SystemTime::now()) < Duration::from_secs(60));
+        assert!(!unused());
         age(&folder.join("sub/file"), old);
         age(&folder.join("sub"), old);
+        assert!(unused());
+        // Too many entries to look through: the record and the folder decide,
+        // rather than keeping it for ever.
+        for index in 0..5 {
+            let file = folder.join(format!("sub/{index}"));
+            std::fs::write(&file, "x").unwrap();
+            age(&file, old);
+        }
+        std::fs::write(folder.join("sub/new"), "x").unwrap();
+        age(&folder.join("sub"), old);
+        assert!(!unused(), "a new file in reach");
+        assert!(recorded().unused_within(IDLE_LIMIT, SystemTime::now(), 1));
         // A command of the chat starts.
         assert_eq!(folder_in(&chats, root), Some(folder));
-        assert!(recorded().untouched(SystemTime::now()) < Duration::from_secs(60));
+        assert!(!unused());
     }
 
     /// The folder's path leaves room for the sockets programs make in
@@ -715,9 +727,9 @@ mod tests {
         let hex = ThreadId::new().0.simple().to_string();
         for (base, name) in [
             (format!("haarness-{user}"), &hex[24..]),
-            (format!("haarness-{user}-ffffffff"), &hex[12..]),
+            (format!("haarness-{user}-8"), &hex[12..]),
             // The longest a user id and a name can be.
-            (format!("haarness-{}-ffffffff", u32::MAX), &hex[12..]),
+            (format!("haarness-{}-8", u32::MAX), &hex[12..]),
         ] {
             let path = temp.join(base).join("chats").join(name).join(SOCKET);
             assert!(path.as_os_str().len() < 104, "{}", path.display());

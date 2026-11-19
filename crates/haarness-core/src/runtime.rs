@@ -5240,7 +5240,7 @@ impl AgentRuntime {
         tokio::task::spawn_blocking(move || {
             let now = std::time::SystemTime::now();
             done.into_iter()
-                .filter(|folder| folder.untouched(now) >= crate::chat_temp::IDLE_LIMIT)
+                .filter(|folder| folder.unused_for(crate::chat_temp::IDLE_LIMIT, now))
                 .filter(|folder| crate::chat_temp::remove(folder.chat()))
                 .count()
         })
