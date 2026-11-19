@@ -245,7 +245,7 @@ impl CommandOutput {
                     };
                     if let Err(error) = written.await {
                         drop(file.take());
-                        self.stop_saving(&error).await;
+                        self.stop_saving(&error);
                         room = 0;
                     }
                 }
@@ -273,15 +273,17 @@ impl CommandOutput {
             && let Err(error) = file.flush().await
         {
             drop(file);
-            self.stop_saving(&error).await;
+            self.stop_saving(&error);
         }
     }
 
     /// The file refused a write (`error`): it goes, since it no longer holds
     /// the whole start and takes room a full disk needs, and the output is
     /// kept in memory alone from now on.
-    async fn stop_saving(&self, error: &std::io::Error) {
-        let path = self.path();
+    fn stop_saving(&self, error: &std::io::Error) {
+        // Held until the file is gone, so a move to the background cannot
+        // rename it in between and leave it behind.
+        let path = self.path.lock();
         tracing::warn!(
             %error,
             file = %path.display(),
@@ -293,7 +295,7 @@ impl CommandOutput {
             let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
             state.failure.get_or_insert((folder, error.to_string()));
         }
-        let _ = tokio::fs::remove_file(&path).await;
+        let _ = std::fs::remove_file(&*path);
     }
 
     /// Why the output is not saved to a file, when its file could not be
