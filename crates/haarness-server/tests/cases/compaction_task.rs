@@ -243,3 +243,68 @@ async fn a_failed_summary_lets_the_chat_be_compacted_again() {
     assert!(fixture.compactions().await.is_empty());
     fixture.handle.shutdown().await.unwrap();
 }
+
+/// The chat can be compacted again: a new summary is asked for and lands.
+async fn compacts_again(fixture: &Fixture) {
+    let next = fixture.post_compact(serde_json::json!({}));
+    fixture.summary_started().await;
+    fixture.provider.release_summary.add_permits(1);
+    assert_eq!(next.await.unwrap().status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_turn_started_during_the_summary_ends_it_at_once() {
+    let fixture = Fixture::start().await;
+    let request = fixture.post_compact(serde_json::json!({}));
+    fixture.summary_started().await;
+
+    // A message from another client: the summary could never be committed
+    // over its turn, so it ends now instead of running on.
+    let turn = fixture
+        .runtime
+        .start_turn(fixture.thread, turn_request("a message from the phone"))
+        .await
+        .unwrap();
+    let answer = tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .expect("the summary ended without being released")
+        .unwrap();
+    assert_eq!(answer.status(), reqwest::StatusCode::CONFLICT);
+    assert!(error_message(answer).await.contains("thread changed"));
+    assert_eq!(
+        wait_done(&fixture.runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(fixture.compactions().await.is_empty());
+
+    compacts_again(&fixture).await;
+    assert_eq!(fixture.compactions().await.len(), 1);
+    fixture.handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stop_on_the_idle_chat_ends_the_summary() {
+    let fixture = Fixture::start().await;
+    let request = fixture.post_compact(serde_json::json!({}));
+    fixture.summary_started().await;
+
+    let stopped = reqwest::Client::new()
+        .post(format!(
+            "http://{}/v1/threads/{}/interrupt",
+            fixture.handle.address, fixture.thread
+        ))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert!(stopped.status().is_success());
+    let answer = tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .expect("Stop did not end the summary")
+        .unwrap();
+    assert_eq!(answer.status(), reqwest::StatusCode::CONFLICT);
+    assert!(fixture.compactions().await.is_empty());
+
+    compacts_again(&fixture).await;
+    fixture.handle.shutdown().await.unwrap();
+}

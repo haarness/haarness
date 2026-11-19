@@ -3383,8 +3383,9 @@ pub struct AgentRuntime {
     answers_owed: Arc<DashMap<ThreadId, TurnId>>,
     title_jobs: Arc<Mutex<HashSet<ThreadId>>>,
     /// Chats whose summary for a compaction someone asked for is being made,
-    /// until its task ends: one at a time per chat.
-    compactions: Arc<Mutex<HashSet<ThreadId>>>,
+    /// until its task ends: one at a time per chat. Its token ends it early:
+    /// a turn starting there (which would void it), or Stop.
+    compactions: Arc<Mutex<HashMap<ThreadId, CancellationToken>>>,
     prepared_prompts: Arc<Mutex<crate::side_question::PreparedPrompts>>,
     workspace: PathBuf,
     permissions: Arc<DashMap<String, PendingPermission>>,
@@ -3479,17 +3480,26 @@ impl Drop for TitleJob {
 /// compaction's task ends, however it ends.
 struct CompactionClaim {
     thread_id: ThreadId,
-    claims: Arc<Mutex<HashSet<ThreadId>>>,
+    claims: Arc<Mutex<HashMap<ThreadId, CancellationToken>>>,
+    cancel: CancellationToken,
 }
 
 impl CompactionClaim {
-    fn take(claims: &Arc<Mutex<HashSet<ThreadId>>>, thread_id: ThreadId) -> CoreResult<Self> {
-        if !claims.lock().insert(thread_id) {
-            return Err(already_compacting());
+    fn take(
+        claims: &Arc<Mutex<HashMap<ThreadId, CancellationToken>>>,
+        thread_id: ThreadId,
+    ) -> CoreResult<Self> {
+        let cancel = CancellationToken::new();
+        match claims.lock().entry(thread_id) {
+            std::collections::hash_map::Entry::Occupied(_) => return Err(already_compacting()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(cancel.clone());
+            }
         }
         Ok(Self {
             thread_id,
             claims: Arc::clone(claims),
+            cancel,
         })
     }
 }
@@ -3592,7 +3602,7 @@ impl AgentRuntime {
             turn_admissions: Arc::new(DashMap::new()),
             answers_owed: Arc::new(DashMap::new()),
             title_jobs: Arc::new(Mutex::new(HashSet::new())),
-            compactions: Arc::new(Mutex::new(HashSet::new())),
+            compactions: Arc::new(Mutex::new(HashMap::new())),
             prepared_prompts: Arc::new(
                 Mutex::new(crate::side_question::PreparedPrompts::default()),
             ),
@@ -6144,6 +6154,10 @@ impl AgentRuntime {
                 haarness_protocol::ShellCommandEndedBy::ChatStopped,
             );
         }
+        // Stop while the chat is idle also ends a compaction's summary.
+        if !self.active.contains_key(&root) {
+            self.end_compaction(root);
+        }
 
         let tasks = self
             .background_tasks
@@ -6394,7 +6408,7 @@ impl AgentRuntime {
             ));
         }
         // A caller's summary would only make the one being written stale.
-        if self.compactions.lock().contains(&id) {
+        if self.compactions.lock().contains_key(&id) {
             return Err(already_compacting());
         }
         self.confirm_revert_before_compaction(id).await?;
@@ -6419,15 +6433,18 @@ impl AgentRuntime {
     /// The work is a task of its own that the caller waits for: a caller
     /// that stops waiting (a request a proxy cut at its time limit, a page
     /// closed meanwhile) does not stop it, and the compaction still lands
-    /// and is announced. Stop does not end it; a shutdown that does not wait
-    /// for it drops it before it commits, leaving the chat as it was.
+    /// and is announced. A turn starting in the chat ends it (that turn
+    /// would void it), as does Stop on the idle chat; a shutdown that does
+    /// not wait for it drops it before it commits, leaving the chat as it was.
     pub async fn compact_with_llm(&self, id: ThreadId) -> CoreResult<Item> {
         let claim = CompactionClaim::take(&self.compactions, id)?;
         let runtime = self.clone();
         let work = tokio::spawn(
             async move {
-                let _claim = claim;
-                runtime.summarize_and_compact(id).await
+                let claim = claim;
+                runtime
+                    .summarize_and_compact(id, claim.cancel.clone())
+                    .await
             }
             .in_current_span(),
         );
@@ -6438,7 +6455,18 @@ impl AgentRuntime {
         }
     }
 
-    async fn summarize_and_compact(&self, id: ThreadId) -> CoreResult<Item> {
+    /// End the summary being made for `id`'s compaction, if one is.
+    fn end_compaction(&self, id: ThreadId) {
+        if let Some(cancel) = self.compactions.lock().get(&id) {
+            cancel.cancel();
+        }
+    }
+
+    async fn summarize_and_compact(
+        &self,
+        id: ThreadId,
+        cancel: CancellationToken,
+    ) -> CoreResult<Item> {
         let admission_lock = turn_admission_lock(&self.turn_admissions, id);
         let (thread, items) = {
             let _admission_guard = admission_lock.lock().await;
@@ -6472,7 +6500,7 @@ impl AgentRuntime {
             .iter()
             .map(|item| (item.id, item.sequence))
             .collect::<Vec<_>>();
-        let summary = summarize_context(
+        let summarizing = summarize_context(
             &provider,
             &thread.model,
             self.components()
@@ -6480,10 +6508,21 @@ impl AgentRuntime {
                 .prompts
                 .text(crate::PromptName::Compaction),
             items.clone(),
-            CancellationToken::new(),
+            cancel.clone(),
             Some(input_limit),
-        )
-        .await?;
+        );
+        let summary = match summarizing.await {
+            Ok(summary) => summary,
+            // A turn started here, which the stale summary could not have
+            // been committed over anyway.
+            Err(CoreError::Cancelled) if self.active.contains_key(&id) => {
+                return Err(CoreError::Conflict(
+                    "thread changed while the compaction summary was generated; retry compaction"
+                        .into(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
         // Do not hold admission during the model call: users must still be
         // able to start work while a slow summary is in flight. Reacquire it
         // for commit, reject an active turn, and also compare the full durable
@@ -8937,6 +8976,9 @@ impl AgentRuntime {
             started_calls: Mutex::new(HashSet::new()),
         });
         self.active.insert(thread_id, active.clone());
+        // A summary being made for a compaction here would be stale once
+        // this turn writes anything: end it now rather than pay for it.
+        self.end_compaction(thread_id);
 
         let setup = async {
             // A runtime circuit breaker parks an otherwise-active pursuit
@@ -9588,7 +9630,7 @@ struct RunnerTask {
     /// it has started: the steering is taken meanwhile.
     answers_owed: Arc<DashMap<ThreadId, TurnId>>,
     title_jobs: Arc<Mutex<HashSet<ThreadId>>>,
-    compactions: Arc<Mutex<HashSet<ThreadId>>>,
+    compactions: Arc<Mutex<HashMap<ThreadId, CancellationToken>>>,
     prepared_prompts: Arc<Mutex<crate::side_question::PreparedPrompts>>,
     thread: Thread,
     turn: Turn,
