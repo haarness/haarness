@@ -212,10 +212,21 @@ impl OpenAiCompatibleProvider {
         self
     }
 
-    /// `tail`, a request's path beyond the base URL, where the person can
-    /// set that base URL (see [`crate::sse::Unfollowed`]).
-    fn beyond_base(&self, tail: &'static str) -> Option<&'static str> {
-        (!self.fixed_address).then_some(tail)
+    /// How a request goes below the base URL (see [`crate::sse::Route`]),
+    /// where the person can set that base URL.
+    fn route(
+        &self,
+        tail: &'static str,
+        endpoint: fn(&str, &str) -> String,
+    ) -> Option<crate::sse::Route<'static>> {
+        (!self.fixed_address).then_some(crate::sse::Route { tail, endpoint })
+    }
+
+    /// A Chat Completions request's route, as [`Self::new`] builds its address.
+    fn chat_route(&self) -> Option<crate::sse::Route<'static>> {
+        self.route("/chat/completions", |base, tail| {
+            format!("{}{tail}", crate::endpoint::chat_completions_base(base))
+        })
     }
 
     /// Reads and writes what listings say of audio in `listed`.
@@ -364,7 +375,13 @@ impl OpenAiCompatibleProvider {
             .await
             .ok()
             .filter(|response| {
-                !crate::sse::unfollowed_listing(&self.id, response, self.beyond_base("/models"))
+                !crate::sse::unfollowed_listing(
+                    &self.id,
+                    response,
+                    self.route("/models", |base, tail| {
+                        format!("{}{tail}", crate::endpoint::chat_completions_base(base))
+                    }),
+                )
             })
             .and_then(|response| response.error_for_status().ok());
         if let Some(response) = discovered
@@ -2858,8 +2875,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         // A refusal read here is the stream's first item, as one the stream
         // reads itself would be.
-        let mut trace =
-            crate::RequestTrace::of(&response).below_base(self.beyond_base("/chat/completions"));
+        let mut trace = crate::RequestTrace::of(&response).below_base(self.chat_route());
         let answer = if !response.status().is_success() && !self.server_output_limit {
             let status = response.status();
             let headers_seen = response.headers().clone();
@@ -2887,8 +2903,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     .headers(headers)
                     .json(&body);
                 let response = crate::sse::send(builder, limits).await?;
-                trace = crate::RequestTrace::of(&response)
-                    .below_base(self.beyond_base("/chat/completions"));
+                trace = crate::RequestTrace::of(&response).below_base(self.chat_route());
                 if response.status().is_success() {
                     Ok(response)
                 } else {
@@ -2903,7 +2918,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         status,
                         &headers_seen,
                         &answered,
-                        trace.tail,
+                        trace.route,
                         &text,
                     ))
                 }
@@ -2923,8 +2938,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     .headers(headers)
                     .json(&body);
                 let response = crate::sse::send(builder, limits).await?;
-                trace = crate::RequestTrace::of(&response)
-                    .below_base(self.beyond_base("/chat/completions"));
+                trace = crate::RequestTrace::of(&response).below_base(self.chat_route());
                 Ok(response)
             } else if matches!(status.as_u16(), 404 | 405) && missing_route(&text) {
                 trace.refused(status);
@@ -2939,7 +2953,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     status,
                     &headers_seen,
                     &answered,
-                    trace.tail,
+                    trace.route,
                     &text,
                 ))
             }
@@ -8728,7 +8742,7 @@ mod tests {
         let said = refusal(OpenAiCompatibleProvider::new(instance.clone())).await;
         assert!(
             said.ends_with(
-                "If you trust that server, set the provider's base_url to https://other.example/team/v1."
+                "If you trust that server, set the provider's base URL to https://other.example/team/v1."
             ),
             "{said}"
         );

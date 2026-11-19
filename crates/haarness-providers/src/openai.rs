@@ -840,8 +840,8 @@ impl ModelProvider for OpenAiProvider {
                 .flatten()
                 .unwrap_or_else(|| {
                     // A ChatGPT sign-in's address is not the person's to set.
-                    let tail = (!subscription).then_some("/responses");
-                    crate::sse::status_error(status, &headers, &answered, tail, &text)
+                    let route = (!subscription).then(|| crate::sse::Route::plain("/responses"));
+                    crate::sse::status_error(status, &headers, &answered, route, &text)
                 }));
         }
         let plan_headers = subscription.then(|| response.headers().clone());

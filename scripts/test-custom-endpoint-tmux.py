@@ -11,7 +11,7 @@ run` fails before sending and says why, the TUI keeps a message for it and point
 provider as not connected and says why where it is connected, and connecting it there saves the key
 for that address too, after which a run gets its answer. A project C whose provider's server answers
 every request with a redirect to another port: that port is sent nothing, `haarness run` and the TUI
-say where the redirect pointed (without its user name, password or query) and the `base_url` that would
+say where the redirect pointed (without its user name, password or query) and the base URL that would
 reach the same API there, and the daemon log names the model list's redirect. With HAARNESS_UPGRADE_FROM naming an older Haarness binary, a key that
 binary saved for a project's provider keeps working in that project after the update, and is not sent
 to a project opened after it.
@@ -289,7 +289,7 @@ def main():
                     "moved-list": {
                         "name": "Moved list", "base_url": f"http://127.0.0.1:{port_r}/listed/v1", "requires_auth": False}}}))
             pointed = f"redirected this request to http://127.0.0.1:{port_l}/openai/v1/chat/completions."
-            advice = f"If you trust that server, set the provider's base_url to http://127.0.0.1:{port_l}/openai/v1."
+            advice = f"If you trust that server, set the provider's base URL to http://127.0.0.1:{port_l}/openai/v1."
             subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
             subprocess.run(["tmux", "new-session", "-d", "-x", "120", "-y", "40", "-s", session, pane_command(env, [binary, "--workspace", project_c])], check=True)
             wait_for("Project C did not open", "Ask anything", timeout=60)
@@ -301,7 +301,7 @@ def main():
             print("\n".join(line.strip() for line in pane().splitlines() if line.strip()).split("Say the proof word.")[-1].strip())
             # The usage panel shares the lines the notice wraps onto, so each phrase is looked for alone.
             for phrase in ("Provider error: HTTP 307 Temporary Redirect", f"http://127.0.0.1:{port_l}/openai/v1/chat/completions.",
-                           "doesn't follow a provider's redirect away from its address", "set the provider's base_url",
+                           "doesn't follow a provider's redirect away from its address", "set the provider's base URL",
                            f"http://127.0.0.1:{port_l}/openai/v1."):
                 assert phrase in shown, (phrase, shown)
             assert "who:pw" not in shown and "redirect-secret" not in shown, shown

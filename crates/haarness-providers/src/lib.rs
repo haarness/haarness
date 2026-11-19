@@ -170,11 +170,11 @@ pub(crate) struct RequestTrace {
     host: Option<String>,
     id: Option<String>,
     finished: Arc<std::sync::atomic::AtomicBool>,
-    /// The request's path beyond the provider's `base_url`, where the
+    /// How the request went below the provider's base URL, where the
     /// person can set that: a redirect it did not follow then names the
-    /// `base_url` that would reach the same API there (see
+    /// base URL that would reach the same API there (see
     /// [`sse::Unfollowed`]).
-    pub(crate) tail: Option<&'static str>,
+    pub(crate) route: Option<sse::Route<'static>>,
 }
 
 impl RequestTrace {
@@ -183,14 +183,14 @@ impl RequestTrace {
             host: response.url().host_str().map(str::to_owned),
             id: request_id(response.headers()),
             finished: Arc::default(),
-            tail: None,
+            route: None,
         }
     }
 
-    /// This trace, for a request whose path beyond the provider's
-    /// `base_url` is `tail` (see [`RequestTrace::tail`]).
-    pub(crate) fn below_base(mut self, tail: Option<&'static str>) -> Self {
-        self.tail = tail;
+    /// This trace, for a request that went below the provider's base URL
+    /// by `route` (see [`RequestTrace::route`]).
+    pub(crate) fn below_base(mut self, route: Option<sse::Route<'static>>) -> Self {
+        self.route = route;
         self
     }
 
@@ -2292,7 +2292,7 @@ mod tests {
                 Some(base_url) => assert!(
                     refusal.contains("Haarness doesn't follow a provider's redirect away")
                         && refusal
-                            .ends_with(&format!("set the provider's base_url to {base_url}.")),
+                            .ends_with(&format!("set the provider's base URL to {base_url}.")),
                     "{id}: {refusal}"
                 ),
                 None => assert!(

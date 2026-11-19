@@ -599,9 +599,11 @@ impl ModelProvider for BedrockProvider {
             let status = response.status();
             let kind = error_type(response.headers());
             let trace = crate::RequestTrace::of(&response);
-            let tail = url.strip_prefix(self.instance.base_url.trim_end_matches('/'));
+            let route = url
+                .strip_prefix(self.instance.base_url.trim_end_matches('/'))
+                .map(crate::sse::Route::plain);
             if let Some(redirect) =
-                crate::sse::unfollowed_error(status, response.headers(), response.url(), tail)
+                crate::sse::unfollowed_error(status, response.headers(), response.url(), route)
             {
                 trace.refused(status);
                 return Err(redirect);
