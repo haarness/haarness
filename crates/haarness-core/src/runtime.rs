@@ -5211,12 +5211,6 @@ impl AgentRuntime {
                     haarness_protocol::ShellCommandEndedBy::ChatStopped,
                 );
             }
-            // Its own temp folder goes with it, in the background: one taken
-            // back out of the archive gets a new one, empty. What is left (a
-            // command still writing there) goes at the next start.
-            if root == id {
-                tokio::task::spawn_blocking(move || crate::chat_temp::remove(id));
-            }
             if let Some(hooks) = &self.components().hooks {
                 let call = self.hook_call(&thread, None).await;
                 hooks.session_end(&call, "archived").await;
@@ -5225,34 +5219,29 @@ impl AgentRuntime {
         Ok(thread)
     }
     /// Takes away the own temp folders ([`crate::chat_temp`]) of the chats
-    /// this server holds archived, and those of chats it does not hold in
-    /// which nothing changed for [`crate::chat_temp::IDLE_LIMIT`]: another
-    /// server's, or one whose data folder is gone. A folder of a chat it holds
-    /// and keeps stays, however old. How many went.
+    /// this server holds archived, and of chats it does not hold (another
+    /// server's, or one whose data folder is gone), once nothing changed in
+    /// them for [`crate::chat_temp::IDLE_LIMIT`]. An archived chat taken back
+    /// out before then finds its files, and a folder of a chat it holds and
+    /// keeps stays, however old. How many went.
     pub async fn sweep_chat_temp_folders(&self) -> usize {
         let Ok(recorded) = tokio::task::spawn_blocking(crate::chat_temp::recorded).await else {
             return 0;
         };
-        let mut archived = Vec::new();
-        let mut unknown = Vec::new();
+        let mut done = Vec::new();
         for folder in recorded {
             match self.repository.get_thread(folder.chat()).await {
-                Ok(thread) if thread.archived => archived.push(folder.chat()),
-                Err(CoreError::NotFound(_)) => unknown.push(folder),
+                Ok(thread) if thread.archived => done.push(folder),
+                Err(CoreError::NotFound(_)) => done.push(folder),
                 // A chat it keeps, or one not known to be gone.
                 Ok(_) | Err(_) => {}
             }
         }
         tokio::task::spawn_blocking(move || {
             let now = std::time::SystemTime::now();
-            let idle = unknown
-                .into_iter()
+            done.into_iter()
                 .filter(|folder| folder.untouched(now) >= crate::chat_temp::IDLE_LIMIT)
-                .map(|folder| folder.chat());
-            archived
-                .into_iter()
-                .chain(idle)
-                .filter(|chat| crate::chat_temp::remove(*chat))
+                .filter(|folder| crate::chat_temp::remove(folder.chat()))
                 .count()
         })
         .await

@@ -4,8 +4,8 @@
 //! not asked). Another chat's folder still asks. Its child agents, its
 //! background commands, a person's `!` command and a workflow's share it,
 //! a `shell.env` hook does not move it, and the prompt names no path.
-//! Archiving the chat takes it away, and the cleanup at start takes away
-//! what archived and long-unused chats left.
+//! Archiving keeps it; the cleanup at start takes away what archived and
+//! unknown chats left once nothing used it for a week.
 use super::*;
 use haarness_core::{HookCall, HookDecision, HookPort};
 use haarness_protocol::{
@@ -506,72 +506,61 @@ async fn child_agents_background_commands_a_person_and_a_workflow_share_the_chat
 }
 
 #[tokio::test]
-async fn archiving_a_chat_takes_its_temp_folder_away_and_a_new_one_comes_with_use() {
+async fn archiving_a_chat_keeps_its_temp_folder_for_when_it_comes_back() {
     let fixture = Fixture::new();
     let (runtime, _) = runtime(&fixture.project(), None);
     let thread = new_chat(&runtime).await;
-    let kept = new_chat(&runtime).await;
-    for chat in [thread, kept] {
-        runs_unasked(
-            &runtime,
-            chat,
-            &bash(r#"mkdir -p "$TMPDIR/build" && echo x > "$TMPDIR/build/out.o""#),
-        )
-        .await;
-    }
+    runs_unasked(
+        &runtime,
+        thread,
+        &bash(r#"mkdir -p "$TMPDIR/build" && echo x > "$TMPDIR/build/out.o""#),
+    )
+    .await;
     let folder = haarness_core::chat_temp::existing(thread).unwrap();
-    let other = haarness_core::chat_temp::existing(kept).unwrap();
     archive(&runtime, thread, true).await;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while folder.exists() || record(&folder).exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("archiving left the chat's temp folder");
-    assert!(other.join("build/out.o").is_file());
-    // Taken back out of the archive, it starts again empty.
+    // What a removal in the background would have taken by now.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(folder.join("build/out.o").is_file());
+    // Lately used: the cleanup at start keeps it too.
+    runtime.sweep_chat_temp_folders().await;
+    assert!(folder.join("build/out.o").is_file());
     archive(&runtime, thread, false).await;
-    runs_unasked(&runtime, thread, &bash(r#"ls -A "$TMPDIR" | wc -l"#)).await;
-    assert!(
-        last_output(&runtime, thread)
-            .await
-            .trim_end()
-            .ends_with('0')
-    );
+    runs_unasked(&runtime, thread, &bash(r#"cat "$TMPDIR/build/out.o""#)).await;
+    assert_eq!(last_output(&runtime, thread).await, "exit: 0\nx\n");
     haarness_core::chat_temp::remove(thread);
-    haarness_core::chat_temp::remove(kept);
 }
 
 #[tokio::test]
-async fn the_cleanup_at_start_takes_away_what_archived_and_long_unused_chats_left() {
+async fn the_cleanup_at_start_takes_away_what_archived_and_unknown_chats_left_unused() {
     let fixture = Fixture::new();
     let (runtime, _) = runtime(&fixture.project(), None);
     let live = new_chat(&runtime).await;
-    let archived = new_chat(&runtime).await;
-    archive(&runtime, archived, true).await;
+    let (archived, lately_archived) = (new_chat(&runtime).await, new_chat(&runtime).await);
+    for chat in [archived, lately_archived] {
+        archive(&runtime, chat, true).await;
+    }
     // Another server's chats, or a test's whose data folder is gone.
     let (unused, recent) = (ThreadId::new(), ThreadId::new());
     let mut folders = Vec::new();
-    for chat in [live, archived, unused, recent] {
+    for chat in [live, archived, lately_archived, unused, recent] {
         let folder = haarness_core::chat_temp::folder(chat).unwrap();
         std::fs::write(folder.join("file"), "x").unwrap();
         folders.push(folder);
     }
-    for folder in [&folders[0], &folders[2]] {
+    for folder in [&folders[0], &folders[1], &folders[3]] {
         for path in [folder.join("file"), folder.clone(), record(folder)] {
             age(&path);
         }
     }
     assert_eq!(runtime.sweep_chat_temp_folders().await, 2);
-    assert!(
-        folders[0].join("file").is_file(),
-        "a chat it keeps, however old"
-    );
-    assert!(!folders[1].exists() && !record(&folders[1]).exists());
-    assert!(!folders[2].exists() && !record(&folders[2]).exists());
-    assert!(folders[3].join("file").is_file(), "lately used");
-    for chat in [live, recent] {
+    let kept = |index: usize| folders[index].join("file").is_file();
+    let gone = |index: usize| !folders[index].exists() && !record(&folders[index]).exists();
+    assert!(kept(0), "a chat it keeps, however old");
+    assert!(gone(1), "archived and unused for a week");
+    assert!(kept(2), "archived lately");
+    assert!(gone(3), "unknown and unused for a week");
+    assert!(kept(4), "unknown, used lately");
+    for chat in [live, lately_archived, recent] {
         haarness_core::chat_temp::remove(chat);
     }
 }

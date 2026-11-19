@@ -6,10 +6,10 @@
 //! like any other.
 //!
 //! A folder is made the first time a command of the chat runs, for this user
-//! alone, and taken away when the chat is archived. A server, as it starts,
-//! also takes away the folders of the chats it holds archived, and those of
-//! chats it does not hold in which nothing changed for [`IDLE_LIMIT`]:
-//! another server's, or one whose data folder is gone (a test's).
+//! alone. A server, as it starts, takes away the folders of the chats it
+//! holds archived, and of chats it does not hold (another server's, or one
+//! whose data folder is gone), once nothing changed in them for
+//! [`IDLE_LIMIT`]: archiving can be undone, and the files are there again.
 //!
 //! The path is short on purpose. Python's `multiprocessing`, `ssh-agent` and
 //! other programs make Unix sockets in `TMPDIR`, and macOS refuses a socket
@@ -35,8 +35,8 @@ use haarness_protocol::ThreadId;
 /// The variables a chat's shell commands find its folder in.
 pub const VARIABLES: [&str; 3] = ["TMPDIR", "TMP", "TEMP"];
 
-/// How long the folder of a chat the server does not hold is kept after
-/// anything in it, or its record, last changed.
+/// How long the folder of an archived chat, or of a chat the server does
+/// not hold, is kept after anything in it, or its record, last changed.
 pub const IDLE_LIMIT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// How a record's file name ends.
