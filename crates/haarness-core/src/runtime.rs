@@ -11449,7 +11449,12 @@ impl RunnerTask {
                 files.push(path);
             }
         }
-        let Some(text) = left_out_note::note(&files, left_out_note::commands_run(&turn)) else {
+        let ran = left_out_note::ran(&turn, |name| {
+            self.tools
+                .get(name)
+                .is_some_and(|tool| tool.side_effectful())
+        });
+        let Some(text) = left_out_note::note(&files, ran) else {
             return;
         };
         if let Err(error) = self

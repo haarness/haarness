@@ -15,6 +15,7 @@ mod execution;
 mod goal;
 mod image_budget;
 pub mod images;
+mod inert_text;
 pub mod instructions;
 pub mod links;
 pub mod made_paths;

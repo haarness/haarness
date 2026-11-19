@@ -381,7 +381,7 @@ async fn a_stopped_turn_that_changed_things_leaves_a_note_of_them() {
         .collect::<Vec<_>>();
     assert_eq!(notes.len(), 1, "only the turn that changed things: {texts}");
     assert!(
-        notes[0].contains("it changed 1 file (notes.txt) and ran 1 shell command.")
+        notes[0].contains("it changed 1 file (\"notes.txt\") and ran 1 shell command.")
             && notes[0].contains("read a file again before you edit it"),
         "{}",
         notes[0]
