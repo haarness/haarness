@@ -258,6 +258,7 @@ fn cmd_word(raw: &str) -> String {
 /// starts its command in the user's home folder and `find -execdir` in
 /// each file's, so they are not among them.
 const KEEPS_FOLDER: &[&str] = &[
+    "arch",
     "builtin",
     "busybox",
     "caffeinate",
@@ -2405,6 +2406,7 @@ impl Reader<'_> {
                 let options = Options::read(arguments, "tw", "", &[]);
                 self.invocation(options.rest, stdin, source, depth);
             }
+            "arch" => self.invocation(arch_command(arguments), stdin, source, depth),
             "xargs" => {
                 let options = Options::xargs(arguments);
                 // The command reads no input of the written command's.
@@ -4796,6 +4798,30 @@ fn sed_in_place<'s, 't>(arguments: &'s [Word<'t>]) -> Option<Vec<&'s Word<'t>>> 
         }
     }
     in_place.then(|| operands.into_iter().skip(usize::from(!scripted)).collect())
+}
+
+/// The command macOS `arch` runs: the words after its own options, which
+/// it reads one word at a time rather than as getopt does. `-arch`, `-d`
+/// and `-e` take the next word (an architecture, a variable to unset, one
+/// to set); `-c` clears the environment and any other names an
+/// architecture (`-arm64`, `-x86_64`, `-32`). `-h` prints its usage and
+/// runs nothing, as `arch` alone does (it prints the machine's
+/// architecture).
+fn arch_command<'s, 't>(arguments: &'s [Word<'t>]) -> &'s [Word<'t>] {
+    let mut index = 0;
+    while let Some(word) = arguments.get(index) {
+        if !word.literal || !word.value.starts_with('-') {
+            break;
+        }
+        index += 1;
+        match word.value.as_str() {
+            "--" => break,
+            "-h" => return &[],
+            "-arch" | "-d" | "-e" => index += 1,
+            _ => {}
+        }
+    }
+    &arguments[index.min(arguments.len())..]
 }
 
 /// A wrapper's long options that take a value, as getopt reads them.
@@ -8948,6 +8974,7 @@ mod regression {
             "cd sub && time cat ../README.md",
             "cd sub && timeout 5 nice cat ../README.md | head",
             "cd sub && env A=1 cat ../README.md",
+            "cd sub && arch -arm64 cat ../README.md",
             "cd sub && ls | xargs cat ../README.md",
             "cd a/l && cat ../../../README.md | head",
         ] {
@@ -8968,6 +8995,7 @@ mod regression {
             "cd sub && cat x | head > ../../out.txt",
             "cd sub && echo \"$(cat ../../x)\"",
             "cd sub && sudo cat ../../x",
+            "cd sub && arch -x86_64 cat ../../x",
             "cd sub && cat ../README.md | head && cat ../../x",
             "cd a/l && cat ../../../../x | head",
         ] {
@@ -9775,6 +9803,12 @@ mod readings {
             "stdbuf -oL rm x",
             "setsid rm x",
             "caffeinate -i rm x",
+            "arch -arm64 rm x",
+            "arch -x86_64 rm x",
+            "arch -arch arm64 rm x",
+            "arch -c -d HOME -e A=1 -arm64e rm x",
+            "/usr/bin/arch -32 -- rm x",
+            "arch rm x",
             "busybox rm x",
             "/bin/rm x",
             "\\rm x",
@@ -9838,6 +9872,9 @@ mod readings {
             "trap -l 'rm x' EXIT",
             "trap - 'rm x' EXIT",
             "trap 2 'rm x'",
+            "arch -h rm x",
+            "arch -arch rm x",
+            "arch -e rm x",
         ] {
             let readings = derived(command);
             assert!(
@@ -11274,6 +11311,9 @@ mod readings {
             format!("stdbuf -o0 rm -rf {out}/cache"),
             format!("caffeinate -i rm -rf {out}/cache"),
             format!("nice -n 5 rm -rf {out}/cache"),
+            format!("arch -arm64 rm -rf {out}/cache"),
+            format!("arch -c -e A=1 -arch arm64 sh -c 'rm -rf {out}/cache'"),
+            format!("arch -d HOME -x86_64 rm -rf {out}/cache"),
         ] {
             assert_eq!(found(&command), vec![placed(&cache)], "{command}");
         }

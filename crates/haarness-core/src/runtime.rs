@@ -21123,6 +21123,7 @@ mod shell_reading_tests {
             "sudo rm x",
             "nohup rm x",
             "timeout 5 rm x",
+            "arch -x86_64 rm x",
             "command rm x",
             "/bin/rm x",
             "\\rm x",
@@ -21163,6 +21164,10 @@ mod shell_reading_tests {
         );
         assert_eq!(verdicts(&review, "timeout 5 cargo test"), Vec::new());
         assert_eq!(verdicts(&review, "git commit -m 'x'"), Vec::new());
+        // So does a remembered allow for a wrapper read since.
+        let mut remembered = review.clone();
+        remembered.approve_always("bash:arch -arm64 *");
+        assert_eq!(verdicts(&remembered, "arch -arm64 cargo test"), Vec::new());
         // A command also written on its own is judged as written.
         assert_eq!(
             verdicts(&review, "cargo test; timeout 5 cargo test"),
