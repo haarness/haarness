@@ -43,6 +43,7 @@ import { cancelled, errorText, failureDetail, failureMessage } from "../renderer
 const say = (key: string) => translate(data().preferences.language, key);
 import { ApiError, authorizationHeaders, type ServerAuth } from "@haarness/sdk";
 import { onceMoreForUnknownSender } from "./unknown-sender";
+import { withDeadline } from "./api-deadlines";
 import { browseRemote, openRemote, remoteLocationId, responseFailure } from "./remote-projects";
 import { connectHost, createRelay, hostBrowse, hostCatalog, hostServerId } from "./remote-hosts";
 import { withThreadKinds } from "../thread-kinds";
@@ -1360,7 +1361,8 @@ function installHandlers() {
     if (typeof fn !== "function")
       throw new Error("This server operation is not available");
     // A refusal for want of telling who asked is asked once more, on a new connection.
-    const result = await onceMoreForUnknownSender(async () => fn.apply(client, input.args));
+    const args = withDeadline(input.method, input.args);
+    const result = await onceMoreForUnknownSender(async () => fn.apply(client, args));
     return input.method === "listThreads"
       ? withThreadKinds(result, (id) => client.listItems(id))
       : result;
