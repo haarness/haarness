@@ -676,7 +676,7 @@ pub enum DiffTruncation {
 /// to apply to produce it.
 ///
 /// It flattens, so the wire shape is a strict superset of `FileDiff` and the
-/// endpoint keeps returning the same array of the same objects; both added
+/// endpoint keeps returning the same array of the same objects; the added
 /// fields are optional and defaulted, so an older client — or the generated
 /// TypeScript SDK before it is regenerated — decodes these responses
 /// unchanged and simply does not see them.
@@ -694,6 +694,11 @@ pub struct ReviewFile {
     /// review listed everything that changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted_files: Option<u64>,
+    /// An untracked text file too large to read for its line counts: its
+    /// `additions` are zero rather than counted, and it has no body. Absent
+    /// for every file whose counts are real.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub uncounted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

@@ -1940,6 +1940,7 @@
   "1 file left as it was": "1 個檔案維持原狀",
   "{count} files left as they were": "{count} 個檔案維持原狀",
   "too large for Undo": "太大，無法復原",
+  "too large to count": "太大，無法計數",
   "ignored": "已忽略",
   "outside the folder": "資料夾以外",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} 超過 2 MiB，復原沒有它的副本。若要讓對話維持現在的樣子，請傳送一則訊息。",

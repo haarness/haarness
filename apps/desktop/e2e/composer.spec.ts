@@ -1045,6 +1045,75 @@ test("an edit's preview opens its file in Review, and an added file reads in one
   }
 });
 
+test("a patch far into a large file previews its real lines, and Review lists a file too large to count", async ({}, info) => {
+  const numbered = (number: number) => `line ${String(number).padStart(5, "0")} of a large file, as written`;
+  const { page, errors, close } = await launch(info, async (workspace) => {
+    const lines = Array.from({ length: 1000 }, (_, index) => numbered(index + 1) + "\n").join("");
+    await writeFile(join(workspace, "large.txt"), lines);
+    gitCheckout(workspace);
+    // Untracked, and over what a review reads of one file.
+    await writeFile(join(workspace, "dump.log"), "a line of a long log\n".repeat(420_000));
+  });
+  const shots = process.env.HAARNESS_SCREENSHOTS;
+  const picture = (name: string) => (shots ? join(shots, name) : info.outputPath(name));
+  try {
+    const patch = `*** Begin Patch\n*** Update File: large.txt\n@@\n-${numbered(990)}\n+line 00990 was patched\n*** End Patch\n`;
+    const input = page.getByRole("textbox", { name: "Message", exact: true });
+    await input.fill("!tool apply_patch " + JSON.stringify({ input: patch }));
+    await input.press("Enter");
+    const row = page.locator(".tool-call").filter({ hasText: "large.txt" });
+    await expect(row).toHaveAttribute("data-status", "done");
+    if ((await row.getAttribute("open")) === null) await row.locator(":scope > summary").click();
+    // The lines the patch changed, from line 987 on, not the start of the file.
+    const lines = row.locator(".change-lines .diff-line");
+    await expect(lines.locator("code")).toHaveText([
+      numbered(987),
+      numbered(988),
+      numbered(989),
+      numbered(990),
+      "line 00990 was patched",
+      numbered(991),
+      numbered(992),
+      numbered(993),
+    ]);
+    await expect(row.locator(".change-lines .remove code")).toHaveText(numbered(990));
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await row.screenshot({ path: picture(`large-file-patch-${value}.png`) });
+    }
+    await theme(page, "light");
+    await row.getByRole("button", { name: "Show in Review", exact: true }).click();
+    await expect(page.locator('.diff-file[data-file="large.txt"]')).toBeVisible();
+    const list = page.locator(".review-file-list");
+    if (!(await list.isVisible())) await page.getByRole("button", { name: "Toggle changed files", exact: true }).click();
+    const dump = list.locator(".file-entry").filter({ hasText: "dump.log" });
+    await expect(dump.locator(".uncounted")).toHaveText("too large to count");
+    await expect(dump.locator(".added, .removed")).toHaveCount(0);
+    const large = list.locator(".file-entry").filter({ hasText: "large.txt" });
+    await expect(large.locator(".added")).toHaveText("+1");
+    await expect(large.locator(".removed")).toHaveText("−1");
+    for (const value of ["light", "dark"] as const) {
+      await theme(page, value);
+      await page.locator(".review-tree").screenshot({ path: picture(`review-too-large-${value}.png`) });
+    }
+    await theme(page, "light");
+    // Right to left, the words take the counts' place at the row's other end.
+    await page.evaluate(() => window.haarness.preferences({ language: "ar" } as never));
+    try {
+      await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+      await expect(dump.locator(".uncounted")).toHaveText("أكبر من أن تُعدّ أسطره");
+      await page.locator(".review-tree").screenshot({ path: picture("review-too-large-rtl.png") });
+    } finally {
+      await page.evaluate(() => window.haarness.preferences({ language: "en" } as never));
+    }
+    await dump.click();
+    await expect(page.locator('.diff-file[data-file="dump.log"]')).toContainText("This diff was truncated by the server.");
+    expect(errors).toEqual([]);
+  } finally {
+    await close();
+  }
+});
+
 test("the queue's Steer now has an arrow of its own, and Remove hands the keyboard on", async ({}, info) => {
   const { page, errors, close } = await launch(info);
   try {

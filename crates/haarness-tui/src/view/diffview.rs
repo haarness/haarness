@@ -496,7 +496,12 @@ fn file_header(app: &App, viewer: &DiffViewer, file: usize, width: usize) -> Lin
     };
     let reviewed = viewer.is_reviewed(file);
     let active = file == viewer.active_file;
-    let counts = format!("+{} −{}", entry.additions, entry.deletions);
+    let uncounted = viewer.uncounted.contains(&entry.file);
+    let counts = if uncounted {
+        "too large to count".to_owned()
+    } else {
+        format!("+{} −{}", entry.additions, entry.deletions)
+    };
     let status = match entry.status {
         haarness_protocol::FileDiffStatus::Added => "added",
         haarness_protocol::FileDiffStatus::Deleted => "deleted",
@@ -512,32 +517,41 @@ fn file_header(app: &App, viewer: &DiffViewer, file: usize, width: usize) -> Lin
     let pad = width.saturating_sub(3 + name.width() + counts.width() + 2 + tail.width());
     let name_color = if reviewed { theme.muted } else { theme.text };
     let surface = theme.surface;
-    Line::new(vec![
+    let mut spans = vec![
         Span::new(if active { " ▎ " } else { "   " }, theme.primary).on(surface),
         Span::new(name, name_color)
             .with_attributes(attr::BOLD)
             .on(surface),
         Span::new(" ".repeat(pad), theme.muted).on(surface),
-        Span::new(
-            format!("+{}", entry.additions),
-            if reviewed {
-                theme.muted
-            } else {
-                theme.diff.added
-            },
-        )
-        .on(surface),
-        Span::new(
-            format!(" −{}", entry.deletions),
-            if reviewed {
-                theme.muted
-            } else {
-                theme.diff.removed
-            },
-        )
-        .on(surface),
-        Span::new(format!("  {tail}"), theme.muted).on(surface),
-    ])
+    ];
+    if uncounted {
+        spans.push(Span::new(counts, theme.muted).on(surface));
+    } else {
+        spans.push(
+            Span::new(
+                format!("+{}", entry.additions),
+                if reviewed {
+                    theme.muted
+                } else {
+                    theme.diff.added
+                },
+            )
+            .on(surface),
+        );
+        spans.push(
+            Span::new(
+                format!(" −{}", entry.deletions),
+                if reviewed {
+                    theme.muted
+                } else {
+                    theme.diff.removed
+                },
+            )
+            .on(surface),
+        );
+    }
+    spans.push(Span::new(format!("  {tail}"), theme.muted).on(surface));
+    Line::new(spans)
 }
 
 /// Widest line number in a file, so the gutter is exactly as wide as it needs.

@@ -1940,6 +1940,7 @@
   "1 file left as it was": "ไฟล์ 1 ไฟล์ยังคงเดิม",
   "{count} files left as they were": "ไฟล์ {count} ไฟล์ยังคงเดิม",
   "too large for Undo": "ใหญ่เกินกว่าจะเลิกทำได้",
+  "too large to count": "ใหญ่เกินกว่าจะนับได้",
   "ignored": "ถูกละเว้น",
   "outside the folder": "นอกโฟลเดอร์",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} มีขนาดเกิน 2 MiB และไม่มีสำเนาไว้สำหรับการเลิกทำ ส่งข้อความเพื่อคงแชตไว้อย่างที่เป็นอยู่ตอนนี้",

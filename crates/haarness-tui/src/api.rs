@@ -27,6 +27,8 @@ pub struct Review {
     /// Changed paths the server did not return at all. `None` means the
     /// review is complete.
     pub omitted_files: Option<u64>,
+    /// Untracked files too large to read for their line counts.
+    pub uncounted: std::collections::BTreeSet<String>,
 }
 
 /// Turn a failed review request into something the reader can act on. The
@@ -1500,7 +1502,7 @@ impl ApiClient {
         let files: Vec<FileDiff> = self.review_get(&format!("/v1/threads/{id}/diff")).await?;
         Ok(Review {
             files,
-            omitted_files: None,
+            ..Review::default()
         })
     }
     pub async fn vcs_diff(&self, mode: &str) -> Result<Review> {
@@ -1522,6 +1524,11 @@ impl ApiClient {
             // The bound is a property of the response, and the server repeats
             // it on every entry so an array can carry it at all.
             omitted_files: files.first().and_then(|file| file.omitted_files),
+            uncounted: files
+                .iter()
+                .filter(|file| file.uncounted)
+                .map(|file| file.diff.file.clone())
+                .collect(),
             files: files.into_iter().map(|file| file.diff).collect(),
         })
     }

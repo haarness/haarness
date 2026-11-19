@@ -1940,6 +1940,7 @@
   "1 file left as it was": "تُرك ملف واحد كما كان",
   "{count} files left as they were": "تُركت {count} ملفات كما كانت",
   "too large for Undo": "أكبر من أن يستعيده التراجع",
+  "too large to count": "أكبر من أن تُعدّ أسطره",
   "ignored": "متجاهَل",
   "outside the folder": "خارج المجلد",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "حجم {path} يتجاوز 2 MiB، وليست لدى التراجع نسخة منه. أرسل رسالة لتبقى المحادثة كما هي الآن.",

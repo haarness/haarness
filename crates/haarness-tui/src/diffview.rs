@@ -827,6 +827,8 @@ pub struct DiffViewer {
     /// Changed paths the server bounded out of this review. `None` means it
     /// returned everything that changed.
     pub omitted_files: Option<u64>,
+    /// Untracked files too large for the server to count: no counts, no body.
+    pub uncounted: BTreeSet<String>,
     /// Columns the patch pane had in the last frame. Split needs room, so the
     /// resolved layout is a function of this as well as the reader's choice.
     pub pane_width: std::cell::Cell<usize>,
@@ -862,6 +864,7 @@ impl DiffViewer {
             tree_scroll: 0,
             loading: false,
             omitted_files: None,
+            uncounted: BTreeSet::new(),
             pane_width: std::cell::Cell::new(0),
             opened_with: DiffPreferences::default(),
         };
@@ -897,7 +900,13 @@ impl DiffViewer {
         self.rows = self
             .files
             .iter()
-            .map(|file| file_rows(file, context))
+            .map(|file| {
+                let mut rows = file_rows(file, context);
+                if self.uncounted.contains(&file.file) {
+                    rows.note = Some("Too large to read here; its lines are not counted".into());
+                }
+                rows
+            })
             .collect();
         self.tree = FileTree::build(&self.files);
         self.expanded = self.tree.all_directories();

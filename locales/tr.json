@@ -1940,6 +1940,7 @@
   "1 file left as it was": "1 dosya olduğu gibi bırakıldı",
   "{count} files left as they were": "{count} dosya olduğu gibi bırakıldı",
   "too large for Undo": "geri alma için fazla büyük",
+  "too large to count": "saymak için fazla büyük",
   "ignored": "yok sayıldı",
   "outside the folder": "klasörün dışında",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} dosyası 2 MiB'tan büyük ve geri almak için kopyası yok. Sohbeti şu anki hâliyle tutmak için bir mesaj gönderin.",

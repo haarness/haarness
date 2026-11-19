@@ -13,7 +13,7 @@ import {
   onMount,
   onCleanup,
 } from "solid-js";
-import type { FileDiff } from "@haarness/sdk";
+import type { FileDiff, ReviewFile } from "@haarness/sdk";
 import { diffWordsWithSpace } from "diff";
 import { useApp } from "./state";
 import { Button, Icon, Empty } from "./ui";
@@ -65,7 +65,7 @@ export function Review(props: { compact?: boolean } = {}) {
   const [showFiles, setShowFiles] = createSignal(!props.compact);
   const [mode, setMode] = createSignal("working"),
     [context, setContext] = createSignal(4),
-    [files, setFiles] = createSignal<FileDiff[]>([]),
+    [files, setFiles] = createSignal<ReviewFile[]>([]),
     [selected, setSelected] = createSignal(""),
     [reviewed, setReviewed] = createSignal<string[]>([]),
     [problem, setProblem] = createSignal(""),
@@ -107,11 +107,11 @@ export function Review(props: { compact?: boolean } = {}) {
     setFiles([]);
     const read = (summary: boolean, path?: string) =>
       source === "last"
-        ? window.haarness.api<FileDiff[]>(connection, "lastTurnReview", [
+        ? window.haarness.api<ReviewFile[]>(connection, "lastTurnReview", [
             thread,
             { summary, path },
           ])
-        : window.haarness.api<FileDiff[]>(connection, "vcsDiff", [
+        : window.haarness.api<ReviewFile[]>(connection, "vcsDiff", [
             { mode: source, context: contextLines, summary, path },
           ]);
     try {
@@ -741,8 +741,13 @@ export function Review(props: { compact?: boolean } = {}) {
                       size="sm"
                     />
                     <span title={file.file}>{file.file}</span>
-                    <span class="added">+{file.additions}</span>
-                    <span class="removed">−{file.deletions}</span>
+                    <Show
+                      when={!file.uncounted}
+                      fallback={<span class="uncounted">{t("too large to count")}</span>}
+                    >
+                      <span class="added">+{file.additions}</span>
+                      <span class="removed">−{file.deletions}</span>
+                    </Show>
                   </button>
                 )}
               </ReviewRows>

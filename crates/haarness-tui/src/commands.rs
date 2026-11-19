@@ -1065,6 +1065,7 @@ impl App {
         match completion.result {
             Ok(review) => {
                 viewer.omitted_files = review.omitted_files;
+                viewer.uncounted = review.uncounted;
                 viewer.set_files(review.files);
             }
             Err(error) => {

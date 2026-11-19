@@ -1940,6 +1940,7 @@
   "1 file left as it was": "1 datoteka ostavljena je kakva je bila",
   "{count} files left as they were": "Datoteke ostavljene kakve su bile: {count}",
   "too large for Undo": "prevelika za poništavanje",
+  "too large to count": "prevelika za brojanje",
   "ignored": "zanemarena",
   "outside the folder": "izvan mape",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "Datoteka {path} veća je od 2 MiB, a poništavanje nema njenu kopiju. Pošaljite poruku da razgovor ostane kakav je sada.",
