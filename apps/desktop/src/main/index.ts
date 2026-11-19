@@ -2131,10 +2131,13 @@ function createWindow() {
     // iframe that navigates (a preview, an MCP app) has not.
     if (!event.isMainFrame || event.isSameDocument) return;
     sideChatKeyboard.delete(win.id);
-    terminalKeyboard.delete(win.id);
     for (const side of sideQuestions.values())
       if (side.owner === win.id) side.abort.abort();
   });
+  // A new page starts with no terminal holding the keyboard. A navigation the
+  // window refuses (a file dropped on it) leaves the page, and so the flag,
+  // as they were: only one that took place clears it.
+  win.webContents.on("did-navigate", () => terminalKeyboard.delete(win.id));
   win.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
     const keys = {

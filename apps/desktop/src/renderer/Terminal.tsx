@@ -467,10 +467,10 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     });
     // On macOS main tells the window when ⌘K is pressed with the keyboard in
     // the terminal (instead of Search, which keeps it everywhere else), so it
-    // has to know where the keyboard is.
+    // has to know where the keyboard is. Every focus says so again, in case
+    // main let go of it meanwhile.
     let keyboard = false;
     const keyboardIn = (inside: boolean) => {
-      if (inside === keyboard) return;
       keyboard = inside;
       void window.haarness.terminalFocus(inside).catch(() => {});
     };
@@ -483,7 +483,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     onCleanup(() => {
       host.removeEventListener("focusin", focusIn);
       host.removeEventListener("focusout", focusOut);
-      keyboardIn(false);
+      if (keyboard) keyboardIn(false);
     });
     // What xterm sends while a key, mouse, focus or paste event is being
     // handled is the person at the terminal, and always goes to the shell;

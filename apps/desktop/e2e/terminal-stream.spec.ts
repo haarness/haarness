@@ -514,6 +514,27 @@ test("⌘K with the keyboard in the terminal clears it, does nothing under a ful
   await expect(page.locator(".palette-dialog")).toHaveCount(0);
   await showAgain();
   await expect.poll(written).toEqual(["query-shell$"]);
+  // A page navigation that starts and is refused (a file dropped on the
+  // window, say) leaves the page as it was, and main still knows the
+  // terminal has the keyboard; one that takes place starts a page without
+  // it. (As the window reports them: a refused one never finishes, which
+  // Playwright would wait for.)
+  await inTerminal(true);
+  const navigation = (event: "did-start-navigation" | "did-navigate") =>
+    app.evaluate(({ BrowserWindow }, event) => {
+      const contents = BrowserWindow.getAllWindows()[0].webContents;
+      if (event === "did-start-navigation")
+        contents.emit(event, { url: "file:///refused", isMainFrame: true, isSameDocument: false });
+      else contents.emit(event, {}, "file:///refused", 200, "OK");
+      return (globalThis as unknown as { haarnessTerminalKeyboard: Set<number> }).haarnessTerminalKeyboard.size;
+    }, event);
+  expect(await navigation("did-start-navigation")).toBe(1);
+  expect(await navigation("did-navigate")).toBe(0);
+  // The keyboard back in the terminal says so again.
+  await input().blur();
+  await input().focus();
+  await inTerminal(true);
+
 
   // Under less, ⌘K leaves its screen and the lines behind it alone.
   await settle("printf 'before-%s\\n' less", "before-less");
