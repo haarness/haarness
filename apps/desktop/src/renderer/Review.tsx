@@ -642,9 +642,17 @@ export function Review(props: { compact?: boolean } = {}) {
             <span class="muted">
               {t(files().length === 1 ? "{count} file" : "{count} files", { count: files().length })}
             </span>
-            {/* The sums leave out files too large to count; say how many. */}
+            {/* The sums leave out files too large to count: a quiet mark
+                says how many, so the controls beside it keep their row. */}
             <Show when={files().filter((file) => file.uncounted).length}>
-              {(count) => <span class="muted">{t("{count} not counted", { count: count() })}</span>}
+              {(count) => {
+                const label = () => t("{count} not counted", { count: count() });
+                return (
+                  <span class="uncounted-mark" role="img" aria-label={label()} title={label()}>
+                    <Icon name="info" size="xs" />
+                  </span>
+                );
+              }}
             </Show>
           </span>
           {/* The view controls move to a second row together when the panel is

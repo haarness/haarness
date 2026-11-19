@@ -147,6 +147,10 @@
 .diff-totals > .muted {
   font-family: var(--sans);
 }
+.diff-totals > .uncounted-mark {
+  display: inline-flex;
+  color: var(--muted);
+}
 
 .file-preview {
   flex: 1;

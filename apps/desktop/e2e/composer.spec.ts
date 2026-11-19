@@ -1092,11 +1092,21 @@ test("a patch far into a large file previews its real lines, and Review lists a 
     const large = list.locator(".file-entry").filter({ hasText: "large.txt" });
     await expect(large.locator(".added")).toHaveText("+1");
     await expect(large.locator(".removed")).toHaveText("−1");
-    // The sums leave the uncounted file out, and say so.
+    // The sums leave the uncounted file out, and a quiet mark says so
+    // without pushing the view controls off the totals' row.
     const totals = page.locator(".review .diff-totals");
     await expect(totals.locator(".added")).toHaveText("+1");
     await expect(totals).toContainText("2 files");
-    await expect(totals).toContainText("1 not counted");
+    const mark = totals.getByRole("img", { name: "1 not counted" });
+    await expect(mark).toHaveAttribute("title", "1 not counted");
+    await expect(totals).not.toContainText("not counted");
+    const rows = await page.evaluate(() => {
+      const top = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+      const totals = top(".review .diff-totals");
+      const view = top(".review .review-view");
+      return { totals: totals.top + totals.height / 2, view: [view.top, view.bottom] };
+    });
+    expect(rows.view[0] < rows.totals && rows.totals < rows.view[1]).toBe(true);
     const parts = [page.locator(".review .panel-toolbar"), page.locator(".review-tree")];
     for (const value of ["light", "dark"] as const) {
       await theme(page, value);
@@ -1109,7 +1119,7 @@ test("a patch far into a large file previews its real lines, and Review lists a 
     try {
       await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
       await expect(dump.locator(".uncounted")).toHaveText("أكبر من أن تُعدّ أسطره");
-      await expect(totals).toContainText("لم تُحسب: 1");
+      await expect(totals.getByRole("img", { name: "لم تُحسب: 1" })).toBeVisible();
       const signFirst = (count: ReturnType<Page["locator"]>) =>
         count.evaluate((element) => {
           // The sign and the number may be separate text nodes.

@@ -72,8 +72,9 @@ one file, is read no further than those first bytes: it is listed as
 `uncounted`, with no line counts and no body, so a large log or dump left in
 the tree costs nothing on each refresh. Desktop's file list says "too large to
 count" in place of its counts, and the TUI's `/diff` says the same in its file
-header; the review's totals leave such files out and say how many, as
-"1 not counted". `.gitignore`, nested ignore files and the usual excludes are
+header. The review's totals leave such files out: in Desktop a quiet info mark
+after the file count says how many ("1 not counted" when pointed at), and the
+TUI's header says it in words. `.gitignore`, nested ignore files and the usual excludes are
 honoured by the same `git ls-files --others --exclude-standard` listing as
 before.
 
