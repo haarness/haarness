@@ -3154,5 +3154,6 @@
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Passordbehandlere og Haarness selv brukes aldri, og agenter skriver aldri i terminaler. I Auto spør apper som er satt til å spørre hver gang, fortsatt deg.",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Spør først betyr én godkjenning per app i hver chat, som Auto-kontrolløren gir i Auto når den er slått på.",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Mens en agent jobber, viser en stripe øverst på skjermen appen som brukes, med Pause og Stopp. Esc stopper den også mens den handler i den fremste appen.",
-  "Esc stops it too, while it acts in the frontmost app": "Esc stopper det også mens det handler i den fremste appen"
+  "Esc stops it too, while it acts in the frontmost app": "Esc stopper det også mens det handler i den fremste appen",
+  "Asked by a hook": "Spurt av en hook"
 }

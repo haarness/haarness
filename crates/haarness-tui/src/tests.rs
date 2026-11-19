@@ -2465,6 +2465,8 @@ fn new_item_kinds_render_in_the_transcript() {
             call_id: None,
             created_at: chrono::Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         });
     let text: String = app
         .lines((100, 40))
@@ -9720,6 +9722,8 @@ fn pending_permission_fixture(
         call_id: None,
         created_at: Utc::now(),
         review: None,
+        hook_asked: false,
+        hook_reason: None,
     }
 }
 
@@ -9750,6 +9754,40 @@ fn an_edit_card_draws_and_copies_the_tabs_of_its_changed_lines() {
     let copy = copied(&lines);
     assert!(copy.contains("- \techo \"build\""), "{copy:?}");
     assert!(copy.contains("+ \techo \"built\"\tdone"), "{copy:?}");
+}
+
+/// A card a hook asked for says so in the review note's row, with the
+/// hook's reason, and offers Allow once and Reject only.
+#[test]
+fn a_card_a_hook_asked_for_says_so_with_its_reason() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mut pending = pending_permission_fixture(&thread, "hook-asked");
+    pending.permission = "bash".into();
+    pending.operation = "bash:git push".into();
+    pending.detail = serde_json::json!({"command": "git push"});
+    pending.patterns = vec!["git push".into()];
+    pending.allow_always = Some(false);
+    pending.hook_asked = true;
+    pending.hook_reason = Some("Pushes need a second look\u{202e}".into());
+    app.pending_permissions.push(pending.clone());
+    app.permission_focus = true;
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("Asked by a hook: Pushes need a second look"),
+        "{text}"
+    );
+    assert!(!text.contains('\u{202e}'), "{text}");
+    assert!(
+        text.contains("Allow once") && !text.contains("Always"),
+        "{text}"
+    );
+    // Without a reason, the note alone.
+    pending.hook_reason = None;
+    app.pending_permissions = vec![pending];
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Asked by a hook"), "{text}");
+    assert!(!text.contains("Asked by a hook:"), "{text}");
 }
 
 #[test]
@@ -9968,6 +10006,8 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
             call_id: None,
             created_at: Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         });
     app.permission_focus = true;
 
@@ -11856,6 +11896,8 @@ async fn a_compact_terminal_shows_the_waiting_request_and_its_answers() {
             call_id: None,
             created_at: Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         }],
         &offline_client(),
     )
@@ -13489,6 +13531,8 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
             call_id: None,
             created_at: Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         });
     app.children.insert(
         "task-hover".into(),
@@ -20832,32 +20876,38 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
     app.yolo = true;
     app.approval_server = true;
-    let (client, server) =
-        workspace_http_status_client(vec![(200, "{}".into()), (200, "{}".into())], false).await;
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into()); 3], false).await;
     let other_chat = ThreadId::new();
-    for (id, owner, root, always) in [
-        ("own", thread.id, thread.id, true),
-        ("child", ThreadId::new(), thread.id, true),
-        ("other-chat", other_chat, other_chat, true),
-        ("always-asks", thread.id, thread.id, false),
+    for (id, owner, root, always, hook) in [
+        ("own", thread.id, thread.id, true, false),
+        ("child", ThreadId::new(), thread.id, true, false),
+        ("other-chat", other_chat, other_chat, true, false),
+        ("always-asks", thread.id, thread.id, false, false),
+        // A hook's ask offers no Always, yet --yolo answers it once.
+        ("hook-asked", thread.id, thread.id, false, true),
     ] {
         let event = fixture_event(
             "permission.requested",
             owner,
             root,
-            serde_json::json!({"permissionId":id,"permission":"external_directory","allowAlways":always}),
+            serde_json::json!({"permissionId":id,"permission":"bash","allowAlways":always,"hookAsked":hook}),
         );
         app.reduce(event.clone(), &client).await.unwrap();
         // A replayed event is not answered twice.
         app.reduce(event, &client).await.unwrap();
     }
     let requests = server.await.unwrap();
-    assert_eq!(requests.len(), 2, "{requests:#?}");
+    assert_eq!(requests.len(), 3, "{requests:#?}");
     assert!(requests[0].contains("/permissions/own"), "{}", requests[0]);
     assert!(
         requests[1].contains("/permissions/child"),
         "{}",
         requests[1]
+    );
+    assert!(
+        requests[2].contains("/permissions/hook-asked"),
+        "{}",
+        requests[2]
     );
     assert!(
         requests
@@ -20894,6 +20944,7 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
             (200, info.to_string()),
             (200, mode.to_string()),
             (200, "{}".into()),
+            (200, "{}".into()),
         ],
         false,
     )
@@ -20916,11 +20967,19 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
         call_id: None,
         created_at: chrono::Utc::now(),
         review: None,
+        hook_asked: false,
+        hook_reason: None,
+    };
+    let hook_asked = haarness_protocol::PendingPermissionInfo {
+        allow_always: Some(false),
+        hook_asked: true,
+        ..waiting("hook-waiting", thread.id, thread.id)
     };
     app.hydrate_permissions(
         vec![
             waiting("waiting", thread.id, thread.id),
             waiting("elsewhere", other_chat, other_chat),
+            hook_asked,
         ],
         &client,
     )
@@ -20928,6 +20987,10 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
     let requests = server.await.unwrap();
     assert!(
         requests[2].contains("/permissions/waiting"),
+        "{requests:#?}"
+    );
+    assert!(
+        requests[3].contains("/permissions/hook-waiting"),
         "{requests:#?}"
     );
     assert!(app.pending_permissions.is_empty());

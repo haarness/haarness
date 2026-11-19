@@ -3154,5 +3154,6 @@
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "密码管理器和 Haarness 本身永远不会被使用，智能体也绝不会在终端中输入。在自动模式下，设为每次都询问的应用仍会询问你。",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "“先询问”是指每个对话中每个应用需批准一次；在自动模式下，审核模型开启时由它批准。",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "智能体工作时，屏幕顶部的条带会显示正在使用的应用，并提供“暂停”和“停止”。它在最前端的应用中操作时，按 Esc 也可停止。",
-  "Esc stops it too, while it acts in the frontmost app": "在最前端的应用中操作时，按 Esc 也可停止"
+  "Esc stops it too, while it acts in the frontmost app": "在最前端的应用中操作时，按 Esc 也可停止",
+  "Asked by a hook": "由钩子请求确认"
 }

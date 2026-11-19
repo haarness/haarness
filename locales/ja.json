@@ -3154,5 +3154,6 @@
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "パスワード管理アプリと Haarness 自体は使われず、エージェントがターミナルに入力することもありません。自動でも、毎回確認するように設定したアプリはあなたに確認します。",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "「先に確認」では、各チャットでアプリごとに1回承認します。自動では、審査役がオンのときは審査役が承認します。",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "エージェントが作業している間、画面上部の帯に使用中のアプリと「一時停止」「停止」が表示されます。最前面のアプリを操作している間は Esc キーでも停止します。",
-  "Esc stops it too, while it acts in the frontmost app": "最前面のアプリを操作中は Esc キーでも停止できます"
+  "Esc stops it too, while it acts in the frontmost app": "最前面のアプリを操作中は Esc キーでも停止できます",
+  "Asked by a hook": "フックが確認を要求"
 }

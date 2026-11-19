@@ -10,6 +10,7 @@ mod background_commands;
 pub mod chat_folders;
 mod config;
 pub mod definitions;
+pub mod envelope;
 mod events;
 mod execution;
 pub mod glob_braces;
@@ -73,8 +74,9 @@ pub use ports::*;
 pub use prompts::{PromptFile, PromptMode, PromptName, Prompts};
 pub use runtime::{
     AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, FailureKind, PROMPT_BLOCKED,
-    ResourceMentionPolicy, SUBAGENT_TASK_DESCRIPTION, StaticProviderRegistry, is_stream_cut,
-    prompt_blocked, refusal_reason, shorten_title, webfetch_address, webfetch_redirect_verdict,
+    ResourceMentionPolicy, SUBAGENT_TASK_DESCRIPTION, StaticProviderRegistry, embedded_ipv4,
+    is_stream_cut, prompt_blocked, refusal_reason, shorten_title, webfetch_address,
+    webfetch_redirect_verdict,
 };
 pub use stream_limits::{
     DEFAULT_RESPONSE_TOTAL, DEFAULT_STREAM_IDLE, StreamLimits, response_timeout, stream_stall,

@@ -3154,5 +3154,6 @@
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Upravitelji lozinki i sam Haarness nikad se ne koriste, a agenti nikad ne kucaju u terminale. Na Auto, aplikacije postavljene da pitaju svaki put i dalje pitaju vas.",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Prvo pitaj znači jedno odobrenje po aplikaciji u svakom razgovoru, koje na Auto daje recenzent za Auto kada je uključen.",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Dok agent radi, traka na vrhu ekrana prikazuje aplikaciju koja se koristi, s opcijama Pauziraj i Zaustavi. Esc ga također zaustavlja dok djeluje u aplikaciji u prvom planu.",
-  "Esc stops it too, while it acts in the frontmost app": "Esc ga također zaustavlja dok djeluje u aplikaciji u prvom planu"
+  "Esc stops it too, while it acts in the frontmost app": "Esc ga također zaustavlja dok djeluje u aplikaciji u prvom planu",
+  "Asked by a hook": "Pita hook"
 }

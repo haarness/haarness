@@ -4134,8 +4134,11 @@ function Permission(props: {
           </pre>
         </Show>
         {/* Why Auto's reviewer left this to the person: one quiet line under
-            the command, there from the card's first paint, above the script. */}
+            the command, there from the card's first paint, above the script.
+            A request a hook asked about, which no reviewer sees, says so in
+            the same place. */}
         <ReviewNote review={props.review} />
+        <HookNote permission={props.permission} review={props.review} />
         <Show when={script()?.withheld ? script() : undefined}>
           {(item) => (
             <p class="approval-script-note">
@@ -4499,6 +4502,27 @@ function ReviewNote(props: { review?: T.PermissionReview | null }) {
           </Show>
         </p>
       )}
+    </Show>
+  );
+}
+
+/** That a hook asked about the request, with its reason, as one quiet line in
+ * the review note's place; nothing for any other request. A request that
+ * always asks carries only the hook's reason, not its mark. */
+function HookNote(props: { permission: T.PendingPermissionInfo; review?: T.PermissionReview | null }) {
+  return (
+    <Show when={!props.review && (props.permission.hookAsked || props.permission.hookReason)}>
+      <p class="approval-review">
+        {t("Asked by a hook")}
+        <Show when={props.permission.hookReason?.trim()}>
+          {(reason) => (
+            <>
+              {": "}
+              <bdi>{reason()}</bdi>
+            </>
+          )}
+        </Show>
+      </p>
     </Show>
   );
 }

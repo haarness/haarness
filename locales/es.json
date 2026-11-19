@@ -3154,5 +3154,6 @@
   "Password managers and Haarness itself are never used, and agents never type into terminals. In Auto, apps set to ask every time still ask you.": "Los gestores de contraseñas y el propio Haarness nunca se usan, y los agentes nunca escriben en terminales. En Auto, las apps configuradas para preguntar cada vez te siguen preguntando.",
   "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.": "Preguntar primero significa una aprobación por app en cada chat, que en Auto da el revisor de Auto cuando está activado.",
   "While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.": "Mientras un agente trabaja, una franja en la parte superior de la pantalla muestra la app en uso, con Pausar y Detener. Esc también lo detiene mientras actúa en la app de primer plano.",
-  "Esc stops it too, while it acts in the frontmost app": "Esc también lo detiene mientras actúa en la app de primer plano"
+  "Esc stops it too, while it acts in the frontmost app": "Esc también lo detiene mientras actúa en la app de primer plano",
+  "Asked by a hook": "Lo pregunta un hook"
 }

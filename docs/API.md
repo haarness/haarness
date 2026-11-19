@@ -511,6 +511,18 @@ message when its turn ends. A person's own `!` command and a workflow's
 the chat's commands or waits for one with the `bash_output` tool and stops one
 with `bash_stop`; both are offered wherever `bash` is.
 
+What these hidden messages quote cannot end the tags Haarness wrote around it,
+so nothing in it reads as Haarness's own words or the person's: a closing tag
+that could end its block, in any case and also spelled with invisible or
+full-width characters, starts with `&lt;` instead of `<`. That is
+`</command_output>` or `</command>` in a command's output, and `</summary>`
+or `</command>` in its line; `</task_result>` (`</task_error>`) or `</task>`
+in a subagent's reply, and `</summary>` or `</task>` in its task's
+description; and `</workflow_result>` (`</workflow_error>`) or `</workflow>`
+in a workflow run's result (error). Everything else stays as written, so code
+such as `Vec<T>` or `a < b && c > d`, and a README's
+`<details><summary>Logs</summary>`, reach the agent unchanged.
+
 Each command is a `ShellCommandInfo`: `id`, `threadId` (the chat whose agent
 ran it), `rootThreadId`, `turnId` and `callId` (the `bash` call that started
 it), `command` (the line as it runs, cut to 8 KiB), `workdir` when the call

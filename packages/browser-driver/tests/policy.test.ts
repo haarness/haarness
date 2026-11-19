@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   browserSiteAccess,
+  carriedIPv4,
+  carryingIPv6,
   destinationOrigin,
   navigationResources,
   normalizeURL,
@@ -104,4 +106,26 @@ test("request filters read WebSockets by their HTTP(S) origin and refuse credent
   for (const url of siteCases.other) assert.equal(policyOrigin(url), undefined, url);
   assert.equal(policyOrigin("not a url"), undefined);
   assert.equal(destinationOrigin("wss://open.example/"), undefined);
+});
+
+test("an IPv6 address that carries an IPv4 address is read as that address, and back", () => {
+  for (const [address, ipv4] of [
+    ["[::ffff:a9fe:a9fe]", "169.254.169.254"],
+    ["::ffff:a9fe:a9fe", "169.254.169.254"],
+    ["[0:0:0:0:0:FFFF:A9FE:A9FE]", "169.254.169.254"],
+    ["[::a9fe:a9fe]", "169.254.169.254"],
+    ["[64:ff9b::a9fe:a9fe]", "169.254.169.254"],
+    ["[::ffff:7f00:1]", "127.0.0.1"],
+  ] as const)
+    assert.equal(carriedIPv4(address), ipv4, address);
+  for (const address of ["[::1]", "[::]", "[fd00::1]", "[2001:db8::a9fe:a9fe]", "[::ffff:1:2:3]", "[1::2::3]", "example.com", "10.0.0.2"])
+    assert.equal(carriedIPv4(address), undefined, address);
+  assert.deepEqual(carryingIPv6("169.254.169.254"), ["[::ffff:a9fe:a9fe]", "[::a9fe:a9fe]", "[64:ff9b::a9fe:a9fe]"]);
+  assert.deepEqual(carryingIPv6("0.0.0.1"), ["[::ffff:0:1]", "[64:ff9b::0:1]"]);
+  for (const ipv4 of ["169.254.169.254", "127.0.0.1", "10.0.0.2"])
+    for (const host of carryingIPv6(ipv4)) {
+      assert.equal(new URL(`http://${host}/`).hostname, host, host);
+      assert.equal(carriedIPv4(host), ipv4, host);
+    }
+  for (const value of ["example.com", "1.2.3", "256.1.1.1", "1.2.3.4.5"]) assert.deepEqual(carryingIPv6(value), [], value);
 });

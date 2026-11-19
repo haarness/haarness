@@ -1175,11 +1175,19 @@ impl CommandEntry {
             .map(|path| format!("\n<output_file>{}</output_file>", path.display()))
             .unwrap_or_default();
         format!(
-            "{}\n<summary>{}</summary>\n<command_output>\n{output}\n</command_output>{file}\n</command>",
+            "{}\n<summary>{}</summary>\n<command_output>\n{}\n</command_output>{file}\n</command>",
             notice_tag(&info),
-            ended_summary(&info),
+            notice_text(&ended_summary(&info), "summary"),
+            notice_text(&output, "command_output"),
         )
     }
+}
+
+/// What a command printed or ran, as its notice quotes it inside its `tag`:
+/// it cannot end that tag or the notice, so nothing it prints reads as
+/// Haarness's own words; any other text reads as printed.
+pub(crate) fn notice_text<'a>(text: &'a str, tag: &str) -> std::borrow::Cow<'a, str> {
+    crate::envelope::closing_tags_broken(text, &[tag, "command"])
 }
 
 /// The opening tag of a command's notice.

@@ -430,6 +430,13 @@ impl ConfiguredHooks {
         if entry.event == "Stop" && outcome.halt {
             outcome.block = None;
         }
+        // Why it answered as it did, kept with an answer that counts.
+        outcome.reason = outcome
+            .permission
+            .and(deny_reason.as_deref())
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_owned);
         // A permission deny stops the action only where the runtime reads it.
         let denied = outcome.permission == Some(PermissionDecision::Deny)
             && matches!(entry.event.as_str(), "PreToolUse" | "PermissionRequest");
@@ -492,13 +499,18 @@ impl ConfiguredHooks {
                     None => combined.context = Some(context),
                 }
             }
-            // Deny outranks allow when several hooks answer.
-            match (combined.permission, outcome.permission) {
-                (_, Some(PermissionDecision::Deny)) => {
-                    combined.permission = Some(PermissionDecision::Deny);
-                }
-                (None, decision) => combined.permission = decision,
-                _ => {}
+            // When several hooks answer, the strictest answer stands, in
+            // whatever order they ran: deny, then ask, then allow. Its reason
+            // is the first one given for that answer.
+            let (answer, held) = (
+                outcome.permission.map(strictness),
+                combined.permission.map(strictness),
+            );
+            if answer > held {
+                combined.permission = outcome.permission;
+                combined.reason = outcome.reason.clone();
+            } else if answer.is_some() && answer == held && combined.reason.is_none() {
+                combined.reason = outcome.reason.clone();
             }
             if outcome.permission == Some(PermissionDecision::Allow) {
                 always = Some(always.unwrap_or(true) && outcome.always);
@@ -510,6 +522,16 @@ impl ConfiguredHooks {
         combined.always =
             combined.permission == Some(PermissionDecision::Allow) && always == Some(true);
         combined
+    }
+}
+
+/// How strict a hook's permission answer is: a stricter one outranks a
+/// looser one another hook gave for the same call.
+fn strictness(decision: PermissionDecision) -> u8 {
+    match decision {
+        PermissionDecision::Allow => 0,
+        PermissionDecision::Ask => 1,
+        PermissionDecision::Deny => 2,
     }
 }
 
@@ -780,6 +802,8 @@ struct HookOutcome {
     block: Option<String>,
     context: Option<String>,
     permission: Option<PermissionDecision>,
+    /// Why the hook gave `permission`: its `permissionDecisionReason`.
+    reason: Option<String>,
     updated_input: Option<Value>,
     always: bool,
     /// A hook answered `continue: false`, with this `stopReason` if any.
@@ -794,6 +818,7 @@ impl From<HookOutcome> for HookDecision {
             block: outcome.block,
             context: outcome.context,
             permission: outcome.permission,
+            reason: outcome.reason,
             updated_input: outcome.updated_input,
             always: outcome.always,
         }
@@ -2400,6 +2425,48 @@ mod tests {
         assert!(!mixed.always);
         let failed = run(vec![&format!("{always}; exit 1")]).await;
         assert!(failed.permission.is_none() && !failed.always);
+    }
+
+    #[tokio::test]
+    async fn the_strictest_answer_of_several_pre_tool_hooks_stands_in_any_order() {
+        let run = |answers: &[&str]| {
+            let hooks = ConfiguredHooks::new(
+                ConfiguredHooks::parse_block(&json!({
+                    "PreToolUse": [{"matcher": "Bash", "hooks": answers
+                        .iter()
+                        .map(|answer| json!({"command": format!(
+                            r#"echo '{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":"{answer}"}}}}'"#
+                        )}))
+                        .collect::<Vec<_>>()}]
+                })),
+                std::env::temp_dir(),
+            );
+            async move {
+                hooks
+                    .pre_tool_use(
+                        &HookCall::new(ThreadId::new()),
+                        "bash",
+                        &json!({"command": "git push"}),
+                    )
+                    .await
+                    .permission
+            }
+        };
+        for (answers, strictest) in [
+            (&["allow", "ask"][..], PermissionDecision::Ask),
+            (&["ask", "allow"][..], PermissionDecision::Ask),
+            (
+                &["allow", "deny", "ask", "allow"][..],
+                PermissionDecision::Deny,
+            ),
+            (&["deny", "allow"][..], PermissionDecision::Deny),
+            (&["ask", "deny"][..], PermissionDecision::Deny),
+            (&["allow", "allow"][..], PermissionDecision::Allow),
+            (&["allow", "none"][..], PermissionDecision::Allow),
+            (&["none", "ask"][..], PermissionDecision::Ask),
+        ] {
+            assert_eq!(run(answers).await, Some(strictest), "{answers:?}");
+        }
     }
 
     #[tokio::test]

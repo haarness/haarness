@@ -15,7 +15,7 @@ use super::{
     refusal_reason,
 };
 use crate::background_commands::{
-    CommandEntry, CommandHooks, ShellCall, ShellCallInner, StopSequence,
+    CommandEntry, CommandHooks, ShellCall, ShellCallInner, StopSequence, notice_text,
 };
 
 /// A chat's end of its commands: events, checkpoints, notices and hooks.
@@ -468,13 +468,14 @@ pub(crate) fn interrupted_report(command: &crate::StrandedCommand) -> Vec<ItemDa
     );
     let _ = write!(
         tag,
-        "\n<summary>`{line}` was cut off: Haarness stopped while it ran in the background, and it was not started again. Check what it left behind before you run it again.</summary>"
+        "\n<summary>`{}` was cut off: Haarness stopped while it ran in the background, and it was not started again. Check what it left behind before you run it again.</summary>",
+        notice_text(&line, "summary")
     );
     if !command.tail.is_empty() {
         let _ = write!(
             tag,
             "\n<command_output>\n{}\n</command_output>",
-            command.tail
+            notice_text(&command.tail, "command_output")
         );
     }
     tag.push_str("\n</command>");

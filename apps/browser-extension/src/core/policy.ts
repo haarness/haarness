@@ -6,7 +6,12 @@
 import { browserSiteAccess } from "@haarness/browser-driver/policy";
 import type { Access, Method, Policy } from "./browser";
 
-export { destinationOrigin, normalizeURL, policyOrigin } from "@haarness/browser-driver/policy";
+export {
+  carryingIPv6,
+  destinationOrigin,
+  normalizeURL,
+  policyOrigin,
+} from "@haarness/browser-driver/policy";
 
 /**
  * The same site with `www.` added or removed, so one approval covers both

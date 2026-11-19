@@ -1434,6 +1434,21 @@ pub struct PendingPermissionInfo {
         deserialize_with = "lenient_review"
     )]
     pub review: Option<PermissionReview>,
+    /// A `PreToolUse` hook asked about the call, and nothing else makes the
+    /// request a person's alone. The hook asks again next time, so the
+    /// request offers no Always (`allowAlways` is `false`, apart from a
+    /// Chrome site's, whose Always is for this chat), yet `--yolo` and Yolo
+    /// answer it once, as any ask a person configured. Never set on a request
+    /// that always asks (a read of where sign-ins are kept, a Cloud action
+    /// that spends money), even when a hook asked too: `hookReason` still
+    /// says so there. Older servers send none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hook_asked: bool,
+    /// Why a hook asked about the call, as it said (its
+    /// `permissionDecisionReason`), for the card to show; none when it gave
+    /// no reason or no hook asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_reason: Option<String>,
 }
 
 /// The script file a shell command runs, as the server read it when the

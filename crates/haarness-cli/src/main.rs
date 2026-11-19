@@ -6406,7 +6406,8 @@ async fn run_command(
     let yolo = approvals.yolo;
     let json_output = args.format == RunFormat::Json;
     let mut chat = None;
-    let result = async {
+    // Boxed: the run's future is too large for the stack.
+    let result = Box::pin(async {
         let show_thinking = args.show_thinking();
         let positional = args.prompt.join(" ");
         let mut prompt = positional.clone();
@@ -6716,7 +6717,7 @@ async fn run_command(
             Ok(watch.refused())
         })
         .await
-    }
+    })
     .await;
     if json_output && let Err(error) = &result {
         // A script reads stdout: the failure, and the chat to look into,
@@ -8007,9 +8008,12 @@ async fn approve_once(
 
 /// Whether `--yolo` may answer a request: not one that always asks (a Cloud
 /// action that spends money, a tool that requires approval each time), and
-/// never a site in the user's Chrome, which only a person answers.
+/// never a site in the user's Chrome, which only a person answers. One a
+/// hook asked about (`hookAsked`, which the server never sets on a request
+/// that always asks) offers no Always, since the hook asks again, but it is
+/// answered once like any ask a person configured.
 fn yolo_answers(pending: &haarness_protocol::PendingPermissionInfo) -> bool {
-    pending.allow_always != Some(false) && !pending.explicit
+    (pending.allow_always != Some(false) || pending.hook_asked) && !pending.explicit
 }
 
 /// What a Chrome approval asks, one phrase per site and kind of access:
@@ -20577,12 +20581,28 @@ request_timeout = 0
             call_id: None,
             created_at: chrono::Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         };
         assert!(super::yolo_answers(&pending(None)));
         assert!(super::yolo_answers(&pending(Some(true))));
         assert!(!super::yolo_answers(&pending(Some(false))));
         let mut chrome = pending(None);
         chrome.explicit = true;
+        assert!(!super::yolo_answers(&chrome));
+        // A request a hook asked about, which the server marks only where
+        // nothing else makes it a person's alone, offers no Always, yet
+        // --yolo answers it once.
+        let mut hook = pending(Some(false));
+        hook.hook_asked = true;
+        hook.hook_reason = Some("Deploys need a second look".into());
+        assert!(super::yolo_answers(&hook));
+        // One that always asks, where a hook asked too, carries the hook's
+        // reason and no mark: it stays a person's.
+        let mut forced = pending(Some(false));
+        forced.hook_reason = Some("Deploys need a second look".into());
+        assert!(!super::yolo_answers(&forced));
+        chrome.hook_asked = true;
         assert!(!super::yolo_answers(&chrome));
     }
 
@@ -20613,6 +20633,8 @@ request_timeout = 0
             call_id: None,
             created_at: chrono::Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         };
         let replies = Arc::new(std::sync::Mutex::new(
             Vec::<(String, serde_json::Value)>::new(),
@@ -20821,6 +20843,8 @@ request_timeout = 0
             call_id: None,
             created_at: chrono::Utc::now(),
             review: None,
+            hook_asked: false,
+            hook_reason: None,
         };
         // The first listing is empty; the agent's request lands right after.
         let listings = Arc::new(AtomicUsize::new(0));

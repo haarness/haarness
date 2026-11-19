@@ -89,6 +89,10 @@ test("shared site cases: a blocked site is refused however its host is spelled, 
       "http://localhost:3000/*",
       "http://localhost.:3000/*",
       "http://127.0.0.1:3000/*",
+      // An IPv4 address also as the IPv6 addresses that carry it.
+      "http://[::ffff:7f00:1]:3000/*",
+      "http://[::7f00:1]:3000/*",
+      "http://[64:ff9b::7f00:1]:3000/*",
       "http://[::1]:3000/*",
     ],
   );

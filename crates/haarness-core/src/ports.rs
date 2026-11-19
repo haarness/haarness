@@ -1312,6 +1312,9 @@ pub struct HookDecision {
     pub context: Option<String>,
     /// Force the permission outcome (bypasses or forces the prompt).
     pub permission: Option<crate::PermissionDecision>,
+    /// Why the hook decided `permission`, as it said it
+    /// (`permissionDecisionReason`): an ask's card shows it.
+    pub reason: Option<String>,
     /// Replacement tool input returned by a PreToolUse hook.
     pub updated_input: Option<Value>,
     /// A `PermissionRequest` allow that answers Always: the runtime
