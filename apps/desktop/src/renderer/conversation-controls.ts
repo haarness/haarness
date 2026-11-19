@@ -133,7 +133,7 @@ export function createConversationControls(props: {
             : []),
         ],
   );
-  /** A safety stop's Edit request: Undo takes the stopped turn back and puts
+  /** A safety stop's Edit and resend: Undo takes the stopped turn back and puts
    * its message in the box. Where Undo has no checkpoints (a folder that is
    * not a repository and has not turned them on) the message comes back all
    * the same, and the turn stays in view: later requests leave it out anyway. */

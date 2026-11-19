@@ -2947,9 +2947,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     ));
                 }
                 if stop_to_edit == Some(item.id) {
-                    let hint = app
-                        .language
-                        .text("/undo puts the message back in the prompt");
+                    let hint = app.language.text("/undo to edit and resend");
                     for wrapped in textwrap::wrap(hint, width.saturating_sub(4).max(10)) {
                         block.push(line(format!("    {wrapped}"), theme.muted));
                     }

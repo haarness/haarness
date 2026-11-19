@@ -226,7 +226,7 @@ async fn a_safety_stop_leaves_its_turn_out_of_the_next_request() {
     assert_eq!(
         stops,
         [(
-            "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit it or pick another model.",
+            "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit and resend it or pick another model.",
             true
         )]
     );

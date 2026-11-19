@@ -2184,11 +2184,11 @@ fn turn_failure_words(
 /// What a person reads after a safety stop's words: the turn it ended is
 /// left out of later requests (see [`leaves_turn_out`]).
 const LEFT_OUT_ADVICE: &str =
-    "The model won't see this request again, so you can edit it or pick another model.";
+    "The model won't see this request again, so you can edit and resend it or pick another model.";
 
 /// The same for a check that reads the whole request, so something earlier
 /// in the chat may have set it off.
-const LEFT_OUT_ADVICE_EARLIER: &str = "The model won't see this request again, so you can edit it, or start a new chat if something earlier set it off.";
+const LEFT_OUT_ADVICE_EARLIER: &str = "The model won't see this request again, so you can edit and resend it, or start a new chat if something earlier set it off.";
 
 /// Whether the provider's safety check refused what `error` ended a turn
 /// with, so the turn is left out of every later request (as
@@ -24792,7 +24792,7 @@ mod tests {
         let person = super::turn_failure_words(&blocked, None, "model", true);
         assert_eq!(
             person,
-            "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit it or pick another model."
+            "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit and resend it or pick another model."
         );
         assert!(super::leaves_turn_out(&blocked));
         // A subagent's own chat keeps it short: its parent reads more.
@@ -24814,7 +24814,7 @@ mod tests {
         let words = super::turn_failure_words(&flagged, Some(&info), "gpt-5", true);
         assert_eq!(
             words,
-            "OpenAI refused this chat: its safety check flagged it as possibly against its usage policy. The model won't see this request again, so you can edit it, or start a new chat if something earlier set it off."
+            "OpenAI refused this chat: its safety check flagged it as possibly against its usage policy. The model won't see this request again, so you can edit and resend it, or start a new chat if something earlier set it off."
         );
         // Its usage reports count it as they did.
         assert_eq!(

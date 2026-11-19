@@ -3757,7 +3757,7 @@ function Message(props: {
                     }
                   >
                     <button class="inline-error-action" onClick={() => props.edit?.()}>
-                      {t("Edit request")}
+                      {t("Edit and resend")}
                     </button>
                   </Show>
                 </div>

@@ -11988,7 +11988,7 @@ async fn approval_hints_use_plain_words_and_the_toast_yields_to_the_card() {
 #[test]
 fn a_safety_stop_that_ended_the_latest_turn_points_to_undo() {
     let thread = fixture_thread();
-    let words = "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit it or pick another model.";
+    let words = "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit and resend it or pick another model.";
     let stop = |turn_left_out| {
         message_item(
             3,
@@ -12027,7 +12027,7 @@ fn a_safety_stop_that_ended_the_latest_turn_points_to_undo() {
             .map(|line| line_text(line) + "\n")
             .collect()
     };
-    let hint = "/undo puts the message back in the prompt";
+    let hint = "/undo to edit and resend";
     let mut app = App::new(
         thread.clone(),
         vec![thread.clone()],
@@ -12042,7 +12042,7 @@ fn a_safety_stop_that_ended_the_latest_turn_points_to_undo() {
         "{text}"
     );
     app.language = crate::locale::Language::Japanese;
-    assert!(render(&app).contains("/undo でメッセージをプロンプトに戻す"));
+    assert!(render(&app).contains("/undo で編集して再送信"));
     app.language = crate::locale::Language::English;
     // While a turn runs, /undo would stop it first.
     app.active_turn = Some(haarness_protocol::TurnId::new());

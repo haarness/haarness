@@ -7,7 +7,7 @@ import { stopChatHome } from "./fixtures/chat-home";
 import { isolatedEnv } from "./fixtures/isolated-env";
 
 // A reply the provider's safety check stopped: the server leaves the turn out
-// of later requests, and the error row offers one way on, Edit request, which
+// of later requests, and the error row offers one way on, Edit and resend, which
 // undoes the turn and puts the message back in the box (in a folder Undo has
 // no checkpoints for, it puts the message back all the same). Against a real
 // server with the echo provider, which ends a reply with any finish reason it
@@ -124,17 +124,17 @@ test.afterAll(async () => {
   await test.info().attach("fixture", { body: root ?? "not started", contentType: "text/plain" });
 });
 
-test("a safety stop says its request is left out and offers Edit request, which puts it back in the box", async () => {
+test("a safety stop says its request is left out and offers Edit and resend, which puts it back in the box", async () => {
   await send("first question", true);
   await send(STOPPED);
   const row = page.locator(".inline-error");
   await expect(row).toHaveCount(1);
   await expect(row).toContainText(
-    "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit it or pick another model.",
+    "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit and resend it or pick another model.",
   );
   // The chat still shows what streamed before the stop.
   await expect(page.locator(".message.assistant").filter({ hasText: "partial words" })).toHaveCount(1);
-  const edit = row.getByRole("button", { name: "Edit request", exact: true });
+  const edit = row.getByRole("button", { name: "Edit and resend", exact: true });
   await expect(edit).toBeVisible();
   // The action sits on the row as Open providers does: theme tokens only.
   const [color, text] = await edit.evaluate((element) => {
@@ -147,7 +147,7 @@ test("a safety stop says its request is left out and offers Edit request, which 
   });
   expect(color).toBe(text);
   await pictures("safety-stop-error-row", row, async (target) => {
-    await expect(target.getByRole("button", { name: "تحرير الطلب", exact: true })).toBeVisible();
+    await expect(target.getByRole("button", { name: "تعديل وإعادة الإرسال", exact: true })).toBeVisible();
   });
 
   await edit.click();
@@ -167,7 +167,7 @@ test("a safety stop says its request is left out and offers Edit request, which 
 
 test("only the stop that ended the latest turn offers it, and other errors do not", async () => {
   await send(STOPPED, true);
-  const edit = page.getByRole("button", { name: "Edit request", exact: true });
+  const edit = page.getByRole("button", { name: "Edit and resend", exact: true });
   await expect(edit).toHaveCount(1);
   // Once another message is sent, Undo would take that turn back instead.
   await send("something else");
@@ -182,7 +182,7 @@ test("only the stop that ended the latest turn offers it, and other errors do no
   expect(errors).toEqual([]);
 });
 
-test("where Undo has no checkpoints, Edit request still puts the message back in the box", async () => {
+test("where Undo has no checkpoints, Edit and resend still puts the message back in the box", async () => {
   await app.evaluate(({ dialog }, path) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] });
   }, plain);
@@ -192,7 +192,7 @@ test("where Undo has no checkpoints, Edit request still puts the message back in
   workspace = plain;
   await send(STOPPED, true);
   const row = page.locator(".inline-error");
-  await row.getByRole("button", { name: "Edit request", exact: true }).click();
+  await row.getByRole("button", { name: "Edit and resend", exact: true }).click();
   const box = page.getByRole("textbox", { name: "Message", exact: true });
   await expect(box).toHaveValue(STOPPED);
   // The stopped turn stays in view, and nothing says Undo failed.
@@ -202,6 +202,6 @@ test("where Undo has no checkpoints, Edit request still puts the message back in
   await page.getByRole("button", { name: /Send message/ }).click();
   await expect(page.locator(".message.assistant").last()).toContainText("Echo: reworded in a plain folder", { timeout: 30000 });
   await expect.poll(async () => (await api("activeTurns")).length, { timeout: 30000 }).toBe(0);
-  await expect(row.getByRole("button", { name: "Edit request", exact: true })).toHaveCount(0);
+  await expect(row.getByRole("button", { name: "Edit and resend", exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
 });

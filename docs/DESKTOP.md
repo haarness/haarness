@@ -130,7 +130,7 @@ On connection or resynchronization, the desktop captures `/v1/info`'s event curs
 
 Open a conversation's actions menu or search the command palette for **Undo last turn**, **Redo turn**, **Compact chat**, or **Find in chat**. The composer also accepts `/undo`, `/redo`, and `/compact` as local commands.
 
-When the provider's safety check stops a reply, the chat's later requests leave that turn out, and its error offers **Edit request** while it ends the chat's latest turn: it undoes the turn and puts the message back in the composer to reword (in a folder without checkpoints it puts the message back and the turn stays in view). The model picker beside the composer sends it to another model.
+When the provider's safety check stops a reply, the chat's later requests leave that turn out, and its error offers **Edit and resend** while it ends the chat's latest turn: it undoes the turn and puts the message back in the composer to reword (in a folder without checkpoints it puts the message back and the turn stays in view). The model picker beside the composer sends it to another model.
 
 Slash commands that answer with text, such as `/workflow` or `/goal status`, show the answer in a tray above the composer; `/workflow run` names the run, keeps its state current until it ends, and shows the ID that `/workflow cancel`, `pause` and `resume` take. The answer stays with its chat until you dismiss it or send the next message. A goal that pauses, blocks or finishes on its own shows its message there too.
 

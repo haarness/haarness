@@ -1078,7 +1078,7 @@ provider's check refusing the whole request), the turn's `error` item carries
 `turn_left_out: true`: every item of that turn, from the person's message to
 the error, is left out of the thread's later requests and of its context
 estimate, in forks too, while the transcript keeps it. A `compaction` made
-during the turn stays. Desktop offers **Edit request** on that error while it
+during the turn stays. Desktop offers **Edit and resend** on that error while it
 ends the thread's latest turn (an undo of the turn), the TUI points to
 `/undo`; the phone apps and Cloud web show the error alone. An error without
 the field (any other failure, or a stop an older server stored) leaves its

@@ -168,7 +168,7 @@ try:
     [error] = errors(thread)
     assert error["turn_left_out"] is True, error
     assert error["message"] == ("Stopped by the provider's safety check (refusal). The model won't see this "
-                                "request again, so you can edit it or pick another model."), error
+                                "request again, so you can edit and resend it or pick another model."), error
     items = api(f"/threads/{thread}/items")
     texts = json.dumps([item["data"] for item in items])
     assert "TRIP_WIRE please" in texts and "PARTIAL_WORDS" in texts, "the chat keeps the stopped turn"
