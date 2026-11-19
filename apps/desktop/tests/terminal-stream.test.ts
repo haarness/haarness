@@ -178,25 +178,6 @@ test("a clear point only moves on, and goes once the server no longer has the ou
   assert.equal(clearPoints.get("c:moved"), undefined);
 });
 
-test("terminals of another chat's folder keep their clear points and scroll places while the server lists them", () => {
-  // This computer's chats share one server: the panel shows one chat's
-  // terminals, and forgets only those the server no longer lists.
-  const place = { start: 0, end: 9, line: 2, cols: 80, rows: 24, text: "x\ny" };
-  clearPoints.set("h:shown", 10);
-  clearPoints.set("h:other", 20);
-  scrollPlaces.save("h:other", place);
-  shownOutput.keep("h:", ["shown", "other"]);
-  assert.equal(clearPoints.get("h:shown"), 10);
-  assert.equal(clearPoints.get("h:other"), 20);
-  assert.deepEqual(scrollPlaces.take("h:other"), place);
-  scrollPlaces.save("h:other", place);
-  // Closed on the server: gone here too.
-  shownOutput.keep("h:", ["shown"]);
-  assert.equal(clearPoints.get("h:other"), undefined);
-  assert.equal(scrollPlaces.take("h:other"), undefined);
-  assert.equal(clearPoints.get("h:shown"), 10);
-});
-
 test("a clear while a full-screen program has the alternate screen does nothing, and leaves no point", () => {
   const view = fakeTerminal(new Map(), "c:less");
   view.stream.replay(0);

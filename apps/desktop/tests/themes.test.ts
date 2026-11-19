@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { SELECTION_SHARE, TERMINAL_MINIMUM_CONTRAST, terminalTheme, themes, themeColors } from "../src/themes";
+import { SELECTION_SHARE, terminalTheme, themes, themeColors } from "../src/themes";
+import { terminalOptions } from "../src/renderer/terminal-options";
 
 function luminance(hex: string) {
   const channels = [1, 3, 5].map(
@@ -56,7 +57,7 @@ const ansi = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "whi
   "bright" + name[0].toUpperCase() + name.slice(1),
 ]);
 
-test("text selected in the terminal is marked as selected text is everywhere else, and stands out from the page", () => {
+test("text selected in the terminal is marked with the app's selection colour, stands out from the page, and reads in the text colour", () => {
   // The app's selection: the primary colour mixed at this share.
   const css = readFileSync(new URL("../src/renderer/base.css", import.meta.url), "utf8");
   assert.match(
@@ -92,23 +93,18 @@ test("text selected in the terminal is marked as selected text is everywhere els
       const selected = over(colors.background, colors.selectionBackground);
       // It was about 1.2:1, hard to find on the page.
       assert.ok(contrast(selected, colors.background) >= 1.5, `${name}: selection on the page`);
-      // Every colour a program writes in reads on it: xterm draws selected
-      // text in the selection's own text colour when the theme has one.
-      const drawn: Record<string, string> = colors;
-      for (const role of ["foreground", ...ansi])
-        assert.ok(
-          contrast(colors.selectionForeground ?? drawn[role], selected) >= 4.5,
-          `${name}: ${role} text on the selection`,
-        );
+      // xterm draws selected text in this colour whatever colour a program
+      // gave it: red, green or muted output would be faint on the selection.
+      assert.equal(colors.selectionForeground, colors.foreground, name);
+      assert.ok(contrast(colors.selectionForeground, selected) >= 4.5, `${name}: text on the selection`);
     }
 });
 
-test("terminal text never vanishes on the page, and cyan is a teal of its own", () => {
-  // xterm lightens or darkens text below this contrast with what is behind
-  // it (black on the dark page, white on the light one); the view sets it.
-  assert.equal(TERMINAL_MINIMUM_CONTRAST, 4.5);
-  const view = readFileSync(new URL("../src/renderer/Terminal.tsx", import.meta.url), "utf8");
-  assert.match(view, /minimumContrastRatio: TERMINAL_MINIMUM_CONTRAST,/);
+test("the terminal's contrast floor lifts only the colours that would vanish on the page, and cyan is a teal of its own", () => {
+  // xterm makes text under this contrast with what is behind it lighter or
+  // darker until it has that much.
+  const floor = terminalOptions(13).minimumContrastRatio!;
+  assert.equal(floor, 3);
   const contrast = (x: string, y: string) => {
     const a = luminance(x),
       b = luminance(y);
@@ -118,6 +114,17 @@ test("terminal text never vanishes on the page, and cyan is a teal of its own", 
     for (const mode of ["light", "dark"] as const) {
       const colors = terminalTheme(theme.id, mode);
       const name = `${theme.name} ${mode}`;
+      const drawn: Record<string, string> = colors;
+      // Black on the dark page and white on the light one; the palettes'
+      // other colours are drawn as they are.
+      assert.deepEqual(
+        ["foreground", ...ansi].filter((role) => contrast(drawn[role], colors.background) < floor),
+        mode === "dark" ? ["black"] : ["white", "brightWhite"],
+        name,
+      );
+      // The character under the block cursor.
+      assert.equal(colors.cursorAccent, colors.background, name);
+      assert.ok(contrast(colors.cursorAccent, colors.cursor) >= 4.5, `${name}: the character under the cursor`);
       assert.equal(colors.brightCyan, colors.cyan, name);
       for (const other of ["foreground", "green", "blue"] as const)
         assert.notEqual(colors.cyan, colors[other], `${name}: cyan is ${other}`);

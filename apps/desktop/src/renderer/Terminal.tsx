@@ -12,7 +12,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { sizePusher } from "./terminal-size";
 import { optionKeys } from "./terminal-keys";
-import { TERMINAL_MINIMUM_CONTRAST, terminalTheme, type ThemeId } from "../themes";
+import { terminalTheme, type ThemeId } from "../themes";
+import { SCROLLBACK, terminalOptions } from "./terminal-options";
 import {
   clearPoints,
   inputQueue,
@@ -367,8 +368,6 @@ export function TerminalPanel() {
     </section>
   );
 }
-/** Lines a terminal view keeps above its screen. */
-const SCROLLBACK = 5000;
 function TerminalView(props: { id: string; onGone: () => void; onNew: () => void }) {
   const app = useApp();
   const [link, setLink] = createSignal<Link>("connected");
@@ -381,14 +380,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
   let disposed = false;
   onMount(() => {
     const connection = app.state.connection!.id;
-    terminal = new Terminal({
-      fontFamily: "SFMono-Regular, Menlo, Consolas, monospace",
-      fontSize: app.state.preferences.terminalFontSize,
-      cursorBlink: true,
-      scrollback: SCROLLBACK,
-      minimumContrastRatio: TERMINAL_MINIMUM_CONTRAST,
-      allowProposedApi: false,
-    });
+    terminal = new Terminal(terminalOptions(app.state.preferences.terminalFontSize));
     fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(host);

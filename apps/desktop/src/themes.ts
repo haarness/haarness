@@ -326,14 +326,6 @@ function selectionColor(colors: Colors) {
   return colors.primary.slice(0, 7) + alpha;
 }
 
-/**
- * The least contrast the terminal gives text against what it is drawn on
- * (xterm's `minimumContrastRatio`). Text a program writes in a colour that
- * would vanish there, such as black on the dark page or white on the light
- * one, is made lighter or darker until it reads; backgrounds keep their
- * colours, so a black-on-white badge stays one.
- */
-export const TERMINAL_MINIMUM_CONTRAST = 4.5;
 /** Halfway between two `#rrggbb` colours. */
 function halfway(a: string, b: string) {
   return (
@@ -367,6 +359,8 @@ export function terminalTheme(id: ThemeId, appearance: Appearance) {
     background: colors.page,
     foreground: colors.text,
     cursor: colors.primary,
+    // The character under the block cursor.
+    cursorAccent: colors.page,
     selectionBackground: selectionColor(colors),
     selectionForeground: colors.text,
     black,
