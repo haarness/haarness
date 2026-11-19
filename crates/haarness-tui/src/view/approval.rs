@@ -766,7 +766,8 @@ fn review_rule(review: &haarness_protocol::PermissionReview, language: Language)
 /// the reviewer never sees, says so in the same line, with the hook's reason.
 pub fn review_note(pending: &PendingPermissionInfo, language: Language) -> Option<String> {
     let Some(review) = pending.review.as_ref() else {
-        if !pending.hook_asked {
+        // A request that always asks carries no hook mark, only the reason.
+        if !pending.hook_asked && pending.hook_reason.is_none() {
             return None;
         }
         let mut note = language.text("Asked by a hook").to_owned();

@@ -7881,7 +7881,8 @@ async fn approve_once(
 /// Whether `--yolo` may answer a request: not one that always asks (a Cloud
 /// action that spends money, a tool that requires approval each time), and
 /// never a site in the user's Chrome, which only a person answers. One a
-/// hook asked about offers no Always, since the hook asks again, but it is
+/// hook asked about (`hookAsked`, which the server never sets on a request
+/// that always asks) offers no Always, since the hook asks again, but it is
 /// answered once like any ask a person configured.
 fn yolo_answers(pending: &haarness_protocol::PendingPermissionInfo) -> bool {
     (pending.allow_always != Some(false) || pending.hook_asked) && !pending.explicit
@@ -19983,11 +19984,18 @@ request_timeout = 0
         let mut chrome = pending(None);
         chrome.explicit = true;
         assert!(!super::yolo_answers(&chrome));
-        // What a hook asked about offers no Always, yet --yolo answers it
-        // once; not a Chrome site a hook asked about.
+        // A request a hook asked about, which the server marks only where
+        // nothing else makes it a person's alone, offers no Always, yet
+        // --yolo answers it once.
         let mut hook = pending(Some(false));
         hook.hook_asked = true;
+        hook.hook_reason = Some("Deploys need a second look".into());
         assert!(super::yolo_answers(&hook));
+        // One that always asks, where a hook asked too, carries the hook's
+        // reason and no mark: it stays a person's.
+        let mut forced = pending(Some(false));
+        forced.hook_reason = Some("Deploys need a second look".into());
+        assert!(!super::yolo_answers(&forced));
         chrome.hook_asked = true;
         assert!(!super::yolo_answers(&chrome));
     }

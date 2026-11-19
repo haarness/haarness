@@ -2008,32 +2008,115 @@ async fn parity_another_cards_always_does_not_answer_what_a_hook_asked() {
 #[tokio::test]
 async fn parity_a_yolo_server_approves_what_a_hook_asked_once() {
     let fixture = Fixture::new();
-    let runtime = runtime(
-        &fixture.0,
-        RuntimeConfig {
-            approval_mode: haarness_protocol::ApprovalMode::Review,
-            auto_approve: true,
-            ..RuntimeConfig::default()
-        },
-        None,
-    )
-    .with_hooks(deploy_guard(&fixture.0));
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        auto_approve: true,
+        ..RuntimeConfig::default()
+    };
+    // A rule asks about every printf, so `serve --yolo` would remember
+    // `printf *` for a call no hook asked about.
+    config.base_rules.push(rule("bash:printf *", D::Ask));
+    let runtime = runtime(&fixture.0, config, None).with_hooks(deploy_guard(&fixture.0));
     let thread = echo_thread(&runtime).await;
+    let run = |command: &'static str| {
+        let (runtime, thread) = (&runtime, &thread);
+        async move {
+            let turn = send(
+                runtime,
+                thread,
+                &format!("!tool bash {}", json!({"command": command})),
+            )
+            .await;
+            assert_success(runtime, thread, &turn).await;
+            assert!(runtime.pending_permissions().is_empty());
+        }
+    };
+    // What the hook asked is approved each time and remembered never: the
+    // hook asks again next time.
     for _ in 0..2 {
-        let turn = send(
-            &runtime,
-            &thread,
-            &format!(
-                "!tool bash {}",
-                json!({"command": "printf deploy >> deploy.txt"})
-            ),
-        )
-        .await;
-        assert_success(&runtime, &thread, &turn).await;
-        assert!(runtime.pending_permissions().is_empty());
+        run("printf deploy >> deploy.txt").await;
+        assert!(
+            runtime.session_rules().is_empty(),
+            "{:?}",
+            runtime.session_rules()
+        );
     }
     assert_eq!(
         std::fs::read_to_string(fixture.0.join("deploy.txt")).unwrap(),
         "deploydeploy"
     );
+    // Without a hook's ask, `serve --yolo` remembers as before.
+    run("printf other >> other.txt").await;
+    assert!(
+        runtime
+            .session_rules()
+            .iter()
+            .any(|rule| rule.pattern == "bash:printf *" && rule.decision == D::Allow),
+        "{:?}",
+        runtime.session_rules()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parity_a_hook_s_ask_never_lets_yolo_answer_what_always_asks() {
+    let fixture = Fixture::new();
+    // Inside the project, so no folder card comes first: the read's own card
+    // is the one that always asks.
+    let project = fixture.0.join("project");
+    let data = project.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let store = data.join("auth.json");
+    std::fs::write(&store, "{\"fixture\":{\"key\":\"sk-fixture-secret\"}}\n").unwrap();
+    haarness_core::record_credential_store(store.clone(), false);
+    let runtime = Arc::new(
+        runtime(
+            &project,
+            RuntimeConfig {
+                approval_mode: haarness_protocol::ApprovalMode::Review,
+                ..RuntimeConfig::default()
+            },
+            None,
+        )
+        .with_hooks(answering_hooks(&project, &["ask"])),
+    );
+    let thread = echo_thread(&runtime).await;
+    let cat = json!({ "command": format!("cat '{}'", store.display()) });
+    // In a turn and as a person's own command: the card always asks, says a
+    // hook asked too, and carries no hook mark, so no --yolo client answers
+    // it.
+    let turn = send(&runtime, &thread, &format!("!tool bash {cat}")).await;
+    let asked = pending(&runtime).await;
+    assert_eq!(asked.allow_always, Some(false));
+    assert!(!asked.hook_asked, "{asked:?}");
+    assert_eq!(asked.hook_reason.as_deref(), Some("ask from hook 0"));
+    answer(&runtime, &asked.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    let direct = {
+        let (runtime, id) = (Arc::clone(&runtime), thread.id);
+        tokio::spawn(async move {
+            runtime
+                .run_direct_tool(id, "bash", cat, CancellationToken::new())
+                .await
+        })
+    };
+    let asked = pending(&runtime).await;
+    assert_eq!(asked.allow_always, Some(false));
+    assert!(!asked.hook_asked, "{asked:?}");
+    assert_eq!(asked.hook_reason.as_deref(), Some("ask from hook 0"));
+    answer(&runtime, &asked.permission_id, Reply::Reject).await;
+    assert!(direct.await.unwrap().unwrap().is_error);
+    // A command nothing else asks about carries the mark.
+    let turn = send(
+        &runtime,
+        &thread,
+        &format!("!tool bash {}", json!({"command": "printf ok"})),
+    )
+    .await;
+    let asked = pending(&runtime).await;
+    assert!(asked.hook_asked, "{asked:?}");
+    answer(&runtime, &asked.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    let items = serde_json::to_string(&runtime.items(thread.id, None).await.unwrap()).unwrap();
+    assert!(!items.contains("sk-fixture-secret"));
 }

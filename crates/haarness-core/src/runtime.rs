@@ -7726,11 +7726,13 @@ impl AgentRuntime {
                     "callId": call_id,
                     "agent": thread.agent,
                 });
-                if hook_asks {
+                // Marked only where nothing else makes it a person's alone:
+                // a request that always asks stays one, whatever a hook says.
+                if hook_asks && !forced {
                     requested["hookAsked"] = json!(true);
-                    if let Some(reason) = &hook_reason {
-                        requested["hookReason"] = json!(reason);
-                    }
+                }
+                if hook_asks && let Some(reason) = &hook_reason {
+                    requested["hookReason"] = json!(reason);
                 }
                 if let Some(review) = &review {
                     requested["review"] = json!(review);
@@ -8127,6 +8129,13 @@ impl AgentRuntime {
     #[must_use]
     pub fn auto_reviews_running(&self) -> usize {
         self.approval_modes.reviews.running()
+    }
+
+    /// The rules this server keeps until it stops: what an Always answer in
+    /// a chat's scope and `serve --yolo` remembered.
+    #[must_use]
+    pub fn session_rules(&self) -> Vec<PermissionRule> {
+        self.session_rules.lock().clone()
     }
 
     /// Whether Auto asks its reviewer model (`auto_review.enabled`).
@@ -10747,7 +10756,9 @@ impl PendingPermission {
             agent: self.agent.clone(),
             created_at: self.created_at,
             review: self.review.clone(),
-            hook_asked: self.hook_asked,
+            // A request that always asks stays one: only its note says a
+            // hook asked too.
+            hook_asked: self.hook_asked && !self.forced,
             hook_reason: self.hook_reason.clone(),
         }
     }
@@ -15832,11 +15843,13 @@ impl RunnerTask {
                     "callId": tool.1,
                     "agent": self.thread.agent,
             });
-            if hook_asked {
+            // Marked only where nothing else makes it a person's alone: a
+            // request that always asks stays one, whatever a hook says.
+            if hook_asked && !forced {
                 requested["hookAsked"] = json!(true);
-                if let Some(reason) = hook_reason {
-                    requested["hookReason"] = json!(reason);
-                }
+            }
+            if hook_asked && let Some(reason) = hook_reason {
+                requested["hookReason"] = json!(reason);
             }
             if let Some(review) = &review {
                 requested["review"] = json!(review);

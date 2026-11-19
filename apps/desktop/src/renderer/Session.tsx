@@ -4507,10 +4507,11 @@ function ReviewNote(props: { review?: T.PermissionReview | null }) {
 }
 
 /** That a hook asked about the request, with its reason, as one quiet line in
- * the review note's place; nothing for any other request. */
+ * the review note's place; nothing for any other request. A request that
+ * always asks carries only the hook's reason, not its mark. */
 function HookNote(props: { permission: T.PendingPermissionInfo; review?: T.PermissionReview | null }) {
   return (
-    <Show when={!props.review && props.permission.hookAsked}>
+    <Show when={!props.review && (props.permission.hookAsked || props.permission.hookReason)}>
       <p class="approval-review">
         {t("Asked by a hook")}
         <Show when={props.permission.hookReason?.trim()}>
