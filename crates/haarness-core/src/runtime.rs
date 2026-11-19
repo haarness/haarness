@@ -20878,26 +20878,44 @@ pub fn webfetch_address(written: &str) -> String {
 
 /// Whether `host` names this computer or an address of a private network:
 /// `localhost` and the `.localhost` and `.local` names, and loopback,
-/// private, link-local and unspecified IP addresses.
+/// private, link-local and unspecified IP addresses, an IPv6 address that
+/// carries an IPv4 one judged as that address.
 fn on_this_computer_or_network(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     let last = host.rsplit('.').next().unwrap_or_default();
     if host == "localhost" || (host.contains('.') && matches!(last, "localhost" | "local")) {
         return true;
     }
+    let local_ipv4 = |ip: std::net::Ipv4Addr| {
+        ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+    };
     match host.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => {
-            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
-        }
+        Ok(std::net::IpAddr::V4(ip)) => local_ipv4(ip),
         Ok(std::net::IpAddr::V6(ip)) => {
             let first = ip.segments()[0];
             ip.is_loopback()
                 || ip.is_unspecified()
                 || first & 0xfe00 == 0xfc00
                 || first & 0xffc0 == 0xfe80
+                || embedded_ipv4(ip).is_some_and(local_ipv4)
         }
         Err(_) => false,
     }
+}
+
+/// The IPv4 address an IPv6 address carries, where a connection to the IPv6
+/// address reaches that IPv4 host: IPv4-mapped (`::ffff:169.254.169.254`),
+/// IPv4-compatible (`::169.254.169.254`) and the well-known NAT64 prefix
+/// (`64:ff9b::169.254.169.254`). `::` and `::1` carry none.
+fn embedded_ipv4(ip: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let segments = ip.segments();
+    let carries = match segments[..6] {
+        [0, 0, 0, 0, 0, 0xffff] | [0x64, 0xff9b, 0, 0, 0, 0] => true,
+        [0, 0, 0, 0, 0, 0] => segments[6] != 0,
+        _ => false,
+    };
+    let octets = ip.octets();
+    carries.then(|| std::net::Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]))
 }
 
 /// The other ways rules may name the address a fetch of `target` reads:
@@ -20907,8 +20925,10 @@ fn on_this_computer_or_network(host: &str) -> bool {
 /// `#` fragment (which never reaches the server), and with the letters,
 /// digits and `-._~` of its path written plainly where `%` codes spell them
 /// (a server reads `/%61dmin` as `/admin`). An address with no path is also
-/// written with its `/` (the page it reads), and a host the address spells
-/// in punycode also in Unicode, as a rule may name it. Empty when `target`
+/// written with its `/` (the page it reads), a host the address spells
+/// in punycode also in Unicode, as a rule may name it, and an IPv6 address
+/// that carries an IPv4 address (see [`embedded_ipv4`]) also as that IPv4
+/// address. Empty when `target`
 /// is already written that way or is not an http(s) URL.
 fn webfetch_patterns(target: &str) -> Vec<String> {
     let Ok(mut url) = url::Url::parse(&webfetch_address(target)) else {
@@ -20944,6 +20964,20 @@ fn webfetch_patterns(target: &str) -> Vec<String> {
         let mut bare = forms[0].clone();
         bare.pop();
         forms.insert(0, bare);
+    }
+    // An IPv6 address that carries an IPv4 address reaches that host, so a
+    // rule for the IPv4 address holds for it too.
+    if let Some(url::Host::Ipv6(ip)) = url.host()
+        && let Some(ipv4) = embedded_ipv4(ip)
+        && let Some(host) = url.host_str()
+    {
+        let ipv6 = format!("://{host}");
+        let spelled = format!("://{ipv4}");
+        let ipv4: Vec<String> = forms
+            .iter()
+            .map(|form| form.replacen(&ipv6, &spelled, 1))
+            .collect();
+        forms.extend(ipv4);
     }
     if let Some(host) = url.host_str()
         && host.split('.').any(|label| label.starts_with("xn--"))
@@ -28441,6 +28475,64 @@ mod tests {
         );
         // Another port is another address.
         assert!(!plan("https://denied.example:8443/secret").1);
+        // An IPv6 address that carries an IPv4 address meets the rules for
+        // that IPv4 address, in every spelling of it, written with a scheme
+        // or without.
+        let metadata = crate::PermissionEngine::new(vec![crate::PermissionRule {
+            pattern: "webfetch:http://169.254.169.254/*".into(),
+            decision: crate::PermissionDecision::Deny,
+        }]);
+        let denied = |url: &str| {
+            let (patterns, _) = plan(url);
+            patterns.iter().any(|pattern| {
+                metadata.evaluate(&format!("webfetch:{pattern}")) == crate::PermissionDecision::Deny
+            })
+        };
+        assert_eq!(
+            plan("http://[::ffff:169.254.169.254]/latest/meta-data").0,
+            vec![
+                "http://[::ffff:169.254.169.254]/latest/meta-data",
+                "http://[::ffff:a9fe:a9fe]/latest/meta-data",
+                "http://169.254.169.254/latest/meta-data",
+            ]
+        );
+        for url in [
+            "http://[::ffff:169.254.169.254]/latest/meta-data",
+            "http://[::ffff:a9fe:a9fe]/latest/meta-data",
+            "http://[::FFFF:A9FE:A9FE]/latest/meta-data",
+            "http://[0:0:0:0:0:ffff:a9fe:a9fe]/latest/meta-data",
+            "http://[::ffff:a9fe:a9fe]:80/latest/meta-data",
+            "http://[::169.254.169.254]/latest/meta-data",
+            "http://[::a9fe:a9fe]/latest/meta-data",
+            "http://[64:ff9b::169.254.169.254]/latest/meta-data",
+            "http://[64:ff9b::a9fe:a9fe]/latest/meta-data",
+            "http://[::ffff:a9fe:a9fe]",
+            "[::ffff:169.254.169.254]/latest/meta-data",
+            "//[::ffff:a9fe:a9fe]/latest/meta-data",
+        ] {
+            assert!(denied(url), "{url}");
+        }
+        // Other addresses stay their own: another IPv4 address, another
+        // port, and IPv6 addresses that carry none.
+        for url in [
+            "http://[::ffff:169.254.169.253]/latest/meta-data",
+            "http://[::ffff:a9fe:a9fe]:8080/latest/meta-data",
+            "http://[2001:db8::a9fe:a9fe]/latest/meta-data",
+            "http://[fd00::1]/latest/meta-data",
+            "http://[::1]/latest/meta-data",
+        ] {
+            assert!(!denied(url), "{url}");
+        }
+        for url in [
+            "http://[fd00::1]/x",
+            "http://[::1]/x",
+            "http://[2001:db8::1]/",
+        ] {
+            assert!(
+                !plan(url).0.iter().any(|pattern| !pattern.contains('[')),
+                "{url}"
+            );
+        }
     }
 
     #[test]
@@ -28469,7 +28561,14 @@ mod tests {
             ),
             ("[::1]:8080/x", "http://[::1]:8080/x"),
             ("[fd00::1]/x", "http://[fd00::1]/x"),
+            (
+                "[::ffff:169.254.169.254]/latest",
+                "http://[::ffff:169.254.169.254]/latest",
+            ),
+            ("[::ffff:7f00:1]:3000/x", "http://[::ffff:7f00:1]:3000/x"),
+            ("[64:ff9b::a00:2]/x", "http://[64:ff9b::a00:2]/x"),
             ("8.8.8.8/dns", "https://8.8.8.8/dns"),
+            ("[::ffff:8.8.8.8]/dns", "https://[::ffff:8.8.8.8]/dns"),
             // Written with a scheme, or not an address at all: as written.
             ("https://example.com/a", "https://example.com/a"),
             ("ftp://example.com/a", "ftp://example.com/a"),
@@ -28509,6 +28608,8 @@ mod tests {
             ("//denied.example/secret", true),
             ("localhost:3000/admin", true),
             ("169.254.169.254/latest/meta-data", true),
+            ("[::ffff:169.254.169.254]/latest/meta-data", true),
+            ("[::ffff:a9fe:a9fe]/latest/meta-data", true),
             ("allowed.example/page", false),
             ("localhost:3001/admin", false),
         ] {
