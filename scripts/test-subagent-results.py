@@ -14,7 +14,8 @@ result:
   returns its previous run's reply (before: it did, marked completed).
 - refusal: a child the provider's safety check stopped tells the parent not to
   retry it as is, with its partial reply (before: "Send a follow-up message
-  to try again"), while the child's own chat keeps the message for a person.
+  to try again"), while the child's own chat keeps words for a person: the
+  turn is left out, and the parent decides what follows.
 """
 import json
 import os
@@ -127,10 +128,13 @@ try:
     assert "The provider's safety check stopped this subagent (refusal)." in output, output
     assert "do not retry it as is" in output and "Partial reply before the stop:\npartial words" in output, output
     assert "Send a follow-up message" not in output, output
-    child_errors = [item["data"]["message"] for item in api(f"/threads/{child_of(thread)}/items")
-                    if item["data"]["type"] == "error"]
-    assert any("Send a follow-up message" in message for message in child_errors), child_errors
-    print("PASS a refused subagent tells its parent not to retry it; its own chat keeps the person's wording",
+    # Its own chat, which no one writes in, tells the person who opens it
+    # that the turn is left out and that the parent decides what follows.
+    child_errors = [(item["data"]["message"], item["data"].get("turn_left_out", False))
+                    for item in api(f"/threads/{child_of(thread)}/items") if item["data"]["type"] == "error"]
+    assert child_errors == [("Stopped by the provider's safety check (refusal). The subagent won't see this request "
+                             "again; the agent that started it decides what to do next.", True)], child_errors
+    print("PASS a refused subagent tells its parent not to retry it; its own chat keeps words for a person",
           flush=True)
 finally:
     try:

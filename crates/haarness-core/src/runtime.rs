@@ -2160,22 +2160,23 @@ fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
 /// known) fails with: what its transcript shows and its stored error holds.
 /// With `advice` they also say what to do (see `describe_failure`); for a
 /// stop by the provider's safety check, that the turn is left out of what
-/// the model sees from now on (see [`leaves_turn_out`]).
+/// the model sees from now on (see [`leaves_turn_out`]). Without it (a
+/// subagent's chat, which no one writes in) a safety stop still tells the
+/// person who opens that chat what follows.
 fn turn_failure_words(
     error: &CoreError,
     info: Option<&haarness_protocol::ProviderInfo>,
     model: &str,
     advice: bool,
 ) -> String {
-    if advice && let CoreError::ProviderBlocked(reason) = error {
-        return format!(
-            "{error} {}",
-            if recitation(reason) {
-                RECITATION_ADVICE
-            } else {
-                LEFT_OUT_ADVICE
-            }
-        );
+    if let CoreError::ProviderBlocked(reason) = error {
+        let words = match (advice, recitation(reason)) {
+            (true, true) => RECITATION_ADVICE,
+            (true, false) => LEFT_OUT_ADVICE,
+            (false, true) => SUBAGENT_STOP_NOTE,
+            (false, false) => SUBAGENT_LEFT_OUT_NOTE,
+        };
+        return format!("{error} {words}");
     }
     if advice
         && let CoreError::Provider(raw) = error
@@ -2212,6 +2213,16 @@ const RECITATION_ADVICE: &str = "The reply followed existing published text too 
 /// automatic compaction: the earlier conversation set it off, so leaving
 /// out this turn would not help.
 const SUMMARY_STOP_ADVICE: &str = "That is the summary Haarness writes when a chat grows past what the model takes in, so something earlier in this chat set it off: start a new chat, or pick another model.";
+
+/// What a person reads in a subagent's chat after a safety stop that left
+/// its turn out. They cannot write there; the agent that started it is told
+/// what the stop means for the task (see `subagent_blocked`).
+const SUBAGENT_LEFT_OUT_NOTE: &str =
+    "The subagent won't see this request again; the agent that started it decides what to do next.";
+
+/// The same after a stop that kept the subagent's turn: a recited reply, or
+/// the summary of its history.
+const SUBAGENT_STOP_NOTE: &str = "The agent that started this subagent decides what to do next.";
 
 /// A stop of the reply for repeating published text rather than for what
 /// was asked.
@@ -11302,7 +11313,7 @@ impl RunnerTask {
             return if self.depth == 0 {
                 format!("{stop} {SUMMARY_STOP_ADVICE}")
             } else {
-                stop
+                format!("{stop} {SUBAGENT_STOP_NOTE}")
             };
         }
         // A child agent's failure is read by the model that started it.
@@ -25533,10 +25544,12 @@ mod tests {
             "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit and resend it or pick another model."
         );
         assert!(super::leaves_turn_out(&blocked));
-        // A subagent's own chat keeps it short: its parent reads more.
+        // A subagent's own chat, which no one writes in, says what follows
+        // for the person who opens it; its parent reads more.
+        let child = super::turn_failure_words(&blocked, None, "model", false);
         assert_eq!(
-            super::turn_failure_words(&blocked, None, "model", false),
-            "Stopped by the provider's safety check (refusal)."
+            child,
+            "Stopped by the provider's safety check (refusal). The subagent won't see this request again; the agent that started it decides what to do next."
         );
         // A check of the whole request is left out the same way.
         let flagged = CoreError::Provider(
@@ -25571,6 +25584,10 @@ mod tests {
             super::turn_failure_words(&recited, None, "model", true),
             "Stopped by the provider's safety check (RECITATION). The reply followed existing published text too closely for the provider: ask for it another way, or pick another model."
         );
+        assert_eq!(
+            super::turn_failure_words(&recited, None, "model", false),
+            "Stopped by the provider's safety check (RECITATION). The agent that started this subagent decides what to do next."
+        );
         // Other failures keep their turn.
         for other in [
             CoreError::Provider("HTTP 500 Internal Server Error".into()),
@@ -25581,6 +25598,7 @@ mod tests {
         }
         for stored in [
             person.as_str(),
+            child.as_str(),
             "Stopped by the provider's safety check (refusal).",
             "The provider's safety check stopped this response (refusal). Send a follow-up message to try again; if it stops again, rephrase the request or choose another model.",
         ] {
