@@ -141,45 +141,110 @@ pub fn file_over_limit(language: crate::locale::Language, name: &str, size: u64)
     )
 }
 
-/// Recognize a bracketed paste as one or more local media paths to attach
-/// next to `attached` (the draft's attachments). `None` means ordinary text:
-/// not paths, or a path to a file that is not media (a README, or one named
-/// `.pdf` that is not a PDF), which a prompt names as text. `Err` means it
-/// was media that cannot be accepted and should be reported, in `language`,
-/// rather than inserted as a prompt. `uploads` says the files go to the
+/// What a drop of files brings to the prompt: the media to attach, and the
+/// other files' paths, which stay text.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Dropped {
+    /// Canonical paths of the media files, in the order they were dropped.
+    pub media: Vec<String>,
+    /// The other files as the terminal wrote them (escaped or quoted), one
+    /// space apart; empty when every file is media.
+    pub text: String,
+}
+
+/// Media a paste held that cannot be attached: why, as the server words it,
+/// and whether the paste still goes into the prompt as text.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Refusal {
+    pub reason: String,
+    /// A drop that named other files too is text as well, so none of it is
+    /// lost; one of media alone is refused whole, as it always was.
+    pub keep_text: bool,
+}
+
+/// Recognize a bracketed paste as a drop of local files that holds media to
+/// attach next to `attached` (the draft's attachments). `None` means
+/// ordinary text: not paths, or only files that are not media (a README, or
+/// one named `.pdf` that is not a PDF), which a prompt names as text. A drop
+/// of media and other files, on one line with every path absolute as
+/// terminals write a drop, attaches the media and keeps the others' paths as
+/// text; any other mix of files, such as a pasted list of the project's
+/// files, is text. `Err` means it held media that cannot be accepted and
+/// should be reported, in `language`. `uploads` says the files go to the
 /// server whole (an attached server), images too.
 pub fn paths_from_paste(
     value: &str,
     attached: &[String],
     language: crate::locale::Language,
     uploads: bool,
-) -> Result<Option<Vec<String>>, String> {
+) -> Result<Option<Dropped>, Refusal> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
-    let whole = decode_path(trimmed);
-    let candidates = if whole.as_ref().is_some_and(|path| path.is_file()) {
-        vec![whole.unwrap_or_default()]
+    let whole = decode_path(trimmed).filter(|path| path.is_file());
+    let (candidates, text) = if let Some(path) = whole {
+        if !is_media(&path) {
+            return Ok(None);
+        }
+        (vec![path], String::new())
     } else {
-        let tokens = shellish_words(trimmed);
-        if tokens.is_empty() {
+        let mut media = Vec::new();
+        let mut others = Vec::new();
+        for word in shellish_words(trimmed) {
+            let Some(path) = word_path(&word.text).filter(|path| path.is_file()) else {
+                return Ok(None);
+            };
+            if is_media(&path) {
+                media.push(path);
+            } else {
+                others.push((word.raw, path.is_absolute()));
+            }
+        }
+        if media.is_empty() {
             return Ok(None);
         }
-        let paths: Vec<_> = tokens
+        // Text that only names files, such as a command run on an image or
+        // a list of changed files, is not a drop: a terminal writes a drop
+        // on one line, every path absolute.
+        let drop = !trimmed.contains(['\n', '\r'])
+            && media.iter().all(|path| path.is_absolute())
+            && others.iter().all(|(_, absolute)| *absolute);
+        if !others.is_empty() && !drop {
+            return Ok(None);
+        }
+        let mut text = others
             .iter()
-            .filter_map(|token| decode_path(token))
-            .collect();
-        if paths.len() != tokens.len() || paths.iter().any(|path| !path.is_file()) {
-            return Ok(None);
+            .map(|(raw, _)| *raw)
+            .collect::<Vec<_>>()
+            .join(" ");
+        // The space a terminal may end a drop with stays after the paths,
+        // so what is typed next does not run into them.
+        if !text.is_empty() && value.ends_with(|character: char| character.is_ascii_whitespace()) {
+            text.push(' ');
         }
-        paths
+        (media, text)
     };
-    if !candidates.iter().all(|path| is_media(path)) {
-        return Ok(None);
+    let keep_text = !text.is_empty();
+    match attachable(candidates, attached, language, uploads) {
+        Ok(media) => Ok(Some(Dropped { media, text })),
+        Err(reason) => Err(Refusal { reason, keep_text }),
     }
+}
+
+/// The canonical paths of dropped media, refused when they break a limit of
+/// one message. Only media count: other files dropped with them are text.
+fn attachable(
+    candidates: Vec<PathBuf>,
+    attached: &[String],
+    language: crate::locale::Language,
+    uploads: bool,
+) -> Result<Vec<String>, String> {
     if candidates.len() > MAX_ATTACHMENTS {
-        return Err(format!("Attach at most {MAX_ATTACHMENTS} files at once"));
+        return Err(language.format(
+            "Attach at most {count} files at once",
+            &[("count", &MAX_ATTACHMENTS.to_string())],
+        ));
     }
     // Counted as the server counts the message, what is attached already
     // included. Images are left out: it shrinks each to a few MB, so only
@@ -217,7 +282,7 @@ pub fn paths_from_paste(
         }
         result.push(canonical);
     }
-    Ok(Some(result))
+    Ok(result)
 }
 
 /// An image attachment, a file or a data URL, judged by its name or type.
@@ -323,23 +388,55 @@ fn decode_path(value: &str) -> Option<PathBuf> {
     Some(PathBuf::from(unescape(unquoted)))
 }
 
+/// The file a word of a drop names. Its quotes and escapes were read with
+/// the word, so a backslash left in it is part of the name.
+fn word_path(text: &str) -> Option<PathBuf> {
+    if text.starts_with("file://") {
+        return url::Url::parse(text).ok()?.to_file_path().ok();
+    }
+    Some(PathBuf::from(text))
+}
+
 /// Whether a backslash escapes the next character in a dropped path. On
 /// Windows it separates folders, and terminals quote a path with a space.
 const BACKSLASH_ESCAPES: bool = !cfg!(windows);
 
+/// One word of a drop: what it says once its quotes and escapes are read,
+/// and the text the terminal wrote for it.
+struct Word<'a> {
+    text: String,
+    raw: &'a str,
+}
+
 /// Small shell-word reader for the forms terminal emulators emit when files
-/// are dropped: quoted paths or spaces escaped with a backslash.
-fn shellish_words(value: &str) -> Vec<String> {
+/// are dropped: quoted paths or spaces escaped with a backslash. A word ends
+/// at an ASCII space, tab or line break, the blanks a terminal escapes in a
+/// path, and nowhere else: the name macOS gives a screenshot keeps a narrow
+/// no-break space before AM or PM, unescaped.
+fn shellish_words(value: &str) -> Vec<Word<'_>> {
     let mut words = Vec::new();
     let mut current = String::new();
+    let mut start = None;
     let mut quote = None;
     let mut escaped = false;
-    for character in value.chars() {
+    for (index, character) in value.char_indices() {
         if escaped {
             current.push(character);
             escaped = false;
             continue;
         }
+        if character.is_ascii_whitespace() && quote.is_none() {
+            if let Some(start) = start.take()
+                && !current.is_empty()
+            {
+                words.push(Word {
+                    text: std::mem::take(&mut current),
+                    raw: &value[start..index],
+                });
+            }
+            continue;
+        }
+        start.get_or_insert(index);
         if BACKSLASH_ESCAPES && character == '\\' && quote != Some('\'') {
             escaped = true;
             continue;
@@ -354,19 +451,18 @@ fn shellish_words(value: &str) -> Vec<String> {
             }
             continue;
         }
-        if character.is_whitespace() && quote.is_none() {
-            if !current.is_empty() {
-                words.push(std::mem::take(&mut current));
-            }
-        } else {
-            current.push(character);
-        }
+        current.push(character);
     }
     if escaped {
         current.push('\\');
     }
-    if !current.is_empty() {
-        words.push(current);
+    if let Some(start) = start
+        && !current.is_empty()
+    {
+        words.push(Word {
+            text: current,
+            raw: &value[start..],
+        });
     }
     words
 }
@@ -406,12 +502,45 @@ mod tests {
         );
     }
 
+    /// What each word says, and the text the terminal wrote for it.
+    fn words(value: &str) -> Vec<(String, &str)> {
+        shellish_words(value)
+            .into_iter()
+            .map(|word| (word.text, word.raw))
+            .collect()
+    }
+
+    /// A path as a terminal drops it: its spaces escaped, or the whole path
+    /// quoted on Windows.
+    fn as_dropped(path: &Path) -> String {
+        if cfg!(windows) {
+            format!("\"{}\"", path.display())
+        } else {
+            path.display().to_string().replace(' ', "\\ ")
+        }
+    }
+
+    fn canonical(path: &Path) -> String {
+        dunce::canonicalize(path).unwrap().display().to_string()
+    }
+
+    /// A paste of media alone that a limit refuses: nothing goes in as text.
+    fn refused(reason: impl Into<String>) -> Result<Option<Dropped>, Refusal> {
+        Err(Refusal {
+            reason: reason.into(),
+            keep_text: false,
+        })
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn shellish_words_handle_terminal_drop_escaping() {
         assert_eq!(
-            shellish_words("/tmp/one\\ file.png '/tmp/two file.mp4'"),
-            vec!["/tmp/one file.png", "/tmp/two file.mp4"]
+            words("/tmp/one\\ file.png '/tmp/two file.mp4'"),
+            vec![
+                ("/tmp/one file.png".into(), "/tmp/one\\ file.png"),
+                ("/tmp/two file.mp4".into(), "'/tmp/two file.mp4'"),
+            ]
         );
     }
 
@@ -421,8 +550,49 @@ mod tests {
     #[test]
     fn shellish_words_read_windows_drops() {
         assert_eq!(
-            shellish_words(r#""C:\shots\one file.png" C:\clips\two.mp4"#),
-            vec![r"C:\shots\one file.png", r"C:\clips\two.mp4"]
+            words(r#""C:\shots\one file.png" C:\clips\two.mp4"#),
+            vec![
+                (
+                    r"C:\shots\one file.png".into(),
+                    r#""C:\shots\one file.png""#
+                ),
+                (r"C:\clips\two.mp4".into(), r"C:\clips\two.mp4"),
+            ]
+        );
+    }
+
+    /// A terminal escapes ASCII spaces alone, so the narrow no-break space
+    /// macOS writes before a screenshot's AM or PM, like any other Unicode
+    /// space, is part of the word.
+    #[test]
+    fn a_unicode_space_is_part_of_a_dropped_word() {
+        assert_eq!(
+            words("/tmp/9.41.00\u{202f}AM.png\t/tmp/a\u{a0}b.png\n/tmp/c\u{3000}d.png  /tmp/e.png"),
+            vec![
+                (
+                    "/tmp/9.41.00\u{202f}AM.png".into(),
+                    "/tmp/9.41.00\u{202f}AM.png"
+                ),
+                ("/tmp/a\u{a0}b.png".into(), "/tmp/a\u{a0}b.png"),
+                ("/tmp/c\u{3000}d.png".into(), "/tmp/c\u{3000}d.png"),
+                ("/tmp/e.png".into(), "/tmp/e.png"),
+            ]
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            words(
+                "/tmp/Screenshot\\ at\\ 9.41.00\u{202f}AM.png /tmp/Screenshot\\ at\\ 9.41.05\u{202f}PM.png"
+            ),
+            vec![
+                (
+                    "/tmp/Screenshot at 9.41.00\u{202f}AM.png".into(),
+                    "/tmp/Screenshot\\ at\\ 9.41.00\u{202f}AM.png"
+                ),
+                (
+                    "/tmp/Screenshot at 9.41.05\u{202f}PM.png".into(),
+                    "/tmp/Screenshot\\ at\\ 9.41.05\u{202f}PM.png"
+                ),
+            ]
         );
     }
 
@@ -432,19 +602,301 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let image = root.join("screen shot.png");
         std::fs::write(&image, b"png fixture").unwrap();
-        // As a terminal drops it: a space escaped, or the path quoted on Windows.
-        let escaped = if cfg!(windows) {
-            format!("\"{}\"", image.display())
-        } else {
-            image.display().to_string().replace(' ', "\\ ")
-        };
 
-        let paths = paths_from_paste(&escaped, &[], Language::English, false)
+        assert_eq!(
+            paths_from_paste(&as_dropped(&image), &[], Language::English, false),
+            Ok(Some(Dropped {
+                media: vec![canonical(&image)],
+                text: String::new(),
+            }))
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Two macOS screenshots dropped at once: their names' spaces escaped,
+    /// the narrow no-break space before AM not.
+    #[test]
+    fn two_dropped_screenshots_both_attach() {
+        let root = std::env::temp_dir().join(format!("haarness-shots-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let shots: Vec<_> = ["9.41.00", "9.41.05"]
+            .iter()
+            .map(|time| {
+                let shot = root.join(format!("Screenshot 2026-11-19 at {time}\u{202f}AM.png"));
+                std::fs::write(&shot, b"png fixture").unwrap();
+                shot
+            })
+            .collect();
+
+        let drop = format!("{} {} ", as_dropped(&shots[0]), as_dropped(&shots[1]));
+        assert_eq!(
+            paths_from_paste(&drop, &[], Language::English, false),
+            Ok(Some(Dropped {
+                media: shots.iter().map(|shot| canonical(shot)).collect(),
+                text: String::new(),
+            }))
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A drop of media and other files attaches the media; the others stay
+    /// their paths, as the terminal wrote them, and only the media count
+    /// toward the limits.
+    #[test]
+    fn a_drop_of_media_and_other_files_attaches_only_the_media() {
+        let root = std::env::temp_dir().join(format!("haarness-mixed-{}", uuid::Uuid::now_v7()));
+        let notes = root.join("team docs");
+        std::fs::create_dir_all(&notes).unwrap();
+        let image = root.join("screen shot.png");
+        std::fs::write(&image, b"png fixture").unwrap();
+        let readme = notes.join("README.md");
+        std::fs::write(&readme, "# Notes\n").unwrap();
+        let log = root.join("build.log");
+        std::fs::write(&log, "ok\n").unwrap();
+
+        let drop = format!(
+            "{} {} {}",
+            as_dropped(&readme),
+            as_dropped(&image),
+            as_dropped(&log)
+        );
+        assert_eq!(
+            paths_from_paste(&drop, &[], Language::English, false),
+            Ok(Some(Dropped {
+                media: vec![canonical(&image)],
+                text: format!("{} {}", as_dropped(&readme), as_dropped(&log)),
+            }))
+        );
+        // A space the terminal ended the drop with stays after the paths.
+        assert_eq!(
+            paths_from_paste(&format!("{drop} "), &[], Language::English, false)
+                .unwrap()
+                .unwrap()
+                .text,
+            format!("{} {} ", as_dropped(&readme), as_dropped(&log))
+        );
+
+        // Words that are not all existing files are text, as before.
+        for text in [
+            format!("{} hello", as_dropped(&image)),
+            format!("{} {}", as_dropped(&image), root.join("gone.md").display()),
+            format!("{} {}", as_dropped(&image), as_dropped(&notes)),
+            format!("{} {}", as_dropped(&readme), as_dropped(&log)),
+        ] {
+            assert_eq!(
+                paths_from_paste(&text, &[], Language::English, false),
+                Ok(None),
+                "{text}"
+            );
+        }
+
+        // Eight images and a large file that is not media: only the images
+        // count, toward the number of files and the size of a message.
+        let shots: Vec<_> = (1..=9)
+            .map(|index| {
+                let shot = root.join(format!("shot {index}.png"));
+                std::fs::write(&shot, b"png fixture").unwrap();
+                shot
+            })
+            .collect();
+        std::fs::File::create(&log)
+            .unwrap()
+            .set_len(MAX_INLINE_BYTES + 1)
+            .unwrap();
+        let eight = shots[..8]
+            .iter()
+            .chain([&log])
+            .map(|path| as_dropped(path))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let dropped = paths_from_paste(&eight, &[], Language::English, true)
             .unwrap()
             .unwrap();
+        assert_eq!(dropped.media.len(), 8);
+        assert_eq!(dropped.text, as_dropped(&log));
+        let nine = shots
+            .iter()
+            .map(|path| as_dropped(path))
+            .collect::<Vec<_>>()
+            .join(" ");
         assert_eq!(
-            paths,
-            vec![dunce::canonicalize(&image).unwrap().display().to_string()]
+            paths_from_paste(&nine, &[], Language::English, false),
+            refused("Attach at most 8 files at once")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Text that names files without being a drop, such as a command run on
+    /// an image or a list of changed files, stays text when it mixes media
+    /// and other files. Media alone are attached, as they always were.
+    #[test]
+    fn a_paste_that_only_names_files_is_not_a_drop() {
+        // In the working folder, so its files have relative names on every
+        // system, whatever drive the temporary folder is on.
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let name = PathBuf::from(format!("haarness-named-{}", uuid::Uuid::now_v7()));
+        let fixture = Fixture(std::env::current_dir().unwrap().join(&name));
+        std::fs::create_dir(&fixture.0).unwrap();
+        let [script, image, other, readme] =
+            ["resize.sh", "icon.png", "logo.png", "README.md"].map(|file| name.join(file));
+        for file in [&script, &image, &other, &readme] {
+            std::fs::write(fixture.0.join(file.file_name().unwrap()), b"fixture").unwrap();
+        }
+        assert!(
+            image.is_relative() && image.is_file(),
+            "{}",
+            image.display()
+        );
+        let absolute = |path: &Path| fixture.0.join(path.file_name().unwrap());
+
+        for text in [
+            // A command run on an image, its words relative.
+            format!("{} {}", script.display(), image.display()),
+            format!("{} {}", script.display(), absolute(&image).display()),
+            // A list of files, one a line, as `git diff --name-only` prints.
+            format!("{}\n{}", readme.display(), image.display()),
+            format!(
+                "{}\n{}",
+                absolute(&readme).display(),
+                absolute(&image).display()
+            ),
+            format!(
+                "{}\r\n{}",
+                absolute(&image).display(),
+                absolute(&readme).display()
+            ),
+        ] {
+            assert_eq!(
+                paths_from_paste(&text, &[], Language::English, false),
+                Ok(None),
+                "{text:?}"
+            );
+        }
+        // Media alone are attached however they are named.
+        for text in [
+            format!("{} {}", image.display(), other.display()),
+            format!(
+                "{}\n{}",
+                absolute(&image).display(),
+                absolute(&other).display()
+            ),
+        ] {
+            assert_eq!(
+                paths_from_paste(&text, &[], Language::English, false)
+                    .unwrap()
+                    .map(|dropped| dropped.media.len()),
+                Some(2),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// A drop whose media break a limit is refused, but when it named other
+    /// files too it still goes in as text: none of it is lost.
+    #[test]
+    fn a_mixed_drop_over_a_limit_keeps_its_text() {
+        let root = std::env::temp_dir().join(format!("haarness-limit-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let readme = root.join("README.md");
+        std::fs::write(&readme, "# Notes\n").unwrap();
+        let shots: Vec<_> = (1..=9)
+            .map(|index| {
+                let shot = root.join(format!("shot {index}.png"));
+                std::fs::write(&shot, b"png fixture").unwrap();
+                shot
+            })
+            .collect();
+        let video = root.join("demo.mov");
+        std::fs::File::create(&video)
+            .unwrap()
+            .set_len(25 * 1024 * 1024)
+            .unwrap();
+
+        let nine = shots
+            .iter()
+            .chain([&readme])
+            .map(|path| as_dropped(path))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            paths_from_paste(&nine, &[], Language::English, false),
+            Err(Refusal {
+                reason: "Attach at most 8 files at once".into(),
+                keep_text: true,
+            })
+        );
+        let large = format!("{} {}", as_dropped(&video), as_dropped(&readme));
+        assert_eq!(
+            paths_from_paste(&large, &[], Language::English, false),
+            Err(Refusal {
+                reason: "demo.mov is 25 MiB, over the 20 MiB limit for media in one message".into(),
+                keep_text: true,
+            })
+        );
+        // The count is said in the interface language.
+        let german = paths_from_paste(&nine, &[], Language::German, false).unwrap_err();
+        assert_eq!(
+            german.reason,
+            Language::German.format("Attach at most {count} files at once", &[("count", "8")])
+        );
+        assert_ne!(german.reason, "Attach at most 8 files at once");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A name holding a backslash, which a terminal writes as `\\`, keeps
+    /// it when it comes with other files: each word is unescaped once.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_backslash_in_a_dropped_name_is_read_once() {
+        let root = std::env::temp_dir().join(format!("haarness-slash-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let odd = root.join("before\\after.png");
+        let shot = root.join("shot.png");
+        for file in [&odd, &shot] {
+            std::fs::write(file, b"png fixture").unwrap();
+        }
+        let escaped = odd.display().to_string().replace('\\', "\\\\");
+
+        for drop in [escaped.clone(), format!("{escaped} {}", shot.display())] {
+            assert_eq!(
+                paths_from_paste(&drop, &[], Language::English, false)
+                    .unwrap()
+                    .map(|dropped| dropped.media.first().cloned()),
+                Some(Some(canonical(&odd))),
+                "{drop}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Windows terminals quote each dropped path; a quoted path that stays
+    /// text keeps its quotes.
+    #[test]
+    fn a_quoted_mixed_drop_keeps_the_other_files_quoted() {
+        let root = std::env::temp_dir().join(format!("haarness-quoted-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let image = root.join("screen shot.png");
+        std::fs::write(&image, b"png fixture").unwrap();
+        let readme = root.join("read me.md");
+        std::fs::write(&readme, "# Notes\n").unwrap();
+
+        let drop = format!("\"{}\" \"{}\"", image.display(), readme.display());
+        assert_eq!(
+            paths_from_paste(&drop, &[], Language::English, false),
+            Ok(Some(Dropped {
+                media: vec![canonical(&image)],
+                text: format!("\"{}\"", readme.display()),
+            }))
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -491,7 +943,7 @@ mod tests {
         let named = "screen shot.png is 20.1 MiB, over the 20 MiB limit for media in one message";
         assert_eq!(
             paths_from_paste(image.to_str().unwrap(), &[], Language::English, true),
-            Err(named.into())
+            refused(named)
         );
         let error = inline_sources(vec![image.display().to_string()])
             .await
@@ -540,11 +992,14 @@ mod tests {
             paths_from_paste(readme.to_str().unwrap(), &[], Language::English, false),
             Ok(None)
         );
-        // Together with media too: the paste is text naming both.
+        // Together with media it stays text too, and the media attaches.
         let both = format!("{} {}", image.display(), readme.display());
         assert_eq!(
             paths_from_paste(&both, &[], Language::English, false),
-            Ok(None)
+            Ok(Some(Dropped {
+                media: vec![canonical(&image)],
+                text: readme.display().to_string(),
+            }))
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -570,9 +1025,10 @@ mod tests {
         std::fs::write(&real, b"\r\n%PDF-1.7\n%%EOF\n").unwrap();
         assert_eq!(
             paths_from_paste(real.to_str().unwrap(), &[], Language::English, false),
-            Ok(Some(vec![
-                dunce::canonicalize(&real).unwrap().display().to_string()
-            ]))
+            Ok(Some(Dropped {
+                media: vec![canonical(&real)],
+                text: String::new(),
+            }))
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -595,7 +1051,8 @@ mod tests {
             .collect();
         let first = paths_from_paste(shots[0].to_str().unwrap(), &[], Language::English, false)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .media;
         assert!(
             paths_from_paste(shots[1].to_str().unwrap(), &first, Language::English, false)
                 .unwrap()
@@ -605,7 +1062,7 @@ mod tests {
         assert_eq!(
             paths_from_paste(&both, &[], Language::English, false)
                 .unwrap()
-                .map(|paths| paths.len()),
+                .map(|dropped| dropped.media.len()),
             Some(2)
         );
 
@@ -637,15 +1094,14 @@ mod tests {
                 Language::English,
                 false
             ),
-            Err(
+            refused(
                 "The attachments come to 24 MiB, over the 20 MiB limit for media in one message"
-                    .into()
             )
         );
         // In the interface language.
         assert_eq!(
             paths_from_paste(second.to_str().unwrap(), &attached, Language::German, false),
-            Err(Language::German.format(
+            refused(Language::German.format(
                 "The attachments come to {size}, over the {limit} limit for media in one message",
                 &[("size", "24 MiB"), ("limit", "20 MiB")]
             ))

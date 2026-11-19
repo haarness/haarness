@@ -2,10 +2,10 @@
 """The TUI's composer features in a real tmux pane, on the echo provider:
 long pastes (its own, one pasted again to open its chip, and Desktop's),
 slash commands shown as typed, the thinking display (Compact, Show, Hide),
-and files dropped into the prompt (media attached, other files and every
-file in shell mode kept as paths, media over a message's limit refused with
-the draft kept). Pane captures, with their colours, go to
-COMPOSER_TMUX_EVIDENCE."""
+and files dropped into the prompt (media attached, one at a time or several
+at once, other files and every file in shell mode kept as paths, media over
+a message's limit refused with the draft kept). Pane captures, with their
+colours, go to COMPOSER_TMUX_EVIDENCE."""
 import json
 import os
 import shlex
@@ -240,8 +240,9 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
             handle.write(b"%PDF-1.7\n")
             handle.truncate(21 * 1024 * 1024)
 
-        def drop(path):
-            run("tmux", "set-buffer", "-b", "composer", str(path).replace(" ", "\\ "))
+        def drop(*paths):
+            """Several files dropped at once come as one paste, a space apart."""
+            run("tmux", "set-buffer", "-b", "composer", " ".join(str(path).replace(" ", "\\ ") for path in paths))
             run("tmux", "paste-buffer", "-p", "-b", "composer", "-t", session)
 
         def draft():
@@ -276,11 +277,40 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
         until(lambda: "one.png" not in composer(), "Backspace did not remove the screenshots")
         checks.append("Drops: README.md and a .pdf that is not a PDF stay their paths, no command list; a real PDF and two 12 MiB screenshots are attached")
 
+        # Two macOS screenshots in one drop: the terminal escapes the spaces
+        # in their names but not the narrow no-break space before AM.
+        shots = [drops / f"Screenshot 2026-11-19 at 9.41.0{second}\u202fAM.png" for second in (0, 5)]
+        for shot in shots:
+            shot.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+        drop(*shots)
+        until(lambda: "Attached 2 files" in pane(), "two screenshots dropped at once were not both attached")
+        assert "Screenshot\\" not in draft() and "9.41.05\u202fAM.png" in composer(), composer()
+        screen("drop-two-at-once")
+        keys("BSpace")
+        keys("BSpace")
+        until(lambda: "9.41.0" not in composer(), "Backspace did not remove the two screenshots")
+
+        # A screenshot dropped with a README: the screenshot is attached and
+        # the README stays its path, written in after what was typed.
+        text("compare with ")
+        drop(drops / "screen shot.png", drops / "README.md")
+        typed = f"compare with {drops}/README.md".replace(" ", "")
+        until(lambda: "Attached 1 file" in pane() and typed in draft().replace(" ", ""),
+              "a screenshot dropped with a README was not attached with the README kept as its path")
+        assert "screen\\ shot.png" not in draft() and "screen shot.png" in composer() and "pasted" not in composer(), composer()
+        screen("drop-mixed")
+        keys("C-u")
+        keys("BSpace")
+        until(lambda: "screen shot.png" not in composer() and "README" not in composer(), "the mixed drop did not clear")
+        checks.append("Drops at once: two screenshots with a narrow no-break space in their names both attach; a screenshot with a README attaches the screenshot and keeps the README's path as text")
+
         text("!")
         until(lambda: "shell — Enter runs the command" in pane(), "shell mode did not open")
         text("ls -l ")
         drop(drops / "screen shot.png")
-        until(lambda: f"{drops}/screen\\ shot.png" in draft(), "a file dropped in shell mode did not stay its path")
+        # Compared without spaces: a long path wraps at its escaped space.
+        kept = f"ls -l {drops}/screen\\ shot.png".replace(" ", "")
+        until(lambda: kept in draft().replace(" ", ""), "a file dropped in shell mode did not stay its path")
         assert "Attached" not in pane(), pane()
         screen("drop-shell")
         keys("Enter")
@@ -292,7 +322,44 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
             return any(item["data"]["type"] == "tool_result" and "screen shot.png" in item["data"].get("output", "")
                        for item in items())
         until(listed, "the shell command did not get the dropped path")
-        checks.append("Shell mode: a dropped image stays its path and the command runs on it")
+        idle()
+        # A drop of an image and a README in shell mode: both stay paths.
+        text("!")
+        until(lambda: "shell — Enter runs the command" in pane(), "shell mode did not open again")
+        text("wc -c ")
+        drop(drops / "screen shot.png", drops / "README.md")
+        kept = f"{drops}/screen\\ shot.png {drops}/README.md".replace(" ", "")
+        until(lambda: kept in draft().replace(" ", ""), "a mixed drop in shell mode did not stay its paths")
+        assert "Attached" not in pane(), pane()
+        screen("drop-shell-mixed")
+        keys("Enter")
+
+        def counted():
+            return any(item["data"]["type"] == "tool_result" and "README.md" in item["data"].get("output", "")
+                       and "screen shot.png" in item["data"].get("output", "") for item in items())
+        until(counted, "the shell command did not get both dropped paths")
+        checks.append("Shell mode: a dropped image, alone or with a README, stays its path and the command runs on it")
+
+        # Nine screenshots and a README in one drop: the media are over the
+        # eight-file limit, so the notice says so and the drop stays text,
+        # sent whole.
+        idle()
+        many = [drops / f"many-{index}.png" for index in range(1, 10)]
+        for shot in many:
+            shot.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+        drop(*many, drops / "README.md")
+        until(lambda: "Attach at most 8 files at once" in pane(), "a drop over the limit was not reported")
+        assert " img " not in composer(), composer()
+        screen("drop-over-limit")
+        keys("Enter")
+
+        def sent_whole():
+            return any(item["data"]["type"] == "user_message"
+                       and all(f"{path}" in item["data"]["text"] for path in [*many, drops / "README.md"])
+                       for item in items())
+        until(sent_whole, "a drop over the limit was not kept as text")
+        idle()
+        checks.append("A drop of nine screenshots and a README is refused for the limit and kept as text, sent whole")
 
         before = len(items())
         text(f"Summarise @{drops}/scan")
