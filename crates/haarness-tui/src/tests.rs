@@ -27692,6 +27692,50 @@ fn a_drop_of_media_and_other_files_attaches_the_media_and_types_the_rest() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A drop of media and other files whose media break a limit says why and
+/// still puts the whole drop in the prompt as text, as a paste of it would.
+#[test]
+fn a_mixed_drop_over_a_limit_is_reported_and_kept_as_text() {
+    let root = std::env::temp_dir().join(format!("haarness-drop-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let readme = root.join("README.md");
+    std::fs::write(&readme, "# Notes\n").unwrap();
+    let mut paths: Vec<_> = (1..=9)
+        .map(|index| {
+            let shot = root.join(format!("shot-{index}.png"));
+            std::fs::write(&shot, b"png fixture").unwrap();
+            shot.display().to_string()
+        })
+        .collect();
+    paths.push(readme.display().to_string());
+    let dropped = paths
+        .iter()
+        .map(|path| {
+            if cfg!(windows) {
+                format!("\"{path}\"")
+            } else {
+                path.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+
+    app.paste_into_prompt(&dropped, false);
+    assert!(app.attachments.is_empty());
+    assert_eq!(app.composer.expanded_text(), dropped);
+    assert_eq!(app.notice, "Attach at most 8 files at once");
+
+    // Media alone over the limit are refused whole, as before.
+    app.composer.clear();
+    app.paste_into_prompt(&dropped[..dropped.rfind(' ').unwrap()], false);
+    assert!(app.composer.is_empty());
+    assert_eq!(app.notice, "Attach at most 8 files at once");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Dropping media the prompt holds already says so instead of counting
 /// nothing attached; the drop notices read in the interface language.
 #[test]

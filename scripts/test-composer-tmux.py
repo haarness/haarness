@@ -340,6 +340,27 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
         until(counted, "the shell command did not get both dropped paths")
         checks.append("Shell mode: a dropped image, alone or with a README, stays its path and the command runs on it")
 
+        # Nine screenshots and a README in one drop: the media are over the
+        # eight-file limit, so the notice says so and the drop stays text,
+        # sent whole.
+        idle()
+        many = [drops / f"many-{index}.png" for index in range(1, 10)]
+        for shot in many:
+            shot.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+        drop(*many, drops / "README.md")
+        until(lambda: "Attach at most 8 files at once" in pane(), "a drop over the limit was not reported")
+        assert " img " not in composer(), composer()
+        screen("drop-over-limit")
+        keys("Enter")
+
+        def sent_whole():
+            return any(item["data"]["type"] == "user_message"
+                       and all(f"{path}" in item["data"]["text"] for path in [*many, drops / "README.md"])
+                       for item in items())
+        until(sent_whole, "a drop over the limit was not kept as text")
+        idle()
+        checks.append("A drop of nine screenshots and a README is refused for the limit and kept as text, sent whole")
+
         before = len(items())
         text(f"Summarise @{drops}/scan")
         until(lambda: "scan.pdf" in pane(), "the large PDF was not offered")

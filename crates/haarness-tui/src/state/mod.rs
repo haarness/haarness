@@ -3001,7 +3001,14 @@ impl App {
                 };
             }
             Ok(None) => self.composer.paste(text),
-            Err(error) => self.notice = error,
+            Err(refusal) => {
+                // Media over a limit are reported; a drop that named other
+                // files goes in as text all the same, so none of it is lost.
+                if refusal.keep_text {
+                    self.composer.paste(text);
+                }
+                self.notice = refusal.reason;
+            }
         }
         self.selection = 0;
     }
