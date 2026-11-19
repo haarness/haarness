@@ -104,7 +104,9 @@ The model-facing `workflow` tool can read, start, wait for, inspect, create,
 cancel, pause, resume, and delete runs. Creation writes
 `.haarness/workflows/<name>.ts` in the project (the name a lowercase slug of
 letters, digits, `-` and `_`), never overwrites an existing file, and follows the
-normal workflow and edit permission decisions. Haarness
+normal workflow and edit permission decisions. A native workflow's `args`
+written as the JSON text of an object (`"args": "{\"target\":\"src\"}"`) start
+it with that object. Haarness
 advertises this tool to a primary model turn only when the request contains a
 standalone `workflow`/`workflows` word, the turn explicitly sets
 `tools.workflow=true`, or Ultracode is active. Ordinary child agents do not

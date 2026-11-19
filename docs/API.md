@@ -1085,7 +1085,10 @@ direct workflow commands and API starts are unaffected.
 
 Dynamic workflow starts accept exactly one of `name`, inline `source`, or
 explicit `path`, plus optional JSON `args`, workflow-wide `agent`, `model`, and
-`variant`, launching `threadId`, `wait`, and bounded `timeoutMs`. Named definitions come from the static project/global/
+`variant`, launching `threadId`, `wait`, and bounded `timeoutMs`. A native
+workflow's `args` must be an object; a string holding an object's JSON text
+(`"{\"target\":\"src\"}"`, as a model may write the `workflow` tool's `args`)
+is read as that object, and any other value is refused. Named definitions come from the static project/global/
 plugin catalog. Each run executes in a dedicated child session and persists an
 immutable source snapshot and SHA-256, status, phase, structured status,
 ordered logs, warnings, child-agent records, result/error, and timestamps.
