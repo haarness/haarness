@@ -155,6 +155,13 @@ CORPUS = [
     'BASH_ENV=./x.sh bash -c \'rm -rf "$TMPDIR"/*\'', 'exec -a -sh sh -c \'rm -rf "$TMPDIR"/*\'',
     '/usr/bin/sudo -n sh -c \'rm -rf "$TMPDIR"/*\'', 'env -S-i sh -c \'rm -rf "$TMPDIR"/*\'',
     'env -0i sh -c \'rm -rf "$TMPDIR"/*\'', '/bin/su -c \'rm -rf "$TMPDIR"/*\'',
+    '(exec -a mysh sh -c \'rm -rf "$TMPDIR"/*\')', 'env --argv0=-sh sh -c \'rm -rf "$TMPDIR"/*\'',
+    'dash -o interactive -c \'echo x > "$TMPDIR/a2.txt"\'', 'ksh -o rc -c \'echo x > "$TMPDIR/a3.txt"\'',
+    'ksh --rc -c \'echo x > "$TMPDIR/a4.txt"\'', 'ksh -ologin_shell -c \'echo x > "$TMPDIR/a5.txt"\'',
+    'export $(grep -v "^#" vars.txt | xargs) && rm -rf "$TMPDIR"/build',
+    'while IFS== read -r k v; do export "$k=$v"; done < vars.txt; rm -rf "$TMPDIR"/build',
+    'env $(cat vars.txt) sh -c \'rm -rf "$TMPDIR"/build\'', 'declare -x "$(head -1 vars.txt)"; rm -rf "$TMPDIR"/build',
+    'export PATH="$PWD/bin:$PATH"; echo x > "$TMPDIR/ok4.txt"',
     # Files
     'rm -rf node_modules && npm install', 'rm -rf ~/Library/Caches/foo', 'cat ~/.zshrc', 'cat ../outside/secret',
     'cp .env.example .env', 'mv build dist', 'chmod +x run.sh && ./run.sh', 'bash run.sh', 'sudo rm -rf /tmp/x',

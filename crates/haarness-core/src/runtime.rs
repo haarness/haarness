@@ -27984,6 +27984,27 @@ mod tests {
             "/bin/su -c 'rm -rf \"$TMPDIR\"/*'",
             "env -S-i sh -c 'rm -rf \"$TMPDIR\"/*'",
             "env -0i sh -c 'rm -rf \"$TMPDIR\"/*'",
+            // A shell run under another name (bash as anything but `sh`
+            // reads `BASH_ENV`), and startup files turned on with `-o`.
+            "(exec -a mysh sh -c 'echo x > \"$TMPDIR/a1.txt\"')",
+            "exec -a sh0 sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "exec -a '' sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "env -a mysh sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "env --argv0=-sh sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "dash -o interactive -c 'echo x > \"$TMPDIR/a2.txt\"'",
+            "ksh -o rc -c 'echo x > \"$TMPDIR/a3.txt\"'",
+            "ksh --rc -c 'echo x > \"$TMPDIR/a4.txt\"'",
+            "ksh -o login -c 'echo x > \"$TMPDIR/a5.txt\"'",
+            "ksh -orc -c 'echo x > \"$TMPDIR/a6.txt\"'",
+            "ksh --login_shell -c 'echo x > \"$TMPDIR/a8.txt\"'",
+            "mksh -o login -c 'echo x > \"$TMPDIR/a9.txt\"'",
+            // A variable whose name the line does not show.
+            "export $(grep -v \"^#\" vars.txt | xargs) && rm -rf \"$TMPDIR\"/build",
+            "while IFS== read -r k v; do export \"$k=$v\"; done < vars.txt; rm -rf \"$TMPDIR\"/build",
+            "export $(cat vars.txt); rm -rf \"$TMPDIR\"/build",
+            "declare -x \"$(head -1 vars.txt)\"; rm -rf \"$TMPDIR\"/build",
+            "read -r \"$name\" < vars.txt; rm -rf \"$TMPDIR\"/build",
+            "printf -v \"$name\" %s x; rm -rf \"$TMPDIR\"/build",
             // Text the line does not show, wherever it runs.
             "if . ./env.sh; then echo x > \"$TMPDIR/c1.txt\"; fi",
             "command . ./env.sh; echo x > \"$TMPDIR/c2.txt\"",
@@ -27997,8 +28018,13 @@ mod tests {
                 "{command} does not ask"
             );
         }
-        // A shell that reads none keeps the folder.
+        // A shell that reads none keeps the folder, and so do setters of
+        // names the line shows.
         for command in [
+            "export PATH=\"$PWD/bin:$PATH\"; echo x > \"$TMPDIR/ok4.txt\"",
+            "env FOO=$(pwd) sh -c 'echo x > \"$TMPDIR/ok5.txt\"'",
+            "read -r line < vars.txt; echo x > \"$TMPDIR/ok6.txt\"",
+            "printf -v line %s x; echo x > \"$TMPDIR/ok7.txt\"",
             "sh -c 'echo x > \"$TMPDIR/ok1.txt\"'",
             "sh -e -o pipefail -c 'echo x > \"$TMPDIR/ok2.txt\"'",
             "sh -c 'echo x > \"$TMPDIR/ok3.txt\"' -l",
@@ -28007,6 +28033,27 @@ mod tests {
             assert!(
                 !outside("bash", shell(command), Some(&temp)),
                 "{command} asks"
+            );
+        }
+        // A folder with a space in it is one word only in double quotes:
+        // bare, the shell splits it, so it is read as before.
+        let spaced = root.join("chats space/1a2b3c4d");
+        std::fs::create_dir_all(&spaced).unwrap();
+        for command in [
+            "rm -rf \"$TMPDIR\"/build",
+            "echo x > \"$TMPDIR/x\"",
+            "cat \"${TMPDIR}/x\"",
+        ] {
+            assert!(
+                !outside("bash", shell(command), Some(&spaced)),
+                "{command} asks"
+            );
+        }
+        for command in ["rm -rf $TMPDIR/build", "cd $TMPDIR && ls", "cat ${TMP}/x"] {
+            assert_eq!(
+                outside("bash", shell(command), Some(&spaced)),
+                outside("bash", shell(command), None),
+                "{command}"
             );
         }
         // Whether the command must get the folder in the variables: only
@@ -28028,6 +28075,9 @@ mod tests {
             "export TMP=~; rm -f $TMP/secret.txt",
             "TEMP=/etc; cat $TEMP/hosts",
             "echo x > \"${TMPDIR:=$HOME}/p10.txt\"",
+            // Their scripts are not read, with the folder or without.
+            "ksh -ologin_shell -c 'echo x > \"$TMPDIR/a7.txt\"'",
+            "env $(cat vars.txt) sh -c 'rm -rf \"$TMPDIR\"/build'",
         ] {
             assert_eq!(
                 outside("bash", shell(command), Some(&temp)),

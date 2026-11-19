@@ -1323,6 +1323,9 @@ impl Reader<'_> {
         while let Some((node, parent)) = stack.pop() {
             sets_tree = sets_tree || sets_work_tree(node, parent, command);
             note_cdpath(node, parent, command, &mut cdpaths);
+            if sets_unknown_name(node, parent, command) {
+                note_temp_reset();
+            }
             if node.kind() == "command" {
                 command_nodes.push((node, parent));
             }
@@ -2250,15 +2253,27 @@ impl Reader<'_> {
             "env" => {
                 let options = Options::with(arguments, "uCPSa", "", ENV_LONG);
                 // An emptied environment (`-i`, `-`), a variable taken away
-                // (`-u`) or a split text (`-S`, which may hold either).
+                // (`-u`), a split text (`-S`, which may hold either), another
+                // name for what it runs (`-a`), or settings only known when
+                // it runs (`env $(cat vars.env) …`).
+                let command = env_command(options.rest);
+                let settings = &options.rest[..options.rest.len() - command.len()];
                 if options.flags.contains('i')
-                    || ["u", "unset", "S", "split-string"]
+                    || ["u", "unset", "S", "split-string", "a", "argv0"]
                         .iter()
                         .any(|name| options.value(name).is_some())
                     || options
                         .rest
                         .first()
                         .is_some_and(|dash| dash.literal && dash.value == "-")
+                    || settings.iter().any(|word| {
+                        let name = word
+                            .raw
+                            .split_once('=')
+                            .map_or(word.raw.as_str(), |(name, _)| name);
+                        name.contains(['$', '`'])
+                    })
+                    || command.first().is_some_and(|word| !word.literal)
                 {
                     note_temp_reset();
                 }
@@ -2379,14 +2394,11 @@ impl Reader<'_> {
             }
             "exec" => {
                 let options = Options::read(arguments, "a", "", &[]);
-                // `-l` makes what it runs a login shell, and so does a name
-                // given with `-a` that starts with `-`; `-c` empties its
+                // `-l` makes what it runs a login shell, and any name given
+                // with `-a` may make a shell another one (bash run as `sh`
+                // under another name reads `BASH_ENV`); `-c` empties its
                 // environment.
-                if options.flags.contains(['l', 'c'])
-                    || options
-                        .value("a")
-                        .is_some_and(|name| name.starts_with('-') || name.contains(['$', '`']))
-                {
+                if options.flags.contains(['l', 'c']) || options.value("a").is_some() {
                     note_temp_reset();
                 }
                 self.invocation(options.rest, stdin, source, depth);
@@ -7540,7 +7552,10 @@ fn reads_startup_files(shell: &str, arguments: &[Word<'_>]) -> bool {
         }
         if let Some(long) = value.strip_prefix("--") {
             let name = long.split_once('=').map_or(long, |(name, _)| name);
-            if matches!(name, "login" | "interactive" | "rcfile" | "init-file") {
+            if matches!(
+                name,
+                "login" | "interactive" | "rcfile" | "init-file" | "rc" | "login_shell"
+            ) {
                 return true;
             }
             continue;
@@ -7549,12 +7564,73 @@ fn reads_startup_files(shell: &str, arguments: &[Word<'_>]) -> bool {
         if letters.contains(startup) {
             return true;
         }
-        // `-o` and `-O` take an option's name.
+        // ksh and mksh take `-o`'s name in the same word (`-orc`).
+        if matches!(shell, "ksh" | "mksh")
+            && let Some(name) = letters.strip_prefix('o').filter(|name| !name.is_empty())
+        {
+            if startup_option(name) {
+                return true;
+            }
+            continue;
+        }
+        // `-o` and `-O` take an option's name, which may be one that reads
+        // them (`dash -o interactive`, `ksh -o rc`).
         if letters.contains(['o', 'O']) {
-            words.next();
+            match words.next() {
+                Some(name) if !name.literal || startup_option(&name.value) => return true,
+                _ => {}
+            }
         }
     }
     false
+}
+
+/// Whether `name`, given to a shell's `-o` or `+o`, makes it read startup
+/// files.
+fn startup_option(name: &str) -> bool {
+    matches!(name, "interactive" | "login" | "login_shell" | "rc")
+}
+
+/// Whether `node` (with its `parent`) may set a variable whose name the line
+/// does not show, `TMPDIR` among them: a declaration (`export`, `declare`,
+/// `typeset`, `local`, `readonly`) given a word with an expansion or a
+/// substitution before its `=`, or none (`export $(cat vars.env)`, `export
+/// "$k=$v"`), and `read`, `mapfile`, `readarray` or `printf -v` given a name
+/// only known when it runs.
+fn sets_unknown_name(
+    node: tree_sitter::Node<'_>,
+    parent: Option<tree_sitter::Node<'_>>,
+    source: &str,
+) -> bool {
+    let text = |node: tree_sitter::Node<'_>| source.get(node.byte_range()).unwrap_or_default();
+    let dynamic = |text: &str| text.contains(['$', '`']);
+    if parent.is_some_and(|parent| parent.kind() == "declaration_command")
+        && !matches!(node.kind(), "variable_assignment" | "variable_name")
+        && node.is_named()
+    {
+        let written = text(node);
+        let name = written.split_once('=').map_or(written, |(name, _)| name);
+        return dynamic(name);
+    }
+    if node.kind() != "command" {
+        return false;
+    }
+    let Some(program) = node.child_by_field_name("name") else {
+        return false;
+    };
+    let words: Vec<_> = node
+        .named_children(&mut node.walk())
+        .filter(|child| child.id() != program.id() && WORD_KINDS.contains(&child.kind()))
+        .collect();
+    match program_name(text(program)).as_str() {
+        "read" | "mapfile" | "readarray" => words
+            .iter()
+            .any(|word| !text(*word).starts_with('-') && dynamic(text(*word))),
+        "printf" => words
+            .windows(2)
+            .any(|pair| text(pair[0]) == "-v" && dynamic(text(pair[1]))),
+        _ => false,
+    }
 }
 
 /// Whether `$TMPDIR`, `$TMP` and `$TEMP` in `command` surely hold the chat's
@@ -7664,16 +7740,21 @@ pub(crate) fn reached_chat_temp(resolved: &Path, folder: &Path) -> bool {
 /// The folder `$NAME` or `${NAME}` stands for, when it is one of
 /// [`FOLDER_VARIABLES`] and set to an absolute path, or one of the chat's
 /// temp folder variables while a line of it is read.
-fn folder_variable(text: &str) -> Option<String> {
+fn folder_variable(text: &str, quoted: bool) -> Option<String> {
     let name = text
         .strip_prefix("${")
         .and_then(|rest| rest.strip_suffix('}'))
         .or_else(|| text.strip_prefix('$'))?;
+    // A folder with a space in it (`C:/Users/Sam Rivera/…`) is one word
+    // only in double quotes; bare, the shell splits it.
     if crate::chat_temp::VARIABLES.contains(&name)
         && let Some(folder) = CHAT_TEMP.with(|own| {
             own.borrow_mut()
                 .as_mut()
-                .filter(|own| own.names)
+                .filter(|own| {
+                    own.names
+                        && (quoted || !own.folder.to_string_lossy().contains(char::is_whitespace))
+                })
                 .map(|own| {
                     own.used.named = true;
                     own.folder.clone()
@@ -7695,17 +7776,23 @@ fn folder_variable(text: &str) -> Option<String> {
 /// reads as the folder the shell puts there, so `> $HOME/.profile` is judged
 /// as the file it writes, like `~/.profile`.
 fn path_literal(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
+    path_literal_in(node, source, false)
+}
+
+/// [`path_literal`], `quoted` inside double quotes.
+fn path_literal_in(node: tree_sitter::Node<'_>, source: &str, quoted: bool) -> (String, bool) {
     match node.kind() {
-        "simple_expansion" | "expansion" => folder_variable(&node_text(node, source))
+        "simple_expansion" | "expansion" => folder_variable(&node_text(node, source), quoted)
             .map_or_else(|| (String::new(), false), |folder| (folder, true)),
         "concatenation" | "string" => {
+            let quoted = quoted || node.kind() == "string";
             let mut value = String::new();
             for index in 0..node.named_child_count() {
                 let Some(child) = node.named_child(index) else {
                     continue;
                 };
                 let (part, complete) = if index == 0 {
-                    path_literal(child, source)
+                    path_literal_in(child, source, quoted)
                 } else {
                     literal(child, source)
                 };
