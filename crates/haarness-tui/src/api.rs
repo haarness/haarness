@@ -78,6 +78,10 @@ const WORKSPACE_MUTATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// nothing about what had gone wrong.
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// A model summary of a long chat can take minutes: `/compact` waits as long
+/// as Desktop, the phones and the web do.
+pub(crate) const COMPACT_TIMEOUT: Duration = Duration::from_secs(310);
+
 /// A request to an MCP server waits while the server is on its first start,
 /// which may take 2 minutes for a local server (a first `npx -y` download),
 /// before it gets its own answer: past the ordinary 15 s deadline.
@@ -1256,6 +1260,7 @@ impl ApiClient {
     ) -> Result<Item> {
         Ok(self
             .request(reqwest::Method::POST, &format!("/v1/threads/{id}/compact"))
+            .timeout(COMPACT_TIMEOUT)
             .json(&request)
             .sent()
             .await?

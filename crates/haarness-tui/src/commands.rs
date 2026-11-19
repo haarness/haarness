@@ -2,9 +2,9 @@
 
 use anyhow::Result;
 use haarness_protocol::{
-    CommandExecutionResponse, CompactRequest, CreateThreadRequest, ExecuteCommandRequest,
-    GoalActionRequest, GoalActionResponse, GoalState, GoalStatus, PtyCreateRequest, RequestId,
-    StartTurnRequest, Thread, UpdateThreadRequest, WorkflowId, WorkflowRun, WorkflowStartRequest,
+    CommandExecutionResponse, CreateThreadRequest, ExecuteCommandRequest, GoalActionRequest,
+    GoalActionResponse, GoalState, GoalStatus, PtyCreateRequest, RequestId, StartTurnRequest,
+    Thread, UpdateThreadRequest, WorkflowId, WorkflowRun, WorkflowStartRequest,
     WorkspaceCleanupRequest, WorkspaceCreateRequest, WorkspaceInfo, WorkspaceListResponse,
     WorkspaceOperationResponse, WorkspaceRefKind, WorkspaceRefsResponse, WorkspaceRemoveRequest,
     WorkspaceResetRequest, WorkspaceResolveRefRequest, WorkspaceResolveRefResponse,
@@ -2616,25 +2616,10 @@ impl App {
                 }
             }
             "compact" => {
-                client
-                    .compact(
-                        self.thread.id,
-                        CompactRequest {
-                            // A bare command asks the server to generate a real
-                            // model summary. Explicit text remains available for
-                            // advanced/manual checkpointing.
-                            summary: (!arguments.is_empty()).then(|| arguments.into()),
-                            files_touched: Vec::new(),
-                            outstanding: Vec::new(),
-                            todo_checkpoint: None,
-                            tail_start_sequence: None,
-                            kept_sequences: Vec::new(),
-                            tool_output_chars: None,
-                        },
-                    )
-                    .await?;
-                self.items = client.items(self.thread.id).await?;
-                self.notice = "Compaction checkpoint created".into();
+                // A bare command asks the server to generate a real model
+                // summary. Explicit text remains available for
+                // advanced/manual checkpointing.
+                self.start_compaction((!arguments.is_empty()).then(|| arguments.into()), client);
             }
             "diff" => match crate::diffview::DiffSource::parse(&arguments.to_ascii_lowercase()) {
                 Some(source) => self.open_diff_viewer(source, client),

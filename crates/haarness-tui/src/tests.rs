@@ -609,10 +609,7 @@ async fn bare_compact_requests_a_server_generated_summary_over_real_http() {
         },
         created_at: Utc::now(),
     };
-    let responses = [
-        serde_json::to_string(&compacted).unwrap(),
-        serde_json::to_string(&vec![compacted.clone()]).unwrap(),
-    ];
+    let responses = [serde_json::to_string(&compacted).unwrap()];
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -655,6 +652,14 @@ async fn bare_compact_requests_a_server_generated_summary_over_real_http() {
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
 
     app.execute_command("/compact", &client).await.unwrap();
+    // The summary is asked for on a worker task; the tick takes its answer.
+    for _ in 0..500 {
+        app.poll_compactions();
+        if app.compacting_since().is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
     assert_eq!(app.notice, "Compaction checkpoint created");
     assert!(matches!(
@@ -24426,6 +24431,9 @@ mod display_tests;
 
 #[path = "background_tests.rs"]
 mod background_tests;
+
+#[path = "compaction_tests.rs"]
+mod compaction_tests;
 
 #[path = "reply_files_tests.rs"]
 mod reply_files_tests;

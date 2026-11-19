@@ -307,7 +307,7 @@ fn rule_state(app: &App, theme: &Theme) -> (char, Color) {
     if !app.pending_permissions.is_empty() || !app.pending_questions.is_empty() {
         return ('━', theme.accent);
     }
-    if app.active_turn.is_some() {
+    if app.active_turn.is_some() || app.compacting_since().is_some() {
         return ('━', theme.pulse(theme.primary, breath(app.tick)));
     }
     ('─', theme.hairline())
@@ -730,6 +730,17 @@ fn right_segments(app: &App, width: usize) -> (Vec<Vec<Span>>, usize) {
     if app.active_turn.is_some() {
         return running_segments(app, theme);
     }
+    // A `/compact` summary on its way: said as a turn's own compaction is.
+    if let Some(started) = app.compacting_since() {
+        return detail(vec![vec![
+            Span::new(
+                crate::compaction::compacting_text(started.elapsed().as_secs()),
+                theme.primary,
+            )
+            .on(theme.surface)
+            .with_attributes(attr::BOLD),
+        ]]);
+    }
     let background = app.root_descendant_active_count();
     // Commands left running in the background: a dev server may run for
     // hours while the chat is done, so they are counted quietly.
@@ -1094,7 +1105,7 @@ fn phase_text(app: &App) -> String {
                 format!("child agents   {elapsed}s")
             }
         }
-        "compacting" => format!("compacting   {elapsed}s"),
+        "compacting" => crate::compaction::compacting_text(elapsed),
         "retrying" => format!("recovering incomplete response   {elapsed}s"),
         "stopping" => app.language.text("stopping").into(),
         "done" => app.language.text("finishing").into(),

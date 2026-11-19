@@ -784,6 +784,9 @@ impl App {
             }
             "item.created" => {
                 if let Ok(item) = serde_json::from_value::<Item>(event.payload.clone()) {
+                    if matches!(item.data, ItemData::Compaction { .. }) {
+                        self.compaction_arrived(item.thread_id);
+                    }
                     // The prompt a turn starts with: a person's own, not a
                     // background result the runtime delivered.
                     if let ItemData::UserMessage {
