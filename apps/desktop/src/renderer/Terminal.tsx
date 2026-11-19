@@ -110,12 +110,13 @@ export function TerminalPanel() {
         return [];
       }
       if (open) await ensureTerminal(connection, shown);
-      const values = ofFolder(
-        await window.haarness.api<PtyInfo[]>(connection, "listPtys", []),
-        shown,
-      );
+      const listed = await window.haarness.api<PtyInfo[]>(connection, "listPtys", []);
+      const values = ofFolder(listed, shown);
       if (id === generation && connection === app.state.connection?.id && shown === folder()) {
-        shownOutput.keep(connection + ":", values.map((value) => value.id));
+        // Only terminals the server no longer has are forgotten. This
+        // computer's chats share one server, and another chat's terminals
+        // keep where they were scrolled and cleared for when it is open again.
+        shownOutput.keep(connection + ":", listed.map((value) => value.id));
         setTabs(values);
         if (!values.some((value) => value.id === selected())) {
           // The terminal shown is gone (closed, or its server replaced). A
