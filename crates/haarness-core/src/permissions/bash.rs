@@ -390,6 +390,7 @@ pub(crate) fn analyze_reading(
     workdir: &Path,
     reading: Reading,
 ) -> BashAnalysis {
+    let _names = LineNames::of(command);
     if command.len() > MAX_COMMAND_BYTES {
         let mut analysis = fallback(&clipped(command));
         analysis.unreadable = true;
@@ -7385,6 +7386,9 @@ const FOLDER_VARIABLES: [&str; 6] = [
 struct ChatTemp {
     folder: PathBuf,
     reached: Vec<PathBuf>,
+    /// Whether `$TMPDIR`, `$TMP` and `$TEMP` name it in the line under way
+    /// (see [`names_chat_temp`]).
+    names: bool,
 }
 
 thread_local! {
@@ -7419,6 +7423,7 @@ pub(crate) fn with_chat_temp_reached<T>(
     let own = folder.map(|folder| ChatTemp {
         folder: folder.to_path_buf(),
         reached: Vec::new(),
+        names: true,
     });
     let previous = CHAT_TEMP.with(|current| current.replace(own));
     let restore = Restore(previous);
@@ -7432,6 +7437,62 @@ pub(crate) fn with_chat_temp_reached<T>(
     });
     drop(restore);
     (value, reached)
+}
+
+/// Whether `$TMPDIR`, `$TMP` and `$TEMP` in `command` surely hold the chat's
+/// own temp folder, as its commands get them: the line names them only in
+/// plain expansions (`$TMPDIR`, `${TMP}`), so it never sets, unsets, declares
+/// or reads a value into one (`TMPDIR=~`, `export`, `unset`, `read`, `for
+/// TMPDIR in`, `printf -v`, `env TMPDIR=`, `${TMPDIR:=…}`), and runs nothing
+/// that hands its commands another environment (`env -i`, `env -u`, `exec
+/// -c`, `sudo`, `doas`, `su`, `pkexec`, `runuser`) or text the line does not
+/// show (`source`, `.`, `eval`). Otherwise the whole line reads them as
+/// before: `$TMPDIR` as the server's own, the others as unknown. It reads
+/// the text, so a word in a string or a comment counts too; that only ever
+/// asks more.
+fn names_chat_temp(command: &str) -> bool {
+    use std::sync::LazyLock;
+    static PLAIN: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\$\{(?:TMPDIR|TMP|TEMP)\}|\$(?:TMPDIR|TMP|TEMP)\b").expect("valid")
+    });
+    static NAMED: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\b(?:TMPDIR|TMP|TEMP)\b").expect("valid"));
+    static ELSEWHERE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(concat!(
+            r"(?:^|[\s;&|(){}!`])(?:sudo|doas|su|pkexec|runuser|source|eval)(?:\s|$)",
+            r"|(?:^|[;&|(){}!\n]|\b(?:then|do|else)\b)\s*\.\s",
+            r"|\benv\b[^;&|\n]*?\s(?:-[A-Za-z]*[iu]|-(?:\s|$)|--(?:ignore-environment|unset))",
+            r"|\bexec\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c",
+        ))
+        .expect("valid")
+    });
+    !NAMED.is_match(&PLAIN.replace_all(command, "")) && !ELSEWHERE.is_match(command)
+}
+
+/// For as long as a line is read, whether its `$TMPDIR`, `$TMP` and `$TEMP`
+/// name the chat's own temp folder (see [`names_chat_temp`]).
+struct LineNames(Option<bool>);
+
+impl LineNames {
+    fn of(command: &str) -> Self {
+        Self(CHAT_TEMP.with(|own| {
+            own.borrow_mut()
+                .as_mut()
+                .map(|own| std::mem::replace(&mut own.names, names_chat_temp(command)))
+        }))
+    }
+}
+
+impl Drop for LineNames {
+    fn drop(&mut self) {
+        if let Some(previous) = self.0 {
+            CHAT_TEMP.with(|own| {
+                if let Some(own) = own.borrow_mut().as_mut() {
+                    own.names = previous;
+                }
+            });
+        }
+    }
 }
 
 /// Whether `resolved` (links followed) is in the chat's own temp folder of
@@ -7469,8 +7530,12 @@ fn folder_variable(text: &str) -> Option<String> {
         .and_then(|rest| rest.strip_suffix('}'))
         .or_else(|| text.strip_prefix('$'))?;
     if crate::chat_temp::VARIABLES.contains(&name)
-        && let Some(folder) =
-            CHAT_TEMP.with(|own| own.borrow().as_ref().map(|own| own.folder.clone()))
+        && let Some(folder) = CHAT_TEMP.with(|own| {
+            own.borrow()
+                .as_ref()
+                .filter(|own| own.names)
+                .map(|own| own.folder.clone())
+        })
     {
         return Some(folder.to_string_lossy().into_owned());
     }
@@ -8525,6 +8590,51 @@ mod tests {
     fn pipes_and_substitution_are_commands_too() {
         let analysis = analyze("cat Cargo.toml | grep name", &workspace());
         assert_eq!(analysis.patterns, vec!["cat Cargo.toml", "grep name"]);
+    }
+
+    /// Only a line that names the temp folder variables in plain
+    /// expansions alone, and runs its commands in its own environment, reads
+    /// them as the chat's own temp folder.
+    #[test]
+    fn a_line_that_sets_the_temp_variables_reads_them_as_before() {
+        for plain in [
+            "echo hi > \"$TMPDIR/out.txt\"",
+            "cat ${TMPDIR}/a $TMP/b $TEMP/c",
+            "cd \"$TMPDIR\" && make > build.log",
+            "python3 -c 'import tempfile' > \"$TMPDIR/log\"; cat .env.example",
+            "find . -name '*.py' > \"$TMPDIR/list\"",
+            "ls $MYTMPDIR $TMP_DIR",
+            "cat source.txt sudoers.md",
+        ] {
+            assert!(names_chat_temp(plain), "{plain}");
+        }
+        for setting in [
+            "export TMPDIR=\"$HOME\"; echo x > \"$TMPDIR/p1.txt\"",
+            "TMPDIR=$HOME; echo x > $TMPDIR/p2.txt",
+            "TMP=x cmd",
+            "for TMPDIR in a; do :; done",
+            "read -r TEMP",
+            "printf -v TMPDIR %s x",
+            "local TMPDIR",
+            "typeset -x TMPDIR",
+            "unset TMP",
+            "echo ${TMPDIR:-/tmp} ${#TMPDIR}",
+            "env TMPDIR=x sh -c 'echo $TMPDIR'",
+            "env -u TMPDIR sh -c 'echo $TMPDIR'",
+            "env -i PATH=/bin sh -c 'echo $TMPDIR'",
+            "env - sh -c 'echo $TMPDIR'",
+            "env --ignore-environment sh -c 'echo $TMPDIR'",
+            "sudo sh -c 'echo $TMPDIR'",
+            "doas sh -c 'echo $TMPDIR'",
+            "su -c 'echo $TMPDIR'",
+            ". ./env.sh; echo $TMPDIR",
+            "true && . env.sh",
+            "source env.sh",
+            "eval \"$x\"; echo $TMPDIR",
+            "exec -c sh -c 'echo $TMPDIR'",
+        ] {
+            assert!(!names_chat_temp(setting), "{setting}");
+        }
     }
 
     #[test]

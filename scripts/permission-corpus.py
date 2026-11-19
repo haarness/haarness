@@ -139,6 +139,13 @@ CORPUS = [
     'mkdir -p ${TMPDIR}/a/b && touch $TMPDIR/a/b/c', 'cp README.md "$TMP/readme.md"', 'cd $TMPDIR && ls',
     'python3 -m pytest > "$TMPDIR/pytest.log" 2>&1; tail -5 "$TMPDIR/pytest.log"', 'printf %s "$TMPDIR"',
     'cat "$TMPDIR/../outside/x"', 'echo x > $TMPDIR/../x', 'cat $TEMP/notes.txt',
+    'export TMPDIR="$HOME"; echo x > "$TMPDIR/p1.txt"', 'TMPDIR=$HOME; echo x > $TMPDIR/p2.txt',
+    'TMPDIR=~ && cp README.md $TMPDIR/p3.txt', 'for TMPDIR in "$HOME"; do echo x > "$TMPDIR/p4.txt"; done',
+    'read -r TMPDIR <<< "$HOME"; echo x > "$TMPDIR/p5.txt"', 'env TMPDIR="$HOME" sh -c \'echo x > "$TMPDIR/p6.txt"\'',
+    'export TMP=~; rm -f $TMP/secret.txt', 'export TMPDIR=~/mytmp; rm -rf "$TMPDIR"/*',
+    'unset TMPDIR; echo x > "$TMPDIR/p7.txt"', 'env -u TMPDIR sh -c \'echo x > "$TMPDIR/p8.txt"\'',
+    'env -i sh -c \'echo x > "$TMPDIR/p9.txt"\'', 'sudo sh -c \'echo x > "$TMPDIR/p10.txt"\'',
+    '. ./settings.sh; echo x > "$TMPDIR/p11.txt"', 'echo x > "${TMPDIR:=$HOME}/p12.txt"',
     # Files
     'rm -rf node_modules && npm install', 'rm -rf ~/Library/Caches/foo', 'cat ~/.zshrc', 'cat ../outside/secret',
     'cp .env.example .env', 'mv build dist', 'chmod +x run.sh && ./run.sh', 'bash run.sh', 'sudo rm -rf /tmp/x',

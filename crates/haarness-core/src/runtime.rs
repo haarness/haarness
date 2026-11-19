@@ -27914,6 +27914,45 @@ mod tests {
                 "{command} does not ask"
             );
         }
+        // A line that sets, unsets or reads a value into one of the
+        // variables, or hands its commands another environment, reads them
+        // as without a folder: here `$TMPDIR` is the test's own temp folder,
+        // outside the project, so each asks as it did.
+        for command in [
+            "export TMPDIR=\"$HOME\"; echo x > \"$TMPDIR/p1.txt\"",
+            "TMPDIR=$HOME; echo x > $TMPDIR/p2.txt",
+            "TMPDIR=~ && cp README.md $TMPDIR/p3.txt",
+            "for TMPDIR in \"$HOME\"; do echo x > \"$TMPDIR/p4.txt\"; done",
+            "read -r TMPDIR <<< \"$HOME\"; echo x > \"$TMPDIR/p5.txt\"",
+            "env TMPDIR=\"$HOME\" sh -c 'echo x > \"$TMPDIR/p6.txt\"'",
+            "export TMPDIR=~/mytmp; rm -rf \"$TMPDIR\"/*",
+            "unset TMPDIR; echo x > \"$TMPDIR/p7.txt\"",
+            "printf -v TMPDIR %s ~; echo x > \"$TMPDIR/p8.txt\"",
+            "declare TMPDIR=~; echo x > $TMPDIR/p9.txt",
+            "env -u TMPDIR sh -c 'echo x > \"$TMPDIR/p11.txt\"'",
+            "env -i sh -c 'echo x > \"$TMPDIR/p12.txt\"'",
+            "sudo sh -c 'echo x > \"$TMPDIR/p13.txt\"'",
+            ". ./settings.sh; echo x > \"$TMPDIR/p14.txt\"",
+            "source settings.sh && echo x > $TMPDIR/p15.txt",
+            "eval \"$SET\"; echo x > $TMPDIR/p16.txt",
+            "exec -c sh -c 'echo x > \"$TMPDIR/p17.txt\"'",
+        ] {
+            assert!(
+                outside("bash", shell(command), Some(&temp)),
+                "{command} does not ask"
+            );
+        }
+        for command in [
+            "export TMP=~; rm -f $TMP/secret.txt",
+            "TEMP=/etc; cat $TEMP/hosts",
+            "echo x > \"${TMPDIR:=$HOME}/p10.txt\"",
+        ] {
+            assert_eq!(
+                outside("bash", shell(command), Some(&temp)),
+                outside("bash", shell(command), None),
+                "{command}"
+            );
+        }
         // Without the chat's folder, as before: a path spelled out there asks.
         assert!(outside("bash", shell(&format!("echo x > {shown}/x")), None));
         // The file tools.
