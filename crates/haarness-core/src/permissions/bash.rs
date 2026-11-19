@@ -3240,32 +3240,9 @@ impl Reader<'_> {
             }
             // `sed -i` rewrites its files in place.
             "sed" | "gsed" => {
-                let in_place = long("--in-place") || short('i');
-                let scripted = arguments.iter().any(|word| {
-                    matches!(word.value.as_str(), "-e" | "--expression" | "-f" | "--file")
-                        || word.value.starts_with("--expression=")
-                        || word.value.starts_with("--file=")
-                });
-                if in_place {
-                    // BSD `sed -i '' …` and `sed -i .bak …`: the word after a
-                    // bare `-i` is its backup suffix.
-                    let suffix = arguments.iter().enumerate().find_map(|(index, word)| {
-                        (word.value == "-i")
-                            .then(|| arguments.get(index + 1))
-                            .flatten()
-                            .filter(|next| next.value.is_empty() || next.value.starts_with('.'))
-                            .map(|next| next.node.id())
-                    });
-                    let files =
-                        operands(&["-e", "--expression", "-f", "--file", "-l", "--line-length"]);
-                    for word in files
-                        .into_iter()
-                        .filter(|word| Some(word.node.id()) != suffix)
-                        .skip(usize::from(!scripted))
-                    {
-                        for path in expanded(word, source) {
-                            record(word, &path, true);
-                        }
+                for word in sed_in_place(arguments).into_iter().flatten() {
+                    for path in expanded(word, source) {
+                        record(word, &path, true);
                     }
                 }
             }
@@ -4738,6 +4715,87 @@ fn program_name(value: &str) -> String {
         Some(stem) => stem.to_owned(),
         None => name,
     }
+}
+
+/// The files `sed` rewrites in place, when it does (`-i`, BSD's `-I`,
+/// `--in-place`): its operands after the script, its options read as its
+/// getopt reads them. A cluster of short options ends at its first letter
+/// that takes a value, which is the rest of the cluster or else the next
+/// word: `-e` a script and `-f` a script file (so `-es/f/g/` is a script
+/// and `-ne's/a/b/p'` holds one), `-i` and `-I` a backup suffix (`-ie` is
+/// `-i` with the suffix `e`; the next word only as BSD's `sed -i ''` and
+/// `sed -i .bak` give it), and GNU's `-l` a line length (a number; BSD's
+/// `-l` takes none). A long option may be shortened as getopt allows
+/// (`--expr=…`, `--fi prog`, `--in-place`'s `--in`). Without `-e` or `-f`
+/// the first operand is the script.
+fn sed_in_place<'s, 't>(arguments: &'s [Word<'t>]) -> Option<Vec<&'s Word<'t>>> {
+    let number = |word: Option<&Word<'_>>| {
+        word.is_some_and(|word| {
+            !word.value.is_empty() && word.value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    };
+    let mut in_place = false;
+    let mut scripted = false;
+    let mut ended = false;
+    let mut operands = Vec::new();
+    let mut index = 0;
+    while let Some(word) = arguments.get(index) {
+        index += 1;
+        let value = word.value.as_str();
+        if ended || !value.starts_with('-') {
+            // `find -exec sed -i … {} +` names what find found.
+            if value != "{}" {
+                operands.push(word);
+            }
+            continue;
+        }
+        if ends_options(word) {
+            ended = true;
+            continue;
+        }
+        if let Some(long) = value.strip_prefix("--") {
+            let (name, attached) = long
+                .split_once('=')
+                .map_or((long, false), |(name, _)| (name, true));
+            let names =
+                |option: &str, shortest: usize| name.len() >= shortest && option.starts_with(name);
+            // `--f` may also be `--follow-symlinks`.
+            if names("expression", 1) || names("file", 2) {
+                scripted = true;
+                index += usize::from(!attached);
+            } else if names("in-place", 1) {
+                in_place = true;
+            } else if names("line-length", 1) {
+                index += usize::from(!attached);
+            }
+            continue;
+        }
+        for (at, letter) in value.char_indices().skip(1) {
+            let rest = &value[at + letter.len_utf8()..];
+            match letter {
+                'e' | 'f' => {
+                    scripted = true;
+                    index += usize::from(rest.is_empty());
+                }
+                'i' | 'I' => {
+                    in_place = true;
+                    let next = arguments.get(index);
+                    if rest.is_empty()
+                        && next.is_some_and(|next| {
+                            next.value.is_empty() || next.value.starts_with('.')
+                        })
+                    {
+                        index += 1;
+                    }
+                }
+                'l' if rest.is_empty() && number(arguments.get(index)) => index += 1,
+                'l' if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) => {}
+                _ => continue,
+            }
+            break;
+        }
+    }
+    in_place.then(|| operands.into_iter().skip(usize::from(!scripted)).collect())
 }
 
 /// A wrapper's long options that take a value, as getopt reads them.
@@ -11091,6 +11149,45 @@ mod readings {
             format!("perl -pi -e 's/a/b/' {}", file.display()),
         ] {
             assert_eq!(found(&command), vec![placed(&file_text)], "{command}");
+        }
+        // sed's script is read however it is given, so the file after it is
+        // never taken for it: written against `-e` or `-f`, at the end of a
+        // cluster, through a shortened long option, after a line length.
+        let file_path = file.display();
+        for options in [
+            "-i -e's/a/b/'",
+            "-i -es/a/b/",
+            "-i -ne's/a/b/p'",
+            "-ni -e's/a/b/'",
+            "-i -nEe's/a/b/'",
+            "-i --expr=s/a/b/",
+            "-i --e s/a/b/",
+            "-i -nf prog.sed",
+            "-i -fprog.sed",
+            "-i --fi=prog.sed",
+            "-i -l 80 -e 's/a/b/'",
+            "-i -l 80 's/a/b/'",
+            "-i -nl 80 's/a/b/'",
+            "-i -l80 's/a/b/'",
+            "-i --line 80 's/a/b/'",
+            // The f of a script, and a script after BSD's line-buffered -l.
+            "-i -es/f/g/",
+            "-i -l 's/a/b/'",
+            // `-ie` is `-i` with the backup suffix `e`; BSD's `-I` and a
+            // shortened `--in-place` rewrite too.
+            "-ie 's/a/b/'",
+            "-ni 's/a/b/p'",
+            "-I '' 's/a/b/'",
+            "--in-pl 's/a/b/'",
+        ] {
+            let command = format!("sed {options} {file_path}");
+            assert_eq!(found(&command), vec![placed(&file_text)], "{command}");
+        }
+        // An `i` in a script, or a script written against `-e`, is no
+        // `-i`.
+        for options in ["-es/a/i/", "-n -e's/i/b/p'", "-e 'i\\'", "--expr=i"] {
+            let command = format!("sed {options} {file_path}");
+            assert!(found(&command).is_empty(), "{command}");
         }
         for command in [
             format!("cp new.bin {out}/cache/"),
