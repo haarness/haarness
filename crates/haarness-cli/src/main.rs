@@ -16661,11 +16661,23 @@ mod tests {
             "{error}"
         );
 
-        // A free default port is used as it is.
+        // A free default port is used as it is. A child process another test
+        // starts at that moment can hold the listener just closed for a few
+        // milliseconds, until it has started.
         drop(occupied);
-        let (listener, took_free_port) =
-            super::bind_serve_listener(host, None, busy).await.unwrap();
-        assert!(!took_free_port);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let listener = loop {
+            let (listener, took_free_port) =
+                super::bind_serve_listener(host, None, busy).await.unwrap();
+            if !took_free_port {
+                break listener;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the free default port was not used"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         assert_eq!(listener.local_addr().unwrap().port(), busy);
     }
 
