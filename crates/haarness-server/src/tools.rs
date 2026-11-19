@@ -3274,7 +3274,9 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
     };
     let mut merged = match metadata.clone() {
         Value::Null => serde_json::Map::new(),
-        Value::Object(object) if !cut.keys().any(|key| object.contains_key(key)) => object,
+        // Both names are Haarness's whether or not a file was saved, so a
+        // server's own `outputPath` never reads as where the whole is.
+        Value::Object(object) if !CUT_KEYS.iter().any(|key| object.contains_key(*key)) => object,
         Value::Object(mut object) => {
             let mut own = serde_json::Map::new();
             for key in ["attachments", "diffs", "mcp_app"] {
@@ -3309,17 +3311,41 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
     })
 }
 
+/// The metadata a cut MCP text carries (see [`capped_mcp_output`]).
+const CUT_KEYS: [&str; 2] = ["truncated", "outputPath"];
+
 fn keep_whole_output(kept: WholeOutput) {
-    let mut outputs = WHOLE_OUTPUTS.lock();
+    keep_within(
+        &mut WHOLE_OUTPUTS.lock(),
+        kept,
+        WHOLE_OUTPUTS_KEPT,
+        WHOLE_TEXT_BYTES_KEPT,
+    );
+}
+
+/// Adds `kept` to `outputs`, the oldest going first past `most` of them,
+/// and past `most_bytes` of texts the oldest of those holding text, so one
+/// large text never costs other calls their files. A text larger than
+/// `most_bytes` on its own is not kept: its call gets what the model gets.
+fn keep_within(
+    outputs: &mut std::collections::VecDeque<WholeOutput>,
+    kept: WholeOutput,
+    most: usize,
+    most_bytes: usize,
+) {
+    let bytes = |kept: &WholeOutput| kept.text.as_ref().map_or(0, String::len);
+    if bytes(&kept) > most_bytes {
+        return;
+    }
     outputs.push_back(kept);
-    while outputs.len() > WHOLE_OUTPUTS_KEPT
-        || outputs
-            .iter()
-            .filter_map(|kept| kept.text.as_ref().map(String::len))
-            .sum::<usize>()
-            > WHOLE_TEXT_BYTES_KEPT
-    {
+    while outputs.len() > most {
         outputs.pop_front();
+    }
+    while outputs.iter().map(bytes).sum::<usize>() > most_bytes {
+        let Some(oldest) = outputs.iter().position(|kept| kept.text.is_some()) else {
+            break;
+        };
+        outputs.remove(oldest);
     }
 }
 
@@ -10659,9 +10685,59 @@ export default workflow({
         let (whole, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
         assert_eq!(
             (whole, metadata, file),
-            (text, json!({"rows": 20_000}), None)
+            (text.clone(), json!({"rows": 20_000}), None)
         );
+        // A server's own `outputPath` moves under `structuredContent`, saved
+        // or not, so it never reads as where the whole is.
+        let script = ScriptCall::new();
+        let named = json!({"outputPath": "/srv/report.txt", "rows": 1});
+        let output = script
+            .run(capped_mcp_output(
+                ToolOutput {
+                    text: text.clone(),
+                    metadata: named.clone(),
+                },
+                &folder,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            output.metadata,
+            json!({"structuredContent": named.clone(), "truncated": true})
+        );
+        let (whole, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
+        assert_eq!((whole, metadata, file), (text, named, None));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// One large text no longer clears what other calls kept: a text larger
+    /// than the budget alone is not kept, and past the budget only texts go,
+    /// oldest first, never an entry whose whole is in a file.
+    #[test]
+    fn a_large_kept_text_never_costs_other_calls_their_files() {
+        let entry = |call: u64, file: Option<&str>, text: Option<usize>| WholeOutput {
+            call,
+            file: file.map(PathBuf::from),
+            cut: (0, [0; 32]),
+            text: text.map(|bytes| "x".repeat(bytes)),
+            metadata: Value::Null,
+        };
+        let calls = |outputs: &std::collections::VecDeque<WholeOutput>| {
+            outputs.iter().map(|kept| kept.call).collect::<Vec<_>>()
+        };
+        let mut outputs = std::collections::VecDeque::new();
+        keep_within(&mut outputs, entry(1, Some("/a"), None), 4, 100);
+        keep_within(&mut outputs, entry(2, None, Some(60)), 4, 100);
+        keep_within(&mut outputs, entry(3, None, Some(101)), 4, 100);
+        assert_eq!(calls(&outputs), [1, 2]);
+        keep_within(&mut outputs, entry(4, Some("/b"), Some(10)), 4, 100);
+        keep_within(&mut outputs, entry(5, None, Some(50)), 4, 100);
+        assert_eq!(calls(&outputs), [1, 4, 5]);
+        // Past the count, the oldest goes whatever it holds.
+        for call in 6..=7 {
+            keep_within(&mut outputs, entry(call, Some("/c"), None), 4, 100);
+        }
+        assert_eq!(calls(&outputs), [4, 5, 6, 7]);
     }
 
     /// An emoji, a flag or a family sits on the cut: it is left out whole
