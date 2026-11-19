@@ -1941,6 +1941,7 @@
   "{count} files left as they were": "{count} files left as they were",
   "too large for Undo": "too large for Undo",
   "too large to count": "too large to count",
+  "{count} not counted": "{count} not counted",
   "ignored": "ignored",
   "outside the folder": "outside the folder",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.",

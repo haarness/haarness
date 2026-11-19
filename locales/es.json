@@ -1941,6 +1941,7 @@
   "{count} files left as they were": "{count} archivos quedaron como estaban",
   "too large for Undo": "demasiado grande para Deshacer",
   "too large to count": "demasiado grande para contar",
+  "{count} not counted": "{count} sin contar",
   "ignored": "ignorado",
   "outside the folder": "fuera de la carpeta",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "{path} supera los 2 MiB y Deshacer no tiene una copia. Envía un mensaje para dejar el chat como está ahora.",

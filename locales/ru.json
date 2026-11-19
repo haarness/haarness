@@ -1941,6 +1941,7 @@
   "{count} files left as they were": "Оставлено как было файлов: {count}",
   "too large for Undo": "слишком большой для отмены",
   "too large to count": "слишком большой для подсчёта",
+  "{count} not counted": "не подсчитано: {count}",
   "ignored": "игнорируется",
   "outside the folder": "вне папки",
   "{path} is over 2 MiB and Undo has no copy of it. Send a message to keep the chat as it is now.": "Файл {path} больше 2 MiB, и у отмены нет его копии. Отправьте сообщение, чтобы оставить чат в текущем виде.",

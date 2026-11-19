@@ -642,6 +642,10 @@ export function Review(props: { compact?: boolean } = {}) {
             <span class="muted">
               {t(files().length === 1 ? "{count} file" : "{count} files", { count: files().length })}
             </span>
+            {/* The sums leave out files too large to count; say how many. */}
+            <Show when={files().filter((file) => file.uncounted).length}>
+              {(count) => <span class="muted">{t("{count} not counted", { count: count() })}</span>}
+            </Show>
           </span>
           {/* The view controls move to a second row together when the panel is
               too narrow, so refresh never wraps onto a row of its own. */}

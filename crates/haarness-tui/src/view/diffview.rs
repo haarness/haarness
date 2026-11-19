@@ -131,6 +131,10 @@ fn header(app: &App, viewer: &DiffViewer, width: usize) -> Line {
         // the reader never takes a short list for a small change.
         right.push(format!("{omitted} not shown"));
     }
+    if !viewer.uncounted.is_empty() {
+        // Nor take the sums for every file's: these were too large to count.
+        right.push(format!("{} not counted", viewer.uncounted.len()));
+    }
     if let Some(line) = viewer.cursor_line() {
         right.push(format!("line {line}"));
     }

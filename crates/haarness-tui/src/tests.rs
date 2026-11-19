@@ -24410,6 +24410,9 @@ async fn review_names_a_file_too_large_to_count() {
     );
     let notes = header("notes.md");
     assert!(notes.contains("+1 −0  added"), "{notes:?}");
+    // The totals leave it out, and say so.
+    assert!(rows[0].contains("+1 −0"), "{:?}", rows[0]);
+    assert!(rows[0].contains("1 not counted"), "{:?}", rows[0]);
     server.await.unwrap();
 }
 
