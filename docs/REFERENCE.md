@@ -24,7 +24,7 @@ publishing, platform validation and rollback.
   `/chrome` or Settings → Browser → Chrome; see [Browser alongside chat](BROWSER.md).
 
 - [Computer use](COMPUTER-USE.md): on macOS, agents see the screen and work in native apps
-  with the `mac_*` tools. It stays off until you accept its terms (Settings → Computer use, `/mac` or
+  with the `mac_*` tools. It stays off until you switch it on (Settings → Computer use, `/mac` or
   `haarness mac on`); each app asks once per chat unless you allow it (in Auto with its reviewer on,
   the reviewer answers, except for terminals and apps set to ask every time), the agent works behind
   your window, a bar on the screen offers Pause and Stop, and a paused chat offers Resume too.
@@ -139,7 +139,7 @@ haarness run --approvals yolo "Regenerate the fixtures"  # the chat stays in Yol
 haarness login                          # Haarness account (--device on a headless machine)
 haarness desktop                        # open Desktop, installing it first if needed
 haarness browser setup                  # let agents use your own Chrome
-haarness mac on                         # let agents see and use this Mac (macOS; agree to the terms first)
+haarness mac on                         # let agents see and use this Mac (macOS)
 haarness remote enable --name "Studio Mac"
 haarness models openai --verbose
 haarness doctor                         # install check, where files live, configuration warnings

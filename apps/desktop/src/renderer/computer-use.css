@@ -123,66 +123,6 @@
   font-size: var(--ui);
   color: var(--danger);
 }
-.computer-agreed {
-  margin: var(--s2) 0 0;
-  font-size: var(--ui);
-}
-
-/* The terms: a calm block of short lists, readable at the settings' measure. */
-.computer-terms {
-  max-width: 620px;
-  margin: var(--s3) 0 0;
-  font-size: var(--ui);
-  line-height: 1.55;
-  color: var(--text);
-}
-.computer-terms > p {
-  margin: 0 0 var(--s3);
-}
-.computer-terms section + section {
-  margin-block-start: var(--s3);
-}
-.computer-terms strong {
-  font-weight: 600;
-}
-.computer-terms ul {
-  margin: var(--s1) 0 0;
-  padding-inline-start: var(--s5);
-}
-.computer-terms li + li {
-  margin-block-start: var(--s1);
-}
-.computer-agreement {
-  padding: var(--s5);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-lg);
-  background: var(--raised);
-}
-.computer-agreement-title {
-  font-size: var(--ui-lg);
-  font-weight: 600;
-}
-/* After the terms changed: one quiet line just above the agreement, which follows it closely. */
-.computer-terms-changed {
-  margin: var(--s5) 0 0;
-  font-size: var(--ui);
-  line-height: 1.5;
-}
-.computer-terms-changed + .computer-agree {
-  margin-top: var(--s2);
-}
-.computer-agree {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  margin: var(--s5) 0 var(--s3);
-  font-size: var(--ui);
-  cursor: pointer;
-}
-.computer-agreement-actions {
-  display: flex;
-  justify-content: flex-end;
-}
 
 /* The approval card for computer use: the planned action, a cropped picture
    of the target with a ring, and any text that would be typed. */

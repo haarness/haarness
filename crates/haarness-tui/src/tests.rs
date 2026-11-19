@@ -28099,7 +28099,7 @@ async fn an_every_time_card_says_why_and_a_terminal_card_offers_always() {
         Some("com.apple.Terminal")
     );
 
-    // A server before terms version 2 marks terminals and editors: a click on their text asks every time and says
+    // A server before 0.1.20 marks terminals and editors: a click on their text asks every time and says
     // why, and nothing in them is offered for good.
     for (every_time, note) in [(true, true), (false, false)] {
         let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);

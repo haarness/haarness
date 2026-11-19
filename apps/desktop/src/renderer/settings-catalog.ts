@@ -33,7 +33,7 @@ export const settingsKeywords: Record<string, string> = {
   general:
     "language locale translation english appearance theme font notifications reasoning editor enter preferences steer queue input delivery project global inherited usage statistics telemetry privacy logs diagnostics",
   browser: "web browser Chromium agent control enabled disabled localhost URL history downloads uploads cookies cache site permissions approval chrome google edge brave extension real profile signed in accounts",
-  computer: "computer use mac screen apps accessibility screen recording click type keys agent control desktop automation native apps terms",
+  computer: "computer use mac screen apps accessibility screen recording click type keys agent control desktop automation native apps",
   shortcuts: "keyboard hotkey keybind key binding accelerators",
   servers: "connections remote host url token switch computer",
   projects: "folders workspace directory configuration forget open",
@@ -78,7 +78,6 @@ export const settingsControls = [
   ["computer", "Apps without a rule", "ask allow default approval apps"],
   ["computer", "Mark each click on screen", "ring marker pointer click highlight"],
   ["computer", "App rules", "allow ask never deny bundle identifier apps"],
-  ["computer", "Terms for computer use", "agree agreement withdraw terms"],
   ["general", "Turn completion notifications", "task finished failed alerts always never unfocused background"],
   ["general", "Permission notifications", "approval needed alerts notify"],
   ["general", "Question notifications", "input answer needed alerts notify"],
@@ -123,7 +122,6 @@ export const macOnlyControls: ReadonlySet<string> = new Set([
   "Apps without a rule",
   "Mark each click on screen",
   "App rules",
-  "Terms for computer use",
 ]);
 /** Sections Settings lists on macOS only. */
 export const macOnlySections: ReadonlySet<string> = new Set(["computer"]);

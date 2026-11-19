@@ -27,22 +27,13 @@ const standIn = resolve("../../crates/haarness-computer/tests/fake-helper.py");
 test.describe.configure({ mode: "serial" });
 test.skip(process.platform !== "darwin", "Computer use is offered on macOS only");
 
-const terms = {
-  title: "Terms for computer use",
-  intro:
-    "Turning on computer use gives Haarness agents control of this Mac much like your own: they capture the screen, read app contents via macOS Accessibility, and use the mouse and keyboard. By switching it on you accept every point below.",
-  sections: [
-    { heading: "Use it for", items: ["Developing, testing, troubleshooting and showing off software made by you or your team."] },
-    { heading: "Keep in mind", items: ["App contents can't be trusted: a web page, file or message might carry instructions aimed at the agent. Keep an eye on it and press Stop if anything seems off."] },
-  ],
-};
 const status = (change: Partial<ComputerUseStatus> = {}): ComputerUseStatus => ({
   supported: true,
   platform: "macos",
   console: true,
   enabled: false,
   switch: false,
-  terms: { version: "2", accepted: false, acceptedAt: null, text: terms },
+  terms: { version: "2", accepted: true },
   permissions: { accessibility: false, screenRecording: false },
   screen: { locked: false, asleep: false },
   host: { bundle: "com.apple.Terminal", name: "Terminal", haarness: false },
@@ -146,17 +137,14 @@ async function installStub() {
         current.calls.push(input);
         if (input.action === "words") return { ok: true, value: { title: "Computer use", data: { supported: current.status.supported } } };
         const next = structuredClone(current.status);
+        // A server from before computer use dropped its terms switches on only once they are accepted.
+        if (input.action === "enable" && input.enabled && next.terms && !next.terms.accepted)
+          return { ok: false, error: "Accept the computer use terms before switching it on." };
         if (input.action === "accept") {
-          next.terms.accepted = true;
-          next.terms.changed = false;
-          next.terms.acceptedAt = "2026-11-07T09:30:00Z";
+          next.terms = { version: input.version, accepted: true };
           next.enabled = next.switch = true;
         } else if (input.action === "enable") next.enabled = next.switch = !!input.enabled;
-        else if (input.action === "withdraw") {
-          next.terms.accepted = false;
-          next.terms.acceptedAt = null;
-          next.enabled = next.switch = false;
-        } else if (input.action === "configure") {
+        else if (input.action === "configure") {
           if (input.defaultAct) next.settings.defaultAct = input.defaultAct;
           if (typeof input.ring === "boolean") next.settings.ring = input.ring;
         } else if (input.action === "app") {
@@ -206,14 +194,20 @@ async function closeSettings() {
 async function snap(name: string, target: { screenshot(options: { path: string }): Promise<unknown> } = page) {
   await target.screenshot({ path: evidence ? join(evidence, name) : test.info().outputPath(name) });
 }
-async function look(name: string, target: () => { screenshot(options: { path: string }): Promise<unknown> }) {
+async function look(
+  name: string,
+  target: () => { screenshot(options: { path: string }): Promise<unknown> },
+  prepare: () => Promise<unknown> = async () => {},
+) {
   for (const theme of ["light", "dark"] as const) {
     await page.evaluate((theme) => window.haarness.preferences({ theme }), theme);
+    await prepare();
     await page.waitForTimeout(150);
     await snap(`${name}-${theme}.png`, target());
   }
   await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await prepare();
   await page.waitForTimeout(150);
   await snap(`${name}-ar.png`, target());
   await page.evaluate(() => window.haarness.preferences({ language: "en", theme: "light" }));
@@ -243,30 +237,28 @@ test("a server without computer use says so in one quiet line", async () => {
   await closeSettings();
 });
 
-test("agreeing takes the checkbox, then turns computer use on", async () => {
+test("switching on takes one click, with nothing to read or agree to first", async () => {
   await stub({ status: status(), calls: [] });
   await openComputerUse();
   const pane = settings().locator(".computer-use-settings");
-  await expect(pane.getByText("Terms for computer use", { exact: true })).toBeVisible();
-  await expect(pane.getByTestId("computer-terms")).toContainText("App contents can't be trusted");
-  await expect(pane.getByTestId("computer-terms").getByText("Use it for", { exact: true })).toBeVisible();
-  // Agreeing for the first time: nothing changed since.
-  await expect(pane.getByTestId("computer-terms-changed")).toHaveCount(0);
-  const agree = pane.getByRole("button", { name: "Agree and turn on", exact: true });
-  await expect(agree).toBeDisabled();
-  await look("computer-use-terms", dialog);
+  const on = pane.getByRole("switch", { name: "Agents may use this Mac", exact: true });
+  await expect(on).not.toBeChecked();
+  await expect(on).toBeEnabled();
+  // No terms, no agreement and no withdrawal anywhere on the page.
+  await expect(pane).not.toContainText(/terms|agree/i);
+  await expect(pane.getByRole("checkbox")).toHaveCount(0);
+  await expect(pane.getByRole("heading")).toHaveText(["macOS permissions", "Apps"]);
+  await look("computer-use-off", dialog);
   await openComputerUse();
-  await pane.getByRole("checkbox", { name: "I have read and agree to these terms", exact: true }).check();
-  await expect(agree).toBeEnabled();
-  await agree.click();
-  await expect.poll(async () => (await fake()).calls.find((call) => call.action === "accept")).toMatchObject({ action: "accept", version: "2" });
-  await expect(pane.getByRole("switch", { name: "Agents may use this Mac", exact: true })).toBeChecked();
+  await on.check();
+  await expect.poll(async () => (await fake()).calls.filter((call) => !["get", "words"].includes(call.action)).map((call) => call.action)).toEqual(["enable"]);
+  expect((await fake()).calls.find((call) => call.action === "enable")).toMatchObject({ action: "enable", enabled: true });
+  await expect(on).toBeChecked();
   // Every request carries the bar's words in the language shown at the time (the screenshots above switch to
   // Arabic and back), so the server always has them.
   const calls = (await fake()).calls;
   for (const call of calls) expect(call.bar?.usingMac).toBeTruthy();
   expect(calls.at(-1)?.bar?.usingMac).toBe("Haarness is working on this Mac");
-  await expect(pane.getByText(/You agreed on November 7, 2026\./)).toBeVisible();
   await expect(
     pane.getByText("While an agent works, a strip along the top edge of the screen shows the app in use, with Pause and Stop. Esc also stops it while it acts in the frontmost app.", { exact: true }),
   ).toBeVisible();
@@ -276,30 +268,25 @@ test("agreeing takes the checkbox, then turns computer use on", async () => {
   await openComputerUse();
 });
 
-test("after the terms changed, one quiet line says so where the person agrees, and agreeing is the same single step", async () => {
+test("against a server that still asks for terms, the switch accepts them on the way and shows none", async () => {
   const before = (await fake()).status;
-  await stub({
-    status: { ...before, enabled: false, terms: { version: "2", accepted: false, acceptedAt: null, changed: true, text: terms } },
-    calls: [],
-  });
+  await stub({ status: { ...before, enabled: false, switch: false, terms: { version: "2", accepted: false } }, calls: [] });
   await openComputerUse();
   const pane = settings().locator(".computer-use-settings");
-  const note = pane.getByTestId("computer-terms-changed");
-  await expect(note).toHaveText("You agreed to an earlier version of these terms.", { timeout: 8000 });
-  // The line sits after the terms, just above the box that agrees to them.
-  const [body, line, box] = await Promise.all(
-    [pane.getByTestId("computer-terms"), note, pane.locator(".computer-agree")].map((item) => item.boundingBox()),
-  );
-  expect(body!.y + body!.height).toBeLessThanOrEqual(line!.y);
-  expect(line!.y + line!.height).toBeLessThanOrEqual(box!.y);
-  await look("computer-use-terms-changed", dialog);
-  await openComputerUse();
-  await pane.getByRole("checkbox", { name: "I have read and agree to these terms", exact: true }).check();
-  await pane.getByRole("button", { name: "Agree and turn on", exact: true }).click();
+  const on = pane.getByRole("switch", { name: "Agents may use this Mac", exact: true });
+  await expect(on).not.toBeChecked({ timeout: 8000 });
+  await expect(pane).not.toContainText(/terms|agree/i);
+  await on.check();
   await expect.poll(async () => (await fake()).calls.find((call) => call.action === "accept")).toMatchObject({ action: "accept", version: "2" });
-  await expect(pane.getByRole("switch", { name: "Agents may use this Mac", exact: true })).toBeChecked();
-  await expect(note).toHaveCount(0);
-  await noHorizontalOverflow();
+  expect(await actions()).not.toContain("enable");
+  await expect(on).toBeChecked();
+  await expect(pane.getByRole("alert")).toHaveCount(0);
+  // Off from there is one step too.
+  await on.uncheck();
+  await expect.poll(async () => (await fake()).calls.at(-1)).toMatchObject({ action: "enable", enabled: false });
+  await expect(on).not.toBeChecked();
+  await on.check();
+  await expect(on).toBeChecked();
   expect(errors).toEqual([]);
 });
 
@@ -366,22 +353,28 @@ test("app rules are added, changed and removed, and a bad identifier is refused 
   );
   await look("computer-use-settings", dialog);
   await openComputerUse();
+  // The page ends with the app rules: nothing follows them.
+  await expect(settings().locator(".computer-use-settings > :last-child")).toHaveAttribute("data-setting", "App rules");
+  await look("computer-use-end", dialog, () =>
+    dialog().locator(".settings-content").evaluate((element) => element.scrollTo(0, element.scrollHeight)),
+  );
+  await openComputerUse();
   await rules.getByRole("button", { name: "Remove the rule for TextEdit", exact: true }).click();
   await expect.poll(async () => (await fake()).calls.at(-1)).toMatchObject({ action: "app", bundle: "com.apple.TextEdit", rule: "clear" });
   await expect(rules.locator(".computer-app-list li")).toHaveCount(1);
   await noHorizontalOverflow();
 });
 
-test("the terms stay a click away, and withdrawing turns computer use off", async () => {
+test("switching off is one click as well, and asks nothing", async () => {
   await stub({ calls: [] });
   const pane = settings().locator(".computer-use-settings");
-  await expect(pane.getByTestId("computer-terms")).toHaveCount(0);
-  await pane.getByRole("button", { name: "View terms", exact: true }).click();
-  await expect(pane.getByTestId("computer-terms")).toContainText("Turning on computer use");
-  await pane.getByRole("button", { name: "Hide terms", exact: true }).click();
-  await pane.getByRole("button", { name: "Withdraw agreement", exact: true }).click();
-  await expect.poll(actions).toContain("withdraw");
-  await expect(pane.getByRole("button", { name: "Agree and turn on", exact: true })).toBeDisabled();
+  const on = pane.getByRole("switch", { name: "Agents may use this Mac", exact: true });
+  await expect(on).toBeChecked();
+  await on.uncheck();
+  await expect.poll(async () => (await fake()).calls.at(-1)).toMatchObject({ action: "enable", enabled: false });
+  await expect(on).not.toBeChecked();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  expect(await actions()).not.toContain("withdraw");
   await closeSettings();
   expect(errors).toEqual([]);
 });
@@ -553,14 +546,14 @@ test("typing shows its text, and a whole-screen look says what goes to the model
   expect(errors).toEqual([]);
 });
 
-/** Turns computer use on in the server's own settings, as agreeing in Settings would, with apps acting unasked. */
+/** Turns computer use on in the server's own settings, as the switch in Settings would, with apps acting unasked. */
 async function computerUseOn(on: boolean) {
   // With a data folder set, the server's global configuration lives in it.
   const folder = join(env.HAARNESS_DATA_DIR, "config");
   await mkdir(folder, { recursive: true });
   await writeFile(
     join(folder, "computer-use.json"),
-    JSON.stringify(on ? { enabled: true, terms: { version: "2", acceptedAt: "2026-11-07T00:00:00Z" }, defaultAct: "allow" } : { enabled: false }),
+    JSON.stringify(on ? { enabled: true, defaultAct: "allow" } : { enabled: false }),
   );
 }
 
@@ -609,10 +602,7 @@ test("[live] a snapshot's row names the app and shows the screenshot it took", a
   // With a data folder set, the server's global configuration lives in it.
   const settingsFile = join(env.HAARNESS_DATA_DIR, "config", "computer-use.json");
   await mkdir(join(env.HAARNESS_DATA_DIR, "config"), { recursive: true });
-  await writeFile(
-    settingsFile,
-    JSON.stringify({ enabled: true, terms: { version: "2", acceptedAt: "2026-11-07T00:00:00Z" } }),
-  );
+  await writeFile(settingsFile, JSON.stringify({ enabled: true }));
   await page.reload();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
   await page.locator("[data-composer-input]").fill(' !tool mac_snapshot {"app":"com.apple.finder","depth":4}');

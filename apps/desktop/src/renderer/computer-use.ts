@@ -13,18 +13,14 @@ export interface ComputerUseStatus {
   platform?: string;
   /** The person running the server is the one logged in at the screen. */
   console: boolean;
-  /** On with the current terms agreed. */
+  /** Agents may use this Mac: the switch is on (and, on a server from before computer use dropped its terms, they
+   * are accepted). */
   enabled: boolean;
-  /** The person's switch, whatever the terms say. */
+  /** The person's switch. */
   switch?: boolean;
-  terms: {
-    version: string;
-    accepted: boolean;
-    acceptedAt?: string | null;
-    /** The person agreed to earlier terms, which changed since. Older servers leave it out. */
-    changed?: boolean;
-    text?: { title: string; intro: string; sections: { heading: string; items: string[] }[] };
-  };
+  /** A server from before computer use dropped its terms keeps it off until they are accepted; later ones always
+   * report them accepted. */
+  terms?: { version: string; accepted: boolean };
   permissions?: { accessibility: boolean; screenRecording: boolean } | null;
   screen?: { locked: boolean; asleep: boolean } | null;
   /** The app macOS charges the permissions to: Haarness, or a terminal. */
@@ -63,6 +59,15 @@ export function barWords(translate: (key: string) => string) {
   return words;
 }
 
+/**
+ * What the switch asks the server for, in one step either way. A server from before computer use dropped its terms
+ * switches on only once they are accepted, so there turning on accepts the version it names, which also switches on.
+ */
+export function switchRequest(status: Pick<ComputerUseStatus, "terms"> | undefined, on: boolean) {
+  const terms = status?.terms;
+  return on && terms && !terms.accepted ? { action: "accept", version: terms.version } : { action: "enable", enabled: on };
+}
+
 /** A bundle identifier as macOS writes it, or a prefix rule such as `com.jetbrains.*`. */
 export function validBundle(text: string) {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\.\*)?$/.test(text.trim()) && text.trim().length <= 255;
@@ -99,7 +104,7 @@ export interface MacDetail {
   /** Whether the server sent the parts above: an older one sends only `summary`. */
   parts?: boolean;
   /**
-   * A terminal or editor, as servers before terms version 2 mark one: such a server asks every time for a click on its
+   * A terminal or editor, as servers before 0.1.20 mark one: such a server asks every time for a click on its
    * text and never keeps an answer for it.
    */
   console?: boolean;
