@@ -2137,13 +2137,27 @@ fn image_volume_refusal(message: &str) -> Option<ImageVolume> {
 
 /// The words a turn on `model` of the provider `info` describes (when it is
 /// known) fails with: what its transcript shows and its stored error holds.
-/// With `advice` they also say what to do (see `describe_failure`).
+/// With `advice` they also say what to do (see `describe_failure`); for a
+/// stop by the provider's safety check, that the turn is left out of what
+/// the model sees from now on (see [`leaves_turn_out`]).
 fn turn_failure_words(
     error: &CoreError,
     info: Option<&haarness_protocol::ProviderInfo>,
     model: &str,
     advice: bool,
 ) -> String {
+    if advice && let CoreError::ProviderBlocked(_) = error {
+        return format!("{error} {LEFT_OUT_ADVICE}");
+    }
+    if advice
+        && let CoreError::Provider(raw) = error
+        && content_check_refusal(raw)
+    {
+        return format!(
+            "{} refused this chat: its safety check flagged it as possibly against its usage policy. {LEFT_OUT_ADVICE_EARLIER}",
+            info.map_or("The provider", |info| info.name.as_str())
+        );
+    }
     if let Some(info) = info
         && let Some(words) = describe_local_model_failure(error, info, model, advice)
             .or_else(|| describe_model_refusal(error, info, model, advice))
@@ -2151,6 +2165,49 @@ fn turn_failure_words(
         return words;
     }
     describe_failure(error, info.map(|info| info.name.as_str()), advice)
+}
+
+/// What a person reads after a safety stop's words: the turn it ended is
+/// left out of later requests (see [`leaves_turn_out`]).
+const LEFT_OUT_ADVICE: &str =
+    "The model won't see this request again, so you can edit it or pick another model.";
+
+/// The same for a check that reads the whole request, so something earlier
+/// in the chat may have set it off.
+const LEFT_OUT_ADVICE_EARLIER: &str = "The model won't see this request again, so you can edit it, or start a new chat if something earlier set it off.";
+
+/// Whether the provider's safety check refused what `error` ended a turn
+/// with, so the turn is left out of every later request (as
+/// `ItemData::Error::turn_left_out` records): a reworded message, or the same
+/// one on another model, then goes without what tripped it. A stop of the
+/// response (Anthropic's `refusal`, a content filter or guardrail, Gemini's
+/// safety finish), or a check of the whole request before any answer.
+fn leaves_turn_out(error: &CoreError) -> bool {
+    match error {
+        CoreError::ProviderBlocked(_) => true,
+        CoreError::Provider(raw) => content_check_refusal(raw),
+        _ => false,
+    }
+}
+
+/// A provider's content check that refused the request as a whole.
+/// OpenAI's flags the chat's earlier messages too ("Invalid prompt: your
+/// prompt was flagged as potentially violating our usage policy. Please try
+/// again with a different prompt"), so a new message in the same chat can be
+/// refused again for an old one. Alibaba's for Qwen (DashScope, or a gateway
+/// such as a router passing its words on, in its stream too) is the same
+/// kind: `data_inspection_failed`, "Input data may contain inappropriate
+/// content".
+fn content_check_refusal(raw: &str) -> bool {
+    provider_error_fields(raw).is_some_and(|(_, code, _)| {
+        matches!(
+            code.as_deref(),
+            Some("invalid_prompt" | "data_inspection_failed" | "DataInspectionFailed")
+        )
+    }) || raw.contains("[invalid_prompt]")
+        || raw.contains("data_inspection_failed")
+        || raw.contains("DataInspectionFailed")
+        || raw.contains("data may contain inappropriate content")
 }
 
 /// Keep transport envelopes in logs while giving the transcript a concise,
@@ -2866,24 +2923,7 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             provider.unwrap_or("The provider")
         );
     }
-    // OpenAI's safety check flags the whole request, the chat's earlier
-    // messages too ("Invalid prompt: your prompt was flagged as potentially
-    // violating our usage policy. Please try again with a different
-    // prompt"): a new message in the same chat can be refused again for an
-    // old one.
-    // Alibaba's content check for Qwen (DashScope, or a gateway passing its
-    // words on) is the same kind of refusal: `data_inspection_failed`, "Input
-    // data may contain inappropriate content".
-    if provider_error_fields(raw).is_some_and(|(_, code, _)| {
-        matches!(
-            code.as_deref(),
-            Some("invalid_prompt" | "data_inspection_failed" | "DataInspectionFailed")
-        )
-    }) || raw.contains("[invalid_prompt]")
-        || raw.contains("data_inspection_failed")
-        || raw.contains("DataInspectionFailed")
-        || raw.contains("data may contain inappropriate content")
-    {
+    if content_check_refusal(raw) {
         return format!(
             "{} refused this chat: its safety check flagged it as possibly against its usage policy. Rephrase your last message, or start a new chat if something earlier in this one set it off.",
             provider.unwrap_or("The provider")
@@ -5981,6 +6021,7 @@ impl AgentRuntime {
                             ItemData::Error {
                                 message: notice,
                                 retryable: false,
+                                turn_left_out: false,
                             },
                         ],
                     )
@@ -8949,6 +8990,7 @@ impl AgentRuntime {
                     ItemData::Error {
                         message: message.clone(),
                         retryable: true,
+                        turn_left_out: false,
                     },
                 )
                 .await
@@ -9470,6 +9512,7 @@ impl AgentRuntime {
                     ItemData::Error {
                         message: message.clone(),
                         retryable: true,
+                        turn_left_out: false,
                     },
                 )
                 .await
@@ -11164,10 +11207,13 @@ impl RunnerTask {
             let message = visible_error;
             // Terminal failures are transcript items too: publish the durable
             // item before turn.finished so attached clients see the error live.
+            // A safety stop leaves its turn out of later requests from here on,
+            // a subagent's too, so resuming it does not send the same again.
             let _ = self
                 .publish_item(ItemData::Error {
                     message: message.clone(),
                     retryable: stop_reason.is_some(),
+                    turn_left_out: stop_reason.is_none() && leaves_turn_out(error_value),
                 })
                 .await;
             self.set_status("done", None);
@@ -11375,6 +11421,7 @@ impl RunnerTask {
                     self.visible_error(error_value)
                 ),
                 retryable: true,
+                turn_left_out: false,
             })
             .await;
         false
@@ -17028,6 +17075,7 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
         ItemData::Error {
             message: notice,
             retryable: false,
+            turn_left_out: false,
         },
     ]
 }
@@ -17106,11 +17154,11 @@ fn finish_note(last: Option<&LastRound>) -> String {
 }
 
 /// What a parent reads when the provider's safety check stopped its
-/// subagent. The child's history still holds what was blocked, so resuming
-/// it or resending the task would most likely be blocked again.
+/// subagent. The stopped turn is left out of the child's history, but the
+/// same task worded the same way would most likely be stopped again.
 fn subagent_blocked(reason: &str, partial: Option<&str>) -> String {
     let mut text = format!(
-        "The provider's safety check stopped this subagent ({reason}). Its history still holds what the blocked request sent, so resuming it or sending the same task again is likely to be blocked too: do not retry it as is. Start a new subagent with the task rephrased or split, do the work directly, or tell the user."
+        "The provider's safety check stopped this subagent ({reason}). That turn is now left out of the subagent's history, but the same task sent again unchanged is likely to be stopped too: do not retry it as is. Resume it or start a new subagent with the task rephrased or split, do the work directly, or tell the user."
     );
     if let Some(partial) = partial {
         text.push_str("\n\nPartial reply before the stop:\n");
@@ -23339,6 +23387,7 @@ mod tests {
         ));
         assert!(
             blocked.contains("The provider's safety check stopped this subagent (refusal).")
+                && blocked.contains("left out of the subagent's history")
                 && blocked.contains("do not retry it as is")
                 && blocked.contains("Partial reply before the stop:\npartial words")
                 && blocked.contains(
@@ -23347,6 +23396,17 @@ mod tests {
             "{blocked}"
         );
         assert!(!blocked.contains("Send a follow-up message"), "{blocked}");
+        // A child an older build stopped is told of as one stopped now.
+        let older = envelope(&task(
+            "failed",
+            None,
+            Some("The provider's safety check stopped this response (refusal). Send a follow-up message to try again; if it stops again, rephrase the request or choose another model.".into()),
+        ));
+        assert!(
+            older.contains("The provider's safety check stopped this subagent (refusal).")
+                && !older.contains("Send a follow-up message"),
+            "{older}"
+        );
         let failed = envelope(&task(
             "failed",
             None,
@@ -24536,10 +24596,205 @@ mod tests {
             ItemData::Error {
                 message: "operation cancelled".into(),
                 retryable: false,
+                turn_left_out: false,
             },
         ));
         stopped.push(at(5, second, user("something else", None)));
         assert_eq!(texts(stopped), ["fix it", "Fixed.", "something else"]);
+    }
+
+    /// A turn the provider's safety check stopped is left out of what later
+    /// requests send, its call and the call's result with it, so a reworded
+    /// message goes without what set the check off. A compaction made in
+    /// that turn stays and stands for the history before it; a stop an older
+    /// build stored stays in the request.
+    #[test]
+    fn a_turn_the_safety_check_stopped_is_left_out_of_later_requests() {
+        let (first, stopped, next) = (
+            Some(TurnId::new()),
+            Some(TurnId::new()),
+            Some(TurnId::new()),
+        );
+        let at = |sequence: u64, turn: Option<TurnId>, data: ItemData| Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        };
+        let user = |text: &str| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+            command_line: None,
+            hook: None,
+        };
+        let reply = |text: &str| ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        };
+        let stop = |turn_left_out| ItemData::Error {
+            message: super::turn_failure_words(
+                &CoreError::ProviderBlocked("refusal".into()),
+                None,
+                "model",
+                true,
+            ),
+            retryable: false,
+            turn_left_out,
+        };
+        let sent = |items: Vec<Item>| -> Vec<String> {
+            provider_messages(items)
+                .into_iter()
+                .map(|message| match message {
+                    ProviderMessage::Text { content, .. } => content,
+                    ProviderMessage::ToolCall { call_id, .. } => format!("call {call_id}"),
+                    ProviderMessage::ToolResult { call_id, .. } => format!("result {call_id}"),
+                    media @ ProviderMessage::Media { .. } => panic!("{media:?}"),
+                })
+                .collect()
+        };
+        let mut items = vec![
+            at(1, first, user("first question")),
+            at(2, first, reply("first answer")),
+            at(3, stopped, user("the stopped request")),
+            at(
+                4,
+                stopped,
+                ItemData::ToolCall {
+                    call_id: "c1".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "notes.txt"}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            at(
+                5,
+                stopped,
+                ItemData::ToolResult {
+                    call_id: "c1".into(),
+                    name: "read".into(),
+                    output: "notes".into(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            at(6, stopped, reply("partial answer")),
+            at(7, stopped, stop(true)),
+            at(8, next, user("reworded")),
+        ];
+        assert_eq!(
+            sent(items.clone()),
+            ["first question", "first answer", "reworded"]
+        );
+        // As an older build stored it, the stop leaves its turn in.
+        items[6].data = stop(false);
+        assert_eq!(
+            sent(items.clone()),
+            [
+                "first question",
+                "first answer",
+                "the stopped request",
+                "call c1",
+                "result c1",
+                "partial answer",
+                "reworded"
+            ]
+        );
+
+        // A compaction made while the stopped turn ran stays.
+        let compacted = vec![
+            at(1, first, user("first question")),
+            at(2, first, reply("first answer")),
+            at(3, stopped, user("the stopped request")),
+            at(
+                4,
+                stopped,
+                ItemData::Compaction {
+                    summary: "SUMMARY OF EVERYTHING".into(),
+                    files_touched: Vec::new(),
+                    outstanding: Vec::new(),
+                    todo_checkpoint: None,
+                    tail_start_sequence: Some(2),
+                    kept_sequences: vec![3],
+                    tool_output_chars: None,
+                },
+            ),
+            at(5, stopped, reply("partial answer")),
+            at(6, stopped, stop(true)),
+            at(7, next, user("reworded")),
+        ];
+        let after = sent(compacted);
+        assert_eq!(after.len(), 3, "{after:?}");
+        assert!(after[0].contains("SUMMARY OF EVERYTHING"), "{after:?}");
+        assert_eq!(after[1..], ["first answer", "reworded"]);
+    }
+
+    /// A safety stop's error says the request stays out of the chat from now
+    /// on, in words of its own; a stopped subagent's says it as plainly to
+    /// the model that started it, and the reason reads back from either, and
+    /// from the words older builds stored.
+    #[test]
+    fn a_safety_stop_says_its_request_is_left_out() {
+        let blocked = CoreError::ProviderBlocked("refusal".into());
+        let person = super::turn_failure_words(&blocked, None, "model", true);
+        assert_eq!(
+            person,
+            "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit it or pick another model."
+        );
+        assert!(super::leaves_turn_out(&blocked));
+        // A subagent's own chat keeps it short: its parent reads more.
+        assert_eq!(
+            super::turn_failure_words(&blocked, None, "model", false),
+            "Stopped by the provider's safety check (refusal)."
+        );
+        // A check of the whole request is left out the same way.
+        let flagged = CoreError::Provider(
+            "HTTP 400 Bad Request: [invalid_prompt] Invalid prompt: your prompt was flagged as potentially violating our usage policy.".into(),
+        );
+        assert!(super::leaves_turn_out(&flagged));
+        let info = haarness_protocol::ProviderInfo {
+            id: "openai".into(),
+            name: "OpenAI".into(),
+            authenticated: true,
+            models: Vec::new(),
+        };
+        let words = super::turn_failure_words(&flagged, Some(&info), "gpt-5", true);
+        assert_eq!(
+            words,
+            "OpenAI refused this chat: its safety check flagged it as possibly against its usage policy. The model won't see this request again, so you can edit it, or start a new chat if something earlier set it off."
+        );
+        // Its usage reports count it as they did.
+        assert_eq!(
+            super::failure_kinds::FailureKind::of(&words),
+            super::failure_kinds::FailureKind::of(&super::describe_failure(
+                &flagged,
+                Some("OpenAI"),
+                true
+            ))
+        );
+        // Other failures keep their turn.
+        for other in [
+            CoreError::Provider("HTTP 500 Internal Server Error".into()),
+            CoreError::ProviderIncomplete("length".into()),
+            CoreError::Cancelled,
+        ] {
+            assert!(!super::leaves_turn_out(&other), "{other:?}");
+        }
+        for stored in [
+            person.as_str(),
+            "Stopped by the provider's safety check (refusal).",
+            "The provider's safety check stopped this response (refusal). Send a follow-up message to try again; if it stops again, rephrase the request or choose another model.",
+        ] {
+            assert_eq!(
+                CoreError::provider_blocked_reason(stored),
+                Some("refusal"),
+                "{stored}"
+            );
+            assert_eq!(
+                super::failure_kinds::FailureKind::of(stored),
+                super::failure_kinds::FailureKind::Blocked,
+                "{stored}"
+            );
+        }
     }
 
     #[test]
@@ -24678,6 +24933,7 @@ mod tests {
                 ItemData::Error {
                     message: "restarted".into(),
                     retryable: true,
+                    turn_left_out: false,
                 },
             ),
             in_turn(6, next, person("and now?", false)),
@@ -26582,6 +26838,7 @@ mod tests {
                 ItemData::Error {
                     message: "Haarness restarted".into(),
                     retryable: true,
+                    turn_left_out: false,
                 },
             ),
             at(next, 4, message("now the docs", false, false)),

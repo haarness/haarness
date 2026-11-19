@@ -68,6 +68,8 @@
   "Copy prompt": "プロンプトをコピー",
   "Copy": "コピー",
   "Copy message": "メッセージをコピー",
+  "Edit request": "リクエストを編集",
+  "/undo puts the message back in the prompt": "/undo でメッセージをプロンプトに戻す",
   "Cost": "コスト",
   "Created": "作成済み",
   "Ctrl": "Ctrl",

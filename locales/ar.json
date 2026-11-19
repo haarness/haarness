@@ -68,6 +68,8 @@
   "Copy prompt": "نسخ الموجه",
   "Copy": "نسخ",
   "Copy message": "نسخ الرسالة",
+  "Edit request": "تحرير الطلب",
+  "/undo puts the message back in the prompt": "/undo يعيد الرسالة إلى الموجّه",
   "Cost": "تكلفة",
   "Created": "تم الإنشاء",
   "Ctrl": "Ctrl",

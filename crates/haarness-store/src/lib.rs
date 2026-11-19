@@ -2207,6 +2207,7 @@ impl ThreadRepository for SqliteStore {
             ended.push(ItemData::Error {
                 message: recovered_turn_message(person),
                 retryable: true,
+                turn_left_out: false,
             });
             for (index, data) in ended.into_iter().enumerate() {
                 let item = Item {
@@ -3211,6 +3212,7 @@ mod tests {
             vec![ItemData::Error {
                 message: command.command_id.clone(),
                 retryable: false,
+                turn_left_out: false,
             }]
         };
         let written = store.recover_interrupted_commands(&report).await.unwrap();
@@ -3325,6 +3327,7 @@ mod tests {
             vec![ItemData::Error {
                 message: format!("{} {}", command.command_id, command.command),
                 retryable: false,
+                turn_left_out: false,
             }]
         };
         let written = store.recover_interrupted_commands(&report).await.unwrap();
@@ -4786,6 +4789,7 @@ mod tests {
             vec![ItemData::Error {
                 message: format!("NOTICE {}", task.description),
                 retryable: false,
+                turn_left_out: false,
             }]
         };
         let (stopped, written) = store.recover_interrupted_tasks(&report).await.unwrap();
@@ -4945,6 +4949,7 @@ mod tests {
             vec![ItemData::Error {
                 message: "NOTICE".into(),
                 retryable: false,
+                turn_left_out: false,
             }]
         };
         let (_, written) = store.recover_interrupted_tasks(&report).await.unwrap();
@@ -5022,7 +5027,9 @@ mod tests {
             .iter()
             .filter(|item| item.turn_id == Some(turn.id))
             .filter_map(|item| match &item.data {
-                ItemData::Error { message, retryable } => Some((message, retryable)),
+                ItemData::Error {
+                    message, retryable, ..
+                } => Some((message, retryable)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -5176,7 +5183,7 @@ mod tests {
                     item.turn_id == Some(turn.id)
                         && matches!(
                             &item.data,
-                            ItemData::Error { message, retryable }
+                            ItemData::Error { message, retryable, .. }
                                 if message == RECOVERED_TURN_MESSAGE && *retryable
                         )
                 })

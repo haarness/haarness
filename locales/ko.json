@@ -68,6 +68,8 @@
   "Copy prompt": "프롬프트 복사",
   "Copy": "복사",
   "Copy message": "메시지 복사",
+  "Edit request": "요청 편집",
+  "/undo puts the message back in the prompt": "/undo로 메시지를 프롬프트에 되돌리기",
   "Cost": "비용",
   "Created": "생성됨",
   "Ctrl": "Ctrl",

@@ -1966,6 +1966,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
     // How each command in the background last stood, from the chat's own
     // checkpoints; read once rather than per row.
     let command_states = crate::background::durable_states(&app.items);
+    let stop_to_edit = app.stopped_request().map(|item| item.id);
     // Off screen, the sidebar leaves one row in its place: the plan's
     // progress where it last changed, which opens the sidebar.
     let plan_at = (app.plan_inline.get() && open_plan(app))
@@ -2944,6 +2945,14 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         format!("{}{}", if index == 0 { "  × " } else { "    " }, wrapped),
                         theme.danger,
                     ));
+                }
+                if stop_to_edit == Some(item.id) {
+                    let hint = app
+                        .language
+                        .text("/undo puts the message back in the prompt");
+                    for wrapped in textwrap::wrap(hint, width.saturating_sub(4).max(10)) {
+                        block.push(line(format!("    {wrapped}"), theme.muted));
+                    }
                 }
             }
             ItemData::MediaOmitted {

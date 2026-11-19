@@ -946,6 +946,61 @@ impl App {
             })
     }
 
+    /// The safety stop that ended the chat's latest turn, which the server
+    /// left out of later requests: `/undo` takes that turn back and puts its
+    /// message in the prompt to edit, which its row says. Not while a turn
+    /// runs, after an undo, or in a subagent's chat, where `/undo` does not
+    /// reach it.
+    pub(crate) fn stopped_request(&self) -> Option<&haarness_protocol::Item> {
+        if self.active_turn.is_some()
+            || self.thread.revert.is_some()
+            || self.thread.parent_id.is_some()
+        {
+            return None;
+        }
+        let stop = self.items.iter().rfind(|item| {
+            matches!(
+                item.data,
+                haarness_protocol::ItemData::Error {
+                    turn_left_out: true,
+                    ..
+                }
+            )
+        })?;
+        let later_turn = self.items.iter().any(|item| {
+            item.sequence > stop.sequence
+                && matches!(
+                    item.data,
+                    haarness_protocol::ItemData::UserMessage { queued: false, .. }
+                )
+        });
+        (!later_turn).then_some(stop)
+    }
+
+    /// The message of the turn [`Self::stopped_request`] names, as `/undo`
+    /// would put it back.
+    fn stopped_prompt(&self) -> Option<(String, Vec<String>)> {
+        let stop = self.stopped_request()?;
+        self.items
+            .iter()
+            .filter(|item| item.sequence < stop.sequence)
+            .rev()
+            .find_map(|item| match &item.data {
+                haarness_protocol::ItemData::UserMessage {
+                    text,
+                    attachments,
+                    command_line,
+                    synthetic: false,
+                    queued: false,
+                    ..
+                } => Some((
+                    command_line.as_ref().unwrap_or(text).clone(),
+                    attachments.clone(),
+                )),
+                _ => None,
+            })
+    }
+
     fn undo_notice(&self, verb: &str) -> String {
         let (undo, redo) = self.undo_depth();
         let mut parts = vec![verb.to_owned()];
@@ -2708,6 +2763,18 @@ impl App {
                         };
                         self.todos = client.todos(self.thread.id).await.unwrap_or_default();
                         self.notice = self.undo_notice("Undone — the next turn confirms");
+                    }
+                    // Where Undo has no checkpoints, a safety stop's message
+                    // still comes back to edit: later requests leave its turn
+                    // out anyway, so the turn stays in view.
+                    Err(error)
+                        if error.to_string().contains("snapshots are disabled")
+                            && self.stopped_prompt().is_some() =>
+                    {
+                        if let Some((text, attachments)) = self.stopped_prompt() {
+                            self.composer.set_text(text);
+                            self.attachments = attachments;
+                        }
                     }
                     Err(error) => self.notice = undo_error(&error, "Undo"),
                 }

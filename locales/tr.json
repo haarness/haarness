@@ -68,6 +68,8 @@
   "Copy prompt": "İstemi kopyala",
   "Copy": "Kopyala",
   "Copy message": "Mesajı kopyala",
+  "Edit request": "İsteği düzenle",
+  "/undo puts the message back in the prompt": "mesajı isteme geri koymak için /undo",
   "Cost": "Maliyet",
   "Created": "Oluşturuldu",
   "Ctrl": "Ctrl",

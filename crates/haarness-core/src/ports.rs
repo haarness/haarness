@@ -49,10 +49,10 @@ pub enum CoreError {
     #[error("provider error: {0}")]
     Provider(String),
     /// The provider's safety check (a content filter, a guardrail or the
-    /// model's own refusal) stopped the response. Never retried.
-    #[error(
-        "The provider's safety check stopped this response ({0}). Send a follow-up message to try again; if it stops again, rephrase the request or choose another model."
-    )]
+    /// model's own refusal) stopped the response. Never retried. A turn it
+    /// ends is left out of later requests, and the person is told so (see
+    /// `turn_failure_words`).
+    #[error("Stopped by the provider's safety check ({0}).")]
     ProviderBlocked(String),
     #[error("Provider response ended before completion ({0}).")]
     ProviderIncomplete(String),
@@ -71,6 +71,9 @@ pub enum CoreError {
     Cancelled,
 }
 
+/// How what [`CoreError::ProviderBlocked`] says begins, up to its reason.
+pub const PROVIDER_BLOCKED: &str = "Stopped by the provider's safety check (";
+
 /// What [`CoreError::Refused`] says: `message` what to do instead, in
 /// English, and `reason` and `path` the same for a client to put in the
 /// person's language.
@@ -83,10 +86,16 @@ pub struct Refusal {
 
 impl CoreError {
     /// The reason in what [`CoreError::ProviderBlocked`] says, read back from
-    /// a failed turn's stored error: `refusal` from "The provider's safety
-    /// check stopped this response (refusal). Send a follow-up message …".
+    /// a failed turn's stored error: `refusal` from "Stopped by the
+    /// provider's safety check (refusal). …", and from the words older
+    /// builds stored ("The provider's safety check stopped this response
+    /// (refusal). Send a follow-up message …").
     #[must_use]
     pub fn provider_blocked_reason(message: &str) -> Option<&str> {
+        if let Some(rest) = message.strip_prefix(PROVIDER_BLOCKED) {
+            let (reason, rest) = rest.split_once(')')?;
+            return rest.starts_with('.').then_some(reason);
+        }
         let (reason, rest) = message
             .strip_prefix("The provider's safety check stopped this response (")?
             .split_once(')')?;

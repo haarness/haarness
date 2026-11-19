@@ -1248,6 +1248,9 @@ html[dir="rtl"] .tool-target {
 .inline-error > span {
   flex: 1;
   min-width: 0;
+  /* The server's words are English even in a right-to-left interface: their
+     closing stop stays at their end. */
+  unicode-bidi: plaintext;
 }
 .inline-error-action {
   flex: none;

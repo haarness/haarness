@@ -1689,7 +1689,7 @@ async fn restart_recovery_reports_background_tasks_to_the_chat_that_launched_the
     }
     let shown = runtime.items(audit, None).await.unwrap();
     assert!(shown.iter().any(|item| matches!(&item.data,
-        haarness_protocol::ItemData::Error { message, retryable: false }
+        haarness_protocol::ItemData::Error { message, retryable: false, .. }
             if message.contains("\u{201c}Audit the parser\u{201d}") && message.contains("not resumed"))));
 
     // The person's next message carries the result to the model.
@@ -9298,7 +9298,7 @@ async fn a_background_result_its_chat_cannot_take_is_kept_for_the_next_message()
     );
     assert!(
         items.iter().any(|item| matches!(&item.data,
-            haarness_protocol::ItemData::Error { message, retryable: false }
+            haarness_protocol::ItemData::Error { message, retryable: false, .. }
                 if message.contains("\u{201c}slow independent check\u{201d} could not start a turn in this chat (Unknown agent: reviewer)")
                     && message.ends_with("your next message passes it to the agent."))),
         "a notice says why: {items:#?}"

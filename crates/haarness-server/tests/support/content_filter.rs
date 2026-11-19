@@ -107,8 +107,129 @@ async fn filtered_turn_preserves_partial_output_and_usage_without_tools_or_queue
         }
     )));
     assert!(items.iter().any(|item| matches!(&item.data, ItemData::ToolResult { call_id, is_error: true, .. } if call_id == "blocked-call")));
-    assert!(items.iter().any(|item| matches!(&item.data, ItemData::Error { message, retryable: false } if message.contains("safety check stopped this response"))));
+    assert!(items.iter().any(|item| matches!(&item.data, ItemData::Error { message, retryable: false, turn_left_out: true } if message.starts_with("Stopped by the provider's safety check (content_filter). The model won't see this request again"))));
     std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// Stops any reply to a request whose last message names `TRIP` with
+/// Anthropic's `refusal`, after a few words, and answers anything else;
+/// records what each request of the chat sent.
+#[derive(Default)]
+struct RefusesTrips {
+    sent: std::sync::Mutex<Vec<Vec<ProviderMessage>>>,
+}
+
+#[async_trait]
+impl ModelProvider for RefusesTrips {
+    fn id(&self) -> &str {
+        "echo"
+    }
+    fn info(&self) -> ProviderInfo {
+        Echo.info()
+    }
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        if let Some(title) = title_fixture(&request) {
+            return title;
+        }
+        self.sent.lock().unwrap().push(request.messages.clone());
+        let tripped = request
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                ProviderMessage::Text { role, content } if role == "user" => {
+                    Some(content.contains("TRIP"))
+                }
+                _ => None,
+            })
+            == Some(true);
+        let (text, finish) = if tripped {
+            ("PARTIAL WORDS", "refusal")
+        } else {
+            ("REPLY", "end_turn")
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderEvent::TextDelta(text.into())),
+            Ok(ProviderEvent::Finished {
+                reason: finish.into(),
+            }),
+        ])))
+    }
+}
+
+/// The turn a safety stop ended stays in the chat but not in what later
+/// requests send: a reworded message goes without the stopped one and the
+/// words that streamed before the stop.
+#[tokio::test]
+async fn a_safety_stop_leaves_its_turn_out_of_the_next_request() {
+    let provider = Arc::new(RefusesTrips::default());
+    let runtime = AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            provider.clone() as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    );
+    let thread = echo_thread(&runtime).await;
+    for (text, status) in [
+        ("first question", TurnStatus::Completed),
+        ("TRIP the check", TurnStatus::Failed),
+        ("reworded", TurnStatus::Completed),
+    ] {
+        let turn = runtime
+            .start_turn(thread.id, turn_request(text))
+            .await
+            .unwrap();
+        assert_eq!(wait_done(&runtime, &turn).await.status, status, "{text}");
+    }
+    let texts = |messages: &[ProviderMessage]| -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                ProviderMessage::Text { content, .. }
+                    if !haarness_core::is_turn_reminder(content) =>
+                {
+                    Some(content.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let sent = provider.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(texts(&sent[2]), ["first question", "REPLY", "reworded"]);
+    // The chat itself is as it was.
+    let items = runtime.items(thread.id, None).await.unwrap();
+    for kept in ["TRIP the check", "PARTIAL WORDS"] {
+        assert!(
+            items.iter().any(|item| matches!(&item.data,
+                ItemData::UserMessage { text, .. } | ItemData::AssistantMessage { text, .. } if text == kept)),
+            "{kept}: {items:#?}"
+        );
+    }
+    let stops = items
+        .iter()
+        .filter_map(|item| match &item.data {
+            ItemData::Error {
+                message,
+                turn_left_out,
+                ..
+            } => Some((message.as_str(), *turn_left_out)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stops,
+        [(
+            "Stopped by the provider's safety check (refusal). The model won't see this request again, so you can edit it or pick another model.",
+            true
+        )]
+    );
 }
 
 #[test]

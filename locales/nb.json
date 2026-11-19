@@ -68,6 +68,8 @@
   "Copy prompt": "Kopier prompt",
   "Copy": "Kopier",
   "Copy message": "Kopier melding",
+  "Edit request": "Rediger forespørselen",
+  "/undo puts the message back in the prompt": "/undo legger meldingen tilbake i prompten",
   "Cost": "Kostnad",
   "Created": "Opprettet",
   "Ctrl": "Ctrl",

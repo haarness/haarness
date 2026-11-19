@@ -331,8 +331,83 @@ fn classes(text: &str) -> [u64; CLASSES] {
 /// Items still sent to the provider after the newest compaction: its summary,
 /// then the items it kept from before the tail (the latest request), then
 /// the retained verbatim tail (whose rows have earlier sequences), then
-/// everything after it.
+/// everything after it. A turn the provider's safety check stopped is left
+/// out whole (see [`left_out`]).
 pub fn visible_items(items: &[Item]) -> Vec<&Item> {
+    let mut visible = compacted_view(items);
+    let left_out = left_out(items);
+    if !left_out.is_empty() {
+        visible.retain(|item| !left_out.contains(&item.id));
+    }
+    visible
+}
+
+/// The items of every turn whose stop by the provider's safety check left
+/// it out of later requests (`ItemData::Error::turn_left_out`): the person's
+/// message, what the model wrote, the calls it made and their results, and
+/// whatever else the turn stored, except a compaction made during it, whose
+/// summary stands for the history before it. A forked chat's copied items
+/// carry no turn, so there a turn runs from the message the person wrote to
+/// the next one, as requests group them.
+pub fn left_out(items: &[Item]) -> std::collections::HashSet<crate::ItemId> {
+    let mut left_out = std::collections::HashSet::new();
+    if !items.iter().any(|item| {
+        matches!(
+            item.data,
+            ItemData::Error {
+                turn_left_out: true,
+                ..
+            }
+        )
+    }) {
+        return left_out;
+    }
+    let mut copied = None;
+    let turns = items
+        .iter()
+        .map(|item| {
+            if item.turn_id.is_some() {
+                copied = None;
+                return item.turn_id;
+            }
+            if matches!(
+                item.data,
+                ItemData::UserMessage {
+                    queued: false,
+                    synthetic: false,
+                    ..
+                }
+            ) {
+                copied = Some(crate::TurnId(item.id.0));
+            }
+            copied
+        })
+        .collect::<Vec<_>>();
+    let stopped = items
+        .iter()
+        .zip(&turns)
+        .filter_map(|(item, turn)| match item.data {
+            ItemData::Error {
+                turn_left_out: true,
+                ..
+            } => *turn,
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    left_out.extend(
+        items
+            .iter()
+            .zip(&turns)
+            .filter(|(item, turn)| {
+                turn.is_some_and(|turn| stopped.contains(&turn))
+                    && !matches!(item.data, ItemData::Compaction { .. })
+            })
+            .map(|(item, _)| item.id),
+    );
+    left_out
+}
+
+fn compacted_view(items: &[Item]) -> Vec<&Item> {
     let Some(index) = items
         .iter()
         .rposition(|item| matches!(item.data, ItemData::Compaction { .. }))
@@ -991,6 +1066,181 @@ mod tests {
         let counted = Tokenizer::Generic.shown(&items[4], Some(cut));
         assert!(counted * 4 < whole, "{counted} of {whole}");
         assert!(context(&items, Tokenizer::Generic).tokens < whole / 4);
+    }
+
+    fn in_turn(sequence: u64, turn: Option<crate::TurnId>, data: ItemData) -> Item {
+        Item {
+            turn_id: turn,
+            ..item(sequence, data)
+        }
+    }
+
+    fn said(text: &str) -> ItemData {
+        ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+            command_line: None,
+            hook: None,
+        }
+    }
+
+    fn replied(text: &str) -> ItemData {
+        ItemData::AssistantMessage {
+            text: text.into(),
+            note: false,
+        }
+    }
+
+    fn stopped(turn_left_out: bool) -> ItemData {
+        ItemData::Error {
+            message: "Stopped by the provider's safety check (refusal).".into(),
+            retryable: false,
+            turn_left_out,
+        }
+    }
+
+    /// The whole stopped turn is left out of what later requests send and of
+    /// what the context meter counts: the message, the partial reply, the
+    /// call and its result, the turn's usage. Earlier and later turns stay.
+    #[test]
+    fn a_turn_the_safety_check_stopped_is_left_out_whole() {
+        let (first, stopped_turn, next) = (
+            Some(crate::TurnId::new()),
+            Some(crate::TurnId::new()),
+            Some(crate::TurnId::new()),
+        );
+        let items = vec![
+            in_turn(1, first, said("first question")),
+            in_turn(2, first, replied("first answer")),
+            in_turn(3, stopped_turn, said("the stopped request")),
+            in_turn(
+                4,
+                stopped_turn,
+                ItemData::ToolCall {
+                    call_id: "c".into(),
+                    name: "read".into(),
+                    arguments: json!({}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            in_turn(
+                5,
+                stopped_turn,
+                ItemData::ToolResult {
+                    call_id: "c".into(),
+                    name: "read".into(),
+                    output: "page ".repeat(5_000),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            in_turn(6, stopped_turn, replied("partial")),
+            in_turn(7, stopped_turn, usage(9_000, 10, None)),
+            in_turn(8, stopped_turn, stopped(true)),
+            in_turn(9, next, said("reworded")),
+        ];
+        let visible = visible_items(&items)
+            .into_iter()
+            .map(|item| item.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![1, 2, 9]);
+        let kept = [&items[0], &items[1], &items[8]]
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            context(&items, Tokenizer::Generic),
+            context(&kept, Tokenizer::Generic),
+            "the meter counts what the next request carries"
+        );
+
+        // A stop stored before turns were left out is still sent.
+        let mut older = items.clone();
+        older[7].data = stopped(false);
+        assert_eq!(visible_items(&older).len(), items.len());
+        // So is it as an older build stored it, without the field.
+        let stored: ItemData = serde_json::from_value(json!({
+            "type": "error",
+            "message": "The provider's safety check stopped this response (refusal). Send a follow-up message to try again; if it stops again, rephrase the request or choose another model.",
+            "retryable": false,
+        }))
+        .unwrap();
+        assert!(matches!(
+            stored,
+            ItemData::Error {
+                turn_left_out: false,
+                ..
+            }
+        ));
+        // The flag is written only when it is set.
+        assert!(
+            !serde_json::to_string(&stopped(false))
+                .unwrap()
+                .contains("turn_left_out")
+        );
+        assert!(
+            serde_json::to_string(&stopped(true))
+                .unwrap()
+                .contains(r#""turn_left_out":true"#)
+        );
+    }
+
+    /// A compaction made while the stopped turn ran stays: its summary
+    /// stands for the history before it. The turn's own items, its message
+    /// kept ahead of the tail included, are left out.
+    #[test]
+    fn a_compaction_made_during_a_stopped_turn_stays() {
+        let (first, stopped_turn) = (Some(crate::TurnId::new()), Some(crate::TurnId::new()));
+        let items = vec![
+            in_turn(1, first, said("old question")),
+            in_turn(2, first, replied("old answer")),
+            in_turn(3, stopped_turn, said("the stopped request")),
+            in_turn(4, stopped_turn, replied("working")),
+            in_turn(
+                5,
+                stopped_turn,
+                ItemData::Compaction {
+                    summary: "summary".into(),
+                    files_touched: Vec::new(),
+                    outstanding: Vec::new(),
+                    todo_checkpoint: None,
+                    tail_start_sequence: Some(2),
+                    kept_sequences: vec![3],
+                    tool_output_chars: None,
+                },
+            ),
+            in_turn(6, stopped_turn, replied("partial")),
+            in_turn(7, stopped_turn, stopped(true)),
+            item(8, said("next")),
+        ];
+        let visible = visible_items(&items)
+            .into_iter()
+            .map(|item| item.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![5, 2, 8]);
+    }
+
+    /// A fork copies items without their turns: the stopped turn there runs
+    /// from the person's message to the next one.
+    #[test]
+    fn a_forked_copy_of_a_stopped_turn_is_left_out_too() {
+        let items = vec![
+            item(1, said("first question")),
+            item(2, replied("first answer")),
+            item(3, said("the stopped request")),
+            item(4, replied("partial")),
+            item(5, stopped(true)),
+            item(6, said("reworded in the fork")),
+            item(7, replied("answer")),
+            in_turn(8, Some(crate::TurnId::new()), said("a later turn")),
+        ];
+        let visible = visible_items(&items)
+            .into_iter()
+            .map(|item| item.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, vec![1, 2, 6, 7, 8]);
     }
 
     fn usage(input_tokens: u64, output_tokens: u64, prompt: Option<PromptUsage>) -> ItemData {

@@ -133,5 +133,19 @@ export function createConversationControls(props: {
             : []),
         ],
   );
-  return { busy, disabled, invoke };
+  /** A safety stop's Edit request: Undo takes the stopped turn back and puts
+   * its message in the box. Where Undo has no checkpoints (a folder that is
+   * not a repository and has not turned them on) the message comes back all
+   * the same, and the turn stays in view: later requests leave it out anyway. */
+  async function editStopped() {
+    const message = lastUserMessage(app.state.items, thread()?.revert?.sequence);
+    try {
+      await invoke("undo");
+    } catch (error) {
+      if (!/snapshots are disabled/i.test(error instanceof Error ? error.message : String(error)))
+        throw error;
+      props.restored(message);
+    }
+  }
+  return { busy, disabled, invoke, editStopped };
 }

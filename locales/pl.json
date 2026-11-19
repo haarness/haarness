@@ -68,6 +68,8 @@
   "Copy prompt": "Kopiuj prompt",
   "Copy": "Kopiuj",
   "Copy message": "Kopiuj wiadomość",
+  "Edit request": "Edytuj prośbę",
+  "/undo puts the message back in the prompt": "/undo przywraca wiadomość do promptu",
   "Cost": "Koszt",
   "Created": "Utworzono",
   "Ctrl": "Ctrl",

@@ -68,6 +68,8 @@
   "Copy prompt": "Копировать запрос",
   "Copy": "Копировать",
   "Copy message": "Копировать сообщение",
+  "Edit request": "Изменить запрос",
+  "/undo puts the message back in the prompt": "/undo — вернуть сообщение в запрос",
   "Cost": "Стоимость",
   "Created": "Создано",
   "Ctrl": "Ctrl",

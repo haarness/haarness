@@ -543,6 +543,14 @@ pub enum ItemData {
     Error {
         message: String,
         retryable: bool,
+        /// The provider's safety check stopped this turn, so every item of
+        /// it is left out of later requests: the person's message, what the
+        /// model wrote and the tools it ran, though the chat still shows them
+        /// (a compaction made during the turn stays). A reworded message is
+        /// then not stopped again for the same history. Set only when the
+        /// stop is stored: older stops are still sent.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        turn_left_out: bool,
     },
     /// Attachments a provider refused, left out of every later request of
     /// this thread so one bad image does not fail each turn. The attachments

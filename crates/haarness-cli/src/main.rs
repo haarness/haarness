@@ -22619,8 +22619,9 @@ request_timeout = 0
 
         let (_, _, end) = follow(&client, "launch: wait 300 then fail", long).await;
         let error = end.unwrap().error.unwrap();
-        assert!(
-            error.starts_with("The provider's safety check stopped this response"),
+        assert_eq!(
+            haarness_core::CoreError::provider_blocked_reason(&error),
+            Some("refusal"),
             "{error}"
         );
 
@@ -22749,8 +22750,9 @@ request_timeout = 0
         )
         .await;
         let error = format!("{:#}", end.unwrap_err());
-        assert!(
-            error.starts_with("The provider's safety check stopped this response"),
+        assert_eq!(
+            haarness_core::CoreError::provider_blocked_reason(&error),
+            Some("refusal"),
             "{error}"
         );
         assert!(

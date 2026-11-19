@@ -492,6 +492,7 @@ pub(crate) fn interrupted_report(command: &crate::StrandedCommand) -> Vec<ItemDa
                 "Haarness restarted while the command \u{201c}{line}\u{201d} ran in the background. It was stopped and not started again; your next message tells the agent."
             ),
             retryable: false,
+            turn_left_out: false,
         },
     ]
 }

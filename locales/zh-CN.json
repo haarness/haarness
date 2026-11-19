@@ -68,6 +68,8 @@
   "Copy prompt": "复制提示词",
   "Copy": "复制",
   "Copy message": "复制消息",
+  "Edit request": "编辑请求",
+  "/undo puts the message back in the prompt": "使用 /undo 将消息放回提示",
   "Cost": "成本",
   "Created": "已创建",
   "Ctrl": "Ctrl",
