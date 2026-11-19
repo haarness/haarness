@@ -4,6 +4,8 @@ import type { Item, Thread } from "@haarness/sdk";
 import { useApp } from "./state";
 import { lastUserMessage, unrestoredFiles } from "./conversation-history";
 import { shortcutLabel, type SearchEntry } from "./search";
+import { isCompactionCut, watchCompaction } from "./compaction-wait";
+import { COMPACTION_WAIT_MS, type CompactionCut } from "../shared";
 
 export const historyCommands = [
   { name: "undo", description: "Undo the last turn and restore its prompt" },
@@ -48,9 +50,11 @@ export function createConversationControls(props: {
     const connection = app.state.connection!.id;
     const key = owner();
     const before = [...app.state.items];
+    const started = Date.now();
+    const compaction = action === "compact" ? watchCompaction(connection, id) : undefined;
     setPending((values) => [...values, key]);
     try {
-      const value = await window.haarness.api<Thread | Item>(
+      const value = await window.haarness.api<Thread | Item | CompactionCut>(
         connection,
         action === "undo"
           ? "revertThread"
@@ -59,6 +63,10 @@ export function createConversationControls(props: {
             : "compact",
         action === "redo" ? [id] : [id, {}],
       );
+      // Cut on its way through a relay: the server goes on, and the chat
+      // stays compacting until the summary lands.
+      if (compaction && isCompactionCut(value))
+        await compaction.until(started + COMPACTION_WAIT_MS, value.compactionCut);
       if (owner() !== key) return;
       await app.refresh();
       if (owner() !== key) return;
@@ -95,6 +103,7 @@ export function createConversationControls(props: {
             : t("Turn restored") + leftNote,
       );
     } finally {
+      compaction?.stop();
       setPending((values) => values.filter((value) => value !== key));
     }
   }

@@ -317,6 +317,15 @@ export interface NotificationTarget {
   connection: string;
   thread: string;
 }
+/** What the window gets for a compaction whose request a relay or proxy cut
+ * on its way: the server goes on with it, so the window waits for its
+ * `thread.compacted`, and says `compactionCut` only if it never comes. */
+export interface CompactionCut {
+  compactionCut: string;
+}
+/** How long a compaction may take, its request and any wait after it
+ * together: as long as the phones and the web wait. */
+export const COMPACTION_WAIT_MS = 310_000;
 export interface DesktopEvent {
   kind:
     | "browser"

@@ -43,7 +43,7 @@ import { cancelled, errorText, failureDetail, failureMessage } from "../renderer
 const say = (key: string) => translate(data().preferences.language, key);
 import { ApiError, authorizationHeaders, type ServerAuth } from "@haarness/sdk";
 import { onceMoreForUnknownSender } from "./unknown-sender";
-import { withDeadline } from "./api-deadlines";
+import { cutOnTheWay, withDeadline } from "./api-deadlines";
 import { browseRemote, openRemote, remoteLocationId, responseFailure } from "./remote-projects";
 import { connectHost, createRelay, hostBrowse, hostCatalog, hostServerId } from "./remote-hosts";
 import { withThreadKinds } from "../thread-kinds";
@@ -78,7 +78,7 @@ import {
   type WorkspaceOperationResponse,
 } from "@haarness/sdk";
 import { z } from "zod";
-import type { Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
+import type { CompactionCut, Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
 import { themeColors } from "../themes";
 import { serverKey } from "../servers";
 import {
@@ -1362,7 +1362,15 @@ function installHandlers() {
       throw new Error("This server operation is not available");
     // A refusal for want of telling who asked is asked once more, on a new connection.
     const args = withDeadline(input.method, input.args);
-    const result = await onceMoreForUnknownSender(async () => fn.apply(client, args));
+    const result = await onceMoreForUnknownSender(async () => fn.apply(client, args)).catch(
+      (error: unknown) => {
+        // The server goes on with a compaction whose request a relay or proxy
+        // cut: the window waits for it to land, with what to say if it never does.
+        if (input.method !== "compact" || !cutOnTheWay(error)) throw error;
+        const relay = !!connections.get(input.connection)?.view.remoteHost;
+        return { compactionCut: failureMessage(error, { relay }) } satisfies CompactionCut;
+      },
+    );
     return input.method === "listThreads"
       ? withThreadKinds(result, (id) => client.listItems(id))
       : result;
