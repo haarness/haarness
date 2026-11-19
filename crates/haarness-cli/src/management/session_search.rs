@@ -7,7 +7,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use haarness_core::{AgentRuntime, CoreError, ToolContext};
 use haarness_protocol::{Item, ItemData, Thread};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{fmt::Write as _, time::Duration};
+use uuid::Uuid;
 
 /// How long one search reads chats before it answers with what it found
 /// and how far it got.
@@ -16,10 +17,9 @@ pub(super) const SEARCH_TIME: Duration = Duration::from_secs(15);
 const EXCERPT_CHARS: usize = 300;
 /// How many of those come before the hit.
 const EXCERPT_LEAD: usize = 100;
-/// Bytes of matches (compact JSON, chat summaries counted) past which a
-/// search stops adding them, so that the answer, laid out, stays well
-/// within the 50 KiB a tool's text reaches the model whole.
-const ANSWER_BYTES: usize = 32 * 1024;
+/// The most bytes a search's chats and matches take in its answer, laid out
+/// as the answer is; what it says about how far it got comes on top.
+const ANSWER_BYTES: usize = 46 * 1024;
 
 enum Stop {
     Time,
@@ -27,42 +27,98 @@ enum Stop {
     Size,
 }
 
+/// Where a search goes on from: the chats after this point in the order a
+/// search reads them (most recently active first, then by id), given as
+/// `"<time> <chat id>"`, or the chats last active before a bare time.
+struct Cursor {
+    time: DateTime<Utc>,
+    id: Option<Uuid>,
+}
+
+impl Cursor {
+    fn parse(text: &str) -> Result<Self> {
+        let refused =
+            || format!("before '{text}' is not an RFC 3339 time, alone or followed by a chat id");
+        let mut words = text.split_whitespace();
+        let time = DateTime::parse_from_rfc3339(words.next().unwrap_or_default())
+            .with_context(refused)?
+            .with_timezone(&Utc);
+        let id = words
+            .next()
+            .map(|id| Uuid::parse_str(id).with_context(refused))
+            .transpose()?;
+        if words.next().is_some() {
+            anyhow::bail!(refused());
+        }
+        Ok(Self { time, id })
+    }
+
+    /// The point just after `thread`.
+    fn after(thread: &Thread) -> String {
+        format!(
+            "{} {}",
+            thread
+                .updated_at
+                .to_rfc3339_opts(SecondsFormat::AutoSi, true),
+            thread.id
+        )
+    }
+
+    fn admits(&self, thread: &Thread) -> bool {
+        match self.id {
+            None => thread.updated_at < self.time,
+            Some(id) => (thread.updated_at, thread.id.0) < (self.time, id),
+        }
+    }
+}
+
 /// Searches the visible text of the chats `input` asks for (`query`,
 /// `includeArchived`, `before`, `limit`), most recently active first, for
-/// at most `time`. The calling chat's own `session_manage` calls, which hold
-/// the query, are left out.
+/// at most `time`; or, given `only`, that one chat's items after `after`.
+/// The calling chat's own session searches, which hold the query, are left
+/// out.
 pub(super) async fn search(
     runtime: &AgentRuntime,
     input: &Value,
     context: &ToolContext,
+    only: Option<Thread>,
     time: Duration,
 ) -> Result<Value> {
     let started = tokio::time::Instant::now();
     let needle = required_string(input, "query")?.to_ascii_lowercase();
     let before = optional_string(input, "before")
-        .map(|text| {
-            DateTime::parse_from_rfc3339(text.trim())
-                .map(|time| time.with_timezone(&Utc))
-                .with_context(|| format!("before '{text}' is not an RFC 3339 time"))
-        })
+        .map(Cursor::parse)
         .transpose()?;
     let include_archived = input
         .get("includeArchived")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let limit = limit(input);
-    let mut threads = runtime
-        .list_threads(include_archived)
-        .await
-        .map_err(core_error)?;
-    threads.retain(|thread| before.is_none_or(|before| thread.updated_at < before));
-    threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let after = only
+        .as_ref()
+        .and(input.get("after").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let mut threads = match only {
+        Some(thread) => vec![thread],
+        None => {
+            let mut threads = runtime
+                .list_threads(include_archived)
+                .await
+                .map_err(core_error)?;
+            threads.retain(|thread| before.as_ref().is_none_or(|before| before.admits(thread)));
+            threads
+        }
+    };
+    threads
+        .sort_by(|left, right| (right.updated_at, right.id.0).cmp(&(left.updated_at, left.id.0)));
     let fragment = stored_fragment(&needle);
 
     let mut chats = Vec::new();
     let (mut found, mut size, mut searched) = (0, 0, 0);
     // The last chat read to its end: every chat before it was too.
     let mut through: Option<&Thread> = None;
+    // The chat the search stopped inside, and the last item of it read.
+    let mut cut: Option<(&Thread, u64)> = None;
     let mut stop = None;
     for thread in &threads {
         if context.cancel.is_cancelled() {
@@ -77,35 +133,40 @@ pub(super) async fn search(
         let own = thread.id == context.thread_id;
         let mut matches = Vec::new();
         let mut summary = None;
-        let mut whole = true;
+        let mut read = after;
         for item in runtime
             .items_holding(thread.id, fragment)
             .await
             .map_err(core_error)?
         {
+            if item.sequence <= after {
+                continue;
+            }
             let Some(hit) = item_match(&item, &needle, own) else {
                 continue;
             };
             if stop.is_some() {
                 // A match past where the search stopped: this chat was
                 // not read to its end after all.
-                whole = false;
+                cut = Some((thread, read));
                 break;
             }
             let summary = summary.get_or_insert_with(|| super::thread_summary(thread.clone()));
-            let bytes = hit.to_string().len()
+            let bytes = laid_out(&hit, 4)
+                + MATCH_FRAME
                 + if matches.is_empty() {
-                    summary.to_string().len()
+                    laid_out(summary, 3) + CHAT_FRAME
                 } else {
                     0
                 };
             if size + bytes > ANSWER_BYTES {
                 stop = Some(Stop::Size);
-                whole = false;
+                cut = Some((thread, read));
                 break;
             }
             size += bytes;
             found += 1;
+            read = item.sequence;
             matches.push(hit);
             if found >= limit {
                 // Read on through this chat only, to tell whether it holds
@@ -116,7 +177,7 @@ pub(super) async fn search(
         if !matches.is_empty() {
             chats.push(json!({"thread": summary, "matches": matches}));
         }
-        if whole {
+        if cut.is_none() {
             searched += 1;
             through = Some(thread);
         }
@@ -129,52 +190,97 @@ pub(super) async fn search(
         "chats": chats,
         "searched": {"chats": searched, "of": threads.len()},
     });
-    if let Some(stop) = stop {
-        let reason = match stop {
-            Stop::Time => format!("Stopped after {} s", time.as_secs()),
-            Stop::Limit => format!("Stopped at the limit of {limit} matches"),
-            Stop::Size => "Stopped when the matches filled the answer".to_owned(),
-        };
-        let note = match through {
-            // A search that stops at its limit with nothing left unread in
-            // the chats in scope missed nothing.
-            Some(thread) if searched < threads.len() => {
-                let time = thread
-                    .updated_at
-                    .to_rfc3339_opts(SecondsFormat::AutoSi, true);
-                result["searched"]["through"] = json!(time);
-                format!(
-                    "{reason}, with {searched} of {} chats searched. Chats last active before {time} \
-                     were not searched: search again with \"before\": \"{time}\" to go on.",
-                    threads.len()
-                )
-            }
-            Some(_) => String::new(),
-            None if matches!(stop, Stop::Time) => {
-                format!("{reason}, before any chat was searched.")
-            }
-            None => format!(
-                "{reason}, before the first chat was searched to its end: narrow the query, or \
-                 read that chat with \"read\"."
-            ),
-        };
-        if !note.is_empty() {
-            result["stopped"] = json!(note);
+    let Some(stop) = stop else {
+        return Ok(result);
+    };
+    // The chats after the one the search stopped in, or after the last one
+    // it read to its end, are the ones left to search.
+    let last = cut.map(|(thread, _)| thread).or(through);
+    let rest_of_chats = match last {
+        Some(last) => threads
+            .last()
+            .is_some_and(|oldest| oldest.id != last.id)
+            .then(|| Cursor::after(last)),
+        None => None,
+    };
+    let reason = match stop {
+        Stop::Time => format!("Stopped after {} s", time.as_secs()),
+        Stop::Limit => format!(
+            "Stopped at the limit of {limit} {}",
+            if limit == 1 { "match" } else { "matches" }
+        ),
+        Stop::Size => "Stopped when the matches filled the answer".to_owned(),
+    };
+    let mut note = format!(
+        "{reason}, with {searched} of {} chats searched.",
+        threads.len()
+    );
+    if let Some((thread, read)) = cut {
+        result["restOfChat"] = json!({"threadId": thread.id, "after": read});
+        let _ = write!(
+            note,
+            " Chat {id} was searched up to item {read}: for its later matches, search again \
+             with \"threadId\": \"{id}\", \"after\": {read}.",
+            id = thread.id
+        );
+    }
+    match rest_of_chats {
+        Some(cursor) => {
+            result["next"] = json!({"before": cursor});
+            let _ = write!(
+                note,
+                " For {}, search again with \"before\": \"{cursor}\".",
+                if cut.is_some() {
+                    "the chats after it"
+                } else {
+                    "the chats not searched yet"
+                }
+            );
         }
+        None if last.is_none() && cut.is_none() && !threads.is_empty() => {
+            note.push_str(" Search again to go on.");
+        }
+        None => {}
+    }
+    // A search that stops at its limit with nothing left unread missed
+    // nothing.
+    if cut.is_some() || result.get("next").is_some() || last.is_none() {
+        result["stopped"] = json!(note);
     }
     Ok(result)
 }
 
+/// Bytes a match takes in the answer besides its own laid-out text: its
+/// indent, a comma and a line break.
+const MATCH_FRAME: usize = 8 + 2;
+/// Bytes a chat takes in the answer besides its summary and matches: the
+/// braces, indents and keys around them.
+const CHAT_FRAME: usize = 64;
+
+/// How many bytes `value` takes laid out as the answer lays it out (serde's
+/// two-space indent), `depth` levels in.
+fn laid_out(value: &Value, depth: usize) -> usize {
+    let text = serde_json::to_string_pretty(value).unwrap_or_default();
+    text.len() + text.matches('\n').count() * 2 * depth
+}
+
 /// A match of `needle` in `item`'s visible text: where it is, what kind of
 /// item it is, and about [`EXCERPT_CHARS`] characters around the hit, never
-/// the whole item. `None` for no match, and for a `session_manage` call of
-/// the calling chat (`own`).
+/// the whole item. `None` for no match, and in the calling chat (`own`) for
+/// a call that searched sessions, itself or through `batch`, Code Mode or a
+/// workflow, since it holds the query.
 fn item_match(item: &Item, needle: &str, own: bool) -> Option<Value> {
     let (kind, tool) = match &item.data {
         ItemData::UserMessage { .. } => ("user_message", None),
         ItemData::AssistantMessage { .. } => ("assistant_message", None),
         ItemData::Reasoning { .. } => ("reasoning", None),
-        ItemData::ToolCall { name, .. } if own && name == "session_manage" => return None,
+        ItemData::ToolCall {
+            name, arguments, ..
+        } if own
+            && (name == "session_manage" || arguments.to_string().contains("session_manage")) =>
+        {
+            return None;
+        }
         ItemData::ToolCall { name, .. } => ("tool_call", Some(name)),
         ItemData::Error { .. } => ("error", None),
         _ => return None,
@@ -233,24 +339,43 @@ mod tests {
     use haarness_protocol::{CreateThreadRequest, ThreadId, TurnId};
     use haarness_server::ManagementRegistry as _;
     use haarness_store::SqliteStore;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     struct Chats {
         store: Arc<SqliteStore>,
         runtime: Arc<AgentRuntime>,
+        /// The folder of a store kept in a file, which a test can change
+        /// behind the store's back.
+        folder: Option<PathBuf>,
     }
 
     impl Chats {
         fn new() -> Self {
-            let store = Arc::new(SqliteStore::in_memory().unwrap());
+            Self::with(Arc::new(SqliteStore::in_memory().unwrap()), None)
+        }
+
+        fn on_disk(name: &str) -> Self {
+            let folder =
+                std::env::temp_dir().join(format!("haarness-{name}-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&folder).unwrap();
+            let store = Arc::new(SqliteStore::open(folder.join("haarness.db")).unwrap());
+            Self::with(store, Some(folder))
+        }
+
+        fn with(store: Arc<SqliteStore>, folder: Option<PathBuf>) -> Self {
             let runtime = Arc::new(AgentRuntime::new(
                 store.clone(),
                 Arc::new(StaticProviderRegistry::new(Vec::new())),
                 Arc::new(EmptyToolRegistry),
                 EventBus::new(8),
             ));
-            Self { store, runtime }
+            Self {
+                store,
+                runtime,
+                folder,
+            }
         }
 
         /// A chat holding `items`, now the most recently active one.
@@ -274,10 +399,48 @@ mod tests {
             thread.id
         }
 
+        /// Makes `chats` last active at one moment, as a restart that
+        /// recovers their turns does.
+        fn at_one_moment(&self, chats: &[ThreadId]) {
+            let folder = self.folder.as_ref().expect("a store in a file");
+            let connection = rusqlite::Connection::open(folder.join("haarness.db")).unwrap();
+            let moment = Utc::now().to_rfc3339();
+            for chat in chats {
+                connection
+                    .execute(
+                        "UPDATE threads SET updated_at=?1 WHERE id=?2",
+                        rusqlite::params![moment, chat.to_string()],
+                    )
+                    .unwrap();
+            }
+        }
+
         async fn search(&self, input: Value, from: ThreadId, time: Duration) -> Value {
-            search(&self.runtime, &input, &context(from), time)
+            self.search_in(input, from, None, time).await
+        }
+
+        async fn search_in(
+            &self,
+            input: Value,
+            from: ThreadId,
+            only: Option<ThreadId>,
+            time: Duration,
+        ) -> Value {
+            let only = match only {
+                Some(id) => Some(self.runtime.get_thread(id).await.unwrap()),
+                None => None,
+            };
+            search(&self.runtime, &input, &context(from), only, time)
                 .await
                 .unwrap()
+        }
+    }
+
+    impl Drop for Chats {
+        fn drop(&mut self) {
+            if let Some(folder) = &self.folder {
+                let _ = std::fs::remove_dir_all(folder);
+            }
         }
     }
 
@@ -322,6 +485,14 @@ mod tests {
             .collect()
     }
 
+    fn with(mut input: Value, extra: Value) -> Value {
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        input
+    }
+
     #[tokio::test]
     async fn a_search_reads_every_chat_not_only_the_most_recent() {
         let chats = Chats::new();
@@ -361,7 +532,7 @@ mod tests {
             result["stopped"]
                 .as_str()
                 .unwrap()
-                .contains("before any chat was searched"),
+                .starts_with("Stopped after 0 s, with 0 of 206 chats searched."),
             "{result}"
         );
     }
@@ -375,67 +546,134 @@ mod tests {
         let third = chats
             .chat(
                 "third",
-                vec![said("deploy key one"), said("deploy key two")],
+                vec![
+                    said("deploy key one"),
+                    said("lunch"),
+                    said("deploy key two"),
+                ],
             )
             .await;
         let query = |extra: Value| {
-            let mut input = json!({"action": "search", "query": "deploy key", "limit": 2});
-            input
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            input
+            with(
+                json!({"action": "search", "query": "deploy key", "limit": 2}),
+                extra,
+            )
         };
         // The limit is reached at the end of the newest chat: it was read to
         // its end, and the older ones were not.
         let result = chats.search(query(json!({})), third, SEARCH_TIME).await;
         assert_eq!(titles(&result), ["third"]);
-        assert_eq!(result["searched"]["chats"], 1);
-        assert_eq!(result["searched"]["of"], 4);
-        let through = result["searched"]["through"].as_str().unwrap().to_owned();
+        assert_eq!(result["searched"], json!({"chats": 1, "of": 4}));
+        assert!(result.get("restOfChat").is_none(), "{result}");
+        let next = result["next"]["before"].as_str().unwrap().to_owned();
+        assert!(next.ends_with(&third.to_string()), "{next}");
         let stopped = result["stopped"].as_str().unwrap();
-        assert!(
-            stopped.starts_with("Stopped at the limit of 2 matches, with 1 of 4 chats searched."),
-            "{stopped}"
-        );
-        assert!(
-            stopped.contains(&format!("\"before\": \"{through}\"")),
-            "{stopped}"
+        assert_eq!(
+            stopped,
+            format!(
+                "Stopped at the limit of 2 matches, with 1 of 4 chats searched. For the chats \
+                 not searched yet, search again with \"before\": \"{next}\"."
+            )
         );
         // Going on from there finds the older ones, and nothing twice.
         let result = chats
-            .search(query(json!({"before": through})), third, SEARCH_TIME)
+            .search(query(json!({"before": next})), third, SEARCH_TIME)
             .await;
         assert_eq!(titles(&result), ["second", "first"], "{result}");
         assert_eq!(result["searched"], json!({"chats": 3, "of": 3}));
         assert!(result.get("stopped").is_none(), "{result}");
-        // A limit reached inside a chat leaves that chat to the next search.
+        // A bare time still reads as the chats last active before it.
+        let time = next.split(' ').next().unwrap();
         let result = chats
-            .search(
-                json!({"action": "search", "query": "deploy key", "limit": 1}),
-                third,
-                SEARCH_TIME,
-            )
+            .search(query(json!({"before": time})), third, SEARCH_TIME)
             .await;
-        assert_eq!(result["searched"]["chats"], 0);
-        assert!(
-            result["stopped"]
-                .as_str()
-                .unwrap()
-                .contains("before the first chat was searched to its end"),
+        assert_eq!(titles(&result), ["second", "first"], "{result}");
+
+        // A limit reached inside a chat: that chat goes on from the last
+        // match given, and the chats after it from after it, so nothing
+        // comes twice and a chat with more matches than the limit is no wall.
+        let one = |extra: Value| {
+            with(
+                json!({"action": "search", "query": "deploy key", "limit": 1}),
+                extra,
+            )
+        };
+        let result = chats.search(one(json!({})), third, SEARCH_TIME).await;
+        assert_eq!(result["searched"], json!({"chats": 0, "of": 4}));
+        assert_eq!(result["chats"][0]["matches"][0]["sequence"], 1);
+        assert_eq!(
+            result["restOfChat"],
+            json!({"threadId": third, "after": 1}),
             "{result}"
         );
+        let next = result["next"]["before"].as_str().unwrap().to_owned();
+        let stopped = result["stopped"].as_str().unwrap();
+        assert!(
+            stopped.contains(&format!(
+                "Chat {third} was searched up to item 1: for its later matches, search again \
+                 with \"threadId\": \"{third}\", \"after\": 1. For the chats after it, search \
+                 again with \"before\": \"{next}\"."
+            )),
+            "{stopped}"
+        );
+        let rest = chats
+            .search_in(one(json!({"after": 1})), third, Some(third), SEARCH_TIME)
+            .await;
+        assert_eq!(rest["chats"][0]["matches"][0]["sequence"], 3, "{rest}");
+        assert_eq!(rest["searched"], json!({"chats": 1, "of": 1}));
+        assert!(rest.get("stopped").is_none(), "{rest}");
+        let older = chats
+            .search(one(json!({"before": next})), third, SEARCH_TIME)
+            .await;
+        assert_eq!(titles(&older), ["second"], "{older}");
+
         // A bad time is refused, naming the field.
-        let error = search(
-            &chats.runtime,
-            &query(json!({"before": "yesterday"})),
-            &context(third),
-            SEARCH_TIME,
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("before 'yesterday'"), "{error}");
+        for before in ["yesterday", "2026-11-19T03:39:03Z not-an-id"] {
+            let error = search(
+                &chats.runtime,
+                &query(json!({"before": before})),
+                &context(third),
+                None,
+                SEARCH_TIME,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(&format!("before '{before}'")), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn going_on_skips_no_chat_last_active_at_the_same_moment() {
+        let chats = Chats::on_disk("session-search-ties");
+        let mut tied = Vec::new();
+        for title in ["w", "x", "y", "z"] {
+            let chat = chats
+                .chat(title, vec![said(&format!("rollback plan {title}"))])
+                .await;
+            if title != "w" {
+                tied.push(chat);
+            }
+        }
+        chats.at_one_moment(&tied);
+        let here = tied[0];
+        let mut seen = Vec::new();
+        let mut before = None;
+        for _ in 0..10 {
+            let mut input = json!({"action": "search", "query": "rollback plan", "limit": 1});
+            if let Some(before) = &before {
+                input["before"] = json!(before);
+            }
+            let result = chats.search(input, here, SEARCH_TIME).await;
+            assert!(result.get("restOfChat").is_none(), "{result}");
+            seen.extend(titles(&result).into_iter().map(str::to_owned));
+            match result.get("next") {
+                Some(next) => before = Some(next["before"].as_str().unwrap().to_owned()),
+                None => break,
+            }
+        }
+        seen.sort();
+        assert_eq!(seen, ["w", "x", "y", "z"]);
     }
 
     #[tokio::test]
@@ -458,10 +696,20 @@ mod tests {
         let here = chats
             .chat(
                 "here",
-                vec![call(
-                    "session_manage",
-                    json!({"action": "search", "query": "zebra"}),
-                )],
+                vec![
+                    call(
+                        "session_manage",
+                        json!({"action": "search", "query": "zebra"}),
+                    ),
+                    call(
+                        "batch",
+                        json!({"tool_calls": [{"tool": "session_manage", "parameters": {"action": "search", "query": "zebra"}}]}),
+                    ),
+                    call(
+                        "execute",
+                        json!({"code": "return await tools.session_manage({action: 'search', query: 'zebra'})"}),
+                    ),
+                ],
             )
             .await;
         let kinds =
@@ -483,7 +731,8 @@ mod tests {
             let chats = &chats;
             async move { chats.search(input, here, SEARCH_TIME).await }
         };
-        // Its own call holds the query; another chat's call is found.
+        // Its own calls hold the query, made directly or through batch or
+        // Code Mode; another chat's call is found.
         let result = run("zebra").await;
         assert_eq!(
             kinds(&result),
@@ -548,7 +797,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(output.text.len() < 50 * 1024, "{}", output.text.len());
+        assert!(output.text.len() <= 50 * 1024, "{}", output.text.len());
         let result: Value = serde_json::from_str(&output.text).unwrap();
         let first = &result["chats"][0]["matches"][0];
         let excerpt = first["excerpt"].as_str().unwrap();
@@ -574,6 +823,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn many_short_matches_fill_the_answer_as_it_is_sent() {
+        let chats = Chats::new();
+        let mut here = None;
+        for index in 0..100 {
+            here = Some(
+                chats
+                    .chat(
+                        &format!("Fix the login flow {index}"),
+                        vec![said("please deploy")],
+                    )
+                    .await,
+            );
+        }
+        let (root, _workspace, _paths, service) =
+            crate::management::tests::isolated_service("session-search-short");
+        service.attach_runtime(&chats.runtime);
+        let output = service
+            .execute(
+                "session_manage",
+                json!({"action": "search", "query": "deploy", "limit": 100}),
+                context(here.unwrap()),
+            )
+            .await
+            .unwrap();
+        // Laid out as sent, the answer stays within what reaches the model
+        // whole, and says where to go on.
+        assert!(output.text.len() <= 50 * 1024, "{}", output.text.len());
+        let result: Value = serde_json::from_str(&output.text).unwrap();
+        let shown = result["chats"].as_array().unwrap().len();
+        assert!((40..100).contains(&shown), "{shown}");
+        assert_eq!(result["searched"]["chats"], shown);
+        assert!(result["next"]["before"].is_string(), "{result}");
+        assert!(
+            result["stopped"]
+                .as_str()
+                .unwrap()
+                .starts_with("Stopped when the matches filled the answer"),
+            "{result}"
+        );
+        // The bytes counted for the chats are no fewer than they take.
+        let counted: usize = result["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chat| {
+                CHAT_FRAME
+                    + laid_out(&chat["thread"], 3)
+                    + chat["matches"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|hit| MATCH_FRAME + laid_out(hit, 4))
+                        .sum::<usize>()
+            })
+            .sum();
+        let mut bare = result.clone();
+        bare["chats"] = json!([]);
+        let rest = serde_json::to_string_pretty(&bare).unwrap().len();
+        assert!(
+            output.text.len() <= counted + rest,
+            "{} > {counted} + {rest}",
+            output.text.len()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn a_stopped_turn_stops_the_search() {
         let chats = Chats::new();
         let here = chats.chat("here", vec![said("anything")]).await;
@@ -583,6 +899,7 @@ mod tests {
             &chats.runtime,
             &json!({"action": "search", "query": "anything"}),
             &context,
+            None,
             SEARCH_TIME,
         )
         .await

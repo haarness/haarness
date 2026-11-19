@@ -1302,7 +1302,13 @@ impl ManagementService {
                 ))
             }
             "search" => {
-                session_search::search(&runtime, input, context, session_search::SEARCH_TIME).await
+                // A search that stopped inside a chat goes on in that chat.
+                let only = match optional_string(input, "threadId") {
+                    Some(_) => Some(self.resolve_thread(input, context.thread_id).await?),
+                    None => None,
+                };
+                session_search::search(&runtime, input, context, only, session_search::SEARCH_TIME)
+                    .await
             }
             "read" => {
                 let thread = self.resolve_thread(input, context.thread_id).await?;
