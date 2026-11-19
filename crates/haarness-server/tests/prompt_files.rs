@@ -370,7 +370,15 @@ async fn without_prompt_files_requests_are_byte_for_byte_the_builtin_ones() {
         .replace("{os}", std::env::consts::OS)
         .replace("{arch}", std::env::consts::ARCH)
         .replace("{date}", &date)
-        .replace("{project}", "Project instructions marker");
+        .replace("{project}", "Project instructions marker")
+        .replace(
+            "{cmd}",
+            if cfg!(windows) {
+                " (in cmd.exe, `echo %TMPDIR%`)"
+            } else {
+                ""
+            },
+        );
     assert_eq!(main.system, golden);
     assert_eq!(main.tools, vec![Preview.definition()]);
     assert!(matches!(

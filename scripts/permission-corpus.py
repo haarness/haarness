@@ -13,10 +13,12 @@ decision that moved from allow to ask or deny under the defaults.
 
 Usage:
   cargo test -p haarness-core --lib --no-run      # prints the test binary's path
-  python3 scripts/permission-corpus.py run <test binary> <out.jsonl> [--root <folder>] [--lines <file.json>]
+  python3 scripts/permission-corpus.py run <test binary> <out.jsonl> [--root <folder>] [--lines <file.json>] [--temp]
   python3 scripts/permission-corpus.py diff <before.jsonl> <after.jsonl>
 
-`--lines` reads the lines from a JSON list instead of the corpus below.
+`--lines` reads the lines from a JSON list instead of the corpus below. `--temp` reads them as lines of
+a chat whose own temp folder is `<root>/chats/1a2b3c4d`, with `<root>/server-tmp` as the run's own
+`TMPDIR`, which a build from before chats had one, and a line that sets the variable, reads `$TMPDIR` as.
 """
 import json
 import os
@@ -132,6 +134,34 @@ CORPUS = [
     'A=1 B=2 \\\n  npm test', 'export A=1 B=2\nnpm test', 'A=1 B=2 npm test',
     # Function definitions
     'cat() { echo x; } > notes.md; cat', 'f() { git status; }; f',
+    # The chat's own temp folder
+    'echo hi > "$TMPDIR/out.txt"', 'cat $TMPDIR/out.txt', 'rm -rf "$TMPDIR/build"', 'rm -f $TMPDIR/*.log',
+    'mkdir -p ${TMPDIR}/a/b && touch $TMPDIR/a/b/c', 'cp README.md "$TMP/readme.md"', 'cd $TMPDIR && ls',
+    'python3 -m pytest > "$TMPDIR/pytest.log" 2>&1; tail -5 "$TMPDIR/pytest.log"', 'printf %s "$TMPDIR"',
+    'cat "$TMPDIR/../outside/x"', 'echo x > $TMPDIR/../x', 'cat $TEMP/notes.txt',
+    'export TMPDIR="$HOME"; echo x > "$TMPDIR/p1.txt"', 'TMPDIR=$HOME; echo x > $TMPDIR/p2.txt',
+    'TMPDIR=~ && cp README.md $TMPDIR/p3.txt', 'for TMPDIR in "$HOME"; do echo x > "$TMPDIR/p4.txt"; done',
+    'read -r TMPDIR <<< "$HOME"; echo x > "$TMPDIR/p5.txt"', 'env TMPDIR="$HOME" sh -c \'echo x > "$TMPDIR/p6.txt"\'',
+    'export TMP=~; rm -f $TMP/secret.txt', 'export TMPDIR=~/mytmp; rm -rf "$TMPDIR"/*',
+    'unset TMPDIR; echo x > "$TMPDIR/p7.txt"', 'env -u TMPDIR sh -c \'echo x > "$TMPDIR/p8.txt"\'',
+    'env -i sh -c \'echo x > "$TMPDIR/p9.txt"\'', 'sudo sh -c \'echo x > "$TMPDIR/p10.txt"\'',
+    '. ./settings.sh; echo x > "$TMPDIR/p11.txt"', 'echo x > "${TMPDIR:=$HOME}/p12.txt"',
+    'bash -lc \'rm -rf "$TMPDIR"/*\'', 'sh -l -c \'echo x > "$TMPDIR/n2.txt"\'',
+    'bash --login -c \'echo x > "$TMPDIR/n3.txt"\'', 'zsh -c \'echo x > "$TMPDIR/n4.txt"\'',
+    'bash -ic \'echo x > "$TMPDIR/n5.txt"\' 2>/dev/null', 'exec -l bash -c \'echo x > "$TMPDIR/c3.txt"\'',
+    'if . ./env.sh; then echo x > "$TMPDIR/c1.txt"; fi', 'command . ./env.sh; echo x > "$TMPDIR/c2.txt"',
+    'bash -c \'echo x > "$TMPDIR/ok.txt"\'', 'sh -c \'echo x > "$TMPDIR/ok.txt"\'',
+    'bash -c -l \'rm -rf "$TMPDIR"/*\'', 'sh -c -l \'rm -rf "$TMPDIR"/*\'',
+    'BASH_ENV=./x.sh bash -c \'rm -rf "$TMPDIR"/*\'', 'exec -a -sh sh -c \'rm -rf "$TMPDIR"/*\'',
+    '/usr/bin/sudo -n sh -c \'rm -rf "$TMPDIR"/*\'', 'env -S-i sh -c \'rm -rf "$TMPDIR"/*\'',
+    'env -0i sh -c \'rm -rf "$TMPDIR"/*\'', '/bin/su -c \'rm -rf "$TMPDIR"/*\'',
+    '(exec -a mysh sh -c \'rm -rf "$TMPDIR"/*\')', 'env --argv0=-sh sh -c \'rm -rf "$TMPDIR"/*\'',
+    'dash -o interactive -c \'echo x > "$TMPDIR/a2.txt"\'', 'ksh -o rc -c \'echo x > "$TMPDIR/a3.txt"\'',
+    'ksh --rc -c \'echo x > "$TMPDIR/a4.txt"\'', 'ksh -ologin_shell -c \'echo x > "$TMPDIR/a5.txt"\'',
+    'export $(grep -v "^#" vars.txt | xargs) && rm -rf "$TMPDIR"/build',
+    'while IFS== read -r k v; do export "$k=$v"; done < vars.txt; rm -rf "$TMPDIR"/build',
+    'env $(cat vars.txt) sh -c \'rm -rf "$TMPDIR"/build\'', 'declare -x "$(head -1 vars.txt)"; rm -rf "$TMPDIR"/build',
+    'export PATH="$PWD/bin:$PATH"; echo x > "$TMPDIR/ok4.txt"',
     # Files
     'rm -rf node_modules && npm install', 'rm -rf ~/Library/Caches/foo', 'cat ~/.zshrc', 'cat ../outside/secret',
     'cp .env.example .env', 'mv build dist', 'chmod +x run.sh && ./run.sh', 'bash run.sh', 'sudo rm -rf /tmp/x',
@@ -243,18 +273,25 @@ def fixture(root):
     return project
 
 
-def run(binary, out, root=None, lines=None):
+def run(binary, out, root=None, lines=None, temp=False):
     holder = None if root else tempfile.TemporaryDirectory(prefix='haarness-permission-corpus-')
     root = Path(root or holder.name)
     root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
     project = fixture(root)
+    chat = root / 'chats' / '1a2b3c4d'
+    if temp:
+        (chat / 'build').mkdir(parents=True, exist_ok=True)
+        (chat / 'out.txt').write_text('x\n')
+        (root / 'server-tmp').mkdir(exist_ok=True)
     lines = json.loads(Path(lines).read_text()) if lines else CORPUS
     corpus = root / 'corpus.json'
     corpus.write_text(json.dumps(lines))
     raw = root / 'raw.jsonl'
     env = {**os.environ, 'HAARNESS_PERMISSION_CORPUS': str(corpus),
            'HAARNESS_PERMISSION_CORPUS_PROJECT': str(project), 'HAARNESS_PERMISSION_CORPUS_OUT': str(raw)}
+    if temp:
+        env.update({'HAARNESS_PERMISSION_CORPUS_TEMP': str(chat), 'TMPDIR': str(root / 'server-tmp')})
     subprocess.run([binary, '--exact', 'runtime::permission_corpus::permission_corpus', '--ignored',
                     '--test-threads', '1'], env=env, check=True, capture_output=True)
     text = raw.read_text()
@@ -312,7 +349,7 @@ if __name__ == '__main__':
     if len(sys.argv) >= 4 and sys.argv[1] == 'run':
         root = sys.argv[sys.argv.index('--root') + 1] if '--root' in sys.argv else None
         lines = sys.argv[sys.argv.index('--lines') + 1] if '--lines' in sys.argv else None
-        run(sys.argv[2], sys.argv[3], root, lines)
+        run(sys.argv[2], sys.argv[3], root, lines, '--temp' in sys.argv)
     elif len(sys.argv) == 4 and sys.argv[1] == 'diff':
         diff(sys.argv[2], sys.argv[3])
     else:

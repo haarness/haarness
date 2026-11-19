@@ -189,20 +189,10 @@ pub(crate) fn private_temp_folder() -> PathBuf {
 /// instead, and no one else can read or plant what is saved there.
 #[cfg(unix)]
 fn private_temp_folder_in(temp: &Path) -> PathBuf {
-    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+    use std::os::unix::fs::DirBuilderExt as _;
     let user = nix::unistd::geteuid().as_raw();
     let named = temp.join(format!("haarness-{user}"));
-    let usable = match std::fs::DirBuilder::new().mode(0o700).create(&named) {
-        Ok(()) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            std::fs::symlink_metadata(&named).is_ok_and(|metadata| {
-                let open_to_others = metadata.mode() & 0o077 != 0;
-                metadata.is_dir() && metadata.uid() == user && !open_to_others
-            })
-        }
-        Err(_) => false,
-    };
-    if usable {
+    if haarness_core::paths::own_private_folder(&named) {
         return named;
     }
     let own = temp.join(format!("haarness-{user}-{}", uuid::Uuid::now_v7()));
@@ -316,6 +306,7 @@ mod tests {
                     &CancellationToken::new(),
                     folder,
                     &BTreeMap::new(),
+                    None,
                     None,
                 )
                 .await

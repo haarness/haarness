@@ -8,6 +8,7 @@ pub mod auto_review;
 mod background;
 mod background_commands;
 pub mod chat_folders;
+pub mod chat_temp;
 mod config;
 pub mod definitions;
 pub mod envelope;

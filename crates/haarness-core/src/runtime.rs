@@ -5393,6 +5393,35 @@ impl AgentRuntime {
         }
         Ok(thread)
     }
+    /// Takes away the own temp folders ([`crate::chat_temp`]) of the chats
+    /// this server holds archived, and of chats it does not hold (another
+    /// server's, or one whose data folder is gone), once nothing changed in
+    /// them for [`crate::chat_temp::IDLE_LIMIT`]. An archived chat taken back
+    /// out before then finds its files, and a folder of a chat it holds and
+    /// keeps stays, however old. How many went.
+    pub async fn sweep_chat_temp_folders(&self) -> usize {
+        let Ok(recorded) = tokio::task::spawn_blocking(crate::chat_temp::recorded).await else {
+            return 0;
+        };
+        let mut done = Vec::new();
+        for folder in recorded {
+            match self.repository.get_thread(folder.chat()).await {
+                Ok(thread) if thread.archived => done.push(folder),
+                Err(CoreError::NotFound(_)) => done.push(folder),
+                // A chat it keeps, or one not known to be gone.
+                Ok(_) | Err(_) => {}
+            }
+        }
+        tokio::task::spawn_blocking(move || {
+            let now = std::time::SystemTime::now();
+            done.into_iter()
+                .filter(|folder| folder.unused_for(crate::chat_temp::IDLE_LIMIT, now))
+                .filter(|folder| crate::chat_temp::remove(folder.chat()))
+                .count()
+        })
+        .await
+        .unwrap_or(0)
+    }
     pub async fn items(
         &self,
         id: ThreadId,
@@ -7529,7 +7558,9 @@ impl AgentRuntime {
         if let Some(store) = &self.repository_approvals {
             *self.repository_rules.lock() = store.load()?;
         }
-        let plans = ask_plans(name, &arguments, &workspace);
+        let temp_folder = chat_temp_folder(root, name);
+        let (plans, temp_folder_named) =
+            chat_ask_plans_named(name, &arguments, &workspace, temp_folder.as_deref());
         let authorized_external_paths = plans
             .iter()
             .flat_map(|plan| plan.external_paths.iter().cloned())
@@ -8064,6 +8095,8 @@ impl AgentRuntime {
         }
         let mut execution = components.config.execution.clone();
         execution.person_shell = !agent_work;
+        execution.temp_folder = temp_folder;
+        execution.temp_folder_named = temp_folder_named;
         execution.chat_home = self.chat_home.then(|| self.workspace.clone());
         if name == "bash"
             && allowed.is_ok()
@@ -15318,7 +15351,9 @@ impl RunnerTask {
         if let Some(store) = &self.repository_approvals {
             *self.repository_rules.lock() = store.load()?;
         }
-        let plans = ask_plans(name, &arguments, &self.workspace);
+        let temp_folder = chat_temp_folder(self.root_thread_id, name);
+        let (plans, temp_folder_named) =
+            chat_ask_plans_named(name, &arguments, &self.workspace, temp_folder.as_deref());
         let authorized_external_paths = plans
             .iter()
             .flat_map(|plan| plan.external_paths.iter().cloned())
@@ -15529,6 +15564,8 @@ impl RunnerTask {
         let mut execution = self.config.execution.clone();
         execution.chat_home = self.chat_home.then(|| self.runtime_workspace.clone());
         execution.root_thread = Some(self.root_thread_id);
+        execution.temp_folder = temp_folder;
+        execution.temp_folder_named = temp_folder_named;
         if name == "bash"
             && let Some(hooks) = &self.hooks
         {
@@ -19690,6 +19727,9 @@ struct AskPlan {
     /// for it (see `permissions::bash::BashAnalysis::globbed`): a rule
     /// answers for it only when it covers every name the glob may pick.
     globbed: HashMap<String, String>,
+    /// Folders in the calling chat's own temp folder (see `chat_ask_plans`):
+    /// a rule that refuses them still does, but nothing asks about them.
+    own_temp: bool,
 }
 
 /// What a bash group read from inside its written commands (see
@@ -19956,6 +19996,25 @@ impl AskPlan {
     /// a here-document's operator on its line) is judged as a written
     /// command: an allow for the command it was read from does not cover it.
     fn evaluate(&self, engine: &PermissionEngine, pattern: &str) -> crate::permissions::Evaluation {
+        let evaluation = self.evaluate_rules(engine, pattern);
+        // The chat's own temp folder: what a rule refuses stays refused, and
+        // nothing asks.
+        if self.own_temp && evaluation.decision == PermissionDecision::Ask {
+            return crate::permissions::Evaluation {
+                decision: PermissionDecision::Allow,
+                protected: false,
+                ..evaluation
+            };
+        }
+        evaluation
+    }
+
+    /// [`Self::evaluate`] by the rules alone.
+    fn evaluate_rules(
+        &self,
+        engine: &PermissionEngine,
+        pattern: &str,
+    ) -> crate::permissions::Evaluation {
         let operation = self.operation(pattern);
         let Some(shell) = &self.shell else {
             let evaluation = engine.evaluate_detailed(&operation);
@@ -20182,6 +20241,7 @@ impl AskPlan {
             resolved,
             shell: self.shell,
             globbed: self.globbed,
+            own_temp: self.own_temp,
         }
     }
 }
@@ -20641,6 +20701,7 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
         resolved: Vec::new(),
         shell: None,
         globbed: HashMap::new(),
+        own_temp: false,
     };
     for plan in plans {
         combined
@@ -20722,6 +20783,70 @@ async fn recover_read_path(
     Ok(())
 }
 
+/// The own temp folder ([`crate::chat_temp`]) of the conversation whose root
+/// chat is `root`, for a call of tool `name`: made for a shell command,
+/// which gets it as `TMPDIR`, and looked up for any other tool, which may
+/// name a path in it once a command made it.
+fn chat_temp_folder(root: ThreadId, name: &str) -> Option<PathBuf> {
+    if name == "bash" {
+        crate::chat_temp::folder(root)
+    } else {
+        crate::chat_temp::existing(root)
+    }
+}
+
+/// [`ask_plans`] for a call of a chat whose own temp folder is `temp`, for
+/// the shell and the file tools alike: `$TMPDIR`, `$TMP` and `$TEMP` name it
+/// (see `bash::with_chat_temp`), and the folders in it the call reaches are
+/// asked about in a group of their own that no ask holds up, so a rule that
+/// refuses them (`"external_directory": {"/tmp/*": "deny"}`) still does.
+#[cfg(test)]
+fn chat_ask_plans(
+    name: &str,
+    arguments: &serde_json::Value,
+    workspace: &Path,
+    temp: Option<&Path>,
+) -> Vec<AskPlan> {
+    chat_ask_plans_named(name, arguments, workspace, temp).0
+}
+
+/// [`chat_ask_plans`], and whether the call was read with `$TMPDIR`, `$TMP`
+/// or `$TEMP` as the chat's folder, so its command must get the folder there
+/// whatever a login profile says (see `ExecutionSettings::temp_folder_named`).
+fn chat_ask_plans_named(
+    name: &str,
+    arguments: &serde_json::Value,
+    workspace: &Path,
+    temp: Option<&Path>,
+) -> (Vec<AskPlan>, bool) {
+    let (mut plans, used) = crate::permissions::bash::with_chat_temp_use(temp, || {
+        ask_plans(name, arguments, workspace)
+    });
+    let mut patterns: Vec<String> = Vec::new();
+    for folder in used.reached {
+        let pattern = format!(
+            "{}/*",
+            folder.to_string_lossy().trim_end_matches(['/', '\\'])
+        );
+        if !patterns.contains(&pattern) {
+            patterns.push(pattern);
+        }
+    }
+    if !patterns.is_empty() {
+        plans.push(AskPlan {
+            permission: "external_directory".into(),
+            always: patterns.clone(),
+            patterns,
+            external_paths: Vec::new(),
+            resolved: Vec::new(),
+            shell: None,
+            globbed: HashMap::new(),
+            own_temp: true,
+        });
+    }
+    (plans, used.named)
+}
+
 /// The permission groups for one tool call. Bash commands are shell-parsed:
 /// each command in a chain becomes its own pattern with an arity-generalized
 /// "always" rule, and touching paths outside the workspace raises a separate
@@ -20752,6 +20877,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
     }
     if matches!(
@@ -20777,6 +20903,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
     }
     if name.starts_with("mac_") {
@@ -20801,6 +20928,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
     }
     if name.starts_with("browser_") {
@@ -20831,6 +20959,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
         let remember = arguments["__browser"]["remember"]
             .as_array()
@@ -20848,6 +20977,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 resolved: Vec::new(),
                 shell: None,
                 globbed: HashMap::new(),
+                own_temp: false,
             });
         }
         if matches!(name, "browser_files_upload" | "browser_files_drop") {
@@ -20896,6 +21026,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
     }
     if matches!(name, "image_generate" | "video_generate") {
@@ -20912,6 +21043,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
     }
     if name == "workflow" {
@@ -20930,6 +21062,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         }];
         if arguments.get("action").and_then(serde_json::Value::as_str) == Some("create") {
             // The new file also meets the rules for where a linked
@@ -20949,6 +21082,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 resolved,
                 shell: None,
                 globbed: HashMap::new(),
+                own_temp: false,
             });
         }
         return plans;
@@ -21048,6 +21182,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 resolved: Vec::new(),
                 shell: None,
                 globbed,
+                own_temp: false,
             });
         }
         if !analysis.patterns.is_empty() {
@@ -21060,6 +21195,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 resolved: Vec::new(),
                 shell: Some(shell),
                 globbed: HashMap::new(),
+                own_temp: false,
             });
         }
         return plans;
@@ -21109,6 +21245,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved,
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         });
     }
     if name == "apply_patch" {
@@ -21146,6 +21283,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                     resolved,
                     shell: None,
                     globbed: HashMap::new(),
+                    own_temp: false,
                 });
                 return plans;
             }
@@ -21158,6 +21296,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
             shell: None,
             globbed: HashMap::new(),
+            own_temp: false,
         });
         return plans;
     }
@@ -21228,6 +21367,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         resolved,
         shell: None,
         globbed: HashMap::new(),
+        own_temp: false,
     });
     plans
 }
@@ -23467,6 +23607,10 @@ fn external_path_request(
         ExternalPathKind::Directory => path.as_path(),
         ExternalPathKind::File | ExternalPathKind::Entry => path.parent().unwrap_or(path.as_path()),
     };
+    // The chat's own temp folder is asked about apart (see `chat_ask_plans`).
+    if crate::permissions::bash::reached_chat_temp(&path, directory) {
+        return None;
+    }
     let pattern = format!(
         "{}/*",
         directory.to_string_lossy().trim_end_matches(['/', '\\'])
@@ -28780,6 +28924,292 @@ mod tests {
         if real != std::path::Path::new("/tmp") {
             assert_eq!(plans[1].patterns[1..], [real.display().to_string()]);
         }
+    }
+
+    /// A chat's own temp folder asks nothing of its shell and file tools, by
+    /// where a path really leads, while a rule that refuses it still does; a
+    /// way out of it, another chat's folder and every other folder outside
+    /// still ask, and without a folder `$TMPDIR` is the server's, as before.
+    // POSIX shell text: Windows runs commands in cmd.exe.
+    #[cfg(unix)]
+    #[test]
+    fn a_chat_s_own_temp_folder_is_no_folder_outside_the_project() {
+        use crate::{PermissionDecision, PermissionEngine, PermissionRule};
+        let root = std::env::temp_dir().join(format!("haarness-own-temp-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let root = crate::paths::canonicalize(&root).unwrap();
+        let temp = root.join("chats/1a2b3c4d");
+        let other = root.join("chats/5e6f7a8b");
+        std::fs::create_dir_all(temp.join("build")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink(&other, temp.join("link")).unwrap();
+        // Whether the call asks under Haarness's defaults, and whether a
+        // person's deny of the folder that holds the chats' folders refuses it.
+        let mut defaults = PermissionEngine::build_defaults();
+        defaults.set_workspace(&workspace);
+        let mut refusing = PermissionEngine::build_defaults();
+        refusing.set_workspace(&workspace);
+        refusing.add_rule(PermissionRule {
+            pattern: format!("external_directory:{}/*", root.join("chats").display()),
+            decision: PermissionDecision::Deny,
+        });
+        let decided = |engine: &PermissionEngine,
+                       name: &str,
+                       arguments: &serde_json::Value,
+                       temp: Option<&std::path::Path>,
+                       decision: PermissionDecision| {
+            super::chat_ask_plans(name, arguments, &workspace, temp)
+                .iter()
+                .any(|plan| {
+                    plan.patterns
+                        .iter()
+                        .any(|pattern| plan.evaluate(engine, pattern).decision == decision)
+                })
+        };
+        let outside = |name: &str, arguments: serde_json::Value, temp: Option<&std::path::Path>| {
+            decided(&defaults, name, &arguments, temp, PermissionDecision::Ask)
+        };
+        let refused = |name: &str, arguments: serde_json::Value| {
+            decided(
+                &refusing,
+                name,
+                &arguments,
+                Some(&temp),
+                PermissionDecision::Deny,
+            )
+        };
+        let shell = |command: &str| json!({ "command": command });
+        let shown = temp.display();
+        for command in [
+            "echo hi > \"$TMPDIR/out.txt\"".to_owned(),
+            "cat $TMPDIR/out.txt".into(),
+            "cat ${TMPDIR}/out.txt | head -1".into(),
+            "rm -rf \"$TMPDIR/build\"".into(),
+            "mkdir -p $TMP/a/b && touch $TEMP/a/b/c".into(),
+            "cp README.md \"$TMPDIR/\"".into(),
+            "rm -f $TMPDIR/*.log".into(),
+            "cd $TMPDIR && ls".into(),
+            "python3 -m pytest > \"$TMPDIR/log.txt\" 2>&1".into(),
+            format!("cd {shown} && rm -rf build && echo x > again.txt"),
+            format!("cat {shown}/out.txt"),
+        ] {
+            assert!(
+                !outside("bash", shell(&command), Some(&temp)),
+                "{command} asks"
+            );
+            assert!(refused("bash", shell(&command)), "{command} is not refused");
+        }
+        assert!(!outside(
+            "bash",
+            json!({ "command": "ls", "workdir": temp.display().to_string() }),
+            Some(&temp)
+        ));
+        for command in [
+            "cat \"$TMPDIR/../5e6f7a8b/x\"".to_owned(),
+            "cat $TMPDIR/link/x".into(),
+            "echo x > $TMPDIR/../x".into(),
+            format!("cat {}/x", other.display()),
+            "echo x > /etc/haarness-test-x".into(),
+        ] {
+            assert!(
+                outside("bash", shell(&command), Some(&temp)),
+                "{command} does not ask"
+            );
+        }
+        // A line that sets, unsets or reads a value into one of the
+        // variables, or hands its commands another environment, reads them
+        // as without a folder: here `$TMPDIR` is the test's own temp folder,
+        // outside the project, so each asks as it did.
+        for command in [
+            "export TMPDIR=\"$HOME\"; echo x > \"$TMPDIR/p1.txt\"",
+            "TMPDIR=$HOME; echo x > $TMPDIR/p2.txt",
+            "TMPDIR=~ && cp README.md $TMPDIR/p3.txt",
+            "for TMPDIR in \"$HOME\"; do echo x > \"$TMPDIR/p4.txt\"; done",
+            "read -r TMPDIR <<< \"$HOME\"; echo x > \"$TMPDIR/p5.txt\"",
+            "env TMPDIR=\"$HOME\" sh -c 'echo x > \"$TMPDIR/p6.txt\"'",
+            "export TMPDIR=~/mytmp; rm -rf \"$TMPDIR\"/*",
+            "unset TMPDIR; echo x > \"$TMPDIR/p7.txt\"",
+            "printf -v TMPDIR %s ~; echo x > \"$TMPDIR/p8.txt\"",
+            "declare TMPDIR=~; echo x > $TMPDIR/p9.txt",
+            "env -u TMPDIR sh -c 'echo x > \"$TMPDIR/p11.txt\"'",
+            "env -i sh -c 'echo x > \"$TMPDIR/p12.txt\"'",
+            "sudo sh -c 'echo x > \"$TMPDIR/p13.txt\"'",
+            ". ./settings.sh; echo x > \"$TMPDIR/p14.txt\"",
+            "source settings.sh && echo x > $TMPDIR/p15.txt",
+            "eval \"$SET\"; echo x > $TMPDIR/p16.txt",
+            "exec -c sh -c 'echo x > \"$TMPDIR/p17.txt\"'",
+            // A shell that reads startup files, which may set them again.
+            "bash -lc 'echo x > \"$TMPDIR/n1.txt\"'",
+            "bash -lc 'rm -rf \"$TMPDIR\"/*'",
+            "sh -l -c 'echo x > \"$TMPDIR/n2.txt\"'",
+            "bash --login -c 'echo x > \"$TMPDIR/n3.txt\"'",
+            "zsh -c 'echo x > \"$TMPDIR/n4.txt\"'",
+            "fish -c 'echo x > $TMPDIR/n5.txt'",
+            "bash -ic 'echo x > \"$TMPDIR/n6.txt\"' 2>/dev/null",
+            "bash --rcfile ./rc -c 'echo x > \"$TMPDIR/n7.txt\"'",
+            "exec -l bash -c 'echo x > \"$TMPDIR/n8.txt\"'",
+            "timeout 5 bash -lc 'echo x > \"$TMPDIR/n9.txt\"'",
+            "bash -l <<'EOF'\necho x > \"$TMPDIR/n10.txt\"\nEOF",
+            // bash reads the file `BASH_ENV` names, which a profile or the
+            // line may export, and options go on past `-c`.
+            "bash -c 'rm -rf \"$TMPDIR\"/*'",
+            "bash <<'EOF'\necho x > \"$TMPDIR/n11.txt\"\nEOF",
+            "BASH_ENV=./x.sh bash -c 'echo x > \"$TMPDIR/n12.txt\"'",
+            "sh -c -l 'echo x > \"$TMPDIR/n13.txt\"'",
+            "sh -c -i 'echo x > \"$TMPDIR/n14.txt\"'",
+            "ksh -E -c 'echo x > \"$TMPDIR/n15.txt\"'",
+            "exec -a -sh sh -c 'echo x > \"$TMPDIR/n16.txt\"'",
+            // Wrappers that hand what they run another environment, however
+            // they are spelled.
+            "/usr/bin/sudo -n sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "\"sudo\" -n sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "\\sudo -n sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "/usr/bin/doas sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "/usr/bin/pkexec sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "/bin/su -c 'rm -rf \"$TMPDIR\"/*'",
+            "env -S-i sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "env -0i sh -c 'rm -rf \"$TMPDIR\"/*'",
+            // A shell run under another name (bash as anything but `sh`
+            // reads `BASH_ENV`), and startup files turned on with `-o`.
+            "(exec -a mysh sh -c 'echo x > \"$TMPDIR/a1.txt\"')",
+            "exec -a sh0 sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "exec -a '' sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "env -a mysh sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "env --argv0=-sh sh -c 'rm -rf \"$TMPDIR\"/*'",
+            "dash -o interactive -c 'echo x > \"$TMPDIR/a2.txt\"'",
+            "ksh -o rc -c 'echo x > \"$TMPDIR/a3.txt\"'",
+            "ksh --rc -c 'echo x > \"$TMPDIR/a4.txt\"'",
+            "ksh -o login -c 'echo x > \"$TMPDIR/a5.txt\"'",
+            "ksh -orc -c 'echo x > \"$TMPDIR/a6.txt\"'",
+            "ksh --login_shell -c 'echo x > \"$TMPDIR/a8.txt\"'",
+            "mksh -o login -c 'echo x > \"$TMPDIR/a9.txt\"'",
+            // A variable whose name the line does not show.
+            "export $(grep -v \"^#\" vars.txt | xargs) && rm -rf \"$TMPDIR\"/build",
+            "while IFS== read -r k v; do export \"$k=$v\"; done < vars.txt; rm -rf \"$TMPDIR\"/build",
+            "export $(cat vars.txt); rm -rf \"$TMPDIR\"/build",
+            "declare -x \"$(head -1 vars.txt)\"; rm -rf \"$TMPDIR\"/build",
+            "read -r \"$name\" < vars.txt; rm -rf \"$TMPDIR\"/build",
+            "printf -v \"$name\" %s x; rm -rf \"$TMPDIR\"/build",
+            // Text the line does not show, wherever it runs.
+            "if . ./env.sh; then echo x > \"$TMPDIR/c1.txt\"; fi",
+            "command . ./env.sh; echo x > \"$TMPDIR/c2.txt\"",
+            "builtin source env.sh; echo x > $TMPDIR/c3.txt",
+            "time . ./env.sh; echo x > $TMPDIR/c4.txt",
+            "while . ./env.sh; do echo x > \"$TMPDIR/c5.txt\"; break; done",
+            "true || . ./env.sh; echo x > \"$TMPDIR/c6.txt\"",
+        ] {
+            assert!(
+                outside("bash", shell(command), Some(&temp)),
+                "{command} does not ask"
+            );
+        }
+        // A shell that reads none keeps the folder, and so do setters of
+        // names the line shows.
+        for command in [
+            "export PATH=\"$PWD/bin:$PATH\"; echo x > \"$TMPDIR/ok4.txt\"",
+            "env FOO=$(pwd) sh -c 'echo x > \"$TMPDIR/ok5.txt\"'",
+            "read -r line < vars.txt; echo x > \"$TMPDIR/ok6.txt\"",
+            "printf -v line %s x; echo x > \"$TMPDIR/ok7.txt\"",
+            "sh -c 'echo x > \"$TMPDIR/ok1.txt\"'",
+            "sh -e -o pipefail -c 'echo x > \"$TMPDIR/ok2.txt\"'",
+            "sh -c 'echo x > \"$TMPDIR/ok3.txt\"' -l",
+            "dash -c 'rm -rf \"$TMPDIR\"/*'",
+        ] {
+            assert!(
+                !outside("bash", shell(command), Some(&temp)),
+                "{command} asks"
+            );
+        }
+        // A folder with a space in it is one word only in double quotes:
+        // bare, the shell splits it, so it is read as before.
+        let spaced = root.join("chats space/1a2b3c4d");
+        std::fs::create_dir_all(&spaced).unwrap();
+        for command in [
+            "rm -rf \"$TMPDIR\"/build",
+            "echo x > \"$TMPDIR/x\"",
+            "cat \"${TMPDIR}/x\"",
+        ] {
+            assert!(
+                !outside("bash", shell(command), Some(&spaced)),
+                "{command} asks"
+            );
+        }
+        for command in ["rm -rf $TMPDIR/build", "cd $TMPDIR && ls", "cat ${TMP}/x"] {
+            assert_eq!(
+                outside("bash", shell(command), Some(&spaced)),
+                outside("bash", shell(command), None),
+                "{command}"
+            );
+        }
+        // Whether the command must get the folder in the variables: only
+        // when its check read them as the folder.
+        let named = |command: &str| {
+            super::chat_ask_plans_named("bash", &shell(command), &workspace, Some(&temp)).1
+        };
+        assert!(named("echo x > \"$TMPDIR/a\""));
+        assert!(named("sh -c 'cat $TMPDIR/a'"));
+        for command in [
+            "echo hello",
+            "git status --short",
+            "TMPDIR=~; echo x > $TMPDIR/a",
+            "bash -lc 'echo x > \"$TMPDIR/a\"'",
+        ] {
+            assert!(!named(command), "{command}");
+        }
+        for command in [
+            "export TMP=~; rm -f $TMP/secret.txt",
+            "TEMP=/etc; cat $TEMP/hosts",
+            "echo x > \"${TMPDIR:=$HOME}/p10.txt\"",
+            // Their scripts are not read, with the folder or without.
+            "ksh -ologin_shell -c 'echo x > \"$TMPDIR/a7.txt\"'",
+            "env $(cat vars.txt) sh -c 'rm -rf \"$TMPDIR\"/build'",
+        ] {
+            assert_eq!(
+                outside("bash", shell(command), Some(&temp)),
+                outside("bash", shell(command), None),
+                "{command}"
+            );
+        }
+        // Without the chat's folder, as before: a path spelled out there asks.
+        assert!(outside("bash", shell(&format!("echo x > {shown}/x")), None));
+        // The file tools.
+        let file = temp.join("notes.md").display().to_string();
+        for (tool, arguments) in [
+            ("read", json!({ "path": file })),
+            ("write", json!({ "path": file, "content": "x" })),
+            ("edit", json!({ "path": file, "old": "x", "new": "y" })),
+            ("list", json!({ "path": temp.display().to_string() })),
+            (
+                "glob",
+                json!({ "pattern": "*", "path": temp.display().to_string() }),
+            ),
+            (
+                "grep",
+                json!({ "pattern": "x", "path": temp.display().to_string() }),
+            ),
+        ] {
+            assert!(!outside(tool, arguments.clone(), Some(&temp)), "{tool}");
+            assert!(refused(tool, arguments.clone()), "{tool} is not refused");
+            assert!(outside(tool, arguments, None), "{tool}");
+        }
+        for (tool, arguments) in [
+            (
+                "read",
+                json!({ "path": temp.join("link/x").display().to_string() }),
+            ),
+            (
+                "write",
+                json!({ "path": other.join("x").display().to_string(), "content": "x" }),
+            ),
+            (
+                "list",
+                json!({ "path": root.join("chats").display().to_string() }),
+            ),
+        ] {
+            assert!(outside(tool, arguments, Some(&temp)), "{tool}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

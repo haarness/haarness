@@ -8,7 +8,10 @@ Schedules are written into the run's own folders and never handed to launchd, sy
 Scheduler, which an isolated data folder does not move.
 """
 
+import atexit
 import os
+import shutil
+import tempfile
 
 # Importing this module turns usage statistics off for the script's own process, so every Haarness it starts from
 # its environment (directly, or through a copy of os.environ) stays quiet even where it does not call `clean_env`:
@@ -17,11 +20,19 @@ import os
 # (scripts/check-test-isolation.py holds them to it).
 os.environ["HAARNESS_TELEMETRY"] = "0"
 
+# The run's chats keep their own temp folders (their commands' TMPDIR) in a folder of the run's own instead of the
+# /tmp/haarness-<uid> a person's Haarness uses: short like that one, since programs make sockets there, and removed
+# when the script ends, so a run leaves none behind. Only a debug build or the test providers read the variable.
+CHAT_TEMP = tempfile.mkdtemp(prefix="hct-", dir=None if os.name == "nt" else "/tmp")
+atexit.register(shutil.rmtree, CHAT_TEMP, True)
+os.environ["HAARNESS_TEST_CHAT_TEMP"] = CHAT_TEMP
+
 # What every Haarness a test starts gets, whatever the caller's environment holds.
 ISOLATED = {
     "HAARNESS_TELEMETRY": "0",
     "HAARNESS_CLOUD_API_URL": "http://127.0.0.1:9",
     "HAARNESS_SCHEDULE_SKIP_INSTALL": "1",
+    "HAARNESS_TEST_CHAT_TEMP": CHAT_TEMP,
 }
 
 

@@ -7,7 +7,9 @@
 //! It runs on demand only: `HAARNESS_PERMISSION_CORPUS` names a JSON list of
 //! command lines, `HAARNESS_PERMISSION_CORPUS_PROJECT` the project folder
 //! they run in and `HAARNESS_PERMISSION_CORPUS_OUT` the file that gets one
-//! JSON object per line.
+//! JSON object per line. `HAARNESS_PERMISSION_CORPUS_TEMP`, when set, names
+//! the folder the lines are read with as their chat's own temp folder (see
+//! [`crate::chat_temp`]); Auto's column reads them without one.
 use super::*;
 use crate::permissions::bash;
 
@@ -72,10 +74,15 @@ fn remembered() -> Vec<PermissionRule> {
 /// What a `bash` call of `command` would do before running: refused by a
 /// rule, asked about (with the patterns and the Always it would offer), or
 /// allowed.
-fn decide(engine: &PermissionEngine, command: &str, workspace: &Path) -> serde_json::Value {
+fn decide(
+    engine: &PermissionEngine,
+    command: &str,
+    workspace: &Path,
+    temp: Option<&Path>,
+) -> serde_json::Value {
     let mut asked = Vec::new();
     let mut always = Vec::new();
-    for plan in ask_plans("bash", &json!({ "command": command }), workspace) {
+    for plan in chat_ask_plans("bash", &json!({ "command": command }), workspace, temp) {
         let mut asks = false;
         for pattern in &plan.patterns {
             let evaluation = plan.evaluate(engine, pattern);
@@ -189,6 +196,7 @@ fn permission_corpus() {
     let lines: Vec<String> =
         serde_json::from_str(&std::fs::read_to_string(corpus).expect("corpus")).expect("a list");
     let project = PathBuf::from(project);
+    let temp = std::env::var_os("HAARNESS_PERMISSION_CORPUS_TEMP").map(PathBuf::from);
     let mut output = String::new();
     for line in &lines {
         let mut decisions = serde_json::Map::new();
@@ -209,14 +217,14 @@ fn permission_corpus() {
                 } else {
                     name.to_owned()
                 };
-                decisions.insert(key, decide(&engine, line, &project));
+                decisions.insert(key, decide(&engine, line, &project, temp.as_deref()));
             }
         }
         decisions.insert("auto".into(), auto(line, &project));
         output.push_str(
             &json!({
                 "line": line,
-                "reading": reading(line, &project),
+                "reading": bash::with_chat_temp(temp.as_deref(), || reading(line, &project)),
                 "decisions": decisions,
             })
             .to_string(),

@@ -410,6 +410,18 @@ pub(crate) fn analyze_reading(
     workdir: &Path,
     reading: Reading,
 ) -> BashAnalysis {
+    let names = LineNames::set(|| names_chat_temp(command));
+    let analysis = read_line(command, workspace, workdir, reading);
+    // A line that runs a shell or text which may set `TMPDIR` again reads
+    // it as without the chat's folder.
+    if names.read_again() {
+        return read_line(command, workspace, workdir, reading);
+    }
+    analysis
+}
+
+/// [`analyze_reading`] in one go.
+fn read_line(command: &str, workspace: &Path, workdir: &Path, reading: Reading) -> BashAnalysis {
     if command.len() > MAX_COMMAND_BYTES {
         let mut analysis = fallback(&clipped(command));
         analysis.unreadable = true;
@@ -1331,6 +1343,9 @@ impl Reader<'_> {
         while let Some((node, parent)) = stack.pop() {
             sets_tree = sets_tree || sets_work_tree(node, parent, command);
             note_cdpath(node, parent, command, &mut cdpaths);
+            if sets_unknown_name(node, parent, command) {
+                note_temp_reset();
+            }
             if node.kind() == "command" {
                 command_nodes.push((node, parent));
             }
@@ -2238,8 +2253,12 @@ impl Reader<'_> {
         let input = || stdin.map_or(Input::Unknown, |stdin| stdin_script(stdin, source));
         let name = program_name(&program.value);
         match name.as_str() {
-            "eval" => self.nested(&joined(arguments), depth),
+            "eval" => {
+                note_temp_reset();
+                self.nested(&joined(arguments), depth);
+            }
             "source" | "." => {
+                note_temp_reset();
                 let text = match arguments.first() {
                     Some(first) if first.node.kind() == "process_substitution" => {
                         substituted(first.node, source).map_or(Input::Unknown, Input::Text)
@@ -2253,6 +2272,31 @@ impl Reader<'_> {
             }
             "env" => {
                 let options = Options::with(arguments, "uCPSa", "", ENV_LONG);
+                // An emptied environment (`-i`, `-`), a variable taken away
+                // (`-u`), a split text (`-S`, which may hold either), another
+                // name for what it runs (`-a`), or settings only known when
+                // it runs (`env $(cat vars.env) …`).
+                let command = env_command(options.rest);
+                let settings = &options.rest[..options.rest.len() - command.len()];
+                if options.flags.contains('i')
+                    || ["u", "unset", "S", "split-string", "a", "argv0"]
+                        .iter()
+                        .any(|name| options.value(name).is_some())
+                    || options
+                        .rest
+                        .first()
+                        .is_some_and(|dash| dash.literal && dash.value == "-")
+                    || settings.iter().any(|word| {
+                        let name = word
+                            .raw
+                            .split_once('=')
+                            .map_or(word.raw.as_str(), |(name, _)| name);
+                        name.contains(['$', '`'])
+                    })
+                    || command.first().is_some_and(|word| !word.literal)
+                {
+                    note_temp_reset();
+                }
                 let folders: Vec<&Given<'_, '_>> = options.all(&["C", "chdir"]).collect();
                 let folder = self.wrapper_folder(&folders, source);
                 if let Some(split) = options.value("S").or_else(|| options.value("split-string")) {
@@ -2270,6 +2314,8 @@ impl Reader<'_> {
                 }
             }
             "sudo" | "doas" => {
+                // What it runs gets an environment of its own.
+                note_temp_reset();
                 let options = if name == "sudo" {
                     Options::sudo(arguments)
                 } else {
@@ -2342,6 +2388,7 @@ impl Reader<'_> {
                 }
             }
             "su" => {
+                note_temp_reset();
                 if let Some(text) = su_command(arguments) {
                     self.nested(&text, depth);
                 }
@@ -2359,11 +2406,21 @@ impl Reader<'_> {
                 }
             }
             "builtin" | "nohup" | "setsid" | "busybox" | "pkexec" => {
+                if name == "pkexec" {
+                    note_temp_reset();
+                }
                 let options = Options::read(arguments, "", "", &["user"]);
                 self.invocation(options.rest, stdin, source, depth);
             }
             "exec" => {
                 let options = Options::read(arguments, "a", "", &[]);
+                // `-l` makes what it runs a login shell, and any name given
+                // with `-a` may make a shell another one (bash run as `sh`
+                // under another name reads `BASH_ENV`); `-c` empties its
+                // environment.
+                if options.flags.contains(['l', 'c']) || options.value("a").is_some() {
+                    note_temp_reset();
+                }
                 self.invocation(options.rest, stdin, source, depth);
             }
             "nice" => {
@@ -2462,6 +2519,9 @@ impl Reader<'_> {
                 }
             }
             name if SHELLS.contains(&name) => {
+                if reads_startup_files(name, arguments) {
+                    note_temp_reset();
+                }
                 self.script(shell_script(arguments, input, source), depth);
             }
             _ => {}
@@ -6439,8 +6499,9 @@ fn fallback(command: &str) -> BashAnalysis {
     }
 }
 
-/// The paths outside `workspace` that `command` deletes when it runs from
-/// `workdir` (the project when `None`), placed where they really lead. A path
+/// The paths outside `workspace` (and outside the chat's own temp folder,
+/// while [`with_chat_temp`] names it) that `command` deletes when it runs
+/// from `workdir` (the project when `None`), placed where they really lead. A path
 /// with a variable or a substitution cannot be placed, and neither can a
 /// relative one in a line that changes directory: both count as outside, and
 /// are given as written.
@@ -6521,7 +6582,10 @@ pub fn outside_deletions(
                     None => resolve(&from, Path::new(&deletion.value)),
                 };
                 let only_a_file = matches!(deletion.effect, Effect::Replaces | Effect::Empties);
-                if resolved.starts_with(&project) || (only_a_file && !resolved.is_file()) {
+                if resolved.starts_with(&project)
+                    || in_chat_temp(&resolved)
+                    || (only_a_file && !resolved.is_file())
+                {
                     continue;
                 }
                 OutsideDeletion {
@@ -7720,11 +7784,12 @@ fn external_dir(
     if resolved.starts_with(&workspace) {
         return None;
     }
-    if !complete || resolved.is_dir() {
-        Some(resolved)
+    let folder = if !complete || resolved.is_dir() {
+        resolved.clone()
     } else {
-        Some(resolved.parent().unwrap_or(&resolved).to_path_buf())
-    }
+        resolved.parent().unwrap_or(&resolved).to_path_buf()
+    };
+    (!reached_chat_temp(&resolved, &folder)).then_some(folder)
 }
 
 /// What separates a path's folders: `/`, and on Windows `\` too.
@@ -7795,11 +7860,12 @@ fn cd_dir(
     if resolved.starts_with(resolve(workspace, Path::new(""))) {
         return None;
     }
-    if !complete || resolved.is_dir() {
-        Some(resolved)
+    let folder = if !complete || resolved.is_dir() {
+        resolved.clone()
     } else {
-        Some(resolved.parent().unwrap_or(&resolved).to_path_buf())
-    }
+        resolved.parent().unwrap_or(&resolved).to_path_buf()
+    };
+    (!reached_chat_temp(&resolved, &folder)).then_some(folder)
 }
 
 /// The folder an unquoted leading `~` expands to: `~` and `~/…` are the
@@ -7906,13 +7972,329 @@ const FOLDER_VARIABLES: [&str; 6] = [
     "XDG_STATE_HOME",
 ];
 
+/// The calling chat's own temp folder while a line of it is read (see
+/// [`with_chat_temp`]), and what the reading did with it.
+struct ChatTemp {
+    folder: PathBuf,
+    used: TempUse,
+    /// Whether `$TMPDIR`, `$TMP` and `$TEMP` name it in the line under way
+    /// (see [`names_chat_temp`]).
+    names: bool,
+    /// Whether the line under way runs a shell or text that may set them
+    /// again (see [`note_temp_reset`]).
+    resets: bool,
+}
+
+/// What reading a call did with the chat's own temp folder.
+#[derive(Debug, Default)]
+pub(crate) struct TempUse {
+    /// The folders in it the call's paths reach (see [`reached_chat_temp`]).
+    pub(crate) reached: Vec<PathBuf>,
+    /// Whether it read `$TMPDIR`, `$TMP` or `$TEMP` as the folder, so the
+    /// command must get the folder there to be what was checked.
+    pub(crate) named: bool,
+}
+
+thread_local! {
+    static CHAT_TEMP: std::cell::RefCell<Option<ChatTemp>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `read` with the readings of this thread taking `folder`, the
+/// calling chat's own temp folder ([`crate::chat_temp`]), as what `$TMPDIR`,
+/// `$TMP` and `$TEMP` name (its commands get it in those variables) and as
+/// no folder outside the project: a path that leads into it, links
+/// followed, is no outside folder, while one that leads out of it (`..`, a
+/// link in it, another chat's folder) is, as before. Without a folder they
+/// read `$TMPDIR` from the server's environment, as always.
+pub(crate) fn with_chat_temp<T>(folder: Option<&Path>, read: impl FnOnce() -> T) -> T {
+    with_chat_temp_use(folder, read).0
+}
+
+/// [`with_chat_temp`], and what the reading did with the folder.
+pub(crate) fn with_chat_temp_use<T>(
+    folder: Option<&Path>,
+    read: impl FnOnce() -> T,
+) -> (T, TempUse) {
+    struct Restore(Option<ChatTemp>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            CHAT_TEMP.with(|current| *current.borrow_mut() = previous);
+        }
+    }
+    let own = folder.map(|folder| ChatTemp {
+        folder: folder.to_path_buf(),
+        used: TempUse::default(),
+        names: true,
+        resets: false,
+    });
+    let previous = CHAT_TEMP.with(|current| current.replace(own));
+    let restore = Restore(previous);
+    let value = read();
+    let used = CHAT_TEMP.with(|current| {
+        current
+            .borrow_mut()
+            .as_mut()
+            .map(|own| std::mem::take(&mut own.used))
+            .unwrap_or_default()
+    });
+    drop(restore);
+    (value, used)
+}
+
+/// Says that the line under way runs something that may set `TMPDIR`,
+/// `TMP` or `TEMP` again after the command's first line set them: text the
+/// line does not show (`source`, `.`, `eval`), or a shell that reads startup
+/// files (see [`reads_startup_files`]). The line is then read again without
+/// the chat's folder (see [`analyze_reading`]).
+fn note_temp_reset() {
+    CHAT_TEMP.with(|own| {
+        if let Some(own) = own.borrow_mut().as_mut() {
+            own.resets = true;
+        }
+    });
+}
+
+/// Whether `shell` (one of [`SHELLS`]), given `arguments`, reads startup
+/// files that may set `TMPDIR` again: bash, zsh and fish always may (bash
+/// reads the file `BASH_ENV` names, which a login profile or the line itself
+/// can export); the others when told to be a login or interactive shell (`-l`
+/// or `-i` in any cluster, `--login`, `--interactive`, `--rcfile`,
+/// `--init-file`), and ksh and mksh with `-E` too. Options are read up to the
+/// first word that is none, past `-c` as the shells do; one only known when
+/// it runs counts.
+fn reads_startup_files(shell: &str, arguments: &[Word<'_>]) -> bool {
+    if matches!(shell, "bash" | "zsh" | "fish") {
+        return true;
+    }
+    let startup = if matches!(shell, "ksh" | "mksh") {
+        &['l', 'i', 'E'][..]
+    } else {
+        &['l', 'i'][..]
+    };
+    let mut words = arguments.iter();
+    while let Some(word) = words.next() {
+        if !word.literal {
+            return true;
+        }
+        let value = word.value.as_str();
+        if value == "--" || !(value.starts_with('-') || value.starts_with('+')) || value.len() < 2 {
+            return false;
+        }
+        if let Some(long) = value.strip_prefix("--") {
+            let name = long.split_once('=').map_or(long, |(name, _)| name);
+            if matches!(
+                name,
+                "login" | "interactive" | "rcfile" | "init-file" | "rc" | "login_shell"
+            ) {
+                return true;
+            }
+            continue;
+        }
+        let letters = &value[1..];
+        if letters.contains(startup) {
+            return true;
+        }
+        // ksh and mksh take `-o`'s name in the same word (`-orc`).
+        if matches!(shell, "ksh" | "mksh")
+            && let Some(name) = letters.strip_prefix('o').filter(|name| !name.is_empty())
+        {
+            if startup_option(name) {
+                return true;
+            }
+            continue;
+        }
+        // `-o` and `-O` take an option's name, which may be one that reads
+        // them (`dash -o interactive`, `ksh -o rc`).
+        if letters.contains(['o', 'O']) {
+            match words.next() {
+                Some(name) if !name.literal || startup_option(&name.value) => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// Whether `name`, given to a shell's `-o` or `+o`, makes it read startup
+/// files.
+fn startup_option(name: &str) -> bool {
+    matches!(name, "interactive" | "login" | "login_shell" | "rc")
+}
+
+/// Whether `node` (with its `parent`) may set a variable whose name the line
+/// does not show, `TMPDIR` among them: a declaration (`export`, `declare`,
+/// `typeset`, `local`, `readonly`) given a word with an expansion or a
+/// substitution before its `=`, or none (`export $(cat vars.env)`, `export
+/// "$k=$v"`), and `read`, `mapfile`, `readarray` or `printf -v` given a name
+/// only known when it runs.
+fn sets_unknown_name(
+    node: tree_sitter::Node<'_>,
+    parent: Option<tree_sitter::Node<'_>>,
+    source: &str,
+) -> bool {
+    let text = |node: tree_sitter::Node<'_>| source.get(node.byte_range()).unwrap_or_default();
+    let dynamic = |text: &str| text.contains(['$', '`']);
+    if parent.is_some_and(|parent| parent.kind() == "declaration_command")
+        && !matches!(node.kind(), "variable_assignment" | "variable_name")
+        && node.is_named()
+    {
+        let written = text(node);
+        let name = written.split_once('=').map_or(written, |(name, _)| name);
+        return dynamic(name);
+    }
+    if node.kind() != "command" {
+        return false;
+    }
+    let Some(program) = node.child_by_field_name("name") else {
+        return false;
+    };
+    let words: Vec<_> = node
+        .named_children(&mut node.walk())
+        .filter(|child| child.id() != program.id() && WORD_KINDS.contains(&child.kind()))
+        .collect();
+    match program_name(text(program)).as_str() {
+        "read" | "mapfile" | "readarray" => words
+            .iter()
+            .any(|word| !text(*word).starts_with('-') && dynamic(text(*word))),
+        "printf" => words
+            .windows(2)
+            .any(|pair| text(pair[0]) == "-v" && dynamic(text(pair[1]))),
+        _ => false,
+    }
+}
+
+/// Whether `$TMPDIR`, `$TMP` and `$TEMP` in `command` surely hold the chat's
+/// own temp folder, as its commands get them: the line names them only in
+/// plain expansions (`$TMPDIR`, `${TMP}`), so it never sets, unsets, declares
+/// or reads a value into one (`TMPDIR=~`, `export`, `unset`, `read`, `for
+/// TMPDIR in`, `printf -v`, `env TMPDIR=`, `${TMPDIR:=…}`), and runs nothing
+/// that hands its commands another environment (`env -i`, `env -u`, `exec
+/// -c`, `sudo`, `doas`, `su`, `pkexec`, `runuser`). Otherwise the whole line
+/// reads them as before: `$TMPDIR` as the server's own, the others as
+/// unknown. It reads the text, so a word in a string or a comment counts
+/// too; that only ever asks more. What the line runs that may set them again
+/// is found as it is read (see [`note_temp_reset`]).
+fn names_chat_temp(command: &str) -> bool {
+    use std::sync::LazyLock;
+    static PLAIN: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\$\{(?:TMPDIR|TMP|TEMP)\}|\$(?:TMPDIR|TMP|TEMP)\b").expect("valid")
+    });
+    static NAMED: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\b(?:TMPDIR|TMP|TEMP)\b").expect("valid"));
+    static ELSEWHERE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(concat!(
+            r"(?:^|[\s;&|(){}!`])(?:sudo|doas|su|pkexec|runuser)(?:\s|$)",
+            r"|\benv\b[^;&|\n]*?\s(?:-[A-Za-z]*[iu]|-(?:\s|$)|--(?:ignore-environment|unset))",
+            r"|\bexec\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c",
+        ))
+        .expect("valid")
+    });
+    !NAMED.is_match(&PLAIN.replace_all(command, "")) && !ELSEWHERE.is_match(command)
+}
+
+/// For as long as a line is read, whether its `$TMPDIR`, `$TMP` and `$TEMP`
+/// name the chat's own temp folder (see [`names_chat_temp`]), with what was
+/// noted before it.
+struct LineNames(Option<(bool, bool, bool)>);
+
+impl LineNames {
+    fn set(names: impl FnOnce() -> bool) -> Self {
+        Self(CHAT_TEMP.with(|own| {
+            own.borrow_mut().as_mut().map(|own| {
+                let previous = (own.names, own.resets, own.used.named);
+                own.names = names();
+                own.resets = false;
+                previous
+            })
+        }))
+    }
+
+    /// Whether the line just read named the folder although it runs
+    /// something that may set the variables again: then what it noted of
+    /// the names goes, and the line is to be read again without them.
+    fn read_again(&self) -> bool {
+        let Some((_, _, named_before)) = self.0 else {
+            return false;
+        };
+        CHAT_TEMP.with(|own| {
+            let mut own = own.borrow_mut();
+            let Some(own) = own.as_mut().filter(|own| own.names && own.resets) else {
+                return false;
+            };
+            own.names = false;
+            own.used.named = named_before;
+            true
+        })
+    }
+}
+
+impl Drop for LineNames {
+    fn drop(&mut self) {
+        if let Some((names, resets, _)) = self.0 {
+            CHAT_TEMP.with(|own| {
+                if let Some(own) = own.borrow_mut().as_mut() {
+                    own.names = names;
+                    own.resets = resets;
+                }
+            });
+        }
+    }
+}
+
+/// Whether `resolved` (links followed) is in the chat's own temp folder of
+/// the reading under way (see [`with_chat_temp`]).
+pub(crate) fn in_chat_temp(resolved: &Path) -> bool {
+    CHAT_TEMP.with(|own| {
+        own.borrow()
+            .as_ref()
+            .is_some_and(|own| resolved.starts_with(&own.folder))
+    })
+}
+
+/// [`in_chat_temp`] for a path a call reaches, which notes `folder`, the
+/// folder it would be asked about by, for the call's group of the chat's own
+/// folders (see `chat_ask_plans`), where a rule that refuses it still does.
+pub(crate) fn reached_chat_temp(resolved: &Path, folder: &Path) -> bool {
+    CHAT_TEMP.with(|own| {
+        let mut own = own.borrow_mut();
+        let Some(own) = own.as_mut().filter(|own| resolved.starts_with(&own.folder)) else {
+            return false;
+        };
+        if !own.used.reached.iter().any(|known| known == folder) {
+            own.used.reached.push(folder.to_path_buf());
+        }
+        true
+    })
+}
+
 /// The folder `$NAME` or `${NAME}` stands for, when it is one of
-/// [`FOLDER_VARIABLES`] and set to an absolute path.
-fn folder_variable(text: &str) -> Option<String> {
+/// [`FOLDER_VARIABLES`] and set to an absolute path, or one of the chat's
+/// temp folder variables while a line of it is read.
+fn folder_variable(text: &str, quoted: bool) -> Option<String> {
     let name = text
         .strip_prefix("${")
         .and_then(|rest| rest.strip_suffix('}'))
         .or_else(|| text.strip_prefix('$'))?;
+    // A folder with a space in it (`C:/Users/Sam Rivera/…`) is one word
+    // only in double quotes; bare, the shell splits it.
+    if crate::chat_temp::VARIABLES.contains(&name)
+        && let Some(folder) = CHAT_TEMP.with(|own| {
+            own.borrow_mut()
+                .as_mut()
+                .filter(|own| {
+                    own.names
+                        && (quoted || !own.folder.to_string_lossy().contains(char::is_whitespace))
+                })
+                .map(|own| {
+                    own.used.named = true;
+                    own.folder.clone()
+                })
+        })
+    {
+        return Some(folder.to_string_lossy().into_owned());
+    }
     if !FOLDER_VARIABLES.contains(&name) {
         return None;
     }
@@ -7926,17 +8308,23 @@ fn folder_variable(text: &str) -> Option<String> {
 /// reads as the folder the shell puts there, so `> $HOME/.profile` is judged
 /// as the file it writes, like `~/.profile`.
 fn path_literal(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
+    path_literal_in(node, source, false)
+}
+
+/// [`path_literal`], `quoted` inside double quotes.
+fn path_literal_in(node: tree_sitter::Node<'_>, source: &str, quoted: bool) -> (String, bool) {
     match node.kind() {
-        "simple_expansion" | "expansion" => folder_variable(&node_text(node, source))
+        "simple_expansion" | "expansion" => folder_variable(&node_text(node, source), quoted)
             .map_or_else(|| (String::new(), false), |folder| (folder, true)),
         "concatenation" | "string" => {
+            let quoted = quoted || node.kind() == "string";
             let mut value = String::new();
             for index in 0..node.named_child_count() {
                 let Some(child) = node.named_child(index) else {
                     continue;
                 };
                 let (part, complete) = if index == 0 {
-                    path_literal(child, source)
+                    path_literal_in(child, source, quoted)
                 } else {
                     literal(child, source)
                 };
@@ -8964,6 +9352,47 @@ mod tests {
     fn pipes_and_substitution_are_commands_too() {
         let analysis = analyze("cat Cargo.toml | grep name", &workspace());
         assert_eq!(analysis.patterns, vec!["cat Cargo.toml", "grep name"]);
+    }
+
+    /// Only a line that names the temp folder variables in plain
+    /// expansions alone, and runs its commands in its own environment, reads
+    /// them as the chat's own temp folder.
+    #[test]
+    fn a_line_that_sets_the_temp_variables_reads_them_as_before() {
+        for plain in [
+            "echo hi > \"$TMPDIR/out.txt\"",
+            "cat ${TMPDIR}/a $TMP/b $TEMP/c",
+            "cd \"$TMPDIR\" && make > build.log",
+            "python3 -c 'import tempfile' > \"$TMPDIR/log\"; cat .env.example",
+            "find . -name '*.py' > \"$TMPDIR/list\"",
+            "ls $MYTMPDIR $TMP_DIR",
+            "cat source.txt sudoers.md",
+        ] {
+            assert!(names_chat_temp(plain), "{plain}");
+        }
+        for setting in [
+            "export TMPDIR=\"$HOME\"; echo x > \"$TMPDIR/p1.txt\"",
+            "TMPDIR=$HOME; echo x > $TMPDIR/p2.txt",
+            "TMP=x cmd",
+            "for TMPDIR in a; do :; done",
+            "read -r TEMP",
+            "printf -v TMPDIR %s x",
+            "local TMPDIR",
+            "typeset -x TMPDIR",
+            "unset TMP",
+            "echo ${TMPDIR:-/tmp} ${#TMPDIR}",
+            "env TMPDIR=x sh -c 'echo $TMPDIR'",
+            "env -u TMPDIR sh -c 'echo $TMPDIR'",
+            "env -i PATH=/bin sh -c 'echo $TMPDIR'",
+            "env - sh -c 'echo $TMPDIR'",
+            "env --ignore-environment sh -c 'echo $TMPDIR'",
+            "sudo sh -c 'echo $TMPDIR'",
+            "doas sh -c 'echo $TMPDIR'",
+            "su -c 'echo $TMPDIR'",
+            "exec -c sh -c 'echo $TMPDIR'",
+        ] {
+            assert!(!names_chat_temp(setting), "{setting}");
+        }
     }
 
     #[test]
