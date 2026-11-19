@@ -430,6 +430,13 @@ impl ConfiguredHooks {
         if entry.event == "Stop" && outcome.halt {
             outcome.block = None;
         }
+        // Why it answered as it did, kept with an answer that counts.
+        outcome.reason = outcome
+            .permission
+            .and(deny_reason.as_deref())
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_owned);
         // A permission deny stops the action only where the runtime reads it.
         let denied = outcome.permission == Some(PermissionDecision::Deny)
             && matches!(entry.event.as_str(), "PreToolUse" | "PermissionRequest");
@@ -493,9 +500,17 @@ impl ConfiguredHooks {
                 }
             }
             // When several hooks answer, the strictest answer stands, in
-            // whatever order they ran: deny, then ask, then allow.
-            if outcome.permission.map(strictness) > combined.permission.map(strictness) {
+            // whatever order they ran: deny, then ask, then allow. Its reason
+            // is the first one given for that answer.
+            let (answer, held) = (
+                outcome.permission.map(strictness),
+                combined.permission.map(strictness),
+            );
+            if answer > held {
                 combined.permission = outcome.permission;
+                combined.reason = outcome.reason.clone();
+            } else if answer.is_some() && answer == held && combined.reason.is_none() {
+                combined.reason = outcome.reason.clone();
             }
             if outcome.permission == Some(PermissionDecision::Allow) {
                 always = Some(always.unwrap_or(true) && outcome.always);
@@ -752,6 +767,8 @@ struct HookOutcome {
     block: Option<String>,
     context: Option<String>,
     permission: Option<PermissionDecision>,
+    /// Why the hook gave `permission`: its `permissionDecisionReason`.
+    reason: Option<String>,
     updated_input: Option<Value>,
     always: bool,
     /// A hook answered `continue: false`, with this `stopReason` if any.
@@ -766,6 +783,7 @@ impl From<HookOutcome> for HookDecision {
             block: outcome.block,
             context: outcome.context,
             permission: outcome.permission,
+            reason: outcome.reason,
             updated_input: outcome.updated_input,
             always: outcome.always,
         }

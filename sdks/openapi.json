@@ -4451,6 +4451,17 @@
             "description": "Only a person may answer: Auto, Yolo, `--yolo`, hooks and configured\nrules never do, so clients must not answer it automatically. Its\n\"always\" lasts for this chat only (a Chrome site approval).",
             "type": "boolean"
           },
+          "hookAsked": {
+            "description": "A `PreToolUse` hook asked about the call. The hook asks again next\ntime, so the request offers no Always (`allowAlways` is `false`, apart\nfrom a Chrome site's, whose Always is for this chat), yet it is no\nrequest that must always ask: `--yolo` and Yolo answer it once, as any\nask a person configured. Older servers send none.",
+            "type": "boolean"
+          },
+          "hookReason": {
+            "description": "Why the hook asked, as it said (its `permissionDecisionReason`), for\nthe card to show; none when it gave no reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "operation": {
             "type": "string"
           },

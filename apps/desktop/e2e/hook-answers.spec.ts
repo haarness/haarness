@@ -57,7 +57,8 @@ test.beforeAll(async () => {
       "    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse',",
       "        'updatedInput': dict(data['tool_input'], answers=[['Unit tests']])}}))",
       "if 'deploy' in data['tool_input'].get('command', ''):",
-      "    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'ask'}}))",
+      "    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'ask',",
+      "        'permissionDecisionReason': 'Deploys need a second look'}}))",
     ].join("\n"),
   );
   const command = (matcher: string) => [{ matcher, hooks: [{ type: "command", command: `python3 ${JSON.stringify(hook)}` }] }];
@@ -262,7 +263,10 @@ test("a command a hook asks about waits for the person, with no Always", async (
   await expect(allow).toBeVisible({ timeout: 30000 });
   await expect(page.getByRole("button", { name: "Deny", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Always allow", exact: true })).toHaveCount(0);
+  // One quiet line says a hook asked, and why.
+  await expect(page.locator(".approval-review")).toHaveText("Asked by a hook: Deploys need a second look");
   const [asked] = await api("listPermissions");
+  expect(asked.hookAsked).toBe(true);
   expect(asked.permission).toBe("bash");
   expect(asked.allowAlways).toBe(false);
   expect(asked.alwaysPatterns ?? []).toEqual([]);

@@ -762,9 +762,25 @@ fn review_rule(review: &haarness_protocol::PermissionReview, language: Language)
 
 /// Why Auto's reviewer left the request to a person, in one line: "Auto
 /// review · <rule>: <reason>", that it was unavailable or paused, or that it
-/// is deciding a request already shown.
+/// is deciding a request already shown. A request a hook asked about, which
+/// the reviewer never sees, says so in the same line, with the hook's reason.
 pub fn review_note(pending: &PendingPermissionInfo, language: Language) -> Option<String> {
-    let review = pending.review.as_ref()?;
+    let Some(review) = pending.review.as_ref() else {
+        if !pending.hook_asked {
+            return None;
+        }
+        let mut note = language.text("Asked by a hook").to_owned();
+        if let Some(reason) = pending
+            .hook_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+        {
+            note.push_str(": ");
+            note.push_str(reason);
+        }
+        return Some(plain(&note));
+    };
     let lead = match review.status {
         haarness_protocol::PermissionReviewStatus::Reviewing => {
             return Some(language.text("Auto review is deciding…").into());

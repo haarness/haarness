@@ -1767,14 +1767,16 @@ async fn parity_a_command_that_denies_reading_still_brings_its_own_files() {
     );
 }
 
-/// Hooks on every shell command, each printing one permission answer.
+/// Hooks on every shell command, each printing one permission answer, with
+/// the reason "<answer> from hook <its place>".
 #[cfg(unix)]
 fn answering_hooks(workspace: &Path, answers: &[&str]) -> Arc<dyn haarness_core::HookPort> {
     let hooks: Vec<serde_json::Value> = answers
         .iter()
-        .map(|answer| {
+        .enumerate()
+        .map(|(at, answer)| {
             json!({"command": format!(
-                r#"echo '{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":"{answer}"}}}}'"#
+                r#"echo '{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":"{answer}","permissionDecisionReason":"{answer} from hook {at}"}}}}'"#
             )})
         })
         .collect();
@@ -1814,6 +1816,13 @@ async fn parity_a_later_hook_s_allow_does_not_undo_an_earlier_hook_s_ask() {
         .await;
         let asked = pending(&runtime).await;
         assert_eq!(asked.permission, "external_directory", "{answers:?}");
+        // The card says a hook asked, with the asking hook's reason.
+        let at = answers.iter().position(|answer| *answer == "ask").unwrap();
+        assert!(asked.hook_asked, "{answers:?}");
+        assert_eq!(
+            asked.hook_reason.as_deref(),
+            Some(format!("ask from hook {at}").as_str())
+        );
         answer(&runtime, &asked.permission_id, Reply::Reject).await;
         wait_done(&runtime, &turn).await;
         let outputs = tool_outputs(&runtime, &thread).await;
@@ -1861,6 +1870,8 @@ async fn parity_a_hook_that_asks_shows_the_call_s_card() {
     assert_eq!(asked.permission, "bash");
     assert_eq!(asked.allow_always, Some(false));
     assert!(asked.always_patterns.is_empty(), "{asked:?}");
+    assert!(asked.hook_asked);
+    assert_eq!(asked.hook_reason.as_deref(), Some("ask from hook 0"));
     answer(&runtime, &asked.permission_id, Reply::Always).await;
     assert_success(&runtime, &thread, &turn).await;
     assert_eq!(made(), "made");
@@ -1903,4 +1914,126 @@ async fn parity_a_hook_that_asks_shows_the_call_s_card() {
     assert_success(&runtime, &thread, &turn).await;
     assert!(runtime.pending_permissions().is_empty());
     assert_eq!(made(), "mademademade");
+}
+
+/// A hook that asks about every shell command naming `deploy`, saying why.
+#[cfg(unix)]
+fn deploy_guard(workspace: &Path) -> Arc<dyn haarness_core::HookPort> {
+    let ask = r#"if grep -q deploy; then echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Deploys need a second look"}}'; fi"#;
+    Arc::new(haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(
+            &json!({"PreToolUse": [{"matcher": "Bash", "hooks": [{"command": ask}]}]}),
+        ),
+        workspace.to_owned(),
+    ))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parity_another_cards_always_does_not_answer_what_a_hook_asked() {
+    let fixture = Fixture::new();
+    let mut config = RuntimeConfig {
+        approval_mode: haarness_protocol::ApprovalMode::Review,
+        ..RuntimeConfig::default()
+    };
+    config.base_rules.push(rule("bash:printf other*", D::Ask));
+    let runtime = runtime(&fixture.0, config, None).with_hooks(deploy_guard(&fixture.0));
+    // The hook asks about one command; a rule asks about the other, whose
+    // Always (`printf *`) would cover the first.
+    let guarded = echo_thread(&runtime).await;
+    let deploy = send(
+        &runtime,
+        &guarded,
+        &format!(
+            "!tool bash {}",
+            json!({"command": "printf deploy > deploy.txt"})
+        ),
+    )
+    .await;
+    let hook_card = pending(&runtime).await;
+    assert!(hook_card.hook_asked);
+    assert_eq!(
+        hook_card.hook_reason.as_deref(),
+        Some("Deploys need a second look")
+    );
+    let configured = echo_thread(&runtime).await;
+    let other = send(
+        &runtime,
+        &configured,
+        &format!(
+            "!tool bash {}",
+            json!({"command": "printf other > other.txt"})
+        ),
+    )
+    .await;
+    let rule_card = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(card) = runtime
+                .pending_permissions()
+                .into_iter()
+                .find(|card| card.permission_id != hook_card.permission_id)
+            {
+                return card;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!rule_card.hook_asked);
+    assert!(
+        rule_card
+            .always_patterns
+            .iter()
+            .any(|rule| rule == "bash:printf *"),
+        "{rule_card:?}"
+    );
+    answer(&runtime, &rule_card.permission_id, Reply::Always).await;
+    assert_success(&runtime, &configured, &other).await;
+    // The hook's card still waits for its own answer.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let waiting: Vec<_> = runtime
+        .pending_permissions()
+        .into_iter()
+        .map(|card| card.permission_id)
+        .collect();
+    assert_eq!(waiting, std::slice::from_ref(&hook_card.permission_id));
+    assert!(!fixture.0.join("deploy.txt").exists());
+    answer(&runtime, &hook_card.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &deploy).await;
+    assert!(!fixture.0.join("deploy.txt").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parity_a_yolo_server_approves_what_a_hook_asked_once() {
+    let fixture = Fixture::new();
+    let runtime = runtime(
+        &fixture.0,
+        RuntimeConfig {
+            approval_mode: haarness_protocol::ApprovalMode::Review,
+            auto_approve: true,
+            ..RuntimeConfig::default()
+        },
+        None,
+    )
+    .with_hooks(deploy_guard(&fixture.0));
+    let thread = echo_thread(&runtime).await;
+    for _ in 0..2 {
+        let turn = send(
+            &runtime,
+            &thread,
+            &format!(
+                "!tool bash {}",
+                json!({"command": "printf deploy >> deploy.txt"})
+            ),
+        )
+        .await;
+        assert_success(&runtime, &thread, &turn).await;
+        assert!(runtime.pending_permissions().is_empty());
+    }
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("deploy.txt")).unwrap(),
+        "deploydeploy"
+    );
 }

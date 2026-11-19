@@ -236,14 +236,17 @@ impl App {
         for request in requests {
             // Chrome site access always waits for a person, whatever this
             // client's yolo or Auto says.
-            let eligible = request.allow_always != Some(false)
-                && !request.explicit
-                && !matches!(request.permission.as_str(), "instruction_import");
+            let answerable =
+                !request.explicit && !matches!(request.permission.as_str(), "instruction_import");
+            let eligible = request.allow_always != Some(false) && answerable;
+            // What a hook asked about offers no Always, yet nothing in it
+            // waits for a person alone: --yolo answers it once.
+            let yolo_eligible = (eligible || request.hook_asked) && answerable;
             let in_conversation = request.root_thread_id == Some(self.root_thread_id)
                 || request.thread_id == self.thread.id;
             if in_conversation
                 && self
-                    .yolo_permission(&request.permission_id, eligible, client)
+                    .yolo_permission(&request.permission_id, yolo_eligible, client)
                     .await
             {
                 continue;
@@ -350,16 +353,19 @@ impl App {
         if event.event_type == "permission.requested"
             && let Some(id) = event.payload["permissionId"].as_str()
         {
-            let eligible = event.payload["allowOnce"] != false
-                && event.payload["allowAlways"] != false
+            let answerable = event.payload["allowOnce"] != false
                 && event.payload["explicit"] != true
                 && !matches!(
                     event.payload["permission"].as_str(),
                     Some("instruction_import")
                 );
+            let eligible = answerable && event.payload["allowAlways"] != false;
+            // As above: --yolo answers once what a hook asked about.
+            let yolo_eligible = answerable
+                && (event.payload["allowAlways"] != false || event.payload["hookAsked"] == true);
             let in_conversation = event.thread_id == Some(self.thread.id)
                 || event.root_thread_id == Some(self.root_thread_id);
-            if in_conversation && self.yolo_permission(id, eligible, client).await {
+            if in_conversation && self.yolo_permission(id, yolo_eligible, client).await {
                 return Ok(());
             }
             if self.auto_permission(id, eligible, client).await {
@@ -658,6 +664,8 @@ impl App {
                             agent: event.payload["agent"].as_str().map(str::to_owned),
                             created_at: event.created_at,
                             review: serde_json::from_value(event.payload["review"].clone()).ok(),
+                            hook_asked: event.payload["hookAsked"] == true,
+                            hook_reason: event.payload["hookReason"].as_str().map(str::to_owned),
                         });
                     }
                     // Nothing new to point at: no focus change, no toast.

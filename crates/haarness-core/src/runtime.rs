@@ -7186,6 +7186,8 @@ impl AgentRuntime {
         );
 
         let mut hook_permission = None;
+        // Why a hook asked, for the card.
+        let mut hook_reason = None;
         let mut hook_context = None;
         // The chat's agent, and its own folder when it works in one.
         let hook_call = crate::HookCall {
@@ -7208,6 +7210,10 @@ impl AgentRuntime {
                 )));
             }
             hook_permission = decision.permission;
+            hook_reason = decision
+                .reason
+                .filter(|_| hook_permission == Some(PermissionDecision::Ask))
+                .map(|reason| clip(&reason));
             hook_context = decision.context;
             if let Some(updated) = decision.updated_input {
                 arguments = updated;
@@ -7453,9 +7459,10 @@ impl AgentRuntime {
                 );
                 continue;
             }
-            // A request a hook asked about offers no Always, so it names no
-            // rule one would keep.
-            let always_rules = if hook_asks {
+            // A request a hook asked about offers no Always (apart from a
+            // Chrome site's, which lasts for this chat), so it names no rule
+            // one would keep.
+            let always_rules = if hook_asks && !explicit {
                 Vec::new()
             } else {
                 plan.always_rules()
@@ -7614,6 +7621,7 @@ impl AgentRuntime {
                     review_abort: review_now.then(CancellationToken::new),
                     own_call: !agent_work,
                     hook_asked: hook_asks,
+                    hook_reason: hook_reason.clone(),
                 },
             );
             drop(approval_gate);
@@ -7705,7 +7713,7 @@ impl AgentRuntime {
                 let mut requested = json!({
                     "permissionId": id,
                     "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
-                    "allowAlways": !forced && !hook_asks,
+                    "allowAlways": !forced && (explicit || !hook_asks),
                     "explicit": explicit,
                     "operation": operation,
                     "detail": card,
@@ -7718,6 +7726,12 @@ impl AgentRuntime {
                     "callId": call_id,
                     "agent": thread.agent,
                 });
+                if hook_asks {
+                    requested["hookAsked"] = json!(true);
+                    if let Some(reason) = &hook_reason {
+                        requested["hookReason"] = json!(reason);
+                    }
+                }
                 if let Some(review) = &review {
                     requested["review"] = json!(review);
                 }
@@ -7972,7 +7986,7 @@ impl AgentRuntime {
             decision => decision,
         };
         // A request that offers no Always takes any allow as once.
-        let once_only = (pending.forced && !explicit) || pending.hook_asked;
+        let once_only = (pending.forced || pending.hook_asked) && !explicit;
         let allowed = match decision {
             decision
                 if once_only
@@ -8092,8 +8106,8 @@ impl AgentRuntime {
             }
         }
         self.publish_permission_resolved(id, &pending, allowed);
-        // A forced or hook-asked request offers nothing longer, so any allow
-        // of it is once.
+        // A forced or hook-asked request offers nothing longer (a Chrome
+        // site's keeps its Allow in this chat), so any allow of it is once.
         let once = allowed && (matches!(decision, PermissionReplyDecision::Once) || once_only);
         let _ = pending.sender.send(PermissionResolution {
             allowed,
@@ -10058,8 +10072,11 @@ struct PendingPermission {
     own_call: bool,
     /// A `PreToolUse` hook asked about the call. The hook asks again next
     /// time, so the request offers no Always (an Always answer is taken as
-    /// once) and no other request's Always answers it.
+    /// once; a Chrome site's still lasts for this chat) and no other
+    /// request's Always answers it.
     hook_asked: bool,
+    /// Why the hook asked, as it said it.
+    hook_reason: Option<String>,
 }
 
 /// Where Auto's reviewer is with a waiting request.
@@ -10519,7 +10536,7 @@ async fn review_waiting(
 /// clients replace the card they show by its id.
 fn publish_requested(events: &EventBus, id: &str, pending: &PendingPermission) {
     let mut payload = json!(pending.info(id));
-    payload["allowAlways"] = json!(!pending.forced && !pending.hook_asked);
+    payload["allowAlways"] = json!(pending.offers_always());
     events.publish_scoped(
         "permission.requested",
         Some(pending.thread_id),
@@ -10715,7 +10732,7 @@ impl PendingPermission {
         PendingPermissionInfo {
             permission_id: id.to_owned(),
             repository_scope: self.repository_scope.clone(),
-            allow_always: (self.forced || self.hook_asked).then_some(false),
+            allow_always: (!self.offers_always()).then_some(false),
             explicit: !self.explicit_operations.is_empty(),
             operation: self.operation.clone(),
             permission: self.permission.clone(),
@@ -10730,7 +10747,16 @@ impl PendingPermission {
             agent: self.agent.clone(),
             created_at: self.created_at,
             review: self.review.clone(),
+            hook_asked: self.hook_asked,
+            hook_reason: self.hook_reason.clone(),
         }
+    }
+
+    /// Whether the request offers Always: not one that asks every time, nor
+    /// one a hook asked about, which asks again (a Chrome site's Always, for
+    /// this chat, stays).
+    fn offers_always(&self) -> bool {
+        !self.forced && (!self.explicit_operations.is_empty() || !self.hook_asked)
     }
     /// Every asked pattern is covered by some rule in `rules`. A line that
     /// reads a secret file also needs each exact command it remembers (see
@@ -14845,6 +14871,8 @@ impl RunnerTask {
         self.set_status("tool", Some((name, call_id)));
         // PreToolUse hooks may block outright or force a permission outcome.
         let mut hook_permission = None;
+        // Why a hook asked, for the card.
+        let mut hook_reason = None;
         let mut hook_context = None;
         let hook_call = self.hook_call(Some(agent));
         // Hooks, like everything after them, are shown the file a read opens.
@@ -14861,6 +14889,10 @@ impl RunnerTask {
                 )));
             }
             hook_permission = decision.permission;
+            hook_reason = decision
+                .reason
+                .filter(|_| hook_permission == Some(PermissionDecision::Ask))
+                .map(|reason| clip(&reason));
             hook_context = decision.context;
             if let Some(updated) = decision.updated_input {
                 arguments = updated;
@@ -15051,6 +15083,7 @@ impl RunnerTask {
                     reviewable,
                     (name, call_id),
                     &AskWhy::of(&plan, &causes),
+                    hook_reason.as_deref(),
                 )
                 .await?;
             // Nobody was asked (a model-loaded skill's snippet): the skill
@@ -15410,6 +15443,7 @@ impl RunnerTask {
     /// reviewer or a card comes back [`AnsweredBy::NotAsked`]; and whether a
     /// `PreToolUse` hook asked about the call, which no rule then answers
     /// and no Always settles. `why`: why it asks, for the log lines.
+    /// `hook_reason`: why the hook asked, as it said it, for the card.
     #[allow(clippy::too_many_arguments)]
     async fn ask_permission(
         &self,
@@ -15421,18 +15455,20 @@ impl RunnerTask {
         reviewable: bool,
         tool: (&str, &str),
         why: &AskWhy,
+        hook_reason: Option<&str>,
     ) -> CoreResult<PermissionResolution> {
         let (forced, yolo_answers, may_ask, hook_asked) = asks;
         let operation = plan.describe(&plan.patterns);
-        // A request a hook asked about offers no Always, so it names no rule
-        // one would keep.
-        let always_rules = if hook_asked {
+        let explicit = !explicit_operations.is_empty();
+        // A request a hook asked about offers no Always (apart from a Chrome
+        // site's, which lasts for this chat), so it names no rule one would
+        // keep.
+        let always_rules = if hook_asked && !explicit {
             Vec::new()
         } else {
             plan.always_rules()
         };
         let remembered = plan.remembered_rules();
-        let explicit = !explicit_operations.is_empty();
         // Yolo is yes to everything: a `--yolo` turn or a chat in Yolo
         // approves computer use once too, also where it asks every time. Read
         // under the gate, as below.
@@ -15701,6 +15737,7 @@ impl RunnerTask {
                     review_abort: review_now.then(CancellationToken::new),
                     own_call: false,
                     hook_asked,
+                    hook_reason: hook_reason.map(str::to_owned),
                 },
             );
         }
@@ -15781,7 +15818,7 @@ impl RunnerTask {
             let mut requested = json!({
                     "permissionId": id,
                     "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
-                    "allowAlways": !forced && !hook_asked,
+                    "allowAlways": !forced && (explicit || !hook_asked),
                     "explicit": explicit,
                     "operation": operation,
                     "detail": detail,
@@ -15795,6 +15832,12 @@ impl RunnerTask {
                     "callId": tool.1,
                     "agent": self.thread.agent,
             });
+            if hook_asked {
+                requested["hookAsked"] = json!(true);
+                if let Some(reason) = hook_reason {
+                    requested["hookReason"] = json!(reason);
+                }
+            }
             if let Some(review) = &review {
                 requested["review"] = json!(review);
             }
@@ -21499,6 +21542,7 @@ mod shell_reading_tests {
             review_abort: None,
             own_call: false,
             hook_asked: false,
+            hook_reason: None,
         }
     }
 
