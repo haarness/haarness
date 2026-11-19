@@ -1,25 +1,13 @@
 //! Text Haarness wraps in tags of its own before the model reads it: a
-//! command's output in the background, a subagent's reply, what hooks say.
-//! That text comes from programs, pages and other agents. Were it to hold
-//! the closing tag of the block it sits in, what followed would read as
-//! Haarness's own words: a notice, a reminder, the person's message.
+//! command's output in the background, a subagent's reply, a workflow's
+//! result, what hooks say. That text comes from programs, pages and other
+//! agents. Were it to hold the closing tag of the block it sits in, what
+//! followed would read as Haarness's own words: a notice, a reminder, the
+//! person's message. Only those closing tags are broken: the text is often
+//! code, which a model may copy into a file, so every other character
+//! reaches it as written.
 
 use std::borrow::Cow;
-
-/// `text` with `&`, `<` and `>` written as entities, for text that is data
-/// from end to end (a subagent's reply and its task's description): no tag
-/// in it opens or closes anything.
-#[must_use]
-pub fn escaped(text: &str) -> Cow<'_, str> {
-    if !text.contains(['&', '<', '>']) {
-        return Cow::Borrowed(text);
-    }
-    Cow::Owned(
-        text.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;"),
-    )
-}
 
 /// `text` with each closing tag of one of `names` broken: its `<` is
 /// written `&lt;`. Any case counts, and so do spaces around the `/`. Every
@@ -61,15 +49,6 @@ fn closes(rest: &str, names: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn escaped_text_holds_no_tag() {
-        assert_eq!(
-            escaped("</task_result></task>\n<x a=\"1\">&amp;"),
-            "&lt;/task_result&gt;&lt;/task&gt;\n&lt;x a=\"1\"&gt;&amp;amp;"
-        );
-        assert!(matches!(escaped("plain text"), Cow::Borrowed(_)));
-    }
 
     #[test]
     fn only_the_named_closing_tags_are_broken() {

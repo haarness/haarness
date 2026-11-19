@@ -512,13 +512,15 @@ the chat's commands or waits for one with the `bash_output` tool and stops one
 with `bash_stop`; both are offered wherever `bash` is.
 
 What these hidden messages quote cannot end the tags Haarness wrote around it,
-so nothing in it reads as Haarness's own words or the person's. In a command's
-message, a closing `</command>`, `</command_output>`, `</summary>` or
-`</output_file>` in the output or in the command's line, in any case, starts
-with `&lt;` instead of `<`; every other angle bracket stays as printed, so
-`Vec<T>` reads as it did. A subagent's reply and its task's description in
-`<task>`, and a workflow run's result or error in `<workflow>`, are escaped
-throughout: `&`, `<` and `>` as `&amp;`, `&lt;` and `&gt;`.
+so nothing in it reads as Haarness's own words or the person's: a closing tag
+of the message's own in it, in any case, starts with `&lt;` instead of `<`.
+That is `</command>`, `</command_output>`, `</summary>` or `</output_file>`
+in a command's output or line; `</task>`, `</summary>`, `</task_result>` or
+`</task_error>` in a subagent's reply or its task's description; and
+`</workflow>`, `</summary>`, `</phase>`, `</workflow_result>` or
+`</workflow_error>` in a workflow run's result or error. Everything else
+stays as written, so code such as `Vec<T>` or `a < b && c > d` reaches the
+agent unchanged.
 
 Each command is a `ShellCommandInfo`: `id`, `threadId` (the chat whose agent
 ran it), `rootThreadId`, `turnId` and `callId` (the `bash` call that started
