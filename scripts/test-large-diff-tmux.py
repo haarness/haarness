@@ -5,7 +5,8 @@ A file over the 32 KiB a tool's result keeps of each text is stored with a diff 
 instead. An edit near the end of a 40 KB file shows its real changed line, numbered as the file is,
 and not "diff content unavailable"; an edit near its start that makes it longer shows that one change
 and nothing at the 32 KiB mark; a patch to it draws the same way. The stored result holds the diff
-and neither text.
+and neither text. A changed line longer than the stored diff may be shows both sides, each from a
+little before the change.
 Pane captures, with their colours, go to LARGE_DIFF_EVIDENCE; LARGE_DIFF_THEME=light or dark draws
 them in that variant of the editorial theme.
 
@@ -185,6 +186,20 @@ try:
     assert diff["patch"].startswith("@@ -987,7 +987,7 @@\n") and "before" not in diff, diff
     check("a patch to a large file shows its real changed line")
     assert (project / "large.txt").read_text().count("\n") == 1000
+
+    # One line longer than the whole diff may be: both what it was and what it is, each from a little
+    # before the change, so the change shows in the row.
+    keys("C-r")
+    (project / "app.min.js").write_text("".join(f"v{index:05}=1;" for index in range(12_500)))
+    shown = run_tool("edit", {"path": "app.min.js", "old": "v08000=1;", "new": "v08000=2;"}, "v08000=2;")
+    rows = shown.splitlines()
+    assert any(" 1 - " in row and "v08000=1;" in row for row in rows), shown
+    assert any(" 1 + " in row and "v08000=2;" in row for row in rows), shown
+    assert "diff content truncated" in shown, shown
+    screen("long-line")
+    [diff] = stored_diffs()[-1]
+    assert diff["patch"].startswith("@@ -1,1 +1,1 @@\n-"), diff["patch"][:80]
+    check("a changed line longer than the bound shows both sides around the change")
     print(f"PASS {len(checks)} large file diff scenarios in the TUI.", flush=True)
 finally:
     subprocess.run(["tmux", "-L", SOCKET, "kill-server"], capture_output=True)
