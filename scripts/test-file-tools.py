@@ -27,16 +27,26 @@
 9. write_pipe: write, edit, multiedit and apply_patch refuse a pipe at once, as read does, rather
    than wait on it with the chat held (an edit of /dev/zero the person allowed too); a new file,
    and one reached through a link, are written as before.
+10. glob_braces: `src/**/*.{ts,tsx}` lists both kinds of file, once each, in walk order; a malformed
+   pattern is named as written instead of answering No files found; a folder named `[slug]` given
+   as path is searched.
+11. unsaved: with a tool output folder that cannot be made (its name taken by a file), a grep past
+   50 KB still shows its start with the reason, a shell command's output is kept in memory (its end
+   shown with the reason), and a command in the background runs to its end.
+12. full_disk (macOS): the same on a real full disk, a small disk image filled to the last byte:
+   `df -h` answers, and the reason reads "No space left on device".
 
 Usage: python3 scripts/test-file-tools.py   (HAARNESS_BIN picks the binary, HAARNESS_E2E_ROOT a
 folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset of read_line,
 read_budget, read_text, read_pipe, grep_line, grep_limit, home, edit_crlf, rg, instructions,
-read_end, edit_empty, read_twin and write_pipe). No model is
+read_end, edit_empty, read_twin, write_pipe, glob_braces, unsaved and full_disk). No model is
 called.
 """
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -413,10 +423,102 @@ def case_write_pipe():
     passed('write, edit, multiedit and apply_patch refuse a pipe (and edit /dev/zero) at once; new and linked files write')
 
 
+def case_glob_braces():
+    folder = files / 'braces'
+    for name in ['src/b.tsx', 'src/a.ts', 'src/lib/c.ts', 'src/lib/d.js', 'app/[slug]/page.tsx', 'app/s/page.tsx']:
+        path = folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('x\n')
+
+    def listed(output):
+        return [line for line in output.replace('Tool glob => ', '\n').splitlines() if line.startswith('braces/')]
+
+    output = tool(files, 'glob', {'pattern': 'braces/src/**/*.{ts,tsx}'})
+    assert listed(output) == ['braces/src/a.ts', 'braces/src/b.tsx', 'braces/src/lib/c.ts'], output
+    passed('a glob with {ts,tsx} lists both kinds of file, each once, in walk order')
+    output = tool(files, 'glob', {'pattern': 'braces/src/['})
+    assert 'glob pattern `braces/src/[` is not valid: invalid range pattern at character 12' in output, output
+    assert 'No files found' not in output, output
+    passed('a malformed glob is named as written instead of answering No files found')
+    output = tool(files, 'glob', {'path': 'braces/app/[slug]', 'pattern': '*.tsx'})
+    assert listed(output) == ['braces/app/[slug]/page.tsx'], output
+    passed('a glob in a folder named [slug] finds its files and no other folder\'s')
+
+
+def unsaved_checks(folder, environment, saved_in, reason):
+    """A grep and shell commands whose output cannot be saved in `saved_in`, failing with `reason`."""
+    (folder / 'big.txt').write_text('needle line\n' * 8000)
+    output = tool(folder, 'grep', {'pattern': 'needle'}, environment=environment)
+    assert 'big.txt:1:needle line' in output, output[:300]
+    assert f'Saving all of it in {saved_in} failed ({reason}' in output, output[-500:]
+    assert 'so only the part above can be read.' in output, output[-500:]
+    passed(f'a grep past 50 KB shows its start and why the rest was not saved ({reason})')
+    output = tool(folder, 'bash', {'command': 'df -h . | head -1'}, environment=environment)
+    assert 'exit: 0' in output and 'Filesystem' in output, output
+    output = tool(folder, 'bash', {'command': 'seq 1 30000; exit 4'}, environment=environment)
+    assert 'exit: 4' in output and f'Saving its full output in {saved_in} failed ({reason}' in output, output[:500]
+    assert 'only its end is shown.' in output and '\n30000' in output, output[-300:]
+    passed('df -h runs, and a long command shows its end and why its output was not saved')
+    waited = subprocess.run(
+        [str(BINARY), '--workspace', str(folder), '--trust-project', 'run', '--wait-background',
+         '--background-timeout-ms', '60000',
+         '!tool bash ' + json.dumps({'command': 'seq 1 30000; echo background-done', 'run_in_background': True})],
+        env=environment, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    assert waited.returncode == 0, waited.stderr
+    assert 'state="exited" exit="0"' in waited.stdout and 'background-done' in waited.stdout, waited.stdout[-800:]
+    passed('a command in the background runs to its end with its output kept in memory')
+
+
+def case_unsaved():
+    blocked = root / 'data-blocked'
+    (blocked / 'data').mkdir(parents=True, exist_ok=True)
+    # The tool output folder cannot be made: its name is taken by a file.
+    (blocked / 'data' / 'tool-output').write_text('not a folder\n')
+    environment = dict(env, HAARNESS_DATA_DIR=str(blocked))
+    folder = project('unsaved')
+    servers.append((folder, environment))
+    unsaved_checks(folder, environment, blocked / 'data' / 'tool-output', 'File exists')
+
+
+def case_full_disk():
+    if sys.platform != 'darwin' or not shutil.which('hdiutil'):
+        print('SKIP full_disk: needs macOS hdiutil', flush=True)
+        return
+    image, mount = root / 'full.dmg', root / 'full-volume'
+    subprocess.run(['hdiutil', 'create', '-size', '8m', '-fs', 'HFS+', '-volname', 'haarness-full', str(image)],
+                   check=True, capture_output=True)
+    mount.mkdir(exist_ok=True)
+    subprocess.run(['hdiutil', 'attach', '-nobrowse', '-mountpoint', str(mount), str(image)],
+                   check=True, capture_output=True)
+    folder = None
+    environment = None
+    try:
+        full = root / 'data-full'
+        (full / 'data').mkdir(parents=True, exist_ok=True)
+        (mount / 'tool-output').mkdir(exist_ok=True)
+        (full / 'data' / 'tool-output').symlink_to(mount / 'tool-output')
+        environment = dict(env, HAARNESS_DATA_DIR=str(full))
+        folder = project('full-disk')
+        # Filled to its last byte, as a disk is when a build runs away.
+        try:
+            with open(mount / 'filler', 'wb') as filler:
+                while True:
+                    filler.write(b'\0' * 4096)
+                    filler.flush()
+        except OSError:
+            pass
+        unsaved_checks(folder, environment, full / 'data' / 'tool-output', 'No space left on device')
+    finally:
+        if folder is not None:
+            subprocess.run([str(BINARY), '--workspace', str(folder), 'serve', '--stop'], env=environment,
+                           capture_output=True, timeout=60)
+        subprocess.run(['hdiutil', 'detach', str(mount)], capture_output=True)
+
+
 CASES = {name: globals()['case_' + name] for name in ['read_line', 'read_budget', 'read_text', 'read_pipe',
                                                        'grep_line', 'grep_limit', 'home', 'edit_crlf', 'rg',
                                                        'instructions', 'read_end', 'edit_empty', 'read_twin',
-                                                       'write_pipe']}
+                                                       'write_pipe', 'glob_braces', 'unsaved', 'full_disk']}
 selected = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
 try:
     for name in selected:
