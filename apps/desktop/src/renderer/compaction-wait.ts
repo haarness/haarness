@@ -9,6 +9,12 @@ export const isCompactionCut = (value: unknown): value is CompactionCut =>
 /** Said when the chat changed while a compaction waited for its summary. */
 export const CHAT_CHANGED = "The chat changed while it was being summarised";
 
+/** The server ended the summary because someone pressed Stop: nothing failed. */
+export const stoppedOnPurpose = (error: unknown) =>
+  /compaction stopped before its summary was written/i.test(
+    error instanceof Error ? error.message : String(error ?? ""),
+  );
+
 interface Envelope {
   type?: unknown;
   threadId?: unknown;

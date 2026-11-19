@@ -40,8 +40,9 @@ const LOST_AFTER: Duration = Duration::from_secs(5);
 pub(crate) struct Compaction {
     thread: ThreadId,
     started: Instant,
-    /// The request, until it answers.
-    answer: Option<tokio::sync::oneshot::Receiver<anyhow::Result<Item>>>,
+    /// The request's answer, and how long it was out when it came, until it
+    /// answers.
+    answer: Option<tokio::sync::oneshot::Receiver<(anyhow::Result<Item>, Duration)>>,
     /// What the request said when its answer never came from the server
     /// (or the server said another compaction was under way). The server
     /// finishes that summary, so this waits for the compaction's row, and
@@ -50,6 +51,9 @@ pub(crate) struct Compaction {
     /// The chat's newest item when it was asked for: a compaction after it
     /// in the chat's history is the one waited for.
     seen_sequence: u64,
+    /// Added to how long the request was out, as if it had taken longer.
+    #[cfg(test)]
+    pretend_out_for: Duration,
 }
 
 /// A message sent while its chat was being compacted, waiting to go out.
@@ -88,7 +92,10 @@ impl App {
                 kept_sequences: Vec::new(),
                 tool_output_chars: None,
             };
-            let _ = sender.send(client.compact(thread, request).await);
+            // Timed here, as it answers: the tick may take it a while later.
+            let sent = Instant::now();
+            let answer = client.compact(thread, request).await;
+            let _ = sender.send((answer, sent.elapsed()));
         });
         let seen_sequence = self
             .items
@@ -102,6 +109,8 @@ impl App {
             answer: Some(receiver),
             unanswered: None,
             seen_sequence,
+            #[cfg(test)]
+            pretend_out_for: Duration::ZERO,
         });
     }
 
@@ -256,12 +265,13 @@ impl App {
                 .map(tokio::sync::oneshot::Receiver::try_recv);
             let overdue = now.duration_since(compaction.started) >= crate::api::COMPACT_TIMEOUT;
             match answered {
-                Some(Ok(Ok(item))) => {
+                Some(Ok((Ok(item), _))) => {
                     let compaction = self.compactions.remove(index);
                     self.compaction_done(compaction.thread, item);
                 }
-                Some(Ok(Err(error))) => {
-                    let out_for = now.duration_since(compaction.started);
+                Some(Ok((Err(error), out_for))) => {
+                    #[cfg(test)]
+                    let out_for = out_for + compaction.pretend_out_for;
                     if already_compacting(&error) {
                         compaction.answer = None;
                         compaction.unanswered =
@@ -271,6 +281,12 @@ impl App {
                         compaction.answer = None;
                         compaction.unanswered = Some(format!("{error:#}"));
                         index += 1;
+                    } else if error
+                        .to_string()
+                        .contains("compaction stopped before its summary was written")
+                    {
+                        // Stop, as the person asked: nothing failed.
+                        self.compactions.remove(index);
                     } else {
                         let compaction = self.compactions.remove(index);
                         tracing::warn!(
@@ -364,6 +380,14 @@ impl App {
             .iter()
             .filter(|compaction| compaction.answer.is_none())
             .count()
+    }
+
+    /// Answers from now on count as having been out `by` longer.
+    #[cfg(test)]
+    pub(crate) fn pretend_out_for(&mut self, by: Duration) {
+        for compaction in &mut self.compactions {
+            compaction.pretend_out_for = by;
+        }
     }
 
     /// Move every running compaction's start `by` into the past.

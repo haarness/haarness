@@ -662,7 +662,7 @@ fn waits_after(
                 .unwrap();
         compact(&mut app, &client).await;
         // As if the request had been out that long when its answer came.
-        app.age_compactions(out_for);
+        app.pretend_out_for(out_for);
         poll_until(&mut app, "the request never answered", |app| {
             app.compactions_waiting_for_row() == 1 || app.compacting_since().is_none()
         })
@@ -913,4 +913,26 @@ async fn a_summary_a_turn_voided_is_said_in_plain_words() {
             .map(|toast| toast.message.as_str()),
         Some(crate::compaction::CHAT_CHANGED)
     );
+}
+
+#[tokio::test]
+async fn a_compaction_stopped_on_purpose_ends_quietly() {
+    let mut app = selector_fixture();
+    let server = serve(vec![(
+        false,
+        http(
+            "409 Conflict",
+            "application/json",
+            r#"{"code":"conflict","message":"conflict: compaction stopped before its summary was written"}"#,
+        ),
+    )])
+    .await;
+    let client =
+        crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
+    compact(&mut app, &client).await;
+    poll_until(&mut app, "the answer never came", |app| {
+        app.compacting_since().is_none()
+    })
+    .await;
+    assert!(app.notification_toast.is_none(), "Stop is no failure");
 }

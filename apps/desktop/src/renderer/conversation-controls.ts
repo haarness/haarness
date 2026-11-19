@@ -4,7 +4,7 @@ import type { Item, Thread } from "@haarness/sdk";
 import { useApp } from "./state";
 import { lastUserMessage, unrestoredFiles } from "./conversation-history";
 import { shortcutLabel, type SearchEntry } from "./search";
-import { CHAT_CHANGED, isCompactionCut, watchCompaction } from "./compaction-wait";
+import { CHAT_CHANGED, isCompactionCut, stoppedOnPurpose, watchCompaction } from "./compaction-wait";
 import { COMPACTION_WAIT_MS, type CompactionCut } from "../shared";
 
 export const historyCommands = [
@@ -122,6 +122,10 @@ export function createConversationControls(props: {
             ? t("Last turn undone") + leftNote
             : t("Turn restored") + leftNote,
       );
+    } catch (error) {
+      // Stop, as the person asked: nothing failed.
+      if (action === "compact" && stoppedOnPurpose(error)) return;
+      throw error;
     } finally {
       compaction?.stop();
       setPending((values) => values.filter((value) => value !== key));

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { DesktopEvent } from "../src/shared";
-import { CHAT_CHANGED, isCompactionCut, watchCompaction } from "../src/renderer/compaction-wait";
+import { CHAT_CHANGED, isCompactionCut, stoppedOnPurpose, watchCompaction } from "../src/renderer/compaction-wait";
 import { errorText } from "../src/renderer/error-text";
 
 /** A stand-in for the window's server events. */
@@ -83,4 +83,10 @@ test("the server's words about a compaction are said in the reader's language", 
   );
   assert.equal(errorText(new Error("The summary didn't come back in time")).message, "The summary didn't come back in time");
   assert.equal(errorText(new Error("The summary didn't come back in time")).known, true);
+});
+
+test("a compaction someone stopped is no failure", () => {
+  assert.equal(stoppedOnPurpose(new Error("conflict: compaction stopped before its summary was written")), true);
+  assert.equal(stoppedOnPurpose(new Error("conflict: thread changed while the compaction summary was generated; retry compaction")), false);
+  assert.equal(stoppedOnPurpose(new Error("provider error: overloaded")), false);
 });
