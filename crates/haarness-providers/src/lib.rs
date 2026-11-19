@@ -2230,6 +2230,10 @@ mod tests {
                 assume_authenticated: false,
                 headers: ProviderHeaders::default(),
             }),
+            super::ProviderInstance::AmazonBedrock(native(
+                "team-bedrock",
+                format!("{address}/hop/bedrock"),
+            )),
         ];
         for instance in &instances {
             store
@@ -2245,6 +2249,7 @@ mod tests {
                 .iter()
                 .map(|instance| instance.id().to_owned())
                 .collect(),
+            no_ambient: HashSet::from(["team-bedrock".to_owned()]),
             ..super::CredentialFence::default()
         };
         let (logged, _guard) = crate::log_capture::Logged::start();
@@ -2266,6 +2271,7 @@ mod tests {
             ("team-gateway", None),
             ("team-leave", Some((&leave, Some(format!("{leave}v1"))))),
             ("team-listed", Some((&hop, Some(format!("{hop}listed/v1"))))),
+            ("team-bedrock", Some((&hop, Some(format!("{hop}bedrock"))))),
         ] {
             let provider = haarness_core::ProviderRegistry::get(&registry, id).unwrap();
             assert!(provider.info().authenticated, "{id}");

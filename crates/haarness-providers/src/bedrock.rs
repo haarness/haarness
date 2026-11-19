@@ -599,6 +599,13 @@ impl ModelProvider for BedrockProvider {
             let status = response.status();
             let kind = error_type(response.headers());
             let trace = crate::RequestTrace::of(&response);
+            let tail = url.strip_prefix(self.instance.base_url.trim_end_matches('/'));
+            if let Some(redirect) =
+                crate::sse::unfollowed_error(status, response.headers(), response.url(), tail)
+            {
+                trace.refused(status);
+                return Err(redirect);
+            }
             let limit = limits.idle(crate::sse::is_loopback(response.url()));
             let text = crate::sse::within(limit, response.text())
                 .await?
