@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -108,6 +108,17 @@ pub struct Archive {
 pub struct Saved {
     pub bytes: Vec<u8>,
     pub left_out: Vec<PathBuf>,
+}
+
+/// The files a restore writes (or, in a dry run, would write), and those it
+/// leaves alone because they are already in place: a link on the way to
+/// them stays inside the same folder and the file it leads to already holds
+/// the profile's bytes, as when a profile is restored into the project it
+/// was saved from.
+#[derive(Debug)]
+pub struct Restored {
+    pub targets: Vec<PathBuf>,
+    pub in_place: Vec<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -474,9 +485,10 @@ impl Archive {
     }
 
     /// Validate every target before making changes; stage all replacements and roll back failures.
-    pub fn restore(&self, roots: &Roots, force: bool, dry_run: bool) -> Result<Vec<PathBuf>> {
+    pub fn restore(&self, roots: &Roots, force: bool, dry_run: bool) -> Result<Restored> {
         let _lock = lock(&roots.data.join(".profile-restore.lock"))?;
-        let mut targets = Vec::new();
+        let mut planned = Vec::new();
+        let mut in_place = Vec::new();
         let mut unique = BTreeSet::new();
         let mut existing = Vec::new();
         for entry in &self.manifest.entries {
@@ -486,6 +498,12 @@ impl Archive {
             );
             let target = target(roots, &entry.path)?;
             ensure!(unique.insert(target.clone()), "profile targets overlap");
+            // Nothing is ever written through a link; one that stays inside
+            // the folder and already leads to these bytes is left alone.
+            if check_path(&target).is_err() && self.in_place(roots, entry, &target) {
+                in_place.push(target);
+                continue;
+            }
             check_path(&target)?;
             if let Ok(metadata) = fs::symlink_metadata(&target) {
                 ensure!(
@@ -504,12 +522,16 @@ impl Archive {
                     );
                 }
             }
-            targets.push(target);
+            planned.push((entry, target));
         }
+        let targets = || planned.iter().map(|(_, target)| target.clone()).collect();
         // A dry run reports every file it would overwrite instead of
         // stopping at the first one.
         if dry_run {
-            return Ok(targets);
+            return Ok(Restored {
+                targets: targets(),
+                in_place,
+            });
         }
         ensure!(
             force || existing.is_empty(),
@@ -518,7 +540,7 @@ impl Archive {
         );
         let mut staged = Vec::new();
         let preparation = (|| -> Result<()> {
-            for (entry, target) in self.manifest.entries.iter().zip(&targets) {
+            for (entry, target) in &planned {
                 let parent = target.parent().context("profile target has no parent")?;
                 private_dir(parent)?;
                 let file = parent.join(format!(".haarness-profile-{}.tmp", Uuid::now_v7()));
@@ -584,7 +606,37 @@ impl Archive {
             }
         }
         result?;
-        Ok(targets)
+        Ok(Restored {
+            targets: targets(),
+            in_place,
+        })
+    }
+
+    /// Whether `target`, which a link leads through, already holds what
+    /// `entry` restores: the link stays inside the folder the entry restores
+    /// into, and the regular file it leads to has the same bytes.
+    fn in_place(&self, roots: &Roots, entry: &Entry, target: &Path) -> bool {
+        let Some(root) = root(roots, &entry.path) else {
+            return false;
+        };
+        let (Ok(root), Ok(real)) = (fs::canonicalize(root), fs::canonicalize(target)) else {
+            return false;
+        };
+        let Some(data) = self.files.get(&entry.path) else {
+            return false;
+        };
+        if !real.starts_with(&root) || !fs::symlink_metadata(&real).is_ok_and(|m| m.is_file()) {
+            return false;
+        }
+        let data = if is_machine_settings(&entry.path) {
+            with_machine_settings(data, machine_settings(target))
+        } else {
+            data.clone()
+        };
+        let mut held = Vec::new();
+        File::open(&real)
+            .and_then(|file| file.take(data.len() as u64 + 1).read_to_end(&mut held))
+            .is_ok_and(|_| held == data)
     }
 }
 
@@ -663,16 +715,26 @@ fn validate_name(name: &str) -> Result<()> {
 }
 
 fn target(roots: &Roots, path: &str) -> Result<PathBuf> {
-    for (prefix, root) in [
+    let (root, relative) = split(roots, path).context("invalid profile target")?;
+    Ok(root.join(relative))
+}
+
+/// The folder an archive path restores into.
+fn root<'a>(roots: &'a Roots, path: &str) -> Option<&'a Path> {
+    split(roots, path).map(|(root, _)| root)
+}
+
+fn split<'a, 'b>(roots: &'a Roots, path: &'b str) -> Option<(&'a Path, &'b str)> {
+    [
         ("global/config/", &roots.config),
         ("global/data/", &roots.data),
         ("project/", &roots.project),
-    ] {
-        if let Some(relative) = path.strip_prefix(prefix) {
-            return Ok(root.join(relative));
-        }
-    }
-    bail!("invalid profile target")
+    ]
+    .into_iter()
+    .find_map(|(prefix, root)| {
+        path.strip_prefix(prefix)
+            .map(|relative| (root.as_path(), relative))
+    })
 }
 
 type Captured = BTreeMap<String, (Vec<u8>, bool)>;

@@ -443,6 +443,29 @@ fn real_cli_saves_linked_skills_and_names_the_links_it_left_out() {
                 .join("target/workspace/.haarness/skills/fmt/SKILL.md"),
         ])
     );
+    // Back into the project it was saved from, the linked copy is in place.
+    let same = fixture.output("source", &["profile", "restore", file, "--force"]);
+    assert!(
+        same.status.success(),
+        "{}",
+        String::from_utf8_lossy(&same.stderr)
+    );
+    let same = String::from_utf8_lossy(&same.stdout);
+    assert!(
+        same.contains(&format!(
+            "1 file is already in place through a link: {}\n",
+            fixture
+                .root
+                .join("source/workspace/.agents/skills/fmt/SKILL.md")
+                .display()
+        )),
+        "{same}"
+    );
+    assert!(
+        fs::symlink_metadata(fixture.root.join("source/workspace/.agents/skills/fmt"))
+            .unwrap()
+            .is_symlink()
+    );
     fixture.ok("target", &["profile", "restore", file, "--json"]);
     let restored = fixture.root.join("target/workspace/.agents/skills/fmt");
     assert!(!fs::symlink_metadata(&restored).unwrap().is_symlink());

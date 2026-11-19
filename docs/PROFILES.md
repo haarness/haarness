@@ -82,7 +82,11 @@ open file, so a link swapped in while a save runs cannot bring in another.
 Links that lead nowhere, or back into a folder that holds them, are passed
 over, and a save stops with an error rather than follow more than 1,000 links.
 Archives never hold links: a restore writes regular files and still refuses a
-link on any path it writes to.
+link on any path it writes to. The one exception writes nothing: where such a
+link stays inside the folder being restored into and the file it leads to
+already holds the profile's bytes, as when a profile goes back into the project
+it was saved from, that file is left alone. The restore says how many files were
+already in place, and `--json` lists them under `inPlace`.
 
 **Configuration and scripts can contain inline secrets.** Archives retain
 their contents, including literal environment/header values, and are neither

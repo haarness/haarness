@@ -2162,7 +2162,7 @@ impl ManagementService {
         if text(input, "action") == "restore_preview" {
             let id: Uuid = required_string(input, "id")?.parse()?;
             let archive = haarness_profiles::Archive::decode(&catalog.download(id)?)?;
-            let targets = archive.restore(&self.profile_roots()?, true, true)?;
+            let targets = archive.restore(&self.profile_roots()?, true, true)?.targets;
             return Ok(View {
                 title: "Restore configuration profile".into(),
                 lines: std::iter::once("These files will be replaced:".into())

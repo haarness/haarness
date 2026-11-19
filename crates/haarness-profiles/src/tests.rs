@@ -293,7 +293,7 @@ fn dry_run_lists_every_target_and_a_refusal_names_every_conflict() {
     let destination = fixture.roots("destination");
     put(&destination.config, "AGENTS.md", "mine");
     put(&destination.project, "haarness.json", "mine");
-    let targets = archive.restore(&destination, false, true).unwrap();
+    let targets = archive.restore(&destination, false, true).unwrap().targets;
     assert_eq!(targets.len(), 3);
     let error = archive
         .restore(&destination, false, false)
@@ -883,6 +883,110 @@ fn only_a_link_that_leads_nowhere_is_passed_over_quietly() {
             Ok(Link::Skip)
         ));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_profile_restores_into_the_project_it_was_saved_from() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    let project = &source.project;
+    put(project, ".haarness/skills/fmt/SKILL.md", "format");
+    put(project, "CLAUDE.md", "project instructions");
+    fs::create_dir_all(project.join(".agents/skills")).unwrap();
+    symlink(
+        "../../.haarness/skills/fmt",
+        project.join(".agents/skills/fmt"),
+    )
+    .unwrap();
+    symlink("CLAUDE.md", project.join("AGENTS.md")).unwrap();
+    let archive = Archive::decode(
+        &Archive::capture(&source, "same", Scope::Local)
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    // The files the links lead to already hold the profile's bytes: they are
+    // left alone, and only the folder's own copy is written.
+    let in_place = [
+        project.join(".agents/skills/fmt/SKILL.md"),
+        project.join("AGENTS.md"),
+    ];
+    let planned = archive.restore(&source, true, true).unwrap();
+    assert_eq!(
+        planned.targets,
+        [project.join(".haarness/skills/fmt/SKILL.md")]
+    );
+    assert_eq!(planned.in_place, in_place);
+    let restored = archive.restore(&source, true, false).unwrap();
+    assert_eq!(restored.in_place, in_place);
+    assert!(
+        fs::symlink_metadata(project.join(".agents/skills/fmt"))
+            .unwrap()
+            .is_symlink()
+    );
+    assert!(
+        fs::symlink_metadata(project.join("AGENTS.md"))
+            .unwrap()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("CLAUDE.md")).unwrap(),
+        "project instructions"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_restore_still_refuses_a_link_to_other_bytes_or_outside_its_folder() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    put(&source.project, ".agents/skills/fmt/SKILL.md", "format");
+    let archive = Archive::decode(
+        &Archive::capture(&source, "links", Scope::Local)
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    // A clone whose linked skill holds other bytes.
+    let clone = fixture.roots("clone");
+    put(
+        &clone.project,
+        ".haarness/skills/fmt/SKILL.md",
+        "older format",
+    );
+    fs::create_dir_all(clone.project.join(".agents/skills")).unwrap();
+    symlink(
+        "../../.haarness/skills/fmt",
+        clone.project.join(".agents/skills/fmt"),
+    )
+    .unwrap();
+    // A project whose skill is linked to the same bytes outside it.
+    let linked = fixture.roots("linked");
+    let outside = fixture.0.join("outside");
+    put(&outside, "fmt/SKILL.md", "format");
+    fs::create_dir_all(linked.project.join(".agents/skills")).unwrap();
+    symlink(
+        outside.join("fmt"),
+        linked.project.join(".agents/skills/fmt"),
+    )
+    .unwrap();
+    for target in [&clone, &linked] {
+        for dry_run in [true, false] {
+            let error = archive
+                .restore(target, true, dry_run)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("symlink path refused"), "{error}");
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(clone.project.join(".haarness/skills/fmt/SKILL.md")).unwrap(),
+        "older format"
+    );
 }
 
 #[test]
