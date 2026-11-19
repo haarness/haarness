@@ -8,9 +8,10 @@ import { isolatedEnv } from "./fixtures/isolated-env";
 
 // Desktop opened from the Dock or the Finder gets launchd's short PATH, and
 // the agent's commands run under `sh -l`, which never reads a zsh profile: a
-// tool in ~/.local/bin or ~/.cargo/bin must still be found, after the
-// person's own folders and never from a folder anyone may write to. The echo
-// provider runs the command for real, in a home folder of the test's own.
+// tool in ~/.local/bin or ~/.cargo/bin, or nvm's default node, must still be
+// found, after the person's own folders and never from a folder anyone may
+// write to. The echo provider runs the command for real, in a home folder of
+// the test's own.
 let app: ElectronApplication | undefined;
 let page: Page;
 let root: string, project: string;
@@ -48,7 +49,15 @@ test.beforeAll(async () => {
   await tool(own, "haarness-probe-both", "found-in-own-folder");
   // A folder anyone may write to is never added, even one Haarness knows.
   await tool(join(home, "go/bin"), "haarness-probe-open", "found-in-open-folder", 0o777);
-  env = isolatedEnv();
+  // nvm with two versions; its default reaches 18 through the LTS aliases.
+  await tool(join(home, ".nvm/versions/node/v18.20.4/bin"), "haarness-probe-node", "found-nvm-default-18");
+  await tool(join(home, ".nvm/versions/node/v20.11.0/bin"), "haarness-probe-node", "found-nvm-newest-20");
+  await mkdir(join(home, ".nvm/alias/lts"), { recursive: true });
+  await writeFile(join(home, ".nvm/alias/default"), "lts/*\n");
+  await writeFile(join(home, ".nvm/alias/lts/*"), "lts/hydrogen\n");
+  await writeFile(join(home, ".nvm/alias/lts/hydrogen"), "v18.20.4\n");
+  // An app opened from the Dock has no NVM_DIR: nvm's folder is ~/.nvm.
+  env = isolatedEnv(["NVM_DIR"]);
   Object.assign(env, {
     HAARNESS_BIN: binary,
     HAARNESS_HOME: join(root, "haarness"),
@@ -96,6 +105,7 @@ test("a command finds the tools in the person's own folders when Desktop starts 
     "haarness-probe-cargo",
     "haarness-probe-both",
     "command -v haarness-probe-open || echo open-folder-skipped",
+    "haarness-probe-node",
   ].join("; ");
   const box = page.getByRole("textbox", { name: "Message", exact: true });
   await box.fill(" !tool bash " + JSON.stringify({ command }));
@@ -111,8 +121,10 @@ test("a command finds the tools in the person's own folders when Desktop starts 
   await expect.poll(async () => (await api("activeTurns")).length, { timeout: 30000 }).toBe(0);
   const output = await result();
   // One line per command, in order: the person's own folder still comes
-  // first for the name both folders have.
-  expect(output).toMatch(/found-in-local-bin\s+found-in-cargo-bin\s+found-in-own-folder\s+open-folder-skipped/);
+  // first for the name both folders have, and nvm's is its default version.
+  expect(output).toMatch(
+    /found-in-local-bin\s+found-in-cargo-bin\s+found-in-own-folder\s+open-folder-skipped\s+found-nvm-default-18/,
+  );
   expect(output).not.toContain("not found");
   // The transcript shows the same.
   await expect(page.locator(".transcript details.tool-call").last()).toContainText("haarness-probe-local");
