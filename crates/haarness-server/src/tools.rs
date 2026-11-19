@@ -668,7 +668,7 @@ impl Tool for ExecuteTool {
                 } else if within_tool_output_limits(&compact) {
                     output(compact)
                 } else {
-                    cut_laid_out(&laid_out, &tool_output_dir(), false).await?.0
+                    cut_laid_out(&laid_out, &tool_output_dir(), false).await.0
                 }
             }
         };
@@ -1849,7 +1849,15 @@ async fn fetch_page(
     }
     let kind = crate::webfetch::kind(content_type.as_deref(), &body);
     let crate::webfetch::Kind::Text { html, .. } = kind else {
-        return fetched_file(&page, kind, content_type.as_deref(), body, media_max_bytes).await;
+        return fetched_file(
+            &page,
+            kind,
+            content_type.as_deref(),
+            body,
+            media_max_bytes,
+            &tool_output_dir(),
+        )
+        .await;
     };
     // A challenge some services answer with 200 instead of the page.
     if let Some(service) = crate::webfetch::bot_check(status.as_u16(), &headers, &body) {
@@ -1933,15 +1941,16 @@ async fn read_head(mut response: reqwest::Response, limit: usize) -> Vec<u8> {
     body
 }
 
-/// A fetched file that is not text: a PDF or an image is saved and attached
-/// for the model, as `read` attaches one; any other file is saved, and the
-/// model is told where.
+/// A fetched file that is not text: a PDF or an image is saved (in
+/// `directory`) and attached for the model, as `read` attaches one; any
+/// other file is saved, and the model is told where.
 async fn fetched_file(
     page: &url::Url,
     kind: crate::webfetch::Kind,
     content_type: Option<&str>,
     body: Vec<u8>,
     media_max_bytes: u64,
+    directory: &Path,
 ) -> CoreResult<ToolOutput> {
     use crate::webfetch::Kind;
     let size = body.len() as u64;
@@ -1950,12 +1959,29 @@ async fn fetched_file(
         Kind::Image(extension) => extension,
         Kind::Other | Kind::Text { .. } => "bin",
     };
+    // A file that is not text reaches the model only through the saved
+    // copy: a save that fails says so, rather than in the system's bare
+    // words.
+    let unsaved = |error: std::io::Error| {
+        CoreError::Tool(format!(
+            "{page} was fetched ({}), but saving it in {} failed ({error}), so it cannot be read.",
+            crate::webfetch::size(size),
+            directory.display()
+        ))
+    };
     let (path, mut file) =
-        crate::data_folder::new_private_file_with(&tool_output_dir(), "fetched", extension)
+        crate::data_folder::new_private_file_with(directory, "fetched", extension)
             .await
-            .map_err(tool_error)?;
-    file.write_all(&body).await.map_err(tool_error)?;
-    file.flush().await.map_err(tool_error)?;
+            .map_err(unsaved)?;
+    let written = async {
+        file.write_all(&body).await?;
+        file.flush().await
+    };
+    if let Err(error) = written.await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(unsaved(error));
+    }
     drop(file);
     let saved = path.display().to_string();
     let title = page
@@ -3193,7 +3219,7 @@ struct WholeOutput {
     /// The [`ScriptCall`] it is kept for.
     call: u64,
     /// The file the cut text names, or `None` for JSON that fit once laid
-    /// out, which is not cut.
+    /// out, which is not cut, and for a cut whose whole could not be saved.
     file: Option<PathBuf>,
     /// The cut text the call gave, by its length and hash: what a script is
     /// handed must start with it (hooks may add to its end), so a server
@@ -3201,7 +3227,8 @@ struct WholeOutput {
     /// that is not cut names no file, so it must be all that is handed.
     cut: (usize, [u8; 32]),
     /// The server's text when the file holds another form of it (JSON
-    /// laid out a value a line), else `None`: the file is the text.
+    /// laid out a value a line) or there is no file, else `None`: the file
+    /// is the text.
     text: Option<String>,
     metadata: Value,
 }
@@ -3227,7 +3254,8 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
     let script = SCRIPT_CALL.try_with(|call| *call).ok();
     let whole = script.map(|_| text.clone());
     let (capped, saved) = cut_mcp_text(text, directory, false).await?;
-    let Some((file, reformatted)) = saved else {
+    // Not cut: as it came, or its JSON laid out.
+    let Value::Object(cut) = capped.metadata else {
         if let (Some(call), Some(whole)) = (script, whole)
             && capped.text != whole
         {
@@ -3244,12 +3272,11 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
             metadata,
         });
     };
-    let Value::Object(cut) = capped.metadata else {
-        unreachable!("a cut output says where it was saved");
-    };
     let mut merged = match metadata.clone() {
         Value::Null => serde_json::Map::new(),
-        Value::Object(object) if !cut.keys().any(|key| object.contains_key(key)) => object,
+        // Both names are Haarness's whether or not a file was saved, so a
+        // server's own `outputPath` never reads as where the whole is.
+        Value::Object(object) if !CUT_KEYS.iter().any(|key| object.contains_key(*key)) => object,
         Value::Object(mut object) => {
             let mut own = serde_json::Map::new();
             for key in ["attachments", "diffs", "mcp_app"] {
@@ -3264,11 +3291,17 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
     };
     merged.extend(cut);
     if let (Some(call), Some(whole)) = (script, whole) {
+        // With no file saved (a full disk), the script gets the whole from
+        // memory.
+        let (file, text) = match saved {
+            Some((file, reformatted)) => (Some(file), reformatted.then_some(whole)),
+            None => (None, Some(whole)),
+        };
         keep_whole_output(WholeOutput {
             call,
-            file: Some(file),
+            file,
             cut: (capped.text.len(), cut_fingerprint(capped.text.as_bytes())),
-            text: reformatted.then_some(whole),
+            text,
             metadata,
         });
     }
@@ -3278,17 +3311,41 @@ async fn capped_mcp_output(output: ToolOutput, directory: &Path) -> CoreResult<T
     })
 }
 
+/// The metadata a cut MCP text carries (see [`capped_mcp_output`]).
+const CUT_KEYS: [&str; 2] = ["truncated", "outputPath"];
+
 fn keep_whole_output(kept: WholeOutput) {
-    let mut outputs = WHOLE_OUTPUTS.lock();
+    keep_within(
+        &mut WHOLE_OUTPUTS.lock(),
+        kept,
+        WHOLE_OUTPUTS_KEPT,
+        WHOLE_TEXT_BYTES_KEPT,
+    );
+}
+
+/// Adds `kept` to `outputs`, the oldest going first past `most` of them,
+/// and past `most_bytes` of texts the oldest of those holding text, so one
+/// large text never costs other calls their files. A text larger than
+/// `most_bytes` on its own is not kept: its call gets what the model gets.
+fn keep_within(
+    outputs: &mut std::collections::VecDeque<WholeOutput>,
+    kept: WholeOutput,
+    most: usize,
+    most_bytes: usize,
+) {
+    let bytes = |kept: &WholeOutput| kept.text.as_ref().map_or(0, String::len);
+    if bytes(&kept) > most_bytes {
+        return;
+    }
     outputs.push_back(kept);
-    while outputs.len() > WHOLE_OUTPUTS_KEPT
-        || outputs
-            .iter()
-            .filter_map(|kept| kept.text.as_ref().map(String::len))
-            .sum::<usize>()
-            > WHOLE_TEXT_BYTES_KEPT
-    {
+    while outputs.len() > most {
         outputs.pop_front();
+    }
+    while outputs.iter().map(bytes).sum::<usize>() > most_bytes {
+        let Some(oldest) = outputs.iter().position(|kept| kept.text.is_some()) else {
+            break;
+        };
+        outputs.remove(oldest);
     }
 }
 
@@ -3316,17 +3373,19 @@ pub(crate) async fn take_whole_mcp_output(
         *outputs = others;
         own
     };
-    let named = if output.metadata.get("truncated") == Some(&Value::Bool(true)) {
-        Some(Path::new(output.metadata.get("outputPath")?.as_str()?))
-    } else {
-        None
+    // A cut names the file that holds the whole, unless none could be saved.
+    let truncated = output.metadata.get("truncated") == Some(&Value::Bool(true));
+    let named = match output.metadata.get("outputPath") {
+        Some(path) if truncated => Some(Path::new(path.as_str()?)),
+        _ => None,
     };
     let kept = own.into_iter().rev().find(|kept| {
         let (length, hash) = kept.cut;
         let text = output.text.as_bytes();
-        let start = match kept.file {
-            Some(_) => text.get(..length),
-            None => (text.len() == length).then_some(text),
+        let start = if truncated {
+            text.get(..length)
+        } else {
+            (text.len() == length).then_some(text)
         };
         kept.file.as_deref() == named && start.is_some_and(|start| cut_fingerprint(start) == hash)
     })?;
@@ -3873,15 +3932,45 @@ impl Tool for BuiltinTool {
                     )));
                 }
                 let pattern = string(&args, "pattern")?;
+                // `src/**/*.{ts,tsx}` stands for a pattern for each
+                // alternative: the glob crate has no braces, and read as
+                // written it finds nothing.
+                let alternatives =
+                    haarness_core::glob_braces::alternatives(pattern).map_err(|error| {
+                        CoreError::Invalid(format!(
+                            "glob pattern `{pattern}` is not valid: {error}"
+                        ))
+                    })?;
                 // A `..` would leave the folder the outside-folder check
                 // judged; the folder is given as `path` instead.
-                if climbs(pattern) {
+                if alternatives.iter().any(|alternative| climbs(alternative)) {
                     return Err(CoreError::Invalid(
                         "a glob pattern cannot contain `..`; pass the folder to search as path"
                             .into(),
                     ));
                 }
-                let pattern = root.join(pattern).to_string_lossy().into_owned();
+                // Checked before the folder is joined to it, so a mistake is
+                // named where the model wrote it.
+                for alternative in &alternatives {
+                    if let Err(error) = glob::Pattern::new(alternative) {
+                        return Err(invalid_glob(pattern, alternative, &error));
+                    }
+                }
+                // The folder matches itself alone, `[slug]` and all.
+                let base = crate::bounded_glob::literal(&root);
+                let patterns: Vec<String> = alternatives
+                    .iter()
+                    .map(|alternative| {
+                        let path = Path::new(alternative);
+                        if path.has_root() || path.is_absolute() {
+                            root.join(path)
+                        } else {
+                            Path::new(&base).join(path)
+                        }
+                        .to_string_lossy()
+                        .into_owned()
+                    })
+                    .collect();
                 let workspace = haarness_core::paths::canonicalize(&context.workspace)
                     .unwrap_or_else(|_| context.workspace.clone());
                 // A file a `read` rule denies is left out like a secret one.
@@ -3898,7 +3987,7 @@ impl Tool for BuiltinTool {
                 // at and at one of folder entries read.
                 let walk = tokio::task::spawn_blocking(move || {
                     glob_walk(
-                        &pattern,
+                        &patterns,
                         &GlobScope {
                             root,
                             workspace,
@@ -3917,7 +4006,7 @@ impl Tool for BuiltinTool {
                     found = walk => found.map_err(tool_error)??,
                 };
                 let mut listed = truncate_output(found.values.join("\n")).await?;
-                if listed.text.is_empty() && !(found.stopped || found.large || found.partial) {
+                if listed.text.is_empty() && !found.partial && found.limit.is_none() {
                     // `*.py` finds nothing in `src` when the files are in
                     // `src/app`: models write it first, then guess. Not when
                     // matches were left out: then there were some.
@@ -3934,12 +4023,11 @@ impl Tool for BuiltinTool {
                     };
                 }
                 let output = with_skipped(listed, found.skipped, found.partial);
-                Ok(if found.stopped {
-                    with_stop(output, GLOB_LOOK_LIMIT)
-                } else if found.large {
-                    with_read_stop(output, GLOB_ENTRY_LIMIT)
-                } else {
-                    output
+                Ok(match found.limit {
+                    Some(GlobLimit::Looked) => with_stop(output, GLOB_LOOK_LIMIT),
+                    Some(GlobLimit::Linked) => with_read_stop(output, GLOB_ENTRY_LIMIT),
+                    Some(GlobLimit::Braces) => with_braces_stop(output, GLOB_ENTRY_LIMIT),
+                    None => output,
                 })
             }
             Kind::Grep => {
@@ -5363,16 +5451,25 @@ struct GlobLimits {
     entries: usize,
 }
 
-/// What a glob found: its matches, what it left out, and whether it stopped
-/// at a limit (`stopped` for [`GLOB_LOOK_LIMIT`], `large` for
-/// [`GLOB_ENTRY_LIMIT`]).
+/// What a glob found: its matches, what it left out, and the limit it
+/// stopped at, when it did.
 #[derive(Default)]
 struct GlobFound {
     values: Vec<String>,
     skipped: Skipped,
     partial: bool,
-    stopped: bool,
-    large: bool,
+    limit: Option<GlobLimit>,
+}
+
+/// The limit a glob stopped at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlobLimit {
+    /// [`GLOB_LOOK_LIMIT`] matches looked at.
+    Looked,
+    /// [`GLOB_ENTRY_LIMIT`] folder entries read through links.
+    Linked,
+    /// The same budget, shared by the walks for further brace alternatives.
+    Braces,
 }
 
 /// Where a glob looks: the canonical folder it searches, the canonical
@@ -5384,10 +5481,17 @@ struct GlobScope {
     named: PathBuf,
 }
 
-/// Walk `pattern` (already joined to the scope's root) within `limits`.
-/// Runs synchronously; the caller keeps it off the async workers.
+/// Walk `patterns` (the alternatives of one pattern, each already joined to
+/// the scope's root) within `limits`, which they share: as few walks as
+/// [`crate::bounded_glob::walks`] needs, one for `**/*.{ts,tsx}`. The first
+/// reads as one pattern's would; the walks after it share one budget of
+/// folder entries with it, all of them counted (`braces_large` when they
+/// reach it), since each would otherwise read the tree again. A path two
+/// walks match is listed once, and the paths of several come in the order
+/// one walk lists them. Runs synchronously; the caller keeps it off the
+/// async workers.
 fn glob_walk(
-    pattern: &str,
+    patterns: &[String],
     scope: &GlobScope,
     secrets: &SecretFilter,
     cancel: &tokio_util::sync::CancellationToken,
@@ -5395,70 +5499,117 @@ fn glob_walk(
 ) -> CoreResult<GlobFound> {
     let mut folders = HashMap::<PathBuf, bool>::new();
     let mut found = GlobFound::default();
-    let stop = cancel.clone();
-    let mut walk = crate::bounded_glob::Walk::new(pattern)
-        .map_err(tool_error)?
-        .linked_entries(limits.entries)
-        .stop_when(move || stop.is_cancelled());
-    for (looked, path) in walk.by_ref().enumerate() {
-        if cancel.is_cancelled() {
-            return Err(CoreError::Cancelled);
+    // Each path listed, with what the output says of it.
+    let mut listed = Vec::<(PathBuf, String)>::new();
+    let walks = crate::bounded_glob::walks(patterns).map_err(tool_error)?;
+    let mut seen = (walks.len() > 1).then(std::collections::HashSet::<PathBuf>::new);
+    let mut looked = 0;
+    // Folder entries the walks have read, against the budget of those after
+    // the first.
+    let mut spent = 0;
+    for (index, walk) in walks.into_iter().enumerate() {
+        let stop = cancel.clone();
+        let walk = if index == 0 {
+            walk.linked_entries(limits.entries)
+        } else {
+            walk.entries(limits.entries.saturating_sub(spent))
+        };
+        let mut walk = walk.stop_when(move || stop.is_cancelled());
+        for path in walk.by_ref() {
+            if cancel.is_cancelled() {
+                return Err(CoreError::Cancelled);
+            }
+            if listed.len() == 10_000 {
+                found.partial = true;
+                break;
+            }
+            if looked == limits.matches {
+                found.partial = true;
+                found.limit = Some(GlobLimit::Looked);
+                break;
+            }
+            if let Some(seen) = seen.as_mut()
+                && !seen.insert(path.clone())
+            {
+                continue;
+            }
+            looked += 1;
+            // A part starting with `.`, such as `.*`, also matches `.` and `..`.
+            if !path.strip_prefix(&scope.root).is_ok_and(|relative| {
+                !relative
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir)
+            }) {
+                continue;
+            }
+            // `**` follows linked folders (never one back up the tree): a match
+            // in a folder a link takes out of the project and the searched folder
+            // is left out, as a list of that folder would ask first.
+            let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
+            let inside = *folders.entry(parent).or_insert_with_key(|parent| {
+                haarness_core::paths::canonicalize(parent).is_ok_and(|real| {
+                    real.starts_with(&scope.root) || real.starts_with(&scope.workspace)
+                })
+            });
+            if !inside {
+                found.skipped.outside += 1;
+                continue;
+            }
+            // `*` matches dotfiles and `**` follows linked folders, so each file
+            // is checked by where it really leads as well.
+            if !path.is_dir()
+                && let Some(hidden) = secrets.hides(&path)
+            {
+                found.skipped.count(hidden);
+                continue;
+            }
+            // Relative with `/`, as grep and the file listing write it (Windows
+            // writes `\\`); a path outside the folder as the system does.
+            let value = match path.strip_prefix(&scope.named) {
+                Ok(relative) if cfg!(windows) => relative.to_string_lossy().replace('\\', "/"),
+                Ok(relative) => relative.display().to_string(),
+                Err(_) => path.display().to_string(),
+            };
+            listed.push((path, value));
         }
-        if found.values.len() == 10_000 {
-            found.partial = true;
+        spent += walk.entries_listed();
+        match walk.cut() {
+            Some(crate::bounded_glob::Cut::Stopped) => return Err(CoreError::Cancelled),
+            Some(crate::bounded_glob::Cut::Large) => {
+                found.partial = true;
+                // The look limit, when it was met too, says more.
+                found.limit.get_or_insert(if index == 0 {
+                    GlobLimit::Linked
+                } else {
+                    GlobLimit::Braces
+                });
+            }
+            None => {}
+        }
+        if found.partial {
             break;
         }
-        if looked == limits.matches {
-            found.partial = true;
-            found.stopped = true;
-            break;
-        }
-        // A part starting with `.`, such as `.*`, also matches `.` and `..`.
-        if !path.strip_prefix(&scope.root).is_ok_and(|relative| {
-            !relative
-                .components()
-                .any(|part| part == std::path::Component::ParentDir)
-        }) {
-            continue;
-        }
-        // `**` follows linked folders (never one back up the tree): a match
-        // in a folder a link takes out of the project and the searched folder
-        // is left out, as a list of that folder would ask first.
-        let parent = path.parent().unwrap_or(&scope.root).to_path_buf();
-        let inside = *folders.entry(parent).or_insert_with_key(|parent| {
-            haarness_core::paths::canonicalize(parent).is_ok_and(|real| {
-                real.starts_with(&scope.root) || real.starts_with(&scope.workspace)
-            })
-        });
-        if !inside {
-            found.skipped.outside += 1;
-            continue;
-        }
-        // `*` matches dotfiles and `**` follows linked folders, so each file
-        // is checked by where it really leads as well.
-        if !path.is_dir()
-            && let Some(hidden) = secrets.hides(&path)
-        {
-            found.skipped.count(hidden);
-            continue;
-        }
-        // Relative with `/`, as grep and the file listing write it (Windows
-        // writes `\\`); a path outside the folder as the system does.
-        found.values.push(match path.strip_prefix(&scope.named) {
-            Ok(relative) if cfg!(windows) => relative.to_string_lossy().replace('\\', "/"),
-            Ok(relative) => relative.display().to_string(),
-            Err(_) => path.display().to_string(),
-        });
     }
-    match walk.cut() {
-        Some(crate::bounded_glob::Cut::Stopped) => return Err(CoreError::Cancelled),
-        Some(crate::bounded_glob::Cut::Large) => {
-            found.partial = true;
-            found.large = true;
-        }
-        None => {}
+    if seen.is_some() {
+        listed.sort_by(|(first, _), (second, _)| first.cmp(second));
     }
+    found.values = listed.into_iter().map(|(_, value)| value).collect();
     Ok(found)
+}
+
+/// A pattern the glob crate cannot read, named as the model wrote it: the
+/// alternative of its braces at fault too, when it has several.
+fn invalid_glob(pattern: &str, alternative: &str, error: &glob::PatternError) -> CoreError {
+    let within = if alternative == pattern {
+        String::new()
+    } else {
+        format!(" (its alternative `{alternative}`)")
+    };
+    CoreError::Invalid(format!(
+        "glob pattern `{pattern}` is not valid{within}: {} at character {}",
+        error.msg,
+        error.pos + 1
+    ))
 }
 
 /// Ends a glob's output saying it stopped at its budget, so an empty or short
@@ -5467,6 +5618,18 @@ fn with_stop(output: ToolOutput, limit: usize) -> ToolOutput {
     with_note(
         output,
         &format!("(stopped after looking at {limit} matches; narrow the pattern or the path)"),
+    )
+}
+
+/// Ends a glob's output saying its walks for further brace alternatives
+/// stopped at the budget of folder entries they share.
+fn with_braces_stop(output: ToolOutput, entries: usize) -> ToolOutput {
+    with_note(
+        output,
+        &format!(
+            "(stopped after reading {entries} folder entries for the alternatives in its braces; \
+             narrow the pattern or the path)"
+        ),
     )
 }
 
@@ -6292,33 +6455,78 @@ pub(crate) async fn truncate_output_at(text: String, directory: &Path) -> CoreRe
         return Ok(output(text));
     }
     let preview = output_preview(&text);
-    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
-        .await
-        .map_err(tool_error)?;
-    file.write_all(text.as_bytes()).await.map_err(tool_error)?;
-    file.flush().await.map_err(tool_error)?;
+    let saved = save_whole(text.as_bytes(), directory, "tool").await;
     let removed = text.len().saturating_sub(preview.len());
-    let notice = cut_notice(&path, removed, false);
+    let notice = cut_notice(&saved, removed, false);
     Ok(ToolOutput {
         text: format!("{preview}\n\n{notice}"),
-        metadata: json!({"truncated": true, "outputPath": path}),
+        metadata: cut_metadata(&saved),
     })
 }
 
-/// What follows the start of a cut output: where the whole of it is, how to
-/// read it, and how much is left out.
-fn cut_notice(path: &Path, removed: usize, failed: bool) -> String {
+/// Saves the whole of a cut text in a new file of `directory`, for the cut
+/// to name. A save that fails (a full disk, a folder that cannot be
+/// written) costs only the file: it is logged, what it left is removed, and
+/// the system's words for it come back for the note, since the cut text is
+/// still worth having.
+pub(crate) async fn save_whole(
+    bytes: &[u8],
+    directory: &Path,
+    prefix: &str,
+) -> Result<PathBuf, String> {
+    let (path, mut file) = crate::data_folder::new_private_file(directory, prefix)
+        .await
+        .map_err(|error| unsaved(directory, &error))?;
+    let written = async {
+        file.write_all(bytes).await?;
+        file.flush().await
+    };
+    if let Err(error) = written.await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(unsaved(directory, &error));
+    }
+    Ok(path)
+}
+
+/// Why a save in `directory` failed, as a cut's note says it, logged.
+fn unsaved(directory: &Path, error: &std::io::Error) -> String {
+    tracing::warn!(
+        %error,
+        folder = %directory.display(),
+        "the whole of a cut tool output could not be saved; the cut is returned without it"
+    );
+    format!(
+        "Saving all of it in {} failed ({error})",
+        directory.display()
+    )
+}
+
+/// A cut output's metadata: cut, and where the whole is when it was saved.
+fn cut_metadata(saved: &Result<PathBuf, String>) -> Value {
+    match saved {
+        Ok(path) => json!({"truncated": true, "outputPath": path}),
+        Err(_) => json!({"truncated": true}),
+    }
+}
+
+/// What follows the start of a cut output: where the whole of it is and
+/// how to read it, or why it could not be saved, and how much is left out.
+fn cut_notice(saved: &Result<PathBuf, String>, removed: usize, failed: bool) -> String {
     let lead = if failed {
         "The tool call failed and its output was truncated."
     } else {
         "The tool call succeeded but its output was truncated."
     };
-    format!(
-        "{lead} Full output saved to: {}\n\
-         Use grep on that path or read it with offset/limit.\n\n\
-         ...{removed} bytes truncated...",
-        path.display()
-    )
+    let whole = match saved {
+        Ok(path) => format!(
+            "Full output saved to: {}\n\
+             Use grep on that path or read it with offset/limit.",
+            path.display()
+        ),
+        Err(why) => format!("{why}, so only the part above can be read."),
+    };
+    format!("{lead} {whole}\n\n...{removed} bytes truncated...")
 }
 
 /// An MCP server's text as it is cut for the model (a tool's result or
@@ -6329,9 +6537,9 @@ fn cut_notice(path: &Path, removed: usize, failed: bool) -> String {
 /// the file can be read by line, and a line longer than what is left of the
 /// 50 KiB is cut inside it rather than left out. JSON that fits once
 /// indented (written with wider indents than two spaces, say) is not cut.
-/// Gives the output (the text, or its JSON indented) and, when it was cut,
-/// the file holding the whole and whether it holds it indented rather than
-/// as it came.
+/// Gives the output (the text, or its JSON indented; cut, its metadata says
+/// so) and, when it was cut and the whole could be saved, the file holding
+/// the whole and whether it holds it indented rather than as it came.
 pub(crate) async fn cut_mcp_text(
     text: String,
     directory: &Path,
@@ -6346,34 +6554,29 @@ pub(crate) async fn cut_mcp_text(
     if reformatted && within_tool_output_limits(&readable) {
         return Ok((output(readable), None));
     }
-    let (cut, path) = cut_laid_out(&readable, directory, failed).await?;
-    Ok((cut, Some((path, reformatted))))
+    let (cut, path) = cut_laid_out(&readable, directory, failed).await;
+    Ok((cut, path.map(|path| (path, reformatted))))
 }
 
 /// `readable`, text past the limits as [`cut_mcp_text`] lays it out, cut:
-/// its start, then where the whole was saved in `directory`.
+/// its start, then where the whole was saved in `directory` (the file too),
+/// or why it could not be.
 async fn cut_laid_out(
     readable: &str,
     directory: &Path,
     failed: bool,
-) -> CoreResult<(ToolOutput, PathBuf)> {
+) -> (ToolOutput, Option<PathBuf>) {
     let preview = filled_preview(readable);
-    let (path, mut file) = crate::data_folder::new_private_file(directory, "tool")
-        .await
-        .map_err(tool_error)?;
-    file.write_all(readable.as_bytes())
-        .await
-        .map_err(tool_error)?;
-    file.flush().await.map_err(tool_error)?;
+    let saved = save_whole(readable.as_bytes(), directory, "tool").await;
     let removed = readable.len().saturating_sub(preview.len());
-    let notice = cut_notice(&path, removed, failed);
-    Ok((
+    let notice = cut_notice(&saved, removed, failed);
+    (
         ToolOutput {
             text: format!("{preview}\n\n{notice}"),
-            metadata: json!({"truncated": true, "outputPath": path}),
+            metadata: cut_metadata(&saved),
         },
-        path,
-    ))
+        saved.ok(),
+    )
 }
 
 /// A line longer than this is taken for data written on one line (JSON,
@@ -6646,7 +6849,8 @@ fn write_json(json: &str, indent: usize, out: &mut String) {
 }
 
 /// The first 50 KiB (and at most 2,000 lines) of `text`, the line that
-/// passes the limit cut where it does, at a character boundary.
+/// passes the limit cut where it does, keeping its characters whole (see
+/// [`whole_cut`]).
 fn filled_preview(text: &str) -> &str {
     let mut end = 0;
     for (index, line) in text.split_inclusive('\n').enumerate() {
@@ -6654,10 +6858,7 @@ fn filled_preview(text: &str) -> &str {
             break;
         }
         if end + line.len() > TOOL_OUTPUT_MAX_BYTES {
-            end = TOOL_OUTPUT_MAX_BYTES;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
+            end = whole_cut(text, TOOL_OUTPUT_MAX_BYTES);
             break;
         }
         end += line.len();
@@ -6665,20 +6866,72 @@ fn filled_preview(text: &str) -> &str {
     text[..end].trim_end_matches(['\n', '\r'])
 }
 
+/// The most a cut keeps of a cluster of characters shown as one (an emoji
+/// with its skin tone and joiners, a flag, a letter with its marks) by
+/// leaving it out whole; a longer one (marks stacked without end) is cut
+/// between two of its characters instead.
+const CLUSTER_BYTES: usize = 64;
+
+/// Where text cut at byte `end` of `text` ends: there, when no character or
+/// cluster of them spans it, else before the character or cluster `end`
+/// falls in (see [`CLUSTER_BYTES`]), so an emoji, a flag or a CJK character
+/// is never shown in part.
+pub(crate) fn whole_cut(text: &str, end: usize) -> usize {
+    let mut end = end.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut cursor = unicode_segmentation::GraphemeCursor::new(end, text.len(), true);
+    if cursor.is_boundary(text, 0).unwrap_or(true) {
+        return end;
+    }
+    match cursor.prev_boundary(text, 0) {
+        Ok(Some(start)) if end - start <= CLUSTER_BYTES => start,
+        _ => end,
+    }
+}
+
+/// The least room the head of a long line after others is shown in: less
+/// would show a fragment (a path cut short) rather than a start worth
+/// reading.
+const LONG_LINE_HEAD_MIN: usize = 256;
+
+/// The start of `text` a native tool's cut output shows: whole lines, up to
+/// 2,000 of them and 50 KiB. A line too long to show whole (minified code, a
+/// JSON dump) shows its head, ending in a cut mark, when it is the first,
+/// so the preview is never empty, or when it is data on one line (over
+/// [`LONG_LINE_BYTES`]) after shorter ones and at least
+/// [`LONG_LINE_HEAD_MIN`] bytes are left for it (a head cut shorter than
+/// 2,000 characters says only that the line goes on); any other line that
+/// does not fit is left out whole, so no path or match is shown in part.
 fn output_preview(text: &str) -> String {
     let mut preview = Vec::new();
     let mut bytes = 0;
     for line in text.lines().take(TOOL_OUTPUT_MAX_LINES) {
         let size = line.len() + usize::from(!preview.is_empty());
         if bytes + size > TOOL_OUTPUT_MAX_BYTES {
-            // A first line too long to show whole (minified code, a JSON
-            // dump) shows its head, so the preview is never empty.
             if preview.is_empty() {
                 return text::shown(line, true).into_owned();
             }
+            if line.len() > LONG_LINE_BYTES {
+                let room = TOOL_OUTPUT_MAX_BYTES.saturating_sub(bytes + 1);
+                // Its first 2,000 characters, when they fit; the line whole
+                // never does.
+                let head = text::shown(line, false);
+                if head.len() <= room {
+                    preview.push(head);
+                } else if room >= LONG_LINE_HEAD_MIN + text::LINE_PART_CUT.len() {
+                    let end = whole_cut(line, room - text::LINE_PART_CUT.len());
+                    preview.push(std::borrow::Cow::Owned(format!(
+                        "{}{}",
+                        &line[..end],
+                        text::LINE_PART_CUT
+                    )));
+                }
+            }
             break;
         }
-        preview.push(line);
+        preview.push(std::borrow::Cow::Borrowed(line));
         bytes += size;
     }
     preview.join("\n")
@@ -10173,11 +10426,25 @@ export default workflow({
         let cancel = CancellationToken::new();
         // Every folder reached without a link is read whatever the budget, as on a
         // repository far larger than it; only the linked folder is cut.
-        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(0)).unwrap();
-        assert!(found.large && found.partial && !found.stopped);
+        let found = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits_entries(0),
+        )
+        .unwrap();
+        assert!(found.partial && found.limit == Some(GlobLimit::Linked));
         assert_eq!(found.values, ["a.txt", "b/c.txt", "d/e.txt"]);
-        let all = glob_walk(&pattern, &scope, &secrets, &cancel, limits_entries(100)).unwrap();
-        assert!(!all.large && !all.partial);
+        let all = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits_entries(100),
+        )
+        .unwrap();
+        assert!(!all.partial && all.limit.is_none());
         assert_eq!(
             all.values,
             ["a.txt", "b/c.txt", "d/e.txt", "z-linked/e.txt"]
@@ -10196,6 +10463,43 @@ export default workflow({
             matches: 1_000,
             entries,
         }
+    }
+
+    /// Alternatives that need walks of their own read the tree again each:
+    /// the first reads as one pattern would, the ones after it share one
+    /// budget of folder entries with it.
+    #[cfg(unix)]
+    #[test]
+    fn walks_for_further_brace_alternatives_share_one_budget() {
+        let workspace = haarness_core::paths::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("haarness-glob-braces-{}", uuid::Uuid::now_v7()));
+        for file in ["a/x.txt", "a/deep/y.txt", "b/z.txt", "b/w.md"] {
+            let path = workspace.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let scope = GlobScope {
+            root: workspace.clone(),
+            workspace: workspace.clone(),
+            named: workspace.clone(),
+        };
+        let secrets = SecretFilter::new(&workspace, ".", &workspace, None);
+        let cancel = CancellationToken::new();
+        let patterns = ["a/**/*.txt", "b/**/*.txt", "b/**/*.md"]
+            .map(|pattern| workspace.join(pattern).to_string_lossy().into_owned());
+        let found = glob_walk(&patterns, &scope, &secrets, &cancel, limits_entries(3)).unwrap();
+        assert!(found.partial && found.limit == Some(GlobLimit::Braces));
+        assert_eq!(found.values, ["a/deep/y.txt", "a/x.txt"]);
+        let all = glob_walk(&patterns, &scope, &secrets, &cancel, limits_entries(100)).unwrap();
+        assert!(!all.partial && all.limit.is_none());
+        assert_eq!(all.values, ["a/deep/y.txt", "a/x.txt", "b/w.md", "b/z.txt"]);
+        assert_eq!(
+            with_braces_stop(output(String::new()), 3).text,
+            "(stopped after reading 3 folder entries for the alternatives in its braces; narrow \
+             the pattern or the path)"
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[cfg(unix)]
@@ -10221,16 +10525,36 @@ export default workflow({
         let pattern = workspace.join("**/*").to_string_lossy().into_owned();
         let cancel = CancellationToken::new();
         // Matches left out count against the budget too.
-        let found = glob_walk(&pattern, &scope, &secrets, &cancel, limits(10)).unwrap();
-        assert!(found.stopped && found.partial);
+        let found = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits(10),
+        )
+        .unwrap();
+        assert!(found.partial && found.limit == Some(GlobLimit::Looked));
         assert!(found.skipped.outside >= 7, "{}", found.skipped.outside);
         assert!(found.values.len() + found.skipped.outside <= 10);
-        let everything = glob_walk(&pattern, &scope, &secrets, &cancel, limits(1_000)).unwrap();
-        assert!(!everything.stopped && !everything.partial);
+        let everything = glob_walk(
+            std::slice::from_ref(&pattern),
+            &scope,
+            &secrets,
+            &cancel,
+            limits(1_000),
+        )
+        .unwrap();
+        assert!(!everything.partial && everything.limit.is_none());
         assert_eq!(everything.skipped.outside, 30);
         cancel.cancel();
         assert!(matches!(
-            glob_walk(&pattern, &scope, &secrets, &cancel, limits(1_000)),
+            glob_walk(
+                std::slice::from_ref(&pattern),
+                &scope,
+                &secrets,
+                &cancel,
+                limits(1_000)
+            ),
             Err(CoreError::Cancelled)
         ));
         let stopped = with_stop(output(String::new()), 10);
@@ -10260,6 +10584,251 @@ export default workflow({
             "head preview kept the tail"
         );
         tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    /// A folder for saved output that cannot be made (it would be under a
+    /// file), as a full disk or a folder that cannot be written refuses a
+    /// save, in a folder of the test's own.
+    fn unwritable_folder() -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("haarness-unsaved-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file"), "").unwrap();
+        let folder = root.join("file/tool-output");
+        (root, folder)
+    }
+
+    /// A save that failed lost the whole result: the model got "Not a
+    /// directory" or "No space left on device" instead of the preview.
+    #[tokio::test]
+    async fn a_cut_output_whose_whole_cannot_be_saved_still_shows_its_start() {
+        let (root, folder) = unwritable_folder();
+        let body = (0..3_000)
+            .map(|line| format!("line {line}: {}", "x".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_output_at(body.clone(), &folder).await.unwrap();
+        assert_eq!(result.metadata, json!({"truncated": true}));
+        assert!(result.text.starts_with("line 0: "), "{:.80}", result.text);
+        assert!(!result.text.contains("line 2999:"));
+        let note = format!(
+            "The tool call succeeded but its output was truncated. Saving all of it in {} failed (",
+            folder.display()
+        );
+        assert!(
+            result.text.contains(&note),
+            "{}",
+            &result.text[result.text.len() - 300..]
+        );
+        assert!(
+            result
+                .text
+                .contains("), so only the part above can be read.\n\n..."),
+            "{}",
+            &result.text[result.text.len() - 300..]
+        );
+        // An MCP tool's text (and a failure's) is cut the same way.
+        for failed in [false, true] {
+            let (cut, saved) = cut_mcp_text(body.clone(), &folder, failed).await.unwrap();
+            assert!(saved.is_none());
+            assert_eq!(cut.metadata, json!({"truncated": true}));
+            assert!(cut.text.starts_with("line 0: ") && cut.text.len() < 52 * 1024);
+            assert!(cut.text.contains("so only the part above can be read."));
+            assert_eq!(
+                cut.text
+                    .contains("The tool call failed and its output was truncated."),
+                failed
+            );
+        }
+        // So is a fetched page, which a save that fails no longer loses;
+        // a fetched file, which has no preview, says why it cannot be read.
+        let page = url::Url::parse("https://example.com/report.pdf").unwrap();
+        let fetched = fetched_file(
+            &page,
+            crate::webfetch::Kind::Pdf,
+            Some("application/pdf"),
+            b"%PDF-1.7\n".to_vec(),
+            u64::MAX,
+            &folder,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            fetched.contains(&format!(
+                "https://example.com/report.pdf was fetched (9 bytes), but saving it in {} failed (",
+                folder.display()
+            )) && fetched.ends_with("), so it cannot be read."),
+            "{fetched}"
+        );
+        assert!(root.join("file").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A script's MCP call gets the whole text from memory when no file
+    /// could hold it, as the model gets the cut.
+    #[tokio::test]
+    async fn a_script_gets_the_whole_mcp_text_its_save_could_not_keep() {
+        let (root, folder) = unwritable_folder();
+        let script = ScriptCall::new();
+        let text = "row\n".repeat(20_000);
+        let output = script
+            .run(capped_mcp_output(
+                ToolOutput {
+                    text: text.clone(),
+                    metadata: json!({"rows": 20_000}),
+                },
+                &folder,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(output.metadata, json!({"rows": 20_000, "truncated": true}));
+        assert!(output.text.contains("so only the part above can be read."));
+        let (whole, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
+        assert_eq!(
+            (whole, metadata, file),
+            (text.clone(), json!({"rows": 20_000}), None)
+        );
+        // A server's own `outputPath` moves under `structuredContent`, saved
+        // or not, so it never reads as where the whole is.
+        let script = ScriptCall::new();
+        let named = json!({"outputPath": "/srv/report.txt", "rows": 1});
+        let output = script
+            .run(capped_mcp_output(
+                ToolOutput {
+                    text: text.clone(),
+                    metadata: named.clone(),
+                },
+                &folder,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            output.metadata,
+            json!({"structuredContent": named.clone(), "truncated": true})
+        );
+        let (whole, metadata, file) = take_whole_mcp_output(&script, &output).await.unwrap();
+        assert_eq!((whole, metadata, file), (text, named, None));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// One large text no longer clears what other calls kept: a text larger
+    /// than the budget alone is not kept, and past the budget only texts go,
+    /// oldest first, never an entry whose whole is in a file.
+    #[test]
+    fn a_large_kept_text_never_costs_other_calls_their_files() {
+        let entry = |call: u64, file: Option<&str>, text: Option<usize>| WholeOutput {
+            call,
+            file: file.map(PathBuf::from),
+            cut: (0, [0; 32]),
+            text: text.map(|bytes| "x".repeat(bytes)),
+            metadata: Value::Null,
+        };
+        let calls = |outputs: &std::collections::VecDeque<WholeOutput>| {
+            outputs.iter().map(|kept| kept.call).collect::<Vec<_>>()
+        };
+        let mut outputs = std::collections::VecDeque::new();
+        keep_within(&mut outputs, entry(1, Some("/a"), None), 4, 100);
+        keep_within(&mut outputs, entry(2, None, Some(60)), 4, 100);
+        keep_within(&mut outputs, entry(3, None, Some(101)), 4, 100);
+        assert_eq!(calls(&outputs), [1, 2]);
+        keep_within(&mut outputs, entry(4, Some("/b"), Some(10)), 4, 100);
+        keep_within(&mut outputs, entry(5, None, Some(50)), 4, 100);
+        assert_eq!(calls(&outputs), [1, 4, 5]);
+        // Past the count, the oldest goes whatever it holds.
+        for call in 6..=7 {
+            keep_within(&mut outputs, entry(call, Some("/c"), None), 4, 100);
+        }
+        assert_eq!(calls(&outputs), [4, 5, 6, 7]);
+    }
+
+    /// An emoji, a flag or a family sits on the cut: it is left out whole
+    /// rather than shown in part.
+    #[test]
+    fn a_cut_never_splits_an_emoji_or_a_flag() {
+        let flag = "\u{1f1ef}\u{1f1f5}"; // 🇯🇵
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}"; // 👨‍👩‍👧
+        // Cut inside the flag, and between its two letters.
+        let text = format!("ab{flag}cd");
+        assert_eq!(whole_cut(&text, 3), 2);
+        assert_eq!(whole_cut(&text, 6), 2);
+        assert_eq!(whole_cut(&text, 10), 10);
+        // Inside the family, after a joiner and after a whole person.
+        let text = format!("a{family}b");
+        for end in [2, 5, 8, 12] {
+            assert_eq!(whole_cut(&text, end), 1, "{end}");
+        }
+        assert_eq!(whole_cut(&text, 1 + family.len()), 1 + family.len());
+        // CJK stays whole; marks stacked past the bound are cut between
+        // two of them.
+        assert_eq!(whole_cut("日本", 4), 3);
+        let stacked = format!("e{}", "\u{301}".repeat(100));
+        assert_eq!(whole_cut(&stacked, 101), 101);
+        // A read's line of 2,000 characters ending inside a flag.
+        let line = format!("{}{flag}{flag}", "x".repeat(1_999));
+        assert_eq!(
+            text::shown(&line, false),
+            format!("{}{}", "x".repeat(1_999), text::LINE_CUT)
+        );
+        // An MCP text filling the 50 KiB with flags.
+        let flags = format!("x{}", flag.repeat(TOOL_OUTPUT_MAX_BYTES / 8 + 1));
+        assert_eq!(
+            filled_preview(&flags),
+            format!("x{}", flag.repeat(TOOL_OUTPUT_MAX_BYTES / 8 - 1))
+        );
+    }
+
+    /// A long line after a short one (a heading, then minified JSON) shows
+    /// its head instead of leaving the preview with the heading alone; a
+    /// later short line that does not fit is left out whole.
+    #[test]
+    fn a_preview_shows_the_head_of_a_long_later_line() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let heading = "## Response";
+        let text = format!("{heading}\n{}\nafter", family.repeat(10_000));
+        let preview = output_preview(&text);
+        let kept = family.repeat(2_000 / 5);
+        assert_eq!(preview, format!("{heading}\n{kept}{}", text::LINE_CUT));
+        // Less room than its first 2,000 characters: the part that fits,
+        // whole, ending in a mark that claims no length.
+        let filler = "y".repeat(TOOL_OUTPUT_MAX_BYTES - 1_001);
+        let text = format!("{filler}\n{}", family.repeat(1_000));
+        let preview = output_preview(&text);
+        let tail = &preview[filler.len() + 1..];
+        let fits = (1_000 - text::LINE_PART_CUT.len()) / family.len();
+        assert_eq!(
+            tail,
+            format!("{}{}", family.repeat(fits), text::LINE_PART_CUT)
+        );
+        // A line of fewer than 2,000 characters that does not fit is cut
+        // with the mark too, never shown whole with it.
+        let wide = "日".repeat(1_500);
+        let preview = output_preview(&format!("{filler}\n{wide}"));
+        let tail = &preview[filler.len() + 1..];
+        let fits = (1_000 - text::LINE_PART_CUT.len()) / 3;
+        assert_eq!(
+            tail,
+            format!("{}{}", "日".repeat(fits), text::LINE_PART_CUT)
+        );
+        // Too little room for a start worth reading: a long grep match is
+        // left out rather than shown as part of its path.
+        for left in [12, 100, 255] {
+            let filler = "y".repeat(TOOL_OUTPUT_MAX_BYTES - left - 1);
+            let matched = format!(
+                "src/components/settings/a.txt:1:{}{}",
+                "q".repeat(2_000),
+                text::LINE_CUT
+            );
+            let preview = output_preview(&format!("{filler}\n{matched}\nlast"));
+            assert_eq!(preview, filler, "{left}");
+        }
+        // A path that does not fit is never shown in part.
+        let paths = (0..2_000)
+            .map(|index| format!("src/{}/module_{index:05}/file.rs", "deep".repeat(5)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = output_preview(&paths);
+        assert!(preview.lines().count() < 2_000);
+        assert!(preview.lines().all(|line| line.ends_with("/file.rs")));
     }
 
     #[test]
@@ -11191,6 +11760,109 @@ export default workflow({
             .await
             .unwrap();
         assert_eq!(none.text, "No files found");
+    }
+
+    /// `src/**/*.{ts,tsx}`, as models write it, answered "No files found":
+    /// the glob crate has no braces. Each alternative is walked now.
+    #[tokio::test]
+    async fn a_glob_with_brace_alternatives_finds_each_of_them() {
+        let (root, _) = read_fixture("README.md", b"# app\n");
+        for file in [
+            "src/b.tsx",
+            "src/a.ts",
+            "src/lib/c.ts",
+            "src/lib/d.js",
+            "test/e.ts",
+            "a{b",
+            "{x}",
+        ] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        let glob = |pattern: &str| {
+            let root = root.clone();
+            let args = json!({"pattern": pattern});
+            async move { edit_in(&root, "glob", args).await }
+        };
+        // In the order one walk would list them, each once.
+        let found = glob("src/**/*.{ts,tsx}").await.unwrap();
+        assert_eq!(found.text, "src/a.ts\nsrc/b.tsx\nsrc/lib/c.ts");
+        let found = glob("{src,test}/**/*.{ts,t{s,s}x}").await.unwrap();
+        assert_eq!(found.text, "src/a.ts\nsrc/b.tsx\nsrc/lib/c.ts\ntest/e.ts");
+        // Braces with no comma, or left open, are the name as written.
+        assert_eq!(glob("a{b").await.unwrap().text, "a{b");
+        assert_eq!(glob("{x}").await.unwrap().text, "{x}");
+        // An alternative may not climb out of the folder either.
+        let climbs = glob("{..,src}/*.ts").await.unwrap_err().to_string();
+        assert!(climbs.contains("cannot contain `..`"), "{climbs}");
+        let many = glob("{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}").await.unwrap_err();
+        assert_eq!(
+            many.to_string(),
+            CoreError::Invalid(
+                "glob pattern `{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}` is not valid: its {a,b} alternatives stand for more than 32 patterns".into()
+            )
+            .to_string()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A malformed pattern says so, named as the model wrote it, never as
+    /// the folder joined to it nor as files that are not there.
+    #[tokio::test]
+    async fn a_malformed_glob_is_named_as_written() {
+        let (root, _) = read_fixture("visible.ts", b"x\n");
+        let refused = |pattern: &str| {
+            let root = root.clone();
+            let args = json!({"pattern": pattern});
+            async move { edit_in(&root, "glob", args).await.unwrap_err().to_string() }
+        };
+        let unclosed = refused("src/[").await;
+        assert!(
+            unclosed.ends_with(
+                "glob pattern `src/[` is not valid: invalid range pattern at character 5"
+            ),
+            "{unclosed}"
+        );
+        let stars = refused("*.{ts,a***}").await;
+        assert!(
+            stars.contains("glob pattern `*.{ts,a***}` is not valid (its alternative `*.a***`): "),
+            "{stars}"
+        );
+        // A true miss still reads as one.
+        let miss = edit_in(&root, "glob", json!({"pattern": "*.txt"}))
+            .await
+            .unwrap();
+        assert!(miss.text.starts_with("No files found"), "{}", miss.text);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A folder named as a route segment (`app/[slug]`) was read as a
+    /// pattern, a class of one letter, so a glob in it found nothing.
+    #[tokio::test]
+    async fn a_glob_in_a_folder_whose_name_looks_like_a_pattern_finds_its_files() {
+        let (root, _) = read_fixture("README.md", b"# app\n");
+        let folder = root.join("app/[slug]");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("page.tsx"), "x").unwrap();
+        let found = edit_in(
+            &root,
+            "glob",
+            json!({"path": "app/[slug]", "pattern": "*.tsx"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.text, "app/[slug]/page.tsx");
+        // An absolute pattern inside the folder reads as before.
+        let absolute = edit_in(
+            &root,
+            "glob",
+            json!({"pattern": root.join("README.*").to_string_lossy()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(absolute.text, "README.md");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Told to "set replaceAll", Qwen2.5 Coder set it on the other edit and

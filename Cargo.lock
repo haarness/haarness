@@ -1920,6 +1920,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "unicode-segmentation",
  "url",
  "utoipa",
  "uuid",

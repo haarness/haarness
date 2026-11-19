@@ -914,7 +914,8 @@ or the message is queued, all of them within 10 s together, and adds each after
 the text (after a command's string `arguments`) as a block under
 `MCP resource: setup · docs:docs://setup`. Its text is fenced, and cut past
 50 KiB (128 KiB for all of a message's resources) with a note that says where
-the whole text was saved; its images and PDFs join `attachments` (10 MiB
+the whole text was saved, or why it could not be (a full disk, say: the
+message is sent all the same); its images and PDFs join `attachments` (10 MiB
 together, and only while the message's media stay within 20 MiB, the
 person's own attachments first). A resource that is not read is named in its
 block with `(not read)`, and the block holds only the reason: the MCP server's
