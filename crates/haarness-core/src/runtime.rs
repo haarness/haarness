@@ -2204,7 +2204,7 @@ const RECITATION_ADVICE: &str = "The reply followed existing published text too 
 /// What a person reads when the safety check stopped the summary of an
 /// automatic compaction: the earlier conversation set it off, so leaving
 /// out this turn would not help.
-const SUMMARY_STOP_ADVICE: &str = "It stopped the summary Haarness writes when a chat grows past what the model takes in, so something earlier in this chat set it off: start a new chat, or pick another model.";
+const SUMMARY_STOP_ADVICE: &str = "That is the summary Haarness writes when a chat grows past what the model takes in, so something earlier in this chat set it off: start a new chat, or pick another model.";
 
 /// A stop of the reply for repeating published text rather than for what
 /// was asked.
@@ -11068,19 +11068,25 @@ impl RunnerTask {
 
     /// The transcript's words for a failure of this turn, naming its provider.
     fn visible_error(&self, error: &CoreError) -> String {
-        if let CoreError::ProviderBlocked(_) = error
-            && self.summary_stopped.load(Ordering::SeqCst)
-        {
-            return if self.depth == 0 {
-                format!("{error} {SUMMARY_STOP_ADVICE}")
-            } else {
-                error.to_string()
-            };
-        }
         let info = self
             .providers
             .get(&self.turn.provider)
             .map(|provider| provider.info());
+        if leaves_turn_out(error) && self.summary_stopped.load(Ordering::SeqCst) {
+            let stop = match error {
+                CoreError::ProviderBlocked(_) => error.to_string(),
+                _ => format!(
+                    "{} refused the summary of this chat: its safety check flagged it as possibly against its usage policy.",
+                    info.as_ref()
+                        .map_or("The provider", |info| info.name.as_str())
+                ),
+            };
+            return if self.depth == 0 {
+                format!("{stop} {SUMMARY_STOP_ADVICE}")
+            } else {
+                stop
+            };
+        }
         // A child agent's failure is read by the model that started it.
         turn_failure_words(error, info.as_ref(), &self.turn.model, self.depth == 0)
     }
@@ -11949,7 +11955,7 @@ impl RunnerTask {
         )
         .await
         .inspect_err(|error| {
-            if matches!(error, CoreError::ProviderBlocked(_)) {
+            if leaves_turn_out(error) {
                 self.summary_stopped.store(true, Ordering::SeqCst);
             }
         })?;
@@ -16879,7 +16885,22 @@ impl RunnerTask {
                                 .as_deref()
                                 .ok()
                                 .and_then(|items| last_reply(items, child_turn));
-                            Err(CoreError::Tool(subagent_blocked(&reason, partial)))
+                            // Its stop says whether the turn was left out.
+                            let left_out = items.as_deref().ok().is_none_or(|items| {
+                                items.iter().rev().any(|item| {
+                                    item.turn_id == Some(child_turn)
+                                        && matches!(
+                                            item.data,
+                                            ItemData::Error {
+                                                turn_left_out: true,
+                                                ..
+                                            }
+                                        )
+                                })
+                            });
+                            Err(CoreError::Tool(subagent_blocked(
+                                &reason, partial, left_out,
+                            )))
                         }
                         error => Err(error),
                     }
@@ -17183,7 +17204,11 @@ fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
                 .as_deref()
                 .and_then(CoreError::provider_blocked_reason)
             {
-                Some(reason) => subagent_blocked(reason, task.reply.as_deref()),
+                // Nothing here says whether a summary was stopped: only a
+                // recited reply is known to keep its turn.
+                Some(reason) => {
+                    subagent_blocked(reason, task.reply.as_deref(), !recitation(reason))
+                }
                 None => task
                     .error
                     .clone()
@@ -17308,12 +17333,25 @@ fn finish_note(last: Option<&LastRound>) -> String {
 }
 
 /// What a parent reads when the provider's safety check stopped its
-/// subagent. The stopped turn is left out of the child's history, but the
-/// same task worded the same way would most likely be stopped again.
-fn subagent_blocked(reason: &str, partial: Option<&str>) -> String {
-    let mut text = format!(
-        "The provider's safety check stopped this subagent ({reason}). That turn is now left out of the subagent's history, so a resumed subagent no longer has what it was asked there: send the whole task again. The same task sent unchanged is likely to be stopped too: do not retry it as is. Resume it or start a new subagent with the whole task rephrased or split, do the work directly, or tell the user."
-    );
+/// subagent. A stopped turn is left out of the child's history, task and
+/// all, so a resumed child needs the whole task again; the same task worded
+/// the same way would most likely be stopped again. A recited reply keeps its
+/// turn; a stopped summary of the child's history (`left_out` false
+/// otherwise) means its history itself sets the check off.
+fn subagent_blocked(reason: &str, partial: Option<&str>, left_out: bool) -> String {
+    let mut text = if left_out {
+        format!(
+            "The provider's safety check stopped this subagent ({reason}). That turn is now left out of the subagent's history, so a resumed subagent no longer has what it was asked there: send the whole task again. The same task sent unchanged is likely to be stopped too: do not retry it as is. Resume it or start a new subagent with the whole task rephrased or split, do the work directly, or tell the user."
+        )
+    } else if recitation(reason) {
+        format!(
+            "The provider's safety check stopped this subagent's reply ({reason}) for following published text too closely. Its history still holds the task: resume it asking for the work another way, do the work directly, or tell the user."
+        )
+    } else {
+        format!(
+            "The provider's safety check stopped this subagent ({reason}) while its long history was being summarized, so something earlier in that history set it off and resuming it would be stopped again. Start a new subagent with the whole task, do the work directly, or tell the user."
+        )
+    };
     if let Some(partial) = partial {
         text.push_str("\n\nPartial reply before the stop:\n");
         text.push_str(partial);
@@ -23582,6 +23620,49 @@ mod tests {
         assert!(
             answered.contains("<task_result>\nthe answer\n</task_result>"),
             "{answered}"
+        );
+    }
+
+    /// A stopped subagent's parent is told what its stop left: a turn left
+    /// out needs the whole task again; a recited reply keeps the task; a
+    /// stopped summary of its history means a new subagent.
+    #[test]
+    fn a_stopped_subagent_is_described_by_what_its_stop_left() {
+        let left_out = super::subagent_blocked("refusal", None, true);
+        assert!(
+            left_out.contains("left out of the subagent's history")
+                && left_out.contains("send the whole task again"),
+            "{left_out}"
+        );
+        let recited = super::subagent_blocked("RECITATION", Some("partial"), false);
+        assert!(
+            recited.contains("Its history still holds the task")
+                && !recited.contains("left out")
+                && recited.ends_with("Partial reply before the stop:\npartial"),
+            "{recited}"
+        );
+        let summary = super::subagent_blocked("refusal", None, false);
+        assert!(
+            summary.contains("while its long history was being summarized")
+                && summary.contains("Start a new subagent with the whole task")
+                && !summary.contains("left out"),
+            "{summary}"
+        );
+        // After a restart only a recited reply is known to keep its turn.
+        assert!(
+            super::stranded_report(&crate::StrandedTask {
+                parent_thread_id: ThreadId::new(),
+                parent_turn_id: None,
+                call_id: "call".into(),
+                child_thread_id: ThreadId::new(),
+                child_turn_id: TurnId::new(),
+                state: "failed".into(),
+                description: "Audit".into(),
+                reply: None,
+                error: Some(CoreError::ProviderBlocked("RECITATION".into()).to_string()),
+            })
+            .iter()
+            .any(|data| matches!(data, ItemData::UserMessage { text, .. } if text.contains("Its history still holds the task")))
         );
     }
 

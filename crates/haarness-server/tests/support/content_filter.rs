@@ -400,6 +400,8 @@ async fn a_stopped_turn_that_changed_things_leaves_a_note_of_them() {
 #[derive(Default)]
 struct SummaryRefused {
     calls: AtomicUsize,
+    /// The summary is refused as a request instead, as OpenAI's check does.
+    whole_request: bool,
 }
 
 #[async_trait]
@@ -423,6 +425,11 @@ impl ModelProvider for SummaryRefused {
                 "HTTP 400 Bad Request: prompt is too long: 250000 tokens > 200000 maximum".into(),
             ));
         }
+        if self.whole_request {
+            return Err(CoreError::Provider(
+                "HTTP 400 Bad Request: [invalid_prompt] Invalid prompt: your prompt was flagged as potentially violating our usage policy.".into(),
+            ));
+        }
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderEvent::TextDelta("Summary so far".into())),
             Ok(ProviderEvent::Finished {
@@ -437,39 +444,46 @@ impl ModelProvider for SummaryRefused {
 /// told to start a new chat or pick another model.
 #[tokio::test]
 async fn a_stopped_compaction_summary_keeps_the_turn_and_says_why() {
-    let runtime = AgentRuntime::new(
-        Arc::new(SqliteStore::in_memory().unwrap()),
-        Arc::new(StaticProviderRegistry::new(vec![
-            Arc::new(SummaryRefused::default()) as Arc<dyn ModelProvider>,
-        ])),
-        Arc::new(EmptyToolRegistry),
-        EventBus::new(64),
-    );
-    let thread = echo_thread(&runtime).await;
-    let turn = runtime
-        .start_turn(thread.id, turn_request("a long chat"))
-        .await
-        .unwrap();
-    assert_eq!(wait_done(&runtime, &turn).await.status, TurnStatus::Failed);
-    let items = runtime.items(thread.id, None).await.unwrap();
-    let stops = items
-        .iter()
-        .filter_map(|item| match &item.data {
-            ItemData::Error {
-                message,
-                turn_left_out,
-                ..
-            } => Some((message.clone(), *turn_left_out)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(stops.len(), 1, "{items:#?}");
-    assert!(!stops[0].1, "{stops:?}");
-    assert!(
-        stops[0].0.starts_with("Stopped by the provider's safety check (refusal). It stopped the summary Haarness writes")
-            && stops[0].0.ends_with("start a new chat, or pick another model."),
-        "{stops:?}"
-    );
+    for whole_request in [false, true] {
+        let runtime = AgentRuntime::new(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new(vec![Arc::new(SummaryRefused {
+                whole_request,
+                ..SummaryRefused::default()
+            })
+                as Arc<dyn ModelProvider>])),
+            Arc::new(EmptyToolRegistry),
+            EventBus::new(64),
+        );
+        let thread = echo_thread(&runtime).await;
+        let turn = runtime
+            .start_turn(thread.id, turn_request("a long chat"))
+            .await
+            .unwrap();
+        assert_eq!(wait_done(&runtime, &turn).await.status, TurnStatus::Failed);
+        let items = runtime.items(thread.id, None).await.unwrap();
+        let stops = items
+            .iter()
+            .filter_map(|item| match &item.data {
+                ItemData::Error {
+                    message,
+                    turn_left_out,
+                    ..
+                } => Some((message.clone(), *turn_left_out)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stops.len(), 1, "{items:#?}");
+        assert!(!stops[0].1, "{stops:?}");
+        assert!(
+            stops[0].0.starts_with(if whole_request {
+                "Echo refused the summary of this chat: its safety check flagged it"
+            } else {
+                "Stopped by the provider's safety check (refusal). That is the summary Haarness writes"
+            }) && stops[0].0.ends_with("start a new chat, or pick another model."),
+            "{stops:?}"
+        );
+    }
 }
 
 #[test]
