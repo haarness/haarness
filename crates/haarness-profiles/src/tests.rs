@@ -1069,6 +1069,96 @@ fn a_restore_still_refuses_a_link_to_other_bytes_or_outside_its_folder() {
     );
 }
 
+/// A file reached through a link is not in place when another file of the
+/// profile, with other bytes, would be written over it in the same restore.
+#[cfg(unix)]
+#[test]
+fn a_restore_refuses_a_file_in_place_that_it_would_then_overwrite() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    put(
+        &source.project,
+        ".agents/skills/fmt/SKILL.md",
+        "team version",
+    );
+    put(
+        &source.project,
+        ".haarness/skills/fmt/SKILL.md",
+        "personal version",
+    );
+    let archive = Archive::decode(
+        &Archive::capture(&source, "copies", Scope::Local)
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    let target = fixture.roots("target");
+    put(
+        &target.project,
+        ".haarness/skills/fmt/SKILL.md",
+        "team version",
+    );
+    fs::create_dir_all(target.project.join(".agents/skills")).unwrap();
+    symlink(
+        "../../.haarness/skills/fmt",
+        target.project.join(".agents/skills/fmt"),
+    )
+    .unwrap();
+    for dry_run in [true, false] {
+        let error = archive
+            .restore(&target, true, dry_run)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("symlink path refused"), "{error}");
+    }
+    assert_eq!(
+        fs::read_to_string(target.project.join(".haarness/skills/fmt/SKILL.md")).unwrap(),
+        "team version"
+    );
+}
+
+/// Comparing a file reached through a link never waits on a named pipe.
+#[cfg(unix)]
+#[test]
+fn a_restore_never_waits_on_a_pipe_behind_a_link() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    put(&source.project, ".agents/skills/fmt/SKILL.md", "format");
+    let archive = Archive::decode(
+        &Archive::capture(&source, "pipe", Scope::Local)
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    let target = fixture.roots("target");
+    fs::create_dir_all(target.project.join(".haarness/skills/fmt")).unwrap();
+    nix::unistd::mkfifo(
+        &target.project.join(".haarness/skills/fmt/SKILL.md"),
+        nix::sys::stat::Mode::from_bits_truncate(0o600),
+    )
+    .unwrap();
+    fs::create_dir_all(target.project.join(".agents/skills")).unwrap();
+    symlink(
+        "../../.haarness/skills/fmt",
+        target.project.join(".agents/skills/fmt"),
+    )
+    .unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let roots = target.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(archive.restore(&roots, true, true).map(|_| ()));
+    });
+    let error = receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the restore waited on the pipe")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("symlink path refused"), "{error}");
+}
+
 #[test]
 fn installed_plugins_are_bundled_with_disabled_state_without_absolute_registry_paths() {
     let fixture = Fixture::new();

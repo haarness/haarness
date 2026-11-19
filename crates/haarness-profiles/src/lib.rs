@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -512,10 +512,12 @@ impl Archive {
             );
             let target = target(roots, &entry.path)?;
             ensure!(unique.insert(target.clone()), "profile targets overlap");
-            // Nothing is ever written through a link; one that stays inside
-            // the folder and already leads to these bytes is left alone.
-            if check_path(&target).is_err() && self.in_place(roots, entry, &target) {
-                in_place.push(target);
+            // Nothing is ever written through a link; one that leads to a
+            // file inside the folder already holding these bytes is left alone.
+            if check_path(&target).is_err()
+                && let Some((real, current)) = self.in_place(roots, entry, &target)
+            {
+                in_place.push((target, real, current));
                 continue;
             }
             check_path(&target)?;
@@ -538,6 +540,19 @@ impl Archive {
             }
             planned.push((entry, target));
         }
+        // A file is not in place when another entry of this restore would
+        // write other bytes over it: the link on the way is refused instead.
+        for (target, real, current) in &in_place {
+            let overwritten = planned.iter().any(|(entry, planned)| {
+                fs::canonicalize(planned).is_ok_and(|planned| planned == *real)
+                    && self.written(entry, current) != *current
+            });
+            if overwritten {
+                check_path(target)?;
+                bail!("symlink path refused: {}", target.display());
+            }
+        }
+        let in_place: Vec<_> = in_place.into_iter().map(|(target, ..)| target).collect();
         let targets = || planned.iter().map(|(_, target)| target.clone()).collect();
         // A dry run reports every file it would overwrite instead of
         // stopping at the first one.
@@ -626,31 +641,44 @@ impl Archive {
         })
     }
 
-    /// Whether `target`, which a link leads through, already holds what
-    /// `entry` restores: the link stays inside the folder the entry restores
-    /// into, and the regular file it leads to has the same bytes.
-    fn in_place(&self, roots: &Roots, entry: &Entry, target: &Path) -> bool {
-        let Some(root) = root(roots, &entry.path) else {
-            return false;
-        };
-        let (Ok(root), Ok(real)) = (fs::canonicalize(root), fs::canonicalize(target)) else {
-            return false;
-        };
-        let Some(data) = self.files.get(&entry.path) else {
-            return false;
-        };
-        if !real.starts_with(&root) || !fs::symlink_metadata(&real).is_ok_and(|m| m.is_file()) {
-            return false;
+    /// The real path and bytes of the file `target`, which a link leads
+    /// through, when it already holds what `entry` restores: the link leads
+    /// to a regular file inside the folder the entry restores into, and that
+    /// file has the bytes the restore would write.
+    fn in_place(&self, roots: &Roots, entry: &Entry, target: &Path) -> Option<(PathBuf, Vec<u8>)> {
+        let root = fs::canonicalize(root(roots, &entry.path)?).ok()?;
+        let real = fs::canonicalize(target).ok()?;
+        if !real.starts_with(&root) {
+            return None;
         }
-        let data = if is_machine_settings(&entry.path) {
-            with_machine_settings(data, machine_settings(target))
+        // Compare the file that was opened, which a folder swapped for a link
+        // since cannot change, and never wait on a pipe.
+        let file = open(&real).ok()?;
+        if !held(&file, &real).is_some_and(|held| held.starts_with(&root)) {
+            return None;
+        }
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_EXPANDED as u64 {
+            return None;
+        }
+        #[cfg(unix)]
+        waiting(&file).ok()?;
+        let mut current = Vec::new();
+        (&file)
+            .take(MAX_EXPANDED as u64 + 1)
+            .read_to_end(&mut current)
+            .ok()?;
+        (self.written(entry, &current) == current).then_some((real, current))
+    }
+
+    /// The bytes restoring `entry` writes over a file that holds `current`.
+    fn written(&self, entry: &Entry, current: &[u8]) -> Vec<u8> {
+        let data = self.files.get(&entry.path).map_or(&[][..], Vec::as_slice);
+        if is_machine_settings(&entry.path) {
+            with_machine_settings(data, machine_settings_in(current))
         } else {
-            data.clone()
-        };
-        let mut held = Vec::new();
-        File::open(&real)
-            .and_then(|file| file.take(data.len() as u64 + 1).read_to_end(&mut held))
-            .is_ok_and(|_| held == data)
+            data.to_vec()
+        }
     }
 }
 
@@ -665,9 +693,13 @@ fn is_machine_settings(path: &str) -> bool {
 
 /// The `telemetry` setting in an existing configuration file.
 fn machine_settings(path: &Path) -> Option<serde_json::Value> {
-    let text = fs::read_to_string(path).ok()?;
+    machine_settings_in(&fs::read(path).ok()?)
+}
+
+/// The `telemetry` setting in the text of a configuration file.
+fn machine_settings_in(bytes: &[u8]) -> Option<serde_json::Value> {
     jsonc_parser::parse_to_serde_value::<serde_json::Value>(
-        &text,
+        std::str::from_utf8(bytes).ok()?,
         &jsonc_parser::ParseOptions::default(),
     )
     .ok()?

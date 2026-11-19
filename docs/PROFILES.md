@@ -85,9 +85,10 @@ Links that lead nowhere, or back into a folder that holds them, are passed
 over, and a save stops with an error rather than follow more than 1,000 links.
 Archives never hold links: a restore writes regular files and still refuses a
 link on any path it writes to. The one exception writes nothing: where such a
-link stays inside the folder being restored into and the file it leads to
-already holds the profile's bytes, as when a profile goes back into the project
-it was saved from, that file is left alone. The restore says how many files were
+link leads to a file inside the folder being restored into that already holds
+the profile's bytes, and no other file of the profile is written over it, as
+when a profile goes back into the project it was saved from, that file is left
+alone. The restore says how many files were
 already in place, and `--json` lists them under `inPlace`.
 
 **Configuration and scripts can contain inline secrets.** Archives retain
